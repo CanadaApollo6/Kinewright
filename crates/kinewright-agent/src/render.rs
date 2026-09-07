@@ -51,16 +51,14 @@ pub fn render_timeline_state(document: &Document) -> String {
     );
 
     for track in &document.tracks {
-        let kind = match track.kind {
-            TrackKind::Video => "video",
-            TrackKind::Audio => "audio",
-        };
+        let kind = track_kind_name(track.kind);
         let _ = writeln!(
             output,
-            "track {} {kind} sync_lock={} clips={}",
+            "track {} {kind} sync_lock={} clips={}{}",
             track.id,
             track.sync_lock,
-            track.clips.len()
+            track.clips.len(),
+            render_track_mix(document, track),
         );
         let caption_clips = track
             .clips
@@ -287,6 +285,9 @@ fn is_internal_marker_label(label: &str) -> bool {
 /// # Errors
 ///
 /// Returns an error string when the clip or its referenced asset is missing.
+// Three sibling renderings (title, freeze, media) share one prologue; splitting
+// them would duplicate the lookup rather than shorten the file.
+#[allow(clippy::too_many_lines)]
 pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, String> {
     let (track, clip) = document
         .tracks
@@ -308,7 +309,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
             .checked_add(duration)
             .ok_or_else(|| "time calculation overflowed".to_owned())?;
         return Ok(format!(
-            "clip {}\ntrack={} kind={:?}\ncontent=title\nlink={}\ntimeline={}..{} duration={}\ntitle={}\neffects={}\ntransition_in={}",
+            "clip {}\ntrack={} kind={:?}\ncontent=title\nlink={}\ntimeline={}..{} duration={}\ntitle={}\neffects={}\ntransition_in={}{}",
             clip.id,
             track.id,
             track.kind,
@@ -320,6 +321,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
             render_title(title),
             render_effects(&clip.effects),
             render_transition(clip.transition_in.as_ref()),
+            render_clip_info_track_mix(document, track),
         ));
     }
     if let ClipContent::Freeze(freeze) = &clip.content {
@@ -334,7 +336,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
             .checked_add(duration)
             .ok_or_else(|| "time calculation overflowed".to_owned())?;
         return Ok(format!(
-            "clip {}\ntrack={} kind={:?}\ncontent=freeze\nasset={} {:?}\nlink={}\ntimeline={}..{} duration={}\nsource_frame={}\neffects={}\ntransition_in={}",
+            "clip {}\ntrack={} kind={:?}\ncontent=freeze\nasset={} {:?}\nlink={}\ntimeline={}..{} duration={}\nsource_frame={}\neffects={}\ntransition_in={}{}",
             clip.id,
             track.id,
             track.kind,
@@ -348,6 +350,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
             frame_and_seconds(freeze.source_frame, asset.fps),
             render_effects(&clip.effects),
             render_transition(clip.transition_in.as_ref()),
+            render_clip_info_track_mix(document, track),
         ));
     }
     let asset = document
@@ -363,7 +366,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
         .checked_add(duration)
         .ok_or_else(|| "time calculation overflowed".to_owned())?;
     Ok(format!(
-        "clip {}\ntrack={} kind={:?}\nasset={} {:?}\nlink={}\ntimeline={}..{} duration={}\nsource={}..{} duration={}\neffects={}\ntransition_in={}{}",
+        "clip {}\ntrack={} kind={:?}\nasset={} {:?}\nlink={}\ntimeline={}..{} duration={}\nsource={}..{} duration={}\neffects={}\ntransition_in={}{}{}",
         clip.id,
         track.id,
         track.kind,
@@ -386,6 +389,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
         render_effects(&clip.effects),
         render_transition(clip.transition_in.as_ref()),
         render_clip_speed(clip),
+        render_clip_info_track_mix(document, track),
     ))
 }
 
@@ -414,6 +418,40 @@ fn render_clip_audio(clip: &kinewright_core::Clip) -> String {
             clip.audio_gain_tenth_db, clip.audio_fade_in_frames.0, clip.audio_fade_out_frames.0
         )
     }
+}
+
+/// The one spelling of a track kind in every agent rendering. Shared with
+/// `get_audio_levels` so the two tools cannot drift (AU1 §6.2).
+pub(crate) const fn track_kind_name(kind: TrackKind) -> &'static str {
+    match kind {
+        TrackKind::Video => "video",
+        TrackKind::Audio => "audio",
+    }
+}
+
+/// AU1 §6.2: the four mix fields, or `None` for a neutral track so every
+/// pre-AU1 rendering is byte-identical. The single source of the literal that
+/// both the timeline track line and the `render_clip_info` line embed.
+fn track_mix_fields(document: &Document, track: &kinewright_core::Track) -> Option<String> {
+    let mix = document.track_mix(track.id);
+    (!mix.is_neutral()).then(|| {
+        format!(
+            "gain:{},pan:{},mute:{},solo:{}",
+            mix.gain_tenth_db, mix.pan_percent, mix.mute, mix.solo
+        )
+    })
+}
+
+/// The track-line suffix. Shaped like [`render_clip_audio`].
+fn render_track_mix(document: &Document, track: &kinewright_core::Track) -> String {
+    track_mix_fields(document, track).map_or_else(String::new, |fields| format!(" mix={fields}"))
+}
+
+/// The [`render_clip_info`] form of [`render_track_mix`]: a whole final line,
+/// absent when the owning track is neutral.
+fn render_clip_info_track_mix(document: &Document, track: &kinewright_core::Track) -> String {
+    track_mix_fields(document, track)
+        .map_or_else(String::new, |fields| format!("\ntrack_mix={fields}"))
 }
 
 fn render_clip_speed(clip: &kinewright_core::Clip) -> String {
@@ -1102,6 +1140,136 @@ assets:
         assert!(rendered.contains(
             "clip 11 asset=4 \"interview.mp4\" timeline=120f/4.000s..180f/6.000s duration=60f/2.000s source=150f/5.000s..210f/7.000s effects=none transition_in=none audio=gain:-60,fade_in:12f,fade_out:0f"
         ));
+    }
+
+    /// AU1 §7 item 20: a non-neutral track carries the exact mix suffix, and
+    /// `render_clip_info` grows the matching final line. The neutral fixture
+    /// renders neither, which is why every pre-AU1 golden is unchanged.
+    #[test]
+    fn timeline_state_appends_non_neutral_track_mix() {
+        let mut document = fixture();
+        document.audio_mix.tracks = vec![kinewright_core::TrackMix {
+            track: TrackId(7),
+            gain_tenth_db: -60,
+            pan_percent: 25,
+            mute: false,
+            solo: true,
+        }];
+        let rendered = render_timeline_state(&document);
+        assert!(
+            rendered.contains(
+                "track 7 video sync_lock=true clips=2 mix=gain:-60,pan:25,mute:false,solo:true"
+            ),
+            "missing track mix suffix: {rendered}"
+        );
+    }
+
+    #[test]
+    fn timeline_state_omits_the_track_mix_suffix_when_neutral() {
+        let mut document = fixture();
+        assert!(!render_timeline_state(&document).contains(" mix=gain:"));
+        // A stored but neutral entry is still no suffix.
+        document.audio_mix.tracks = vec![kinewright_core::TrackMix::neutral(TrackId(7))];
+        let rendered = render_timeline_state(&document);
+        assert!(!rendered.contains(" mix=gain:"), "{rendered}");
+        assert!(rendered.contains("track 7 video sync_lock=true clips=2\n"));
+    }
+
+    #[test]
+    fn clip_info_shows_track_mix_only_when_non_neutral() {
+        let mut document = fixture();
+        let neutral = render_clip_info(&document, ClipId(10)).unwrap();
+        assert!(!neutral.contains("track_mix="), "{neutral}");
+
+        // A title clip and a freeze clip on their own tracks, so all three
+        // `render_clip_info` branches are covered by the assertions below.
+        document.tracks.push(Track {
+            id: TrackId(8),
+            kind: TrackKind::Video,
+            sync_lock: false,
+            clips: vec![Clip {
+                id: ClipId(12),
+                asset: AssetId::default(),
+                source_range: TimeCode(0)..TimeCode(60),
+                content: ClipContent::Title(Title {
+                    text: "Lower third".to_owned(),
+                    font_size_token: 2,
+                    color_token: 2,
+                    position: kinewright_core::TitlePosition::LowerThird,
+                    background_scrim: false,
+                    fade_in_frames: TimeCode(6),
+                    fade_out_frames: TimeCode(9),
+                    caption_preset: None,
+                }),
+                timeline_start: TimeCode(30),
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+            }],
+        });
+        document.tracks.push(Track {
+            id: TrackId(9),
+            kind: TrackKind::Video,
+            sync_lock: false,
+            clips: vec![Clip {
+                id: ClipId(13),
+                asset: AssetId(4),
+                source_range: TimeCode(0)..TimeCode(60),
+                content: ClipContent::Freeze(kinewright_core::FreezeFrame {
+                    source_frame: TimeCode(45),
+                }),
+                timeline_start: TimeCode(30),
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+            }],
+        });
+        let non_neutral = |track| kinewright_core::TrackMix {
+            track,
+            gain_tenth_db: -60,
+            pan_percent: 25,
+            mute: false,
+            solo: true,
+        };
+        document.audio_mix.tracks = vec![
+            non_neutral(TrackId(7)),
+            non_neutral(TrackId(8)),
+            non_neutral(TrackId(9)),
+        ];
+
+        // media, title and freeze branches all end with the same final line.
+        for clip in [ClipId(10), ClipId(12), ClipId(13)] {
+            let rendered = render_clip_info(&document, clip).unwrap();
+            assert!(
+                rendered.ends_with("\ntrack_mix=gain:-60,pan:25,mute:false,solo:true"),
+                "{clip}: {rendered}"
+            );
+        }
+
+        // In the media branch the speed suffix and the mix line are adjacent
+        // format arguments; pin their order with both non-empty.
+        let clip = document
+            .tracks
+            .iter_mut()
+            .flat_map(|track| &mut track.clips)
+            .find(|clip| clip.id == ClipId(10))
+            .unwrap();
+        clip.speed_percent = 50;
+        let rendered = render_clip_info(&document, ClipId(10)).unwrap();
+        assert!(
+            rendered.ends_with(
+                "\ntransition_in=crossfade:15f speed=50% (audio muted)\ntrack_mix=gain:-60,pan:25,mute:false,solo:true"
+            ),
+            "{rendered}"
+        );
     }
 
     #[test]

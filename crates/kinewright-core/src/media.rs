@@ -10,9 +10,10 @@ use crossbeam_channel::{Receiver, Sender};
 use thiserror::Error;
 
 use crate::{
-    AssetId, ClipId, ColorDescription, DeliveryVerification, DeliveryVerificationRequest, Document,
-    EffectId, LutAsset, LutAssetId, MediaAsset, MediaSourceFingerprint, NormalizedRoi, Rational,
-    SCOPE_BASIS_POINTS, TimeCode, TrackId,
+    AssetId, AudioBusId, ClipId, ColorDescription, DeliveryVerification,
+    DeliveryVerificationRequest, Document, EffectId, LutAsset, LutAssetId, MediaAsset,
+    MediaSourceFingerprint, NormalizedRoi, Rational, SCOPE_BASIS_POINTS, TimeCode, TrackId,
+    TrackKind, TrackMix,
 };
 
 /// The runtime truth about whether an imported source can currently be read.
@@ -1055,6 +1056,66 @@ pub struct AudioLoudness {
     pub sample_frames: u64,
 }
 
+/// Post-track-stage, post-bus, and post-limiter peak telemetry (AU1 §4.1).
+///
+/// Telemetry, not document state: the vectors follow document order and are
+/// empty whenever nothing is playing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MixPeaks {
+    pub tracks: Vec<(TrackId, [f32; 2])>,
+    pub buses: Vec<(AudioBusId, [f32; 2])>,
+    pub master: [f32; 2],
+}
+
+/// A read-only mix level measurement request (AU1 §6.1). `None` measures the
+/// whole document.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct MixLevelRequest {
+    /// Omitted or `null` measures the whole document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub range: Option<std::ops::Range<TimeCode>>,
+}
+
+/// Measured loudness for one track's post-track-stage stem (AU1 §6.1).
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct TrackLevels {
+    pub track: TrackId,
+    pub kind: TrackKind,
+    pub mix: TrackMix,
+    pub audible: bool,
+    pub bus: Option<AudioBusId>,
+    pub levels: AudioLoudness,
+}
+
+/// Measured loudness for one bus stem, after its effect chain (AU1 §6.1).
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct BusLevels {
+    pub bus: AudioBusId,
+    pub name: String,
+    pub levels: AudioLoudness,
+}
+
+/// Per-track, per-bus, and master loudness over one project range (AU1 §6.1).
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct MixLevelReport {
+    pub range: std::ops::Range<TimeCode>,
+    pub any_solo: bool,
+    /// Every document track, in document order.
+    pub tracks: Vec<TrackLevels>,
+    /// Every bus, in document order.
+    pub buses: Vec<BusLevels>,
+    pub master: AudioLoudness,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExportCancellation(Arc<AtomicBool>);
 
@@ -1443,6 +1504,16 @@ pub trait Playback: Send + Sync {
     fn position(&self) -> TimeCode;
     /// Read the current post-limiter master output peaks for left and right.
     fn output_peaks(&self) -> [f32; 2];
+    /// AU1 §4.2: per-track, per-bus, and master post-stage peaks. Empty when
+    /// nothing is playing. Default: empty so test doubles need no change.
+    fn mix_peaks(&self) -> MixPeaks {
+        MixPeaks::default()
+    }
+    /// AU1 §5.3: apply a document that differs only in `audio_mix.tracks`
+    /// without stopping playback. Default: `self.set_document(doc)`.
+    fn update_audio_mix(&self, doc: Arc<Document>) {
+        self.set_document(doc);
+    }
 }
 
 pub trait Analysis: Send + Sync {
@@ -1676,6 +1747,20 @@ pub trait Analysis: Send + Sync {
     ///
     /// Returns a media error when timeline audio cannot be rendered or measured.
     fn timeline_loudness(&self, _document: &Document) -> Result<AudioLoudness, MediaError> {
+        Err(MediaError::NotImplemented)
+    }
+    /// Measure per-track, per-bus, and master loudness over a project range
+    /// through the AU1 track stage (AU1 §6.1).
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the range is invalid or the mix cannot be
+    /// rendered or measured.
+    fn mix_levels(
+        &self,
+        _document: &Document,
+        _request: &MixLevelRequest,
+    ) -> Result<MixLevelReport, MediaError> {
         Err(MediaError::NotImplemented)
     }
     /// Queue deterministic beat/onset analysis without blocking the caller.

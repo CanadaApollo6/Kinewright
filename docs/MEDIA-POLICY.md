@@ -106,8 +106,19 @@ and channel-owned frame.
 ## Playback audio mixdown
 
 Playback enumerates audio-bearing clips on every audio and video track for the
-remaining project range. The media worker mixes them in document order at
-unity gain, then applies the export mixdown's single hard clamp to `-1.0..=1.0`.
+remaining project range. The media worker runs one stage order in playback and in
+export: clip shaping (gain, fades, transition ramps), then the per-track stage
+(mute/solo gate, gain, balance pan), then routing — unrouted tracks to master,
+bus tracks to their bus, ducking sidechains tapping the post-track-stage signal —
+then bus effects in order, the master sum, and a single hard clamp to
+`-1.0..=1.0`. That clamp is the only one in the path. Unrouted tracks are summed
+in `document.tracks` order, so both paths add the same floats in the same order
+and the result is deterministic run to run. The output ring keeps two seconds of
+capacity, but the feeder fills only to a one-second target
+(`LIVE_FILL_MILLISECONDS = 1000`), so a live mixer edit is heard within about a
+second plus device latency. A live track-mix change is applied to the running
+processor over a 5 ms per-channel ramp; the ramp is playback-only transient
+state, never document state, and neither export nor a freshly opened mixer ramps.
 Project-frame boundaries are converted directly to device sample boundaries;
 each source is trimmed to its source-sample range and padded with silence when
 that range cannot fill its mapped project duration. Stream PTS is normalized by
@@ -116,8 +127,8 @@ set at one shared project-sample position, while paused scrubbing remains
 video-only.
 
 The worker mixes fixed 1,024-sample-frame chunks and lazily opens a decoder only
-when the feeder reaches its clip. Since the output ring holds two seconds, this
-normally opens an upcoming boundary nearly two seconds before it is heard.
+when the feeder reaches its clip. Since the feeder fills to one second, this
+normally opens an upcoming boundary about a second before it is heard.
 Completed sources are closed immediately after their final mixed sample. The
 audio callback is unchanged: it only pops interleaved samples (or zero on
 underflow) and atomically advances the sample-count master clock. A project with

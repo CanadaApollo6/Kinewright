@@ -43,6 +43,8 @@ pub(crate) enum MaterialTab {
     #[default]
     Timeline,
     Transcript,
+    /// AU1 §5.1: the manual mixer — per-track faders, meters, and M/S.
+    Mixer,
 }
 
 // Independent transport, agent, dialog, and window flags model separate UI state machines.
@@ -141,6 +143,9 @@ pub(crate) struct KinewrightApp {
     pub(crate) matte_overlay: crate::matte_overlay_ui::MatteOverlayState,
     pub(crate) playing: bool,
     pub(crate) meter_levels: [f32; 2],
+    /// AU1 §5.1: the mixer's displayed meter levels, one entry per mix point,
+    /// decaying on the transport meter's schedule between peaks.
+    pub(crate) mixer_levels: crate::mixer_ui::MixerMeterLevels,
     pub(crate) resume_after_scrub: bool,
     pub(crate) transcript_scope: TranscriptScope,
     pub(crate) material_tab: MaterialTab,
@@ -310,17 +315,19 @@ impl KinewrightApp {
             matte_overlay: crate::matte_overlay_ui::MatteOverlayState::default(),
             playing: false,
             meter_levels: [0.0; 2],
+            mixer_levels: crate::mixer_ui::MixerMeterLevels::default(),
             resume_after_scrub: false,
             transcript_scope: TranscriptScope::default(),
             // The screenshot harness can pre-raise a summoned surface that no
             // startup interaction could otherwise reach in a static capture.
             material_tab: match std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").as_deref() {
                 Ok("transcript") => MaterialTab::Transcript,
+                Ok("mixer") => MaterialTab::Mixer,
                 _ => MaterialTab::default(),
             },
             show_material_strip: matches!(
                 std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").as_deref(),
-                Ok("timeline" | "transcript")
+                Ok("timeline" | "transcript" | "mixer")
             ),
             show_media_rail: false,
             pending_project_action: None,
@@ -468,6 +475,11 @@ impl KinewrightApp {
         self.playing = false;
         self.resume_after_scrub = false;
         self.meter_levels = [0.0; 2];
+        // Mixer levels are keyed by `TrackId` and `AudioBusId`, which only
+        // mean anything inside one document: carrying them across a project
+        // switch would light the new project's identically numbered tracks
+        // with the old project's signal until they decayed (AU1 §5.1).
+        self.mixer_levels = crate::mixer_ui::MixerMeterLevels::default();
         self.texture = None;
         self.focused_project = index;
         let document = Arc::clone(&self.focused().document);
@@ -1038,6 +1050,10 @@ impl KinewrightApp {
                     last_op,
                     journal_command,
                 } => {
+                    // AU1 §5.3: a change made only of `SetTrackMix` keeps the
+                    // transport running. Decided before the command is
+                    // consumed by the status line below.
+                    let live_track_mix = is_live_track_mix_change(journal_command.as_ref());
                     let previous_document = Arc::clone(&self.projects[project_index].document);
                     let media_changed_assets = doc
                         .media_pool
@@ -1135,14 +1151,22 @@ impl KinewrightApp {
                         );
                     }
                     if project_index == self.focused_project {
-                        self.playing = false;
                         if !media_changed_assets.is_empty() {
                             self.texture = None;
                         }
-                        let position = self.projects[project_index].position;
-                        self.playback.set_document(Arc::clone(&doc));
-                        self.playback.seek(position);
-                        self.playback.request_frame(position);
+                        if live_track_mix {
+                            // The document differs only in `audio_mix.tracks`,
+                            // which no video path reads: hand it to the engine
+                            // without stopping, re-cueing, or asking for the
+                            // frame that is already on screen (AU1 §5.3).
+                            self.playback.update_audio_mix(Arc::clone(&doc));
+                        } else {
+                            self.playing = false;
+                            let position = self.projects[project_index].position;
+                            self.playback.set_document(Arc::clone(&doc));
+                            self.playback.seek(position);
+                            self.playback.request_frame(position);
+                        }
                     }
                     if let Some(Operation::AddAsset { asset }) = &last_op {
                         self.projects[project_index].cue_source_asset(asset.id);
@@ -1536,9 +1560,17 @@ impl KinewrightApp {
                 .any(|thread| !thread.pending_confirmations.is_empty());
         let mut thread_rail_open = self.show_thread_rail;
         let mut media_rail_open = self.show_media_rail;
-        egui::Panel::bottom("timeline-dock")
-            .default_size(240.0)
-            .min_size(160.0)
+        // The Mixer needs more height than the Timeline does, and egui
+        // remembers a panel's size per id: giving the tab its own id lets each
+        // one keep the height its content asks for (AU1 §5.1).
+        let (dock_id, dock_default, dock_minimum) = if self.material_tab == MaterialTab::Mixer {
+            ("mixer-dock", 320.0, 260.0)
+        } else {
+            ("timeline-dock", 240.0, 160.0)
+        };
+        egui::Panel::bottom(dock_id)
+            .default_size(dock_default)
+            .min_size(dock_minimum)
             .resizable(true)
             .frame(
                 egui::Frame::new()
@@ -1553,11 +1585,13 @@ impl KinewrightApp {
                         MaterialTab::Transcript,
                         "Transcript",
                     );
+                    ui.selectable_value(&mut self.material_tab, MaterialTab::Mixer, "Mixer");
                 });
                 ui.separator();
                 match self.material_tab {
                     MaterialTab::Timeline => self.timeline(ui),
                     MaterialTab::Transcript => self.transcript_panel(ui),
+                    MaterialTab::Mixer => self.mixer_panel(ui),
                 }
             });
         egui::Panel::left("thread-rail")
@@ -1620,6 +1654,35 @@ pub(crate) fn review_preroll_frames(fps: kinewright_core::Rational) -> i64 {
     nominal.max(1) * 2
 }
 
+/// Whether a document change is a live mixer edit and nothing else (AU1 §5.3).
+///
+/// True only for a history command whose every operation is
+/// [`Operation::SetTrackMix`]: a lone `Do`, or a batch — coalesced or not —
+/// that carries nothing else. Undo, redo, the initial snapshot (`None`), and
+/// any batch that mixes a track-mix edit with another operation take the
+/// ordinary stop-and-re-cue path, because only the all-mix case is known to
+/// leave every video and clip structure untouched.
+pub(crate) fn is_live_track_mix_change(journal_command: Option<&JournalCommand>) -> bool {
+    fn all_track_mix(operations: &[Operation]) -> bool {
+        // An empty batch changes nothing; taking the ordinary path for it
+        // costs one re-cue that nobody can hear and keeps the predicate a
+        // positive claim about operations that are actually present.
+        !operations.is_empty()
+            && operations
+                .iter()
+                .all(|operation| matches!(operation, Operation::SetTrackMix { .. }))
+    }
+
+    match journal_command {
+        Some(JournalCommand::Do(operation)) => matches!(operation, Operation::SetTrackMix { .. }),
+        Some(
+            JournalCommand::DoBatch(operations)
+            | JournalCommand::DoBatchCoalesced { operations, .. },
+        ) => all_track_mix(operations),
+        Some(JournalCommand::Undo | JournalCommand::Redo) | None => false,
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn operation_status(operation: &Operation) -> String {
     match operation {
@@ -1660,6 +1723,16 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
         Operation::SetTrackSyncLock { track, locked } => format!(
             "Turned sync lock {} for track {track}",
             if *locked { "on" } else { "off" }
+        ),
+        Operation::SetTrackMix {
+            track,
+            gain_tenth_db,
+            pan_percent,
+            mute,
+            solo,
+        } => format!(
+            "Set mix on track {track} (gain {:+.1} dB, pan {pan_percent}, mute {mute}, solo {solo})",
+            f64::from(*gain_tenth_db) / 10.0
         ),
         Operation::AddClip { asset, .. } => format!("Added asset {asset} to timeline"),
         Operation::AddTitle { title, .. } => format!("Added title {:?}", title.text),
@@ -1878,6 +1951,92 @@ mod tests {
                 .instance_descriptor
                 .backends
                 .contains(eframe::wgpu::Backends::GL)
+        );
+    }
+
+    fn set_track_mix(track: u64) -> super::Operation {
+        super::Operation::SetTrackMix {
+            track: super::TrackId(track),
+            gain_tenth_db: -60,
+            pan_percent: 25,
+            mute: false,
+            solo: true,
+        }
+    }
+
+    /// AU1 §7 item 22: only an all-`SetTrackMix` history command keeps the
+    /// transport running. Everything else re-cues, because only that case is
+    /// known to leave the video and clip structure untouched.
+    #[test]
+    fn only_an_all_track_mix_change_takes_the_live_path() {
+        use super::{JournalCommand, is_live_track_mix_change};
+
+        assert!(is_live_track_mix_change(Some(&JournalCommand::Do(
+            set_track_mix(1)
+        ))));
+        assert!(is_live_track_mix_change(Some(&JournalCommand::DoBatch(
+            vec![set_track_mix(1), set_track_mix(2)]
+        ))));
+        assert!(is_live_track_mix_change(Some(
+            &JournalCommand::DoBatchCoalesced {
+                operations: vec![set_track_mix(1)],
+                coalesce_key: "track_mix:1#3".to_owned(),
+            }
+        )));
+
+        let other = super::Operation::RemoveTrack {
+            track: super::TrackId(2),
+        };
+        assert!(
+            !is_live_track_mix_change(Some(&JournalCommand::Do(other.clone()))),
+            "an ordinary edit still stops and re-cues"
+        );
+        assert!(
+            !is_live_track_mix_change(Some(&JournalCommand::DoBatch(vec![
+                set_track_mix(1),
+                other.clone()
+            ]))),
+            "a mixed batch may change anything, so it takes the ordinary path"
+        );
+        assert!(
+            !is_live_track_mix_change(Some(&JournalCommand::DoBatchCoalesced {
+                operations: vec![set_track_mix(1), other],
+                coalesce_key: "track_mix:1#3".to_owned(),
+            })),
+            "a mixed coalesced batch is no different"
+        );
+        assert!(
+            !is_live_track_mix_change(Some(&JournalCommand::Undo)),
+            "AU1 §5.4: undo during playback stops and re-cues"
+        );
+        assert!(!is_live_track_mix_change(Some(&JournalCommand::Redo)));
+        assert!(
+            !is_live_track_mix_change(None),
+            "the initial snapshot is not a live edit"
+        );
+        assert!(
+            !is_live_track_mix_change(Some(&JournalCommand::DoBatch(Vec::new()))),
+            "an empty batch claims nothing about track mix"
+        );
+    }
+
+    /// The status line reads back every value the operation carries, in the
+    /// voice the rest of the map uses.
+    #[test]
+    fn a_track_mix_edit_reports_all_four_values() {
+        assert_eq!(
+            super::operation_status(&set_track_mix(3)),
+            "Set mix on track 3 (gain -6.0 dB, pan 25, mute false, solo true)"
+        );
+        assert_eq!(
+            super::operation_status(&super::Operation::SetTrackMix {
+                track: super::TrackId(1),
+                gain_tenth_db: 0,
+                pan_percent: 0,
+                mute: false,
+                solo: false,
+            }),
+            "Set mix on track 1 (gain +0.0 dB, pan 0, mute false, solo false)"
         );
     }
 }

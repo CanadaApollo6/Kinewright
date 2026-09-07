@@ -7,9 +7,10 @@ use std::{
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
-    ColorDescription, DELIVERY_BIT_DEPTH_ALLOWED, DeliveryColorError, DeliveryColorMismatch,
-    DeliveryEncodeDepth, Document, ExportProgress, ExportSettings, FrameRounding, MediaError,
-    ProgressSink, TimeCode, TrackId, delivery_color_mismatches, map_frames_with_rounding,
+    AudioBusId, BusLevels, ColorDescription, DELIVERY_BIT_DEPTH_ALLOWED, DeliveryColorError,
+    DeliveryColorMismatch, DeliveryEncodeDepth, Document, ExportCancellation, ExportProgress,
+    ExportSettings, FrameRounding, MediaError, MixLevelReport, MixLevelRequest, ProgressSink,
+    TimeCode, TrackId, TrackLevels, delivery_color_mismatches, map_frames_with_rounding,
 };
 
 use crate::{
@@ -17,6 +18,7 @@ use crate::{
     clock::frame_to_samples,
     compositor::GpuContext,
     decode::backend,
+    loudness::measure_loudness,
     lut_store::LutLibrary,
     render::FrameRenderer,
     timeline::timeline_audio_segments,
@@ -757,17 +759,52 @@ fn drain_audio_packets(
     Ok(())
 }
 
+/// AU1 §6.1: the per-track, per-bus, and master stems of one mix pass.
+///
+/// `tracks` and `buses` are empty when the caller did not ask for stems.
+pub(crate) struct MixStems {
+    /// Post-track-stage, one entry per document track in document order.
+    pub(crate) tracks: Vec<(TrackId, Vec<f32>)>,
+    /// Post-effects, one entry per bus in document order.
+    pub(crate) buses: Vec<(AudioBusId, Vec<f32>)>,
+    /// Post-limiter.
+    pub(crate) master: Vec<f32>,
+}
+
+/// The whole-document export mix (AU1 §6.1: the same code path the measured
+/// master comes from, with stem collection switched off).
 pub(crate) fn mix_audio(
     document: &Document,
     settings: &ExportSettings,
 ) -> Result<Vec<f32>, MediaError> {
-    let total_sample_frames = frame_to_samples(document.duration, AUDIO_RATE, document.fps);
+    mix_pass(document, TimeCode::ZERO..document.duration, settings, false).map(|stems| stems.master)
+}
+
+/// AU1 §6.1: mix from frame 0 through `range.end` — the seek-preroll rule, so
+/// stateful bus effects match export exactly — and keep `[range.start,
+/// range.end)` of every stem.
+fn mix_audio_stems(
+    document: &Document,
+    range: std::ops::Range<TimeCode>,
+    settings: &ExportSettings,
+) -> Result<MixStems, MediaError> {
+    mix_pass(document, range, settings, true)
+}
+
+#[allow(clippy::too_many_lines)]
+fn mix_pass(
+    document: &Document,
+    range: std::ops::Range<TimeCode>,
+    settings: &ExportSettings,
+    collect_stems: bool,
+) -> Result<MixStems, MediaError> {
+    let total_sample_frames = frame_to_samples(range.end, AUDIO_RATE, document.fps);
     let total_samples = usize::try_from(total_sample_frames)
         .map_err(|_| MediaError::Backend("audio mix is too large".to_owned()))?
         .checked_mul(usize::from(AUDIO_CHANNELS))
         .ok_or_else(|| MediaError::Backend("audio mix is too large".to_owned()))?;
     let mut track_mixes = HashMap::<TrackId, Vec<f32>>::new();
-    let segments = timeline_audio_segments(document, TimeCode::ZERO..document.duration)?;
+    let segments = timeline_audio_segments(document, TimeCode::ZERO..range.end)?;
     for segment in segments {
         check_cancelled(settings)?;
         let clip = document.clip(segment.clip).ok_or_else(|| {
@@ -816,8 +853,27 @@ pub(crate) fn mix_audio(
         }
     }
     let channel_count = usize::from(AUDIO_CHANNELS);
-    let mut processor = AudioMixProcessor::new(document, AUDIO_RATE, channel_count);
+    let mut processor = AudioMixProcessor::new(document, AUDIO_RATE, channel_count, None);
+    let track_order = document
+        .tracks
+        .iter()
+        .map(|track| track.id)
+        .collect::<Vec<_>>();
+    let bus_order = document
+        .audio_mix
+        .buses
+        .iter()
+        .map(|bus| bus.id)
+        .collect::<Vec<_>>();
     let mut mix = Vec::with_capacity(total_samples);
+    let mut track_stems = track_order
+        .iter()
+        .map(|track| (*track, Vec::<f32>::new()))
+        .collect::<Vec<_>>();
+    let mut bus_stems = bus_order
+        .iter()
+        .map(|bus| (*bus, Vec::<f32>::new()))
+        .collect::<Vec<_>>();
     let mut start_frame = 0_u64;
     while start_frame < total_sample_frames {
         check_cancelled(settings)?;
@@ -835,11 +891,123 @@ pub(crate) fn mix_audio(
                 (*track, samples[start..end].to_vec())
             })
             .collect::<HashMap<_, _>>();
-        mix.extend(processor.mix_chunk(&chunk_tracks, start_frame, frame_count)?);
+        if collect_stems {
+            let stems = processor.mix_chunk_with_stems(&chunk_tracks, start_frame, frame_count)?;
+            for (stem, chunk) in track_stems.iter_mut().zip(stems.tracks) {
+                stem.1.extend_from_slice(&chunk);
+            }
+            for (stem, chunk) in bus_stems.iter_mut().zip(stems.buses) {
+                stem.1.extend_from_slice(&chunk);
+            }
+            mix.extend(stems.master);
+        } else {
+            mix.extend(processor.mix_chunk(&chunk_tracks, start_frame, frame_count)?);
+        }
         start_frame = start_frame.saturating_add(u64::try_from(frame_count).unwrap_or(u64::MAX));
     }
     limit_audio_mix(&mut mix);
-    Ok(mix)
+    let keep_from = usize::try_from(frame_to_samples(range.start, AUDIO_RATE, document.fps))
+        .unwrap_or(usize::MAX)
+        .saturating_mul(channel_count)
+        .min(mix.len());
+    if keep_from > 0 {
+        mix.drain(..keep_from);
+        for stem in &mut track_stems {
+            let cut = keep_from.min(stem.1.len());
+            stem.1.drain(..cut);
+        }
+        for stem in &mut bus_stems {
+            let cut = keep_from.min(stem.1.len());
+            stem.1.drain(..cut);
+        }
+    }
+    Ok(MixStems {
+        tracks: if collect_stems {
+            track_stems
+        } else {
+            Vec::new()
+        },
+        buses: if collect_stems { bus_stems } else { Vec::new() },
+        master: mix,
+    })
+}
+
+/// AU1 §6.1: measure every track, bus, and the master over one project range.
+///
+/// # Errors
+///
+/// Returns a media error when the clamped range is empty or the mix cannot be
+/// rendered or measured.
+pub(crate) fn measure_mix_levels(
+    document: &Document,
+    request: &MixLevelRequest,
+) -> Result<MixLevelReport, MediaError> {
+    let requested = request
+        .range
+        .clone()
+        .unwrap_or(TimeCode::ZERO..document.duration);
+    let range = requested.start.max(TimeCode::ZERO)..requested.end.min(document.duration);
+    if range.start >= range.end {
+        return Err(MediaError::Backend(format!(
+            "mix level range {}..{} is empty after clamping to 0..{}",
+            requested.start.0, requested.end.0, document.duration.0
+        )));
+    }
+    let settings = ExportSettings {
+        fps: document.fps,
+        resolution: document.resolution,
+        delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
+        video_codec: "libx264".to_owned(),
+        audio_codec: "aac".to_owned(),
+        video_bitrate: 1,
+        audio_bitrate: 1,
+        cancellation: ExportCancellation::default(),
+    };
+    let stems = mix_audio_stems(document, range.clone(), &settings)?;
+    let mut tracks = Vec::with_capacity(document.tracks.len());
+    for track in &document.tracks {
+        let samples = stems
+            .tracks
+            .iter()
+            .find(|(id, _)| *id == track.id)
+            .map(|(_, samples)| samples.as_slice())
+            .unwrap_or_default();
+        tracks.push(TrackLevels {
+            track: track.id,
+            kind: track.kind,
+            mix: document.track_mix(track.id),
+            audible: document.track_audible(track.id),
+            bus: document
+                .audio_mix
+                .buses
+                .iter()
+                .find(|bus| bus.tracks.contains(&track.id))
+                .map(|bus| bus.id),
+            levels: measure_loudness(samples, AUDIO_RATE, AUDIO_CHANNELS)?,
+        });
+    }
+    let mut buses = Vec::with_capacity(document.audio_mix.buses.len());
+    for bus in &document.audio_mix.buses {
+        let samples = stems
+            .buses
+            .iter()
+            .find(|(id, _)| *id == bus.id)
+            .map(|(_, samples)| samples.as_slice())
+            .unwrap_or_default();
+        buses.push(BusLevels {
+            bus: bus.id,
+            name: bus.name.clone(),
+            levels: measure_loudness(samples, AUDIO_RATE, AUDIO_CHANNELS)?,
+        });
+    }
+    let master = measure_loudness(&stems.master, AUDIO_RATE, AUDIO_CHANNELS)?;
+    Ok(MixLevelReport {
+        range,
+        any_solo: document.audio_mix.any_solo(),
+        tracks,
+        buses,
+        master,
+    })
 }
 
 fn validate_settings(

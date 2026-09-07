@@ -18,16 +18,16 @@ use kinewright_core::{
     MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE, MatteParams, MatteProof, MatteProofError,
     MatteProofMetadata, MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus,
     MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,
-    MediaError, MediaEvent, MonitorProof, Playback, PlaybackState, ProgressSink, Rational,
-    RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, VisualAssetResult,
-    WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof, WorkingProofMetadata,
-    export_lut_preflight_with,
+    MediaError, MediaEvent, MixLevelReport, MixLevelRequest, MixPeaks, MonitorProof, Playback,
+    PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode,
+    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TranscriptStatus, VisualAssetResult, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof,
+    WorkingProofMetadata, export_lut_preflight_with,
 };
 
 use crate::{
     analysis::VisualAssetService,
-    audio::{AudioRuntime, MeterState, decode_audio_range},
+    audio::{AudioRuntime, MeterState, MixMeters, decode_audio_range},
     clock::samples_to_frame,
     compositor::GpuContext,
     decode::probe_path,
@@ -272,6 +272,9 @@ enum Control {
     /// itself never crosses this channel: it is rebuilt from the worker's own
     /// document, which is the only document the worker may resolve looks for.
     LutLatticesPublished,
+    /// AU1 §5.3: a document that differs only in `audio_mix.tracks`, applied to
+    /// the running mixer without pausing, reseeking, or touching video state.
+    UpdateAudioMix(Arc<Document>),
     Play(TimeCode),
     Pause,
     Thumbnail {
@@ -295,6 +298,9 @@ pub struct FfmpegMediaEngine {
     requested: Arc<RequestedPositions>,
     clock: Arc<SharedClock>,
     meter: Arc<MeterState>,
+    /// AU1 §4.1: the peak table the worker installs while it is playing, read
+    /// by `Playback::mix_peaks`.
+    mix_meters: Arc<RwLock<Arc<MixMeters>>>,
     next_asset_id: AtomicU64,
     data_dir: PathBuf,
     gpu: GpuContext,
@@ -378,6 +384,8 @@ impl FfmpegMediaEngine {
         let worker_clock = Arc::clone(&clock);
         let meter = Arc::new(MeterState::default());
         let worker_meter = Arc::clone(&meter);
+        let mix_meters = Arc::new(RwLock::new(Arc::new(MixMeters::empty(Arc::clone(&meter)))));
+        let worker_mix_meters = Arc::clone(&mix_meters);
         let frames_drop_rx = frames_rx.clone();
         let events_drop_rx = events_rx.clone();
         // Scrub positions use shared atomics so rapid mouse movement is coalesced
@@ -400,6 +408,7 @@ impl FfmpegMediaEngine {
                     },
                     worker_clock,
                     worker_meter,
+                    worker_mix_meters,
                     worker_requested,
                     worker_gpu,
                     worker_lut_lattices,
@@ -417,6 +426,7 @@ impl FfmpegMediaEngine {
             requested,
             clock,
             meter,
+            mix_meters,
             next_asset_id: AtomicU64::new(1),
             data_dir: data_dir_for_self,
             gpu,
@@ -557,6 +567,15 @@ impl FfmpegMediaEngine {
         self.data_dir.join(family).join("v1")
     }
 
+    /// AU1 §4.1: clear whatever peak table is installed, master included.
+    fn clear_mix_meters(&self) {
+        if let Ok(meters) = self.mix_meters.read() {
+            meters.clear();
+        } else {
+            self.meter.clear();
+        }
+    }
+
     fn cache_family_status(
         family: MediaCacheFamily,
         root: Option<PathBuf>,
@@ -632,13 +651,13 @@ impl Playback for FfmpegMediaEngine {
     }
 
     fn play(&self, from: TimeCode) {
-        self.meter.clear();
+        self.clear_mix_meters();
         self.clock.set_frame(from);
         let _ = self.control_tx.send(Control::Play(from));
     }
 
     fn pause(&self) {
-        self.meter.clear();
+        self.clear_mix_meters();
         let _ = self.control_tx.send(Control::Pause);
     }
 
@@ -655,6 +674,23 @@ impl Playback for FfmpegMediaEngine {
 
     fn output_peaks(&self) -> [f32; 2] {
         self.meter.peaks()
+    }
+
+    fn mix_peaks(&self) -> MixPeaks {
+        self.mix_meters
+            .read()
+            .map_or_else(|_| MixPeaks::default(), |meters| meters.peaks())
+    }
+
+    /// AU1 §5.3: publish a document that differs only in `audio_mix.tracks`.
+    ///
+    /// The export document is refreshed exactly as `set_document` does; the
+    /// clock, the next asset id, and the worker's video state are untouched.
+    fn update_audio_mix(&self, doc: Arc<Document>) {
+        if let Ok(mut export_document) = self.export_document.write() {
+            *export_document = Arc::clone(&doc);
+        }
+        let _ = self.control_tx.send(Control::UpdateAudioMix(doc));
     }
 }
 
@@ -750,6 +786,14 @@ impl Analysis for FfmpegMediaEngine {
         };
         let samples = crate::export::mix_audio(document, &settings)?;
         measure_loudness(&samples, 48_000, 2)
+    }
+
+    fn mix_levels(
+        &self,
+        document: &Document,
+        request: &MixLevelRequest,
+    ) -> Result<MixLevelReport, MediaError> {
+        crate::export::measure_mix_levels(document, request)
     }
 
     fn request_beat_detection(&self, asset: MediaAsset) {
@@ -1231,6 +1275,9 @@ struct Worker {
     events_drop_rx: Receiver<MediaEvent>,
     clock: Arc<SharedClock>,
     meter: Arc<MeterState>,
+    /// AU1 §4.1: shared with the engine; holds `MixMeters::empty` whenever the
+    /// worker is not playing.
+    mix_meters: Arc<RwLock<Arc<MixMeters>>>,
     requested: Arc<RequestedPositions>,
     handled_frame_sequence: u64,
     handled_seek_sequence: u64,
@@ -1262,6 +1309,7 @@ impl Worker {
         channels: WorkerChannels,
         clock: Arc<SharedClock>,
         meter: Arc<MeterState>,
+        mix_meters: Arc<RwLock<Arc<MixMeters>>>,
         requested: Arc<RequestedPositions>,
         gpu: GpuContext,
         lut_lattices: Arc<RwLock<PublishedLattices>>,
@@ -1274,6 +1322,7 @@ impl Worker {
             events_drop_rx: channels.events_drop_rx,
             clock,
             meter,
+            mix_meters,
             requested,
             handled_frame_sequence: 0,
             handled_seek_sequence: 0,
@@ -1290,12 +1339,18 @@ impl Worker {
     fn run(mut self) {
         loop {
             match self.control_rx.recv_timeout(WORKER_TICK) {
-                Ok(control) => self.handle_control(control),
+                Ok(control) => {
+                    self.handle_control(control);
+                    // AU1 §5.3: a burst of controls cannot starve the ring for
+                    // longer than one decode.
+                    self.fill_audio();
+                }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
             }
             while let Ok(control) = self.control_rx.try_recv() {
                 self.handle_control(control);
+                self.fill_audio();
             }
             self.handle_coalesced_requests();
             self.tick();
@@ -1306,6 +1361,7 @@ impl Worker {
         match control {
             Control::SetDocument(doc) => self.set_document(&doc),
             Control::LutLatticesPublished => self.rebind_lut_library(),
+            Control::UpdateAudioMix(doc) => self.update_audio_mix(doc),
             Control::Play(from) => self.start_playback(from),
             Control::Pause => self.pause(),
             Control::Thumbnail {
@@ -1369,6 +1425,17 @@ impl Worker {
         self.renderer.set_lut_library(Arc::clone(&self.lut_library));
     }
 
+    /// AU1 §5.3: the document differs only in `audio_mix.tracks`, which no
+    /// video path reads, so nothing is paused, reseeked, or rebound. The app's
+    /// `is_live_track_mix_change` predicate is the contract; the worker does
+    /// not verify it.
+    fn update_audio_mix(&mut self, doc: Arc<Document>) {
+        self.document = doc;
+        if let Some(audio) = &mut self.audio {
+            audio.update_track_mix(&self.document);
+        }
+    }
+
     fn set_document(&mut self, doc: &Document) {
         self.pause();
         self.document = Arc::new(doc.clone());
@@ -1405,17 +1472,31 @@ impl Worker {
     fn start_playback(&mut self, from: TimeCode) {
         self.audio = None;
         self.meter.clear();
+        // AU1 §4.1: a seek during playback re-enters here without passing
+        // through `Playback::play`, so the installed slots are cleared too.
+        if let Ok(meters) = self.mix_meters.read() {
+            meters.clear();
+        }
         if self.document.duration <= TimeCode::ZERO {
             self.fail(MediaError::Backend("the timeline is empty".to_owned()));
             return;
         }
         let from = TimeCode(from.0.clamp(0, self.document.duration.0.saturating_sub(1)));
         self.clock.set_frame(from);
-        match self.audio_for_position(from).and_then(|runtime| {
-            runtime.play()?;
-            Ok(runtime)
-        }) {
+        let mix_meters = Arc::new(MixMeters::for_document(
+            &self.document,
+            Arc::clone(&self.meter),
+        ));
+        match self
+            .audio_for_position(from, Arc::clone(&mix_meters))
+            .and_then(|runtime| {
+                runtime.play()?;
+                Ok(runtime)
+            }) {
             Ok(runtime) => {
+                // AU1 §4.1: installed only once the runtime exists, so
+                // `mix_peaks()` stays empty when playback fails to start.
+                self.install_mix_meters(mix_meters);
                 self.audio = Some(runtime);
                 self.playing = true;
                 self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Playing));
@@ -1437,6 +1518,7 @@ impl Worker {
             .store(position.0, Ordering::Release);
         self.audio = None;
         self.meter.clear();
+        self.install_mix_meters(Arc::new(MixMeters::empty(Arc::clone(&self.meter))));
         self.clock.sample_rate.store(0, Ordering::Release);
         if self.playing {
             self.playing = false;
@@ -1501,14 +1583,38 @@ impl Worker {
         send_latest(&self.frames_tx, &self.frames_drop_rx, (project_at, frame));
     }
 
-    fn audio_for_position(&self, project_at: TimeCode) -> Result<AudioRuntime, MediaError> {
+    fn audio_for_position(
+        &self,
+        project_at: TimeCode,
+        mix_meters: Arc<MixMeters>,
+    ) -> Result<AudioRuntime, MediaError> {
         AudioRuntime::open(
             &self.document,
             project_at,
             &self.clock.position_samples,
             &self.clock.sample_rate,
             Arc::clone(&self.meter),
+            mix_meters,
         )
+    }
+
+    /// AU1 §4.1: publish the table `Playback::mix_peaks` reads.
+    fn install_mix_meters(&self, meters: Arc<MixMeters>) {
+        if let Ok(mut installed) = self.mix_meters.write() {
+            *installed = meters;
+        }
+    }
+
+    /// AU1 §5.3: top the output ring back up to the live fill target.
+    fn fill_audio(&mut self) {
+        if !self.playing {
+            return;
+        }
+        if let Some(audio) = &mut self.audio
+            && let Err(error) = audio.fill()
+        {
+            self.fail(error);
+        }
     }
 
     fn fail(&mut self, error: MediaError) {

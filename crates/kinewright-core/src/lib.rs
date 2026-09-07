@@ -131,20 +131,21 @@ pub use effect::{
 pub use journal::JournalCommand;
 pub use media::{
     Analysis, AnalysisJobStatus, AnalysisKind, AnalysisPhase, AssetBeats, AssetSceneChanges,
-    AssetSilences, AssetTranscript, AudioLoudness, BeatMarker, BeatStatus, Export,
+    AssetSilences, AssetTranscript, AudioLoudness, BeatMarker, BeatStatus, BusLevels, Export,
     ExportCancellation, ExportLutPreflightIssue, ExportLutPreflightReport,
     ExportMediaPreflightIssue, ExportMediaPreflightReport, ExportProgress, ExportSettings,
     FrameTexture, LinearRgbaImage, LutAvailabilityKind, LutAvailabilityStatus,
     MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_HISTOGRAM_BUCKETS, MATTE_COVERAGE_SCALE,
     MatteCoverageError, MatteCoverageStatistics, MatteProof, MatteProofError, MatteProofMetadata,
     MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,
-    MediaCacheFamilyStatus, MediaCacheInventory, MediaError, MediaEvent, MonitorProof,
-    MonitorProofMetadata, MonitorProofRenderKind, Playback, PlaybackState, ProgressSink, RgbaImage,
-    SceneChange, SceneStatus, SilenceSpan, SilenceStatus, ThumbnailFrame, ThumbnailKey,
-    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TranscriptStatus, TranscriptWord, VisualAssetResult, VisualRequestKind, WORKING_PROOF_ENCODING,
-    WORKING_PROOF_STAGE, WaveformData, WaveformPeak, WorkingProof, WorkingProofMetadata,
-    export_lut_preflight_with, export_media_preflight, matte_coverage_statistics,
+    MediaCacheFamilyStatus, MediaCacheInventory, MediaError, MediaEvent, MixLevelReport,
+    MixLevelRequest, MixPeaks, MonitorProof, MonitorProofMetadata, MonitorProofRenderKind,
+    Playback, PlaybackState, ProgressSink, RgbaImage, SceneChange, SceneStatus, SilenceSpan,
+    SilenceStatus, ThumbnailFrame, ThumbnailKey, TimelineBeat, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TrackLevels, TranscriptStatus, TranscriptWord,
+    VisualAssetResult, VisualRequestKind, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE,
+    WaveformData, WaveformPeak, WorkingProof, WorkingProofMetadata, export_lut_preflight_with,
+    export_media_preflight, matte_coverage_statistics,
 };
 pub use model::{
     AssetId, AudioBus, AudioBusId, AudioMix, BinId, Clip, ClipContent, ClipId, Document, Effect,
@@ -152,7 +153,8 @@ pub use model::{
     LutAssetId, LutAssetKind, LutAssetSource, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId,
     MediaAsset, MediaBin, MediaCatalog, MediaKind, MediaSourceFingerprint, ParamValue,
     RelinkCandidate, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
-    Track, TrackId, TrackKind, Transition, clip_effective_fps, validate_lut_asset,
+    TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, Track, TrackId,
+    TrackKind, TrackMix, Transition, clip_effective_fps, validate_lut_asset,
 };
 pub use multicam::{
     ReframeFocusBounds, SpeakerAngleAssignment, SpeakerMulticamCut, SpeakerMulticamError,

@@ -40,7 +40,29 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   off the composite, instead of clamping it to the raster edge and tracking
   whatever is there.
 
+### Changed
+- Unrouted tracks are now summed in document order in both playback and export;
+  export audio may differ by one ulp per sample from earlier builds when two or
+  more unrouted tracks are audible at once (previously nondeterministic run to
+  run).
+
 ### Added
+- AU1 manual mix: every track carries typed mix state — `TrackMix` entries in
+  `Document.audio_mix.tracks` (gain in tenths of a decibel, pan in integer
+  percent, mute, solo) written by one idempotent `SetTrackMix` and re-validated
+  at document load. The shared `AudioMixProcessor` gains a track stage ahead of
+  routing — mute/solo gate, gain, then a balance pan whose centre is an exact
+  identity, so a neutral document still mixes bit-identically — and `MixMeters`
+  publishes per-track, per-bus, and master post-stage peaks through
+  `Playback::mix_peaks` as telemetry that never enters the document.
+  `Playback::update_audio_mix` applies a mix-only document to the running
+  worker, so mixing no longer stops the transport: the feeder fills the
+  two-second ring to a one-second target, an edit is heard about a second after
+  the gesture, and a 5 ms playback-only ramp keeps it from clicking. The app
+  gains a Mixer tab (`Ctrl+Shift+M`) with track, read-only bus, and master
+  strips plus `M`/`S` toggles in every timeline track header; the agent gains
+  the generated `set_track_mix` and the read-only `get_audio_levels` over
+  `Analysis::mix_levels`. See docs/AU1-MANUAL-MIX.md.
 - CC7 workflow evaluation: no colour feature and no MCP tool — the slice
   evaluates the CC0–CC6 surface. `kinewright_core::cc7_scenarios` is the single
   authority for six synthetic scenarios (patch geometry, analytic codes, camera

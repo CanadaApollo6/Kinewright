@@ -364,6 +364,12 @@ const fn i32_is_zero(value: &i32) -> bool {
     *value == 0
 }
 
+// Serde's `skip_serializing_if` callbacks receive references to the fields.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn bool_is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn time_code_is_zero(value: &TimeCode) -> bool {
     value.0 == 0
@@ -482,17 +488,87 @@ pub struct AudioBus {
     pub ducking_sidechain_tracks: Vec<TrackId>,
 }
 
+/// Per-track mix state (AU1 §2.1). An absent entry is neutral.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrackMix {
+    pub track: TrackId,
+    /// Integer tenths of a decibel, inclusive range `TRACK_MIX_GAIN_MIN..=TRACK_MIX_GAIN_MAX`.
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    #[schemars(default)]
+    pub gain_tenth_db: i32,
+    /// Integer percent, -100 (hard left) ..= 100 (hard right), 0 centre (AU1 §3.1).
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    #[schemars(default)]
+    pub pan_percent: i32,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    #[schemars(default)]
+    pub mute: bool,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    #[schemars(default)]
+    pub solo: bool,
+}
+
+/// Lowest accepted track mix gain in tenths of a decibel (AU1 §2.1).
+pub const TRACK_MIX_GAIN_MIN: i32 = -600;
+/// Highest accepted track mix gain in tenths of a decibel (AU1 §2.1).
+pub const TRACK_MIX_GAIN_MAX: i32 = 120;
+/// Hard-left track mix pan position in percent (AU1 §2.1).
+pub const TRACK_MIX_PAN_MIN: i32 = -100;
+/// Hard-right track mix pan position in percent (AU1 §2.1).
+pub const TRACK_MIX_PAN_MAX: i32 = 100;
+
+impl TrackMix {
+    /// The neutral mix state for a track: unity gain, centred, unmuted, unsoloed.
+    #[must_use]
+    pub const fn neutral(track: TrackId) -> Self {
+        Self {
+            track,
+            gain_tenth_db: 0,
+            pan_percent: 0,
+            mute: false,
+            solo: false,
+        }
+    }
+
+    /// Whether this entry leaves the track's signal untouched (AU1 §2.1).
+    #[must_use]
+    pub const fn is_neutral(&self) -> bool {
+        self.gain_tenth_db == 0 && self.pan_percent == 0 && !self.mute && !self.solo
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AudioMix {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub buses: Vec<AudioBus>,
+    /// AU1: per-track mix entries, sorted by track id, unique, never neutral
+    /// when written by Core. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub tracks: Vec<TrackMix>,
 }
 
 impl AudioMix {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.buses.is_empty()
+        self.buses.is_empty() && self.tracks.is_empty()
+    }
+
+    /// The stored mix state for a track, or the neutral state when absent (AU1 §2.2).
+    #[must_use]
+    pub fn track(&self, track: TrackId) -> TrackMix {
+        self.tracks
+            .iter()
+            .copied()
+            .find(|entry| entry.track == track)
+            .unwrap_or_else(|| TrackMix::neutral(track))
+    }
+
+    /// Whether any track in the document is soloed (AU1 §3.1).
+    #[must_use]
+    pub fn any_solo(&self) -> bool {
+        self.tracks.iter().any(|entry| entry.solo)
     }
 }
 
@@ -841,6 +917,19 @@ impl Document {
     #[must_use]
     pub fn marker(&self, id: MarkerId) -> Option<&Marker> {
         self.markers.iter().find(|marker| marker.id == id)
+    }
+
+    /// The mix state for a track, neutral when the document stores no entry (AU1 §2.2).
+    #[must_use]
+    pub fn track_mix(&self, track: TrackId) -> TrackMix {
+        self.audio_mix.track(track)
+    }
+
+    /// AU1 §3.1 gate: whether the track's post-stage signal reaches buses/master.
+    #[must_use]
+    pub fn track_audible(&self, track: TrackId) -> bool {
+        let mix = self.track_mix(track);
+        !mix.mute && (!self.audio_mix.any_solo() || mix.solo)
     }
 
     /// Validate every cross-reference and timeline invariant in the document.

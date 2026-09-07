@@ -25,8 +25,8 @@ use kinewright_core::{
     DeliveryVariant, Document, Effect, EffectId, Event, Export, ExportCancellation, Keyframe,
     KeyframeInterpolation, LutAsset, MUSIC_STRUCTURE_DEFAULT_METER_BEATS,
     MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId, MediaAsset, MediaAvailabilityKind,
-    MediaCacheFamily, MediaCacheInventory, MediaKind, Operation, ParamValue, Playback, Query,
-    QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus, SilenceStatus,
+    MediaCacheFamily, MediaCacheInventory, MediaKind, MixLevelRequest, Operation, ParamValue,
+    Playback, Query, QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus, SilenceStatus,
     SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
     SubjectFocusBasisPointConstraint, SubjectReframeSettings, SyncGroupId, ThreePointMode,
     TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
@@ -81,6 +81,7 @@ use crate::{
         cuttable_timeline_silences, render_asset_scene_changes, render_asset_silences,
         render_asset_transcript, render_clip_info, render_timeline_scene_changes,
         render_timeline_silences, render_timeline_state, render_timeline_transcript,
+        track_kind_name,
     },
     runtime::{
         CapabilityDescriptor, CapabilityKind, PreparedEditPlan, PreparedPlanId, PreparedPlanStore,
@@ -961,6 +962,10 @@ impl KinewrightMcp {
             "get_timeline_silences" => {
                 let args: TimelineSilencesArgs = decode_args("get_timeline_silences", arguments)?;
                 self.timeline_silences(args.range, args.min_duration_frames)
+            }
+            "get_audio_levels" => {
+                let args: AudioLevelsArgs = decode_args("get_audio_levels", arguments)?;
+                self.audio_levels(&args)
             }
             "get_scene_changes" => {
                 let args: SceneChangesArgs = decode_args("get_scene_changes", arguments)?;
@@ -7153,6 +7158,84 @@ impl KinewrightMcp {
         ))
     }
 
+    /// AU1 §6.2: measure the mix through the track stage over an optional
+    /// project range and report it per track, per bus, and at master.
+    fn audio_levels(&self, args: &AudioLevelsArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let request = match (args.start_frame, args.end_frame) {
+            (None, None) => MixLevelRequest { range: None },
+            (start, end) => {
+                let start = start.unwrap_or(TimeCode::ZERO);
+                let end = end.unwrap_or(document.duration);
+                if start >= end {
+                    return Ok(error_text(format!(
+                        "get_audio_levels needs start_frame < end_frame; got {start}..{end}"
+                    )));
+                }
+                MixLevelRequest {
+                    range: Some(start..end),
+                }
+            }
+        };
+        let report = match self.analysis.mix_levels(&document, &request) {
+            Ok(report) => report,
+            Err(error) => {
+                return Ok(error_text(format!("could not measure mix levels: {error}")));
+            }
+        };
+        let mut text = String::new();
+        let _ = writeln!(
+            text,
+            "mix_levels range={}..{} any_solo={} lufs/peak in hundredths",
+            report.range.start, report.range.end, report.any_solo
+        );
+        for track in &report.tracks {
+            let kind = track_kind_name(track.kind);
+            let _ = writeln!(
+                text,
+                "track {} {kind} gain={} pan={} mute={} solo={} audible={} bus={} lufs={} peak={}",
+                track.track,
+                track.mix.gain_tenth_db,
+                track.mix.pan_percent,
+                track.mix.mute,
+                track.mix.solo,
+                track.audible,
+                track
+                    .bus
+                    .map_or_else(|| "none".to_owned(), |bus| bus.to_string()),
+                render_optional_hundredths(track.levels.integrated_lufs_hundredths),
+                render_optional_hundredths(track.levels.sample_peak_dbfs_hundredths),
+            );
+        }
+        for bus in &report.buses {
+            let _ = writeln!(
+                text,
+                "bus {} {:?} lufs={} peak={}",
+                bus.bus,
+                bus.name,
+                render_optional_hundredths(bus.levels.integrated_lufs_hundredths),
+                render_optional_hundredths(bus.levels.sample_peak_dbfs_hundredths),
+            );
+        }
+        let _ = write!(
+            text,
+            "master lufs={} peak={}",
+            render_optional_hundredths(report.master.integrated_lufs_hundredths),
+            render_optional_hundredths(report.master.sample_peak_dbfs_hundredths),
+        );
+        // AU1 §2.1: `TrackMix` skips its neutral fields on the wire, so a
+        // neutral track serialises as `{"track": 1}` here and a reader must
+        // default the absent `gain_tenth_db`, `pan_percent`, `mute` and `solo`.
+        // The text lines above always spell all four.
+        Ok(success_structured(
+            text,
+            serde_json::json!({
+                "timeline_revision": revision.0,
+                "report": report,
+            }),
+        ))
+    }
+
     fn timeline_silences(
         &self,
         requested: Option<TranscriptRangeArgs>,
@@ -9146,6 +9229,20 @@ struct SilencesArgs {
     min_duration_frames: Option<TimeCode>,
 }
 
+/// AU1 §6.2: an optional half-open project-frame window for `get_audio_levels`.
+/// Omitting both bounds measures the whole timeline.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AudioLevelsArgs {
+    /// Optional inclusive first project frame. Defaults to 0 when only
+    /// `end_frame` is given, and to the whole timeline when both are omitted.
+    #[serde(default)]
+    start_frame: Option<TimeCode>,
+    /// Optional exclusive last project frame. Defaults to the timeline
+    /// duration when only `start_frame` is given.
+    #[serde(default)]
+    end_frame: Option<TimeCode>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SceneChangesArgs {
     /// Stable asset id shown by `get_timeline_state`.
@@ -9793,6 +9890,12 @@ fn inspector_tools() -> Vec<Tool> {
             "get_timeline_silences",
             "Return cached silence spans mapped through clips to exact project frames and seconds, filtered by a caller-selected final cuttable duration. Transcript protection and the 100 ms fps-aware margin are applied before the duration gate.",
             schema_object::<TimelineSilencesArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_audio_levels",
+            "Measure per-track, per-bus, and master loudness through the mix, including each track's gain, pan, mute, and solo state. Loudness and sample peak are reported in hundredths of a unit, and read `none` for a stem that decoded silent, which is what a muted or solo-suppressed track reports. Omit both frame bounds to measure the whole timeline; give either bound to measure a half-open project-frame window. This capability is read-only and produces no edit operations.",
+            schema_object::<AudioLevelsArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -10582,6 +10685,12 @@ fn success_structured(text: impl Into<String>, value: serde_json::Value) -> Call
     let mut result = success_text(text);
     result.structured_content = Some(value);
     result
+}
+
+/// AU1 §6.2: `none` for an unmeasurable (silent) stem, the raw hundredths
+/// otherwise, so the text summary and the structured report agree.
+fn render_optional_hundredths(value: Option<i32>) -> String {
+    value.map_or_else(|| "none".to_owned(), |value| value.to_string())
 }
 
 fn error_text(text: impl Into<String>) -> CallToolResult {
@@ -19091,7 +19200,7 @@ mod tests {
                 "{name} must be read-only"
             );
         }
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 75);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 76);
 
         // M36: every colour planner and every CC5 tool stays inside the
         // kilobyte description budget, measured on the *registered* descriptor
@@ -20959,12 +21068,16 @@ mod tests {
         // inside the crate (`capability_tools` is private), so it is pinned
         // here beside the served figure CC7 asserts is byte-identical to CC6's.
         // Errata D-E9 claimed this test already did that; it did not until now.
+        // AU1 §6.2 regenerated the registry figure (126 tools, 1,303,967 B =
+        // 1,186,449 B of input schemas + 96,840 B of descriptions); served is
+        // byte-identical because the seven served tools do not embed the
+        // `Operation` schema.
         assert_eq!(
             (
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_280_060, 5_660),
+            (1_303_967, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
 

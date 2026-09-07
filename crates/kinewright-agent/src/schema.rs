@@ -13,7 +13,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 75] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 76] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -71,6 +71,11 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 75] = [
     "get_beats",
     "get_timeline_beats",
     "get_music_structure",
+    // AU1 §6.2: the read-only mix measurement surface, beside the other audio
+    // inspectors. `get_` already infers `CapabilityKind::Inspector`, so no
+    // `CAPABILITY_KIND_OVERRIDES` entry is needed; that omission is a
+    // decision, not an oversight, exactly as for `get_color_qc` above.
+    "get_audio_levels",
     "plan_dialogue_assembly",
     "plan_beat_pacing",
     "plan_beat_montage",
@@ -266,6 +271,7 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::AddTrack { .. } => "add_track",
         Operation::RemoveTrack { .. } => "remove_track",
         Operation::SetTrackSyncLock { .. } => "set_track_sync_lock",
+        Operation::SetTrackMix { .. } => "set_track_mix",
         Operation::AddClip { .. } => "add_clip",
         Operation::AddTitle { .. } => "add_title",
         Operation::SplitClip { .. } => "split_clip",
@@ -374,7 +380,7 @@ fn operation_tool(
             name.as_str(),
             "delete_clip" | "ripple_delete_clip" | "remove_track"
         ))
-        .idempotent(name == "set_clip_audio")
+        .idempotent(matches!(name.as_str(), "set_clip_audio" | "set_track_mix"))
         .open_world(false);
     let mut description = format!(
         "Apply Operation::{variant} to the live timeline only at expected_revision from get_timeline_state. All frame values are exact integers."
@@ -428,6 +434,9 @@ fn operation_tool(
         ),
         "SetTrackSyncLock" => description.push_str(
             " Sync lock is enabled by default. Disable it only when a track should run free during ripple edits on other tracks.",
+        ),
+        "SetTrackMix" => description.push_str(
+            " gain_tenth_db is an integer number of tenths of a decibel in -600..=120; pan_percent is an integer in -100..=100 using a balance law (0 is an exact identity, -100 silences the right channel, 100 silences the left); mute silences the track everywhere including ducking sidechains; any solo silences every non-solo track. The operation replaces all four values; sending neutral values removes the track's entry.",
         ),
         "LinkClips" | "UnlinkClips" => description.push_str(
             " Links are metadata: moving, trimming, or deleting a member requires an atomic plan covering its whole link group.",
@@ -729,6 +738,7 @@ mod tests {
                 "add_track",
                 "remove_track",
                 "set_track_sync_lock",
+                "set_track_mix",
                 "add_clip",
                 "add_title",
                 "split_clip",
@@ -879,6 +889,33 @@ mod tests {
         );
     }
 
+    /// AU1 §7 item 19: the generated `set_track_mix` tool documents both
+    /// ranges and the pan law, and is annotated idempotent because the
+    /// operation replaces all four values.
+    #[test]
+    fn set_track_mix_schema_documents_ranges_and_the_balance_law() {
+        let tools = operation_tools().unwrap();
+        let set_track_mix = tools
+            .iter()
+            .find(|definition| definition.tool.name == "set_track_mix")
+            .unwrap();
+        let description = set_track_mix.tool.description.as_deref().unwrap();
+        assert!(description.contains("-600..=120"));
+        assert!(description.contains("-100..=100"));
+        assert!(description.contains("balance law"));
+        assert!(description.contains("any solo silences every non-solo track"));
+        assert!(description.contains("sending neutral values removes the track's entry"));
+        let serialized = serde_json::to_value(&set_track_mix.tool).unwrap();
+        assert_eq!(
+            serialized["annotations"]["idempotentHint"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(
+            serialized["annotations"]["destructiveHint"],
+            serde_json::Value::Bool(false)
+        );
+    }
+
     #[test]
     fn operation_exhaustiveness_guard_requires_new_variants_to_be_acknowledged() {
         assert_eq!(
@@ -894,6 +931,16 @@ mod tests {
                 locked: false,
             }),
             "set_track_sync_lock"
+        );
+        assert_eq!(
+            operation_tool_name(&Operation::SetTrackMix {
+                track: TrackId(1),
+                gain_tenth_db: -60,
+                pan_percent: 25,
+                mute: false,
+                solo: true,
+            }),
+            "set_track_mix"
         );
         assert_eq!(
             operation_tool_name(&Operation::RippleInsertGap {
@@ -938,6 +985,7 @@ mod tests {
         for (name, destructive) in [
             ("ripple_delete_clip", true),
             ("set_track_sync_lock", false),
+            ("set_track_mix", false),
             ("add_marker", false),
             ("move_marker", false),
             ("remove_marker", false),

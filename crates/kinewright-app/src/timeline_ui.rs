@@ -12,11 +12,16 @@ use kinewright_media::timeline_source_at;
 use crate::{
     app::KinewrightApp,
     icons::{self, Icon},
+    mixer_ui::{MixToggle, paint_mix_toggle, track_caption_and_icon, track_mix_toggle_operation},
     theme::{self, color, radius, size, space, type_size},
     visual_cache::VisualCache,
 };
 
-const TRACK_LABEL_WIDTH: f32 = 76.0;
+/// Width of the timeline's track-label column.
+///
+/// AU1 §5.2 grew it from 76 to 96 to seat the mute and solo toggles between
+/// the caption column and the sync-lock button.
+const TRACK_LABEL_WIDTH: f32 = 96.0;
 const EDGE_HANDLE_WIDTH: f32 = 6.0;
 const SNAP_TOLERANCE: f32 = 8.0;
 const FILMSTRIP_TILE_WIDTH: f32 = 96.0;
@@ -937,10 +942,9 @@ fn paint_track_labels(
             [lane.left_bottom(), lane.right_bottom()],
             egui::Stroke::new(1.0, color::BORDER_SUBTLE),
         );
-        let (label, icon) = match track.kind {
-            TrackKind::Video => (format!("V{}", index + 1), Icon::Filmstrip),
-            TrackKind::Audio => (format!("A{}", index + 1), Icon::Waveform),
-        };
+        // The mixer names the same track the same way; one function owns the
+        // spelling so the two surfaces cannot drift (AU1 §5.1).
+        let (label, icon) = track_caption_and_icon(track.kind, index);
         painter.text(
             egui::pos2(lane.left() + space::TWO, lane.center().y - 8.0),
             egui::Align2::LEFT_CENTER,
@@ -956,11 +960,68 @@ fn paint_track_labels(
             .tint(color::TEXT_MUTED)
             .paint_at(ui, icon_rect);
 
+        // One operation per frame leaves this column: the header sends its
+        // edits as a single non-coalesced batch, so a second click in the same
+        // frame would open a second undo entry for a gesture nobody made.
+        if let Some(operation) = paint_mix_toggles(ui, &painter, lane, document, track) {
+            pending_operation = Some(operation);
+        }
         if let Some(operation) = paint_sync_lock_toggle(ui, &painter, lane, track) {
             pending_operation = Some(operation);
         }
     }
     pending_operation
+}
+
+/// The track header's mute and solo toggles (AU1 §5.2).
+///
+/// The column sits between the caption and the sync-lock button; the two 14 px
+/// squares are stacked and centred on the lane. Each returns the whole mix
+/// state with one flag flipped, so a click is one idempotent operation and one
+/// undo entry.
+fn paint_mix_toggles(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    lane: egui::Rect,
+    document: &kinewright_core::Document,
+    track: &kinewright_core::Track,
+) -> Option<Operation> {
+    const TOGGLE: f32 = size::ICON_SM;
+    let mix = document.track_mix(track.id);
+    let column_x = mix_toggle_column_x(lane);
+    let top = lane.center().y - TOGGLE - space::ONE / 2.0;
+    let mut pending = None;
+    for (offset, toggle, id) in [
+        (0.0, MixToggle::Mute, "track-mute"),
+        (TOGGLE + space::ONE, MixToggle::Solo, "track-solo"),
+    ] {
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(column_x, top + offset),
+            egui::vec2(TOGGLE, TOGGLE),
+        );
+        let response = ui
+            .interact(
+                rect,
+                ui.make_persistent_id((id, track.id.0)),
+                egui::Sense::click(),
+            )
+            .on_hover_text(toggle.tooltip());
+        paint_mix_toggle(painter, rect, toggle, toggle.is_on(mix));
+        if response.clicked() {
+            pending = Some(track_mix_toggle_operation(mix, toggle));
+        }
+    }
+    pending
+}
+
+/// The left edge of the track header's mute/solo column (AU1 §5.2).
+///
+/// The column is inset from the lane's right edge by the sync-lock button and
+/// the rhythm on either side of it, so the caption keeps the rest of the
+/// label strip. The test asserts the resulting numbers, so changing this
+/// expression fails it.
+fn mix_toggle_column_x(lane: egui::Rect) -> f32 {
+    lane.right() - space::TWO - size::ICON_BUTTON - space::TWO - size::ICON_SM
 }
 
 fn paint_sync_lock_toggle(
@@ -2119,6 +2180,63 @@ mod tests {
     use kinewright_core::{AssetId, LinkId, MediaAsset, Track};
 
     use super::*;
+
+    /// AU1 §7 item 24: the header paints its mix toggles, and a frame of
+    /// painting writes nothing.
+    #[test]
+    fn track_labels_paint_the_mix_toggles_and_write_nothing() {
+        let ctx = egui::Context::default();
+        // The header asks for the app's own font families, so the theme has to
+        // be installed before a label can be laid out.
+        crate::theme::install(&ctx);
+        let document = linked_fixture();
+        let mut operation = None;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            operation = paint_track_labels(ui, &document, 200.0, size::TRACK_HEIGHT);
+        });
+        assert!(
+            operation.is_none(),
+            "painting the track headers writes no operation"
+        );
+        let painted = crate::theme::painted_text(&output);
+        for expected in ["TRACKS", "V1", "A2", "M", "S"] {
+            assert!(
+                painted.iter().any(|text| text == expected),
+                "the track header paints {expected}; it painted {painted:?}"
+            );
+        }
+    }
+
+    /// AU1 §5.2: the mix column sits inside the widened label strip, clear of
+    /// both the caption column and the sync-lock button.
+    #[test]
+    fn the_mix_toggle_column_fits_between_the_caption_and_the_sync_lock() {
+        assert!((TRACK_LABEL_WIDTH - 96.0).abs() < f32::EPSILON);
+        // Fixed numbers, not the formula again: the point of the test is that
+        // the code the header runs still lands on §5.2's x = 40..54.
+        let lane = egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(TRACK_LABEL_WIDTH, size::TRACK_HEIGHT),
+        );
+        let column_left = mix_toggle_column_x(lane);
+        assert!(
+            (column_left - 40.0).abs() < f32::EPSILON,
+            "the mix column starts at x = 40; it starts at {column_left}"
+        );
+        assert!(
+            (column_left + size::ICON_SM - 54.0).abs() < f32::EPSILON,
+            "the mix column ends at x = 54; it ends at {}",
+            column_left + size::ICON_SM
+        );
+        assert!(
+            column_left + size::ICON_SM <= 62.0,
+            "the toggles must not overlap the sync-lock button, which starts at x = 62"
+        );
+        assert!(
+            column_left >= space::TWO + size::ICON_SM,
+            "the caption and kind icon keep their column"
+        );
+    }
 
     fn linked_fixture() -> Document {
         let fps = Rational::new(30, 1).unwrap();

@@ -6,7 +6,7 @@ use kinewright_core::{
     FrameRounding, TimeCode, map_frames_with_rounding, map_source_range_to_project,
 };
 
-use crate::app::KinewrightApp;
+use crate::app::{KinewrightApp, MaterialTab};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum KeyAction {
@@ -30,11 +30,13 @@ pub(crate) enum KeyAction {
     Export,
     /// CC6 §8.1: open the read-only Colour QC window.
     ColorQc,
+    /// AU1 §5.1: open the material strip on the Mixer tab.
+    Mixer,
     Help,
 }
 
 #[cfg(test)]
-const ALL_ACTIONS: [KeyAction; 20] = [
+const ALL_ACTIONS: [KeyAction; 21] = [
     KeyAction::TogglePlayback,
     KeyAction::Split,
     KeyAction::Delete,
@@ -54,6 +56,7 @@ const ALL_ACTIONS: [KeyAction; 20] = [
     KeyAction::Save,
     KeyAction::Export,
     KeyAction::ColorQc,
+    KeyAction::Mixer,
     KeyAction::Help,
 ];
 
@@ -67,7 +70,7 @@ pub(crate) struct KeyBinding {
     pub(crate) description: &'static str,
 }
 
-pub(crate) const KEYMAP: [KeyBinding; 20] = [
+pub(crate) const KEYMAP: [KeyBinding; 21] = [
     KeyBinding {
         key: egui::Key::Space,
         ctrl: false,
@@ -224,6 +227,16 @@ pub(crate) const KEYMAP: [KeyBinding; 20] = [
         description: "Open the Colour QC window (evidence only)",
     },
     KeyBinding {
+        // Ctrl+Shift+M: bare M is Add marker and Ctrl+M is free, so the
+        // mixer takes the modifier pair that no other binding spends on M.
+        key: egui::Key::M,
+        ctrl: true,
+        shift: true,
+        action: KeyAction::Mixer,
+        shortcut: "Ctrl+Shift+M",
+        description: "Open the Mixer",
+    },
+    KeyBinding {
         key: egui::Key::Questionmark,
         ctrl: false,
         shift: true,
@@ -291,6 +304,10 @@ impl KinewrightApp {
             }
             KeyAction::Export => self.open_export_dialog(),
             KeyAction::ColorQc => self.color_qc.open = true,
+            KeyAction::Mixer => {
+                self.show_material_strip = true;
+                self.material_tab = MaterialTab::Mixer;
+            }
             KeyAction::Help => self.help_open = true,
         }
     }
@@ -420,11 +437,12 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(bindings.len(), KEYMAP.len(), "duplicate key binding");
 
-        // CC6 §8.1 added `ColorQc`, growing both arrays from 19 to 20. This is
+        // AU1 §5.1 added `Mixer`, growing both arrays from 20 to 21. This is
         // the assertion that keeps them together: an action added to the enum
         // and to `ALL_ACTIONS` but given no binding fails here, as does a
         // binding for an action nobody declared. The array lengths are
         // compile-time constants and assert nothing on their own.
+        assert_eq!(KEYMAP.len(), 21);
         let actions = KEYMAP
             .iter()
             .map(|binding| binding.action)
@@ -434,5 +452,27 @@ mod tests {
             actions.contains(&KeyAction::ColorQc),
             "the Colour QC window is reachable from the keyboard"
         );
+    }
+
+    /// AU1 §7 item 23: the mixer is reachable, and on the binding the contract
+    /// names.
+    #[test]
+    fn the_mixer_is_bound_to_ctrl_shift_m() {
+        let binding = KEYMAP
+            .iter()
+            .find(|binding| binding.action == KeyAction::Mixer)
+            .expect("the Mixer action is bound");
+        assert_eq!(binding.key, egui::Key::M);
+        assert!(binding.ctrl);
+        assert!(binding.shift);
+        assert_eq!(binding.shortcut, "Ctrl+Shift+M");
+        assert_eq!(binding.description, "Open the Mixer");
+        // Bare M stays Add marker: the modifiers are what separate them.
+        let marker = KEYMAP
+            .iter()
+            .find(|binding| binding.action == KeyAction::AddMarker)
+            .expect("the marker action is bound");
+        assert_eq!(marker.key, egui::Key::M);
+        assert!(!marker.ctrl && !marker.shift);
     }
 }

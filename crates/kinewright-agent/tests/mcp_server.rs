@@ -2460,8 +2460,10 @@ async fn cc7_prepare_commit_and_compare(
     );
 }
 
-/// CC7 §5.4: CC7 adds no tool, so the served surface, the internal registry
-/// and `INSPECTOR_TOOL_NAMES` are byte-for-byte what CC6 published.
+/// CC7 §5.4: CC7 added no tool, so the served surface stays byte-for-byte
+/// what CC6 published. AU1 §6.2 adds two internal tools — the generated
+/// `set_track_mix` mutator and the `get_audio_levels` inspector — so the
+/// registry counts move while the served seven do not.
 #[tokio::test(flavor = "multi_thread")]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let core = Core::spawn(Document::default()).unwrap();
@@ -2474,7 +2476,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
 
     // The served surface, over the live endpoint.
     let tools = client.list_tools(None).await.unwrap().tools;
-    assert_eq!(tools.len(), 7, "CC7 adds no served tool");
+    assert_eq!(tools.len(), 7, "AU1 adds no served tool");
     assert_eq!(
         tools
             .iter()
@@ -2483,22 +2485,329 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 124 tools, of which `INSPECTOR_TOOL_NAMES` is 75.
+    // The internal registry: 126 tools, of which `INSPECTOR_TOOL_NAMES` is 76.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
-    assert_eq!(registry.len(), 124, "CC7 adds no registry tool");
+    assert_eq!(
+        registry.len(),
+        126,
+        "AU1 adds set_track_mix and get_audio_levels"
+    );
+    assert!(registry.iter().any(|name| name == "set_track_mix"));
+    assert!(registry.iter().any(|name| name == "get_audio_levels"));
     assert_eq!(
         registry.len() - operations.len(),
-        75,
-        "INSPECTOR_TOOL_NAMES stays at 75"
+        76,
+        "AU1 adds set_track_mix and get_audio_levels"
     );
 
-    // The served byte counts CC6 recorded, asserted byte-identically.
+    // The served byte counts CC6 recorded, asserted byte-identically: neither
+    // AU1 tool is served, and the seven served tools do not embed the
+    // `Operation` schema, so the generated mutator does not reach them.
     let metrics = server.tool_surface_metrics();
     assert_eq!(metrics.tool_count, 7);
     assert_eq!(metrics.serialized_bytes, 5_660, "{metrics:?}");
     assert_eq!(metrics.input_schema_bytes, 3_510, "{metrics:?}");
     assert_eq!(metrics.description_bytes, 998, "{metrics:?}");
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU1 §7 item 21: the generated `set_track_mix` mutator survives the whole
+/// agent round trip — plan preparation, commit, and the compact state
+/// rendering — and a neutral set removes both the entry and the suffix.
+#[tokio::test(flavor = "multi_thread")]
+async fn au1_set_track_mix_round_trips_through_edit_plans_and_state() {
+    let core = Core::spawn(edit_plan_document()).unwrap();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let prepared = prepare_plan(
+        &client,
+        0,
+        json!([{
+            "op": "set_track_mix",
+            "track": 1,
+            "gain_tenth_db": -60,
+            "pan_percent": 25,
+            "mute": false,
+            "solo": true
+        }]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(0, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+
+    let document = query_document(&core);
+    assert_eq!(document.audio_mix.tracks.len(), 1);
+    assert_eq!(document.track_mix(TrackId(1)).gain_tenth_db, -60);
+    assert_eq!(document.track_mix(TrackId(1)).pan_percent, 25);
+    assert!(document.track_mix(TrackId(1)).solo);
+
+    let state = client
+        .call_tool(CallToolRequestParams::new("get_timeline_state"))
+        .await
+        .unwrap();
+    let text = &state.content[0].as_text().unwrap().text;
+    assert!(
+        text.contains(
+            "track 1 video sync_lock=true clips=1 mix=gain:-60,pan:25,mute:false,solo:true"
+        ),
+        "{text}"
+    );
+
+    // A neutral set removes the entry, so the suffix disappears again.
+    let prepared = prepare_plan(
+        &client,
+        1,
+        json!([{
+            "op": "set_track_mix",
+            "track": 1,
+            "gain_tenth_db": 0,
+            "pan_percent": 0,
+            "mute": false,
+            "solo": false
+        }]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(1, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+    assert!(query_document(&core).audio_mix.tracks.is_empty());
+
+    let state = client
+        .call_tool(CallToolRequestParams::new("get_timeline_state"))
+        .await
+        .unwrap();
+    let text = &state.content[0].as_text().unwrap().text;
+    assert!(
+        text.contains("track 1 video sync_lock=true clips=1\n"),
+        "{text}"
+    );
+    assert!(!text.contains("mix=gain:"), "{text}");
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU1 §7 item 21: `get_audio_levels` measured end to end on generated 440 Hz
+/// sine media.
+///
+/// This test deliberately exercises `Analysis::mix_levels` on the REAL
+/// `FfmpegMediaEngine` — no stub, no double — so it is the agent-side proof
+/// that the measurement reaches the media engine's track stage. The engine
+/// implements the facet in `engine.rs` by delegating to
+/// `export::measure_mix_levels`; a `NotImplemented` failure on the first
+/// assertion means that impl was lost, not that the measurement is a stub.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au1_get_audio_levels_measures_the_real_mix() {
+    let mut arguments = vec![
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=30000/1001",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=48000",
+        "-frames:v",
+        "60",
+        "-t",
+        "2.002",
+    ];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    arguments.extend(["-c:a", "aac", "-shortest"]);
+    let generated = GeneratedMedia::ffmpeg("au1-levels", &arguments, "mp4");
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+
+    // Two tracks carrying the same sine so the report has a track to mute and
+    // a track to attenuate independently.
+    let mut document = single_clip_document(asset.clone());
+    document.tracks.push(Track {
+        id: TrackId(2),
+        kind: TrackKind::Audio,
+        sync_lock: true,
+        clips: vec![Clip {
+            id: ClipId(2),
+            asset: asset.id,
+            source_range: TimeCode::ZERO..asset.duration,
+            content: kinewright_core::ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+        }],
+    });
+    let duration = document.duration.0;
+    assert!(
+        duration > 2,
+        "the fixture needs a measurable span: {duration}"
+    );
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let baseline = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(
+        baseline.is_error,
+        Some(false),
+        "get_audio_levels must measure the real mix: {baseline:?}"
+    );
+    let report = &baseline
+        .structured_content
+        .as_ref()
+        .expect("get_audio_levels must publish the machine-readable report")["report"];
+    assert_eq!(report["tracks"].as_array().unwrap().len(), 2);
+    assert_eq!(report["any_solo"], false);
+    let before = report["tracks"][0]["levels"]["integrated_lufs_hundredths"]
+        .as_i64()
+        .expect("the unmuted sine track must measure a programme loudness");
+    assert!(
+        report["tracks"][1]["levels"]["integrated_lufs_hundredths"].is_i64(),
+        "{report}"
+    );
+
+    // -60 tenth-dB is -6 dB, so the track stem must fall by 600 hundredths.
+    let prepared = prepare_plan(
+        &client,
+        0,
+        json!([{
+            "op": "set_track_mix",
+            "track": 1,
+            "gain_tenth_db": -60,
+            "pan_percent": 0,
+            "mute": false,
+            "solo": false
+        }]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(0, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+
+    let attenuated = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(attenuated.is_error, Some(false), "{attenuated:?}");
+    let report = &attenuated.structured_content.as_ref().unwrap()["report"];
+    let after = report["tracks"][0]["levels"]["integrated_lufs_hundredths"]
+        .as_i64()
+        .expect("an attenuated sine is still not silent");
+    assert!(
+        (after - before + 600).abs() <= 5,
+        "a -60 tenth-dB track gain must move the stem by -600 LUFS hundredths, \
+         measured {before} -> {after}"
+    );
+
+    // A muted track reads null: its post-stage stem is exact silence.
+    let prepared = prepare_plan(
+        &client,
+        1,
+        json!([{
+            "op": "set_track_mix",
+            "track": 2,
+            "gain_tenth_db": 0,
+            "pan_percent": 0,
+            "mute": true,
+            "solo": false
+        }]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(1, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+
+    let muted = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(muted.is_error, Some(false), "{muted:?}");
+    let report = &muted.structured_content.as_ref().unwrap()["report"];
+    assert_eq!(report["tracks"][1]["mix"]["mute"], true);
+    assert_eq!(report["tracks"][1]["audible"], false);
+    assert!(
+        report["tracks"][1]["levels"]["integrated_lufs_hundredths"].is_null(),
+        "a muted track must read none: {report}"
+    );
+    let text = &muted.content[0].as_text().unwrap().text;
+    assert!(
+        text.contains("mute=true") && text.contains("lufs=none"),
+        "{text}"
+    );
+
+    // An inverted range is refused rather than clamped.
+    let inverted = invoke_capability(
+        &client,
+        "get_audio_levels",
+        json!({"start_frame": 30, "end_frame": 10}),
+    )
+    .await;
+    assert_eq!(inverted.is_error, Some(true), "{inverted:?}");
+
+    // AU1 §6.2: one bound given fills the other. `start_frame` alone runs to
+    // the timeline duration; `end_frame` alone starts at frame 0. The echoed
+    // `report.range` is the proof.
+    let from_start = invoke_capability(
+        &client,
+        "get_audio_levels",
+        json!({"start_frame": duration / 2}),
+    )
+    .await;
+    assert_eq!(from_start.is_error, Some(false), "{from_start:?}");
+    let range = &from_start.structured_content.as_ref().unwrap()["report"]["range"];
+    assert_eq!(range["start"], json!(duration / 2), "{range}");
+    assert_eq!(range["end"], json!(duration), "{range}");
+
+    let to_end = invoke_capability(
+        &client,
+        "get_audio_levels",
+        json!({"end_frame": duration / 2}),
+    )
+    .await;
+    assert_eq!(to_end.is_error, Some(false), "{to_end:?}");
+    let range = &to_end.structured_content.as_ref().unwrap()["report"]["range"];
+    assert_eq!(range["start"], json!(0), "{range}");
+    assert_eq!(range["end"], json!(duration / 2), "{range}");
+
+    // AU1 §6.1: a range past the end is clamped by the media side, not
+    // rejected — unlike the sibling transcript/silence range helper.
+    let beyond = invoke_capability(
+        &client,
+        "get_audio_levels",
+        json!({"start_frame": 0, "end_frame": duration + 100_000}),
+    )
+    .await;
+    assert_eq!(beyond.is_error, Some(false), "{beyond:?}");
+    let report = &beyond.structured_content.as_ref().unwrap()["report"];
+    assert_eq!(report["range"]["start"], json!(0), "{report}");
+    assert_eq!(report["range"]["end"], json!(duration), "{report}");
+    let text = &beyond.content[0].as_text().unwrap().text;
+    assert!(
+        text.contains(&format!("mix_levels range=0..{duration} ")),
+        "{text}"
+    );
 
     client.cancel().await.unwrap();
     server.shutdown();

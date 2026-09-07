@@ -284,6 +284,13 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             track: TrackId(1),
             locked: false,
         },
+        Operation::SetTrackMix {
+            track: TrackId(1),
+            gain_tenth_db: -60,
+            pan_percent: 25,
+            mute: false,
+            solo: true,
+        },
         Operation::AddClip {
             track: TrackId(1),
             asset: AssetId(1),

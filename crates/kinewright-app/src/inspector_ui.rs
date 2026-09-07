@@ -122,7 +122,7 @@ pub(crate) enum LookRequest {
 
 impl InspectorEdits {
     /// Record a discrete edit. Discrete edits are never coalesced.
-    fn push(&mut self, operation: Operation) {
+    pub(crate) fn push(&mut self, operation: Operation) {
         self.coalesce_key = None;
         self.operations.push(operation);
     }
@@ -136,7 +136,7 @@ impl InspectorEdits {
     }
 
     /// Record one frame of a live control gesture.
-    fn push_live(&mut self, operation: Operation, coalesce_key: String) {
+    pub(crate) fn push_live(&mut self, operation: Operation, coalesce_key: String) {
         if self.operations.is_empty() {
             self.coalesce_key = Some(coalesce_key);
         }
@@ -221,9 +221,17 @@ impl InspectorEdits {
         &self.operations
     }
 
+    /// `pub(crate)` so the mixer's input-driven tests can assert that a drag
+    /// carries the track's key and a discrete edit carries none (AU1 §7).
     #[cfg(test)]
-    fn coalesce_key(&self) -> Option<&str> {
+    pub(crate) fn coalesce_key(&self) -> Option<&str> {
         self.coalesce_key.as_deref()
+    }
+
+    /// `pub(crate)` for the same reason as [`Self::coalesce_key`].
+    #[cfg(test)]
+    pub(crate) const fn gesture_started(&self) -> bool {
+        self.gesture_started
     }
 
     #[cfg(test)]
@@ -1014,7 +1022,11 @@ impl KinewrightApp {
                 egui::Slider::new(&mut gain_tenth_db, -600..=120)
                     .text("Gain")
                     .integer()
-                    .custom_formatter(|value, _| format!("{:+.1} dB", value / 10.0)),
+                    .custom_formatter(|value, _| format!("{:+.1} dB", value / 10.0))
+                    // AU1: the readout is parsed in the unit it displays, and a
+                    // typed value commits once, on Enter or blur.
+                    .custom_parser(crate::mixer_ui::parse_gain_db)
+                    .update_while_editing(false),
             );
             if gain.drag_started() {
                 pending.begin_gesture();
@@ -1060,7 +1072,12 @@ impl KinewrightApp {
                     }
                 });
             }
-            if changed {
+            // AU1: a readout that commits on Enter or blur reports one
+            // `changed()` frame with the unchanged value; skip no-op writes.
+            let differs = gain_tenth_db != audio_clip.audio_gain_tenth_db
+                || fade_in_frames != audio_clip.audio_fade_in_frames.0
+                || fade_out_frames != audio_clip.audio_fade_out_frames.0;
+            if changed && differs {
                 let operation = clip_audio_operation(
                     audio_clip.id,
                     gain_tenth_db,
@@ -4064,7 +4081,11 @@ fn audio_target_clip(document: &kinewright_core::Document, selected: ClipId) -> 
         .find(|clip| clip_carries_audio(document, clip))
 }
 
-fn clip_carries_audio(document: &kinewright_core::Document, clip: &Clip) -> bool {
+/// Whether this clip's media carries audio.
+///
+/// `pub(crate)` for the AU1 mixer, which asks the same question per track:
+/// the two surfaces must agree on what "no audio" means (AU1 §5.1).
+pub(crate) fn clip_carries_audio(document: &kinewright_core::Document, clip: &Clip) -> bool {
     clip.content.is_media()
         && document
             .asset(clip.asset)

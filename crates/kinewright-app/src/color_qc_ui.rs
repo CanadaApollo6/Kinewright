@@ -442,6 +442,16 @@ impl Analysis for BaselineProofAnalysis {
         self.inner.timeline_loudness(document)
     }
 
+    /// AU1 §6.1: measurement forwards like every other read-only method; this
+    /// proxy only shares the colour working proof.
+    fn mix_levels(
+        &self,
+        document: &Document,
+        request: &kinewright_core::MixLevelRequest,
+    ) -> Result<kinewright_core::MixLevelReport, MediaError> {
+        self.inner.mix_levels(document, request)
+    }
+
     fn request_beat_detection(&self, asset: kinewright_core::MediaAsset) {
         self.inner.request_beat_detection(asset);
     }

@@ -114,7 +114,6 @@ impl KinewrightApp {
     }
 
     fn master_output_meter(&mut self, ui: &mut egui::Ui) {
-        const DECAY_PER_SECOND: f32 = 0.9;
         let live = if self.playing {
             self.playback.output_peaks()
         } else {
@@ -156,8 +155,6 @@ impl KinewrightApp {
 fn draw_meter_bar(ui: &mut egui::Ui, level: f32) {
     const WIDTH: f32 = 88.0;
     const HEIGHT: f32 = 4.0;
-    const WARNING_START: f32 = 0.8;
-    const DANGER_START: f32 = 0.95;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(WIDTH, HEIGHT), egui::Sense::hover());
     ui.painter().rect_filled(rect, 1.0, color::SURFACE_ACTIVE);
 
@@ -195,7 +192,27 @@ fn draw_meter_segment(ui: &egui::Ui, rect: egui::Rect, start: f32, end: f32, fil
     );
 }
 
-fn peak_to_meter_level(peak: f32) -> f32 {
+/// How fast a displayed meter level falls back to silence, in fill per second.
+///
+/// Shared with the AU1 mixer so every meter in the app has the same
+/// ballistics (AU1 §5.1).
+pub(crate) const DECAY_PER_SECOND: f32 = 0.9;
+
+/// Meter fill at which a bar turns from success to warning.
+///
+/// Shared with the AU1 mixer (AU1 §5.1).
+pub(crate) const WARNING_START: f32 = 0.8;
+
+/// Meter fill at which a bar turns from warning to danger.
+///
+/// Shared with the AU1 mixer (AU1 §5.1).
+pub(crate) const DANGER_START: f32 = 0.95;
+
+/// Map a linear peak to a meter fill in 0..=1 with a −60 dB floor.
+///
+/// Shared with the AU1 mixer so every meter in the app reads the same
+/// (AU1 §5.1).
+pub(crate) fn peak_to_meter_level(peak: f32) -> f32 {
     const FLOOR_DB: f32 = -60.0;
     if peak <= 0.0 {
         return 0.0;

@@ -82,6 +82,13 @@ pub(crate) mod size {
     pub const TIMELINE_TOOLBAR_HEIGHT: f32 = 32.0;
     pub const RULER_HEIGHT: f32 = 24.0;
     pub const TRACK_HEIGHT: f32 = 72.0;
+    /// Width of one mixer strip — track, bus, or master (AU1 §5.1).
+    pub const MIXER_STRIP_WIDTH: f32 = 72.0;
+    /// Height of a mixer gain fader and of the meter bars beside it
+    /// (AU1 §5.1).
+    pub const MIXER_FADER_HEIGHT: f32 = 120.0;
+    /// Width of one mixer meter bar; a strip carries an L/R pair (AU1 §5.1).
+    pub const MIXER_METER_WIDTH: f32 = 4.0;
 }
 
 pub(crate) mod motion {

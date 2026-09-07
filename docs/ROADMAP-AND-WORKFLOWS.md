@@ -132,7 +132,7 @@ Colour begins immediately, while non-colour work continues in parallel.
 | Editorial and long-form | Three-point edits, slip/roll/slide, replace, fit-to-fill, bins, string-outs, sync groups, transcript editing | Dual source/program workflow, source patching and track targeting, compound/nested structure, long-sequence navigation and revision |
 | Media and interchange | Import, project media, verified source identity, offline/changed status, undoable relink, ephemeral scaled preview memory, scoped cache visibility/clearing, hostile-media policy, save/recovery | Generated playable proxies, richer metadata, managed/project-relative media, interchange that preserves supported edit semantics |
 | Colour | Managed SDR Rec.709 input → high-precision working → primary correction → monitor/delivery pipeline, typed source assumptions and metadata, ten primary controls, CPU/GPU/proof/export parity, four built-in looks, agent/core `.cube` LUT support, masks, chroma key, professional post-composite scopes, ROI/temporal evidence, and reference-shot matching proposals | Curves/wheels, grade-scoped secondaries, human LUT workflow, look management, delivery QC |
-| Audio | Multi-track mixing, buses, EQ/compression/ducking operations, waveform/transcript analysis | Manual mixer and bus UI, meters, detailed EQ/dynamics control, repair and room-tone workflows, loudness-aware delivery |
+| Audio | Multi-track mixing, buses, EQ/compression/ducking operations, waveform/transcript analysis, per-track gain/pan/mute/solo, track stage, per-track/bus/master meters, mixer panel, live mixing, measured levels | Bus and master control UI, parametric EQ/dynamics, loudness metering and loudness-aware delivery, clip envelopes/automation, repair and room tone |
 | Motion, compositing, and retiming | GPU compositor, effects, keyframes, masks/tracking, transitions, constant-speed controls | Keyframe editing UI, speed ramps, effect-scoped mattes, adjustment/compound layers, transform and compositing polish |
 | Multicam | Sync groups and agent speaker/angle planning primitives | Angle viewer, live switching and revision, audio-follow policy, explicit master-audio handling |
 | Delivery and performance | Shared render path, H.264/AAC export queue and profiles | Codec/preset breadth, colour/audio tags and QC, cache control, long-project responsiveness, interruption and recovery testing |
@@ -284,6 +284,21 @@ With CC7 the colour programme table is complete; HDR, camera RAW, ACES/OCIO,
 calibrated-monitor output, and temporal noise reduction remain deliberate later
 programmes, and the M40 gauntlet continues to rotate colour tasks as
 regressions.
+
+11. **AU1 manual mix — implemented 2026-09-07, pending platform smoke.** The
+   first slice of the audio programme (below). Every
+   track carries typed mix state: `TrackMix` entries in `audio_mix.tracks`
+   (tenth-dB gain, integer pan, mute, solo) set by one idempotent `SetTrackMix`.
+   The shared `AudioMixProcessor` gains a track stage — gate → gain → balance
+   pan — before routing and the master sum, and sums unrouted tracks in document
+   order, so playback and export add the same floats in the same order.
+   `MixMeters` reports per-track, per-bus, and master peaks through
+   `Playback::mix_peaks`; a live `update_audio_mix` path applies a mix-only
+   document without stopping the transport, filling the ring to a one-second
+   target so an edit is heard about a second after the gesture. The Mixer tab
+   (`Ctrl+Shift+M`) and the track-header M/S toggles are the person surface; the
+   agent gets the generated `set_track_mix` and the read-only `get_audio_levels`
+   over `Analysis::mix_levels`. The contract is `AU1-MANUAL-MIX.md`.
 
 Within that cadence, three workstreams remain active:
 
@@ -565,6 +580,97 @@ coverage and receives the equivalent hands-on smoke test for release-affecting
 changes. An Arch-family automated build/test job should eventually replace the
 manual build portion when it can reproduce the supported runtime accurately.
 
+## Audio programme
+
+### Product boundary
+
+The audio programme makes Kinewright able to finish the sound of an ordinary edit
+without leaving the application: balance dialogue, music, and effects tracks by
+hand or by agent, shape and control dynamics with real controls, measure and meet
+a delivery loudness target, repair common location problems, and prove that what
+plays back is what exports. It is a post-production mixing programme for picture
+editors, not a digital audio workstation. Surround delivery, MIDI, virtual
+instruments, third-party plug-in hosting, and spectral editing are deliberate
+later programmes and are not implied by any slice below.
+
+### Current foundation and limits
+
+The audio base was laid in M12 (multi-track playback mixing at export parity),
+M20/M21 (transition ramps, per-clip gain and fades, the master peak meter), M33
+(buses, fixed three-band EQ, peak compressor, sidechain ducking, hard limiter, and
+project-frame automation on bus effects), and the analysis work that supplies
+BS.1770 integrated loudness, silences, beats, and waveform peaks. One stateful
+`AudioMixProcessor` sums clip-shaped per-track buffers through buses to master for
+both playback and export, so the parity contract already exists at the sample
+level; AU1 added the track stage to that processor and made its summation order
+deterministic.
+
+Before AU1 the limits were equally clear. There was no track-level mix state: a
+track could not be muted, soloed, panned, or set to a level without touching every
+clip on it or wrapping it in an agent-authored bus, and the only meter was the
+master peak. AU1 closed that gap with per-track gain, pan, mute, and solo, a
+deterministic track stage, per-track/bus/master meters, and a Mixer panel that
+keeps playing while it is edited. The rest of the audit's findings stand. Buses
+still have no editable human surface. The EQ is two fixed one-pole crossovers, the
+compressor detects peaks with no knee, and the limiter is a clamp. Loudness is
+measured but never targeted, displayed, or verified on the delivered file. There
+is no repair, room tone, or clip-envelope workflow. The competitive audit scored
+audio depth at one star for exactly these reasons.
+
+### Audio architecture principles
+
+- **One mix graph, one evaluator.** Playback, proof, and export run the same
+  `AudioMixProcessor` in the same stage order on the same 48 kHz stereo
+  interleaved buffers. A control that cannot be applied identically in both
+  paths is not a control.
+- **Explicit, ordered stages.** Clip shaping (gain, fades, transition ramps) →
+  track stage (mute/solo gate, gain, pan) → bus routing and bus effects in
+  `effects` order → master sum → master limiter. Sidechains tap the post-track-
+  stage signal. Each slice names where its stage sits.
+- **Integer document controls with stable units.** Tenths of a decibel, integer
+  pan positions, milliseconds, hundredths of a ratio, hundredths of a LUFS. Every
+  control has a descriptor with minimum, maximum, and neutral, validated in the
+  operation and again at document load.
+- **Metering is telemetry, not state.** Meters read post-stage peaks through the
+  same lock-free discipline as the master meter and never enter the document.
+- **Measurement before change.** Agent tools measure through the real mix path
+  and return exact revision-gated operations; nothing auto-applies.
+- **Deliverable loudness is verified on the written file**, not inferred from the
+  intermediate, in the same way CC6 verifies colour.
+
+### Staged implementation
+
+| Stage | Deliverable | Exit gate |
+| --- | --- | --- |
+| AU1 — Manual mix | Per-track gain, pan, mute, and solo as typed document state with one idempotent operation; a deterministic track stage (gate → gain → balance pan, centre an exact identity) in the shared processor; per-track, bus, and master post-stage peak meters; a Mixer panel with track, read-only bus, and master strips that keeps playing while it is edited, about one second behind the gesture; agent parity and `get_audio_levels`, a read-only level measurement tool | Track-stage algebra and the balance pan law are analytic tests; playback and export agree through the track stage on a generated fixture at 1e-6; mixer edits and agent edits reach the same operation; serialized defaults are omitted and hand-edited values are rejected on load |
+| AU2 — EQ and dynamics | Parametric EQ nodes (low/high shelf, up to four peaking bands, high-pass) on biquads; RMS/peak compressor with soft knee and lookahead; gate/expander; true-peak limiter; bus and master control editing in the mixer; constant-power pan as a second law; spectrum evidence for the agent | Filter magnitude response matches the analytic transfer function at pinned frequencies; gain reduction and ceiling are measured on synthetic material; playback/export parity through every node |
+| AU3 — Loudness and delivery | Momentary, short-term, integrated, LRA, and true-peak metering; per-profile loudness targets; normalization as an explicit export step; audio QC (`get_audio_qc`) with clipping, silence, channel-balance, and target checks; decoded verification of the written file's loudness and true peak | Encoded fixtures land within pinned LU/dBTP budgets on both CI operating systems; the QC report is integer-reported and evidence-only |
+| AU4 — Clip envelopes and automation | Keyframed clip gain envelopes with a rubber-band editor on the clip, track gain and pan automation, bus automation editing in the mixer, audio-aware trim behaviour, agent planners that propose envelopes | Envelope evaluation is integer-exact and identical in both paths; edited envelopes survive split/trim/slip/speed operations under a stated policy |
+| AU5 — Repair and room tone | Broadband noise reduction with a learned profile, hum removal, de-click, room-tone capture and fill for cut gaps, dialogue isolation where the model can measure improvement | Repair is measured on synthetic corruptions with pinned SNR gains; fills are seamless at 1e-4 across the join |
+| AU6 — Workflow evaluation | Two-person interview with music bed, podcast with uneven voices, noisy location dialogue, event/multicam with a master audio track, and encoded delivery at two loudness targets | Technical gates pass independently; blind human review is limited to balance and intelligibility questions |
+
+**Current status (2026-09-07): AU1 is implemented and pending its hands-on
+platform smoke.** Bus and master controls, loudness targeting, automation, and
+repair remain deferred to AU2–AU5 exactly as their rows state.
+
+Each slice writes its contract under `docs/AU<n>-<NAME>.md` before implementation
+and records deferrals explicitly, as the colour slices did.
+
+### Agent surface direction
+
+- `get_audio_levels`: per-track, per-bus, and master peak and integrated loudness
+  over a project range, measured through the real mix path (shipped in AU1).
+- `get_audio_qc`: clipping, silence, balance, loudness-target, and true-peak
+  exceptions for a delivery profile.
+- `plan_track_mix`: a revision-gated balance proposal returning exact
+  `set_track_mix` operations.
+- `plan_audio_normalization`: existing; widens to true-peak and profile targets.
+- `plan_dialogue_ducking`, `plan_audio_repair`: proposals over buses and clips,
+  never applied without commit.
+
+Analysis tools do not mutate. Plan tools return the exact operations they intend
+to apply and require the project revision they analyzed.
+
 ## Programme scorecard
 
 The roadmap is healthy when all of these improve, not merely the taste score of one
@@ -600,5 +706,7 @@ ownership boundary, and definition of done stable.
 - [M42 source/program patching and track targeting](M42-SOURCE-PROGRAM-PATCHING.md)
   — independent Source/Program workflow, explicit routes, and verified compound
   edits.
+- [AU1 manual mix](AU1-MANUAL-MIX.md) — per-track mix state, the track stage,
+  meters, and the Mixer panel.
 - [Media policy](MEDIA-POLICY.md) — hostile-media behaviour and invariants.
 - [Building Kinewright](BUILDING.md) — Windows, Linux, FFmpeg, and toolchain setup.

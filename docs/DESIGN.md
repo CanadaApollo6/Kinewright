@@ -126,7 +126,15 @@ Logical egui points, based on a compact 4 pt rhythm:
 
 Standard panel inset is `space-3`. Standard control height is 26. Compact icon
 controls are 26 square; primary transport is 30 square. Timeline header is 32,
-ruler is 24, and each track lane is 72.
+ruler is 24, each track lane is 72, and the track header column is 96.
+
+Mixer strips use their own size tokens:
+
+| Token | Value | Use |
+| --- | ---: | --- |
+| `size-mixer-strip-width` | 72 | Track, bus, and master strip width |
+| `size-mixer-fader-height` | 120 | Fader travel and meter-bar height |
+| `size-mixer-meter-width` | 4 | Single mixer meter bar width |
 
 The default desktop viewport is 1,440 by 900 points. The minimum supported
 viewport is 1,100 by 700 points; below that size, the three-column editing
@@ -255,12 +263,19 @@ Hover reveals the marker label; selection and active drag use `accent`. The
 timeline toolbar's ripple-mode control uses the standard selected button fill
 and border plus a compact `RIPPLE` accent state label while enabled.
 
-Each track header has a compact sync-lock toggle. The default locked state uses
-the closed-lock icon in `text-muted` so it remains subordinate to edit content.
-The exceptional free-running state uses the open-lock icon and a `FREE`
-micro-label in `status-warning`. Its tooltip describes whether ripple edits on
-other tracks will shift the track. The control does not reuse `accent`, which
-remains reserved for selection and direct manipulation.
+Each track header is 96 points wide and carries, left to right, the label column
+with the kind icon, an `M`/`S` micro-toggle column, and the sync-lock toggle. The
+mute and solo toggles are micro caps: inactive is `text-muted` on no fill, an
+active `M` is `status-warning` text on `surface-active` (a functional warning
+that the track is silent), and an active `S` is `text-primary` text on
+`surface-active`. Neither state uses `accent`.
+
+The sync-lock toggle is compact. The default locked state uses the closed-lock
+icon in `text-muted` so it remains subordinate to edit content. The exceptional
+free-running state uses the open-lock icon and a `FREE` micro-label in
+`status-warning`. Its tooltip describes whether ripple edits on other tracks will
+shift the track. Neither control reuses `accent`, which remains reserved for
+selection and direct manipulation.
 
 Title clips use an `accent` 16% fill, an `accent` 72% border, a compact Inter
 `T` glyph, and the first line of title text. Selection and drag reuse the
@@ -303,6 +318,37 @@ Transport is a centered 34 point bar. Step, play/pause, and seek controls are
 icons; play/pause is the only `icon-lg` control. The current timecode uses
 `type-timecode` and `text-primary`, the total duration uses `text-secondary`.
 The scrub rail stays visually quiet because the timeline playhead is primary.
+The master output meter is the one place in the bar that carries colour: it
+fills `status-success` below 0.8, `status-warning` from 0.8, and
+`status-danger` from 0.95, decaying at 0.9 per second. This is a functional
+level signal, not decoration, and it is the only status colour in the transport.
+
+### Mixer
+
+The Mixer is a tab of the bottom material strip beside Timeline and Transcript.
+It owns its dock height (default 320 points, minimum 260) so the Timeline keeps
+its own. Strips run left to right in a scroll area: one per track in document
+order, a `border-subtle` rule, one per bus (with a second rule only when buses
+exist), then the master strip. Each strip is `size-mixer-strip-width` wide and
+fits in 240 points of height in its tallest state.
+
+A track strip reads top to bottom: the caption and kind icon at the track
+header's type size (plus `NO AUDIO` on the next line, in `text-muted`, for a
+track with no audio-bearing clip); one `size-mixer-fader-height`-tall group with
+a pair of vertical L/R meter bars on the left, each `size-mixer-meter-width`
+wide and using the transport meter's thresholds, colours, and 0.9 per second
+decay, and the vertical gain fader labelled in dB on the right (`SILENCED` in
+`text-muted` sits under the meters when another track's solo silences this one
+and the strip does not already say `NO AUDIO`); a horizontal pan control
+labelled `L`/`C`/`R`; the `M`/`S` toggles side by side, which use the same states
+as the timeline track header; and a `Reset` small button that appears only while
+the track's mix is not neutral. Sliders have no double-click reset. Neither
+micro label disables the strip's controls.
+
+Bus strips are read-only: name, member tracks, effect chain in order, sidechain
+sources, and a meter pair. The master strip is the label `MASTER` and a meter
+pair fed by the post-limiter master peaks. Meters read zero whenever nothing is
+playing.
 
 ### Transcript and utility panels
 

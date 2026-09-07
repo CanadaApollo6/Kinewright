@@ -9,9 +9,10 @@ use crate::{
     CaptionPreset, Clip, ClipContent, ClipId, ColorContext, ColorDescription, ColorProvenance,
     Document, Effect, EffectId, FreezeFrame, KeyframeInterpolation, LinkId, LutAsset, LutAssetId,
     MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaSourceFingerprint,
-    ParamValue, RelinkCandidate, StringOut, StringOutId, SyncGroup, SyncGroupId, ThreePointMode,
+    ParamValue, RelinkCandidate, StringOut, StringOutId, SyncGroup, SyncGroupId,
+    TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, ThreePointMode,
     TimeCode, TimeMappingError, Title, TitleParameterKind, TitlePosition, Track, TrackId,
-    TrackKind, Transition, is_audio_effect, map_source_range_to_project,
+    TrackKind, TrackMix, Transition, is_audio_effect, map_source_range_to_project,
     title_parameter_descriptor,
 };
 
@@ -90,6 +91,16 @@ pub enum Operation {
     SetTrackSyncLock {
         track: TrackId,
         locked: bool,
+    },
+    /// Replace the whole mix state of one track (AU1 §2.3). Idempotent full set.
+    SetTrackMix {
+        track: TrackId,
+        /// Integer tenths of a decibel in -600..=120.
+        gain_tenth_db: i32,
+        /// Integer percent in -100..=100; 0 is centre. Balance law, see AU1 §3.1.
+        pan_percent: i32,
+        mute: bool,
+        solo: bool,
     },
     AddClip {
         track: TrackId,
@@ -841,6 +852,18 @@ pub enum OpError {
     TitleClipHasNoAudio(ClipId),
     #[error("freeze clip {0} has no audio contribution; SetClipAudio accepts media clips only")]
     FreezeClipHasNoAudio(ClipId),
+    #[error(
+        "track mix gain on track {track} is {gain_tenth_db} tenth-dB, outside the inclusive range -600..=120"
+    )]
+    TrackMixGainOutOfRange { track: TrackId, gain_tenth_db: i32 },
+    #[error(
+        "track mix pan on track {track} is {pan_percent} percent, outside the inclusive range -100..=100"
+    )]
+    TrackMixPanOutOfRange { track: TrackId, pan_percent: i32 },
+    #[error("track {0} has more than one mix entry")]
+    DuplicateTrackMix(TrackId),
+    #[error("track mix entries are not sorted by track id")]
+    TrackMixUnsorted,
     #[error("clip speed must be an integer percentage in 10..=1000, got {0}")]
     ClipSpeedOutOfRange(u32),
     #[error("clip {0} is not a media clip; only media clips have playback speed")]
@@ -901,6 +924,13 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         Operation::AddTrack { track } => add_track(doc, track.clone()),
         Operation::RemoveTrack { track } => remove_track(doc, *track),
         Operation::SetTrackSyncLock { track, locked } => set_track_sync_lock(doc, *track, *locked),
+        Operation::SetTrackMix {
+            track,
+            gain_tenth_db,
+            pan_percent,
+            mute,
+            solo,
+        } => set_track_mix(doc, *track, *gain_tenth_db, *pan_percent, *mute, *solo),
         Operation::AddClip {
             track,
             asset,
@@ -1082,6 +1112,7 @@ fn remove_track(doc: &mut Document, track_id: TrackId) -> Result<(), OpError> {
             .retain(|track| *track != track_id);
     }
     doc.audio_mix.buses.retain(|bus| !bus.tracks.is_empty());
+    doc.audio_mix.tracks.retain(|entry| entry.track != track_id);
     Ok(())
 }
 
@@ -1092,6 +1123,61 @@ fn set_track_sync_lock(doc: &mut Document, track_id: TrackId, locked: bool) -> R
         .find(|track| track.id == track_id)
         .ok_or(OpError::MissingTrack(track_id))?;
     track.sync_lock = locked;
+    Ok(())
+}
+
+/// Replace one track's mix state (AU1 §2.3). A neutral result removes the entry.
+fn set_track_mix(
+    doc: &mut Document,
+    track_id: TrackId,
+    gain_tenth_db: i32,
+    pan_percent: i32,
+    mute: bool,
+    solo: bool,
+) -> Result<(), OpError> {
+    if !doc.tracks.iter().any(|track| track.id == track_id) {
+        return Err(OpError::MissingTrack(track_id));
+    }
+    let entry = TrackMix {
+        track: track_id,
+        gain_tenth_db,
+        pan_percent,
+        mute,
+        solo,
+    };
+    validate_track_mix_values(&entry)?;
+    if entry.is_neutral() {
+        doc.audio_mix
+            .tracks
+            .retain(|stored| stored.track != track_id);
+        return Ok(());
+    }
+    match doc
+        .audio_mix
+        .tracks
+        .iter_mut()
+        .find(|stored| stored.track == track_id)
+    {
+        Some(stored) => *stored = entry,
+        None => doc.audio_mix.tracks.push(entry),
+    }
+    doc.audio_mix.tracks.sort_by_key(|stored| stored.track);
+    Ok(())
+}
+
+fn validate_track_mix_values(entry: &TrackMix) -> Result<(), OpError> {
+    if !(TRACK_MIX_GAIN_MIN..=TRACK_MIX_GAIN_MAX).contains(&entry.gain_tenth_db) {
+        return Err(OpError::TrackMixGainOutOfRange {
+            track: entry.track,
+            gain_tenth_db: entry.gain_tenth_db,
+        });
+    }
+    if !(TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX).contains(&entry.pan_percent) {
+        return Err(OpError::TrackMixPanOutOfRange {
+            track: entry.track,
+            pan_percent: entry.pan_percent,
+        });
+    }
     Ok(())
 }
 
@@ -3807,7 +3893,31 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
             actual: doc.duration,
         });
     }
+    validate_track_mix(doc)?;
     validate_audio_mix(doc)?;
+    Ok(())
+}
+
+/// Reject hand-edited track mix tables (AU1 §2.3). Entries must be strictly
+/// ascending by track id, reference existing tracks, and stay in range. A
+/// stored neutral entry is accepted: Core never writes one and it is harmless.
+fn validate_track_mix(doc: &Document) -> Result<(), OpError> {
+    let mut previous: Option<TrackId> = None;
+    for entry in &doc.audio_mix.tracks {
+        if let Some(previous) = previous {
+            if entry.track == previous {
+                return Err(OpError::DuplicateTrackMix(entry.track));
+            }
+            if entry.track < previous {
+                return Err(OpError::TrackMixUnsorted);
+            }
+        }
+        previous = Some(entry.track);
+        if !doc.tracks.iter().any(|track| track.id == entry.track) {
+            return Err(OpError::MissingTrack(entry.track));
+        }
+        validate_track_mix_values(entry)?;
+    }
     Ok(())
 }
 
