@@ -1131,6 +1131,63 @@ pub struct MixLevelReport {
     pub master: AudioLoudness,
 }
 
+/// Which mix point a spectrum measurement reads (AU2 §5.9).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MixSpectrumPoint {
+    /// The summed master, after the master chain.
+    Master,
+    /// One track's post-track-stage stem.
+    Track(TrackId),
+    /// One bus stem, after its effect chain.
+    Bus(AudioBusId),
+}
+
+/// A read-only third-octave spectrum request (AU2 §5.9). `None` measures the
+/// whole document.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct MixSpectrumRequest {
+    /// Omitted or `null` measures the whole document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub range: Option<std::ops::Range<TimeCode>>,
+    pub point: MixSpectrumPoint,
+}
+
+/// One third-octave band of a spectrum measurement (AU2 §5.9).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct SpectrumBand {
+    /// ISO nominal centre frequency in tenths of a hertz.
+    pub center_hertz_tenths: u32,
+    /// Band level in hundredths of a dBFS; `None` when the band measured
+    /// silent.
+    pub level_dbfs_hundredths: Option<i32>,
+    /// True when the band is narrower than the analysis window's main lobe, so
+    /// its reading is dominated by leakage from its neighbours (AU2 §5.9).
+    pub window_limited: bool,
+}
+
+/// The measured third-octave spectrum of one mix point (AU2 §5.9).
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct MixSpectrumReport {
+    pub range: std::ops::Range<TimeCode>,
+    pub point: MixSpectrumPoint,
+    pub sample_rate: u32,
+    pub sample_frames: u64,
+    /// How many Welch segments the average covers.
+    pub segments: u32,
+    /// 31 ISO third-octave bands, low to high.
+    pub bands: Vec<SpectrumBand>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExportCancellation(Arc<AtomicBool>);
 
@@ -1487,6 +1544,12 @@ pub enum MediaError {
     /// and nothing flattens it to [`Self::Backend`] any more.
     #[error(transparent)]
     ColorQc(crate::ColorQcError),
+    /// AU2 §5.9: a spectrum range shorter than two Welch segments.
+    ///
+    /// Typed rather than a formatted [`Self::Backend`] string so a caller can
+    /// tell "the range is too short" from a backend failure and widen it.
+    #[error("mix spectrum needs at least {required} sample frames; got {sample_frames}")]
+    MixSpectrumRangeTooShort { sample_frames: u64, required: u64 },
     #[error("media backend error: {0}")]
     Backend(String),
 }
@@ -1500,7 +1563,10 @@ impl MediaError {
             Self::DeliveryColor(error) => Some(error.code()),
             Self::DeliveryVerification(error) => Some(error.code()),
             Self::ColorQc(error) => Some(error.code()),
-            Self::NotImplemented | Self::Cancelled | Self::Backend(_) => None,
+            Self::NotImplemented
+            | Self::Cancelled
+            | Self::MixSpectrumRangeTooShort { .. }
+            | Self::Backend(_) => None,
         }
     }
 }
@@ -1524,8 +1590,10 @@ pub trait Playback: Send + Sync {
     fn mix_peaks(&self) -> MixPeaks {
         MixPeaks::default()
     }
-    /// AU1 §5.3: apply a document that differs only in `audio_mix.tracks`
-    /// without stopping playback. Default: `self.set_document(doc)`.
+    /// AU1 §5.3 / AU2 §5.8: apply a document that differs only in `audio_mix`
+    /// (track mix, buses, master, pan law) without stopping playback; the
+    /// engine re-cues instead when the declared lookahead changes. Default:
+    /// `self.set_document(doc)`.
     fn update_audio_mix(&self, doc: Arc<Document>) {
         self.set_document(doc);
     }
@@ -1776,6 +1844,22 @@ pub trait Analysis: Send + Sync {
         _document: &Document,
         _request: &MixLevelRequest,
     ) -> Result<MixLevelReport, MediaError> {
+        Err(MediaError::NotImplemented)
+    }
+    /// Measure the third-octave spectrum of one mix point over a project
+    /// range, through the real mix path (AU2 §5.9).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MediaError::MixSpectrumRangeTooShort`] when the range holds
+    /// fewer than two Welch segments, or a media error when the range is
+    /// invalid or the mix cannot be rendered or measured.
+    fn mix_spectrum(
+        &self,
+        document: &Document,
+        request: &MixSpectrumRequest,
+    ) -> Result<MixSpectrumReport, MediaError> {
+        let _ = (document, request);
         Err(MediaError::NotImplemented)
     }
     /// Queue deterministic beat/onset analysis without blocking the caller.

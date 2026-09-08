@@ -33,7 +33,7 @@ Kinewright is a **native desktop** video editor written in Rust — the same fas
 ## Features
 
 - Timeline editing: cut, trim, move, split, multi-track, ripple delete/insert with cross-track sync-lock, A/V clip linking, project markers, snapping (markers, cross-track edges, Alt to bypass), filmstrip thumbnails, audio waveforms
-- Playback with sample-accurate A/V sync (the audio clock is the master; video never leads) and **multi-track audio mixing that matches the export mixdown to sample-level parity** — per-track gain, pan, mute and solo in a Mixer with per-track, bus and master meters that keeps playing while you mix, plus levels the agent can measure through the same mix path
+- Playback with sample-accurate A/V sync (the audio clock is the master; video never leads) and **multi-track audio mixing that matches the export mixdown to sample-level parity** — per-track gain, pan, mute and solo in a Mixer with per-track, bus and master meters that keeps playing while you mix; parametric EQ, soft-knee compression, gating and a true-peak limiter on editable bus and master chains with latency-compensated lookahead; a constant-power pan law; and levels and spectra the agent can measure through the same mix path
 - Smooth 4K scrubbing via proxy-resolution preview decode, with performance budgets asserted in tests — and hostile real-world media (VFR phone footage, rotation metadata, HEVC, odd audio) handled by written policy
 - Multi-track GPU compositing (wgpu) with effects, crossfades, and **titles as first-class clips** — preview and export share one render path, so what you see is what you export
 - Export to H.264/AAC mp4 with progress and cancellation

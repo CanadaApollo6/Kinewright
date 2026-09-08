@@ -13,7 +13,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 76] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 77] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -76,6 +76,10 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 76] = [
     // `CAPABILITY_KIND_OVERRIDES` entry is needed; that omission is a
     // decision, not an oversight, exactly as for `get_color_qc` above.
     "get_audio_levels",
+    // AU2 §6.2: the third-octave evidence surface, beside the levels
+    // measurement it mirrors. `get_` infers `CapabilityKind::Inspector`, so
+    // no `CAPABILITY_KIND_OVERRIDES` entry is needed here either.
+    "get_audio_spectrum",
     "plan_dialogue_assembly",
     "plan_beat_pacing",
     "plan_beat_montage",
@@ -268,6 +272,8 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::RemoveSyncGroup { .. } => "remove_sync_group",
         Operation::UpsertAudioBus { .. } => "upsert_audio_bus",
         Operation::RemoveAudioBus { .. } => "remove_audio_bus",
+        Operation::SetAudioMaster { .. } => "set_audio_master",
+        Operation::SetPanLaw { .. } => "set_pan_law",
         Operation::AddTrack { .. } => "add_track",
         Operation::RemoveTrack { .. } => "remove_track",
         Operation::SetTrackSyncLock { .. } => "set_track_sync_lock",
@@ -380,7 +386,14 @@ fn operation_tool(
             name.as_str(),
             "delete_clip" | "ripple_delete_clip" | "remove_track"
         ))
-        .idempotent(matches!(name.as_str(), "set_clip_audio" | "set_track_mix"))
+        .idempotent(matches!(
+            name.as_str(),
+            "set_clip_audio"
+                | "set_track_mix"
+                | "upsert_audio_bus"
+                | "set_audio_master"
+                | "set_pan_law"
+        ))
         .open_world(false);
     let mut description = format!(
         "Apply Operation::{variant} to the live timeline only at expected_revision from get_timeline_state. All frame values are exact integers."
@@ -436,7 +449,7 @@ fn operation_tool(
             " Sync lock is enabled by default. Disable it only when a track should run free during ripple edits on other tracks.",
         ),
         "SetTrackMix" => description.push_str(
-            " gain_tenth_db is an integer number of tenths of a decibel in -600..=120; pan_percent is an integer in -100..=100 using a balance law (0 is an exact identity, -100 silences the right channel, 100 silences the left); mute silences the track everywhere including ducking sidechains; any solo silences every non-solo track. The operation replaces all four values; sending neutral values removes the track's entry.",
+            " gain_tenth_db is an integer number of tenths of a decibel in -600..=120; pan_percent is an integer in -100..=100; -100 is hard left and 100 is hard right. How a position becomes per-channel gains is a document-level setting, set_pan_law: under the default balance law 0 is an exact identity, and under constant_power 0 is -3.01 dB on both channels. mute silences the track everywhere including ducking sidechains; any solo silences every non-solo track. The operation replaces all four values; sending neutral values removes the track's entry.",
         ),
         "LinkClips" | "UnlinkClips" => description.push_str(
             " Links are metadata: moving, trimming, or deleting a member requires an atomic plan covering its whole link group.",
@@ -475,7 +488,13 @@ fn operation_tool(
             " gain_tenth_db is an integer number of tenths of a decibel in -600..=120. Fade values are non-negative project frames whose sum cannot exceed the clip duration. Fade-out anchors to the clip's project end. Gain and clip fades compose multiplicatively with transition audio ramps.",
         ),
         "UpsertAudioBus" | "RemoveAudioBus" => description.push_str(
-            " Audio buses route each track to at most one bus and carry an ordered effect chain. Bus effects must use one of audio_gain, audio_eq, audio_compressor, audio_ducking, audio_limiter, audio_parametric_eq, audio_gate, or audio_true_peak_limiter. Prefer audio_parametric_eq (high-pass, low and high shelves, four peaking bands), audio_compressor (peak or RMS detection, soft knee, lookahead), audio_gate, and audio_true_peak_limiter, whose true_peak mode measures the inter-sample peak with a 4x oversampled detector. audio_eq and audio_limiter are legacy fixed-crossover and hard-clamp nodes kept for existing projects; do not add them to a new chain. Every node takes bypass, 0 or 1; bypass, detector and true_peak accept only hold keyframes. The nodes of one chain may declare at most 20 ms of lookahead_milliseconds in total, and that parameter cannot be keyframed at all. Every other numeric control supports the same fixed-point keyframe curves as clip effects, on project frames; frequency and Q interpolate linearly in their integer unit, not logarithmically. Ducking reads the listed sidechain tracks before bus processing. Unrouted tracks feed the master directly.",
+            " Audio buses route each track to at most one bus and carry an ordered effect chain. Each bus also carries a post-effects fader, gain_tenth_db, in tenths of a decibel in -600..=120. Bus effects must use one of audio_gain, audio_eq, audio_compressor, audio_ducking, audio_limiter, audio_parametric_eq, audio_gate, or audio_true_peak_limiter. Prefer audio_parametric_eq (high-pass, low and high shelves, four peaking bands), audio_compressor (peak or RMS detection, soft knee, lookahead), audio_gate, and audio_true_peak_limiter, whose true_peak mode measures the inter-sample peak with a 4x oversampled detector. audio_eq and audio_limiter are legacy fixed-crossover and hard-clamp nodes kept for existing projects; do not add them to a new chain. Every node takes bypass, 0 or 1; bypass, detector and true_peak accept only hold keyframes. The nodes of one chain may declare at most 20 ms of lookahead_milliseconds in total, and that parameter cannot be keyframed at all. Every other numeric control supports the same fixed-point keyframe curves as clip effects, on project frames; frequency and Q interpolate linearly in their integer unit, not logarithmically. Ducking reads the listed sidechain tracks before bus processing. Unrouted tracks feed the master directly.",
+        ),
+        "SetAudioMaster" => description.push_str(
+            " The master chain sits after the bus sum: master gain, then the effects in order, then the single hard clamp to -1.0..=1.0. gain_tenth_db is an integer number of tenths of a decibel in -600..=120. The same audio effect names, ranges, curves, keyframe rules and 20 ms lookahead budget apply as on a bus, except audio_ducking, which has no sidechain at master and is rejected. The operation replaces the whole master chain; sending a zero gain and an empty effect list removes it.",
+        ),
+        "SetPanLaw" => description.push_str(
+            " The pan law decides how each track's pan_percent becomes per-channel gains. balance is the default and leaves centre an exact identity, so a centred document renders bit-identically. constant_power places centre at -3.01 dB on both channels and keeps L^2 + R^2 equal to 1 at every position; switching to it changes the output of every panned and centred track. A one-channel output device applies no pan under either law, and channels beyond the first two take the unpanned gain. The law is a document-level setting; there is no per-track override.",
         ),
         "SetEffectKeyframes" => description.push_str(
             " The curve uses clip-local integer frame offsets and fixed-point parameter values. Keyframes must be non-negative, strictly ordered, inside the clip, and inside the parameter's documented range. Interpolation is hold, linear, ease_in, ease_out, or ease_in_out and applies from each keyframe to the next.",
@@ -819,6 +838,10 @@ mod tests {
                 "remove_sync_group",
                 "upsert_audio_bus",
                 "remove_audio_bus",
+                // AU2 §5.4/§6.4: declared immediately after `RemoveAudioBus`
+                // and before `AddTrack`, in `Operation` declaration order.
+                "set_audio_master",
+                "set_pan_law",
                 "add_track",
                 "remove_track",
                 "set_track_sync_lock",
@@ -976,6 +999,12 @@ mod tests {
     /// AU1 §7 item 19: the generated `set_track_mix` tool documents both
     /// ranges and the pan law, and is annotated idempotent because the
     /// operation replaces all four values.
+    ///
+    /// AU2 §6.1/B14: the sentence no longer *asserts* a law. Under
+    /// `PanLaw::ConstantPower` "0 is an exact identity" is false, so the
+    /// description now points at the document-level `set_pan_law` and
+    /// describes both laws; the negative assertion below pins that the old
+    /// unconditional claim is gone.
     #[test]
     fn set_track_mix_schema_documents_ranges_and_the_balance_law() {
         let tools = operation_tools().unwrap();
@@ -986,7 +1015,16 @@ mod tests {
         let description = set_track_mix.tool.description.as_deref().unwrap();
         assert!(description.contains("-600..=120"));
         assert!(description.contains("-100..=100"));
-        assert!(description.contains("balance law"));
+        assert!(description.contains("-100 is hard left and 100 is hard right"));
+        assert!(description.contains(
+            "How a position becomes per-channel gains is a document-level setting, set_pan_law"
+        ));
+        assert!(description.contains("under the default balance law 0 is an exact identity"));
+        assert!(description.contains("under constant_power 0 is -3.01 dB on both channels"));
+        assert!(
+            !description.contains("using a balance law"),
+            "set_track_mix must not assert one law: {description}"
+        );
         assert!(description.contains("any solo silences every non-solo track"));
         assert!(description.contains("sending neutral values removes the track's entry"));
         let serialized = serde_json::to_value(&set_track_mix.tool).unwrap();
@@ -1025,6 +1063,22 @@ mod tests {
                 solo: true,
             }),
             "set_track_mix"
+        );
+        // AU2 §6.4: the two Part B variants.
+        assert_eq!(
+            operation_tool_name(&Operation::SetAudioMaster {
+                master: kinewright_core::AudioMaster {
+                    gain_tenth_db: -30,
+                    effects: Vec::new(),
+                },
+            }),
+            "set_audio_master"
+        );
+        assert_eq!(
+            operation_tool_name(&Operation::SetPanLaw {
+                law: kinewright_core::PanLaw::ConstantPower,
+            }),
+            "set_pan_law"
         );
         assert_eq!(
             operation_tool_name(&Operation::RippleInsertGap {
@@ -1476,6 +1530,94 @@ audio_true_peak_limiter.",
                 "the {kind} entry omitted the shared bypass row: {documented}"
             );
         }
+    }
+
+    /// AU2 §7 item B14: the two Part B mutators carry the §6.1 prose and the
+    /// three full-set operations are annotated idempotent and non-destructive.
+    ///
+    /// `set_audio_master` and `set_pan_law` replace the whole master chain and
+    /// the whole document law respectively, so re-sending one is a no-op; the
+    /// `upsert_audio_bus` annotation was simply missing before AU2 even though
+    /// it has always been a full upsert.
+    #[test]
+    fn au2_master_and_pan_law_tools_are_documented_and_idempotent() {
+        let tools = operation_tools().unwrap();
+        let description_of = |name: &str| generated_tool_description(&tools, name);
+
+        let master = description_of("set_audio_master");
+        for sentence in [
+            "The master chain sits after the bus sum",
+            "then the single hard clamp to -1.0..=1.0",
+            "gain_tenth_db is an integer number of tenths of a decibel in -600..=120",
+            "20 ms lookahead budget",
+            "except audio_ducking, which has no sidechain at master and is rejected",
+            "sending a zero gain and an empty effect list removes it",
+        ] {
+            assert!(
+                master.contains(sentence),
+                "set_audio_master omitted {sentence}: {master}"
+            );
+        }
+
+        let law = description_of("set_pan_law");
+        for sentence in [
+            "balance is the default and leaves centre an exact identity",
+            "constant_power",
+            "-3.01 dB on both channels",
+            "L^2 + R^2 equal to 1 at every position",
+            "A one-channel output device applies no pan under either law, and channels beyond the first two take the unpanned gain.",
+            "there is no per-track override",
+        ] {
+            assert!(
+                law.contains(sentence),
+                "set_pan_law omitted {sentence}: {law}"
+            );
+        }
+
+        // §6.1: the bus arm gains the fader sentence, and both bus tools share
+        // the arm.
+        for name in ["upsert_audio_bus", "remove_audio_bus"] {
+            let description = description_of(name);
+            assert!(
+                description.contains(
+                    "Each bus also carries a post-effects fader, gain_tenth_db, in tenths of a decibel in -600..=120."
+                ),
+                "{name} omitted the bus fader sentence: {description}"
+            );
+        }
+
+        for name in ["upsert_audio_bus", "set_audio_master", "set_pan_law"] {
+            let tool = tools
+                .iter()
+                .find(|definition| definition.tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be a generated tool"));
+            let serialized = serde_json::to_value(&tool.tool).unwrap();
+            assert_eq!(
+                serialized["annotations"]["idempotentHint"],
+                serde_json::Value::Bool(true),
+                "{name} must be annotated idempotent"
+            );
+            assert_eq!(
+                serialized["annotations"]["destructiveHint"],
+                serde_json::Value::Bool(false),
+                "{name} must not be annotated destructive"
+            );
+        }
+        // `remove_audio_bus` is neither: it is not a full set, and the
+        // destructive list is unchanged by AU2.
+        let remove = tools
+            .iter()
+            .find(|definition| definition.tool.name == "remove_audio_bus")
+            .unwrap();
+        let serialized = serde_json::to_value(&remove.tool).unwrap();
+        assert_eq!(
+            serialized["annotations"]["idempotentHint"],
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(
+            serialized["annotations"]["destructiveHint"],
+            serde_json::Value::Bool(false)
+        );
     }
 
     /// CC5 §2.2, normative: `schema.rs` must not enumerate the 32

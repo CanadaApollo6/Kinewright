@@ -491,6 +491,11 @@ pub struct AudioBus {
     pub id: AudioBusId,
     pub name: String,
     pub tracks: Vec<TrackId>,
+    /// AU2 §5.1: post-effects bus fader in integer tenths of a decibel,
+    /// inclusive range `AUDIO_BUS_GAIN_MIN..=AUDIO_BUS_GAIN_MAX`.
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    #[schemars(default)]
+    pub gain_tenth_db: i32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub effects: Vec<Effect>,
@@ -548,6 +553,67 @@ impl TrackMix {
     }
 }
 
+/// Lowest accepted audio bus gain in tenths of a decibel (AU2 §5.4).
+pub const AUDIO_BUS_GAIN_MIN: i32 = -600;
+/// Highest accepted audio bus gain in tenths of a decibel (AU2 §5.4).
+pub const AUDIO_BUS_GAIN_MAX: i32 = 120;
+/// Lowest accepted audio master gain in tenths of a decibel (AU2 §5.4).
+pub const AUDIO_MASTER_GAIN_MIN: i32 = -600;
+/// Highest accepted audio master gain in tenths of a decibel (AU2 §5.4).
+pub const AUDIO_MASTER_GAIN_MAX: i32 = 120;
+
+/// The master chain (AU2 §5.2). A neutral master is omitted from the wire.
+///
+/// The master sums every bus stem and the unrouted path, applies its own
+/// fader, then its effects in order. It carries no sidechain, so
+/// `audio_ducking` is rejected on it (AU2 §5.4).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AudioMaster {
+    /// Integer tenths of a decibel, inclusive range
+    /// `AUDIO_MASTER_GAIN_MIN..=AUDIO_MASTER_GAIN_MAX`.
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    #[schemars(default)]
+    pub gain_tenth_db: i32,
+    /// The master chain's audio effects, in order. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub effects: Vec<Effect>,
+}
+
+impl AudioMaster {
+    /// Whether this master leaves the summed mix untouched (AU2 §5.2).
+    ///
+    /// `const` so [`AudioMix::is_empty`] stays `const`.
+    #[must_use]
+    pub const fn is_neutral(&self) -> bool {
+        self.gain_tenth_db == 0 && self.effects.is_empty()
+    }
+}
+
+/// How [`TrackMix::pan_percent`] becomes per-channel gains (AU2 §5.7).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PanLaw {
+    /// Centre is the exact identity; the law never boosts (AU1 §3.1).
+    #[default]
+    Balance,
+    /// Constant power: centre is -3.0103 dB on both channels, and
+    /// `L^2 + R^2 == 1` at every position.
+    ConstantPower,
+}
+
+impl PanLaw {
+    /// Whether this is AU1's balance law, which leaves centre an exact
+    /// identity and is therefore omitted from the wire (AU2 §5.3).
+    ///
+    /// Takes `&self` because serde's `skip_serializing_if` callbacks receive a
+    /// reference to the field.
+    #[must_use]
+    pub const fn is_balance(&self) -> bool {
+        matches!(self, Self::Balance)
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AudioMix {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -558,6 +624,17 @@ pub struct AudioMix {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub tracks: Vec<TrackMix>,
+    /// AU2 §5.2: the master chain. A neutral master is omitted from the wire,
+    /// so a document that only ever set neutral is byte-identical to one that
+    /// never touched the master at all.
+    #[serde(default, skip_serializing_if = "AudioMaster::is_neutral")]
+    #[schemars(default)]
+    pub master: AudioMaster,
+    /// AU2 §5.3: the document-level pan law. `Balance` is omitted from the
+    /// wire, so every pre-AU2 document keeps AU1's law and its bytes.
+    #[serde(default, skip_serializing_if = "PanLaw::is_balance")]
+    #[schemars(default)]
+    pub pan_law: PanLaw,
 }
 
 /// AU2 §3.6: the per-chain lookahead budget, in milliseconds.
@@ -576,8 +653,9 @@ pub const CHAIN_LOOKAHEAD_MILLISECONDS: i64 = 20;
 pub struct ChainLookahead {
     /// The largest lookahead any one bus chain declares, in milliseconds.
     pub bus_stage: i64,
-    /// The master chain's own declared lookahead, in milliseconds. Always 0 in
-    /// AU2 Part A, which adds no master chain.
+    /// The master chain's own declared lookahead, in milliseconds (AU2 §5.6).
+    /// Zero for every pre-AU2 document and for every document with a neutral
+    /// master.
     pub master_stage: i64,
 }
 
@@ -613,17 +691,55 @@ pub fn chain_lookahead_milliseconds(effects: &[Effect]) -> i64 {
 }
 
 impl AudioMix {
+    /// Whether this mix leaves every track and the master untouched (AU2 §5.4).
+    ///
+    /// Stays `const`, so the derived `PartialEq` — which is not `const` — must
+    /// not be used: the law is tested with `matches!`.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.buses.is_empty() && self.tracks.is_empty()
+        self.buses.is_empty()
+            && self.tracks.is_empty()
+            && self.master.is_neutral()
+            && matches!(self.pan_law, PanLaw::Balance)
+    }
+
+    /// AU2 §5.4: the next unused bus id, `max + 1`, or 1 for a mix with no
+    /// buses.
+    #[must_use]
+    pub fn next_bus_id(&self) -> AudioBusId {
+        AudioBusId(
+            self.buses
+                .iter()
+                .map(|bus| bus.id.0)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+        )
+    }
+
+    /// The stored bus with this id, when the document has one (AU2 §5.4).
+    #[must_use]
+    pub fn bus(&self, id: AudioBusId) -> Option<&AudioBus> {
+        self.buses.iter().find(|bus| bus.id == id)
+    }
+
+    /// The bus a track routes to, when it is routed at all (AU2 §5.4).
+    ///
+    /// A track routes to at most one bus, which `validate_audio_mix` enforces.
+    #[must_use]
+    pub fn bus_for_track(&self, track: TrackId) -> Option<AudioBusId> {
+        self.buses
+            .iter()
+            .find(|bus| bus.tracks.contains(&track))
+            .map(|bus| bus.id)
     }
 
     /// AU2 §3.6: the processing latency this document's chains declare.
     ///
     /// `bus_stage` is the maximum over buses of that bus's declared lookahead
     /// sum, because every bus chain and the unrouted path are padded to it;
-    /// `master_stage` is the master chain's own sum, which is always 0 in Part
-    /// A. Zero for every pre-AU2 document.
+    /// `master_stage` is the master chain's own sum (AU2 §5.6). Zero for every
+    /// pre-AU2 document.
     #[must_use]
     pub fn lookahead_milliseconds(&self) -> ChainLookahead {
         ChainLookahead {
@@ -633,7 +749,7 @@ impl AudioMix {
                 .map(|bus| chain_lookahead_milliseconds(&bus.effects))
                 .max()
                 .unwrap_or_default(),
-            master_stage: 0,
+            master_stage: chain_lookahead_milliseconds(&self.master.effects),
         }
     }
 

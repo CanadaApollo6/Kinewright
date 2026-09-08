@@ -9,8 +9,9 @@ use ffmpeg_next as ffmpeg;
 use kinewright_core::{
     AudioBusId, BusLevels, ColorDescription, DELIVERY_BIT_DEPTH_ALLOWED, DeliveryColorError,
     DeliveryColorMismatch, DeliveryEncodeDepth, Document, ExportCancellation, ExportProgress,
-    ExportSettings, FrameRounding, MediaError, MixLevelReport, MixLevelRequest, ProgressSink,
-    TimeCode, TrackId, TrackLevels, delivery_color_mismatches, map_frames_with_rounding,
+    ExportSettings, FrameRounding, MediaError, MixLevelReport, MixLevelRequest, MixSpectrumPoint,
+    MixSpectrumReport, MixSpectrumRequest, ProgressSink, TimeCode, TrackId, TrackLevels,
+    delivery_color_mismatches, map_frames_with_rounding,
 };
 
 use crate::{
@@ -24,6 +25,7 @@ use crate::{
     loudness::measure_loudness,
     lut_store::LutLibrary,
     render::FrameRenderer,
+    spectrum::{SPECTRUM_MINIMUM_FRAMES, third_octave_spectrum},
     timeline::timeline_audio_segments,
 };
 
@@ -1006,27 +1008,8 @@ pub(crate) fn measure_mix_levels(
     document: &Document,
     request: &MixLevelRequest,
 ) -> Result<MixLevelReport, MediaError> {
-    let requested = request
-        .range
-        .clone()
-        .unwrap_or(TimeCode::ZERO..document.duration);
-    let range = requested.start.max(TimeCode::ZERO)..requested.end.min(document.duration);
-    if range.start >= range.end {
-        return Err(MediaError::Backend(format!(
-            "mix level range {}..{} is empty after clamping to 0..{}",
-            requested.start.0, requested.end.0, document.duration.0
-        )));
-    }
-    let settings = ExportSettings {
-        fps: document.fps,
-        resolution: document.resolution,
-        delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
-        video_codec: "libx264".to_owned(),
-        audio_codec: "aac".to_owned(),
-        video_bitrate: 1,
-        audio_bitrate: 1,
-        cancellation: ExportCancellation::default(),
-    };
+    let range = clamped_measurement_range(document, request.range.clone(), "mix level")?;
+    let settings = measurement_settings(document);
     let stems = mix_audio_stems(document, range.clone(), &settings)?;
     let mut tracks = Vec::with_capacity(document.tracks.len());
     for track in &document.tracks {
@@ -1072,6 +1055,103 @@ pub(crate) fn measure_mix_levels(
         buses,
         master,
     })
+}
+
+/// AU1 §6.1 / AU2 §5.9: the clamped project range one measurement covers.
+///
+/// # Errors
+///
+/// Returns a media error when the range is empty after clamping.
+fn clamped_measurement_range(
+    document: &Document,
+    requested: Option<std::ops::Range<TimeCode>>,
+    what: &str,
+) -> Result<std::ops::Range<TimeCode>, MediaError> {
+    let requested = requested.unwrap_or(TimeCode::ZERO..document.duration);
+    let range = requested.start.max(TimeCode::ZERO)..requested.end.min(document.duration);
+    if range.start >= range.end {
+        return Err(MediaError::Backend(format!(
+            "{what} range {}..{} is empty after clamping to 0..{}",
+            requested.start.0, requested.end.0, document.duration.0
+        )));
+    }
+    Ok(range)
+}
+
+/// AU2 §5.9: the third-octave spectrum of one mix point over a project range.
+///
+/// Measured on the stem `mix_audio_stems` produces — the same path
+/// `measure_mix_levels` uses — so the reading runs through the real graph at
+/// 48 kHz with §3.7's head-and-tail trim already applied.
+///
+/// # Errors
+///
+/// Returns [`MediaError::MixSpectrumRangeTooShort`] when the clamped range
+/// holds fewer than two Welch segments, or a media error when the range is
+/// empty, the mix point is not in the document, or the mix cannot be rendered.
+pub(crate) fn measure_mix_spectrum(
+    document: &Document,
+    request: &MixSpectrumRequest,
+) -> Result<MixSpectrumReport, MediaError> {
+    let range = clamped_measurement_range(document, request.range.clone(), "mix spectrum")?;
+    // AU2 §5.9/A23: rejected before any decoding, so a too-short range never
+    // costs a mix pass and never returns a degenerate spectrum.
+    let sample_frames = frame_to_samples(range.end, AUDIO_RATE, document.fps)
+        .saturating_sub(frame_to_samples(range.start, AUDIO_RATE, document.fps));
+    if sample_frames < SPECTRUM_MINIMUM_FRAMES {
+        return Err(MediaError::MixSpectrumRangeTooShort {
+            sample_frames,
+            required: SPECTRUM_MINIMUM_FRAMES,
+        });
+    }
+    let settings = measurement_settings(document);
+    let stems = mix_audio_stems(document, range.clone(), &settings)?;
+    let samples = match request.point {
+        MixSpectrumPoint::Master => &stems.master,
+        MixSpectrumPoint::Track(track) => stems
+            .tracks
+            .iter()
+            .find(|(id, _)| *id == track)
+            .map(|(_, samples)| samples)
+            .ok_or_else(|| {
+                MediaError::Backend(format!("track {} is not in the document", track.0))
+            })?,
+        MixSpectrumPoint::Bus(bus) => stems
+            .buses
+            .iter()
+            .find(|(id, _)| *id == bus)
+            .map(|(_, samples)| samples)
+            .ok_or_else(|| MediaError::Backend(format!("bus {} is not in the document", bus.0)))?,
+    };
+    let channels = usize::from(AUDIO_CHANNELS);
+    let measured = third_octave_spectrum(samples, channels, AUDIO_RATE).ok_or(
+        MediaError::MixSpectrumRangeTooShort {
+            sample_frames: u64::try_from(samples.len() / channels.max(1)).unwrap_or(0),
+            required: SPECTRUM_MINIMUM_FRAMES,
+        },
+    )?;
+    Ok(MixSpectrumReport {
+        range,
+        point: request.point,
+        sample_rate: AUDIO_RATE,
+        sample_frames: u64::try_from(samples.len() / channels.max(1)).unwrap_or(0),
+        segments: measured.segments,
+        bands: measured.bands,
+    })
+}
+
+/// AU1 §6.1: the throwaway settings a measurement pass needs.
+fn measurement_settings(document: &Document) -> ExportSettings {
+    ExportSettings {
+        fps: document.fps,
+        resolution: document.resolution,
+        delivery_color: kinewright_core::ColorContext::sdr_rec709().delivery,
+        video_codec: "libx264".to_owned(),
+        audio_codec: "aac".to_owned(),
+        video_bitrate: 1,
+        audio_bitrate: 1,
+        cancellation: ExportCancellation::default(),
+    }
 }
 
 fn validate_settings(

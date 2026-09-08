@@ -146,6 +146,10 @@ pub(crate) struct KinewrightApp {
     /// AU1 §5.1: the mixer's displayed meter levels, one entry per mix point,
     /// decaying on the transport meter's schedule between peaks.
     pub(crate) mixer_levels: crate::mixer_ui::MixerMeterLevels,
+    /// AU2 §6.6: the chain the mixer's pane is editing, if any. UI state, not
+    /// document state: it is cleared when the bus it names leaves the focused
+    /// document and never travels with a project.
+    pub(crate) mixer_selection: Option<crate::mixer_ui::MixerSelection>,
     pub(crate) resume_after_scrub: bool,
     pub(crate) transcript_scope: TranscriptScope,
     pub(crate) material_tab: MaterialTab,
@@ -316,18 +320,22 @@ impl KinewrightApp {
             playing: false,
             meter_levels: [0.0; 2],
             mixer_levels: crate::mixer_ui::MixerMeterLevels::default(),
+            mixer_selection: screenshot_mixer_selection(
+                std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").ok().as_deref(),
+                &document,
+            ),
             resume_after_scrub: false,
             transcript_scope: TranscriptScope::default(),
             // The screenshot harness can pre-raise a summoned surface that no
             // startup interaction could otherwise reach in a static capture.
             material_tab: match std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").as_deref() {
                 Ok("transcript") => MaterialTab::Transcript,
-                Ok("mixer") => MaterialTab::Mixer,
+                Ok("mixer" | "mixer-chain") => MaterialTab::Mixer,
                 _ => MaterialTab::default(),
             },
             show_material_strip: matches!(
                 std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").as_deref(),
-                Ok("timeline" | "transcript" | "mixer")
+                Ok("timeline" | "transcript" | "mixer" | "mixer-chain")
             ),
             show_media_rail: false,
             pending_project_action: None,
@@ -480,6 +488,9 @@ impl KinewrightApp {
         // switch would light the new project's identically numbered tracks
         // with the old project's signal until they decayed (AU1 §5.1).
         self.mixer_levels = crate::mixer_ui::MixerMeterLevels::default();
+        // A selection names an `AudioBusId`, which only means anything inside
+        // one document (AU2 §6.6).
+        self.mixer_selection = None;
         self.texture = None;
         self.focused_project = index;
         let document = Arc::clone(&self.focused().document);
@@ -1050,11 +1061,17 @@ impl KinewrightApp {
                     last_op,
                     journal_command,
                 } => {
-                    // AU1 §5.3: a change made only of `SetTrackMix` keeps the
-                    // transport running. Decided before the command is
-                    // consumed by the status line below.
-                    let live_track_mix = is_live_track_mix_change(journal_command.as_ref());
+                    // AU2 §6.8: a change made only of mix operations that
+                    // declares the same processing latency keeps the transport
+                    // running. Decided before the command is consumed by the
+                    // status line below, and after `previous_document` is
+                    // fetched, because the predicate compares both documents.
                     let previous_document = Arc::clone(&self.projects[project_index].document);
+                    let live_audio_mix = is_live_audio_mix_change(
+                        journal_command.as_ref(),
+                        &previous_document,
+                        &doc,
+                    );
                     let media_changed_assets = doc
                         .media_pool
                         .iter()
@@ -1154,11 +1171,11 @@ impl KinewrightApp {
                         if !media_changed_assets.is_empty() {
                             self.texture = None;
                         }
-                        if live_track_mix {
-                            // The document differs only in `audio_mix.tracks`,
-                            // which no video path reads: hand it to the engine
-                            // without stopping, re-cueing, or asking for the
-                            // frame that is already on screen (AU1 §5.3).
+                        if live_audio_mix {
+                            // The document differs only in `audio_mix`, which
+                            // no video path reads, and declares the same
+                            // processing latency, so the running processor can
+                            // be retargeted in place (AU2 §6.8).
                             self.playback.update_audio_mix(Arc::clone(&doc));
                         } else {
                             self.playing = false;
@@ -1654,33 +1671,58 @@ pub(crate) fn review_preroll_frames(fps: kinewright_core::Rational) -> i64 {
     nominal.max(1) * 2
 }
 
-/// Whether a document change is a live mixer edit and nothing else (AU1 §5.3).
+/// Whether one operation only ever edits `audio_mix` (AU2 §6.8).
 ///
-/// True only for a history command whose every operation is
-/// [`Operation::SetTrackMix`]: a lone `Do`, or a batch — coalesced or not —
-/// that carries nothing else. Undo, redo, the initial snapshot (`None`), and
-/// any batch that mixes a track-mix edit with another operation take the
-/// ordinary stop-and-re-cue path, because only the all-mix case is known to
-/// leave every video and clip structure untouched.
-pub(crate) fn is_live_track_mix_change(journal_command: Option<&JournalCommand>) -> bool {
-    fn all_track_mix(operations: &[Operation]) -> bool {
+/// Every variant here is an idempotent full set of one mix target, and
+/// `audio_mix` is read by exactly the mix processor, the mixer panel, core
+/// validation, and one line of the renderer — never by a video or clip path.
+const fn is_audio_mix_operation(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::SetTrackMix { .. }
+            | Operation::UpsertAudioBus { .. }
+            | Operation::RemoveAudioBus { .. }
+            | Operation::SetAudioMaster { .. }
+            | Operation::SetPanLaw { .. }
+    )
+}
+
+/// Whether a document change is a live mixer edit and nothing else (AU2 §6.8).
+///
+/// True only for a history command whose every operation edits `audio_mix`
+/// and nothing else: a lone `Do`, or a batch — coalesced or not — that carries
+/// nothing else. Undo, redo, the initial snapshot (`None`), and any batch that
+/// mixes a mix edit with another operation take the ordinary stop-and-re-cue
+/// path, because only the all-mix case is known to leave every video and clip
+/// structure untouched.
+///
+/// The lookahead comparison is the second half of the claim (AU2 §5.8,
+/// OPEN-3). `L` is derived from the document and fixed for a processor's life,
+/// so a chain edit that changes any declared lookahead — inserting a true-peak
+/// limiter, removing one, retuning a compressor's lookahead — cannot be
+/// retargeted into a running processor and takes the stop-and-re-cue path even
+/// though every one of its operations is eligible.
+pub(crate) fn is_live_audio_mix_change(
+    journal_command: Option<&JournalCommand>,
+    old: &Document,
+    new: &Document,
+) -> bool {
+    fn all_audio_mix(operations: &[Operation]) -> bool {
         // An empty batch changes nothing; taking the ordinary path for it
         // costs one re-cue that nobody can hear and keeps the predicate a
         // positive claim about operations that are actually present.
-        !operations.is_empty()
-            && operations
-                .iter()
-                .all(|operation| matches!(operation, Operation::SetTrackMix { .. }))
+        !operations.is_empty() && operations.iter().all(is_audio_mix_operation)
     }
 
-    match journal_command {
-        Some(JournalCommand::Do(operation)) => matches!(operation, Operation::SetTrackMix { .. }),
+    let eligible = match journal_command {
+        Some(JournalCommand::Do(operation)) => is_audio_mix_operation(operation),
         Some(
             JournalCommand::DoBatch(operations)
             | JournalCommand::DoBatchCoalesced { operations, .. },
-        ) => all_track_mix(operations),
+        ) => all_audio_mix(operations),
         Some(JournalCommand::Undo | JournalCommand::Redo) | None => false,
-    }
+    };
+    eligible && old.audio_mix.lookahead_milliseconds() == new.audio_mix.lookahead_milliseconds()
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1718,6 +1760,18 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
             format!("Updated audio bus {} ({})", bus.id, bus.name)
         }
         Operation::RemoveAudioBus { bus } => format!("Removed audio bus {bus}"),
+        Operation::SetAudioMaster { master } => format!(
+            "Set master mix (gain {:+.1} dB, {} effects)",
+            f64::from(master.gain_tenth_db) / 10.0,
+            master.effects.len()
+        ),
+        Operation::SetPanLaw { law } => format!(
+            "Set pan law to {}",
+            match law {
+                kinewright_core::PanLaw::Balance => "balance",
+                kinewright_core::PanLaw::ConstantPower => "constant power",
+            }
+        ),
         Operation::AddTrack { track } => format!("Added {:?} track {}", track.kind, track.id),
         Operation::RemoveTrack { track } => format!("Removed track {track}"),
         Operation::SetTrackSyncLock { track, locked } => format!(
@@ -1848,6 +1902,31 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
     }
 }
 
+/// The chain the screenshot harness pre-selects, if any (AU2 §6.6).
+///
+/// `KINEWRIGHT_SCREENSHOT_SHOW=mixer-chain` raises the Mixer with its chain
+/// pane already open on the first bus, because a static capture has no way to
+/// press an `Edit` toggle. `mixer` keeps AU1's behaviour: the tab, the strips,
+/// and no pane. A document with no bus falls back to the master chain, which
+/// every document has.
+fn screenshot_mixer_selection(
+    show: Option<&str>,
+    document: &Document,
+) -> Option<crate::mixer_ui::MixerSelection> {
+    match show {
+        Some("mixer-chain") => Some(
+            document
+                .audio_mix
+                .buses
+                .first()
+                .map_or(crate::mixer_ui::MixerSelection::Master, |bus| {
+                    crate::mixer_ui::MixerSelection::Bus(bus.id)
+                }),
+        ),
+        _ => None,
+    }
+}
+
 fn default_project_document() -> Document {
     Document {
         tracks: vec![Track {
@@ -1964,59 +2043,209 @@ mod tests {
         }
     }
 
-    /// AU1 §7 item 22: only an all-`SetTrackMix` history command keeps the
+    /// AU2 §6.8: only a history command made entirely of `audio_mix`
+    /// operations that leaves the declared processing latency alone keeps the
     /// transport running. Everything else re-cues, because only that case is
-    /// known to leave the video and clip structure untouched.
+    /// known to leave the video and clip structure — and the running
+    /// processor's fixed latency — untouched.
     #[test]
-    fn only_an_all_track_mix_change_takes_the_live_path() {
-        use super::{JournalCommand, is_live_track_mix_change};
+    #[allow(clippy::too_many_lines)]
+    fn only_an_all_audio_mix_change_at_one_latency_takes_the_live_path() {
+        use super::{JournalCommand, is_live_audio_mix_change};
 
-        assert!(is_live_track_mix_change(Some(&JournalCommand::Do(
-            set_track_mix(1)
-        ))));
-        assert!(is_live_track_mix_change(Some(&JournalCommand::DoBatch(
-            vec![set_track_mix(1), set_track_mix(2)]
-        ))));
-        assert!(is_live_track_mix_change(Some(
-            &JournalCommand::DoBatchCoalesced {
-                operations: vec![set_track_mix(1)],
-                coalesce_key: "track_mix:1#3".to_owned(),
-            }
-        )));
+        let plain = super::Document::default();
+        let live =
+            |command: Option<&JournalCommand>| is_live_audio_mix_change(command, &plain, &plain);
+
+        assert!(live(Some(&JournalCommand::Do(set_track_mix(1)))));
+        assert!(live(Some(&JournalCommand::DoBatch(vec![
+            set_track_mix(1),
+            set_track_mix(2)
+        ]))));
+        assert!(live(Some(&JournalCommand::DoBatchCoalesced {
+            operations: vec![set_track_mix(1)],
+            coalesce_key: "track_mix:1#3".to_owned(),
+        })));
+        for operation in [
+            super::Operation::UpsertAudioBus {
+                bus: kinewright_core::AudioBus {
+                    id: kinewright_core::AudioBusId(1),
+                    name: "Dialogue".to_owned(),
+                    tracks: vec![super::TrackId(1)],
+                    gain_tenth_db: -30,
+                    effects: Vec::new(),
+                    ducking_sidechain_tracks: Vec::new(),
+                },
+            },
+            super::Operation::RemoveAudioBus {
+                bus: kinewright_core::AudioBusId(1),
+            },
+            super::Operation::SetAudioMaster {
+                master: kinewright_core::AudioMaster {
+                    gain_tenth_db: -20,
+                    effects: Vec::new(),
+                },
+            },
+            super::Operation::SetPanLaw {
+                law: kinewright_core::PanLaw::ConstantPower,
+            },
+        ] {
+            assert!(
+                live(Some(&JournalCommand::Do(operation.clone()))),
+                "AU2 widens the live path to every mix operation; {operation:?} was refused"
+            );
+            assert!(live(Some(&JournalCommand::DoBatch(vec![
+                set_track_mix(1),
+                operation
+            ]))));
+        }
 
         let other = super::Operation::RemoveTrack {
             track: super::TrackId(2),
         };
         assert!(
-            !is_live_track_mix_change(Some(&JournalCommand::Do(other.clone()))),
+            !live(Some(&JournalCommand::Do(other.clone()))),
             "an ordinary edit still stops and re-cues"
         );
         assert!(
-            !is_live_track_mix_change(Some(&JournalCommand::DoBatch(vec![
+            !live(Some(&JournalCommand::DoBatch(vec![
                 set_track_mix(1),
                 other.clone()
             ]))),
             "a mixed batch may change anything, so it takes the ordinary path"
         );
         assert!(
-            !is_live_track_mix_change(Some(&JournalCommand::DoBatchCoalesced {
+            !live(Some(&JournalCommand::DoBatchCoalesced {
                 operations: vec![set_track_mix(1), other],
                 coalesce_key: "track_mix:1#3".to_owned(),
             })),
             "a mixed coalesced batch is no different"
         );
         assert!(
-            !is_live_track_mix_change(Some(&JournalCommand::Undo)),
+            !live(Some(&JournalCommand::Undo)),
             "AU1 §5.4: undo during playback stops and re-cues"
         );
-        assert!(!is_live_track_mix_change(Some(&JournalCommand::Redo)));
+        assert!(!live(Some(&JournalCommand::Redo)));
+        assert!(!live(None), "the initial snapshot is not a live edit");
         assert!(
-            !is_live_track_mix_change(None),
-            "the initial snapshot is not a live edit"
+            !live(Some(&JournalCommand::DoBatch(Vec::new()))),
+            "an empty batch claims nothing about the mix"
+        );
+
+        // Every operation is eligible and the documents still differ in the
+        // latency the chains declare, which no running processor can absorb
+        // (AU2 §5.8, OPEN-3).
+        let mut with_lookahead = super::Document::default();
+        with_lookahead.audio_mix.master = kinewright_core::AudioMaster {
+            gain_tenth_db: 0,
+            effects: vec![kinewright_core::Effect {
+                id: kinewright_core::EffectId(1),
+                name: "audio_true_peak_limiter".to_owned(),
+                parameters: std::collections::BTreeMap::from([(
+                    "lookahead_milliseconds".to_owned(),
+                    kinewright_core::ParamValue::Integer(5),
+                )]),
+                keyframes: std::collections::BTreeMap::new(),
+            }],
+        };
+        assert_ne!(
+            plain.audio_mix.lookahead_milliseconds(),
+            with_lookahead.audio_mix.lookahead_milliseconds(),
+            "the fixture must actually change the declared latency"
         );
         assert!(
-            !is_live_track_mix_change(Some(&JournalCommand::DoBatch(Vec::new()))),
-            "an empty batch claims nothing about track mix"
+            !is_live_audio_mix_change(
+                Some(&JournalCommand::Do(super::Operation::SetAudioMaster {
+                    master: with_lookahead.audio_mix.master.clone(),
+                })),
+                &plain,
+                &with_lookahead,
+            ),
+            "an eligible operation that changes the declared latency still re-cues"
+        );
+        assert!(
+            is_live_audio_mix_change(
+                Some(&JournalCommand::Do(set_track_mix(1))),
+                &with_lookahead,
+                &with_lookahead,
+            ),
+            "the same latency on both sides is the live case, whatever the figure"
+        );
+    }
+
+    /// AU2 §6.6: the screenshot harness can raise the Mixer with the chain
+    /// pane already open, and `mixer` still means strips only.
+    #[test]
+    fn the_screenshot_harness_can_pre_select_a_chain() {
+        use super::screenshot_mixer_selection;
+        use crate::mixer_ui::MixerSelection;
+
+        let mut document = super::Document::default();
+        assert_eq!(screenshot_mixer_selection(None, &document), None);
+        assert_eq!(
+            screenshot_mixer_selection(Some("mixer"), &document),
+            None,
+            "the AU1 value still shows the strips and no pane"
+        );
+        assert_eq!(
+            screenshot_mixer_selection(Some("timeline"), &document),
+            None
+        );
+        assert_eq!(
+            screenshot_mixer_selection(Some("mixer-chain"), &document),
+            Some(MixerSelection::Master),
+            "a document with no bus falls back to the chain every document has"
+        );
+        document.audio_mix.buses.push(kinewright_core::AudioBus {
+            id: kinewright_core::AudioBusId(4),
+            name: "Dialogue".to_owned(),
+            tracks: Vec::new(),
+            gain_tenth_db: 0,
+            effects: Vec::new(),
+            ducking_sidechain_tracks: Vec::new(),
+        });
+        assert_eq!(
+            screenshot_mixer_selection(Some("mixer-chain"), &document),
+            Some(MixerSelection::Bus(kinewright_core::AudioBusId(4))),
+            "the first bus in document order is the one a capture shows"
+        );
+    }
+
+    /// AU2 §6.8 and §7 B20: the two new mix operations read back in the same
+    /// voice the rest of the status map uses.
+    #[test]
+    fn the_master_and_pan_law_edits_report_what_they_set() {
+        assert_eq!(
+            super::operation_status(&super::Operation::SetAudioMaster {
+                master: kinewright_core::AudioMaster {
+                    gain_tenth_db: -35,
+                    effects: vec![kinewright_core::Effect {
+                        id: kinewright_core::EffectId(1),
+                        name: "audio_gain".to_owned(),
+                        parameters: std::collections::BTreeMap::new(),
+                        keyframes: std::collections::BTreeMap::new(),
+                    }],
+                }
+            }),
+            "Set master mix (gain -3.5 dB, 1 effects)"
+        );
+        assert_eq!(
+            super::operation_status(&super::Operation::SetAudioMaster {
+                master: kinewright_core::AudioMaster::default()
+            }),
+            "Set master mix (gain +0.0 dB, 0 effects)"
+        );
+        assert_eq!(
+            super::operation_status(&super::Operation::SetPanLaw {
+                law: kinewright_core::PanLaw::Balance
+            }),
+            "Set pan law to balance"
+        );
+        assert_eq!(
+            super::operation_status(&super::Operation::SetPanLaw {
+                law: kinewright_core::PanLaw::ConstantPower
+            }),
+            "Set pan law to constant power"
         );
     }
 

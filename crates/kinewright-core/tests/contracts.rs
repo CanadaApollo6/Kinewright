@@ -6,14 +6,14 @@ use std::{
 };
 
 use kinewright_core::{
-    AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, Clip, ClipContent, ClipId,
+    AssetId, AudioBus, AudioBusId, AudioMaster, AutomationCurve, BinId, Clip, ClipContent, ClipId,
     ColorBitDepth, ColorContext, ColorDescription, ColorMatrix, ColorPipelineState, ColorPrimaries,
     ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Command, Core, Document,
     EFFECT_DESCRIPTORS, Effect, EffectCompatibilityStage, EffectId, EffectUniform, Event,
     FreezeFrame, JournalCommand, Keyframe, KeyframeInterpolation, LEGACY_DISPLAY_EFFECT_NAMES,
     LinkId, LutAsset, LutAssetId, LutAssetKind, LutAssetSource, Marker, MarkerId, MediaAsset,
     MediaBin, MediaKind, MediaSourceFingerprint, OpError, Operation, POST_PRIMARY_LUT_EFFECT_NAMES,
-    ParamValue, Query, QueryResult, Rational, RelinkCandidate, SourceSelect, StringOut,
+    PanLaw, ParamValue, Query, QueryResult, Rational, RelinkCandidate, SourceSelect, StringOut,
     StringOutId, SyncGroup, SyncGroupId, SyncGroupMember, TRANSITION_DESCRIPTORS, ThreePointMode,
     TimeCode, Title, TitlePosition, Track, TrackId, TrackKind, Transition,
     effect_compatibility_stage, effect_descriptor, is_legacy_display_effect, transition_descriptor,
@@ -182,6 +182,48 @@ fn document_and_every_operation_variant_round_trip_through_json() {
     let decoded: Document = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, doc);
 
+    // AU2 §5.1 to §5.4: a document carrying every Part B addition — a bus
+    // fader, a master chain, and a non-default pan law — round trips too.
+    let mut part_b = doc.clone();
+    Operation::UpsertAudioBus {
+        bus: AudioBus {
+            id: AudioBusId(1),
+            name: "Dialogue".to_owned(),
+            tracks: vec![TrackId(1)],
+            gain_tenth_db: -25,
+            effects: Vec::new(),
+            ducking_sidechain_tracks: Vec::new(),
+        },
+    }
+    .apply(&mut part_b)
+    .unwrap();
+    Operation::SetAudioMaster {
+        master: AudioMaster {
+            gain_tenth_db: 20,
+            effects: vec![Effect {
+                id: EffectId(1),
+                name: "audio_gain".to_owned(),
+                parameters: BTreeMap::from([(
+                    "gain_tenth_db".to_owned(),
+                    ParamValue::Integer(-30),
+                )]),
+                keyframes: BTreeMap::new(),
+            }],
+        },
+    }
+    .apply(&mut part_b)
+    .unwrap();
+    Operation::SetPanLaw {
+        law: PanLaw::ConstantPower,
+    }
+    .apply(&mut part_b)
+    .unwrap();
+    let encoded = serde_json::to_string(&part_b).unwrap();
+    assert!(encoded.contains(r#""gain_tenth_db":-25"#));
+    assert!(encoded.contains(r#""pan_law":"constant_power""#));
+    let decoded: Document = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, part_b);
+
     let operations = vec![
         Operation::AddAsset {
             asset: asset(2, Rational::new(24_000, 1_001).unwrap(), 240),
@@ -258,6 +300,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                 id: AudioBusId(1),
                 name: "Dialogue".to_owned(),
                 tracks: vec![TrackId(1)],
+                // AU2 §5.1: the bus fader rides the same wire as the chain.
+                gain_tenth_db: -30,
                 effects: vec![
                     Effect {
                         id: EffectId(1),
@@ -302,6 +346,24 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             },
         },
         Operation::RemoveAudioBus { bus: AudioBusId(1) },
+        // AU2 §5.2 and §5.3: the two Part B operations.
+        Operation::SetAudioMaster {
+            master: AudioMaster {
+                gain_tenth_db: -15,
+                effects: vec![Effect {
+                    id: EffectId(1),
+                    name: "audio_true_peak_limiter".to_owned(),
+                    parameters: BTreeMap::from([
+                        ("ceiling_tenth_db".to_owned(), ParamValue::Integer(-10)),
+                        ("lookahead_milliseconds".to_owned(), ParamValue::Integer(5)),
+                    ]),
+                    keyframes: BTreeMap::new(),
+                }],
+            },
+        },
+        Operation::SetPanLaw {
+            law: PanLaw::ConstantPower,
+        },
         Operation::AddTrack {
             track: Track {
                 id: TrackId(2),
@@ -3075,6 +3137,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             id: AudioBusId(1),
             name: "Dialogue".to_owned(),
             tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
             effects: vec![gain],
             ducking_sidechain_tracks: Vec::new(),
         },
@@ -3089,6 +3152,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             id: AudioBusId(2),
             name: "Duplicate route".to_owned(),
             tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
             effects: Vec::new(),
             ducking_sidechain_tracks: Vec::new(),
         },
@@ -3096,6 +3160,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             id: AudioBusId(1),
             name: "Visual effect".to_owned(),
             tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
             effects: vec![Effect {
                 id: EffectId(1),
                 name: "brightness".to_owned(),
@@ -3108,6 +3173,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             id: AudioBusId(1),
             name: "Outside project".to_owned(),
             tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
             effects: vec![Effect {
                 id: EffectId(1),
                 name: "audio_gain".to_owned(),
@@ -3125,11 +3191,21 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             }],
             ducking_sidechain_tracks: Vec::new(),
         },
+        // AU2 §5.4: the bus fader shares the `audio_gain` domain.
+        AudioBus {
+            id: AudioBusId(1),
+            name: "Loud fader".to_owned(),
+            tracks: vec![TrackId(1)],
+            gain_tenth_db: 121,
+            effects: Vec::new(),
+            ducking_sidechain_tracks: Vec::new(),
+        },
         // AU2 §2.3: 10 + 10 + 1 ms is one millisecond past the chain budget.
         AudioBus {
             id: AudioBusId(1),
             name: "Too much lookahead".to_owned(),
             tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
             effects: vec![
                 lookahead_effect(1, "audio_compressor", 10),
                 lookahead_effect(2, "audio_compressor", 10),
@@ -3142,6 +3218,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             id: AudioBusId(1),
             name: "Interpolated bypass".to_owned(),
             tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
             effects: vec![Effect {
                 id: EffectId(1),
                 name: "audio_gain".to_owned(),
@@ -3165,6 +3242,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             id: AudioBusId(1),
             name: "Keyed RMS window".to_owned(),
             tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
             effects: vec![Effect {
                 id: EffectId(1),
                 name: "audio_compressor".to_owned(),
@@ -3188,6 +3266,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             id: AudioBusId(1),
             name: "Keyed lookahead".to_owned(),
             tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
             effects: vec![Effect {
                 id: EffectId(1),
                 name: "audio_true_peak_limiter".to_owned(),
@@ -3215,6 +3294,146 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
         .apply(&mut doc)
         .unwrap();
     assert!(doc.audio_mix.is_empty());
+}
+
+/// AU2 §5.4: the master chain carries the bus rules with master-flavoured
+/// errors, and every rejection is atomic.
+#[test]
+fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain() {
+    let mut doc = document_with_one_clip();
+    Operation::SetAudioMaster {
+        master: AudioMaster {
+            gain_tenth_db: -20,
+            effects: vec![Effect {
+                id: EffectId(1),
+                name: "audio_true_peak_limiter".to_owned(),
+                parameters: BTreeMap::from([(
+                    "ceiling_tenth_db".to_owned(),
+                    ParamValue::Integer(-10),
+                )]),
+                keyframes: BTreeMap::new(),
+            }],
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(doc.audio_mix.master.gain_tenth_db, -20);
+
+    let before = doc.clone();
+    let rejected = [
+        (
+            AudioMaster {
+                gain_tenth_db: -601,
+                effects: Vec::new(),
+            },
+            OpError::AudioMasterGainOutOfRange {
+                gain_tenth_db: -601,
+            },
+        ),
+        (
+            AudioMaster {
+                gain_tenth_db: 0,
+                effects: vec![
+                    lookahead_effect(1, "audio_compressor", 10),
+                    lookahead_effect(2, "audio_compressor", 10),
+                    lookahead_effect(3, "audio_true_peak_limiter", 1),
+                ],
+            },
+            OpError::AudioMasterLookaheadExceeded { milliseconds: 21 },
+        ),
+        (
+            AudioMaster {
+                gain_tenth_db: 0,
+                effects: vec![
+                    lookahead_effect(7, "audio_compressor", 5),
+                    lookahead_effect(7, "audio_true_peak_limiter", 5),
+                ],
+            },
+            OpError::DuplicateAudioMasterEffect {
+                effect: EffectId(7),
+            },
+        ),
+        (
+            AudioMaster {
+                gain_tenth_db: 0,
+                effects: vec![Effect {
+                    id: EffectId(1),
+                    name: "audio_ducking".to_owned(),
+                    parameters: BTreeMap::new(),
+                    keyframes: BTreeMap::new(),
+                }],
+            },
+            OpError::AudioMasterDuckingUnsupported,
+        ),
+        (
+            AudioMaster {
+                gain_tenth_db: 0,
+                effects: vec![Effect {
+                    id: EffectId(1),
+                    name: "brightness".to_owned(),
+                    parameters: BTreeMap::new(),
+                    keyframes: BTreeMap::new(),
+                }],
+            },
+            OpError::VisualEffectOnAudioMaster {
+                effect: "brightness".to_owned(),
+            },
+        ),
+    ];
+    for (master, expected) in rejected {
+        assert_eq!(
+            Operation::SetAudioMaster { master }.apply(&mut doc),
+            Err(expected)
+        );
+        assert_eq!(doc, before);
+    }
+
+    // A neutral whole-set clears the chain and leaves nothing on the wire.
+    Operation::SetAudioMaster {
+        master: AudioMaster::default(),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(doc.audio_mix.is_empty());
+}
+
+/// AU2 §5.1 to §5.4: every Part B document field is additive on the wire, so a
+/// pre-AU2 project loads and re-serializes byte-identically.
+#[test]
+fn a_pre_au2_document_survives_a_load_and_save_byte_identically() {
+    let mut doc = document_with_one_clip();
+    Operation::UpsertAudioBus {
+        bus: AudioBus {
+            id: AudioBusId(1),
+            name: "Dialogue".to_owned(),
+            tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
+            effects: vec![Effect {
+                id: EffectId(1),
+                name: "audio_gain".to_owned(),
+                parameters: BTreeMap::from([(
+                    "gain_tenth_db".to_owned(),
+                    ParamValue::Integer(-30),
+                )]),
+                keyframes: BTreeMap::new(),
+            }],
+            ducking_sidechain_tracks: Vec::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let pre_au2 = serde_json::to_string(&doc).unwrap();
+    // The pre-AU2 wire spells none of the three new keys.
+    assert!(!pre_au2.contains("\"master\""));
+    assert!(!pre_au2.contains("\"pan_law\""));
+    assert!(!pre_au2.contains("\"gain_tenth_db\":0"));
+
+    let loaded: Document = serde_json::from_str(&pre_au2).unwrap();
+    assert_eq!(loaded.validate(), Ok(()));
+    assert_eq!(loaded.audio_mix.buses[0].gain_tenth_db, 0);
+    assert!(loaded.audio_mix.master.is_neutral());
+    assert_eq!(loaded.audio_mix.pan_law, PanLaw::Balance);
+    assert_eq!(serde_json::to_string(&loaded).unwrap(), pre_au2);
 }
 
 #[test]

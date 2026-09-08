@@ -47,6 +47,23 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- AU2 Part B, bus and master control: buses carry a post-effects fader
+  (`AudioBus.gain_tenth_db`), the document gains a master chain
+  (`AudioMix.master` with gain and effects, set by the idempotent
+  `SetAudioMaster`) and a pan law (`AudioMix.pan_law`, `Balance` by default or
+  `ConstantPower`, set by `SetPanLaw`; mono devices apply no pan under either
+  law). Bus, master, and pan-law edits keep the transport running: the worker
+  diffs each chain's structure and retargets parameters in place, rebuilding
+  only a chain whose nodes changed, and an edit that changes the declared
+  lookahead stops and re-cues once. The Mixer's bus and master strips gain a
+  fader and an `Edit` toggle that opens an in-dock chain pane — routing and
+  sidechain checkboxes, effect cards with descriptor-driven controls in their
+  own units, an analytic EQ magnitude curve, gain-reduction bars, reorder,
+  bypass, remove, and a `+ Effect` menu — plus a `+ Bus` control on every
+  track strip. The agent gains generated `set_audio_master` and `set_pan_law`,
+  bus gain, master, and pan law in the compact state, and the read-only
+  `get_audio_spectrum` (31 ISO third-octave bands over a project range through
+  the real mix path). See docs/AU2-EQ-AND-DYNAMICS.md Part B.
 - AU2 Part A, EQ and dynamics nodes: three new bus effects —
   `audio_parametric_eq` (a biquad high-pass, low and high shelves, and four
   peaking bands with frequency, gain, and Q), `audio_gate` (a downward expander

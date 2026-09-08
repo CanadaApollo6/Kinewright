@@ -2463,11 +2463,15 @@ async fn cc7_prepare_commit_and_compare(
 /// CC7 §5.4: CC7 added no tool, so the served surface stays byte-for-byte
 /// what CC6 published. AU1 §6.2 adds two internal tools — the generated
 /// `set_track_mix` mutator and the `get_audio_levels` inspector — so the
-/// registry counts move while the served seven do not. AU2 §4.2 Part A adds
-/// no tool at all: the registry stays at 126 with 76 inspectors and only
-/// descriptions grow — the five effect tools' by 1,299 B each and the two bus
-/// tools' by 835 B each, for the +8,165 B the registry figure records — so
-/// every figure below is unchanged.
+/// registry counts move while the served seven do not. AU2 §4.2 Part A added
+/// no tool at all: the registry stayed at 126 with 76 inspectors and only
+/// descriptions grew, by the +8,165 B the registry figure records.
+///
+/// AU2 §6.4 Part B adds three: the generated `set_audio_master` and
+/// `set_pan_law` mutators and the `get_audio_spectrum` inspector, so 52
+/// generated operations + 77 inspectors = 129. The served seven still do not
+/// move a byte, because none of them embeds the `Operation` schema and none
+/// of the three is served.
 #[tokio::test(flavor = "multi_thread")]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let core = Core::spawn(Document::default()).unwrap();
@@ -2480,11 +2484,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
 
     // The served surface, over the live endpoint.
     let tools = client.list_tools(None).await.unwrap().tools;
-    assert_eq!(
-        tools.len(),
-        7,
-        "neither AU1 nor AU2 Part A adds a served tool"
-    );
+    assert_eq!(tools.len(), 7, "no part of AU1 or AU2 adds a served tool");
     assert_eq!(
         tools
             .iter()
@@ -2493,26 +2493,39 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 126 tools, of which `INSPECTOR_TOOL_NAMES` is 76.
+    // The internal registry: 129 tools, of which `INSPECTOR_TOOL_NAMES` is 77.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        126,
-        "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool"
+        129,
+        "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
+         AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum"
     );
-    assert!(registry.iter().any(|name| name == "set_track_mix"));
-    assert!(registry.iter().any(|name| name == "get_audio_levels"));
+    assert_eq!(
+        operations.len(),
+        52,
+        "AU2 Part B generates two more mutators"
+    );
+    for name in [
+        "set_track_mix",
+        "get_audio_levels",
+        "set_audio_master",
+        "set_pan_law",
+        "get_audio_spectrum",
+    ] {
+        assert!(registry.iter().any(|entry| entry == name), "missing {name}");
+    }
     assert_eq!(
         registry.len() - operations.len(),
-        76,
-        "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool"
+        77,
+        "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum"
     );
 
-    // The served byte counts CC6 recorded, asserted byte-identically: neither
-    // AU1 tool is served, and the seven served tools do not embed the
-    // `Operation` schema, so neither the generated mutator nor AU2 Part A's
-    // forty new audio descriptor rows reach them.
+    // The served byte counts CC6 recorded, asserted byte-identically: no AU1
+    // or AU2 tool is served, and the seven served tools do not embed the
+    // `Operation` schema, so neither the generated mutators nor AU2's new
+    // audio descriptor rows and prose reach them.
     let metrics = server.tool_surface_metrics();
     assert_eq!(metrics.tool_count, 7);
     assert_eq!(metrics.serialized_bytes, 5_660, "{metrics:?}");
@@ -2816,6 +2829,372 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
     assert!(
         text.contains(&format!("mix_levels range=0..{duration} ")),
         "{text}"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU2 §7 item B17: the two Part B mutators survive the whole agent round
+/// trip — plan preparation, commit, and the compact state rendering — beside
+/// a bus carrying the new fader, and a neutral set removes every line again.
+///
+/// The AU1 sibling above is
+/// `au1_set_track_mix_round_trips_through_edit_plans_and_state`; this test
+/// mirrors its shape.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au2_set_audio_master_and_pan_law_round_trip_through_edit_plans_and_state() {
+    let core = Core::spawn(edit_plan_document()).unwrap();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    // One plan, all three Part B edits: a bus with a non-zero fader, a master
+    // chain, and the constant-power law.
+    let prepared = prepare_plan(
+        &client,
+        0,
+        json!([
+            {
+                "op": "upsert_audio_bus",
+                "bus": {
+                    "id": 1,
+                    "name": "Dialogue",
+                    "tracks": [1],
+                    "gain_tenth_db": -35
+                }
+            },
+            {
+                "op": "set_audio_master",
+                "master": {
+                    "gain_tenth_db": 15,
+                    "effects": [{
+                        "id": 9,
+                        "name": "audio_true_peak_limiter",
+                        "parameters": {"ceiling_tenth_db": -10}
+                    }]
+                }
+            },
+            {"op": "set_pan_law", "law": "constant_power"}
+        ]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(0, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+
+    let document = query_document(&core);
+    assert_eq!(document.audio_mix.master.gain_tenth_db, 15);
+    assert_eq!(document.audio_mix.master.effects.len(), 1);
+    assert!(!document.audio_mix.master.is_neutral());
+    assert_eq!(
+        document.audio_mix.pan_law,
+        kinewright_core::PanLaw::ConstantPower
+    );
+    assert_eq!(
+        document
+            .audio_mix
+            .bus(kinewright_core::AudioBusId(1))
+            .expect("the bus must be stored")
+            .gain_tenth_db,
+        -35
+    );
+
+    // AU2 §6.3: the pan law first, then the buses, then the master.
+    let state = client
+        .call_tool(CallToolRequestParams::new("get_timeline_state"))
+        .await
+        .unwrap();
+    let text = &state.content[0].as_text().unwrap().text;
+    assert!(
+        text.contains(
+            "audio_pan_law=constant_power\naudio_buses:\n  audio_bus 1 \"Dialogue\" tracks=1 gain=-35 sidechain=none effects=none\naudio_master gain=15 effects=[9:audio_true_peak_limiter(ceiling_tenth_db=-10)]"
+        ),
+        "{text}"
+    );
+
+    // A neutral set removes the master and returns the law to balance, so
+    // both lines disappear again.
+    let prepared = prepare_plan(
+        &client,
+        1,
+        json!([
+            {"op": "set_audio_master", "master": {"gain_tenth_db": 0, "effects": []}},
+            {"op": "set_pan_law", "law": "balance"},
+            {
+                "op": "upsert_audio_bus",
+                "bus": {"id": 1, "name": "Dialogue", "tracks": [1], "gain_tenth_db": 0}
+            }
+        ]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(1, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+
+    let document = query_document(&core);
+    assert!(document.audio_mix.master.is_neutral());
+    assert!(document.audio_mix.pan_law.is_balance());
+
+    let state = client
+        .call_tool(CallToolRequestParams::new("get_timeline_state"))
+        .await
+        .unwrap();
+    let text = &state.content[0].as_text().unwrap().text;
+    assert!(
+        text.contains("  audio_bus 1 \"Dialogue\" tracks=1 sidechain=none effects=none"),
+        "{text}"
+    );
+    assert!(!text.contains("audio_pan_law"), "{text}");
+    assert!(!text.contains("audio_master"), "{text}");
+    assert!(!text.contains("gain="), "{text}");
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// One band's measured level, in hundredths of a dBFS, from a structured
+/// `get_audio_spectrum` report. Panics on a silent band, which none of the
+/// 1 kHz fixture's measured points has.
+fn spectrum_band_level(report: &serde_json::Value, center_hertz_tenths: i64) -> i64 {
+    report["bands"]
+        .as_array()
+        .expect("every report carries its bands")
+        .iter()
+        .find(|band| band["center_hertz_tenths"] == json!(center_hertz_tenths))
+        .unwrap_or_else(|| panic!("band {center_hertz_tenths} must be reported: {report}"))
+        ["level_dbfs_hundredths"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("band {center_hertz_tenths} measured silent: {report}"))
+}
+
+/// AU2 §7 item B17: `get_audio_spectrum` measured end to end on generated
+/// 1 kHz sine media.
+///
+/// Like its AU1 sibling `au1_get_audio_levels_measures_the_real_mix`, this
+/// test deliberately exercises `Analysis::mix_spectrum` on the REAL
+/// `FfmpegMediaEngine` — no stub, no double — so it is the agent-side proof
+/// that the measurement reaches the media engine's mix path. The engine
+/// implements the facet in `engine.rs` by delegating to
+/// `export::measure_mix_spectrum`; a `NotImplemented` failure on the first
+/// assertion means that impl was lost, not that the measurement is a stub.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au2_get_audio_spectrum_measures_the_real_mix() {
+    let mut arguments = vec![
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=30000/1001",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=1000:sample_rate=48000",
+        "-frames:v",
+        "60",
+        "-t",
+        "2.002",
+    ];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    arguments.extend(["-c:a", "aac", "-shortest"]);
+    let generated = GeneratedMedia::ffmpeg("au2-spectrum", &arguments, "mp4");
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let document = single_clip_document(asset);
+    let duration = document.duration.0;
+    assert!(
+        duration > 30,
+        "the fixture must exceed the 512 ms Welch minimum: {duration}"
+    );
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    // AU2 §6.2: omitting both bounds measures the whole timeline at master.
+    let master = invoke_capability(&client, "get_audio_spectrum", json!({})).await;
+    assert_eq!(
+        master.is_error,
+        Some(false),
+        "get_audio_spectrum must measure the real mix: {master:?}"
+    );
+    let structured = master
+        .structured_content
+        .as_ref()
+        .expect("get_audio_spectrum must publish the machine-readable report");
+    assert_eq!(structured["timeline_revision"], json!(0));
+    let report = &structured["report"];
+    assert_eq!(report["point"], json!("master"), "{report}");
+    assert_eq!(report["range"]["start"], json!(0), "{report}");
+    assert_eq!(report["range"]["end"], json!(duration), "{report}");
+    assert_eq!(report["sample_rate"], json!(48_000), "{report}");
+    assert!(
+        report["segments"].as_u64().unwrap() >= 2,
+        "Welch needs at least two segments: {report}"
+    );
+
+    let bands = report["bands"].as_array().unwrap();
+    assert_eq!(bands.len(), 31, "31 ISO third-octave bands: {report}");
+    assert_eq!(bands[0]["center_hertz_tenths"], json!(200));
+    assert_eq!(bands[30]["center_hertz_tenths"], json!(200_000));
+    let peak = bands
+        .iter()
+        .max_by_key(|band| band["level_dbfs_hundredths"].as_i64().unwrap_or(i64::MIN))
+        .unwrap();
+    assert_eq!(
+        peak["center_hertz_tenths"],
+        json!(10_000),
+        "a 1 kHz sine must peak in the 1000 Hz band: {report}"
+    );
+
+    // AU2 §6.2: the text format, including the five flagged bands and the
+    // one-decimal centre.
+    let text = &master.content[0].as_text().unwrap().text;
+    let lines = text.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 32, "one header and 31 band lines: {text}");
+    assert!(
+        lines[0].starts_with(&format!(
+            "mix_spectrum range=0..{duration} point=master sample_frames="
+        )) && lines[0].ends_with("levels in dBFS hundredths"),
+        "{text}"
+    );
+    for (index, centre) in ["20", "25", "31.5", "40", "50"].into_iter().enumerate() {
+        assert!(
+            lines[index + 1].starts_with(&format!("band {centre} "))
+                && lines[index + 1].ends_with(" window_limited"),
+            "{text}"
+        );
+    }
+    assert!(lines[6].starts_with("band 63 "), "{text}");
+    assert!(!lines[6].ends_with(" window_limited"), "{text}");
+    assert!(lines[31].starts_with("band 20000 "), "{text}");
+    assert!(!text.ends_with('\n'), "{text}");
+
+    // A track target and a bus target, both through the real mix path.
+    let track = invoke_capability(&client, "get_audio_spectrum", json!({"track": 1})).await;
+    assert_eq!(track.is_error, Some(false), "{track:?}");
+    let report = &track.structured_content.as_ref().unwrap()["report"];
+    assert_eq!(report["point"], json!({"track": 1}), "{report}");
+    let peak = report["bands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .max_by_key(|band| band["level_dbfs_hundredths"].as_i64().unwrap_or(i64::MIN))
+        .unwrap()
+        .clone();
+    assert_eq!(peak["center_hertz_tenths"], json!(10_000), "{report}");
+    let track_1k = spectrum_band_level(report, 10_000);
+    assert!(
+        track.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("point=track 1"),
+        "{track:?}"
+    );
+
+    let prepared = prepare_plan(
+        &client,
+        0,
+        json!([{
+            "op": "upsert_audio_bus",
+            "bus": {"id": 1, "name": "Dialogue", "tracks": [1], "gain_tenth_db": -60}
+        }]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(0, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+
+    let bus = invoke_capability(&client, "get_audio_spectrum", json!({"bus": 1})).await;
+    assert_eq!(bus.is_error, Some(false), "{bus:?}");
+    let report = &bus.structured_content.as_ref().unwrap()["report"];
+    assert_eq!(report["point"], json!({"bus": 1}), "{report}");
+    let peak = report["bands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .max_by_key(|band| band["level_dbfs_hundredths"].as_i64().unwrap_or(i64::MIN))
+        .unwrap()
+        .clone();
+    assert_eq!(peak["center_hertz_tenths"], json!(10_000), "{report}");
+    // AU2 §5.6: the bus fader sits inside the bus stem, so a -60 tenth-dB bus
+    // gain must move every band of that stem by -600 hundredths against the
+    // post-track-stage stem feeding it. This is the AU1 gain pin
+    // (`au1_get_audio_levels_measures_the_real_mix`) applied to the spectrum:
+    // a bus stem tapped pre-fader, or the wrong stem entirely, would still
+    // peak at 1 kHz and pass the assertion above.
+    let bus_1k = spectrum_band_level(report, 10_000);
+    assert!(
+        (bus_1k - track_1k + 600).abs() <= 5,
+        "a -60 tenth-dB bus gain must move the 1 kHz band by -600 hundredths, \
+         measured track {track_1k} -> bus {bus_1k}"
+    );
+    assert!(
+        bus.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("point=bus 1"),
+        "{bus:?}"
+    );
+
+    // AU2 §5.9/A23: a range shorter than two Welch segments is refused with
+    // the typed `MixSpectrumRangeTooShort`, never a degenerate spectrum.
+    let short = invoke_capability(
+        &client,
+        "get_audio_spectrum",
+        json!({"start_frame": 0, "end_frame": 10}),
+    )
+    .await;
+    assert_eq!(short.is_error, Some(true), "{short:?}");
+    let text = &short.content[0].as_text().unwrap().text;
+    assert!(
+        text.contains("could not measure the mix spectrum")
+            && text.contains("mix spectrum needs at least 24576 sample frames"),
+        "{text}"
+    );
+
+    // An inverted range is refused rather than clamped, exactly as
+    // `get_audio_levels` refuses one.
+    let inverted = invoke_capability(
+        &client,
+        "get_audio_spectrum",
+        json!({"start_frame": 30, "end_frame": 10}),
+    )
+    .await;
+    assert_eq!(inverted.is_error, Some(true), "{inverted:?}");
+    assert!(
+        inverted.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("get_audio_spectrum needs start_frame < end_frame; got 30..10"),
+        "{inverted:?}"
+    );
+
+    // Two targets at once is a caller error, not a silent preference.
+    let both =
+        invoke_capability(&client, "get_audio_spectrum", json!({"track": 1, "bus": 1})).await;
+    assert_eq!(both.is_error, Some(true), "{both:?}");
+    assert_eq!(
+        both.content[0].as_text().unwrap().text,
+        "get_audio_spectrum takes at most one of track and bus"
     );
 
     client.cancel().await.unwrap();

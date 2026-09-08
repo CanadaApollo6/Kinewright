@@ -16,6 +16,7 @@ mod look_browser_ui;
 mod matte_overlay_ui;
 mod media_bin;
 mod media_workflow;
+mod mixer_pane_ui;
 mod mixer_ui;
 mod preview_ui;
 mod project;

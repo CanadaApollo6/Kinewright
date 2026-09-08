@@ -5,7 +5,7 @@ use std::{
 };
 
 use kinewright_core::{
-    AssetId, AssetTranscript, ClipContent, ClipId, Document, Effect, FrameRounding, LinkId,
+    AssetId, AssetTranscript, ClipContent, ClipId, Document, Effect, FrameRounding, LinkId, PanLaw,
     ParamValue, Rational, SceneStatus, SilenceSpan, SilenceStatus, TimeCode, TimelineSceneChange,
     TimelineSilenceSpan, TimelineTranscriptWord, Title, TrackKind, TranscriptStatus,
     map_frames_with_rounding, map_source_range_to_project,
@@ -619,12 +619,22 @@ fn render_catalog(output: &mut String, document: &Document) {
     }
 }
 
+/// AU2 §6.3: the pan law, the buses, and the master chain, each rendered only
+/// when it is not the default. A document with no buses, a neutral master and
+/// the balance law renders nothing at all, so every pre-AU2 compact state is
+/// byte-identical.
 fn render_audio_mix(output: &mut String, document: &Document) {
-    if document.audio_mix.buses.is_empty() {
+    let mix = &document.audio_mix;
+    if mix.buses.is_empty() && mix.master.is_neutral() && mix.pan_law.is_balance() {
         return;
     }
-    output.push_str("audio_buses:\n");
-    for bus in &document.audio_mix.buses {
+    if !mix.pan_law.is_balance() {
+        let _ = writeln!(output, "audio_pan_law={}", pan_law_name(mix.pan_law));
+    }
+    if !mix.buses.is_empty() {
+        output.push_str("audio_buses:\n");
+    }
+    for bus in &mix.buses {
         let tracks = bus
             .tracks
             .iter()
@@ -639,10 +649,14 @@ fn render_audio_mix(output: &mut String, document: &Document) {
             .join(",");
         let _ = writeln!(
             output,
-            "  audio_bus {} {:?} tracks={} sidechain={} effects={}",
+            "  audio_bus {} {:?} tracks={}{} sidechain={} effects={}",
             bus.id,
             bus.name,
             tracks,
+            // AU2 §6.3: the only conditional mid-line field in this module.
+            // A zero fader is the overwhelming default and the bus line is
+            // already the longest in the compact state.
+            render_audio_gain(bus.gain_tenth_db),
             if sidechain.is_empty() {
                 "none"
             } else {
@@ -650,6 +664,32 @@ fn render_audio_mix(output: &mut String, document: &Document) {
             },
             render_effects(&bus.effects),
         );
+    }
+    if !mix.master.is_neutral() {
+        let _ = writeln!(
+            output,
+            "audio_master gain={} effects={}",
+            mix.master.gain_tenth_db,
+            render_effects(&mix.master.effects),
+        );
+    }
+}
+
+/// AU2 §6.3: ` gain={tenth_db}`, or nothing at all at unity.
+fn render_audio_gain(gain_tenth_db: i32) -> String {
+    if gain_tenth_db == 0 {
+        String::new()
+    } else {
+        format!(" gain={gain_tenth_db}")
+    }
+}
+
+/// The one spelling of a pan law in the compact state, matching the serde
+/// `snake_case` name the `set_pan_law` tool takes (AU2 §5.3).
+const fn pan_law_name(law: PanLaw) -> &'static str {
+    match law {
+        PanLaw::Balance => "balance",
+        PanLaw::ConstantPower => "constant_power",
     }
 }
 
@@ -1052,9 +1092,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn timeline_state_matches_the_compact_golden_rendering() {
-        let expected = r#"project fps=30/1 size=1920x1080 duration=180f/6.000s
+    /// The checked-in compact rendering of [`fixture`], byte for byte.
+    ///
+    /// AU2 §6.3 hoisted this literal out of the golden test below so the
+    /// Part B omission test can assert against the *stored* bytes rather than
+    /// against another call to the renderer.
+    const COMPACT_GOLDEN: &str = r#"project fps=30/1 size=1920x1080 duration=180f/6.000s
 tracks=1 clips=2 assets=1 markers=1 link_groups=1 bins=0 string_outs=0 sync_groups=0
 track 7 video sync_lock=true clips=2
   clip 10 asset=4 "interview.mp4" timeline=0f/0.000s..90f/3.000s duration=90f/3.000s source=30f/1.000s..120f/4.000s effects=[3:brightness(percent=25)] transition_in=crossfade:15f
@@ -1065,7 +1108,10 @@ markers:
   marker 3 at=45f/1.500s color=0 label="Check reaction"
 assets:
   asset 4 "interview.mp4" kind=AudioVideo duration=300f/10.000s fps=30/1 size=1920x1080 path="fixtures/interview.mp4""#;
-        assert_eq!(render_timeline_state(&fixture()), expected);
+
+    #[test]
+    fn timeline_state_matches_the_compact_golden_rendering() {
+        assert_eq!(render_timeline_state(&fixture()), COMPACT_GOLDEN);
     }
 
     #[test]
@@ -1173,6 +1219,111 @@ assets:
         let rendered = render_timeline_state(&document);
         assert!(!rendered.contains(" mix=gain:"), "{rendered}");
         assert!(rendered.contains("track 7 video sync_lock=true clips=2\n"));
+    }
+
+    /// AU2 §7 item B16: the bus fader, the master chain, and the pan law each
+    /// render, in §6.3's order, when they are not the default.
+    #[test]
+    fn au2_timeline_state_renders_the_pan_law_bus_gain_and_master() {
+        let mut document = fixture();
+        document.audio_mix.pan_law = PanLaw::ConstantPower;
+        document.audio_mix.buses = vec![kinewright_core::AudioBus {
+            id: kinewright_core::AudioBusId(1),
+            name: "Dialogue".to_owned(),
+            tracks: vec![TrackId(7)],
+            gain_tenth_db: -35,
+            effects: vec![Effect {
+                id: kinewright_core::EffectId(21),
+                name: "audio_gain".to_owned(),
+                parameters: [("gain_tenth_db".to_owned(), ParamValue::Integer(-20))]
+                    .into_iter()
+                    .collect(),
+                keyframes: std::collections::BTreeMap::new(),
+            }],
+            ducking_sidechain_tracks: Vec::new(),
+        }];
+        document.audio_mix.master = kinewright_core::AudioMaster {
+            gain_tenth_db: 15,
+            effects: vec![Effect {
+                id: kinewright_core::EffectId(22),
+                name: "audio_true_peak_limiter".to_owned(),
+                parameters: [("ceiling_tenth_db".to_owned(), ParamValue::Integer(-10))]
+                    .into_iter()
+                    .collect(),
+                keyframes: std::collections::BTreeMap::new(),
+            }],
+        };
+
+        let rendered = render_timeline_state(&document);
+        assert!(
+            rendered.contains(
+                "audio_pan_law=constant_power\naudio_buses:\n  audio_bus 1 \"Dialogue\" tracks=7 gain=-35 sidechain=none effects=[21:audio_gain(gain_tenth_db=-20)]\naudio_master gain=15 effects=[22:audio_true_peak_limiter(ceiling_tenth_db=-10)]"
+            ),
+            "AU2 §6.3 renderings missing or out of order: {rendered}"
+        );
+    }
+
+    /// AU2 §7 item B16: every AU2 Part B field is omitted at its default, so
+    /// the compact golden is byte-unchanged.
+    #[test]
+    fn au2_timeline_state_omits_the_neutral_master_law_and_bus_gain() {
+        // The golden fixture, with the two new fields spelled out explicitly.
+        let mut document = fixture();
+        document.audio_mix.pan_law = PanLaw::Balance;
+        document.audio_mix.master = kinewright_core::AudioMaster::default();
+        let rendered = render_timeline_state(&document);
+        assert_eq!(
+            rendered, COMPACT_GOLDEN,
+            "a neutral master and the balance law must not move a byte of the stored golden"
+        );
+        for absent in ["audio_pan_law=", "audio_master ", "audio_buses:"] {
+            assert!(!rendered.contains(absent), "{absent} in {rendered}");
+        }
+
+        // A bus at unity carries no `gain=` field at all.
+        document.audio_mix.buses = vec![kinewright_core::AudioBus {
+            id: kinewright_core::AudioBusId(1),
+            name: "Dialogue".to_owned(),
+            tracks: vec![TrackId(7)],
+            gain_tenth_db: 0,
+            effects: Vec::new(),
+            ducking_sidechain_tracks: vec![TrackId(7)],
+        }];
+        let rendered = render_timeline_state(&document);
+        assert!(
+            rendered.contains(
+                "audio_buses:\n  audio_bus 1 \"Dialogue\" tracks=7 sidechain=7 effects=none"
+            ),
+            "a unity bus must render exactly as it did before AU2: {rendered}"
+        );
+        assert!(!rendered.contains("gain="), "{rendered}");
+        assert!(!rendered.contains("audio_master"), "{rendered}");
+        assert!(!rendered.contains("audio_pan_law"), "{rendered}");
+
+        // A master that is only gain, and a master that is only effects, each
+        // render; `is_neutral` is both fields at once.
+        document.audio_mix.master = kinewright_core::AudioMaster {
+            gain_tenth_db: -60,
+            effects: Vec::new(),
+        };
+        assert!(
+            render_timeline_state(&document).contains("audio_master gain=-60 effects=none"),
+            "a gain-only master must render"
+        );
+        document.audio_mix.master = kinewright_core::AudioMaster {
+            gain_tenth_db: 0,
+            effects: vec![Effect {
+                id: kinewright_core::EffectId(22),
+                name: "audio_gate".to_owned(),
+                parameters: std::collections::BTreeMap::new(),
+                keyframes: std::collections::BTreeMap::new(),
+            }],
+        };
+        assert!(
+            render_timeline_state(&document)
+                .contains("audio_master gain=0 effects=[22:audio_gate()]"),
+            "an effects-only master must render"
+        );
     }
 
     #[test]

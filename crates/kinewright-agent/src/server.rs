@@ -25,18 +25,19 @@ use kinewright_core::{
     DeliveryVariant, Document, Effect, EffectId, Event, Export, ExportCancellation, Keyframe,
     KeyframeInterpolation, LutAsset, MUSIC_STRUCTURE_DEFAULT_METER_BEATS,
     MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId, MediaAsset, MediaAvailabilityKind,
-    MediaCacheFamily, MediaCacheInventory, MediaKind, MixLevelRequest, Operation, ParamValue,
-    Playback, Query, QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus, SilenceStatus,
-    SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
-    SubjectFocusBasisPointConstraint, SubjectReframeSettings, SyncGroupId, ThreePointMode,
-    TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track, TrackId, TrackKind,
-    TranscriptStatus, animated_caption_operations_at, apply_batch, authored_caption_cues,
-    beat_montage_plan, beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors,
-    beat_pacing_plan, caption_cues, dedup_timeline_words, delivery_conformance,
-    document_for_delivery_profile, document_for_delivery_variant, is_filler_word,
-    map_source_range_to_project, music_fit_plan_with_end_anchor, music_structure_analysis,
-    plan_speaker_multicam, plan_subject_reframe_basis_points_with_containment, qa_document,
+    MediaCacheFamily, MediaCacheInventory, MediaKind, MixLevelRequest, MixSpectrumPoint,
+    MixSpectrumRequest, Operation, ParamValue, Playback, Query, QueryResult, ReframeFocusBounds,
+    RelinkCandidate, SceneStatus, SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings,
+    SubjectCenterBasisPointSample, SubjectFocusBasisPointConstraint, SubjectReframeSettings,
+    SyncGroupId, ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState,
+    TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TitlePosition, Track, TrackId, TrackKind, TranscriptStatus, animated_caption_operations_at,
+    apply_batch, authored_caption_cues, beat_montage_plan,
+    beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors, beat_pacing_plan,
+    caption_cues, dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
+    document_for_delivery_variant, is_filler_word, map_source_range_to_project,
+    music_fit_plan_with_end_anchor, music_structure_analysis, plan_speaker_multicam,
+    plan_subject_reframe_basis_points_with_containment, qa_document,
     validate_beat_montage_plan_cadence,
 };
 use rmcp::{
@@ -966,6 +967,10 @@ impl KinewrightMcp {
             "get_audio_levels" => {
                 let args: AudioLevelsArgs = decode_args("get_audio_levels", arguments)?;
                 self.audio_levels(&args)
+            }
+            "get_audio_spectrum" => {
+                let args: AudioSpectrumArgs = decode_args("get_audio_spectrum", arguments)?;
+                self.audio_spectrum(&args)
             }
             "get_scene_changes" => {
                 let args: SceneChangesArgs = decode_args("get_scene_changes", arguments)?;
@@ -7236,6 +7241,80 @@ impl KinewrightMcp {
         ))
     }
 
+    /// AU2 §6.2: the third-octave spectrum of one mix point, measured over an
+    /// optional project range through the same real mix path
+    /// [`Self::audio_levels`] uses.
+    fn audio_spectrum(&self, args: &AudioSpectrumArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let point = match (args.track, args.bus) {
+            (Some(_), Some(_)) => {
+                return Ok(error_text(
+                    "get_audio_spectrum takes at most one of track and bus",
+                ));
+            }
+            (Some(track), None) => MixSpectrumPoint::Track(track),
+            (None, Some(bus)) => MixSpectrumPoint::Bus(bus),
+            (None, None) => MixSpectrumPoint::Master,
+        };
+        // The same range rule as `get_audio_levels`: both bounds omitted
+        // measures the whole timeline, and either bound alone fills the other.
+        let range = match (args.start_frame, args.end_frame) {
+            (None, None) => None,
+            (start, end) => {
+                let start = start.unwrap_or(TimeCode::ZERO);
+                let end = end.unwrap_or(document.duration);
+                if start >= end {
+                    return Ok(error_text(format!(
+                        "get_audio_spectrum needs start_frame < end_frame; got {start}..{end}"
+                    )));
+                }
+                Some(start..end)
+            }
+        };
+        let request = MixSpectrumRequest { range, point };
+        // Every analysis failure, including the typed
+        // `MixSpectrumRangeTooShort` a sub-512 ms range earns, is reported as
+        // tool-call text rather than a protocol error.
+        let report = match self.analysis.mix_spectrum(&document, &request) {
+            Ok(report) => report,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "could not measure the mix spectrum: {error}"
+                )));
+            }
+        };
+        let mut text = String::new();
+        let _ = write!(
+            text,
+            "mix_spectrum range={}..{} point={} sample_frames={} segments={} levels in dBFS hundredths",
+            report.range.start,
+            report.range.end,
+            render_mix_spectrum_point(report.point),
+            report.sample_frames,
+            report.segments,
+        );
+        for band in &report.bands {
+            let _ = write!(
+                text,
+                "\nband {} {}{}",
+                render_band_center_hertz(band.center_hertz_tenths),
+                render_optional_hundredths(band.level_dbfs_hundredths),
+                if band.window_limited {
+                    " window_limited"
+                } else {
+                    ""
+                },
+            );
+        }
+        Ok(success_structured(
+            text,
+            serde_json::json!({
+                "timeline_revision": revision.0,
+                "report": report,
+            }),
+        ))
+    }
+
     fn timeline_silences(
         &self,
         requested: Option<TranscriptRangeArgs>,
@@ -8310,16 +8389,10 @@ fn normalization_context(
     if !(25..=300).contains(&args.tolerance_hundredths) {
         return Err("tolerance_hundredths must be in 25..=300".to_owned());
     }
-    let bus_id = AudioBusId(
-        document
-            .audio_mix
-            .buses
-            .iter()
-            .map(|bus| bus.id.0)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1),
-    );
+    // AU2 §5.4/B5: the shared `max + 1` allocator, which core pins against
+    // this call site's former inline loop. There is deliberately no matching
+    // document-wide effect-id helper (N1), so the scan below stays local.
+    let bus_id = document.audio_mix.next_bus_id();
     let first_effect_id = document
         .tracks
         .iter()
@@ -8496,6 +8569,7 @@ fn normalization_bus(
         id: bus_id,
         name: "Delivery normalization".to_owned(),
         tracks,
+        gain_tenth_db: 0,
         effects,
         ducking_sidechain_tracks: Vec::new(),
     })
@@ -9243,6 +9317,27 @@ struct AudioLevelsArgs {
     end_frame: Option<TimeCode>,
 }
 
+/// AU2 §6.2: the range and mix point of one third-octave spectrum
+/// measurement. Omitting both bounds measures the whole timeline; omitting
+/// both `track` and `bus` measures the master.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AudioSpectrumArgs {
+    /// Optional inclusive first project frame. Defaults to 0 when only
+    /// `end_frame` is given, and to the whole timeline when both are omitted.
+    #[serde(default)]
+    start_frame: Option<TimeCode>,
+    /// Optional exclusive last project frame. Defaults to the timeline
+    /// duration when only `start_frame` is given.
+    #[serde(default)]
+    end_frame: Option<TimeCode>,
+    /// Measure this track's post-track-stage stem instead of the master.
+    #[serde(default)]
+    track: Option<TrackId>,
+    /// Measure this bus's post-chain stem instead of the master.
+    #[serde(default)]
+    bus: Option<AudioBusId>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SceneChangesArgs {
     /// Stable asset id shown by `get_timeline_state`.
@@ -9896,6 +9991,12 @@ fn inspector_tools() -> Vec<Tool> {
             "get_audio_levels",
             "Measure per-track, per-bus, and master loudness through the mix, including each track's gain, pan, mute, and solo state. Loudness and sample peak are reported in hundredths of a unit, and read `none` for a stem that decoded silent, which is what a muted or solo-suppressed track reports. Omit both frame bounds to measure the whole timeline; give either bound to measure a half-open project-frame window. This capability is read-only and produces no edit operations.",
             schema_object::<AudioLevelsArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_audio_spectrum",
+            "Measure the third-octave spectrum of one mix point through the real mix path: 31 ISO nominal bands from 20 Hz to 20 kHz, reported in hundredths of a dBFS, where a full-scale sine inside one band reads 0. Measure the master by default, or one track's post-track-stage stem, or one bus's post-chain stem. The five bands below 63 Hz are narrower than the analysis window and are flagged window_limited. The range must cover at least 24576 sample frames (512 ms at 48 kHz). Omit both frame bounds to measure the whole timeline. Use it to justify an EQ move before proposing one. This capability is read-only and produces no edit operations.",
+            schema_object::<AudioSpectrumArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -10687,8 +10788,29 @@ fn success_structured(text: impl Into<String>, value: serde_json::Value) -> Call
     result
 }
 
+/// AU2 §6.2: the one spelling of a spectrum mix point in the agent's text,
+/// so the header line and the structured `report.point` cannot drift.
+fn render_mix_spectrum_point(point: MixSpectrumPoint) -> String {
+    match point {
+        MixSpectrumPoint::Master => "master".to_owned(),
+        MixSpectrumPoint::Track(track) => format!("track {track}"),
+        MixSpectrumPoint::Bus(bus) => format!("bus {bus}"),
+    }
+}
+
+/// AU2 §6.2: an ISO nominal centre in tenths of a hertz as the shortest exact
+/// decimal, so band 3 reads `31.5` and band 8 reads `1000`.
+fn render_band_center_hertz(tenths: u32) -> String {
+    if tenths.is_multiple_of(10) {
+        (tenths / 10).to_string()
+    } else {
+        format!("{}.{}", tenths / 10, tenths % 10)
+    }
+}
+
 /// AU1 §6.2: `none` for an unmeasurable (silent) stem, the raw hundredths
-/// otherwise, so the text summary and the structured report agree.
+/// otherwise, so the text summary and the structured report agree. AU2 §6.2
+/// reuses it for a band that measured silent.
 fn render_optional_hundredths(value: Option<i32>) -> String {
     value.map_or_else(|| "none".to_owned(), |value| value.to_string())
 }
@@ -19200,7 +19322,7 @@ mod tests {
                 "{name} must be read-only"
             );
         }
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 76);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 77);
 
         // M36: every colour planner and every CC5 tool stays inside the
         // kilobyte description budget, measured on the *registered* descriptor
@@ -21072,39 +21194,70 @@ mod tests {
         // 1,186,449 B of input schemas + 96,840 B of descriptions); served is
         // byte-identical because the seven served tools do not embed the
         // `Operation` schema.
-        // AU2 §4.2 Part A adds no tool: the count stays 126 and the registry
-        // grows to 1,312,132 B = the same 1,186,449 B of input schemas plus
-        // 105,005 B of descriptions. Only descriptions move, because the
+        // AU2 §4.2 Part A added no tool: the count stayed 126 and the registry
+        // grew to 1,312,132 B = the same 1,186,449 B of input schemas plus
+        // 105,005 B of descriptions. Only descriptions moved, because the
         // `Operation` schema embeds `Effect.parameters` as an untyped map, so
-        // no descriptor addition reaches an input schema. The +8,165 B splits
-        // two ways: the forty new descriptor rows add 1,299 B to each of the
+        // no descriptor addition reaches an input schema. That +8,165 B split
+        // two ways: the forty new descriptor rows added 1,299 B to each of the
         // five effect tools that carry `effect_documentation()` (6,495 B), and
-        // §4.1's rewritten bus prose grows the arm shared by
+        // §4.1's rewritten bus prose grew the arm shared by
         // `upsert_audio_bus` and `remove_audio_bus` from 335 B to 1,170 B
-        // (835 B x 2 = 1,670 B). That arm carries the closed set of eight
-        // legal bus effect names, which `upsert_audio_bus` cannot learn from
-        // `effect_documentation()` because only the five effect tools carry
-        // it. §4.2's "only the five effect tools' descriptions grow" overlooks
-        // its own §4.1 rewrite. Served stays 5,660 B.
+        // (835 B x 2 = 1,670 B). §4.2's "only the five effect tools'
+        // descriptions grow" overlooked its own §4.1 rewrite.
+        //
+        // AU2 §6.4 Part B adds three tools — the generated `set_audio_master`
+        // and `set_pan_law` mutators and the `get_audio_spectrum` inspector —
+        // so 52 generated operations + 77 inspectors = 129 and the registry
+        // grows to 1,421,520 B = 1,293,084 B of input schemas + 107,271 B of
+        // descriptions.
+        //
+        // Unlike Part A, Part B does move input schemas (+106,635 B), because
+        // it changes the `Operation` model rather than the descriptor table.
+        // The measured split, which sums exactly:
+        //
+        //   43,559 B  the two new mutators' own schemas (21,785 + 21,774),
+        //             each carrying its own copy of the shared `Operation`
+        //             `$defs`;
+        //    1,340 B  `get_audio_spectrum`'s own schema, which embeds no
+        //             `Operation` and is the cheapest tool in the registry;
+        //   61,736 B  spread over the 51 pre-existing tools that do embed
+        //             `Operation`, namely 1,195 B of shared `$defs` growth on
+        //             each of the fifty generated tools (`AudioMaster` and
+        //             `PanLaw` are new definitions and `AudioBus` gains
+        //             `gain_tenth_db`; nothing references `AudioMix`, so its
+        //             two new fields reach no input schema at all), plus 62 B
+        //             on `set_track_mix` for the reworded `pan_percent` doc
+        //             comment, plus 1,924 B on `apply_edit_plan` — the one
+        //             non-generated tool that embeds `Operation`, whose inline
+        //             definition gains the two new `oneOf` variants and the
+        //             same 62 B doc comment.
+        //
+        // So 49 x 1,195 + (1,195 + 62) + 1,924 = 61,736, and
+        // 43,559 + 1,340 + 61,736 = 106,635.
+        //
+        // The +2,266 B of descriptions splits exactly four ways: 1,302 B of
+        // the two new mutators' descriptions, 636 B of `get_audio_spectrum`'s,
+        // 194 B for §6.1's bus fader sentence on the two bus tools (97 B x 2),
+        // and 134 B for the law-neutral `set_track_mix` rewrite. Served stays
+        // 5,660 B in both parts.
         assert_eq!(
             (
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_312_132, 5_660),
+            (1_421_520, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
-        // AU2 §4.2/A18: asserting the input-schema figure unchanged is a
-        // stronger and cheaper check than regenerating the total.
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_186_449,
-            "AU2 Part A must not move a byte of the generated input schemas: {registry_metrics:?}"
-        );
-        assert_eq!(
-            registry_metrics.description_bytes, 105_005,
+            registry_metrics.input_schema_bytes, 1_293_084,
             "registry={registry_metrics:?}"
         );
-        // AU2 §4.2/A18: the served triple, byte-identical to CC6's.
+        assert_eq!(
+            registry_metrics.description_bytes, 107_271,
+            "registry={registry_metrics:?}"
+        );
+        // AU2 §6.4/B15: the served quad, byte-identical to CC6's.
         assert_eq!(
             (
                 served_metrics.tool_count,

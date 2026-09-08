@@ -89,6 +89,13 @@ pub(crate) mod size {
     pub const MIXER_FADER_HEIGHT: f32 = 120.0;
     /// Width of one mixer meter bar; a strip carries an L/R pair (AU1 §5.1).
     pub const MIXER_METER_WIDTH: f32 = 4.0;
+    /// Width of the mixer chain pane beside the strips (AU2 §6.6).
+    pub const MIXER_CHAIN_PANE_WIDTH: f32 = 400.0;
+    /// Height of the EQ magnitude well on an expanded parametric EQ card
+    /// (AU2 §6.7).
+    pub const MIXER_EQ_CURVE_HEIGHT: f32 = 96.0;
+    /// Height of a gain-reduction bar on an expanded dynamics card (AU2 §6.7).
+    pub const MIXER_REDUCTION_METER_HEIGHT: f32 = 6.0;
 }
 
 pub(crate) mod motion {

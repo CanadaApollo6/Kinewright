@@ -452,6 +452,18 @@ impl Analysis for BaselineProofAnalysis {
         self.inner.mix_levels(document, request)
     }
 
+    /// AU2 §5.9: the spectrum measurement forwards exactly as `mix_levels`
+    /// does. Without this arm the proxy would answer `NotImplemented` while
+    /// the engine behind it can measure, which is the one way this wrapper can
+    /// change an answer rather than only sharing a working proof.
+    fn mix_spectrum(
+        &self,
+        document: &Document,
+        request: &kinewright_core::MixSpectrumRequest,
+    ) -> Result<kinewright_core::MixSpectrumReport, MediaError> {
+        self.inner.mix_spectrum(document, request)
+    }
+
     fn request_beat_detection(&self, asset: kinewright_core::MediaAsset) {
         self.inner.request_beat_detection(asset);
     }

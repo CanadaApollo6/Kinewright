@@ -649,9 +649,15 @@ audio depth at one star for exactly these reasons.
 | AU5 — Repair and room tone | Broadband noise reduction with a learned profile, hum removal, de-click, room-tone capture and fill for cut gaps, dialogue isolation where the model can measure improvement | Repair is measured on synthetic corruptions with pinned SNR gains; fills are seamless at 1e-4 across the join |
 | AU6 — Workflow evaluation | Two-person interview with music bed, podcast with uneven voices, noisy location dialogue, event/multicam with a master audio track, and encoded delivery at two loudness targets | Technical gates pass independently; blind human review is limited to balance and intelligibility questions |
 
-**Current status (2026-09-07): AU1 is implemented and pending its hands-on
-platform smoke.** Bus and master controls, loudness targeting, automation, and
-repair remain deferred to AU2–AU5 exactly as their rows state.
+**Current status (2026-09-08): AU1 is implemented and pending its hands-on
+platform smoke; AU2 landed in two parts on one contract
+(`docs/AU2-EQ-AND-DYNAMICS.md`).** Part A (EQ and dynamics nodes) discharges
+the row's first two exit-gate clauses and the bus half of "playback/export
+parity through every node"; Part B (bus and master control) closes that clause
+through the master chain and delivers the row's remaining deliverables — bus
+and master editing in the Mixer, the constant-power pan law, and
+`get_audio_spectrum`. Loudness targeting, automation, and repair remain
+deferred to AU3–AU5 exactly as their rows state.
 
 Each slice writes its contract under `docs/AU<n>-<NAME>.md` before implementation
 and records deferrals explicitly, as the colour slices did.

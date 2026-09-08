@@ -19,6 +19,7 @@ mod lut;
 mod lut_store;
 mod render;
 mod sha256;
+mod spectrum;
 mod timeline;
 mod title;
 mod transcript;

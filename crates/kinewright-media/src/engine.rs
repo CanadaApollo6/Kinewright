@@ -18,11 +18,11 @@ use kinewright_core::{
     MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE, MatteParams, MatteProof, MatteProofError,
     MatteProofMetadata, MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus,
     MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,
-    MediaError, MediaEvent, MixLevelReport, MixLevelRequest, MixPeaks, MonitorProof, Playback,
-    PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode,
-    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TranscriptStatus, VisualAssetResult, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof,
-    WorkingProofMetadata, export_lut_preflight_with,
+    MediaError, MediaEvent, MixLevelReport, MixLevelRequest, MixPeaks, MixSpectrumReport,
+    MixSpectrumRequest, MonitorProof, Playback, PlaybackState, ProgressSink, Rational, RgbaImage,
+    SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, TranscriptStatus, VisualAssetResult, WORKING_PROOF_ENCODING,
+    WORKING_PROOF_STAGE, WorkingProof, WorkingProofMetadata, export_lut_preflight_with,
 };
 
 use crate::{
@@ -682,7 +682,7 @@ impl Playback for FfmpegMediaEngine {
             .map_or_else(|_| MixPeaks::default(), |meters| meters.peaks())
     }
 
-    /// AU1 §5.3: publish a document that differs only in `audio_mix.tracks`.
+    /// AU2 §5.8: publish a document that differs only in `audio_mix`.
     ///
     /// The export document is refreshed exactly as `set_document` does; the
     /// clock, the next asset id, and the worker's video state are untouched.
@@ -794,6 +794,15 @@ impl Analysis for FfmpegMediaEngine {
         request: &MixLevelRequest,
     ) -> Result<MixLevelReport, MediaError> {
         crate::export::measure_mix_levels(document, request)
+    }
+
+    /// AU2 §5.9: measured through the real mix path, at 48 kHz stereo.
+    fn mix_spectrum(
+        &self,
+        document: &Document,
+        request: &MixSpectrumRequest,
+    ) -> Result<MixSpectrumReport, MediaError> {
+        crate::export::measure_mix_spectrum(document, request)
     }
 
     fn request_beat_detection(&self, asset: MediaAsset) {
@@ -1425,14 +1434,50 @@ impl Worker {
         self.renderer.set_lut_library(Arc::clone(&self.lut_library));
     }
 
-    /// AU1 §5.3: the document differs only in `audio_mix.tracks`, which no
-    /// video path reads, so nothing is paused, reseeked, or rebound. The app's
-    /// `is_live_track_mix_change` predicate is the contract; the worker does
-    /// not verify it.
+    /// AU2 §5.8: the document differs only in `audio_mix`, which no video path
+    /// reads, so nothing is paused, reseeked, or rebound. The app's
+    /// `is_live_audio_mix_change` predicate is the contract; the worker does not
+    /// verify it, with one exception.
+    ///
+    /// **The latency guard (A34).** `L` is fixed for a processor's life, so a
+    /// document whose declared lookahead differs cannot be applied to a running
+    /// one: the worker falls back to `set_document` and re-cues to the position
+    /// it was at, rather than retargeting. Defensive, because the app predicate
+    /// already refuses the live path in that case.
     fn update_audio_mix(&mut self, doc: Arc<Document>) {
+        if !can_retarget_audio_mix(&self.document, &doc) {
+            // AU2 §5.8: "a pause and re-cue", not a rewind. `set_document`
+            // lands the transport on frame 0, so the position is captured
+            // first and restored afterwards exactly as the paused branch of
+            // `handle_coalesced_requests` does — the same place the app's own
+            // non-live path leaves it.
+            let at = self.clock.position();
+            self.set_document(&doc);
+            let at = TimeCode(at.0.clamp(0, self.document.duration.0.saturating_sub(1)));
+            self.clock.set_frame(at);
+            self.emit(MediaEvent::Position(at));
+            self.present(at);
+            return;
+        }
         self.document = doc;
+        if self.audio.is_none() {
+            return;
+        }
+        // AU2 §5.8/R8: the peak table is rebuilt only when its key set stops
+        // describing the document, so a fader drag does not zero every meter on
+        // every frame, and the rebuild attaches and publishes in one call.
+        let rebuilt =
+            self.mix_meters.read().ok().and_then(|installed| {
+                mix_meters_for_update(&installed, &self.document, &self.meter)
+            });
         if let Some(audio) = &mut self.audio {
-            audio.update_track_mix(&self.document);
+            audio.update_audio_mix(&self.document);
+            if let Some(meters) = &rebuilt {
+                audio.attach_mix_meters(Arc::clone(meters));
+            }
+        }
+        if let Some(meters) = rebuilt {
+            self.install_mix_meters(meters);
         }
     }
 
@@ -1635,6 +1680,33 @@ fn send_latest<T: Send>(sender: &Sender<T>, drop_receiver: &Receiver<T>, value: 
             let _ = sender.try_send(value);
         }
     }
+}
+
+/// AU2 §5.8/A34: whether a live update can be applied to a running processor.
+///
+/// `L` is derived from the document and fixed for a processor's life, so a
+/// document whose declared lookahead differs cannot be retargeted onto a
+/// running one — the worker pauses and re-cues instead. Defensive: the app
+/// predicate already refuses the live path in that case (OPEN-3).
+fn can_retarget_audio_mix(current: &Document, incoming: &Document) -> bool {
+    current.audio_mix.lookahead_milliseconds() == incoming.audio_mix.lookahead_milliseconds()
+}
+
+/// AU2 §5.8/R8: the peak table a live update needs, or `None` to keep the one
+/// already installed.
+///
+/// `MixMeters::for_document` allocates fresh zeroed slots and the mixer UI only
+/// raises its meters while playing, so rebuilding on every update would zero
+/// every meter on every frame of a fader drag. The table is rebuilt only when
+/// its `(track id, bus id, chain-and-effect-id)` key set stops describing the
+/// document (A33).
+fn mix_meters_for_update(
+    installed: &MixMeters,
+    document: &Document,
+    master: &Arc<MeterState>,
+) -> Option<Arc<MixMeters>> {
+    (!installed.matches_document(document))
+        .then(|| Arc::new(MixMeters::for_document(document, Arc::clone(master))))
 }
 
 #[cfg(test)]
@@ -2427,5 +2499,222 @@ mod tests {
         );
         assert_eq!(at_start.len(), 32 * 36);
         assert_eq!(at_end.len(), 32 * 36);
+    }
+
+    /// AU2 §7 item B12 / R8: ten consecutive live updates that change only a
+    /// gain keep the installed peak table — `Arc::ptr_eq` on the very table
+    /// `Playback::mix_peaks` reads — and a structural edit replaces it.
+    #[test]
+    fn ten_gain_only_updates_keep_the_installed_meter_table() {
+        use kinewright_core::{AudioBus, AudioBusId, ParamValue};
+
+        let audio_track = |id: u64| Track {
+            id: TrackId(id),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: Vec::new(),
+        };
+        let mut document = Document {
+            fps: Rational::new(10, 1).unwrap(),
+            duration: TimeCode(30),
+            tracks: vec![audio_track(1), audio_track(2)],
+            ..Document::default()
+        };
+        document.audio_mix.buses = vec![AudioBus {
+            id: AudioBusId(1),
+            name: "Bed".to_owned(),
+            tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
+            effects: vec![Effect {
+                id: EffectId(1),
+                name: "audio_compressor".to_owned(),
+                parameters: std::collections::BTreeMap::new(),
+                keyframes: std::collections::BTreeMap::new(),
+            }],
+            ducking_sidechain_tracks: Vec::new(),
+        }];
+
+        let master = Arc::new(MeterState::default());
+        let installed = Arc::new(MixMeters::for_document(&document, Arc::clone(&master)));
+        let mut current = Arc::clone(&installed);
+        for step in 1..=10_i32 {
+            document.audio_mix.buses[0].gain_tenth_db = -step;
+            document.audio_mix.master.gain_tenth_db = step;
+            if let Some(rebuilt) = mix_meters_for_update(&current, &document, &master) {
+                current = rebuilt;
+            }
+            assert!(
+                Arc::ptr_eq(&current, &installed),
+                "update {step} replaced the installed table"
+            );
+        }
+
+        // A master node adds a gain-reduction key, so the table must change.
+        document.audio_mix.master.effects = vec![Effect {
+            id: EffectId(9),
+            name: "audio_true_peak_limiter".to_owned(),
+            parameters: std::collections::BTreeMap::from([(
+                "ceiling_tenth_db".to_owned(),
+                ParamValue::Integer(-10),
+            )]),
+            keyframes: std::collections::BTreeMap::new(),
+        }];
+        let rebuilt = mix_meters_for_update(&current, &document, &master)
+            .expect("a structural edit must rebuild the table");
+        assert!(!Arc::ptr_eq(&rebuilt, &installed));
+        assert!(rebuilt.matches_document(&document));
+        assert!(mix_meters_for_update(&rebuilt, &document, &master).is_none());
+    }
+
+    /// AU2 §7 item B11 / A34: the worker's latency guard. A gain-only edit and
+    /// a second bus that declares no more than the standing maximum stay on the
+    /// live path; anything that moves `L` re-cues.
+    #[test]
+    fn the_latency_guard_re_cues_only_when_the_declared_lookahead_moves() {
+        use kinewright_core::{AudioBus, AudioBusId, ParamValue};
+
+        let lookahead_node = |id: u64, name: &str, milliseconds: i64| Effect {
+            id: EffectId(id),
+            name: name.to_owned(),
+            parameters: std::collections::BTreeMap::from([(
+                "lookahead_milliseconds".to_owned(),
+                ParamValue::Integer(milliseconds),
+            )]),
+            keyframes: std::collections::BTreeMap::new(),
+        };
+        let bus = |id: u64, effects: Vec<Effect>| AudioBus {
+            id: AudioBusId(id),
+            name: format!("Bus {id}"),
+            tracks: Vec::new(),
+            gain_tenth_db: 0,
+            effects,
+            ducking_sidechain_tracks: Vec::new(),
+        };
+        let mut document = Document {
+            fps: Rational::new(10, 1).unwrap(),
+            duration: TimeCode(30),
+            ..Document::default()
+        };
+        document.audio_mix.buses = vec![bus(
+            1,
+            vec![lookahead_node(1, "audio_true_peak_limiter", 10)],
+        )];
+
+        let mut faded = document.clone();
+        faded.audio_mix.buses[0].gain_tenth_db = -60;
+        faded.audio_mix.master.gain_tenth_db = -30;
+        assert!(can_retarget_audio_mix(&document, &faded));
+
+        // `L_bus` is the maximum over buses, so a second 10 ms chain does not
+        // move it.
+        let mut second = document.clone();
+        second
+            .audio_mix
+            .buses
+            .push(bus(2, vec![lookahead_node(2, "audio_compressor", 10)]));
+        assert!(can_retarget_audio_mix(&document, &second));
+
+        // A master limiter adds a whole new stage.
+        let mut mastered = document.clone();
+        mastered.audio_mix.master.effects = vec![lookahead_node(3, "audio_true_peak_limiter", 5)];
+        assert!(!can_retarget_audio_mix(&document, &mastered));
+
+        // And so does raising the bus stage.
+        let mut deeper = document.clone();
+        deeper.audio_mix.buses[0].effects = vec![lookahead_node(1, "audio_true_peak_limiter", 4)];
+        assert!(!can_retarget_audio_mix(&document, &deeper));
+    }
+
+    /// AU2 §7 item B11 / §5.8 (A34): the latency guard is a pause and **re-cue**,
+    /// not a rewind. A live update whose declared lookahead differs, applied
+    /// while the transport sits at frame 10, leaves it at frame 10 and paused —
+    /// the same place the app's own non-live path leaves it — instead of
+    /// snapping to frame 0 the way `set_document` alone would.
+    #[test]
+    fn the_latency_guard_fallback_re_cues_at_the_current_position() {
+        use kinewright_core::{AudioBus, AudioBusId, ParamValue};
+
+        let (_control_tx, control_rx) = unbounded::<Control>();
+        let (frames_tx, frames_rx) = bounded(2);
+        let (events_tx, events_rx) = bounded(16);
+        let clock = Arc::new(SharedClock::new());
+        let meter = Arc::new(MeterState::default());
+        let mix_meters = Arc::new(RwLock::new(Arc::new(MixMeters::empty(Arc::clone(&meter)))));
+        let mut worker = Worker::new(
+            WorkerChannels {
+                control_rx,
+                frames_tx,
+                frames_drop_rx: frames_rx.clone(),
+                events_tx,
+                events_drop_rx: events_rx.clone(),
+            },
+            Arc::clone(&clock),
+            Arc::clone(&meter),
+            Arc::clone(&mix_meters),
+            Arc::new(RequestedPositions::default()),
+            fallback_gpu().context(),
+            Arc::new(RwLock::new(PublishedLattices::default())),
+        );
+
+        let limiter = |milliseconds: i64| Effect {
+            id: EffectId(1),
+            name: "audio_true_peak_limiter".to_owned(),
+            parameters: std::collections::BTreeMap::from([(
+                "lookahead_milliseconds".to_owned(),
+                ParamValue::Integer(milliseconds),
+            )]),
+            keyframes: std::collections::BTreeMap::new(),
+        };
+        let document = |milliseconds: i64| {
+            let mut document = Document {
+                fps: Rational::new(10, 1).unwrap(),
+                duration: TimeCode(30),
+                resolution: (64, 64),
+                tracks: vec![Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                }],
+                ..Document::default()
+            };
+            document.audio_mix.buses = vec![AudioBus {
+                id: AudioBusId(1),
+                name: "Bed".to_owned(),
+                tracks: vec![TrackId(1)],
+                gain_tenth_db: 0,
+                effects: vec![limiter(milliseconds)],
+                ducking_sidechain_tracks: Vec::new(),
+            }];
+            Arc::new(document)
+        };
+
+        // The transport is playing at frame 10. No audio device is opened here:
+        // the guard runs before anything touches `self.audio`.
+        worker.document = document(10);
+        worker.playing = true;
+        worker.clock.set_fps(worker.document.fps);
+        worker.clock.set_frame(TimeCode(10));
+        assert_eq!(worker.clock.position(), TimeCode(10));
+
+        let deeper = document(4);
+        assert!(!can_retarget_audio_mix(&worker.document, &deeper));
+        worker.update_audio_mix(Arc::clone(&deeper));
+
+        assert_eq!(
+            worker.clock.position(),
+            TimeCode(10),
+            "the defensive fallback must re-cue, not rewind to frame 0"
+        );
+        assert!(!worker.playing, "the fallback pauses the transport");
+        assert_eq!(worker.document.audio_mix, deeper.audio_mix);
+
+        // A gain-only update on the same lookahead stays on the live path and
+        // leaves the position alone too.
+        let mut faded = (*deeper).clone();
+        faded.audio_mix.buses[0].gain_tenth_db = -60;
+        worker.update_audio_mix(Arc::new(faded));
+        assert_eq!(worker.clock.position(), TimeCode(10));
+        assert_eq!(worker.document.audio_mix.buses[0].gain_tenth_db, -60);
     }
 }

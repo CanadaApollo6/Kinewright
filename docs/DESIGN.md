@@ -135,6 +135,9 @@ Mixer strips use their own size tokens:
 | `size-mixer-strip-width` | 72 | Track, bus, and master strip width |
 | `size-mixer-fader-height` | 120 | Fader travel and meter-bar height |
 | `size-mixer-meter-width` | 4 | Single mixer meter bar width |
+| `size-mixer-chain-pane-width` | 400 | Chain pane beside the strips |
+| `size-mixer-eq-curve-height` | 96 | Parametric EQ magnitude well |
+| `size-mixer-reduction-meter-height` | 6 | Gain-reduction bar on a dynamics card |
 
 The default desktop viewport is 1,440 by 900 points. The minimum supported
 viewport is 1,100 by 700 points; below that size, the three-column editing
@@ -330,7 +333,9 @@ It owns its dock height (default 320 points, minimum 260) so the Timeline keeps
 its own. Strips run left to right in a scroll area: one per track in document
 order, a `border-subtle` rule, one per bus (with a second rule only when buses
 exist), then the master strip. Each strip is `size-mixer-strip-width` wide and
-fits in 240 points of height in its tallest state.
+fits in 240 points of height in its tallest state: 232 for a track strip
+carrying both its `SILENCED` line and its button row, 215 for a bus strip
+whether it holds one node or six, and 196 for the master.
 
 A track strip reads top to bottom: the caption and kind icon at the track
 header's type size (plus `NO AUDIO` on the next line, in `text-muted`, for a
@@ -341,14 +346,29 @@ decay, and the vertical gain fader labelled in dB on the right (`SILENCED` in
 `text-muted` sits under the meters when another track's solo silences this one
 and the strip does not already say `NO AUDIO`); a horizontal pan control
 labelled `L`/`C`/`R`; the `M`/`S` toggles side by side, which use the same states
-as the timeline track header; and a `Reset` small button that appears only while
-the track's mix is not neutral. Sliders have no double-click reset. Neither
-micro label disables the strip's controls.
+as the timeline track header; and a bottom row holding a `Reset` small button
+that appears only while the track's mix is not neutral. Sliders have no
+double-click reset. Neither micro label disables the strip's controls.
 
-Bus strips are read-only: name, member tracks, effect chain in order, sidechain
-sources, and a meter pair. The master strip is the label `MASTER` and a meter
-pair fed by the post-limiter master peaks. Meters read zero whenever nothing is
-playing.
+A bus strip reads: name, member tracks, a node count with the full chain as its
+tooltip, one row carrying the meter pair and the vertical gain fader with its dB
+readout, and an `Edit` toggle. The master strip is the label `MASTER`, that same
+meter-and-fader row fed by the post-limiter master peaks, a node count, and its
+own `Edit` toggle. Each track strip carries a `+ Bus` button, disabled with its
+reason when the track has no audio or is already routed. Meters read zero
+whenever nothing is playing.
+
+`Edit` opens the chain pane beside the strips, inside the same dock — the Mixer
+adds no floating surface. The pane carries the chain's routing and sidechain
+checkboxes, its effects as cards, a `+ Effect` menu, and, on the master, the
+pan-law choice. One card is expanded at a time; a collapsed card is a single row
+with the effect's display name, a `Bypass` checkbox, its gain-reduction readout,
+move-up and move-down buttons, and a `Remove` button in status-danger text. An
+expanded card adds a wrapped row of controls labelled in their own units (dB,
+Hz, ms, ratio, Q), a read-only magnitude well on a parametric EQ, and a
+gain-reduction bar on a dynamics node. The gain-reduction bar is the one meter
+in the product that fills from the right, because it shows how far a signal has
+been pushed down; it uses status-warning and never accent.
 
 ### Transcript and utility panels
 

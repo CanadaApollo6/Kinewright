@@ -1,13 +1,15 @@
-//! AU2 EQ and dynamics, Part A — core contract tests (AU2 §7 items A1, A4, A7).
+//! AU2 EQ and dynamics — core contract tests (AU2 §7 items A1, A4, A7 and
+//! B2 to B6).
 
 use std::collections::BTreeMap;
 
 use kinewright_core::{
-    AudioBus, AudioBusId, AudioMix, AutomationCurve, CHAIN_LOOKAHEAD_MILLISECONDS, ChainLookahead,
-    ColorContext, Document, Effect, EffectId, EffectUniform, Keyframe, KeyframeInterpolation,
-    MediaAsset, MediaCatalog, MediaKind, MediaSourceFingerprint, OpError, Operation, ParamValue,
-    Rational, TimeCode, Track, TrackId, TrackKind, chain_lookahead_milliseconds, effect_descriptor,
-    is_audio_effect, is_static_audio_parameter,
+    AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AudioBus,
+    AudioBusId, AudioMaster, AudioMix, AutomationCurve, CHAIN_LOOKAHEAD_MILLISECONDS,
+    ChainLookahead, ColorContext, Command, Core, Document, Effect, EffectId, EffectUniform, Event,
+    Keyframe, KeyframeInterpolation, MediaAsset, MediaCatalog, MediaKind, MediaSourceFingerprint,
+    OpError, Operation, ParamValue, Rational, TimeCode, Track, TrackId, TrackKind,
+    chain_lookahead_milliseconds, effect_descriptor, is_audio_effect, is_static_audio_parameter,
 };
 
 /// The eight bus-only audio node names, in `EFFECT_DESCRIPTORS` order (AU2 §2.1).
@@ -419,6 +421,7 @@ fn bus_with(effects: Vec<Effect>) -> AudioBus {
         id: AudioBusId(1),
         name: "Dialogue".to_owned(),
         tracks: vec![TrackId(1)],
+        gain_tenth_db: 0,
         effects,
         ducking_sidechain_tracks: Vec::new(),
     }
@@ -891,4 +894,555 @@ fn upsert_audio_bus_round_trips_one_of_each_new_node() {
     doc.validate().unwrap();
     assert_eq!(doc.audio_mix.buses[0].effects.len(), 4);
     assert_eq!(doc.audio_mix.lookahead_milliseconds().bus_stage, 10);
+}
+
+// ---------------------------------------------------------------------------
+// AU2 Part B — bus and master control (§5.1 to §5.4).
+// ---------------------------------------------------------------------------
+
+/// A master chain whose effect ids and names the caller chooses.
+fn master_with(gain_tenth_db: i32, effects: Vec<Effect>) -> AudioMaster {
+    AudioMaster {
+        gain_tenth_db,
+        effects,
+    }
+}
+
+/// The same master reached through the document invariant rather than through
+/// the operation: a hand-edited project must be rejected on load too.
+fn hand_edited_master(master: AudioMaster) -> Document {
+    let mut doc = document_with_one_clip();
+    doc.audio_mix.master = master;
+    doc
+}
+
+/// `AudioMix::is_empty` and `AudioMaster::is_neutral` are only usable here if
+/// they are still `const fn` (AU2 §5.4, R20).
+const fn mix_is_empty(mix: &AudioMix) -> bool {
+    mix.is_empty()
+}
+
+const fn master_is_neutral(master: &AudioMaster) -> bool {
+    master.is_neutral()
+}
+
+/// AU2 §7 item B2.
+#[test]
+fn a_neutral_master_and_the_balance_law_never_reach_the_wire() {
+    let untouched = document_with_one_clip();
+    let untouched_bytes = serde_json::to_string(&untouched).unwrap();
+
+    let mut only_neutral = document_with_one_clip();
+    Operation::SetAudioMaster {
+        master: AudioMaster::default(),
+    }
+    .apply(&mut only_neutral)
+    .unwrap();
+    Operation::SetPanLaw {
+        law: kinewright_core::PanLaw::Balance,
+    }
+    .apply(&mut only_neutral)
+    .unwrap();
+
+    // A document that only ever set neutral is byte-identical to one that
+    // never touched either field.
+    assert_eq!(only_neutral, untouched);
+    assert_eq!(
+        serde_json::to_string(&only_neutral).unwrap(),
+        untouched_bytes
+    );
+    assert!(!untouched_bytes.contains("master"));
+    assert!(!untouched_bytes.contains("pan_law"));
+
+    // The two predicates stay `const`, so the serde skip and `is_empty` stay
+    // const too.
+    assert!(master_is_neutral(&only_neutral.audio_mix.master));
+    assert!(mix_is_empty(&only_neutral.audio_mix));
+
+    // A non-neutral master or law is written, and both survive a round trip.
+    let mut touched = document_with_one_clip();
+    Operation::SetAudioMaster {
+        master: master_with(-15, vec![audio_effect(1, "audio_gain", &[])]),
+    }
+    .apply(&mut touched)
+    .unwrap();
+    Operation::SetPanLaw {
+        law: kinewright_core::PanLaw::ConstantPower,
+    }
+    .apply(&mut touched)
+    .unwrap();
+    assert!(!mix_is_empty(&touched.audio_mix));
+    let bytes = serde_json::to_string(&touched).unwrap();
+    assert!(bytes.contains(r#""pan_law":"constant_power""#));
+    assert_eq!(
+        serde_json::from_str::<Document>(&bytes).unwrap(),
+        touched.clone()
+    );
+
+    // Both operations are idempotent whole sets.
+    let repeated = touched.clone();
+    Operation::SetAudioMaster {
+        master: touched.audio_mix.master.clone(),
+    }
+    .apply(&mut touched)
+    .unwrap();
+    Operation::SetPanLaw {
+        law: touched.audio_mix.pan_law,
+    }
+    .apply(&mut touched)
+    .unwrap();
+    assert_eq!(touched, repeated);
+}
+
+/// AU2 §7 item B3.
+#[test]
+fn bus_and_master_gain_share_the_audio_gain_domain_and_reject_outside_it() {
+    // The bounds are the `audio_gain` descriptor's own, as AU1 pinned the
+    // track-mix bounds.
+    let descriptor = effect_descriptor("audio_gain")
+        .unwrap()
+        .parameter("gain_tenth_db")
+        .unwrap();
+    assert_eq!(i64::from(AUDIO_BUS_GAIN_MIN), descriptor.min);
+    assert_eq!(i64::from(AUDIO_BUS_GAIN_MAX), descriptor.max);
+    assert_eq!(AUDIO_MASTER_GAIN_MIN, AUDIO_BUS_GAIN_MIN);
+    assert_eq!(AUDIO_MASTER_GAIN_MAX, AUDIO_BUS_GAIN_MAX);
+    // The same domain AU1 gave the track fader, so one control reads the same
+    // everywhere in the mixer.
+    assert_eq!(AUDIO_BUS_GAIN_MIN, kinewright_core::TRACK_MIX_GAIN_MIN);
+    assert_eq!(AUDIO_BUS_GAIN_MAX, kinewright_core::TRACK_MIX_GAIN_MAX);
+
+    let mut doc = document_with_one_clip();
+    for gain in [AUDIO_BUS_GAIN_MIN, 0, AUDIO_BUS_GAIN_MAX] {
+        let mut bus = bus_with(Vec::new());
+        bus.gain_tenth_db = gain;
+        Operation::UpsertAudioBus { bus }.apply(&mut doc).unwrap();
+        assert_eq!(doc.audio_mix.buses[0].gain_tenth_db, gain);
+        doc.validate().unwrap();
+    }
+    for gain in [AUDIO_MASTER_GAIN_MIN, 0, AUDIO_MASTER_GAIN_MAX] {
+        Operation::SetAudioMaster {
+            master: master_with(gain, Vec::new()),
+        }
+        .apply(&mut doc)
+        .unwrap();
+        assert_eq!(doc.audio_mix.master.gain_tenth_db, gain);
+        doc.validate().unwrap();
+    }
+
+    let before = doc.clone();
+    for gain in [AUDIO_BUS_GAIN_MIN - 1, AUDIO_BUS_GAIN_MAX + 1] {
+        let mut bus = bus_with(Vec::new());
+        bus.gain_tenth_db = gain;
+        assert_eq!(
+            Operation::UpsertAudioBus { bus }.apply(&mut doc),
+            Err(OpError::AudioBusGainOutOfRange {
+                bus: AudioBusId(1),
+                gain_tenth_db: gain,
+            })
+        );
+        assert_eq!(doc, before);
+
+        assert_eq!(
+            Operation::SetAudioMaster {
+                master: master_with(gain, Vec::new()),
+            }
+            .apply(&mut doc),
+            Err(OpError::AudioMasterGainOutOfRange {
+                gain_tenth_db: gain
+            })
+        );
+        assert_eq!(doc, before);
+    }
+
+    // The rendered messages name the shared domain.
+    assert_eq!(
+        OpError::AudioBusGainOutOfRange {
+            bus: AudioBusId(1),
+            gain_tenth_db: 121,
+        }
+        .to_string(),
+        "audio bus 1 gain is 121 tenth-dB, outside the inclusive range -600..=120"
+    );
+    assert_eq!(
+        OpError::AudioMasterGainOutOfRange {
+            gain_tenth_db: -601,
+        }
+        .to_string(),
+        "audio master gain is -601 tenth-dB, outside the inclusive range -600..=120"
+    );
+
+    // A hand-edited out-of-range fader is rejected on load, not just by the
+    // operation.
+    let mut hand_edited = before.clone();
+    hand_edited.audio_mix.buses[0].gain_tenth_db = -900;
+    assert_eq!(
+        hand_edited.validate(),
+        Err(OpError::AudioBusGainOutOfRange {
+            bus: AudioBusId(1),
+            gain_tenth_db: -900,
+        })
+    );
+    assert_eq!(
+        hand_edited_master(master_with(900, Vec::new())).validate(),
+        Err(OpError::AudioMasterGainOutOfRange { gain_tenth_db: 900 })
+    );
+}
+
+/// AU2 §7 item B4.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn the_master_chain_carries_the_bus_rules_with_master_flavoured_errors() {
+    let mut doc = document_with_one_clip();
+    let rejected: Vec<(AudioMaster, OpError)> = vec![
+        (
+            master_with(
+                0,
+                vec![Effect {
+                    id: EffectId(1),
+                    name: "brightness".to_owned(),
+                    parameters: BTreeMap::new(),
+                    keyframes: BTreeMap::new(),
+                }],
+            ),
+            OpError::VisualEffectOnAudioMaster {
+                effect: "brightness".to_owned(),
+            },
+        ),
+        (
+            master_with(
+                0,
+                vec![
+                    audio_effect(4, "audio_gain", &[]),
+                    audio_effect(4, "audio_limiter", &[]),
+                ],
+            ),
+            OpError::DuplicateAudioMasterEffect {
+                effect: EffectId(4),
+            },
+        ),
+        (
+            master_with(0, vec![audio_effect(1, "audio_ducking", &[])]),
+            OpError::AudioMasterDuckingUnsupported,
+        ),
+        (
+            master_with(
+                0,
+                vec![Effect {
+                    id: EffectId(1),
+                    name: "audio_gain".to_owned(),
+                    parameters: BTreeMap::new(),
+                    keyframes: BTreeMap::from([(
+                        "gain_tenth_db".to_owned(),
+                        AutomationCurve {
+                            keyframes: vec![Keyframe {
+                                at: TimeCode(60),
+                                value: -60,
+                                interpolation: KeyframeInterpolation::Linear,
+                            }],
+                        },
+                    )]),
+                }],
+            ),
+            OpError::AudioMasterKeyframeOutsideProject {
+                effect: EffectId(1),
+                name: "gain_tenth_db".to_owned(),
+                at: TimeCode(60),
+                duration: TimeCode(60),
+            },
+        ),
+        (
+            master_with(
+                0,
+                vec![audio_effect(1, "audio_gain", &[("gain_tenth_db", 121)])],
+            ),
+            OpError::EffectParamOutOfRange {
+                effect: "audio_gain".to_owned(),
+                name: "gain_tenth_db".to_owned(),
+                min: -600,
+                max: 120,
+                actual: 121,
+            },
+        ),
+        (
+            master_with(
+                0,
+                vec![
+                    audio_effect(1, "audio_compressor", &[("lookahead_milliseconds", 10)]),
+                    audio_effect(2, "audio_compressor", &[("lookahead_milliseconds", 10)]),
+                    audio_effect(
+                        3,
+                        "audio_true_peak_limiter",
+                        &[("lookahead_milliseconds", 1)],
+                    ),
+                ],
+            ),
+            OpError::AudioMasterLookaheadExceeded { milliseconds: 21 },
+        ),
+        // AU2 §2.2 rule 1, shared with the bus path.
+        (
+            master_with(
+                0,
+                vec![keyed_effect(
+                    1,
+                    "audio_gain",
+                    "bypass",
+                    1,
+                    KeyframeInterpolation::Linear,
+                )],
+            ),
+            OpError::NonHoldKeyframeParameter {
+                effect: "audio_gain".to_owned(),
+                name: "bypass".to_owned(),
+            },
+        ),
+        // AU2 §2.2 rule 2, shared with the bus path.
+        (
+            master_with(
+                0,
+                vec![keyed_effect(
+                    1,
+                    "audio_true_peak_limiter",
+                    "lookahead_milliseconds",
+                    3,
+                    KeyframeInterpolation::Hold,
+                )],
+            ),
+            OpError::InvalidEffectAutomation {
+                effect: "audio_true_peak_limiter".to_owned(),
+                name: "lookahead_milliseconds".to_owned(),
+                reason: "sets processing latency and cannot be keyframed".to_owned(),
+            },
+        ),
+    ];
+    let before = doc.clone();
+    for (master, expected) in rejected {
+        // From the operation ...
+        assert_eq!(
+            Operation::SetAudioMaster {
+                master: master.clone(),
+            }
+            .apply(&mut doc),
+            Err(expected.clone())
+        );
+        assert_eq!(doc, before);
+        // ... and again from the document invariant, so a hand-edited project
+        // is refused on load.
+        assert_eq!(hand_edited_master(master).validate(), Err(expected));
+    }
+
+    // Exactly the budget is legal, and the effect-id scope is the chain: a bus
+    // may reuse the master's ids.
+    Operation::SetAudioMaster {
+        master: master_with(
+            -30,
+            vec![
+                audio_effect(1, "audio_compressor", &[("lookahead_milliseconds", 10)]),
+                audio_effect(
+                    2,
+                    "audio_true_peak_limiter",
+                    &[("lookahead_milliseconds", 10)],
+                ),
+            ],
+        ),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::UpsertAudioBus {
+        bus: bus_with(vec![audio_effect(1, "audio_gain", &[])]),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    doc.validate().unwrap();
+    assert_eq!(
+        doc.audio_mix.lookahead_milliseconds(),
+        ChainLookahead {
+            bus_stage: 0,
+            master_stage: CHAIN_LOOKAHEAD_MILLISECONDS,
+        }
+    );
+
+    // The two master messages read exactly as the contract writes them.
+    assert_eq!(
+        OpError::AudioMasterLookaheadExceeded { milliseconds: 21 }.to_string(),
+        "audio master chain declares 21 ms of lookahead, beyond the 20 ms chain budget"
+    );
+    assert_eq!(
+        OpError::AudioMasterDuckingUnsupported.to_string(),
+        "audio_ducking has no sidechain on the master chain and cannot be used there"
+    );
+    assert_eq!(
+        OpError::DuplicateAudioMasterEffect {
+            effect: EffectId(4),
+        }
+        .to_string(),
+        "audio master chain has more than one effect with id 4"
+    );
+    assert_eq!(
+        OpError::VisualEffectOnAudioMaster {
+            effect: "brightness".to_owned(),
+        }
+        .to_string(),
+        "effect \"brightness\" is not an audio effect and cannot sit on the audio master chain"
+    );
+    assert_eq!(
+        OpError::AudioMasterKeyframeOutsideProject {
+            effect: EffectId(1),
+            name: "gain_tenth_db".to_owned(),
+            at: TimeCode(60),
+            duration: TimeCode(60),
+        }
+        .to_string(),
+        "audio master effect 1 keyframes gain_tenth_db at frame 60, outside the project duration 60"
+    );
+}
+
+/// AU2 §7 item B5.
+#[test]
+fn next_bus_id_allocates_max_plus_one_and_agrees_with_the_former_inline_scan() {
+    // The allocator `normalization_context` spelled inline before AU2 §5.4.
+    fn former_inline_allocator(mix: &AudioMix) -> AudioBusId {
+        AudioBusId(
+            mix.buses
+                .iter()
+                .map(|bus| bus.id.0)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+        )
+    }
+
+    let mut doc = document_with_one_clip();
+    assert_eq!(doc.audio_mix.next_bus_id(), AudioBusId(1));
+    assert_eq!(
+        doc.audio_mix.next_bus_id(),
+        former_inline_allocator(&doc.audio_mix)
+    );
+
+    for id in [2, 3] {
+        Operation::AddTrack {
+            track: Track {
+                id: TrackId(id),
+                kind: TrackKind::Audio,
+                sync_lock: true,
+                clips: Vec::new(),
+            },
+        }
+        .apply(&mut doc)
+        .unwrap();
+    }
+    Operation::UpsertAudioBus {
+        bus: bus_with(Vec::new()),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(doc.audio_mix.next_bus_id(), AudioBusId(2));
+
+    // A gap in the ids does not make the allocator reuse one.
+    let mut sparse = AudioBus {
+        id: AudioBusId(9),
+        name: "Music".to_owned(),
+        tracks: vec![TrackId(2)],
+        gain_tenth_db: 0,
+        effects: Vec::new(),
+        ducking_sidechain_tracks: Vec::new(),
+    };
+    Operation::UpsertAudioBus {
+        bus: sparse.clone(),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(doc.audio_mix.next_bus_id(), AudioBusId(10));
+    assert_eq!(
+        doc.audio_mix.next_bus_id(),
+        former_inline_allocator(&doc.audio_mix)
+    );
+
+    // The two AU2 §5.4 accessors read the same routing the validator enforces.
+    assert_eq!(
+        doc.audio_mix.bus(AudioBusId(9)).map(|bus| bus.id),
+        Some(AudioBusId(9))
+    );
+    assert_eq!(doc.audio_mix.bus(AudioBusId(3)), None);
+    assert_eq!(doc.audio_mix.bus_for_track(TrackId(2)), Some(AudioBusId(9)));
+    assert_eq!(doc.audio_mix.bus_for_track(TrackId(1)), Some(AudioBusId(1)));
+    // Track 3 exists but routes to no bus, so it reaches the master directly
+    // (AU2 §5.6); an unknown track answers the same way.
+    assert!(doc.tracks.iter().any(|track| track.id == TrackId(3)));
+    assert_eq!(doc.audio_mix.bus_for_track(TrackId(3)), None);
+    assert_eq!(doc.audio_mix.bus_for_track(TrackId(404)), None);
+
+    sparse.tracks = Vec::new();
+    assert!(matches!(
+        Operation::UpsertAudioBus { bus: sparse }.apply(&mut doc),
+        Err(OpError::InvalidAudioBus(AudioBusId(9)))
+    ));
+}
+
+/// AU2 §7 item B6.
+#[test]
+fn a_coalesced_bus_fader_drag_is_one_undo_entry() {
+    let mut initial = document_with_one_clip();
+    Operation::UpsertAudioBus {
+        bus: bus_with(vec![audio_effect(
+            1,
+            "audio_compressor",
+            &[("threshold_tenth_db", -100)],
+        )]),
+    }
+    .apply(&mut initial)
+    .unwrap();
+    let core = Core::spawn(initial.clone()).unwrap();
+
+    let mut tenth = None;
+    for step in 1..=10 {
+        let mut bus = bus_with(vec![audio_effect(
+            1,
+            "audio_compressor",
+            &[("threshold_tenth_db", -100 - step * 10)],
+        )]);
+        bus.gain_tenth_db = i32::try_from(-step).unwrap();
+        let Event::DocumentChanged { doc, .. } = core
+            .request(Command::DoBatchCoalesced {
+                operations: vec![Operation::UpsertAudioBus { bus }],
+                coalesce_key: "audio_bus:1#1".to_owned(),
+            })
+            .unwrap()
+        else {
+            panic!("a coalesced bus batch should be accepted");
+        };
+        assert_eq!(
+            doc.audio_mix.buses[0].gain_tenth_db,
+            i32::try_from(-step).unwrap()
+        );
+        tenth = Some(doc);
+    }
+    let tenth = tenth.unwrap();
+    assert_eq!(tenth.audio_mix.buses[0].gain_tenth_db, -10);
+
+    let Event::DocumentChanged {
+        doc,
+        revision: first,
+        ..
+    } = core.request(Command::Undo).unwrap()
+    else {
+        panic!("the gesture should be undoable");
+    };
+    assert_eq!(&*doc, &initial);
+
+    let Event::DocumentChanged {
+        doc,
+        revision: second,
+        ..
+    } = core.request(Command::Undo).unwrap()
+    else {
+        panic!("a second undo should still report the document");
+    };
+    assert_eq!(&*doc, &initial);
+    assert_eq!(first, second);
+
+    let Event::DocumentChanged { doc, .. } = core.request(Command::Redo).unwrap() else {
+        panic!("the gesture should be redoable");
+    };
+    assert_eq!(&*doc, &*tenth);
 }

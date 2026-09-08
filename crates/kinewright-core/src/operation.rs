@@ -5,15 +5,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AssetId, AudioBus, AudioBusId, AutomationCurve, BinId, COLOR_CONFIDENCE_MAX_BASIS_POINTS,
-    CaptionPreset, Clip, ClipContent, ClipId, ColorContext, ColorDescription, ColorProvenance,
-    Document, Effect, EffectId, FreezeFrame, KeyframeInterpolation, LinkId, LutAsset, LutAssetId,
-    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaSourceFingerprint,
-    ParamValue, RelinkCandidate, StringOut, StringOutId, SyncGroup, SyncGroupId,
-    TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, ThreePointMode,
-    TimeCode, TimeMappingError, Title, TitleParameterKind, TitlePosition, Track, TrackId,
-    TrackKind, TrackMix, Transition, is_audio_effect, map_source_range_to_project,
-    title_parameter_descriptor,
+    AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AssetId,
+    AudioBus, AudioBusId, AudioChain, AudioMaster, AutomationCurve, BinId,
+    COLOR_CONFIDENCE_MAX_BASIS_POINTS, CaptionPreset, Clip, ClipContent, ClipId, ColorContext,
+    ColorDescription, ColorProvenance, Document, Effect, EffectId, FreezeFrame,
+    KeyframeInterpolation, LinkId, LutAsset, LutAssetId, MARKER_COLOR_TOKEN_COUNT, Marker,
+    MarkerId, MediaAsset, MediaBin, MediaSourceFingerprint, PanLaw, ParamValue, RelinkCandidate,
+    StringOut, StringOutId, SyncGroup, SyncGroupId, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
+    TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, ThreePointMode, TimeCode, TimeMappingError, Title,
+    TitleParameterKind, TitlePosition, Track, TrackId, TrackKind, TrackMix, Transition,
+    is_audio_effect, map_source_range_to_project, title_parameter_descriptor,
 };
 
 // The project colour context is intentionally kept inline in the operation so
@@ -81,6 +82,16 @@ pub enum Operation {
     RemoveAudioBus {
         bus: AudioBusId,
     },
+    /// Replace the whole master chain (AU2 §5.2). Idempotent full set; a
+    /// neutral master is stored as the default and disappears from the wire.
+    SetAudioMaster {
+        master: AudioMaster,
+    },
+    /// Set the document-level pan law (AU2 §5.3). Idempotent full set;
+    /// `PanLaw::Balance` disappears from the wire.
+    SetPanLaw {
+        law: PanLaw,
+    },
     AddTrack {
         track: Track,
     },
@@ -97,7 +108,7 @@ pub enum Operation {
         track: TrackId,
         /// Integer tenths of a decibel in -600..=120.
         gain_tenth_db: i32,
-        /// Integer percent in -100..=100; 0 is centre. Balance law, see AU1 §3.1.
+        /// Integer percent in -100..=100; -100 is hard left, 100 hard right. The document-level law `SetPanLaw` turns it into gains (AU2 §5.3).
         pan_percent: i32,
         mute: bool,
         solo: bool,
@@ -498,6 +509,48 @@ pub enum OpError {
         at: TimeCode,
         duration: TimeCode,
     },
+    /// AU2 §5.4: one bus fader is outside the shared audio gain domain.
+    #[error(
+        "audio bus {bus} gain is {gain_tenth_db} tenth-dB, outside the inclusive range {min}..={max}",
+        min = crate::AUDIO_BUS_GAIN_MIN,
+        max = crate::AUDIO_BUS_GAIN_MAX
+    )]
+    AudioBusGainOutOfRange { bus: AudioBusId, gain_tenth_db: i32 },
+    /// AU2 §5.4: the master fader is outside the shared audio gain domain.
+    #[error(
+        "audio master gain is {gain_tenth_db} tenth-dB, outside the inclusive range {min}..={max}",
+        min = crate::AUDIO_MASTER_GAIN_MIN,
+        max = crate::AUDIO_MASTER_GAIN_MAX
+    )]
+    AudioMasterGainOutOfRange { gain_tenth_db: i32 },
+    /// AU2 §5.4: effect ids are unique within the master chain, which is its
+    /// own scope; a bus may reuse the same id.
+    #[error("audio master chain has more than one effect with id {effect}")]
+    DuplicateAudioMasterEffect { effect: EffectId },
+    /// AU2 §5.4: only registered `audio_*` effects sit on the master chain.
+    #[error("effect {effect:?} is not an audio effect and cannot sit on the audio master chain")]
+    VisualEffectOnAudioMaster { effect: String },
+    /// AU2 §5.4: the master sums every stem, so it has no sidechain to duck
+    /// against.
+    #[error("audio_ducking has no sidechain on the master chain and cannot be used there")]
+    AudioMasterDuckingUnsupported,
+    /// AU2 §5.4: a master chain keyframe sits at or past the project duration.
+    #[error(
+        "audio master effect {effect} keyframes {name} at frame {at}, outside the project duration {duration}"
+    )]
+    AudioMasterKeyframeOutsideProject {
+        effect: EffectId,
+        name: String,
+        at: TimeCode,
+        duration: TimeCode,
+    },
+    /// AU2 §5.4: the master chain declares more lookahead than the budget
+    /// allows.
+    #[error(
+        "audio master chain declares {milliseconds} ms of lookahead, beyond the {budget} ms chain budget",
+        budget = crate::CHAIN_LOOKAHEAD_MILLISECONDS
+    )]
+    AudioMasterLookaheadExceeded { milliseconds: i64 },
     #[error("track {0} occurs more than once")]
     DuplicateTrack(TrackId),
     #[error("new track {0} must be empty")]
@@ -927,6 +980,11 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         Operation::RemoveSyncGroup { sync_group } => remove_sync_group(doc, *sync_group),
         Operation::UpsertAudioBus { bus } => upsert_audio_bus(doc, bus.clone()),
         Operation::RemoveAudioBus { bus } => remove_audio_bus(doc, *bus),
+        Operation::SetAudioMaster { master } => set_audio_master(doc, master.clone()),
+        Operation::SetPanLaw { law } => {
+            doc.audio_mix.pan_law = *law;
+            Ok(())
+        }
         Operation::AddTrack { track } => add_track(doc, track.clone()),
         Operation::RemoveTrack { track } => remove_track(doc, *track),
         Operation::SetTrackSyncLock { track, locked } => set_track_sync_lock(doc, *track, *locked),
@@ -1423,6 +1481,16 @@ fn upsert_audio_bus(doc: &mut Document, bus: AudioBus) -> Result<(), OpError> {
         doc.audio_mix.buses.push(bus);
     }
     doc.audio_mix.buses.sort_by_key(|bus| bus.id);
+    Ok(())
+}
+
+/// Replace the whole master chain (AU2 §5.2).
+///
+/// A neutral master is stored as the default, so a document that only ever set
+/// neutral serializes byte-identically to one that never touched the master.
+fn set_audio_master(doc: &mut Document, master: AudioMaster) -> Result<(), OpError> {
+    validate_audio_master(doc, &master)?;
+    doc.audio_mix.master = master;
     Ok(())
 }
 
@@ -3955,12 +4023,57 @@ fn validate_audio_mix(doc: &Document) -> Result<(), OpError> {
             }
         }
     }
+    validate_audio_master(doc, &doc.audio_mix.master)?;
+    Ok(())
+}
+
+/// Validate the master chain against the AU2 §5.4 rules.
+///
+/// Mirrors [`validate_audio_bus`] with master-flavoured errors: the master has
+/// no routed tracks and no sidechain, so `audio_ducking` is rejected outright
+/// rather than conditioned on a sidechain list.
+fn validate_audio_master(doc: &Document, master: &AudioMaster) -> Result<(), OpError> {
+    if !(AUDIO_MASTER_GAIN_MIN..=AUDIO_MASTER_GAIN_MAX).contains(&master.gain_tenth_db) {
+        return Err(OpError::AudioMasterGainOutOfRange {
+            gain_tenth_db: master.gain_tenth_db,
+        });
+    }
+    let mut effect_ids = HashSet::new();
+    for effect in &master.effects {
+        // AU2 §5.4 (N1): uniqueness is scoped to this chain, so a bus may
+        // legally reuse the same effect id.
+        if !effect_ids.insert(effect.id) {
+            return Err(OpError::DuplicateAudioMasterEffect { effect: effect.id });
+        }
+        if !is_audio_effect(&effect.name) {
+            return Err(OpError::VisualEffectOnAudioMaster {
+                effect: effect.name.clone(),
+            });
+        }
+        validate_effect(effect)?;
+        if effect.name == "audio_ducking" {
+            return Err(OpError::AudioMasterDuckingUnsupported);
+        }
+        validate_audio_chain_automation(doc.duration, AudioChain::Master, effect)?;
+    }
+    let lookahead = crate::chain_lookahead_milliseconds(&master.effects);
+    if lookahead > crate::CHAIN_LOOKAHEAD_MILLISECONDS {
+        return Err(OpError::AudioMasterLookaheadExceeded {
+            milliseconds: lookahead,
+        });
+    }
     Ok(())
 }
 
 fn validate_audio_bus(doc: &Document, bus: &AudioBus) -> Result<(), OpError> {
     if bus.name.trim().is_empty() || bus.tracks.is_empty() {
         return Err(OpError::InvalidAudioBus(bus.id));
+    }
+    if !(AUDIO_BUS_GAIN_MIN..=AUDIO_BUS_GAIN_MAX).contains(&bus.gain_tenth_db) {
+        return Err(OpError::AudioBusGainOutOfRange {
+            bus: bus.id,
+            gain_tenth_db: bus.gain_tenth_db,
+        });
     }
     let mut tracks = HashSet::new();
     for track in &bus.tracks {
@@ -4006,7 +4119,7 @@ fn validate_audio_bus(doc: &Document, bus: &AudioBus) -> Result<(), OpError> {
         if effect.name == "audio_ducking" && bus.ducking_sidechain_tracks.is_empty() {
             return Err(OpError::AudioBusDuckingWithoutSidechain(bus.id));
         }
-        validate_audio_bus_automation(doc.duration, bus.id, effect)?;
+        validate_audio_chain_automation(doc.duration, AudioChain::Bus(bus.id), effect)?;
     }
     // AU2 §2.3: the whole chain's declared latency is one figure the mix graph
     // must pad every other chain to, so it is bounded per chain rather than
@@ -4021,14 +4134,16 @@ fn validate_audio_bus(doc: &Document, bus: &AudioBus) -> Result<(), OpError> {
     Ok(())
 }
 
-/// Validate one bus effect's automation against the AU2 §2.2 keyframe rules,
+/// Validate one chain effect's automation against the AU2 §2.2 keyframe rules,
 /// the project range, and the parameter's descriptor domain.
 ///
-/// The bus path cannot reuse `validate_curve`, which is clip-scoped, so it
-/// applies the same predicates directly.
-fn validate_audio_bus_automation(
+/// The bus and master paths cannot reuse `validate_curve`, which is
+/// clip-scoped, so they apply the same predicates directly. Shared between the
+/// two chains (AU2 §5.4) so the two §2.2 rules can never drift apart; only the
+/// project-range rejection is chain-flavoured.
+fn validate_audio_chain_automation(
     duration: TimeCode,
-    bus: AudioBusId,
+    chain: AudioChain,
     effect: &Effect,
 ) -> Result<(), OpError> {
     let descriptor = crate::effect_descriptor(&effect.name).expect("registered effect");
@@ -4073,12 +4188,20 @@ fn validate_audio_bus_automation(
         }
         for keyframe in &curve.keyframes {
             if keyframe.at >= duration {
-                return Err(OpError::AudioBusKeyframeOutsideProject {
-                    bus,
-                    effect: effect.id,
-                    name: name.clone(),
-                    at: keyframe.at,
-                    duration,
+                return Err(match chain {
+                    AudioChain::Bus(bus) => OpError::AudioBusKeyframeOutsideProject {
+                        bus,
+                        effect: effect.id,
+                        name: name.clone(),
+                        at: keyframe.at,
+                        duration,
+                    },
+                    AudioChain::Master => OpError::AudioMasterKeyframeOutsideProject {
+                        effect: effect.id,
+                        name: name.clone(),
+                        at: keyframe.at,
+                        duration,
+                    },
                 });
             }
             validate_described_effect_parameter(

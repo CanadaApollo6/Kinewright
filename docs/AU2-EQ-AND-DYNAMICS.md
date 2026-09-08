@@ -183,6 +183,87 @@ Part B's registry totals.
   per-sample parameter reads. The A19 figures of record are E32's (8.0 ms release); E21's 11.6 ms
   predates the cache.
 
+**Part B, core (2026-09-08):**
+
+- **E36. One chain-automation validator.** `validate_audio_bus_automation` became
+  `validate_audio_chain_automation(chain: AudioChain, …)`, reusing the public
+  `media::AudioChain { Bus, Master }` so the hold-only, never-keyed, and value-range checks are
+  one code path for buses and the master; only the project-range rejection branches on the
+  chain. Check order and bus behaviour unchanged.
+- **E37. `validate_audio_master(doc, master)` takes the candidate**, mirroring
+  `validate_audio_bus(doc, bus)`, so the operation validates before storing; `validate_audio_mix`
+  passes `&doc.audio_mix.master`. Both private.
+- **E38. Bus gain is checked right after the `InvalidAudioBus` name/tracks check**, before the
+  track and effect loops. `SetPanLaw` stores inline in `apply_unchecked` (nothing to validate);
+  `SetAudioMaster` has `set_audio_master`.
+- **E39. Literal counts.** Part A had grown `AudioBus { … }` to 24 literals (not §5.1's 16) and
+  four `AudioMix { … }` literals also needed the two new fields; the `AudioMix` sites took
+  `..AudioMix::default()`.
+- **E40. Extra accessors and consts.** `AudioMix::bus(id)`, `AudioMix::bus_for_track(track)`,
+  `AUDIO_BUS_GAIN_MIN/MAX` and `AUDIO_MASTER_GAIN_MIN/MAX` (−600 / 120, pinned equal to the
+  `audio_gain` descriptor and to `TRACK_MIX_GAIN_MIN/MAX`). The spectrum types derive `Eq`
+  (all-integer fields). `operation.rs:100`'s "Balance law" doc comment is the agent
+  implementer's edit (it is tool-description text).
+- **E41. Message formats.** `VisualEffectOnAudioMaster` renders the effect name with `{:?}`
+  (quoted), matching its `VisualEffectOnAudioBus` sibling rather than §5.4's `{effect}`; the two
+  gain-range messages interpolate `AUDIO_BUS_GAIN_MIN/MAX` and `AUDIO_MASTER_GAIN_MIN/MAX` in
+  E4's pattern. `PanLaw::is_balance` carries no `trivially_copy_pass_by_ref` allow because the
+  lint does not fire on a `pub` method (avoid-breaking-exported-api); §5.3's instruction to add
+  one is withdrawn. The pre-AU2 load/save test builds its fixture from the pre-AU2 field set
+  through serde rather than a checked-in JSON string.
+
+**Part B, media (2026-09-08):**
+
+- **E42. `PanLaw::Balance` keeps AU1's `f32` expression verbatim.** §5.7 shows both laws
+  computed in `f64` and cast once. Evaluating AU1's `[1 - p.max(0), 1 + p.min(0)]` in `f64` and
+  casting the result changes **82 of the 201** integer pan positions by one `f32` ulp (the first
+  is `-99`, where the `f32` path lands on an exact tie and rounds to even while the `f64` path
+  does not), which would change the exported bytes of every pre-AU2 document carrying one of
+  them — exactly what §5.10(f) and A14 forbid, and what B8's "`Balance` is bit-identical to AU1"
+  asks for. Only `ConstantPower` computes in `f64`; the cardinal special case is scoped to it,
+  since AU1's own expression is already exact at `-100`, `0`, and `+100`. B8 pins all 201.
+- **E43. The structural key excludes `rms_window_milliseconds`.** §5.8 defines structure as
+  `(EffectId, effect name, static lookahead_milliseconds)`, so a live change to the
+  compressor's RMS window retargets in place and keeps the window length the chain was built
+  with. That is E16's own rule ("read once when the chain is built"), not a new limit; recorded
+  because the window is the one static parameter the key does not carry.
+- **E44. The fader survives a chain rebuild.** §5.8 lists the gain retarget (step 5) after the
+  chain rules (steps 3–4), so when a chain is rebuilt its `GainRamp` is carried across from the
+  old runtime and retargeted rather than reconstructed settled: only the chain's DSP state takes
+  the momentary discontinuity a structural edit accepts.
+- **E45. `third_octave_spectrum` enforces the two-segment minimum itself.** §5.9 puts the
+  24 576-frame rejection at the caller. The analyser refuses the same length, so B13's
+  "24 575 refused, 24 576 accepted" is pinned on the analyser directly and
+  `measure_mix_spectrum` can still reject before it decodes anything.
+- **E46. Bin extent for the overlap weighting.** §5.9 says each bin contributes in proportion to
+  the fraction of its 2.93 Hz width inside the band without fixing where that width sits: bin
+  `k` is taken to span `[k·Δf − Δf/2, k·Δf + Δf/2)`. `window_limited` and the main-lobe width are
+  derived from the runtime rate rather than hard-coded, and the band's upper edge is clamped to
+  Nyquist (a no-op at 48 kHz, where the 20 kHz band ends at 22.6 kHz).
+- **E47. New media names.** `GainRamp` and `AudioMasterRuntime` in `audio.rs`;
+  `AudioMixProcessor::master_stage_frames` beside `bus_stage_frames`;
+  `AudioEffectRuntime::retarget`, `node_structure`, `node_lookahead_milliseconds`,
+  `chain_structure_matches`, `retarget_chain`, and `gain_reduction_keys` as module-private
+  helpers; `export::measure_mix_spectrum` plus the shared `clamped_measurement_range` and
+  `measurement_settings` `measure_mix_levels` now uses too; `engine::can_retarget_audio_mix` and
+  `engine::mix_meters_for_update`, extracted so A34's latency guard and A33's rebuild rule are
+  pinned without standing up a worker. `AudioEffectRuntime::new` now derives its own
+  `latency_frames` through `node_lookahead_milliseconds`, so the structural key and the delay
+  line can never disagree. Nothing new is public from `kinewright_media`.
+- **E48. B10 uses a sibling fixture.** `parity_document_with_master_chain` extends
+  `parity_document_with_full_chain` with the master gain, the master true-peak limiter, a
+  non-neutral bus fader, `PanLaw::ConstantPower`, and a panned track, so A17's existing
+  `bus_stage: 10, master_stage: 0` pin is untouched. The new test asserts
+  `master_stage: 5` and a 720-frame graph latency (480 + 240, the sum of the two truncations).
+- **E49. The through-the-mix spectrum test lives in `audio.rs`**, for E19's reason: `export.rs`'s
+  test module is video-only and every audio fixture (`wav_f32`, `audio_clip`, `audio_asset`) is
+  in `audio.rs`. The pure-analysis pins are in `spectrum.rs`.
+- **E50. B7's `decode_from == TimeCode::ZERO`** is observed as `mixer.sources[0]
+  .project_sample_start == 0` — the mixer keeps no `decode_from` field — with the cursor landing
+  at `target + L` per §3.7. The fixture's master limiter declares 5 ms, the descriptor's minimum
+  being 1 rather than 0. A master carrying only a fader still needs no preroll, which the same
+  test pins.
+
 Remaining OPEN notes for the critic:
 
 - **OPEN-3 (carried).** `lookahead_milliseconds` is read **once** at
@@ -201,6 +282,98 @@ Remaining OPEN notes for the critic:
 
 Resolved since revision 2: OPEN-1 (bypass on all eight descriptors, one shared uniform per A8);
 OPEN-2 (per-family head-and-tail stem trim, A2).
+
+**Part B, agent (2026-09-08):**
+
+- **E51. Registry figures.** 129 tools / 77 inspectors; registry **1,421,520 B** =
+  **1,293,084 B** input schemas + **107,271 B** descriptions; served quad 7 / 5,660 / 3,510 /
+  998 byte-identical. §4.2/§6.4's "input schemas cannot move" holds for Part A only: Part B
+  changes the `Operation` model, so `input_schema_bytes` grows by 106,635 B: the two new
+  mutators' own schemas (43,559 B), `get_audio_spectrum`'s own schema (1,340 B), the widened
+  shared `$defs` in each of the fifty generated tools (49 × 1,195 B, plus 1,195 + 62 B on
+  `set_track_mix` for its law-neutral doc comment), and `apply_edit_plan`, the one non-generated
+  tool that embeds `Operation` (+1,924 B). Descriptions grow 2,266 B = 1,302 (two
+  new mutators) + 636 (`get_audio_spectrum`) + 194 (bus fader sentence × 2) + 134 (`set_track_mix`
+  rewrite).
+- **E52. Test names.** B17's round trip is `au2_set_audio_master_and_pan_law_round_trip_through_
+  edit_plans_and_state` and carries an `upsert_audio_bus` with `gain_tenth_db: -35`, pinning the
+  ` gain=` field; B14's annotations live in `au2_master_and_pan_law_tools_are_documented_and_
+  idempotent`, which also pins `remove_audio_bus` as neither idempotent nor destructive;
+  `set_track_mix_schema_documents_ranges_and_the_balance_law` keeps its name and now asserts the
+  old unconditional claim is gone.
+- **E53. Handler details.** `get_audio_spectrum` checks the `track`/`bus` conflict before the
+  range; `render_band_center_hertz` uses `is_multiple_of(10)` (clippy); the bus fader sentence is
+  the second sentence of the bus arm; the `SetTrackMix.pan_percent` doc comment is at
+  `operation.rs:111` after Part A's shift; `normalization_context` allocates through
+  `AudioMix::next_bus_id()` (B5). Two test-only `#[allow(clippy::too_many_lines)]` were added;
+  `AudioSpectrumArgs`' doc comments mirror `AudioLevelsArgs` rather than §6.2's literal wording
+  (both true). The compact golden literal is hoisted into `const COMPACT_GOLDEN` shared by the
+  AU1 golden test and the AU2 neutral-omission test, so the byte-unchanged claim is asserted
+  against stored bytes.
+
+**Part B, app (2026-09-08):**
+
+- **E54. `mixer_body` returns `Option<MixerSelection>`** (§6.6 wrote `()`): the `Edit` toggle
+  is a control that changes the selection, and a selection naming a bus the document lost is
+  cleared. `mixer_panel` and `MixerHarness` assign it to their own field.
+- **E55. `MixerChainEdits` carries `pan_law: Option<PanLaw>` and `gesture_started: bool`** in
+  addition to `buses`, `master`, `live`; controls call `chain.begin_gesture()` and the fold calls
+  `edits.begin_gesture()` once, keeping `InspectorEdits` out of the strip/pane signatures.
+  `SetPanLaw` is folded under `audio_master` with the frame's live rule (a radio click is never
+  a drag, so it is the discrete branch in practice).
+- **E56. Control signatures.** `mixer_parameter_control` takes `chain: MixerChain<'_>` (the
+  selection plus the chain's current value to clone); `meters_and_fader` takes range and value,
+  since all three faders read in decibels through `format_gain_db`/`parse_gain_db`.
+- **E57. Layout.** `+ Bus` shares the `Reset` row (its own row made the `NO AUDIO` strip 244 px);
+  a collapsed card carries no `ui.group` frame (the row's whole budget is `ICON_BUTTON`); the
+  pane is allocated at `MIXER_CHAIN_PANE_WIDTH` and each control gets a fixed cell of
+  `(MIXER_CHAIN_PANE_WIDTH − space::EIGHT) / 3`, three per row — `set_max_width` alone does not
+  hold a `ScrollArea`, and a nested `Ui` of unknown width defeats `horizontal_wrapped`, which a
+  real screenshot (not a test) caught as an EQ card running off the window. Pinned by
+  `the_chain_pane_is_one_column_however_wide_the_dock_is`. Measured: track strip 218 / 232 /
+  232 px, bus strip 215 px (one node and six nodes + sidechain + gain), master 196 px, collapsed
+  card 18 px, all under budget; DESIGN.md names these figures.
+- **E58. `MixerUnit::Plain`** is a seventh, defensive formatter for a registered name in none of
+  §6.7's five units; a test asserts no insertable node has one. Gain reduction is stored as a
+  fraction of `MIXER_REDUCTION_METER_RANGE_DB` (which lives in `mixer_ui.rs`, a range not a
+  size token) so it decays on the shared 0.9-per-second schedule; `MixerMeterLevels::reduction`
+  returns decibels.
+- **E59. Routing checkboxes also list a track already on this bus even if it carries no audio**,
+  so a routed track can always be moved off. The test rect recorder is keyed by `String` with
+  `record_keyed_rect`/`record_param_rect`; a flag control records only the unselected option's
+  rect.
+- **E60. B21's "no longer contains `read-only`" is pinned as the removal of the sentence "Bus
+  strips are read-only…"**, because §6.9's own replacement text calls the EQ well a read-only
+  magnitude well. `is_effect_insertable` and `effect_display_name` became `pub(crate)`; the
+  latter gained the eight audio display names.
+- **E61. Screenshot harness.** `KINEWRIGHT_SCREENSHOT_SHOW=mixer-chain` raises the Mixer tab and
+  pre-selects the first bus (Master on a bus-free document) so a static capture shows the pane;
+  `=mixer` is unchanged. Both verified by real captures.
+
+**Part B, second pass (2026-09-08):**
+
+- **E62. Media review notes.** E47's `AudioMixProcessor::master_stage_frames` is a field, not an
+  accessor (export trims by `graph_latency_frames`). A structural rebuild of a chain, removing a
+  bus, or un-routing a track drops that path's audio for `L_bus` frames (the pad refills from
+  silence) — this is §5.8's "momentary discontinuity", now stated with its length. Master-chain
+  automation reads `project_at` from the output index, so it acts up to `L_bus` early relative
+  to content that arrives through a bus pad; playback and export agree. The worker's latency-
+  guard fallback re-cues at the current position (second-pass fix); the FFT recomputes
+  `sin_cos` per butterfly (measurement path only).
+- **E63. App review notes.** A live bus-fader drag and an Enter-committed master readout in the
+  same frame fold both operations under the frame's first live key (`audio_bus:{id}`); the
+  journal keeps every batch, so only undo granularity is affected. The EQ well samples the
+  chain at `TimeCode::ZERO`, so a keyframed EQ shows its t = 0 curve. Rounded readouts ("1.2 kHz"
+  for 1250 Hz, "4.0:1" for 405) were re-parsed on focus-out and wrote the rounded value back;
+  the parsers are value-aware (a text equal to the current value's own rendering returns the
+  current value) — second-pass fix, pinned by harness tests.
+- **E64. Pane strings and rounding.** `LAST_TRACK_REASON` reads "a bus keeps at least one
+  track; ask the agent to remove the bus instead" (the pane has no bus-removal control; core's
+  own message is unchanged), not §6.8's quoted string. Parsed pane values are rounded before
+  they reach the integer `DragValue` (emath truncates `from_f64`), so "Q 0.57" is 57 and
+  "2.3:1" is 230; the round-trip pin is exact. The card header tooltip shows the registered
+  name and node id. The `Playback::update_audio_mix` trait doc comment now describes the AU2
+  live set and the re-cue on a lookahead change.
 
 ## 1. Scope
 

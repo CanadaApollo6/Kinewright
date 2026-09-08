@@ -108,6 +108,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-07, after AU1) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-08, after AU2 Part A) | 126 | 1,312,132 B | 1,186,449 B | 105,005 B |
 | Served MCP runtime (2026-09-08, after AU2 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-08, after AU2 Part B) | 129 | 1,421,520 B | 1,293,084 B | 107,271 B |
+| Served MCP runtime (2026-09-08, after AU2 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
 
 That is a 99.1% reduction in initially advertised serialized tool metadata at
 the M36 baseline, 99.4% at the 2026-08-24 measurement, 99.56% after CC6
@@ -124,8 +126,41 @@ schema and only description bytes move, from 96,840 B to 105,005 B. That
 effect tools) and 1,670 B of prose (the rewritten `upsert_audio_bus` /
 `remove_audio_bus` arm, 335 B to 1,170 B, on two tools). `input_schema_bytes`
 stays byte-identical at 1,186,449 B and the served triple at
-7 / 5,660 B / 3,510 B / 998 B. The registry grew with the colour tools; the
-served surface stays at seven tools. The `color_curves` descriptor (133
+7 / 5,660 B / 3,510 B / 998 B.
+
+AU2 Part B adds three tools — the generated `set_audio_master` and
+`set_pan_law` mutators and the `get_audio_spectrum` inspector — so the registry
+goes to 129 tools and 1,421,520 B. Unlike Part A it does move input schemas, by
+106,635 B, because it changes the `Operation` model rather than the descriptor
+table. The measured split, which sums exactly:
+
+- **43,559 B**, the two new mutators' own schemas (21,785 B + 21,774 B), each
+  carrying its own copy of the shared `Operation` `$defs`;
+- **1,340 B**, `get_audio_spectrum`'s own schema, which embeds no `Operation`
+  and is the cheapest tool in the registry;
+- **61,736 B** spread over the 51 pre-existing tools that do embed `Operation`:
+  1,195 B of shared `$defs` growth on each of the fifty generated tools
+  (`AudioMaster` and `PanLaw` are new definitions and `AudioBus` gains
+  `gain_tenth_db`; nothing references `AudioMix`, so its two new fields reach
+  no input schema at all), plus 62 B on `set_track_mix` for the reworded
+  `pan_percent` doc comment, plus 1,924 B on `apply_edit_plan` — the one
+  non-generated tool that embeds `Operation`, whose inline definition gains the
+  two new `oneOf` variants and the same 62 B doc comment.
+
+That is 49 x 1,195 + (1,195 + 62) + 1,924 = 61,736, and
+43,559 + 1,340 + 61,736 = 106,635.
+
+The 2,266 B of new descriptions splits exactly four ways: 1,302 B of the two
+new mutators' prose, 636 B of `get_audio_spectrum`'s, 194 B for the bus fader
+sentence on the two bus tools (97 B x 2), and 134 B for the law-neutral
+`set_track_mix` rewrite. The served quad is byte-identical again at
+7 / 5,660 B / 3,510 B / 998 B: none of the three new tools is served, and the
+seven served tools do not embed the `Operation` schema, so even a model change
+cannot reach them. That is the whole point of the split surface — a 99.6%
+reduction that holds at 5,660 B served against a 1,421,520 B registry.
+
+The registry grew with the colour tools; the served surface stays at seven
+tools. The `color_curves` descriptor (133
 parameters) is summarized as a compact pattern in tool documentation, keeping
 roughly 18.8 KB out of the registry, and AU2 gives `audio_parametric_eq`'s
 twelve peaking-band rows the same treatment.

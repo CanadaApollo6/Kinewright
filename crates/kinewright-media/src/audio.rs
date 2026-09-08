@@ -10,8 +10,9 @@ use std::{
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
-    AudioBus, AudioBusId, AudioChain, ChainLookahead, Clip, Document, Effect, EffectId,
-    ExportCancellation, MediaError, MixPeaks, Rational, TimeCode, TrackId,
+    AudioBus, AudioBusId, AudioChain, AudioMaster, ChainLookahead, Clip, Document, Effect,
+    EffectId, ExportCancellation, MediaError, MixPeaks, PanLaw, Rational, TRACK_MIX_PAN_MAX,
+    TRACK_MIX_PAN_MIN, TimeCode, TrackId,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -223,6 +224,30 @@ fn has_gain_computer(name: &str) -> bool {
     )
 }
 
+/// AU2 §3.8/§5.6: every gain-reduction slot key one document asks for, each
+/// bus chain in document order and then the master chain.
+fn gain_reduction_keys(document: &Document) -> impl Iterator<Item = (AudioChain, EffectId)> + '_ {
+    document
+        .audio_mix
+        .buses
+        .iter()
+        .flat_map(|bus| {
+            bus.effects
+                .iter()
+                .filter(|effect| has_gain_computer(&effect.name))
+                .map(move |effect| (AudioChain::Bus(bus.id), effect.id))
+        })
+        .chain(
+            document
+                .audio_mix
+                .master
+                .effects
+                .iter()
+                .filter(|effect| has_gain_computer(&effect.name))
+                .map(|effect| (AudioChain::Master, effect.id)),
+        )
+}
+
 /// One lock-free peak slot per mix point (AU1 §4.1).
 ///
 /// Telemetry, not document state: every slot is overwritten per chunk exactly
@@ -254,25 +279,39 @@ impl MixMeters {
                 .iter()
                 .map(|bus| (bus.id, MeterState::default()))
                 .collect(),
-            gain_reduction: document
-                .audio_mix
-                .buses
-                .iter()
-                .flat_map(|bus| {
-                    bus.effects
-                        .iter()
-                        .filter(|effect| has_gain_computer(&effect.name))
-                        .map(|effect| {
-                            (
-                                AudioChain::Bus(bus.id),
-                                effect.id,
-                                GainReductionState::default(),
-                            )
-                        })
-                })
+            gain_reduction: gain_reduction_keys(document)
+                .map(|(chain, effect)| (chain, effect, GainReductionState::default()))
                 .collect(),
             master,
         }
+    }
+
+    /// AU2 §5.8: whether the installed table's key set still describes this
+    /// document, so a live update can skip the rebuild (A33).
+    ///
+    /// `MixMeters::for_document` allocates fresh zeroed slots, and the mixer UI
+    /// only raises its meters while playing, so rebuilding on every update
+    /// would zero every meter on every frame of a fader drag. A parameter-only
+    /// retarget leaves the installed table and its accumulated peaks alone.
+    pub(crate) fn matches_document(&self, document: &Document) -> bool {
+        self.tracks.len() == document.tracks.len()
+            && self
+                .tracks
+                .iter()
+                .zip(&document.tracks)
+                .all(|((installed, _), track)| *installed == track.id)
+            && self.buses.len() == document.audio_mix.buses.len()
+            && self
+                .buses
+                .iter()
+                .zip(&document.audio_mix.buses)
+                .all(|((installed, _), bus)| *installed == bus.id)
+            && self.gain_reduction.len() == gain_reduction_keys(document).count()
+            && self
+                .gain_reduction
+                .iter()
+                .zip(gain_reduction_keys(document))
+                .all(|((chain, effect, _), key)| (*chain, *effect) == key)
     }
 
     /// The table installed whenever the worker is not playing (AU1 §4.1).
@@ -694,22 +733,7 @@ struct AudioEffectRuntime {
 
 impl AudioEffectRuntime {
     fn new(effect: &Effect, channels: usize, sample_rate: u32) -> Self {
-        let latency_frames = if kinewright_core::is_static_audio_parameter(
-            &effect.name,
-            AUDIO_LOOKAHEAD_PARAMETER,
-        ) {
-            let neutral = if effect.name == "audio_true_peak_limiter" {
-                5
-            } else {
-                0
-            };
-            stage_latency_frames(
-                static_audio_value(effect, AUDIO_LOOKAHEAD_PARAMETER, neutral),
-                sample_rate,
-            )
-        } else {
-            0
-        };
+        let latency_frames = stage_latency_frames(node_lookahead_milliseconds(effect), sample_rate);
         let state = match effect.name.as_str() {
             "audio_eq" => AudioEffectState::Eq {
                 low: vec![0.0; channels],
@@ -774,6 +798,19 @@ impl AudioEffectRuntime {
             parameter_epoch: 0,
             bypass_cache: None,
         }
+    }
+
+    /// AU2 §5.8: adopt new parameter values for the same node, preserving
+    /// every piece of DSP state — filter memories, envelopes, delay lines,
+    /// RMS windows, and release state.
+    ///
+    /// The parameter epoch is bumped **unconditionally** (A13), which is what
+    /// makes the edit audible on the next sample frame rather than at the next
+    /// project-frame boundary: every per-project-frame cache in this module is
+    /// keyed on `(project frame, parameter epoch)`.
+    fn retarget(&mut self, effect: &Effect) {
+        self.effect = effect.clone();
+        self.parameter_epoch = self.parameter_epoch.wrapping_add(1);
     }
 
     /// AU2 §2.1: whether this node's gain computer is switched off at one
@@ -1169,19 +1206,119 @@ impl AudioEffectRuntime {
     }
 }
 
+/// AU2 §5.8: one node's contribution to a chain's **structure** — its id, its
+/// effect name, and its static `lookahead_milliseconds`.
+///
+/// Two chains with the same ordered structure can be retargeted in place;
+/// anything else rebuilds. `rms_window_milliseconds` is static too (AU2 §0
+/// E16) but is deliberately not part of the key, because E16 defines the
+/// window as read once when the chain is built.
+fn node_structure(effect: &Effect) -> (EffectId, &str, i64) {
+    (
+        effect.id,
+        effect.name.as_str(),
+        node_lookahead_milliseconds(effect),
+    )
+}
+
+/// AU2 §3.6: one node's declared lookahead in milliseconds, read statically.
+fn node_lookahead_milliseconds(effect: &Effect) -> i64 {
+    if kinewright_core::is_static_audio_parameter(&effect.name, AUDIO_LOOKAHEAD_PARAMETER) {
+        let neutral = if effect.name == "audio_true_peak_limiter" {
+            5
+        } else {
+            0
+        };
+        static_audio_value(effect, AUDIO_LOOKAHEAD_PARAMETER, neutral)
+    } else {
+        0
+    }
+}
+
+/// AU2 §5.8: whether an installed chain and a document chain share a structure.
+fn chain_structure_matches(runtimes: &[AudioEffectRuntime], effects: &[Effect]) -> bool {
+    runtimes.len() == effects.len()
+        && runtimes
+            .iter()
+            .zip(effects)
+            .all(|(runtime, effect)| node_structure(&runtime.effect) == node_structure(effect))
+}
+
+/// AU2 §5.8: retarget an already-matching chain, node by node.
+fn retarget_chain(runtimes: &mut [AudioEffectRuntime], effects: &[Effect]) {
+    for (runtime, effect) in runtimes.iter_mut().zip(effects) {
+        runtime.retarget(effect);
+    }
+}
+
+/// AU2 §5.6: the master chain's runtime — the same machinery a bus carries,
+/// with no routed tracks and no sidechain.
+struct AudioMasterRuntime {
+    /// AU2 §5.6: the master fader, applied to the summed mix before the chain.
+    gain: GainRamp,
+    effects: Vec<AudioEffectRuntime>,
+    /// AU2 §3.6: the pad that brings the chain's own node delays up to
+    /// `L_master`. Zero-length for every chain whose nodes already sum to it.
+    pad: DelayLine,
+    /// A scratch buffer of exact zeros: the master carries no sidechain, so
+    /// `audio_ducking` is rejected on it (AU2 §5.4).
+    silence: Vec<f32>,
+}
+
+impl AudioMasterRuntime {
+    fn new(
+        master: &AudioMaster,
+        channels: usize,
+        sample_rate: u32,
+        ramp_frames: usize,
+        master_stage_frames: usize,
+    ) -> Self {
+        let effects = master
+            .effects
+            .iter()
+            .map(|effect| AudioEffectRuntime::new(effect, channels, sample_rate))
+            .collect::<Vec<_>>();
+        let node_frames = effects
+            .iter()
+            .map(|effect| effect.latency_frames)
+            .sum::<usize>();
+        Self {
+            gain: GainRamp::settled(db_gain(i64::from(master.gain_tenth_db)), ramp_frames),
+            effects,
+            pad: DelayLine::new(master_stage_frames.saturating_sub(node_frames), channels),
+            silence: Vec::new(),
+        }
+    }
+
+    /// AU2 §5.8: adopt a same-structure master chain in place.
+    fn retarget(&mut self, master: &AudioMaster, ramp_frames: usize) {
+        retarget_chain(&mut self.effects, &master.effects);
+        self.gain
+            .retarget(db_gain(i64::from(master.gain_tenth_db)), ramp_frames);
+    }
+}
+
 #[derive(Debug)]
 struct AudioBusRuntime {
     id: AudioBusId,
     tracks: Vec<TrackId>,
     sidechain_tracks: Vec<TrackId>,
     effects: Vec<AudioEffectRuntime>,
+    /// AU2 §5.6: the post-effects bus fader.
+    gain: GainRamp,
     /// AU2 §3.6: the alignment pad that brings this chain's own node delays up
     /// to the bus stage's latency, so every bus leaves the stage aligned.
     pad: DelayLine,
 }
 
 impl AudioBusRuntime {
-    fn new(bus: &AudioBus, channels: usize, sample_rate: u32, bus_stage_frames: usize) -> Self {
+    fn new(
+        bus: &AudioBus,
+        channels: usize,
+        sample_rate: u32,
+        ramp_frames: usize,
+        bus_stage_frames: usize,
+    ) -> Self {
         let effects = bus
             .effects
             .iter()
@@ -1198,8 +1335,24 @@ impl AudioBusRuntime {
             tracks: bus.tracks.clone(),
             sidechain_tracks: bus.ducking_sidechain_tracks.clone(),
             effects,
+            gain: GainRamp::settled(db_gain(i64::from(bus.gain_tenth_db)), ramp_frames),
             pad: DelayLine::new(bus_stage_frames.saturating_sub(node_frames), channels),
         }
+    }
+
+    /// AU2 §5.8: adopt a same-structure bus without disturbing any DSP state.
+    ///
+    /// Routing and sidechain taps are re-read on every update, the chain is
+    /// retargeted node by node, and the fader ramps over the 5 ms constant.
+    fn retarget(&mut self, bus: &AudioBus, ramp_frames: usize) {
+        self.tracks.clear();
+        self.tracks.extend_from_slice(&bus.tracks);
+        self.sidechain_tracks.clear();
+        self.sidechain_tracks
+            .extend_from_slice(&bus.ducking_sidechain_tracks);
+        retarget_chain(&mut self.effects, &bus.effects);
+        self.gain
+            .retarget(db_gain(i64::from(bus.gain_tenth_db)), ramp_frames);
     }
 }
 
@@ -1212,11 +1365,128 @@ fn track_mix_ramp_frames(sample_rate: u32) -> usize {
         .max(1)
 }
 
-/// AU1 §3.1 balance law: centre is the exact identity and the law never boosts.
-#[allow(clippy::cast_precision_loss)]
-fn pan_channel_ratios(pan_percent: i32) -> [f32; 2] {
-    let pan = pan_percent as f32 / 100.0;
-    [1.0 - pan.max(0.0), 1.0 + pan.min(0.0)]
+/// AU2 §5.7: one scalar gain with the [`TrackStageRuntime`] ramp discipline.
+///
+/// Construction is settled (`current == target`, `ramp_index == ramp_frames`),
+/// so export and a freshly opened playback mixer never ramp and steady-state
+/// parity is untouched. Playback-only transient state, not observable through
+/// any facet.
+#[derive(Debug)]
+struct GainRamp {
+    target: f32,
+    current: f32,
+    ramp_start: f32,
+    ramp_index: usize,
+}
+
+impl GainRamp {
+    fn settled(target: f32, ramp_frames: usize) -> Self {
+        Self {
+            target,
+            current: target,
+            ramp_start: target,
+            ramp_index: ramp_frames,
+        }
+    }
+
+    /// AU2 §5.7: restart from the current interpolated value when the new
+    /// target differs from it, exactly as [`TrackStageRuntime::retarget`] does.
+    // The comparison is an exact identity test, not a tolerance question: an
+    // unchanged target must not restart the ramp.
+    #[allow(clippy::float_cmp)]
+    fn retarget(&mut self, target: f32, ramp_frames: usize) {
+        self.target = target;
+        if target == self.current {
+            self.ramp_index = ramp_frames;
+        } else {
+            self.ramp_start = self.current;
+            self.ramp_index = 0;
+        }
+    }
+
+    #[cfg(test)]
+    fn is_settled(&self, ramp_frames: usize) -> bool {
+        self.ramp_index >= ramp_frames
+    }
+
+    // The ramp position is an integer sample-frame index converted once per frame.
+    #[allow(clippy::cast_precision_loss)]
+    fn advance(&mut self, ramp_frames: usize) {
+        if self.ramp_index >= ramp_frames {
+            return;
+        }
+        let progress = (self.ramp_index + 1) as f32 / ramp_frames as f32;
+        self.current = self.ramp_start + (self.target - self.ramp_start) * progress;
+        self.ramp_index += 1;
+        if self.ramp_index >= ramp_frames {
+            self.current = self.target;
+        }
+    }
+
+    /// Multiply one interleaved chunk by this gain, advancing the ramp once per
+    /// sample frame while it runs.
+    // A settled unity gain is an exact identity: `x * 1.0 == x` in IEEE 754, so
+    // a neutral fader stays bit-identical to a pass-through.
+    #[allow(clippy::float_cmp)]
+    fn apply(&mut self, samples: &mut [f32], channels: usize, ramp_frames: usize) {
+        if self.ramp_index >= ramp_frames {
+            if self.current == 1.0 {
+                return;
+            }
+            let gain = self.current;
+            for sample in samples.iter_mut() {
+                *sample *= gain;
+            }
+            return;
+        }
+        for frame in samples.chunks_mut(channels.max(1)) {
+            self.advance(ramp_frames);
+            let gain = self.current;
+            for sample in frame.iter_mut() {
+                *sample *= gain;
+            }
+        }
+    }
+}
+
+/// AU2 §5.7: one pan position as a pair of channel ratios under one law.
+///
+/// `ConstantPower` computes in `f64` and casts once (R16). The three cardinal
+/// positions are special-cased to exact ratios so it does not lose AU1's "hard
+/// left yields the left channel at unity and the right silent": without the
+/// special case `cos(PI/2)` in `f32` is `-4.371e-8`, which leaks -147 dBFS into
+/// the far channel.
+///
+/// `Balance` keeps AU1's own `f32` expression **verbatim** (AU2 §0 E42): 82 of
+/// the 201 integer positions round differently when the same expression is
+/// evaluated in `f64` and cast once, so computing it in `f64` would change the
+/// exported bytes of every pre-AU2 document carrying one of those pans, which
+/// AU2 §5.10(f) and A14 forbid. Centre is the exact identity under it either
+/// way.
+// The pan position is an integer percent and the ratios are bounded by one:
+// the single cast per channel is the intentional analysis-to-mix conversion.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn pan_channel_ratios(law: PanLaw, pan_percent: i32) -> [f32; 2] {
+    match law {
+        // AU1 §3.1 balance law: centre is the exact identity, and the law
+        // never boosts.
+        PanLaw::Balance => {
+            let pan = pan_percent as f32 / 100.0;
+            [1.0 - pan.max(0.0), 1.0 + pan.min(0.0)]
+        }
+        PanLaw::ConstantPower => match pan_percent {
+            TRACK_MIX_PAN_MIN => [1.0, 0.0],
+            TRACK_MIX_PAN_MAX => [0.0, 1.0],
+            0 => [
+                std::f32::consts::FRAC_1_SQRT_2,
+                std::f32::consts::FRAC_1_SQRT_2,
+            ],
+            _ => {
+                let theta = (f64::from(pan_percent) / 100.0 + 1.0) * std::f64::consts::FRAC_PI_4;
+                [theta.cos() as f32, theta.sin() as f32]
+            }
+        },
+    }
 }
 
 /// AU1 §3.1: gate, gain, and the per-channel fold of gain and balance pan.
@@ -1236,7 +1506,7 @@ fn track_stage_parameters(
     if channels < 2 {
         return (true, gain, [gain, gain]);
     }
-    let pan = pan_channel_ratios(mix.pan_percent);
+    let pan = pan_channel_ratios(document.audio_mix.pan_law, mix.pan_percent);
     (true, gain, [gain * pan[0], gain * pan[1]])
 }
 
@@ -1410,6 +1680,8 @@ pub(crate) struct AudioMixProcessor {
     /// Post-track-stage scratch, one per track, resized per chunk, never freed.
     staged: Vec<Vec<f32>>,
     buses: Vec<AudioBusRuntime>,
+    /// AU2 §5.6: the master fader and the master chain, run on the summed mix.
+    master: AudioMasterRuntime,
     routed_tracks: HashSet<TrackId>,
     /// AU2 §3.6: the unrouted path is padded to the bus stage's latency, so it
     /// reaches the master sum aligned with every bus.
@@ -1417,6 +1689,8 @@ pub(crate) struct AudioMixProcessor {
     /// AU2 §3.6: `stage_latency_frames(L_bus, rate)`, computed once when the
     /// processor is built and held for its life.
     bus_stage_frames: usize,
+    /// AU2 §5.6: `stage_latency_frames(L_master, rate)`, likewise fixed.
+    master_stage_frames: usize,
     /// `None` in export and measurement (AU1 §4.1).
     meters: Option<Arc<MixMeters>>,
     ramp_frames: usize,
@@ -1451,10 +1725,9 @@ impl AudioMixProcessor {
         let scratch = track_order.iter().map(|_| Vec::new()).collect();
         // AU2 §3.6: latency is derived from the document once, here, and held
         // constant for this processor's life. Zero for every pre-AU2 document.
-        let bus_stage_frames = stage_latency_frames(
-            document.audio_mix.lookahead_milliseconds().bus_stage,
-            sample_rate,
-        );
+        let lookahead = document.audio_mix.lookahead_milliseconds();
+        let bus_stage_frames = stage_latency_frames(lookahead.bus_stage, sample_rate);
+        let master_stage_frames = stage_latency_frames(lookahead.master_stage, sample_rate);
         Self {
             track_order,
             stages,
@@ -1463,11 +1736,21 @@ impl AudioMixProcessor {
                 .audio_mix
                 .buses
                 .iter()
-                .map(|bus| AudioBusRuntime::new(bus, channels, sample_rate, bus_stage_frames))
+                .map(|bus| {
+                    AudioBusRuntime::new(bus, channels, sample_rate, ramp_frames, bus_stage_frames)
+                })
                 .collect(),
+            master: AudioMasterRuntime::new(
+                &document.audio_mix.master,
+                channels,
+                sample_rate,
+                ramp_frames,
+                master_stage_frames,
+            ),
             routed_tracks,
             unrouted_delay: DelayLine::new(bus_stage_frames, channels),
             bus_stage_frames,
+            master_stage_frames,
             meters,
             ramp_frames,
             sample_rate,
@@ -1487,14 +1770,105 @@ impl AudioMixProcessor {
         self.bus_stage_frames
     }
 
-    /// AU1 §5.3: replace stage targets from a document whose tracks and buses
-    /// are unchanged. Bus effect state is untouched and each changed stage
-    /// ramps from its current value (AU1 §3.4).
-    pub(crate) fn update_track_mix(&mut self, document: &Document) {
+    /// AU2 §5.8: apply a document that may differ in track mix, bus chains,
+    /// the master chain, or the pan law, without stopping playback.
+    ///
+    /// The caller guarantees `AudioMix::lookahead_milliseconds()` is unchanged
+    /// (the app predicate refuses the live path otherwise and the worker
+    /// re-cues defensively), because `L` is fixed for a processor's life.
+    ///
+    /// A chain whose **structure** — the ordered list of `(effect id, effect
+    /// name, static lookahead)` — is unchanged is retargeted in place, which
+    /// preserves filter memories, envelopes, delay lines, and RMS windows and
+    /// is audible on the next sample frame (A13). Any other change rebuilds
+    /// just that chain and accepts a momentary discontinuity.
+    pub(crate) fn update_audio_mix(&mut self, document: &Document) {
         let channels = self.channels;
         let ramp_frames = self.ramp_frames;
+        let sample_rate = self.sample_rate;
+        // 1. Track stages, which now also fold the document's pan law.
         for stage in &mut self.stages {
             stage.retarget(document, channels, ramp_frames);
+        }
+        // 2. Routing, recomputed on every update.
+        self.routed_tracks = document
+            .audio_mix
+            .buses
+            .iter()
+            .flat_map(|bus| bus.tracks.iter().copied())
+            .collect();
+        // 3. Buses, in the new document's order. A bus that disappears takes
+        //    its runtime with it; a bus that arrives gets a fresh one.
+        //
+        //    The unrouted path's delay line is deliberately *not* cleared here,
+        //    so when a track moves onto a new bus the old path's `L_bus` tail
+        //    drains while the new chain's line fills and the join has no gap
+        //    (AU2 §5.8, seamless bus creation).
+        let bus_stage_frames = self.bus_stage_frames;
+        let mut existing = std::mem::take(&mut self.buses);
+        self.buses = document
+            .audio_mix
+            .buses
+            .iter()
+            .map(|bus| {
+                let matched = existing
+                    .iter()
+                    .position(|runtime| runtime.id == bus.id)
+                    .map(|index| {
+                        (
+                            index,
+                            chain_structure_matches(&existing[index].effects, &bus.effects),
+                        )
+                    });
+                match matched {
+                    Some((index, true)) => {
+                        let mut runtime = existing.remove(index);
+                        runtime.retarget(bus, ramp_frames);
+                        runtime
+                    }
+                    // 5. The fader is continuous across a chain rebuild: only
+                    //    the chain's own state resets.
+                    Some((index, false)) => {
+                        let gain = existing.remove(index).gain;
+                        let mut runtime = AudioBusRuntime::new(
+                            bus,
+                            channels,
+                            sample_rate,
+                            ramp_frames,
+                            bus_stage_frames,
+                        );
+                        let target = runtime.gain.target;
+                        runtime.gain = gain;
+                        runtime.gain.retarget(target, ramp_frames);
+                        runtime
+                    }
+                    None => AudioBusRuntime::new(
+                        bus,
+                        channels,
+                        sample_rate,
+                        ramp_frames,
+                        bus_stage_frames,
+                    ),
+                }
+            })
+            .collect();
+        // 4. The master chain, by the same rule.
+        if chain_structure_matches(&self.master.effects, &document.audio_mix.master.effects) {
+            self.master
+                .retarget(&document.audio_mix.master, ramp_frames);
+        } else {
+            let mut master = AudioMasterRuntime::new(
+                &document.audio_mix.master,
+                channels,
+                sample_rate,
+                ramp_frames,
+                self.master_stage_frames,
+            );
+            let target = master.gain.target;
+            master.gain =
+                std::mem::replace(&mut self.master.gain, GainRamp::settled(1.0, ramp_frames));
+            master.gain.retarget(target, ramp_frames);
+            self.master = master;
         }
     }
 
@@ -1619,6 +1993,10 @@ impl AudioMixProcessor {
                     );
                 }
             }
+            // AU2 §5.6: the bus fader sits after the chain and before the pad,
+            // so the bus stem, the bus meter, and the master sum all read the
+            // faded signal. Settled at unity it is an exact pass-through.
+            bus.gain.apply(&mut signal, channels, ramp_frames);
             // AU2 §3.6: the alignment pad brings this chain up to `L_bus`, so
             // the bus stem, the bus meter, and the master sum all see the same
             // stage latency whatever the chain's own split.
@@ -1642,6 +2020,50 @@ impl AudioMixProcessor {
             add_signal(&mut master, &signal);
             if collect_stems {
                 bus_stems.push(signal);
+            }
+        }
+
+        // AU2 §5.6: master sum -> master gain -> master effects in order ->
+        // alignment pad to `L_master`. The callers' +/-1.0 clamp and the master
+        // meter stay exactly where they were, after this.
+        {
+            let sample_rate = self.sample_rate;
+            let project_fps = self.project_fps;
+            let frame_channels = self.channels;
+            let runtime = &mut self.master;
+            runtime.gain.apply(&mut master, channels, ramp_frames);
+            if !runtime.effects.is_empty() {
+                // The master carries no sidechain, so `audio_ducking` is
+                // rejected on it (AU2 §5.4) and the tap reads exact zeros.
+                runtime.silence.clear();
+                runtime.silence.resize(frame_channels.max(1), 0.0);
+                for frame in 0..sample_frames {
+                    let start = frame * frame_channels;
+                    let end = start + frame_channels;
+                    let project_at = samples_to_frame(
+                        start_sample.saturating_add(u64::try_from(frame).unwrap_or(u64::MAX)),
+                        sample_rate,
+                        project_fps,
+                    );
+                    for effect in &mut runtime.effects {
+                        effect.process_frame(
+                            &mut master[start..end],
+                            &runtime.silence,
+                            project_at,
+                            sample_rate,
+                        );
+                    }
+                }
+            }
+            runtime.pad.process_buffer(&mut master, channels);
+            // AU2 §3.8: `AudioChain::Master` slots, once per chunk with
+            // overwrite semantics and never during seek preroll.
+            for effect in &mut runtime.effects {
+                if let Some(reduction) = effect.take_gain_reduction()
+                    && let Some(meters) = &self.meters
+                {
+                    meters.record_gain_reduction(AudioChain::Master, effect.effect.id, reduction);
+                }
             }
         }
 
@@ -1797,11 +2219,16 @@ impl AudioMixSource {
     }
 }
 
-/// AU1 §2.2: preroll is a property of stateful bus effects, not of the
-/// stateless track stage, so a document carrying only track-mix entries seeks
-/// straight to its target.
+/// AU1 §2.2 / AU2 §5.6: preroll is a property of stateful chain nodes, not of
+/// the stateless track stage, so a document carrying only track-mix entries
+/// seeks straight to its target.
+///
+/// AU2 §5.6 widens the predicate to the master chain: a document with no buses
+/// and one master true-peak limiter — the first document the "+ Effect" menu on
+/// the master produces — has stateful nodes and must warm them.
 fn needs_seek_preroll(document: &Document, project_from: TimeCode) -> bool {
-    !document.audio_mix.buses.is_empty() && project_from > TimeCode::ZERO
+    (!document.audio_mix.buses.is_empty() || !document.audio_mix.master.effects.is_empty())
+        && project_from > TimeCode::ZERO
 }
 
 struct AudioMixer {
@@ -1917,9 +2344,10 @@ impl AudioMixer {
         self.processor.attach_meters(Some(meters));
     }
 
-    /// AU1 §5.3: apply new track-stage targets to a running mixer.
-    fn update_track_mix(&mut self, document: &Document) {
-        self.processor.update_track_mix(document);
+    /// AU2 §5.8: apply a new audio mix — track stages, bus chains, the master
+    /// chain, and the pan law — to a running mixer.
+    fn update_audio_mix(&mut self, document: &Document) {
+        self.processor.update_audio_mix(document);
     }
 
     fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
@@ -2096,9 +2524,15 @@ impl AudioRuntime {
         Ok(runtime)
     }
 
-    /// AU1 §5.3: apply new track-stage targets without stopping the stream.
-    pub(crate) fn update_track_mix(&mut self, document: &Document) {
-        self.mixer.update_track_mix(document);
+    /// AU2 §5.8: apply a new audio mix without stopping the stream.
+    pub(crate) fn update_audio_mix(&mut self, document: &Document) {
+        self.mixer.update_audio_mix(document);
+    }
+
+    /// AU2 §5.8: install a rebuilt peak table on a running stream, in the same
+    /// call the worker publishes it.
+    pub(crate) fn attach_mix_meters(&mut self, meters: Arc<MixMeters>) {
+        self.mixer.attach_mix_meters(meters);
     }
 
     pub(crate) fn play(&self) -> Result<(), MediaError> {
@@ -2470,6 +2904,7 @@ mod tests {
             audio_mix: AudioMix {
                 buses,
                 tracks: Vec::new(),
+                ..AudioMix::default()
             },
             ..Document::default()
         }
@@ -2502,6 +2937,7 @@ mod tests {
                 id: AudioBusId(1),
                 name: "Music".to_owned(),
                 tracks: vec![TrackId(1)],
+                gain_tenth_db: 0,
                 effects: vec![gain],
                 ducking_sidechain_tracks: Vec::new(),
             }],
@@ -2526,6 +2962,7 @@ mod tests {
                     id: AudioBusId(1),
                     name: "Bed".to_owned(),
                     tracks: vec![TrackId(1)],
+                    gain_tenth_db: 0,
                     effects: vec![
                         audio_effect(1, "audio_eq", &[("low_gain_tenth_db", -240)]),
                         audio_effect(
@@ -2553,6 +2990,7 @@ mod tests {
                     id: AudioBusId(2),
                     name: "Sidechain monitor".to_owned(),
                     tracks: vec![TrackId(2)],
+                    gain_tenth_db: 0,
                     effects: vec![audio_effect(4, "audio_gain", &[("gain_tenth_db", -600)])],
                     ducking_sidechain_tracks: Vec::new(),
                 },
@@ -2583,6 +3021,7 @@ mod tests {
                 id: AudioBusId(1),
                 name: "Delivery".to_owned(),
                 tracks: vec![TrackId(1)],
+                gain_tenth_db: 0,
                 effects: vec![audio_effect(
                     1,
                     "audio_limiter",
@@ -3008,6 +3447,7 @@ mod tests {
             id: AudioBusId(1),
             name: "Bed".to_owned(),
             tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
             effects: vec![audio_effect(
                 1,
                 "audio_ducking",
@@ -3045,6 +3485,7 @@ mod tests {
             id: AudioBusId(2),
             name: "Sidechain monitor".to_owned(),
             tracks: vec![TrackId(2)],
+            gain_tenth_db: 0,
             effects: vec![audio_effect(2, "audio_gain", &[("gain_tenth_db", -600)])],
             ducking_sidechain_tracks: Vec::new(),
         };
@@ -3183,7 +3624,7 @@ mod tests {
         let buffers = HashMap::from([(TrackId(1), vec![1.0; 512])]);
 
         let mut processor = AudioMixProcessor::new(&document, 48_000, 1, None);
-        processor.update_track_mix(&muted);
+        processor.update_audio_mix(&muted);
         let ramped = processor.mix_chunk(&buffers, 0, 512).unwrap();
 
         for index in 1..240 {
@@ -3223,7 +3664,7 @@ mod tests {
 
         // 512 absent frames is more than the 240-frame ramp: it settles in the gap.
         let mut processor = AudioMixProcessor::new(&document, 48_000, 1, None);
-        processor.update_track_mix(&muted);
+        processor.update_audio_mix(&muted);
         let gap = processor.mix_chunk(&HashMap::new(), 0, 512).unwrap();
         assert!(
             gap.iter().all(|sample| *sample == 0.0),
@@ -3243,7 +3684,7 @@ mod tests {
         // A gap shorter than the ramp advances it partway, continuously with
         // `advance_ramp`: frame 100 of the gap plus frame 0 of the clip is 101.
         let mut partial = AudioMixProcessor::new(&document, 48_000, 1, None);
-        partial.update_track_mix(&muted);
+        partial.update_audio_mix(&muted);
         partial.mix_chunk(&HashMap::new(), 0, 100).unwrap();
         let after_gap = partial.mix_chunk(&buffers, 100, 512).unwrap();
         assert_close(after_gap[0], 1.0 - 101.0 / 240.0);
@@ -3265,7 +3706,7 @@ mod tests {
         muted.audio_mix.tracks = vec![track_mix(1, 0, 0, true, false)];
 
         let mut processor = AudioMixProcessor::new(&document, 48_000, 1, None);
-        processor.update_track_mix(&muted);
+        processor.update_audio_mix(&muted);
         // 100 of the 240 ramp frames elapse before the editor changes its mind.
         let falling = processor
             .mix_chunk(&HashMap::from([(TrackId(1), vec![1.0_f32; 100])]), 0, 100)
@@ -3273,7 +3714,7 @@ mod tests {
         let start = 1.0 - 100.0 / 240.0;
         assert_close(falling[99], start);
 
-        processor.update_track_mix(&document);
+        processor.update_audio_mix(&document);
         let rising = processor
             .mix_chunk(&HashMap::from([(TrackId(1), vec![1.0_f32; 512])]), 100, 512)
             .unwrap();
@@ -3312,6 +3753,7 @@ mod tests {
             id: AudioBusId(1),
             name: "Bed".to_owned(),
             tracks: vec![TrackId(2)],
+            gain_tenth_db: 0,
             effects: vec![audio_effect(1, "audio_gain", &[("gain_tenth_db", -60)])],
             ducking_sidechain_tracks: Vec::new(),
         };
@@ -3477,6 +3919,7 @@ mod tests {
             id: AudioBusId(1),
             name: "Bed".to_owned(),
             tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
             effects: vec![audio_effect(1, "audio_gain", &[("gain_tenth_db", -60)])],
             ducking_sidechain_tracks: Vec::new(),
         }];
@@ -3511,6 +3954,7 @@ mod tests {
                     id: AudioBusId(1),
                     name: "Bed duck".to_owned(),
                     tracks: vec![TrackId(2)],
+                    gain_tenth_db: 0,
                     effects: vec![
                         audio_effect(10, "audio_eq", &[("high_gain_tenth_db", -30)]),
                         audio_effect(
@@ -3527,6 +3971,7 @@ mod tests {
                     ],
                     ducking_sidechain_tracks: vec![TrackId(1)],
                 }],
+                ..AudioMix::default()
             },
             color_context: kinewright_core::ColorContext::default(),
             lut_assets: Vec::new(),
@@ -3890,6 +4335,7 @@ mod tests {
             id: AudioBusId(1),
             name: "Chain".to_owned(),
             tracks: vec![TrackId(1)],
+            gain_tenth_db: 0,
             effects,
             ducking_sidechain_tracks: vec![TrackId(2)],
         }
@@ -5050,6 +5496,7 @@ mod tests {
             id: AudioBusId(2),
             name: "Legacy".to_owned(),
             tracks: vec![TrackId(3)],
+            gain_tenth_db: 0,
             effects: vec![
                 audio_effect(20, "audio_eq", &[("high_gain_tenth_db", -30)]),
                 audio_effect(21, "audio_limiter", &[("ceiling_tenth_db", -20)]),
@@ -5146,6 +5593,7 @@ mod tests {
                     id: AudioBusId(1),
                     name: "Delivery".to_owned(),
                     tracks: vec![TrackId(1)],
+                    gain_tenth_db: 0,
                     effects: vec![audio_effect(
                         1,
                         "audio_true_peak_limiter",
@@ -5158,6 +5606,7 @@ mod tests {
                     )],
                     ducking_sidechain_tracks: Vec::new(),
                 }],
+                ..AudioMix::default()
             },
             color_context: kinewright_core::ColorContext::default(),
             lut_assets: Vec::new(),
@@ -5510,5 +5959,818 @@ mod tests {
             "a whole extra frame still ends at 11"
         );
         assert_eq!(covering(end + 4_801), 12);
+    }
+
+    // ---- AU2 Part B -------------------------------------------------------
+
+    /// One clipless bus routing track 1, with the given chain.
+    fn part_b_bus(id: u64, tracks: Vec<u64>, effects: Vec<Effect>) -> AudioBus {
+        AudioBus {
+            id: AudioBusId(id),
+            name: format!("Bus {id}"),
+            tracks: tracks.into_iter().map(TrackId).collect(),
+            gain_tenth_db: 0,
+            effects,
+            ducking_sidechain_tracks: Vec::new(),
+        }
+    }
+
+    /// A non-neutral parametric EQ, so its biquad memories are worth
+    /// preserving across a live edit.
+    fn part_b_eq(id: u64, output_gain_tenth_db: i64) -> Effect {
+        parametric_eq(
+            id,
+            &[
+                ("low_shelf_hertz", 200),
+                ("low_shelf_gain_tenth_db", -40),
+                ("band2_hertz", 1_000),
+                ("band2_gain_tenth_db", 60),
+                ("band2_q_hundredths", 150),
+                ("output_gain_tenth_db", output_gain_tenth_db),
+            ],
+        )
+    }
+
+    /// Mix one chunk of one track through a processor and return the master.
+    ///
+    /// `frames` is the chunk's sample-frame count, so a multi-channel caller
+    /// passes `input.len() / channels` and never relies on `mix`'s zero-fill.
+    fn part_b_chunk(
+        processor: &mut AudioMixProcessor,
+        track: u64,
+        input: &[f32],
+        frames: usize,
+        start_sample: u64,
+    ) -> Vec<f32> {
+        processor
+            .mix_chunk(
+                &HashMap::from([(TrackId(track), input.to_vec())]),
+                start_sample,
+                frames,
+            )
+            .expect("the chunk should mix")
+    }
+
+    /// AU2 §7 item B7 / §5.6: a bus-free document carrying one master effect —
+    /// the first document the "+ Effect" menu on the master produces — has
+    /// stateful nodes, so a seek must warm them from zero.
+    #[test]
+    fn a_bus_free_document_with_one_master_effect_needs_seek_preroll() {
+        let fps = Rational::new(10, 1).unwrap();
+        let source = GeneratedMedia::from_bytes(
+            "au2b-preroll",
+            "wav",
+            &wav_f32(&vec![0.25_f32; 96_000 * 2], 48_000, 2),
+        );
+        let mut document = processor_document(fps, 20, Vec::new());
+        document.media_pool = vec![audio_asset(1, source.path(), "steady", fps)];
+        document.tracks[0].clips = vec![audio_clip(1, 1, 0..20, 0)];
+        document.audio_mix.master.effects = vec![audio_effect(
+            1,
+            "audio_true_peak_limiter",
+            &[
+                ("ceiling_tenth_db", -10),
+                ("lookahead_milliseconds", 5),
+                ("release_milliseconds", 50),
+                ("true_peak", 1),
+            ],
+        )];
+        document.validate().expect("the fixture should validate");
+
+        assert!(document.audio_mix.buses.is_empty());
+        assert!(needs_seek_preroll(&document, TimeCode(5)));
+        assert!(!needs_seek_preroll(&document, TimeCode::ZERO));
+        // `decode_from == TimeCode::ZERO`: the sources are built from frame 0,
+        // not from the seek target, and the discard loop then runs the mix
+        // forward to it.
+        let mixer = AudioMixer::open(&document, TimeCode(5), 48_000, 2, None).unwrap();
+        assert_eq!(mixer.sources.len(), 1);
+        assert_eq!(mixer.sources[0].project_sample_start, 0);
+        // AU2 §3.7: the discard loop runs `L` frames past the target, so output
+        // frame `k` still carries project frame `target + k`.
+        assert_eq!(latency_offset(&document, 48_000), 240);
+        assert_eq!(
+            mixer.cursor_sample,
+            frame_to_samples(TimeCode(5), 48_000, fps) + 240
+        );
+
+        // The AU1 predicate is untouched for a master that carries only a
+        // fader: a fader has no state to warm.
+        let mut faded = document.clone();
+        faded.audio_mix.master.effects.clear();
+        faded.audio_mix.master.gain_tenth_db = -60;
+        assert!(!needs_seek_preroll(&faded, TimeCode(5)));
+    }
+
+    /// AU2 §7 item B8 / §5.10(e): the two laws, their exact cardinals, and the
+    /// channel rules neither law changes.
+    // The cardinal ratios and the balance law's AU1 identity are exact claims.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn both_pan_laws_follow_their_channel_and_cardinal_rules() {
+        // `L^2 + R^2 == 1` within 1e-6 at every integer position.
+        for pan in TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX {
+            let [left, right] = pan_channel_ratios(PanLaw::ConstantPower, pan);
+            let power =
+                f64::from(left).mul_add(f64::from(left), f64::from(right) * f64::from(right));
+            assert!(
+                (power - 1.0).abs() <= 1.0e-6,
+                "constant power at {pan} carries {power}"
+            );
+        }
+        // The three cardinal positions are exact under `==`.
+        assert_eq!(pan_channel_ratios(PanLaw::ConstantPower, -100), [1.0, 0.0]);
+        assert_eq!(pan_channel_ratios(PanLaw::ConstantPower, 100), [0.0, 1.0]);
+        assert_eq!(
+            pan_channel_ratios(PanLaw::ConstantPower, 0),
+            [
+                std::f32::consts::FRAC_1_SQRT_2,
+                std::f32::consts::FRAC_1_SQRT_2
+            ]
+        );
+        assert_eq!(pan_channel_ratios(PanLaw::Balance, -100), [1.0, 0.0]);
+        assert_eq!(pan_channel_ratios(PanLaw::Balance, 100), [0.0, 1.0]);
+        assert_eq!(pan_channel_ratios(PanLaw::Balance, 0), [1.0, 1.0]);
+        // Centre is -3.0103 dB +/- 0.001 under constant power.
+        let centre = f64::from(pan_channel_ratios(PanLaw::ConstantPower, 0)[0]);
+        let centre_db = 20.0 * centre.log10();
+        assert!(
+            (centre_db + 3.0103).abs() <= 0.001,
+            "constant-power centre is {centre_db} dB"
+        );
+        // `Balance` is bit-identical to AU1's own expression at every integer
+        // position (AU2 §0 E42: 82 of the 201 round differently in f64).
+        for pan in TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX {
+            #[allow(clippy::cast_precision_loss)]
+            let au1 = pan as f32 / 100.0;
+            assert_eq!(
+                pan_channel_ratios(PanLaw::Balance, pan),
+                [1.0 - au1.max(0.0), 1.0 + au1.min(0.0)],
+                "the balance law moved at {pan}"
+            );
+        }
+
+        // AU1's channel rules, under both laws: a one-channel device applies no
+        // pan, and channels beyond the first two take the unpanned gain.
+        for law in [PanLaw::Balance, PanLaw::ConstantPower] {
+            let mut document = mix_document(vec![track_mix(1, 30, -100, false, false)], Vec::new());
+            document.audio_mix.pan_law = law;
+            let gain = db_gain(30);
+            assert_eq!(
+                track_stage_parameters(&document, TrackId(1), 1),
+                (true, gain, [gain, gain]),
+                "a mono device must hear no pan under {law:?}"
+            );
+            let mixed = part_b_chunk(
+                &mut AudioMixProcessor::new(&document, 1_000, 4, None),
+                1,
+                &[1.0; 32],
+                8,
+                0,
+            );
+            assert_eq!(mixed[0], gain, "hard left keeps channel 0 at unity gain");
+            assert_eq!(mixed[1], 0.0, "hard left silences channel 1");
+            assert_eq!(mixed[2], gain, "channel 2 takes the unpanned gain");
+            assert_eq!(mixed[3], gain, "channel 3 takes the unpanned gain");
+        }
+    }
+
+    /// AU2 §7 item B9 / §5.7: the bus and master faders ramp over 240 sample
+    /// frames at 48 kHz and settle exactly; a fresh processor never ramps.
+    // Ramp values are exact by construction, as AU1's ramp tests are.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn bus_and_master_gain_ramp_over_five_milliseconds_and_settle_exactly() {
+        let fps = Rational::new(10, 1).unwrap();
+        let document = processor_document(fps, 30, vec![part_b_bus(1, vec![1], Vec::new())]);
+        let ramp_frames = track_mix_ramp_frames(48_000);
+        assert_eq!(ramp_frames, 240);
+        let ones = vec![1.0_f32; 300];
+
+        for (label, retarget) in [
+            (
+                "bus",
+                (|document: &mut Document, tenth_db: i32| {
+                    document.audio_mix.buses[0].gain_tenth_db = tenth_db;
+                }) as fn(&mut Document, i32),
+            ),
+            ("master", |document: &mut Document, tenth_db: i32| {
+                document.audio_mix.master.gain_tenth_db = tenth_db;
+            }),
+        ] {
+            let mut processor = AudioMixProcessor::new(&document, 48_000, 1, None);
+            // A freshly built processor is settled, so export and a newly
+            // opened playback mixer never ramp.
+            assert!(processor.buses[0].gain.is_settled(ramp_frames));
+            assert!(processor.master.gain.is_settled(ramp_frames));
+            let settled = part_b_chunk(&mut processor, 1, &ones, ones.len(), 0);
+            assert!(
+                settled.iter().all(|sample| *sample == 1.0),
+                "{label}: a fresh processor must not ramp"
+            );
+
+            let mut updated = document.clone();
+            retarget(&mut updated, -60);
+            processor.update_audio_mix(&updated);
+            let ramped = part_b_chunk(&mut processor, 1, &ones, ones.len(), 300);
+            let target = db_gain(-60);
+            for (frame, sample) in ramped.iter().enumerate().take(ramp_frames - 1) {
+                #[allow(clippy::cast_precision_loss)]
+                let progress = (frame + 1) as f32 / ramp_frames as f32;
+                assert_eq!(
+                    *sample,
+                    1.0 + (target - 1.0) * progress,
+                    "{label}: sample frame {frame} is off the ramp"
+                );
+            }
+            assert_eq!(
+                ramped[ramp_frames - 1],
+                target,
+                "{label}: the ramp settles exactly at frame 239"
+            );
+            for sample in &ramped[ramp_frames..] {
+                assert_eq!(*sample, target, "{label}: the settled gain must not drift");
+            }
+
+            // A second update to the same value does not restart the ramp.
+            processor.update_audio_mix(&updated);
+            let held = part_b_chunk(&mut processor, 1, &ones, ones.len(), 600);
+            assert!(held.iter().all(|sample| *sample == target));
+        }
+
+        // Export builds a fresh processor per pass and never calls
+        // `update_audio_mix`, so a stored fader is applied from sample zero.
+        let mut geared = document.clone();
+        geared.audio_mix.buses[0].gain_tenth_db = -60;
+        geared.audio_mix.master.gain_tenth_db = 60;
+        let mixed = part_b_chunk(
+            &mut AudioMixProcessor::new(&geared, 48_000, 1, None),
+            1,
+            &ones,
+            ones.len(),
+            0,
+        );
+        let expected = db_gain(-60) * db_gain(60);
+        assert!(mixed.iter().all(|sample| *sample == expected));
+    }
+
+    /// AU2 §7 item B9 / §5.7: retargeting a fader mid-ramp restarts from the
+    /// **current interpolated value**, so a fader dragged through two positions
+    /// inside 5 ms has no discontinuity. `TrackStageRuntime` carries AU1's own
+    /// pin; `GainRamp` is a separate struct with its own copy of the arithmetic.
+    // Ramp values are exact by construction, as AU1's ramp tests are.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn a_fader_retarget_mid_ramp_restarts_from_the_current_value() {
+        let fps = Rational::new(10, 1).unwrap();
+        let document = processor_document(fps, 30, vec![part_b_bus(1, vec![1], Vec::new())]);
+        let ramp_frames = track_mix_ramp_frames(48_000);
+        let ones = vec![1.0_f32; 300];
+        let target = db_gain(-60);
+
+        for (label, retarget) in [
+            (
+                "bus",
+                (|document: &mut Document, tenth_db: i32| {
+                    document.audio_mix.buses[0].gain_tenth_db = tenth_db;
+                }) as fn(&mut Document, i32),
+            ),
+            ("master", |document: &mut Document, tenth_db: i32| {
+                document.audio_mix.master.gain_tenth_db = tenth_db;
+            }),
+        ] {
+            let mut processor = AudioMixProcessor::new(&document, 48_000, 1, None);
+            let mut lowered = document.clone();
+            retarget(&mut lowered, -60);
+            processor.update_audio_mix(&lowered);
+
+            // 100 of the 240 frames, so the ramp is still in flight.
+            let partial = part_b_chunk(&mut processor, 1, &ones[..100], 100, 0);
+            #[allow(clippy::cast_precision_loss)]
+            let mid = 1.0 + (target - 1.0) * (100.0_f32 / ramp_frames as f32);
+            assert_eq!(
+                partial[99], mid,
+                "{label}: the ramp must be 100/240 of the way down"
+            );
+
+            // Retarget back to unity from the interpolated value.
+            processor.update_audio_mix(&document);
+            let restarted = part_b_chunk(&mut processor, 1, &ones, ones.len(), 100);
+            #[allow(clippy::cast_precision_loss)]
+            let first_step = mid + (1.0 - mid) * (1.0 / ramp_frames as f32);
+            assert_eq!(
+                restarted[0], first_step,
+                "{label}: the second ramp must start from the current value, not from unity"
+            );
+            assert!(
+                (restarted[0] - mid).abs() < (1.0 - mid).abs(),
+                "{label}: the restart must not step past its own target"
+            );
+            for (frame, sample) in restarted.iter().enumerate().take(ramp_frames - 1) {
+                #[allow(clippy::cast_precision_loss)]
+                let progress = (frame + 1) as f32 / ramp_frames as f32;
+                assert_eq!(
+                    *sample,
+                    mid + (1.0 - mid) * progress,
+                    "{label}: sample frame {frame} is off the restarted ramp"
+                );
+            }
+            assert_eq!(
+                restarted[ramp_frames - 1],
+                1.0,
+                "{label}: the restarted ramp settles exactly on unity"
+            );
+            for sample in &restarted[ramp_frames..] {
+                assert_eq!(*sample, 1.0);
+            }
+        }
+    }
+
+    /// AU2 §3.9(d)/§5.10, the master half: the full-chain parity fixture with a
+    /// master chain of one gain plus one true-peak limiter, and a non-neutral
+    /// bus and master fader. `parity_document` and
+    /// `parity_document_with_full_chain` are untouched.
+    fn parity_document_with_master_chain(voice: &Path, bed: &Path, fps: Rational) -> Document {
+        let mut document = parity_document_with_full_chain(voice, bed, fps);
+        document.audio_mix.buses[0].gain_tenth_db = -30;
+        document.audio_mix.master = kinewright_core::AudioMaster {
+            gain_tenth_db: -20,
+            effects: vec![
+                audio_effect(30, "audio_gain", &[("gain_tenth_db", 40)]),
+                audio_effect(
+                    31,
+                    "audio_true_peak_limiter",
+                    &[
+                        ("ceiling_tenth_db", -10),
+                        ("lookahead_milliseconds", 5),
+                        ("release_milliseconds", 50),
+                        ("true_peak", 1),
+                    ],
+                ),
+            ],
+        };
+        document.audio_mix.pan_law = PanLaw::ConstantPower;
+        document.audio_mix.tracks = vec![track_mix(2, 0, 25, false, false)];
+        document
+    }
+
+    /// AU2 §7 item B10 (exit-gate clause 3): playback/export parity through
+    /// every node, the master chain included, with the graph latency
+    /// compensated on both sides.
+    #[test]
+    fn playback_feeder_mix_matches_export_through_the_master_chain() {
+        crate::initialize_ffmpeg().unwrap();
+        let voice = loud_sine("au2b-voice", 440);
+        let bed = loud_sine("au2b-bed", 660);
+        let fps = Rational::new(10, 1).unwrap();
+        let settings = parity_settings(fps);
+        let document = transitioned(parity_document_with_master_chain(
+            voice.path(),
+            bed.path(),
+            fps,
+        ));
+
+        assert_eq!(
+            document.audio_mix.lookahead_milliseconds(),
+            ChainLookahead {
+                bus_stage: 10,
+                master_stage: 5,
+            }
+        );
+        // AU2 §3.6: the sum of the two truncations, never a truncation of the
+        // sum.
+        assert_eq!(latency_offset(&document, 48_000), 480 + 240);
+        let exported = crate::export::mix_audio(&document, &settings).unwrap();
+        assert_eq!(
+            exported.len(),
+            usize::try_from(frame_to_samples(TimeCode(30), 48_000, fps)).unwrap() * 2,
+            "the master flush must not lengthen the export"
+        );
+        assert_playback_matches_export(&document, &exported, fps);
+    }
+
+    /// AU2 §7 item B11 / A13: a parameter-only edit keeps every filter memory
+    /// and is audible on the **next sample frame**, not at the next
+    /// project-frame boundary — 100 ms away at this fixture's 10 fps.
+    // The scaling identity is exact: the chain's output gain is the last
+    // multiply, so the two runs differ by exactly one factor.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn a_parameter_retarget_preserves_chain_state_and_is_audible_next_sample_frame() {
+        let fps = Rational::new(10, 1).unwrap();
+        let document = processor_document(
+            fps,
+            30,
+            vec![part_b_bus(1, vec![1], vec![part_b_eq(10, 0)])],
+        );
+        let mut updated = document.clone();
+        updated.audio_mix.buses[0].effects = vec![part_b_eq(10, -60)];
+        // Both chunks sit inside project frame 0, which spans 4 800 sample
+        // frames at 10 fps.
+        let first = tone(440.0, 0.5, 48_000, 480);
+        let second = tone(1_000.0, 0.5, 48_000, 480);
+
+        let mut unchanged = AudioMixProcessor::new(&document, 48_000, 1, None);
+        part_b_chunk(&mut unchanged, 1, &first, first.len(), 0);
+        let steady = part_b_chunk(&mut unchanged, 1, &second, second.len(), 480);
+
+        let mut retargeted = AudioMixProcessor::new(&document, 48_000, 1, None);
+        part_b_chunk(&mut retargeted, 1, &first, first.len(), 0);
+        retargeted.update_audio_mix(&updated);
+        let edited = part_b_chunk(&mut retargeted, 1, &second, second.len(), 480);
+
+        let trim = db_gain(-60);
+        assert_eq!(
+            edited[0],
+            steady[0] * trim,
+            "the retarget must be heard on the very next sample frame"
+        );
+        for (frame, (edited, steady)) in edited.iter().zip(&steady).enumerate() {
+            assert_eq!(
+                *edited,
+                steady * trim,
+                "sample frame {frame} lost the preserved filter state"
+            );
+        }
+
+        // A rebuilt chain would have reset those biquads, which is audible.
+        let mut rebuilt = AudioMixProcessor::new(&updated, 48_000, 1, None);
+        let cold = part_b_chunk(&mut rebuilt, 1, &second, second.len(), 480);
+        assert!(
+            (cold[0] - edited[0]).abs() > 1.0e-6,
+            "the retargeted chain must not read like a freshly built one"
+        );
+    }
+
+    /// AU2 §7 item B11: an insertion, a removal, and a reorder each rebuild
+    /// **only** the chain that changed; every other chain keeps its state.
+    // The untouched bus is asserted bit-identical.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn a_structural_live_edit_rebuilds_only_the_chain_that_changed() {
+        let fps = Rational::new(10, 1).unwrap();
+        let document = processor_document(
+            fps,
+            30,
+            vec![
+                part_b_bus(1, vec![1], vec![part_b_eq(10, 0)]),
+                part_b_bus(
+                    2,
+                    vec![2],
+                    vec![
+                        part_b_eq(20, 0),
+                        audio_effect(21, "audio_gain", &[("gain_tenth_db", -20)]),
+                    ],
+                ),
+            ],
+        );
+        let first = tone(440.0, 0.5, 48_000, 480);
+        let second = tone(1_000.0, 0.5, 48_000, 480);
+        let inputs = |samples: &[f32]| {
+            HashMap::from([
+                (TrackId(1), samples.to_vec()),
+                (TrackId(2), samples.to_vec()),
+            ])
+        };
+
+        for (label, mutate) in [
+            (
+                "insertion",
+                (|effects: &mut Vec<Effect>| {
+                    effects.insert(1, audio_effect(22, "audio_gain", &[("gain_tenth_db", -10)]));
+                }) as fn(&mut Vec<Effect>),
+            ),
+            ("removal", |effects: &mut Vec<Effect>| {
+                effects.pop();
+            }),
+            ("reorder", |effects: &mut Vec<Effect>| {
+                effects.swap(0, 1);
+            }),
+        ] {
+            let mut updated = document.clone();
+            mutate(&mut updated.audio_mix.buses[1].effects);
+
+            let mut unchanged = AudioMixProcessor::new(&document, 48_000, 1, None);
+            unchanged
+                .mix_chunk_with_stems(&inputs(&first), 0, 480)
+                .unwrap();
+            let steady = unchanged
+                .mix_chunk_with_stems(&inputs(&second), 480, 480)
+                .unwrap();
+
+            let mut edited = AudioMixProcessor::new(&document, 48_000, 1, None);
+            edited
+                .mix_chunk_with_stems(&inputs(&first), 0, 480)
+                .unwrap();
+            edited.update_audio_mix(&updated);
+            let after = edited
+                .mix_chunk_with_stems(&inputs(&second), 480, 480)
+                .unwrap();
+
+            assert_eq!(
+                after.buses[0], steady.buses[0],
+                "{label}: the untouched bus must keep every filter memory"
+            );
+            let mut cold = AudioMixProcessor::new(&updated, 48_000, 1, None);
+            let fresh = cold
+                .mix_chunk_with_stems(&inputs(&second), 480, 480)
+                .unwrap();
+            assert_eq!(
+                after.buses[1], fresh.buses[1],
+                "{label}: the edited bus must be rebuilt, not retargeted"
+            );
+            assert_ne!(
+                after.buses[1], steady.buses[1],
+                "{label}: the edited bus must actually change"
+            );
+        }
+    }
+
+    /// AU2 §7 item B11: flipping `bypass` is a parameter change, so it
+    /// retargets in place — the chain's other node keeps its filter memory —
+    /// and takes effect on the next sample frame.
+    // Bypass removes exactly one multiply, so the identity is exact.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn a_bypass_flip_retargets_the_chain_in_place() {
+        let fps = Rational::new(10, 1).unwrap();
+        let chain = vec![
+            part_b_eq(10, 0),
+            audio_effect(11, "audio_gain", &[("gain_tenth_db", -60)]),
+        ];
+        let document = processor_document(fps, 30, vec![part_b_bus(1, vec![1], chain.clone())]);
+        let mut updated = document.clone();
+        updated.audio_mix.buses[0].effects[1] =
+            audio_effect(11, "audio_gain", &[("gain_tenth_db", -60), ("bypass", 1)]);
+        let first = tone(440.0, 0.5, 48_000, 480);
+        let second = tone(1_000.0, 0.5, 48_000, 480);
+
+        let mut unchanged = AudioMixProcessor::new(&document, 48_000, 1, None);
+        part_b_chunk(&mut unchanged, 1, &first, first.len(), 0);
+        let steady = part_b_chunk(&mut unchanged, 1, &second, second.len(), 480);
+
+        let mut flipped = AudioMixProcessor::new(&document, 48_000, 1, None);
+        part_b_chunk(&mut flipped, 1, &first, first.len(), 0);
+        flipped.update_audio_mix(&updated);
+        let bypassed = part_b_chunk(&mut flipped, 1, &second, second.len(), 480);
+
+        let trim = db_gain(-60);
+        for (frame, (bypassed, steady)) in bypassed.iter().zip(&steady).enumerate() {
+            assert_eq!(
+                bypassed * trim,
+                *steady,
+                "sample frame {frame}: the EQ before the bypassed gain lost its state"
+            );
+        }
+    }
+
+    /// AU2 §7 item B11 / §5.8: creating a bus mid-play leaves the unrouted
+    /// path's delay line to drain, so the join has no gap.
+    // The drained tail and the new chain's pad sum to an exact unity.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn creating_a_bus_mid_play_drains_the_unrouted_path_without_a_gap() {
+        let fps = Rational::new(10, 1).unwrap();
+        // Bus 1 declares 10 ms, so `L_bus` is 480 sample frames at 48 kHz and
+        // the unrouted path track 1 sits on is padded to match.
+        let document = processor_document(
+            fps,
+            30,
+            vec![part_b_bus(
+                1,
+                vec![2],
+                vec![audio_effect(
+                    10,
+                    "audio_true_peak_limiter",
+                    &[
+                        ("ceiling_tenth_db", 0),
+                        ("lookahead_milliseconds", 10),
+                        ("release_milliseconds", 50),
+                        ("true_peak", 0),
+                    ],
+                )],
+            )],
+        );
+        let mut routed = document.clone();
+        routed.audio_mix.buses.push(part_b_bus(
+            2,
+            vec![1],
+            vec![audio_effect(20, "audio_gain", &[("gain_tenth_db", 0)])],
+        ));
+        // The latency guard: the live path is only legal because `L` is equal.
+        assert_eq!(
+            document.audio_mix.lookahead_milliseconds(),
+            routed.audio_mix.lookahead_milliseconds()
+        );
+
+        let inputs = |frames: usize| {
+            HashMap::from([
+                (TrackId(1), vec![1.0_f32; frames]),
+                (TrackId(2), vec![0.0_f32; frames]),
+            ])
+        };
+        let mut processor = AudioMixProcessor::new(&document, 48_000, 1, None);
+        // Fill the unrouted delay line, then confirm the steady state.
+        processor.mix_chunk(&inputs(960), 0, 960).unwrap();
+        let steady = processor.mix_chunk(&inputs(480), 960, 480).unwrap();
+        assert!(steady.iter().all(|sample| *sample == 1.0));
+
+        processor.update_audio_mix(&routed);
+        let joined = processor.mix_chunk(&inputs(960), 1_440, 960).unwrap();
+        for (frame, sample) in joined.iter().enumerate() {
+            assert_eq!(
+                *sample, 1.0,
+                "sample frame {frame} gapped while the unrouted path drained"
+            );
+        }
+    }
+
+    /// AU2 §7 item B12 / R8: the installed peak table survives ten consecutive
+    /// gain-only updates and is rebuilt only when its key set stops describing
+    /// the document. The master chain contributes gain-reduction keys.
+    #[test]
+    fn the_meter_table_survives_gain_only_updates_and_rebuilds_on_a_structural_edit() {
+        let fps = Rational::new(10, 1).unwrap();
+        let mut document = processor_document(
+            fps,
+            30,
+            vec![part_b_bus(
+                1,
+                vec![1],
+                vec![
+                    audio_effect(10, "audio_gain", &[("gain_tenth_db", 0)]),
+                    audio_effect(11, "audio_compressor", &[("threshold_tenth_db", -120)]),
+                ],
+            )],
+        );
+        document.audio_mix.master.effects = vec![audio_effect(
+            30,
+            "audio_true_peak_limiter",
+            &[("ceiling_tenth_db", -10)],
+        )];
+        let master_meter = Arc::new(MeterState::default());
+        let installed = Arc::new(MixMeters::for_document(
+            &document,
+            Arc::clone(&master_meter),
+        ));
+        // AU2 §3.8/§5.6: one slot per node with a gain computer, buses in
+        // document order and then the master chain.
+        assert_eq!(
+            installed
+                .peaks()
+                .gain_reduction
+                .iter()
+                .map(|(chain, effect, _)| (*chain, *effect))
+                .collect::<Vec<_>>(),
+            vec![
+                (AudioChain::Bus(AudioBusId(1)), EffectId(11)),
+                (AudioChain::Master, EffectId(30)),
+            ]
+        );
+
+        let mut live = document.clone();
+        for step in 1..=10 {
+            live.audio_mix.buses[0].gain_tenth_db = -step;
+            live.audio_mix.master.gain_tenth_db = step;
+            live.audio_mix.tracks = vec![track_mix(1, -step, 0, false, false)];
+            assert!(
+                installed.matches_document(&live),
+                "update {step} must not rebuild the table"
+            );
+        }
+
+        for (label, mutate) in [
+            (
+                "a bus chain insertion",
+                (|document: &mut Document| {
+                    document.audio_mix.buses[0]
+                        .effects
+                        .push(audio_effect(12, "audio_gate", &[]));
+                }) as fn(&mut Document),
+            ),
+            ("a master chain removal", |document: &mut Document| {
+                document.audio_mix.master.effects.clear();
+            }),
+            ("a new bus", |document: &mut Document| {
+                document
+                    .audio_mix
+                    .buses
+                    .push(part_b_bus(2, vec![2], Vec::new()));
+            }),
+            ("a removed track", |document: &mut Document| {
+                document.tracks.pop();
+            }),
+        ] {
+            let mut structural = live.clone();
+            mutate(&mut structural);
+            assert!(
+                !installed.matches_document(&structural),
+                "{label} must force a rebuild"
+            );
+            let rebuilt = MixMeters::for_document(&structural, Arc::clone(&master_meter));
+            assert!(rebuilt.matches_document(&structural));
+        }
+    }
+
+    /// AU2 §7 item B13 / §5.9: the spectrum is measured through the real mix
+    /// path — the same `mix_audio_stems` `measure_mix_levels` uses — at every
+    /// mix point, and a range shorter than two Welch segments is refused.
+    ///
+    /// Placed here rather than in `export.rs`'s video-only test module, for
+    /// AU2 §0 E19's reason: the audio fixtures live here.
+    #[test]
+    fn mix_spectrum_measures_every_mix_point_through_the_real_mix_path() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(10, 1).unwrap();
+        // Two seconds of a full-scale 1 kHz sine, written by hand so the
+        // amplitude survives exactly.
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        let samples = (0..96_000_usize)
+            .flat_map(|frame| {
+                let phase = 2.0 * std::f64::consts::PI * 1_000.0 * frame as f64 / 48_000.0;
+                let sample = phase.sin() as f32;
+                [sample, sample]
+            })
+            .collect::<Vec<_>>();
+        let source =
+            GeneratedMedia::from_bytes("au2b-spectrum", "wav", &wav_f32(&samples, 48_000, 2));
+        let mut document = processor_document(
+            fps,
+            20,
+            vec![part_b_bus(
+                1,
+                vec![1],
+                vec![audio_effect(10, "audio_gain", &[("gain_tenth_db", 0)])],
+            )],
+        );
+        document.media_pool = vec![audio_asset(1, source.path(), "kilohertz", fps)];
+        document.tracks[0].clips = vec![audio_clip(1, 1, 0..20, 0)];
+        document.validate().expect("the fixture should validate");
+
+        for point in [
+            kinewright_core::MixSpectrumPoint::Master,
+            kinewright_core::MixSpectrumPoint::Track(TrackId(1)),
+            kinewright_core::MixSpectrumPoint::Bus(AudioBusId(1)),
+        ] {
+            let report = crate::export::measure_mix_spectrum(
+                &document,
+                &kinewright_core::MixSpectrumRequest {
+                    range: Some(TimeCode::ZERO..TimeCode(10)),
+                    point,
+                },
+            )
+            .expect("a one-second range is four Welch segments");
+            assert_eq!(report.point, point);
+            assert_eq!(report.sample_rate, 48_000);
+            assert_eq!(report.sample_frames, 48_000);
+            assert_eq!(report.segments, 4);
+            assert_eq!(report.bands.len(), 31);
+            assert_eq!(report.bands[17].center_hertz_tenths, 10_000);
+            let peak = f64::from(
+                report.bands[17]
+                    .level_dbfs_hundredths
+                    .expect("the 1 kHz band carries the tone"),
+            ) / 100.0;
+            assert!(
+                peak.abs() <= 0.05,
+                "{point:?}: the 1 kHz band read {peak} dBFS, not 0.00"
+            );
+            for index in [11_usize, 23] {
+                let neighbour = report.bands[index]
+                    .level_dbfs_hundredths
+                    .map_or(f64::NEG_INFINITY, |hundredths| {
+                        f64::from(hundredths) / 100.0
+                    });
+                assert!(
+                    neighbour <= peak - 40.0,
+                    "{point:?}: band {index} read {neighbour} dBFS, under 40 dB down"
+                );
+            }
+            assert!(
+                report.bands[..5].iter().all(|band| band.window_limited)
+                    && report.bands[5..].iter().all(|band| !band.window_limited)
+            );
+        }
+
+        // AU2 §5.9/A23: 400 ms is four project frames, 19 200 sample frames,
+        // short of the 24 576 two segments need.
+        let rejected = crate::export::measure_mix_spectrum(
+            &document,
+            &kinewright_core::MixSpectrumRequest {
+                range: Some(TimeCode::ZERO..TimeCode(4)),
+                point: kinewright_core::MixSpectrumPoint::Master,
+            },
+        )
+        .expect_err("a 400 ms range must be refused");
+        assert!(
+            matches!(
+                rejected,
+                MediaError::MixSpectrumRangeTooShort {
+                    sample_frames: 19_200,
+                    required: 24_576,
+                }
+            ),
+            "the rejection must be typed, not a formatted string: {rejected}"
+        );
     }
 }

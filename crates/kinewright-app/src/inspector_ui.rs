@@ -3921,13 +3921,28 @@ fn primary_parameter_readout(name: &str, value: i64) -> String {
     }
 }
 
-fn effect_display_name(name: &str) -> &str {
+/// The human name of one effect node.
+///
+/// AU2 §6.7 adds all eight audio nodes, and the mixer's chain cards share this
+/// table so a node cannot be called two things in two docks. The two legacy
+/// pairs carry `(legacy)` because a plan produced by `plan_audio_normalization`
+/// always ends in an `audio_limiter`, and a chain listing `Limiter` beside
+/// `True-peak limiter` with nothing to tell them apart is unreadable.
+pub(crate) fn effect_display_name(name: &str) -> &str {
     match name {
         "primary_correction" => "Primary correction",
         "color_wheels" => "Colour wheels",
         "color_curves" => "Colour curves",
         "technical_lut" => "Technical LUT",
         "creative_look" => "Creative look",
+        "audio_gain" => "Gain",
+        "audio_eq" => "EQ (legacy)",
+        "audio_compressor" => "Compressor",
+        "audio_ducking" => "Ducking",
+        "audio_limiter" => "Limiter (legacy)",
+        "audio_parametric_eq" => "Parametric EQ",
+        "audio_gate" => "Gate",
+        "audio_true_peak_limiter" => "True-peak limiter",
         _ => name,
     }
 }
@@ -3938,7 +3953,7 @@ fn effect_display_name(name: &str) -> &str {
 /// `creative_look` kinds now cover every look, so a new project never grows a
 /// legacy stage. The legacy nodes already in a project stay visible, keep
 /// rendering, and offer **Convert to managed look**.
-fn is_effect_insertable(name: &str) -> bool {
+pub(crate) fn is_effect_insertable(name: &str) -> bool {
     !is_audio_effect(name)
         && !is_legacy_display_effect(name)
         && !matches!(name, "color_grade" | "cube_lut" | "look_lut")
