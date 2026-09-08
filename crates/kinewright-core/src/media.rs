@@ -1056,6 +1056,16 @@ pub struct AudioLoudness {
     pub sample_frames: u64,
 }
 
+/// Which processing chain a mix point belongs to (AU2 §3.8).
+///
+/// [`AudioChain::Master`] slots exist only from AU2 Part B; Part A emits
+/// [`AudioChain::Bus`] keys only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AudioChain {
+    Bus(AudioBusId),
+    Master,
+}
+
 /// Post-track-stage, post-bus, and post-limiter peak telemetry (AU1 §4.1).
 ///
 /// Telemetry, not document state: the vectors follow document order and are
@@ -1065,6 +1075,11 @@ pub struct MixPeaks {
     pub tracks: Vec<(TrackId, [f32; 2])>,
     pub buses: Vec<(AudioBusId, [f32; 2])>,
     pub master: [f32; 2],
+    /// AU2 §3.8: per-node gain reduction in decibels, always `>= 0`, keyed by
+    /// the owning chain and the effect's id. One entry per node with a gain
+    /// computer — `audio_compressor`, `audio_ducking`, `audio_gate`, and
+    /// `audio_true_peak_limiter` — in chain order.
+    pub gain_reduction: Vec<(AudioChain, EffectId, f32)>,
 }
 
 /// A read-only mix level measurement request (AU1 §6.1). `None` measures the

@@ -62,6 +62,45 @@ pub enum EffectUniform {
     DuckReduction,
     DuckAttack,
     DuckRelease,
+    /// The shared bypass control of every audio node (AU2 §2.1).
+    ///
+    /// One variant serves all eight `bypass` rows, exactly as
+    /// [`EffectUniform::ColorNode`] serves every colour node's: nothing
+    /// requires a uniform to be unique per descriptor, and every audio
+    /// uniform is ignored by the compositor.
+    AudioBypass,
+    CompressorKnee,
+    CompressorDetector,
+    CompressorRmsWindow,
+    CompressorLookahead,
+    ParametricEqHighPassHertz,
+    ParametricEqLowShelfHertz,
+    ParametricEqLowShelfGain,
+    ParametricEqBand1Hertz,
+    ParametricEqBand1Gain,
+    ParametricEqBand1Q,
+    ParametricEqBand2Hertz,
+    ParametricEqBand2Gain,
+    ParametricEqBand2Q,
+    ParametricEqBand3Hertz,
+    ParametricEqBand3Gain,
+    ParametricEqBand3Q,
+    ParametricEqBand4Hertz,
+    ParametricEqBand4Gain,
+    ParametricEqBand4Q,
+    ParametricEqHighShelfHertz,
+    ParametricEqHighShelfGain,
+    ParametricEqOutputGain,
+    GateThreshold,
+    GateRatio,
+    GateRange,
+    GateAttack,
+    GateHold,
+    GateRelease,
+    TruePeakCeiling,
+    TruePeakLookahead,
+    TruePeakRelease,
+    TruePeakDetector,
     /// Consumed by the ordered colour-node storage buffer, never by the
     /// `LayerParams` uniform block.
     ///
@@ -1322,6 +1361,36 @@ const COLOR_CURVES_DESCRIPTOR_PARAMETERS: [EffectParameterDescriptor;
 const CREATIVE_LOOK_DESCRIPTOR_PARAMETERS: [EffectParameterDescriptor;
     CREATIVE_LOOK_DESCRIPTOR_PARAMETER_COUNT] = with_matte_parameters(&CREATIVE_LOOK_PARAMETERS);
 
+/// The shared bypass control of every audio node (AU2 §2.1).
+///
+/// One `EffectParameterDescriptor` reused by all eight audio descriptors,
+/// following [`COLOR_NODE_BYPASS_DESCRIPTOR`]. `bypass = 1` turns the node's
+/// gain computer off; the node's delay line is still applied, so bypass never
+/// changes a chain's declared lookahead. Hold-only (AU2 §2.2).
+const AUDIO_BYPASS_DESCRIPTOR: EffectParameterDescriptor = EffectParameterDescriptor {
+    name: "bypass",
+    min: 0,
+    max: 1,
+    neutral: 0,
+    uniform: EffectUniform::AudioBypass,
+};
+
+/// The latency-bearing parameter shared by `audio_compressor` and
+/// `audio_true_peak_limiter` (AU2 §2.2).
+///
+/// Read once when a chain runtime is built and never keyframed, so it is the
+/// one parameter [`chain_lookahead_milliseconds`](crate::chain_lookahead_milliseconds)
+/// sums.
+pub(crate) const AUDIO_LOOKAHEAD_PARAMETER: &str = "lookahead_milliseconds";
+
+/// The compressor's RMS detector window, in milliseconds (AU2 §0 E16).
+///
+/// The window's length is fixed when the chain runtime is built, so a curve on
+/// it would be silently ignored; it is static like the lookahead parameters,
+/// but it is *not* latency and never enters
+/// [`chain_lookahead_milliseconds`](crate::chain_lookahead_milliseconds).
+pub(crate) const AUDIO_RMS_WINDOW_PARAMETER: &str = "rms_window_milliseconds";
+
 /// Built-in effect metadata used by validation, rendering, and agent documentation.
 pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
     EffectDescriptor {
@@ -1641,13 +1710,16 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
     },
     EffectDescriptor {
         name: "audio_gain",
-        parameters: &[EffectParameterDescriptor {
-            name: "gain_tenth_db",
-            min: -600,
-            max: 120,
-            neutral: 0,
-            uniform: EffectUniform::AudioGain,
-        }],
+        parameters: &[
+            EffectParameterDescriptor {
+                name: "gain_tenth_db",
+                min: -600,
+                max: 120,
+                neutral: 0,
+                uniform: EffectUniform::AudioGain,
+            },
+            AUDIO_BYPASS_DESCRIPTOR,
+        ],
     },
     EffectDescriptor {
         name: "audio_eq",
@@ -1673,6 +1745,7 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
                 neutral: 0,
                 uniform: EffectUniform::EqHighGain,
             },
+            AUDIO_BYPASS_DESCRIPTOR,
         ],
     },
     EffectDescriptor {
@@ -1713,6 +1786,35 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
                 neutral: 0,
                 uniform: EffectUniform::CompressorMakeup,
             },
+            EffectParameterDescriptor {
+                name: "knee_tenth_db",
+                min: 0,
+                max: 240,
+                neutral: 0,
+                uniform: EffectUniform::CompressorKnee,
+            },
+            EffectParameterDescriptor {
+                name: "detector",
+                min: 0,
+                max: 1,
+                neutral: 0,
+                uniform: EffectUniform::CompressorDetector,
+            },
+            EffectParameterDescriptor {
+                name: "rms_window_milliseconds",
+                min: 1,
+                max: 100,
+                neutral: 10,
+                uniform: EffectUniform::CompressorRmsWindow,
+            },
+            EffectParameterDescriptor {
+                name: AUDIO_LOOKAHEAD_PARAMETER,
+                min: 0,
+                max: 10,
+                neutral: 0,
+                uniform: EffectUniform::CompressorLookahead,
+            },
+            AUDIO_BYPASS_DESCRIPTOR,
         ],
     },
     EffectDescriptor {
@@ -1746,17 +1848,240 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
                 neutral: 300,
                 uniform: EffectUniform::DuckRelease,
             },
+            AUDIO_BYPASS_DESCRIPTOR,
         ],
     },
     EffectDescriptor {
         name: "audio_limiter",
-        parameters: &[EffectParameterDescriptor {
-            name: "ceiling_tenth_db",
-            min: -120,
-            max: 0,
-            neutral: -10,
-            uniform: EffectUniform::LimiterCeiling,
-        }],
+        parameters: &[
+            EffectParameterDescriptor {
+                name: "ceiling_tenth_db",
+                min: -120,
+                max: 0,
+                neutral: -10,
+                uniform: EffectUniform::LimiterCeiling,
+            },
+            AUDIO_BYPASS_DESCRIPTOR,
+        ],
+    },
+    // AU2 §2.1: high-pass, two shelves, four peaking bands, and an output trim.
+    // All-neutral is an exact identity.
+    EffectDescriptor {
+        name: "audio_parametric_eq",
+        parameters: &[
+            AUDIO_BYPASS_DESCRIPTOR,
+            EffectParameterDescriptor {
+                name: "high_pass_hertz",
+                min: 0,
+                max: 1_000,
+                neutral: 0,
+                uniform: EffectUniform::ParametricEqHighPassHertz,
+            },
+            EffectParameterDescriptor {
+                name: "low_shelf_hertz",
+                min: 20,
+                max: 1_000,
+                neutral: 100,
+                uniform: EffectUniform::ParametricEqLowShelfHertz,
+            },
+            EffectParameterDescriptor {
+                name: "low_shelf_gain_tenth_db",
+                min: -240,
+                max: 240,
+                neutral: 0,
+                uniform: EffectUniform::ParametricEqLowShelfGain,
+            },
+            EffectParameterDescriptor {
+                name: "band1_hertz",
+                min: 20,
+                max: 20_000,
+                neutral: 120,
+                uniform: EffectUniform::ParametricEqBand1Hertz,
+            },
+            EffectParameterDescriptor {
+                name: "band1_gain_tenth_db",
+                min: -240,
+                max: 240,
+                neutral: 0,
+                uniform: EffectUniform::ParametricEqBand1Gain,
+            },
+            EffectParameterDescriptor {
+                name: "band1_q_hundredths",
+                min: 10,
+                max: 1_800,
+                neutral: 71,
+                uniform: EffectUniform::ParametricEqBand1Q,
+            },
+            EffectParameterDescriptor {
+                name: "band2_hertz",
+                min: 20,
+                max: 20_000,
+                neutral: 500,
+                uniform: EffectUniform::ParametricEqBand2Hertz,
+            },
+            EffectParameterDescriptor {
+                name: "band2_gain_tenth_db",
+                min: -240,
+                max: 240,
+                neutral: 0,
+                uniform: EffectUniform::ParametricEqBand2Gain,
+            },
+            EffectParameterDescriptor {
+                name: "band2_q_hundredths",
+                min: 10,
+                max: 1_800,
+                neutral: 71,
+                uniform: EffectUniform::ParametricEqBand2Q,
+            },
+            EffectParameterDescriptor {
+                name: "band3_hertz",
+                min: 20,
+                max: 20_000,
+                neutral: 2_000,
+                uniform: EffectUniform::ParametricEqBand3Hertz,
+            },
+            EffectParameterDescriptor {
+                name: "band3_gain_tenth_db",
+                min: -240,
+                max: 240,
+                neutral: 0,
+                uniform: EffectUniform::ParametricEqBand3Gain,
+            },
+            EffectParameterDescriptor {
+                name: "band3_q_hundredths",
+                min: 10,
+                max: 1_800,
+                neutral: 71,
+                uniform: EffectUniform::ParametricEqBand3Q,
+            },
+            EffectParameterDescriptor {
+                name: "band4_hertz",
+                min: 20,
+                max: 20_000,
+                neutral: 8_000,
+                uniform: EffectUniform::ParametricEqBand4Hertz,
+            },
+            EffectParameterDescriptor {
+                name: "band4_gain_tenth_db",
+                min: -240,
+                max: 240,
+                neutral: 0,
+                uniform: EffectUniform::ParametricEqBand4Gain,
+            },
+            EffectParameterDescriptor {
+                name: "band4_q_hundredths",
+                min: 10,
+                max: 1_800,
+                neutral: 71,
+                uniform: EffectUniform::ParametricEqBand4Q,
+            },
+            EffectParameterDescriptor {
+                name: "high_shelf_hertz",
+                min: 1_000,
+                max: 20_000,
+                neutral: 8_000,
+                uniform: EffectUniform::ParametricEqHighShelfHertz,
+            },
+            EffectParameterDescriptor {
+                name: "high_shelf_gain_tenth_db",
+                min: -240,
+                max: 240,
+                neutral: 0,
+                uniform: EffectUniform::ParametricEqHighShelfGain,
+            },
+            EffectParameterDescriptor {
+                name: "output_gain_tenth_db",
+                min: -240,
+                max: 240,
+                neutral: 0,
+                uniform: EffectUniform::ParametricEqOutputGain,
+            },
+        ],
+    },
+    // AU2 §2.1: downward expander. All-neutral is an identity twice over —
+    // `ratio_hundredths` 100 is 1:1 and `range_tenth_db` 0 is no attenuation.
+    EffectDescriptor {
+        name: "audio_gate",
+        parameters: &[
+            AUDIO_BYPASS_DESCRIPTOR,
+            EffectParameterDescriptor {
+                name: "threshold_tenth_db",
+                min: -600,
+                max: 0,
+                neutral: -600,
+                uniform: EffectUniform::GateThreshold,
+            },
+            EffectParameterDescriptor {
+                name: "ratio_hundredths",
+                min: 100,
+                max: 2_000,
+                neutral: 100,
+                uniform: EffectUniform::GateRatio,
+            },
+            EffectParameterDescriptor {
+                name: "range_tenth_db",
+                min: 0,
+                max: 800,
+                neutral: 0,
+                uniform: EffectUniform::GateRange,
+            },
+            EffectParameterDescriptor {
+                name: "attack_milliseconds",
+                min: 1,
+                max: 1_000,
+                neutral: 1,
+                uniform: EffectUniform::GateAttack,
+            },
+            EffectParameterDescriptor {
+                name: "hold_milliseconds",
+                min: 0,
+                max: 1_000,
+                neutral: 10,
+                uniform: EffectUniform::GateHold,
+            },
+            EffectParameterDescriptor {
+                name: "release_milliseconds",
+                min: 10,
+                max: 5_000,
+                neutral: 100,
+                uniform: EffectUniform::GateRelease,
+            },
+        ],
+    },
+    // AU2 §2.1: lookahead limiter with an inter-sample peak detector.
+    EffectDescriptor {
+        name: "audio_true_peak_limiter",
+        parameters: &[
+            AUDIO_BYPASS_DESCRIPTOR,
+            EffectParameterDescriptor {
+                name: "ceiling_tenth_db",
+                min: -120,
+                max: 0,
+                neutral: 0,
+                uniform: EffectUniform::TruePeakCeiling,
+            },
+            EffectParameterDescriptor {
+                name: AUDIO_LOOKAHEAD_PARAMETER,
+                min: 1,
+                max: 10,
+                neutral: 5,
+                uniform: EffectUniform::TruePeakLookahead,
+            },
+            EffectParameterDescriptor {
+                name: "release_milliseconds",
+                min: 1,
+                max: 1_000,
+                neutral: 50,
+                uniform: EffectUniform::TruePeakRelease,
+            },
+            EffectParameterDescriptor {
+                name: "true_peak",
+                min: 0,
+                max: 1,
+                neutral: 1,
+                uniform: EffectUniform::TruePeakDetector,
+            },
+        ],
     },
 ];
 
@@ -2741,12 +3066,47 @@ impl EffectCompatibilityStage {
     }
 }
 
+/// Whether an effect name is one of the eight bus-only audio nodes.
+///
+/// AU2 §2.1 grew the list from five to eight with `audio_parametric_eq`,
+/// `audio_gate`, and `audio_true_peak_limiter`. `audio_eq` and `audio_limiter`
+/// stay registered, valid, and processed.
 #[must_use]
 pub fn is_audio_effect(name: &str) -> bool {
     matches!(
         name,
-        "audio_gain" | "audio_eq" | "audio_compressor" | "audio_ducking" | "audio_limiter"
+        "audio_gain"
+            | "audio_eq"
+            | "audio_compressor"
+            | "audio_ducking"
+            | "audio_limiter"
+            | "audio_parametric_eq"
+            | "audio_gate"
+            | "audio_true_peak_limiter"
     )
+}
+
+/// AU2 §2.2: parameters read once when a chain runtime is built, never per
+/// frame.
+///
+/// True for exactly three pairs:
+/// `("audio_compressor", "lookahead_milliseconds")` and
+/// `("audio_true_peak_limiter", "lookahead_milliseconds")`, which set the
+/// node's signal-path delay and so fix the whole graph's latency; and
+/// `("audio_compressor", "rms_window_milliseconds")`, whose detector window is
+/// allocated once at construction (AU2 §0 E16). `validate_audio_bus` rejects
+/// any curve on all three — with distinct reasons, since only the first two
+/// are latency — and the runtime reads them with
+/// [`Effect::static_integer_parameter`].
+#[must_use]
+pub fn is_static_audio_parameter(effect: &str, parameter: &str) -> bool {
+    match parameter {
+        AUDIO_LOOKAHEAD_PARAMETER => {
+            matches!(effect, "audio_compressor" | "audio_true_peak_limiter")
+        }
+        AUDIO_RMS_WINDOW_PARAMETER => effect == "audio_compressor",
+        _ => false,
+    }
 }
 
 /// Whether an effect is a legacy display-coded colour effect.

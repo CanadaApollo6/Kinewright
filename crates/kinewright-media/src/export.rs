@@ -14,8 +14,11 @@ use kinewright_core::{
 };
 
 use crate::{
-    audio::{AudioMixProcessor, ClipAudioShaping, decode_audio_range, limit_audio_mix},
-    clock::frame_to_samples,
+    audio::{
+        AudioMixProcessor, ClipAudioShaping, decode_audio_range, graph_latency_frames,
+        limit_audio_mix,
+    },
+    clock::{frame_to_samples, samples_to_frame},
     compositor::GpuContext,
     decode::backend,
     loudness::measure_loudness,
@@ -759,6 +762,14 @@ fn drain_audio_packets(
     Ok(())
 }
 
+/// AU2 §3.7: drop one stem family's leading sample frames in place.
+fn drop_leading_samples(samples: &mut Vec<f32>, count: usize) {
+    let cut = count.min(samples.len());
+    if cut > 0 {
+        samples.drain(..cut);
+    }
+}
+
 /// AU1 §6.1: the per-track, per-bus, and master stems of one mix pass.
 ///
 /// `tracks` and `buses` are empty when the caller did not ask for stems.
@@ -798,13 +809,38 @@ fn mix_pass(
     settings: &ExportSettings,
     collect_stems: bool,
 ) -> Result<MixStems, MediaError> {
-    let total_sample_frames = frame_to_samples(range.end, AUDIO_RATE, document.fps);
+    // AU2 §3.7: the processor holds `latency` sample frames of the mix, so the
+    // pass runs that much past the requested end and each stem family drops the
+    // leading frames its own tap carries. Zero for every pre-AU2 document.
+    let latency = graph_latency_frames(&document.audio_mix.lookahead_milliseconds(), AUDIO_RATE);
+    let total_sample_frames = frame_to_samples(range.end, AUDIO_RATE, document.fps)
+        .saturating_add(u64::try_from(latency).unwrap_or(0));
     let total_samples = usize::try_from(total_sample_frames)
         .map_err(|_| MediaError::Backend("audio mix is too large".to_owned()))?
         .checked_mul(usize::from(AUDIO_CHANNELS))
         .ok_or_else(|| MediaError::Backend("audio mix is too large".to_owned()))?;
     let mut track_mixes = HashMap::<TrackId, Vec<f32>>::new();
-    let segments = timeline_audio_segments(document, TimeCode::ZERO..range.end)?;
+    // AU2 §3.7: the extra `latency` input frames must carry real programme
+    // audio, not silence, or a sub-range measurement's last `L` sample frames
+    // are gained as if the programme stopped at `range.end`. Enumerate exactly
+    // the project frames that contain the mixed sample frames: the last one
+    // consumed is `total_sample_frames - 1`, so the smallest sufficient
+    // exclusive end is that frame plus one. When `L == 0` this collapses to
+    // `range.end` — at 48 kHz and 10 fps, `samples_to_frame(47_999) + 1 == 10`
+    // — so no pre-AU2 measurement decodes a frame it did not decode before,
+    // and for `mix_audio` the clamp holds it at the duration. The head and
+    // tail trim below discards the surplus.
+    let segment_end = if total_sample_frames == 0 {
+        range.end
+    } else {
+        TimeCode(
+            samples_to_frame(total_sample_frames - 1, AUDIO_RATE, document.fps)
+                .0
+                .saturating_add(1)
+                .clamp(range.end.0, document.duration.0.max(range.end.0)),
+        )
+    };
+    let segments = timeline_audio_segments(document, TimeCode::ZERO..segment_end)?;
     for segment in segments {
         check_cancelled(settings)?;
         let clip = document.clip(segment.clip).ok_or_else(|| {
@@ -906,6 +942,15 @@ fn mix_pass(
         start_frame = start_frame.saturating_add(u64::try_from(frame_count).unwrap_or(u64::MAX));
     }
     limit_audio_mix(&mut mix);
+    // AU2 §3.7: the head trim, per stem family and dropped unconditionally.
+    // Track stems are tapped pre-bus and carry nothing; bus stems are tapped
+    // after the bus stage's alignment pad; the master carries the whole graph
+    // latency. Unlike `keep_from`, this runs even when `range.start` is zero.
+    drop_leading_samples(&mut mix, latency.saturating_mul(channel_count));
+    let bus_head = processor.bus_stage_frames().saturating_mul(channel_count);
+    for stem in &mut bus_stems {
+        drop_leading_samples(&mut stem.1, bus_head);
+    }
     let keep_from = usize::try_from(frame_to_samples(range.start, AUDIO_RATE, document.fps))
         .unwrap_or(usize::MAX)
         .saturating_mul(channel_count)
@@ -920,6 +965,25 @@ fn mix_pass(
             let cut = keep_from.min(stem.1.len());
             stem.1.drain(..cut);
         }
+    }
+    // AU2 §3.7/A2: and the tail trim, so every family covers exactly
+    // `[range.start, range.end)` and `measure_loudness` reports one
+    // `sample_frames` for one requested range.
+    let kept = usize::try_from(
+        frame_to_samples(range.end, AUDIO_RATE, document.fps).saturating_sub(frame_to_samples(
+            range.start,
+            AUDIO_RATE,
+            document.fps,
+        )),
+    )
+    .unwrap_or(usize::MAX)
+    .saturating_mul(channel_count);
+    mix.truncate(kept);
+    for stem in &mut track_stems {
+        stem.1.truncate(kept);
+    }
+    for stem in &mut bus_stems {
+        stem.1.truncate(kept);
     }
     Ok(MixStems {
         tracks: if collect_stems {

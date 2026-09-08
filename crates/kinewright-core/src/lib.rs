@@ -125,14 +125,15 @@ pub use effect::{
     color_node_inactive_reason, color_stage_order_violation, effect_compatibility_stage,
     effect_descriptor, is_audio_effect, is_hold_only_matte_parameter, is_legacy_display_effect,
     is_lut_color_node, is_managed_color_node, is_matte_capable_color_node, is_matte_parameter,
-    lut_node_count, lut_node_may_be_active, managed_color_node_count, matte_capable,
-    matte_parameter_names, matte_parameters, matte_window_parameter_names, matte_window_parameters,
+    is_static_audio_parameter, lut_node_count, lut_node_may_be_active, managed_color_node_count,
+    matte_capable, matte_parameter_names, matte_parameters, matte_window_parameter_names,
+    matte_window_parameters,
 };
 pub use journal::JournalCommand;
 pub use media::{
     Analysis, AnalysisJobStatus, AnalysisKind, AnalysisPhase, AssetBeats, AssetSceneChanges,
-    AssetSilences, AssetTranscript, AudioLoudness, BeatMarker, BeatStatus, BusLevels, Export,
-    ExportCancellation, ExportLutPreflightIssue, ExportLutPreflightReport,
+    AssetSilences, AssetTranscript, AudioChain, AudioLoudness, BeatMarker, BeatStatus, BusLevels,
+    Export, ExportCancellation, ExportLutPreflightIssue, ExportLutPreflightReport,
     ExportMediaPreflightIssue, ExportMediaPreflightReport, ExportProgress, ExportSettings,
     FrameTexture, LinearRgbaImage, LutAvailabilityKind, LutAvailabilityStatus,
     MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_HISTOGRAM_BUCKETS, MATTE_COVERAGE_SCALE,
@@ -148,13 +149,14 @@ pub use media::{
     export_media_preflight, matte_coverage_statistics,
 };
 pub use model::{
-    AssetId, AudioBus, AudioBusId, AudioMix, BinId, Clip, ClipContent, ClipId, Document, Effect,
-    EffectId, FreezeFrame, LUT_ASSET_ID_MAX, LUT_SIZE_MAX, LUT_SIZE_MIN, LinkId, LutAsset,
-    LutAssetId, LutAssetKind, LutAssetSource, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId,
-    MediaAsset, MediaBin, MediaCatalog, MediaKind, MediaSourceFingerprint, ParamValue,
-    RelinkCandidate, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
-    TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, Track, TrackId,
-    TrackKind, TrackMix, Transition, clip_effective_fps, validate_lut_asset,
+    AssetId, AudioBus, AudioBusId, AudioMix, BinId, CHAIN_LOOKAHEAD_MILLISECONDS, ChainLookahead,
+    Clip, ClipContent, ClipId, Document, Effect, EffectId, FreezeFrame, LUT_ASSET_ID_MAX,
+    LUT_SIZE_MAX, LUT_SIZE_MIN, LinkId, LutAsset, LutAssetId, LutAssetKind, LutAssetSource,
+    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaCatalog, MediaKind,
+    MediaSourceFingerprint, ParamValue, RelinkCandidate, SourceSelect, StringOut, StringOutId,
+    SyncGroup, SyncGroupId, SyncGroupMember, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
+    TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix, Transition,
+    chain_lookahead_milliseconds, clip_effective_fps, validate_lut_asset,
 };
 pub use multicam::{
     ReframeFocusBounds, SpeakerAngleAssignment, SpeakerMulticamCut, SpeakerMulticamError,

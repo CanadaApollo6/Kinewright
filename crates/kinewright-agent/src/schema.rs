@@ -475,7 +475,7 @@ fn operation_tool(
             " gain_tenth_db is an integer number of tenths of a decibel in -600..=120. Fade values are non-negative project frames whose sum cannot exceed the clip duration. Fade-out anchors to the clip's project end. Gain and clip fades compose multiplicatively with transition audio ramps.",
         ),
         "UpsertAudioBus" | "RemoveAudioBus" => description.push_str(
-            " Audio buses route each track to at most one bus. Bus effects must use audio_gain, audio_eq, audio_compressor, audio_ducking, or audio_limiter; their numeric controls support the same fixed-point keyframe curves as clip effects. Ducking reads the listed sidechain tracks before bus processing. Unrouted tracks feed the master directly.",
+            " Audio buses route each track to at most one bus and carry an ordered effect chain. Bus effects must use one of audio_gain, audio_eq, audio_compressor, audio_ducking, audio_limiter, audio_parametric_eq, audio_gate, or audio_true_peak_limiter. Prefer audio_parametric_eq (high-pass, low and high shelves, four peaking bands), audio_compressor (peak or RMS detection, soft knee, lookahead), audio_gate, and audio_true_peak_limiter, whose true_peak mode measures the inter-sample peak with a 4x oversampled detector. audio_eq and audio_limiter are legacy fixed-crossover and hard-clamp nodes kept for existing projects; do not add them to a new chain. Every node takes bypass, 0 or 1; bypass, detector and true_peak accept only hold keyframes. The nodes of one chain may declare at most 20 ms of lookahead_milliseconds in total, and that parameter cannot be keyframed at all. Every other numeric control supports the same fixed-point keyframe curves as clip effects, on project frames; frequency and Q interpolate linearly in their integer unit, not logarithmically. Ducking reads the listed sidechain tracks before bus processing. Unrouted tracks feed the master directly.",
         ),
         "SetEffectKeyframes" => description.push_str(
             " The curve uses clip-local integer frame offsets and fixed-point parameter values. Keyframes must be non-negative, strictly ordered, inside the clip, and inside the parameter's documented range. Interpolation is hold, linear, ease_in, ease_out, or ease_in_out and applies from each keyframe to the next.",
@@ -522,11 +522,18 @@ fn effect_documentation() -> String {
             documentation.push_str(&lut_node_pattern_documentation(effect.parameters));
         } else {
             // CC5 §2.2/M36: the 47 matte parameters are emitted once as a
-            // shared legend below, never enumerated per kind.
+            // shared legend below, never enumerated per kind. AU2 §4.1/M36:
+            // the twelve `audio_parametric_eq` band rows are emitted once as
+            // one generating pattern below, for the same reason.
+            let parametric_eq = effect.name == PARAMETRIC_EQ_EFFECT_NAME;
             for (parameter_index, parameter) in effect
                 .parameters
                 .iter()
-                .filter(|parameter| !is_matte_parameter(parameter.name))
+                .filter(|parameter| {
+                    let summarised = is_matte_parameter(parameter.name)
+                        || (parametric_eq && is_parametric_eq_band_parameter(parameter.name));
+                    !summarised
+                })
                 .enumerate()
             {
                 if parameter_index != 0 {
@@ -544,6 +551,14 @@ fn effect_documentation() -> String {
         if is_matte_capable_color_node(effect.name) {
             documentation.push_str("; ");
             documentation.push_str(&matte_pattern_documentation());
+        }
+        // AU2 §4.1, normative: one generating pattern for the four peaking
+        // bands, never twelve enumerated rows.
+        if effect.name == PARAMETRIC_EQ_EFFECT_NAME {
+            documentation.push_str("; ");
+            documentation.push_str(&audio_parametric_eq_pattern_documentation(
+                effect.parameters,
+            ));
         }
         documentation.push(')');
         // Legacy compatibility stages remain loadable but are outside the CC1
@@ -658,6 +673,75 @@ see inspect_grade_matte for measured coverage",
         half = window("_half_width_basis_points"),
         rotation = window("_rotation_centidegrees"),
         feather = window("_feather_basis_points"),
+    )
+}
+
+/// The canonical AU2 parametric EQ effect name, kept local so the compact
+/// description special case is greppable from the schema module.
+const PARAMETRIC_EQ_EFFECT_NAME: &str = "audio_parametric_eq";
+
+/// Whether a parameter name is one of `audio_parametric_eq`'s twelve peaking
+/// band rows.
+///
+/// Deliberately exact — `band` followed by a band index in 1..=4 and an
+/// underscore. A loose `starts_with("band")` would silently swallow a future
+/// `bandwidth_hertz` or `band_solo`: the row would be dropped from the
+/// enumeration *and* fall outside the pattern sentence, leaving a settable
+/// parameter undocumented. A row this predicate rejects is simply enumerated.
+fn is_parametric_eq_band_parameter(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("band") else {
+        return false;
+    };
+    let mut characters = rest.chars();
+    matches!(characters.next(), Some('1'..='4')) && characters.next() == Some('_')
+}
+
+/// A compact pattern description of the twelve `audio_parametric_eq` peaking
+/// band parameters (AU2 §4.1, M36).
+///
+/// Four identical bands enumerated into each of the five effect tools is one
+/// generating pattern written twenty times: the same M36 runtime-efficiency
+/// argument that gave `color_curves` its pattern form and the CC5 matte its
+/// shared legend. Every bound and neutral below is read from the Core
+/// descriptor, so the sentence cannot drift from what Core validates.
+fn audio_parametric_eq_pattern_documentation(parameters: &[EffectParameterDescriptor]) -> String {
+    let band = |suffix: &str| {
+        parameters
+            .iter()
+            .find(|parameter| {
+                is_parametric_eq_band_parameter(parameter.name) && parameter.name.ends_with(suffix)
+            })
+            .map_or_else(
+                || "?".to_owned(),
+                |parameter| format!("{}..={}", parameter.min, parameter.max),
+            )
+    };
+    let centres = parameters
+        .iter()
+        .filter(|parameter| {
+            is_parametric_eq_band_parameter(parameter.name) && parameter.name.ends_with("_hertz")
+        })
+        .map(|parameter| parameter.neutral.to_string())
+        .collect::<Vec<_>>();
+    let band_count = centres.len();
+    let neutral = |suffix: &str| {
+        parameters
+            .iter()
+            .find(|parameter| {
+                is_parametric_eq_band_parameter(parameter.name) && parameter.name.ends_with(suffix)
+            })
+            .map_or_else(|| "?".to_owned(), |parameter| parameter.neutral.to_string())
+    };
+    format!(
+        "band{{i}}_hertz/band{{i}}_gain_tenth_db/band{{i}}_q_hundredths for i=1..={band_count}, \
+one peaking band each: hertz={hertz}, neutral {centres} by band; gain_tenth_db={gain}, \
+neutral {gain_neutral}; q_hundredths={q} hundredths of Q, neutral {q_neutral}",
+        hertz = band("_hertz"),
+        centres = centres.join("/"),
+        gain = band("_gain_tenth_db"),
+        gain_neutral = neutral("_gain_tenth_db"),
+        q = band("_q_hundredths"),
+        q_neutral = neutral("_q_hundredths"),
     )
 }
 
@@ -1106,6 +1190,292 @@ mod tests {
         assert!(wheels.contains("lift_master_basis_points=-2000..=2000, neutral 0"));
         assert!(wheels.contains("gain_blue_thousandths=0..=4000, neutral 1000"));
         assert!(wheels.contains("bypass=0..=1, neutral 0"));
+    }
+
+    /// The description of one generated operation tool, by tool name.
+    fn generated_tool_description(tools: &[OperationToolDefinition], name: &str) -> String {
+        tools
+            .iter()
+            .find(|definition| definition.tool.name == name)
+            .unwrap_or_else(|| panic!("{name} must be a generated tool"))
+            .tool
+            .description
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name} must carry a description"))
+            .to_owned()
+    }
+
+    /// AU2 §7 item A18: the `upsert_audio_bus` prose names the four preferred
+    /// AU2 nodes, tells the agent not to add the two legacy nodes to a new
+    /// chain, states the 20 ms per-chain lookahead budget and the hold-only
+    /// rule, and never claims the ITU detector (AU2 OPEN-4).
+    #[test]
+    fn au2_audio_bus_prose_names_the_new_nodes_and_the_chain_budget() {
+        let tools = operation_tools().unwrap();
+        let description_of = |name: &str| generated_tool_description(&tools, name);
+
+        for tool in ["upsert_audio_bus", "remove_audio_bus"] {
+            let description = description_of(tool);
+            for phrase in [
+                // The closed set Core enforces (`VisualEffectOnAudioBus`).
+                // `upsert_audio_bus` carries no `effect_documentation()`, so
+                // this arm is the only place an agent can read the legal names.
+                "Bus effects must use one of audio_gain, audio_eq, audio_compressor, \
+audio_ducking, audio_limiter, audio_parametric_eq, audio_gate, or \
+audio_true_peak_limiter.",
+                "audio_parametric_eq",
+                "audio_compressor",
+                "audio_gate",
+                "audio_true_peak_limiter",
+                "4x oversampled detector",
+                "do not add them to a new chain",
+                "bypass, detector and true_peak accept only hold keyframes",
+                "at most 20 ms of lookahead_milliseconds",
+                "cannot be keyframed at all",
+                "Unrouted tracks feed the master directly",
+            ] {
+                assert!(
+                    description.contains(phrase),
+                    "{tool} description omitted {phrase}: {description}"
+                );
+            }
+            // Every name Core accepts on a bus is named in the arm, so the
+            // sentence cannot fall behind `is_audio_effect`.
+            for name in [
+                "audio_gain",
+                "audio_eq",
+                "audio_compressor",
+                "audio_ducking",
+                "audio_limiter",
+                "audio_parametric_eq",
+                "audio_gate",
+                "audio_true_peak_limiter",
+            ] {
+                assert!(
+                    kinewright_core::is_audio_effect(name),
+                    "{name} must be a Core audio effect"
+                );
+                assert!(
+                    description.contains(name),
+                    "{tool} description omitted the legal bus effect {name}: {description}"
+                );
+            }
+            // AU2 OPEN-4: the detector has the structure of BS.1770-4 Annex 2
+            // with this contract's own coefficients, so the prose must never
+            // advertise ITU conformance.
+            assert!(
+                !description.contains("ITU"),
+                "{tool} description must not claim the ITU detector: {description}"
+            );
+        }
+    }
+
+    /// AU2 §7 item A18: the twelve `audio_parametric_eq` band rows are one
+    /// generating pattern, not twelve entries repeated into each of the five
+    /// effect tools; every other new AU2 audio row is enumerated normally.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn au2_parametric_eq_band_rows_are_one_pattern_not_twelve_entries() {
+        let tools = operation_tools().unwrap();
+        let description_of = |name: &str| generated_tool_description(&tools, name);
+        let add_effect = description_of("add_effect");
+        let entry = |name: &str| {
+            let start = add_effect
+                .find(&format!("{name}("))
+                .unwrap_or_else(|| panic!("{name} must be documented"));
+            let close = start
+                + add_effect[start..]
+                    .find(')')
+                    .expect("every entry closes its parameter list")
+                + 1;
+            add_effect[start..close].to_owned()
+        };
+
+        // The twelve generated band rows are never enumerated, in any of the
+        // five effect tools that carry `effect_documentation()`.
+        for tool in [
+            "add_effect",
+            "insert_effect",
+            "set_effect_param",
+            "set_effect_keyframes",
+            "clear_effect_keyframes",
+        ] {
+            let description = description_of(tool);
+            for band in 1..=4 {
+                for suffix in ["hertz", "gain_tenth_db", "q_hundredths"] {
+                    let name = format!("band{band}_{suffix}");
+                    assert!(
+                        !description.contains(&name),
+                        "{tool} must summarise {name} rather than enumerate it"
+                    );
+                }
+            }
+        }
+
+        let parametric_eq = entry("audio_parametric_eq");
+        let pattern = audio_parametric_eq_pattern_documentation(
+            EFFECT_DESCRIPTORS
+                .iter()
+                .find(|effect| effect.name == "audio_parametric_eq")
+                .expect("Core must register audio_parametric_eq")
+                .parameters,
+        );
+        assert!(
+            parametric_eq.contains(&pattern),
+            "the audio_parametric_eq entry must carry the band pattern: {parametric_eq}"
+        );
+        // Asserted on the generated description, not on the helper's own
+        // output, so these are not a self-test of the helper.
+        assert!(
+            parametric_eq
+                .contains("band{i}_hertz/band{i}_gain_tenth_db/band{i}_q_hundredths for i=1..=4")
+        );
+        // Every bound and neutral is read from the Core descriptor.
+        assert!(parametric_eq.contains("hertz=20..=20000, neutral 120/500/2000/8000 by band"));
+        assert!(parametric_eq.contains("gain_tenth_db=-240..=240, neutral 0"));
+        assert!(parametric_eq.contains("q_hundredths=10..=1800 hundredths of Q, neutral 71"));
+
+        // The sentence states one set of bounds for all four bands, so the four
+        // bands must actually agree. Unlike the CC5 matte windows, the twelve
+        // rows are hand-written per band in Core, so a per-band edit could
+        // otherwise make the summary a lie the agent cannot see through.
+        let band_parameters = EFFECT_DESCRIPTORS
+            .iter()
+            .find(|effect| effect.name == "audio_parametric_eq")
+            .expect("Core must register audio_parametric_eq")
+            .parameters;
+        let band_row = |index: u32, suffix: &str| {
+            let name = format!("band{index}_{suffix}");
+            *band_parameters
+                .iter()
+                .find(|parameter| parameter.name == name)
+                .unwrap_or_else(|| panic!("Core must register {name}"))
+        };
+        for suffix in ["hertz", "gain_tenth_db", "q_hundredths"] {
+            let first = band_row(1, suffix);
+            assert!(
+                is_parametric_eq_band_parameter(first.name),
+                "band1_{suffix} must be summarised by the pattern"
+            );
+            for index in 2..=4 {
+                let other = band_row(index, suffix);
+                assert!(
+                    is_parametric_eq_band_parameter(other.name),
+                    "band{index}_{suffix} must be summarised by the pattern"
+                );
+                assert_eq!(
+                    (other.min, other.max),
+                    (first.min, first.max),
+                    "band{index}_{suffix} must share band1_{suffix}'s bounds or the one-sentence summary is wrong"
+                );
+                if suffix != "hertz" {
+                    assert_eq!(
+                        other.neutral, first.neutral,
+                        "band{index}_{suffix} must share band1_{suffix}'s neutral or the one-sentence summary is wrong"
+                    );
+                }
+            }
+        }
+        // The four centre neutrals are the four bands' own, in band order.
+        let centres = (1..=4)
+            .map(|index| band_row(index, "hertz").neutral.to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        assert!(
+            parametric_eq.contains(&format!("neutral {centres} by band")),
+            "the centre list must be bands 1..=4 in order: {parametric_eq}"
+        );
+        let enumerated = EFFECT_DESCRIPTORS
+            .iter()
+            .find(|effect| effect.name == "audio_parametric_eq")
+            .expect("Core must register audio_parametric_eq")
+            .parameters
+            .iter()
+            .filter(|parameter| is_parametric_eq_band_parameter(parameter.name))
+            .map(|parameter| {
+                format!(
+                    "{}={}..={}, neutral {}, ",
+                    parameter.name, parameter.min, parameter.max, parameter.neutral
+                )
+                .len()
+            })
+            .sum::<usize>();
+        assert!(
+            enumerated > pattern.len(),
+            "enumerating the bands would cost {enumerated} bytes against the {} byte pattern",
+            pattern.len()
+        );
+
+        // The other seven EQ rows, and every other AU2 row, are enumerated.
+        for row in [
+            "bypass=0..=1, neutral 0",
+            "high_pass_hertz=0..=1000, neutral 0",
+            "low_shelf_hertz=20..=1000, neutral 100",
+            "low_shelf_gain_tenth_db=-240..=240, neutral 0",
+            "high_shelf_hertz=1000..=20000, neutral 8000",
+            "high_shelf_gain_tenth_db=-240..=240, neutral 0",
+            "output_gain_tenth_db=-240..=240, neutral 0",
+        ] {
+            assert!(
+                parametric_eq.contains(row),
+                "the audio_parametric_eq entry omitted {row}: {parametric_eq}"
+            );
+        }
+        let compressor = entry("audio_compressor");
+        for row in [
+            "knee_tenth_db=0..=240, neutral 0",
+            "detector=0..=1, neutral 0",
+            "rms_window_milliseconds=1..=100, neutral 10",
+            "lookahead_milliseconds=0..=10, neutral 0",
+        ] {
+            assert!(
+                compressor.contains(row),
+                "the audio_compressor entry omitted {row}: {compressor}"
+            );
+        }
+        let gate = entry("audio_gate");
+        for row in [
+            "threshold_tenth_db=-600..=0, neutral -600",
+            "ratio_hundredths=100..=2000, neutral 100",
+            "range_tenth_db=0..=800, neutral 0",
+            "attack_milliseconds=1..=1000, neutral 1",
+            "hold_milliseconds=0..=1000, neutral 10",
+            "release_milliseconds=10..=5000, neutral 100",
+        ] {
+            assert!(
+                gate.contains(row),
+                "the audio_gate entry omitted {row}: {gate}"
+            );
+        }
+        let limiter = entry("audio_true_peak_limiter");
+        for row in [
+            "ceiling_tenth_db=-120..=0, neutral 0",
+            "lookahead_milliseconds=1..=10, neutral 5",
+            "release_milliseconds=1..=1000, neutral 50",
+            "true_peak=0..=1, neutral 1",
+        ] {
+            assert!(
+                limiter.contains(row),
+                "the audio_true_peak_limiter entry omitted {row}: {limiter}"
+            );
+        }
+        // The shared bypass row reaches all eight audio kinds.
+        for kind in [
+            "audio_gain",
+            "audio_eq",
+            "audio_compressor",
+            "audio_ducking",
+            "audio_limiter",
+            "audio_parametric_eq",
+            "audio_gate",
+            "audio_true_peak_limiter",
+        ] {
+            let documented = entry(kind);
+            assert!(
+                documented.contains("bypass=0..=1, neutral 0"),
+                "the {kind} entry omitted the shared bypass row: {documented}"
+            );
+        }
     }
 
     /// CC5 §2.2, normative: `schema.rs` must not enumerate the 32

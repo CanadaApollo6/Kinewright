@@ -482,6 +482,12 @@ pub enum OpError {
     DuplicateAudioBusEffect { bus: AudioBusId, effect: EffectId },
     #[error("audio bus {0} uses audio_ducking without any sidechain tracks")]
     AudioBusDuckingWithoutSidechain(AudioBusId),
+    /// AU2 §2.3: one bus chain declares more lookahead than the budget allows.
+    #[error(
+        "audio bus {bus} declares {milliseconds} ms of lookahead, beyond the {budget} ms chain budget",
+        budget = crate::CHAIN_LOOKAHEAD_MILLISECONDS
+    )]
+    AudioBusLookaheadExceeded { bus: AudioBusId, milliseconds: i64 },
     #[error(
         "automation keyframe {at} for audio bus {bus} effect {effect} parameter {name:?} is outside project range 0..{duration}"
     )]
@@ -3365,7 +3371,17 @@ fn validate_curve(
 /// window's `shape_token` and `invert` — on the four matte-capable kinds.
 /// Every other matte control, including the mix, the window geometry, and
 /// every qualifier scalar, keeps every interpolation.
+///
+/// AU2 §2.2 adds an audio branch: on any [`is_audio_effect`] name, `bypass`,
+/// `detector`, and `true_peak` are hold-only and nothing else is — a frequency,
+/// a gain, a Q, and a time constant all keep every interpolation.
 fn is_hold_only_parameter(effect_name: &str, name: &str) -> bool {
+    // AU2 §2.2 rule 1: an audio node's `bypass`, detector mode, and true-peak
+    // flag are switches, not scalars — interpolating between two of their
+    // settings would resolve states no author ever authored.
+    if crate::is_audio_effect(effect_name) {
+        return matches!(name, "bypass" | "detector" | "true_peak");
+    }
     let Some(kind) = crate::ColorNodeKind::from_effect_name(effect_name) else {
         return false;
     };
@@ -3990,31 +4006,86 @@ fn validate_audio_bus(doc: &Document, bus: &AudioBus) -> Result<(), OpError> {
         if effect.name == "audio_ducking" && bus.ducking_sidechain_tracks.is_empty() {
             return Err(OpError::AudioBusDuckingWithoutSidechain(bus.id));
         }
-        let descriptor = crate::effect_descriptor(&effect.name).expect("registered effect");
-        for (name, curve) in &effect.keyframes {
-            curve
-                .validate()
-                .map_err(|error| OpError::InvalidEffectAutomation {
-                    effect: effect.name.clone(),
+        validate_audio_bus_automation(doc.duration, bus.id, effect)?;
+    }
+    // AU2 §2.3: the whole chain's declared latency is one figure the mix graph
+    // must pad every other chain to, so it is bounded per chain rather than
+    // per node.
+    let lookahead = crate::chain_lookahead_milliseconds(&bus.effects);
+    if lookahead > crate::CHAIN_LOOKAHEAD_MILLISECONDS {
+        return Err(OpError::AudioBusLookaheadExceeded {
+            bus: bus.id,
+            milliseconds: lookahead,
+        });
+    }
+    Ok(())
+}
+
+/// Validate one bus effect's automation against the AU2 §2.2 keyframe rules,
+/// the project range, and the parameter's descriptor domain.
+///
+/// The bus path cannot reuse `validate_curve`, which is clip-scoped, so it
+/// applies the same predicates directly.
+fn validate_audio_bus_automation(
+    duration: TimeCode,
+    bus: AudioBusId,
+    effect: &Effect,
+) -> Result<(), OpError> {
+    let descriptor = crate::effect_descriptor(&effect.name).expect("registered effect");
+    for (name, curve) in &effect.keyframes {
+        // AU2 §2.2 rule 2: a parameter read once when the chain runtime is
+        // built takes no curve at all, because the curve would be silently
+        // ignored. Checked before the curve's own structural validation,
+        // because the entry itself is what is rejected. The two reasons stay
+        // distinct: only the lookahead parameters set the graph's latency; the
+        // compressor's RMS window merely sizes a buffer allocated at
+        // construction (AU2 §0 E16).
+        if crate::is_static_audio_parameter(&effect.name, name) {
+            let reason = if name == crate::effect::AUDIO_LOOKAHEAD_PARAMETER {
+                "sets processing latency and cannot be keyframed"
+            } else {
+                "is read once when the chain is built and cannot be keyframed"
+            };
+            return Err(OpError::InvalidEffectAutomation {
+                effect: effect.name.clone(),
+                name: name.clone(),
+                reason: reason.to_owned(),
+            });
+        }
+        curve
+            .validate()
+            .map_err(|error| OpError::InvalidEffectAutomation {
+                effect: effect.name.clone(),
+                name: name.clone(),
+                reason: error.to_string(),
+            })?;
+        // AU2 §2.2 rule 1.
+        if is_hold_only_parameter(&effect.name, name)
+            && curve
+                .keyframes
+                .iter()
+                .any(|keyframe| keyframe.interpolation != KeyframeInterpolation::Hold)
+        {
+            return Err(OpError::NonHoldKeyframeParameter {
+                effect: effect.name.clone(),
+                name: name.clone(),
+            });
+        }
+        for keyframe in &curve.keyframes {
+            if keyframe.at >= duration {
+                return Err(OpError::AudioBusKeyframeOutsideProject {
+                    bus,
+                    effect: effect.id,
                     name: name.clone(),
-                    reason: error.to_string(),
-                })?;
-            for keyframe in &curve.keyframes {
-                if keyframe.at >= doc.duration {
-                    return Err(OpError::AudioBusKeyframeOutsideProject {
-                        bus: bus.id,
-                        effect: effect.id,
-                        name: name.clone(),
-                        at: keyframe.at,
-                        duration: doc.duration,
-                    });
-                }
-                validate_described_effect_parameter(
-                    descriptor,
-                    name,
-                    &ParamValue::Integer(keyframe.value),
-                )?;
+                    at: keyframe.at,
+                    duration,
+                });
             }
+            validate_described_effect_parameter(
+                descriptor,
+                name,
+                &ParamValue::Integer(keyframe.value),
+            )?;
         }
     }
     Ok(())

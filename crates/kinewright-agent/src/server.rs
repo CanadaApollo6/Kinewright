@@ -21072,13 +21072,48 @@ mod tests {
         // 1,186,449 B of input schemas + 96,840 B of descriptions); served is
         // byte-identical because the seven served tools do not embed the
         // `Operation` schema.
+        // AU2 §4.2 Part A adds no tool: the count stays 126 and the registry
+        // grows to 1,312,132 B = the same 1,186,449 B of input schemas plus
+        // 105,005 B of descriptions. Only descriptions move, because the
+        // `Operation` schema embeds `Effect.parameters` as an untyped map, so
+        // no descriptor addition reaches an input schema. The +8,165 B splits
+        // two ways: the forty new descriptor rows add 1,299 B to each of the
+        // five effect tools that carry `effect_documentation()` (6,495 B), and
+        // §4.1's rewritten bus prose grows the arm shared by
+        // `upsert_audio_bus` and `remove_audio_bus` from 335 B to 1,170 B
+        // (835 B x 2 = 1,670 B). That arm carries the closed set of eight
+        // legal bus effect names, which `upsert_audio_bus` cannot learn from
+        // `effect_documentation()` because only the five effect tools carry
+        // it. §4.2's "only the five effect tools' descriptions grow" overlooks
+        // its own §4.1 rewrite. Served stays 5,660 B.
         assert_eq!(
             (
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_303_967, 5_660),
+            (1_312_132, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
+        );
+        // AU2 §4.2/A18: asserting the input-schema figure unchanged is a
+        // stronger and cheaper check than regenerating the total.
+        assert_eq!(
+            registry_metrics.input_schema_bytes, 1_186_449,
+            "AU2 Part A must not move a byte of the generated input schemas: {registry_metrics:?}"
+        );
+        assert_eq!(
+            registry_metrics.description_bytes, 105_005,
+            "registry={registry_metrics:?}"
+        );
+        // AU2 §4.2/A18: the served triple, byte-identical to CC6's.
+        assert_eq!(
+            (
+                served_metrics.tool_count,
+                served_metrics.serialized_bytes,
+                served_metrics.input_schema_bytes,
+                served_metrics.description_bytes
+            ),
+            (7, 5_660, 3_510, 998),
+            "served={served_metrics:?}"
         );
 
         let catalog = capabilities(&registry);

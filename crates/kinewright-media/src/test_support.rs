@@ -57,6 +57,20 @@ impl GeneratedMedia {
         Self(output)
     }
 
+    /// Write a fixture straight to disk, for material a generator cannot
+    /// express exactly (AU2 §3.9: a single-sample impulse).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the file cannot be written.
+    #[must_use]
+    pub fn from_bytes(label: &str, extension: &str, bytes: &[u8]) -> Self {
+        let output = std::env::temp_dir().join(format!("{}.{}", unique_stem(label), extension));
+        fs::write(&output, bytes)
+            .unwrap_or_else(|error| panic!("could not write {}: {error}", output.display()));
+        Self(output)
+    }
+
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.0

@@ -215,10 +215,21 @@ impl Effect {
         self.keyframes
             .get(name)
             .and_then(|curve| curve.value_at(at))
-            .or_else(|| match self.parameters.get(name) {
-                Some(ParamValue::Integer(value)) => Some(*value),
-                Some(ParamValue::Boolean(_) | ParamValue::Text(_)) | None => None,
-            })
+            .or_else(|| self.static_integer_parameter(name))
+    }
+
+    /// AU2 §2.2: the stored static value of one parameter, ignoring keyframes.
+    ///
+    /// `None` when the parameter is absent; callers fall back to the
+    /// descriptor neutral. Distinct from [`Effect::integer_parameter_at`],
+    /// which resolves a curve: a latency-bearing parameter is read once when a
+    /// chain runtime is built and never per frame.
+    #[must_use]
+    pub fn static_integer_parameter(&self, name: &str) -> Option<i64> {
+        match self.parameters.get(name) {
+            Some(ParamValue::Integer(value)) => Some(*value),
+            Some(ParamValue::Boolean(_) | ParamValue::Text(_)) | None => None,
+        }
     }
 
     /// Produce an ephemeral static effect for one rendered frame.
@@ -549,10 +560,81 @@ pub struct AudioMix {
     pub tracks: Vec<TrackMix>,
 }
 
+/// AU2 §3.6: the per-chain lookahead budget, in milliseconds.
+///
+/// One chain may carry a 10 ms lookahead compressor *and* a 10 ms true-peak
+/// limiter; a chain declaring more is rejected with
+/// [`OpError::AudioBusLookaheadExceeded`](crate::OpError::AudioBusLookaheadExceeded).
+pub const CHAIN_LOOKAHEAD_MILLISECONDS: i64 = 20;
+
+/// AU2 §3.6: the processing latency one document's chains declare.
+///
+/// Deliberately carries no `total()`: latency is only ever converted to sample
+/// frames per stage and then summed, never summed in milliseconds first, which
+/// would be off by a frame wherever the sample rate is not a multiple of 1 000.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ChainLookahead {
+    /// The largest lookahead any one bus chain declares, in milliseconds.
+    pub bus_stage: i64,
+    /// The master chain's own declared lookahead, in milliseconds. Always 0 in
+    /// AU2 Part A, which adds no master chain.
+    pub master_stage: i64,
+}
+
+/// AU2 §3.6: the declared processing latency of one ordered chain, in
+/// milliseconds.
+///
+/// Sums the **static** `lookahead_milliseconds` of every `audio_compressor`
+/// and `audio_true_peak_limiter` in the slice, using the descriptor neutral
+/// when the parameter is absent, whether or not the node is bypassed: a
+/// bypassed node keeps its delay line, so toggling bypass changes no
+/// alignment. The compressor's `rms_window_milliseconds` is static too (AU2 §0
+/// E16) but is not latency, so it is never counted here.
+#[must_use]
+pub fn chain_lookahead_milliseconds(effects: &[Effect]) -> i64 {
+    effects
+        .iter()
+        .filter(|effect| {
+            crate::is_static_audio_parameter(&effect.name, crate::effect::AUDIO_LOOKAHEAD_PARAMETER)
+        })
+        .map(|effect| {
+            effect
+                .static_integer_parameter(crate::effect::AUDIO_LOOKAHEAD_PARAMETER)
+                .or_else(|| {
+                    crate::effect_descriptor(&effect.name)
+                        .and_then(|descriptor| {
+                            descriptor.parameter(crate::effect::AUDIO_LOOKAHEAD_PARAMETER)
+                        })
+                        .map(|parameter| parameter.neutral)
+                })
+                .unwrap_or_default()
+        })
+        .sum()
+}
+
 impl AudioMix {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.buses.is_empty() && self.tracks.is_empty()
+    }
+
+    /// AU2 §3.6: the processing latency this document's chains declare.
+    ///
+    /// `bus_stage` is the maximum over buses of that bus's declared lookahead
+    /// sum, because every bus chain and the unrouted path are padded to it;
+    /// `master_stage` is the master chain's own sum, which is always 0 in Part
+    /// A. Zero for every pre-AU2 document.
+    #[must_use]
+    pub fn lookahead_milliseconds(&self) -> ChainLookahead {
+        ChainLookahead {
+            bus_stage: self
+                .buses
+                .iter()
+                .map(|bus| chain_lookahead_milliseconds(&bus.effects))
+                .max()
+                .unwrap_or_default(),
+            master_stage: 0,
+        }
     }
 
     /// The stored mix state for a track, or the neutral state when absent (AU1 §2.2).

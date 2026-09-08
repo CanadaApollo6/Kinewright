@@ -49,6 +49,11 @@ New bus effects:
 - `audio_eq`
 - `audio_compressor`
 - `audio_ducking`
+- `audio_limiter`
+
+AU2 added `audio_parametric_eq`, `audio_gate`, and `audio_true_peak_limiter`, a
+`bypass` flag on every audio node, and soft-knee, RMS, and lookahead controls on
+`audio_compressor`; see `docs/AU2-EQ-AND-DYNAMICS.md`.
 
 New inspectors:
 
@@ -110,7 +115,9 @@ M33 is complete when:
 - Audio buses are flat. There are no nested sends, aux returns, plug-in hosting,
   or loudness normalization in M33.
 - The EQ uses deterministic 200 Hz and 4 kHz one-pole crossovers. It is useful
-  shaping, not a replacement for a full parametric studio EQ.
+  shaping, not a replacement for a full parametric studio EQ. AU2 added the
+  biquad `audio_parametric_eq` beside it; `audio_eq` remains valid as a legacy
+  node.
 - Exact stateful seek preroll can be expensive late in a long project. A future
   processor-checkpoint cache can preserve the contract while reducing seek
   latency.

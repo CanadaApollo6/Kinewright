@@ -110,8 +110,9 @@ remaining project range. The media worker runs one stage order in playback and i
 export: clip shaping (gain, fades, transition ramps), then the per-track stage
 (mute/solo gate, gain, balance pan), then routing — unrouted tracks to master,
 bus tracks to their bus, ducking sidechains tapping the post-track-stage signal —
-then bus effects in order, the master sum, and a single hard clamp to
-`-1.0..=1.0`. That clamp is the only one in the path. Unrouted tracks are summed
+then bus effects in order (a bypassed node still applies its delay), each bus's
+alignment pad, the unrouted path's plain delay, the master sum, and a single
+hard clamp to `-1.0..=1.0`. That clamp is the only one in the path. Unrouted tracks are summed
 in `document.tracks` order, so both paths add the same floats in the same order
 and the result is deterministic run to run. The output ring keeps two seconds of
 capacity, but the feeder fills only to a one-second target
@@ -125,6 +126,18 @@ that range cannot fill its mapped project duration. Stream PTS is normalized by
 the stream-start offset before trimming. A playback seek rebuilds the source
 set at one shared project-sample position, while paused scrubbing remains
 video-only.
+
+A chain that declares processing lookahead delays the whole mix by that much.
+The bus stage's latency is the largest lookahead any one bus declares, the
+master stage's is the master chain's own, and every other chain and the
+unrouted path are padded to match, so buses stay aligned with each other. The
+total is computed once when the processor is built and is zero for any document
+with no lookahead node, so every project written before AU2 mixes byte for byte
+as it did. Export mixes past the requested end by the total and drops the same
+number of leading sample frames; a playback seek runs past its target by the
+total and discards it, so output frame `k` still carries project frame
+`target + k` and the transport clock is unchanged. A live edit that changes any
+chain's lookahead stops and re-cues playback once.
 
 The worker mixes fixed 1,024-sample-frame chunks and lazily opens a decoder only
 when the feeder reaches its clip. Since the feeder fills to one second, this

@@ -106,6 +106,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-08-27, after CC7) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-07, after AU1) | 126 | 1,303,967 B | 1,186,449 B | 96,840 B |
 | Served MCP runtime (2026-09-07, after AU1) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-08, after AU2 Part A) | 126 | 1,312,132 B | 1,186,449 B | 105,005 B |
+| Served MCP runtime (2026-09-08, after AU2 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 
 That is a 99.1% reduction in initially advertised serialized tool metadata at
 the M36 baseline, 99.4% at the 2026-08-24 measurement, 99.56% after CC6
@@ -114,10 +116,19 @@ the M36 baseline, 99.4% at the 2026-08-24 measurement, 99.56% after CC6
 rows are byte-identical to CC6's. AU1 adds the generated `set_track_mix`
 mutator and the `get_audio_levels` inspector, which grow the registry by
 23,907 B without moving the served surface by a byte: neither tool is served,
-and the seven served tools do not embed the `Operation` schema. The registry
-grew with the colour tools; the served surface stays at seven tools. The
-`color_curves` descriptor (133 parameters) is summarized as a compact pattern in
-tool documentation, keeping roughly 18.8 KB out of the registry.
+and the seven served tools do not embed the `Operation` schema. AU2 Part A adds
+no tool and no input-schema byte: the `Operation` schema embeds
+`Effect.parameters` as an untyped map, so nothing it adds can reach an input
+schema and only description bytes move, from 96,840 B to 105,005 B. That
+8,165 B splits into 6,495 B of descriptor rows (1,299 B on each of the five
+effect tools) and 1,670 B of prose (the rewritten `upsert_audio_bus` /
+`remove_audio_bus` arm, 335 B to 1,170 B, on two tools). `input_schema_bytes`
+stays byte-identical at 1,186,449 B and the served triple at
+7 / 5,660 B / 3,510 B / 998 B. The registry grew with the colour tools; the
+served surface stays at seven tools. The `color_curves` descriptor (133
+parameters) is summarized as a compact pattern in tool documentation, keeping
+roughly 18.8 KB out of the registry, and AU2 gives `audio_parametric_eq`'s
+twelve peaking-band rows the same treatment.
 It is not yet a claim of 99.1% fewer provider tokens. Providers transform,
 cache, and meter tool definitions differently. A controlled benchmark between
 the pre-M36 revision and the current runtime is the acceptance gate for model-

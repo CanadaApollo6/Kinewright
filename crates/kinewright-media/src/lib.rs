@@ -10,6 +10,7 @@ mod compositor;
 mod decode;
 mod derived;
 mod derived_cache;
+mod dsp;
 mod engine;
 mod export;
 mod frame;
@@ -60,6 +61,7 @@ use ffmpeg_next as ffmpeg;
 use kinewright_core::MediaError;
 
 pub use analysis::{MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_FILES, MAX_WAVEFORM_PEAKS};
+pub use audio::parametric_eq_magnitude_db;
 pub use builtin_looks::{
     BUILTIN_IDENTITY_SIZE, BUILTIN_LOOK_DOMAIN_MAX, BUILTIN_LOOK_DOMAIN_MIN, BUILTIN_LOOK_SHA256,
     BUILTIN_LOOK_SIZE, BuiltinLook,

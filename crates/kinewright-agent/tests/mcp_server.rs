@@ -2463,7 +2463,11 @@ async fn cc7_prepare_commit_and_compare(
 /// CC7 §5.4: CC7 added no tool, so the served surface stays byte-for-byte
 /// what CC6 published. AU1 §6.2 adds two internal tools — the generated
 /// `set_track_mix` mutator and the `get_audio_levels` inspector — so the
-/// registry counts move while the served seven do not.
+/// registry counts move while the served seven do not. AU2 §4.2 Part A adds
+/// no tool at all: the registry stays at 126 with 76 inspectors and only
+/// descriptions grow — the five effect tools' by 1,299 B each and the two bus
+/// tools' by 835 B each, for the +8,165 B the registry figure records — so
+/// every figure below is unchanged.
 #[tokio::test(flavor = "multi_thread")]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let core = Core::spawn(Document::default()).unwrap();
@@ -2476,7 +2480,11 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
 
     // The served surface, over the live endpoint.
     let tools = client.list_tools(None).await.unwrap().tools;
-    assert_eq!(tools.len(), 7, "AU1 adds no served tool");
+    assert_eq!(
+        tools.len(),
+        7,
+        "neither AU1 nor AU2 Part A adds a served tool"
+    );
     assert_eq!(
         tools
             .iter()
@@ -2491,19 +2499,20 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     assert_eq!(
         registry.len(),
         126,
-        "AU1 adds set_track_mix and get_audio_levels"
+        "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool"
     );
     assert!(registry.iter().any(|name| name == "set_track_mix"));
     assert!(registry.iter().any(|name| name == "get_audio_levels"));
     assert_eq!(
         registry.len() - operations.len(),
         76,
-        "AU1 adds set_track_mix and get_audio_levels"
+        "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool"
     );
 
     // The served byte counts CC6 recorded, asserted byte-identically: neither
     // AU1 tool is served, and the seven served tools do not embed the
-    // `Operation` schema, so the generated mutator does not reach them.
+    // `Operation` schema, so neither the generated mutator nor AU2 Part A's
+    // forty new audio descriptor rows reach them.
     let metrics = server.tool_surface_metrics();
     assert_eq!(metrics.tool_count, 7);
     assert_eq!(metrics.serialized_bytes, 5_660, "{metrics:?}");

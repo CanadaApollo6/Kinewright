@@ -2669,6 +2669,39 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 | EffectUniform::DuckReduction
                 | EffectUniform::DuckAttack
                 | EffectUniform::DuckRelease
+                | EffectUniform::AudioBypass
+                | EffectUniform::CompressorKnee
+                | EffectUniform::CompressorDetector
+                | EffectUniform::CompressorRmsWindow
+                | EffectUniform::CompressorLookahead
+                | EffectUniform::ParametricEqHighPassHertz
+                | EffectUniform::ParametricEqLowShelfHertz
+                | EffectUniform::ParametricEqLowShelfGain
+                | EffectUniform::ParametricEqBand1Hertz
+                | EffectUniform::ParametricEqBand1Gain
+                | EffectUniform::ParametricEqBand1Q
+                | EffectUniform::ParametricEqBand2Hertz
+                | EffectUniform::ParametricEqBand2Gain
+                | EffectUniform::ParametricEqBand2Q
+                | EffectUniform::ParametricEqBand3Hertz
+                | EffectUniform::ParametricEqBand3Gain
+                | EffectUniform::ParametricEqBand3Q
+                | EffectUniform::ParametricEqBand4Hertz
+                | EffectUniform::ParametricEqBand4Gain
+                | EffectUniform::ParametricEqBand4Q
+                | EffectUniform::ParametricEqHighShelfHertz
+                | EffectUniform::ParametricEqHighShelfGain
+                | EffectUniform::ParametricEqOutputGain
+                | EffectUniform::GateThreshold
+                | EffectUniform::GateRatio
+                | EffectUniform::GateRange
+                | EffectUniform::GateAttack
+                | EffectUniform::GateHold
+                | EffectUniform::GateRelease
+                | EffectUniform::TruePeakCeiling
+                | EffectUniform::TruePeakLookahead
+                | EffectUniform::TruePeakRelease
+                | EffectUniform::TruePeakDetector
                 | EffectUniform::ColorNode => {}
                 EffectUniform::LutPreset => params.lut_preset = value,
                 EffectUniform::LutIntensity => params.lut_intensity = value / 100.0,

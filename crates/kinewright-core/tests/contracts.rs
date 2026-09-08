@@ -258,15 +258,46 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                 id: AudioBusId(1),
                 name: "Dialogue".to_owned(),
                 tracks: vec![TrackId(1)],
-                effects: vec![Effect {
-                    id: EffectId(1),
-                    name: "audio_gain".to_owned(),
-                    parameters: BTreeMap::from([(
-                        "gain_tenth_db".to_owned(),
-                        ParamValue::Integer(-30),
-                    )]),
-                    keyframes: BTreeMap::new(),
-                }],
+                effects: vec![
+                    Effect {
+                        id: EffectId(1),
+                        name: "audio_gain".to_owned(),
+                        parameters: BTreeMap::from([(
+                            "gain_tenth_db".to_owned(),
+                            ParamValue::Integer(-30),
+                        )]),
+                        keyframes: BTreeMap::new(),
+                    },
+                    // AU2 §2.1: the three new nodes are ordinary `Effect`
+                    // records, so they ride the existing wire shape.
+                    Effect {
+                        id: EffectId(2),
+                        name: "audio_parametric_eq".to_owned(),
+                        parameters: BTreeMap::from([
+                            ("high_pass_hertz".to_owned(), ParamValue::Integer(80)),
+                            ("band1_gain_tenth_db".to_owned(), ParamValue::Integer(-45)),
+                        ]),
+                        keyframes: BTreeMap::new(),
+                    },
+                    Effect {
+                        id: EffectId(3),
+                        name: "audio_gate".to_owned(),
+                        parameters: BTreeMap::from([
+                            ("threshold_tenth_db".to_owned(), ParamValue::Integer(-380)),
+                            ("range_tenth_db".to_owned(), ParamValue::Integer(180)),
+                        ]),
+                        keyframes: BTreeMap::new(),
+                    },
+                    Effect {
+                        id: EffectId(4),
+                        name: "audio_true_peak_limiter".to_owned(),
+                        parameters: BTreeMap::from([
+                            ("ceiling_tenth_db".to_owned(), ParamValue::Integer(-10)),
+                            ("lookahead_milliseconds".to_owned(), ParamValue::Integer(5)),
+                        ]),
+                        keyframes: BTreeMap::new(),
+                    },
+                ],
                 ducking_sidechain_tracks: Vec::new(),
             },
         },
@@ -3007,7 +3038,21 @@ fn cube_lut_requires_a_non_empty_text_path_and_preserves_it() {
     );
 }
 
+/// One AU2 §2.1 audio node declaring a static `lookahead_milliseconds`.
+fn lookahead_effect(id: u64, name: &str, milliseconds: i64) -> Effect {
+    Effect {
+        id: EffectId(id),
+        name: name.to_owned(),
+        parameters: BTreeMap::from([(
+            "lookahead_milliseconds".to_owned(),
+            ParamValue::Integer(milliseconds),
+        )]),
+        keyframes: BTreeMap::new(),
+    }
+}
+
 #[test]
+#[allow(clippy::too_many_lines)]
 fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically() {
     let mut doc = document_with_one_clip();
     let gain = Effect {
@@ -3074,6 +3119,86 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
                             at: doc.duration,
                             value: 0,
                             interpolation: KeyframeInterpolation::Linear,
+                        }],
+                    },
+                )]),
+            }],
+            ducking_sidechain_tracks: Vec::new(),
+        },
+        // AU2 §2.3: 10 + 10 + 1 ms is one millisecond past the chain budget.
+        AudioBus {
+            id: AudioBusId(1),
+            name: "Too much lookahead".to_owned(),
+            tracks: vec![TrackId(1)],
+            effects: vec![
+                lookahead_effect(1, "audio_compressor", 10),
+                lookahead_effect(2, "audio_compressor", 10),
+                lookahead_effect(3, "audio_true_peak_limiter", 1),
+            ],
+            ducking_sidechain_tracks: Vec::new(),
+        },
+        // AU2 §2.2 rule 1: `bypass` is a switch, so only `Hold` is legal.
+        AudioBus {
+            id: AudioBusId(1),
+            name: "Interpolated bypass".to_owned(),
+            tracks: vec![TrackId(1)],
+            effects: vec![Effect {
+                id: EffectId(1),
+                name: "audio_gain".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::from([(
+                    "bypass".to_owned(),
+                    AutomationCurve {
+                        keyframes: vec![Keyframe {
+                            at: TimeCode(20),
+                            value: 1,
+                            interpolation: KeyframeInterpolation::Linear,
+                        }],
+                    },
+                )]),
+            }],
+            ducking_sidechain_tracks: Vec::new(),
+        },
+        // AU2 §0 E16: the RMS detector window is sized once when the chain is
+        // built, so a curve on it would be silently ignored.
+        AudioBus {
+            id: AudioBusId(1),
+            name: "Keyed RMS window".to_owned(),
+            tracks: vec![TrackId(1)],
+            effects: vec![Effect {
+                id: EffectId(1),
+                name: "audio_compressor".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::from([(
+                    "rms_window_milliseconds".to_owned(),
+                    AutomationCurve {
+                        keyframes: vec![Keyframe {
+                            at: TimeCode(20),
+                            value: 40,
+                            interpolation: KeyframeInterpolation::Linear,
+                        }],
+                    },
+                )]),
+            }],
+            ducking_sidechain_tracks: Vec::new(),
+        },
+        // AU2 §2.2 rule 2: a latency-bearing parameter takes no curve at all,
+        // not even a `Hold` one.
+        AudioBus {
+            id: AudioBusId(1),
+            name: "Keyed lookahead".to_owned(),
+            tracks: vec![TrackId(1)],
+            effects: vec![Effect {
+                id: EffectId(1),
+                name: "audio_true_peak_limiter".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::from([(
+                    "lookahead_milliseconds".to_owned(),
+                    AutomationCurve {
+                        keyframes: vec![Keyframe {
+                            at: TimeCode(20),
+                            value: 3,
+                            interpolation: KeyframeInterpolation::Hold,
                         }],
                     },
                 )]),

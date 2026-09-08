@@ -47,6 +47,21 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- AU2 Part A, EQ and dynamics nodes: three new bus effects —
+  `audio_parametric_eq` (a biquad high-pass, low and high shelves, and four
+  peaking bands with frequency, gain, and Q), `audio_gate` (a downward expander
+  with ratio, range floor, attack, hold, and release), and
+  `audio_true_peak_limiter` (a lookahead limiter with a 4x oversampled
+  true-peak detector whose ceiling is a proven bound) — plus a soft knee, an
+  RMS detector, and lookahead on `audio_compressor`, and a `bypass` flag on
+  every audio node. Every new control has a descriptor with minimum, maximum,
+  and neutral, validated in the operation and at document load; a chain may
+  declare at most 20 ms of lookahead and lookahead is never keyframed. A chain
+  that looks ahead delays the whole mix by a document-derived latency that
+  export and playback both compensate, so audio stays aligned with picture and
+  every project written before AU2 mixes byte for byte as it did.
+  `MixPeaks` reports gain reduction per dynamics node. `audio_eq` and
+  `audio_limiter` remain valid legacy nodes. See docs/AU2-EQ-AND-DYNAMICS.md.
 - AU1 manual mix: every track carries typed mix state — `TrackMix` entries in
   `Document.audio_mix.tracks` (gain in tenths of a decibel, pan in integer
   percent, mute, solo) written by one idempotent `SetTrackMix` and re-validated
