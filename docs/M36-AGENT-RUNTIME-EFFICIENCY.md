@@ -110,6 +110,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-08, after AU2 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-08, after AU2 Part B) | 129 | 1,421,520 B | 1,293,084 B | 107,271 B |
 | Served MCP runtime (2026-09-08, after AU2 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-09, after AU3 Part A) | 130 | 1,424,875 B | 1,295,138 B | 108,413 B |
+| Served MCP runtime (2026-09-09, after AU3 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 
 That is a 99.1% reduction in initially advertised serialized tool metadata at
 the M36 baseline, 99.4% at the 2026-08-24 measurement, 99.56% after CC6
@@ -158,6 +160,17 @@ sentence on the two bus tools (97 B x 2), and 134 B for the law-neutral
 seven served tools do not embed the `Operation` schema, so even a model change
 cannot reach them. That is the whole point of the split surface — a 99.6%
 reduction that holds at 5,660 B served against a 1,421,520 B registry.
+
+AU3 Part A adds one tool, the `get_audio_qc` inspector, so the registry goes to
+130 tools and 1,424,875 B, up 3,355 B. The 2,054 B of new input schema is
+`get_audio_qc`'s own schema entire: it embeds no `Operation`, and none of the
+AU3 core types (`AudioLoudness`'s four new fields, `LoudnessTarget`,
+`AudioQcReport`) appears in any tool's arguments, so no other schema moved. The
+1,142 B of new descriptions splits exactly three ways: 890 B of `get_audio_qc`'s
+own prose, 205 B for `get_audio_levels`' four-field gloss and its sub-block
+refusal sentence, and 47 B for `get_delivery_profiles`' loudness-target clause.
+The served quad is byte-identical again at 7 / 5,660 B / 3,510 B / 998 B: a
+99.60% reduction that holds at 5,660 B served against a 1,424,875 B registry.
 
 The registry grew with the colour tools; the served surface stays at seven
 tools. The `color_curves` descriptor (133

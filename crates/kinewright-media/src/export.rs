@@ -7,11 +7,15 @@ use std::{
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
-    AudioBusId, BusLevels, ColorDescription, DELIVERY_BIT_DEPTH_ALLOWED, DeliveryColorError,
-    DeliveryColorMismatch, DeliveryEncodeDepth, Document, ExportCancellation, ExportProgress,
+    AUDIO_QC_CLIPPED_RUN_SAMPLES, AUDIO_QC_SILENCE_DBFS_HUNDREDTHS,
+    AUDIO_QC_SILENCE_WINDOW_MILLISECONDS, AudioBusId, AudioChannelClipping, AudioClipping,
+    AudioQcMeasurements, AudioQcProvenance, AudioQcReport, AudioQcRequest, BusLevels,
+    ColorDescription, DELIVERY_BIT_DEPTH_ALLOWED, DeliveryColorError, DeliveryColorMismatch,
+    DeliveryEncodeDepth, DeliveryProfile, Document, ExportCancellation, ExportProgress,
     ExportSettings, FrameRounding, MediaError, MixLevelReport, MixLevelRequest, MixSpectrumPoint,
     MixSpectrumReport, MixSpectrumRequest, ProgressSink, TimeCode, TrackId, TrackLevels,
-    delivery_color_mismatches, map_frames_with_rounding,
+    audio_qc_exceptions, audio_qc_technical_pass, delivery_color_mismatches,
+    map_frames_with_rounding,
 };
 
 use crate::{
@@ -22,7 +26,7 @@ use crate::{
     clock::{frame_to_samples, samples_to_frame},
     compositor::GpuContext,
     decode::backend,
-    loudness::measure_loudness,
+    loudness::{LOUDNESS_GATING_BLOCK_FRAMES, LoudnessMeter},
     lut_store::LutLibrary,
     render::FrameRenderer,
     spectrum::{SPECTRUM_MINIMUM_FRAMES, third_octave_spectrum},
@@ -784,32 +788,121 @@ pub(crate) struct MixStems {
     pub(crate) master: Vec<f32>,
 }
 
+/// AU3 §3.8: a per-chunk consumer of the mix pass.
+///
+/// The pass calls `track`, `bus`, and `master` with exactly the frames the
+/// corresponding stem would have held for the requested range — the AU2 §3.7
+/// head drop and tail truncation are applied to the feed by [`FamilyWindow`]
+/// before any callback — in order, one 1 024-frame chunk (or the split of one
+/// at a range boundary) at a time. `master` sees the summed master **before**
+/// the single clamp (F7); a loudness consumer clamps a copy itself.
+pub(crate) trait MixObserver {
+    /// True when the pass must run `mix_chunk_with_stems`; `mix_audio` pays
+    /// nothing for an observer that does not want them.
+    fn wants_stems(&self) -> bool {
+        false
+    }
+    /// Post-stage, pre-bus.
+    fn track(&mut self, _track: TrackId, _chunk: &[f32]) -> Result<(), MediaError> {
+        Ok(())
+    }
+    /// Post-bus-chain.
+    fn bus(&mut self, _bus: AudioBusId, _chunk: &[f32]) -> Result<(), MediaError> {
+        Ok(())
+    }
+    /// The summed master before the clamp.
+    fn master(&mut self, _chunk: &[f32]) -> Result<(), MediaError> {
+        Ok(())
+    }
+}
+
+/// AU3 §3.8: the observer that observes nothing.
+pub(crate) struct NoObserver;
+
+impl MixObserver for NoObserver {}
+
+/// AU3 §3.8: which whole-length buffers a mix pass keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MixCollect {
+    /// Keep every track and bus stem (`measure_mix_spectrum`'s whole-stem path).
+    pub(crate) stems: bool,
+    /// Keep the post-clamp master (`mix_audio`).
+    pub(crate) master: bool,
+}
+
+/// AU3 §3.8: AU2 §3.7's head drop and tail truncation as a window over a
+/// streamed feed, in sample frames. A chunk straddling a boundary is split;
+/// the observer receives exactly the frames the stem would have held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FamilyWindow {
+    skip: usize,
+    remaining: usize,
+}
+
+impl FamilyWindow {
+    pub(crate) const fn new(skip: usize, remaining: usize) -> Self {
+        Self { skip, remaining }
+    }
+
+    /// The part of `chunk` (interleaved over `channels`) inside the window.
+    pub(crate) fn take<'a>(&mut self, chunk: &'a [f32], channels: usize) -> &'a [f32] {
+        let channels = channels.max(1);
+        let frames = chunk.len() / channels;
+        let drop = self.skip.min(frames);
+        self.skip -= drop;
+        let take = (frames - drop).min(self.remaining);
+        self.remaining -= take;
+        &chunk[drop * channels..(drop + take) * channels]
+    }
+}
+
 /// The whole-document export mix (AU1 §6.1: the same code path the measured
 /// master comes from, with stem collection switched off).
 pub(crate) fn mix_audio(
     document: &Document,
     settings: &ExportSettings,
 ) -> Result<Vec<f32>, MediaError> {
-    mix_pass(document, TimeCode::ZERO..document.duration, settings, false).map(|stems| stems.master)
+    mix_pass(
+        document,
+        TimeCode::ZERO..document.duration,
+        settings,
+        MixCollect {
+            stems: false,
+            master: true,
+        },
+        &mut NoObserver,
+    )
+    .map(|stems| stems.master)
 }
 
 /// AU1 §6.1: mix from frame 0 through `range.end` — the seek-preroll rule, so
 /// stateful bus effects match export exactly — and keep `[range.start,
-/// range.end)` of every stem.
-fn mix_audio_stems(
+/// range.end)` of every stem. AU3 §3.8: the remaining whole-stem path, used by
+/// `measure_mix_spectrum`.
+pub(crate) fn mix_audio_stems(
     document: &Document,
     range: std::ops::Range<TimeCode>,
     settings: &ExportSettings,
 ) -> Result<MixStems, MediaError> {
-    mix_pass(document, range, settings, true)
+    mix_pass(
+        document,
+        range,
+        settings,
+        MixCollect {
+            stems: true,
+            master: true,
+        },
+        &mut NoObserver,
+    )
 }
 
 #[allow(clippy::too_many_lines)]
-fn mix_pass(
+pub(crate) fn mix_pass(
     document: &Document,
     range: std::ops::Range<TimeCode>,
     settings: &ExportSettings,
-    collect_stems: bool,
+    collect: MixCollect,
+    observer: &mut dyn MixObserver,
 ) -> Result<MixStems, MediaError> {
     // AU2 §3.7: the processor holds `latency` sample frames of the mix, so the
     // pass runs that much past the requested end and each stem family drops the
@@ -903,7 +996,36 @@ fn mix_pass(
         .iter()
         .map(|bus| bus.id)
         .collect::<Vec<_>>();
-    let mut mix = Vec::with_capacity(total_samples);
+    // AU3 §3.8: the per-family windows the observer feed is trimmed through —
+    // AU2 §3.7's head drop (per family) plus `keep_from`, then `T` frames.
+    let keep_from_frames = usize::try_from(frame_to_samples(range.start, AUDIO_RATE, document.fps))
+        .unwrap_or(usize::MAX);
+    let kept_frames = usize::try_from(
+        frame_to_samples(range.end, AUDIO_RATE, document.fps).saturating_sub(frame_to_samples(
+            range.start,
+            AUDIO_RATE,
+            document.fps,
+        )),
+    )
+    .unwrap_or(usize::MAX);
+    let mut track_windows = track_order
+        .iter()
+        .map(|_| FamilyWindow::new(keep_from_frames, kept_frames))
+        .collect::<Vec<_>>();
+    let bus_head_frames = processor.bus_stage_frames();
+    let mut bus_windows = bus_order
+        .iter()
+        .map(|_| {
+            FamilyWindow::new(
+                bus_head_frames.saturating_add(keep_from_frames),
+                kept_frames,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut master_window =
+        FamilyWindow::new(latency.saturating_add(keep_from_frames), kept_frames);
+    let run_stems = collect.stems || observer.wants_stems();
+    let mut mix = Vec::with_capacity(if collect.master { total_samples } else { 0 });
     let mut track_stems = track_order
         .iter()
         .map(|track| (*track, Vec::<f32>::new()))
@@ -929,17 +1051,36 @@ fn mix_pass(
                 (*track, samples[start..end].to_vec())
             })
             .collect::<HashMap<_, _>>();
-        if collect_stems {
+        if run_stems {
             let stems = processor.mix_chunk_with_stems(&chunk_tracks, start_frame, frame_count)?;
-            for (stem, chunk) in track_stems.iter_mut().zip(stems.tracks) {
-                stem.1.extend_from_slice(&chunk);
+            for ((track, window), chunk) in track_order
+                .iter()
+                .zip(&mut track_windows)
+                .zip(&stems.tracks)
+            {
+                observer.track(*track, window.take(chunk, channel_count))?;
             }
-            for (stem, chunk) in bus_stems.iter_mut().zip(stems.buses) {
-                stem.1.extend_from_slice(&chunk);
+            for ((bus, window), chunk) in bus_order.iter().zip(&mut bus_windows).zip(&stems.buses) {
+                observer.bus(*bus, window.take(chunk, channel_count))?;
             }
-            mix.extend(stems.master);
+            observer.master(master_window.take(&stems.master, channel_count))?;
+            if collect.stems {
+                for (stem, chunk) in track_stems.iter_mut().zip(stems.tracks) {
+                    stem.1.extend_from_slice(&chunk);
+                }
+                for (stem, chunk) in bus_stems.iter_mut().zip(stems.buses) {
+                    stem.1.extend_from_slice(&chunk);
+                }
+            }
+            if collect.master {
+                mix.extend(stems.master);
+            }
         } else {
-            mix.extend(processor.mix_chunk(&chunk_tracks, start_frame, frame_count)?);
+            let chunk = processor.mix_chunk(&chunk_tracks, start_frame, frame_count)?;
+            observer.master(master_window.take(&chunk, channel_count))?;
+            if collect.master {
+                mix.extend(chunk);
+            }
         }
         start_frame = start_frame.saturating_add(u64::try_from(frame_count).unwrap_or(u64::MAX));
     }
@@ -949,12 +1090,11 @@ fn mix_pass(
     // after the bus stage's alignment pad; the master carries the whole graph
     // latency. Unlike `keep_from`, this runs even when `range.start` is zero.
     drop_leading_samples(&mut mix, latency.saturating_mul(channel_count));
-    let bus_head = processor.bus_stage_frames().saturating_mul(channel_count);
+    let bus_head = bus_head_frames.saturating_mul(channel_count);
     for stem in &mut bus_stems {
         drop_leading_samples(&mut stem.1, bus_head);
     }
-    let keep_from = usize::try_from(frame_to_samples(range.start, AUDIO_RATE, document.fps))
-        .unwrap_or(usize::MAX)
+    let keep_from = keep_from_frames
         .saturating_mul(channel_count)
         .min(mix.len());
     if keep_from > 0 {
@@ -969,17 +1109,9 @@ fn mix_pass(
         }
     }
     // AU2 §3.7/A2: and the tail trim, so every family covers exactly
-    // `[range.start, range.end)` and `measure_loudness` reports one
-    // `sample_frames` for one requested range.
-    let kept = usize::try_from(
-        frame_to_samples(range.end, AUDIO_RATE, document.fps).saturating_sub(frame_to_samples(
-            range.start,
-            AUDIO_RATE,
-            document.fps,
-        )),
-    )
-    .unwrap_or(usize::MAX)
-    .saturating_mul(channel_count);
+    // `[range.start, range.end)` and the meter reports one `sample_frames`
+    // for one requested range.
+    let kept = kept_frames.saturating_mul(channel_count);
     mix.truncate(kept);
     for stem in &mut track_stems {
         stem.1.truncate(kept);
@@ -988,37 +1120,129 @@ fn mix_pass(
         stem.1.truncate(kept);
     }
     Ok(MixStems {
-        tracks: if collect_stems {
+        tracks: if collect.stems {
             track_stems
         } else {
             Vec::new()
         },
-        buses: if collect_stems { bus_stems } else { Vec::new() },
+        buses: if collect.stems { bus_stems } else { Vec::new() },
         master: mix,
     })
 }
 
+/// AU3 §3.8: `measure_mix_levels`' observer — one meter per track, per bus,
+/// and for the master, fed through the pass's family windows. The master
+/// meter measures a clamped copy: the signal export encodes.
+struct LevelsObserver {
+    tracks: Vec<(TrackId, LoudnessMeter)>,
+    buses: Vec<(AudioBusId, LoudnessMeter)>,
+    master: LoudnessMeter,
+    clamped: Vec<f32>,
+}
+
+impl LevelsObserver {
+    fn new(document: &Document) -> Result<Self, MediaError> {
+        let meter = || LoudnessMeter::new(AUDIO_RATE, AUDIO_CHANNELS);
+        Ok(Self {
+            tracks: document
+                .tracks
+                .iter()
+                .map(|track| Ok((track.id, meter()?)))
+                .collect::<Result<_, MediaError>>()?,
+            buses: document
+                .audio_mix
+                .buses
+                .iter()
+                .map(|bus| Ok((bus.id, meter()?)))
+                .collect::<Result<_, MediaError>>()?,
+            master: meter()?,
+            clamped: Vec::new(),
+        })
+    }
+}
+
+impl MixObserver for LevelsObserver {
+    fn wants_stems(&self) -> bool {
+        true
+    }
+
+    fn track(&mut self, track: TrackId, chunk: &[f32]) -> Result<(), MediaError> {
+        if let Some((_, meter)) = self.tracks.iter_mut().find(|(id, _)| *id == track) {
+            meter.push(chunk)?;
+        }
+        Ok(())
+    }
+
+    fn bus(&mut self, bus: AudioBusId, chunk: &[f32]) -> Result<(), MediaError> {
+        if let Some((_, meter)) = self.buses.iter_mut().find(|(id, _)| *id == bus) {
+            meter.push(chunk)?;
+        }
+        Ok(())
+    }
+
+    fn master(&mut self, chunk: &[f32]) -> Result<(), MediaError> {
+        self.clamped.clear();
+        self.clamped.extend_from_slice(chunk);
+        limit_audio_mix(&mut self.clamped);
+        self.master.push(&self.clamped)?;
+        Ok(())
+    }
+}
+
+/// AU3 §2.5 / §3.3: refuse a clamped range shorter than one gating block
+/// before anything is decoded, so that after a refusal-free measurement
+/// `integrated == None` means silent and only silent.
+fn refuse_short_loudness_range(
+    document: &Document,
+    range: &std::ops::Range<TimeCode>,
+) -> Result<(), MediaError> {
+    let sample_frames = frame_to_samples(range.end, AUDIO_RATE, document.fps)
+        .saturating_sub(frame_to_samples(range.start, AUDIO_RATE, document.fps));
+    if sample_frames < LOUDNESS_GATING_BLOCK_FRAMES {
+        return Err(MediaError::MixLoudnessRangeTooShort {
+            sample_frames,
+            required: LOUDNESS_GATING_BLOCK_FRAMES,
+        });
+    }
+    Ok(())
+}
+
 /// AU1 §6.1: measure every track, bus, and the master over one project range.
+///
+/// AU3 §3.8: streamed through a [`LevelsObserver`] — no stem is held whole —
+/// after the §2.5 length refusal.
 ///
 /// # Errors
 ///
-/// Returns a media error when the clamped range is empty or the mix cannot be
-/// rendered or measured.
+/// Returns [`MediaError::MixLoudnessRangeTooShort`] when the clamped range
+/// holds fewer than one 400 ms gating block, or a media error when the range
+/// is empty or the mix cannot be rendered or measured.
 pub(crate) fn measure_mix_levels(
     document: &Document,
     request: &MixLevelRequest,
 ) -> Result<MixLevelReport, MediaError> {
     let range = clamped_measurement_range(document, request.range.clone(), "mix level")?;
+    refuse_short_loudness_range(document, &range)?;
     let settings = measurement_settings(document);
-    let stems = mix_audio_stems(document, range.clone(), &settings)?;
+    let mut observer = LevelsObserver::new(document)?;
+    mix_pass(
+        document,
+        range.clone(),
+        &settings,
+        MixCollect {
+            stems: false,
+            master: false,
+        },
+        &mut observer,
+    )?;
+    let LevelsObserver {
+        tracks: track_meters,
+        buses: bus_meters,
+        master,
+        ..
+    } = observer;
     let mut tracks = Vec::with_capacity(document.tracks.len());
-    for track in &document.tracks {
-        let samples = stems
-            .tracks
-            .iter()
-            .find(|(id, _)| *id == track.id)
-            .map(|(_, samples)| samples.as_slice())
-            .unwrap_or_default();
+    for (track, (_, meter)) in document.tracks.iter().zip(track_meters) {
         tracks.push(TrackLevels {
             track: track.id,
             kind: track.kind,
@@ -1030,31 +1254,240 @@ pub(crate) fn measure_mix_levels(
                 .iter()
                 .find(|bus| bus.tracks.contains(&track.id))
                 .map(|bus| bus.id),
-            levels: measure_loudness(samples, AUDIO_RATE, AUDIO_CHANNELS)?,
+            levels: meter.finish()?,
         });
     }
     let mut buses = Vec::with_capacity(document.audio_mix.buses.len());
-    for bus in &document.audio_mix.buses {
-        let samples = stems
-            .buses
-            .iter()
-            .find(|(id, _)| *id == bus.id)
-            .map(|(_, samples)| samples.as_slice())
-            .unwrap_or_default();
+    for (bus, (_, meter)) in document.audio_mix.buses.iter().zip(bus_meters) {
         buses.push(BusLevels {
             bus: bus.id,
             name: bus.name.clone(),
-            levels: measure_loudness(samples, AUDIO_RATE, AUDIO_CHANNELS)?,
+            levels: meter.finish()?,
         });
     }
-    let master = measure_loudness(&stems.master, AUDIO_RATE, AUDIO_CHANNELS)?;
     Ok(MixLevelReport {
         range,
         any_solo: document.audio_mix.any_solo(),
         tracks,
         buses,
-        master,
+        master: master.finish()?,
     })
+}
+
+/// AU3 §3.10: the silence window in sample frames at the measurement rate —
+/// `detect_silences`' `ceil(rate · ms / 1 000)`, 480 at 48 kHz.
+const AUDIO_QC_SILENCE_WINDOW_FRAMES: usize =
+    (AUDIO_RATE as usize * AUDIO_QC_SILENCE_WINDOW_MILLISECONDS as usize).div_ceil(1_000);
+
+/// AU3 §3.10: `audio_qc`'s observer over the master feed.
+///
+/// Clipping is counted per channel on the **pre-clamp** chunk with the run
+/// state carried across callbacks; a clamped copy goes to the loudness meter
+/// (`report.master`, the balance) and to the silence windows, whose square
+/// sum and count persist across callbacks so a 480-frame window split by a
+/// 1 024-frame chunk boundary is closed once, when its 480th frame arrives.
+pub(crate) struct QcObserver {
+    meter: LoudnessMeter,
+    clamped: Vec<f32>,
+    channel_frames: u64,
+    over_full_scale: [u64; 2],
+    clipped_runs: [u32; 2],
+    run_length: [u32; 2],
+    window_square_sum: f64,
+    window_frames: usize,
+    silence_threshold: f64,
+    windows: u64,
+    leading_silent_windows: u64,
+    all_silent_so_far: bool,
+    trailing_silent_windows: u64,
+    trailing_silent_frames: u64,
+}
+
+impl QcObserver {
+    pub(crate) fn new() -> Result<Self, MediaError> {
+        Ok(Self {
+            meter: LoudnessMeter::new(AUDIO_RATE, AUDIO_CHANNELS)?,
+            clamped: Vec::new(),
+            channel_frames: 0,
+            over_full_scale: [0; 2],
+            clipped_runs: [0; 2],
+            run_length: [0; 2],
+            window_square_sum: 0.0,
+            window_frames: 0,
+            silence_threshold: 10.0_f64.powf(f64::from(AUDIO_QC_SILENCE_DBFS_HUNDREDTHS) / 2_000.0),
+            windows: 0,
+            leading_silent_windows: 0,
+            all_silent_so_far: true,
+            trailing_silent_windows: 0,
+            trailing_silent_frames: 0,
+        })
+    }
+
+    /// Close one silence window of `frames` frames (480, or the partial one at
+    /// `range.end`).
+    #[allow(clippy::cast_precision_loss)]
+    fn close_window(&mut self, frames: usize) {
+        let samples = (frames * usize::from(AUDIO_CHANNELS)).max(1) as f64;
+        let rms = (self.window_square_sum / samples).sqrt();
+        self.window_square_sum = 0.0;
+        self.window_frames = 0;
+        self.windows += 1;
+        let frames = u64::try_from(frames).unwrap_or(u64::MAX);
+        if rms <= self.silence_threshold {
+            if self.all_silent_so_far {
+                self.leading_silent_windows += 1;
+            }
+            self.trailing_silent_windows += 1;
+            self.trailing_silent_frames = self.trailing_silent_frames.saturating_add(frames);
+        } else {
+            self.all_silent_so_far = false;
+            self.trailing_silent_windows = 0;
+            self.trailing_silent_frames = 0;
+        }
+    }
+
+    /// Sample frames covered by the leading silent run.
+    fn leading_silent_frames(&self) -> u64 {
+        self.leading_silent_windows
+            .saturating_mul(u64::try_from(AUDIO_QC_SILENCE_WINDOW_FRAMES).unwrap_or(u64::MAX))
+            .min(self.channel_frames)
+    }
+
+    fn clipping(&self) -> AudioClipping {
+        let channel = |index: usize| AudioChannelClipping {
+            over_full_scale_samples: self.over_full_scale[index],
+            clipped_runs: self.clipped_runs[index],
+            basis_points: self.over_full_scale[index]
+                .saturating_mul(10_000)
+                .checked_div(self.channel_frames)
+                .map_or(0, |points| u32::try_from(points).unwrap_or(u32::MAX)),
+        };
+        AudioClipping {
+            left: channel(0),
+            right: channel(1),
+        }
+    }
+
+    /// Finish the measurement: the last partial window is closed over its
+    /// own length, the meter is finished, and the report is judged by core.
+    pub(crate) fn finish(
+        mut self,
+        range: std::ops::Range<TimeCode>,
+        fps: kinewright_core::Rational,
+        target: Option<kinewright_core::LoudnessTarget>,
+    ) -> Result<AudioQcReport, MediaError> {
+        if self.window_frames > 0 {
+            let frames = self.window_frames;
+            self.close_window(frames);
+        }
+        let clipping = self.clipping();
+        let leading_frames = self.leading_silent_frames();
+        let trailing_frames = self.trailing_silent_frames;
+        let channel_balance_lu_hundredths = self.meter.channel_balance_lu_hundredths();
+        let master = self.meter.finish()?;
+        let to_frames = |sample_frames: u64| samples_to_frame(sample_frames, AUDIO_RATE, fps);
+        let to_milliseconds =
+            |sample_frames: u64| sample_frames.saturating_mul(1_000) / u64::from(AUDIO_RATE);
+        let measured = AudioQcMeasurements {
+            master,
+            channel_balance_lu_hundredths,
+            clipping,
+            leading_silence_frames: to_frames(leading_frames),
+            leading_silence_milliseconds: to_milliseconds(leading_frames),
+            trailing_silence_frames: to_frames(trailing_frames),
+            trailing_silence_milliseconds: to_milliseconds(trailing_frames),
+            target,
+        };
+        let exceptions = audio_qc_exceptions(&measured);
+        Ok(AudioQcReport {
+            range,
+            master,
+            channel_balance_lu_hundredths,
+            clipping,
+            leading_silence_frames: measured.leading_silence_frames,
+            trailing_silence_frames: measured.trailing_silence_frames,
+            target,
+            technical_pass: audio_qc_technical_pass(&exceptions),
+            exceptions,
+            evidence_only: true,
+            provenance: AudioQcProvenance::default(),
+        })
+    }
+}
+
+impl MixObserver for QcObserver {
+    fn master(&mut self, chunk: &[f32]) -> Result<(), MediaError> {
+        let channels = usize::from(AUDIO_CHANNELS);
+        for frame in chunk.chunks_exact(channels) {
+            self.channel_frames += 1;
+            for (channel, sample) in frame.iter().enumerate().take(2) {
+                if sample.abs() >= 1.0 {
+                    self.over_full_scale[channel] += 1;
+                    self.run_length[channel] += 1;
+                    if self.run_length[channel] == AUDIO_QC_CLIPPED_RUN_SAMPLES {
+                        self.clipped_runs[channel] += 1;
+                    }
+                } else {
+                    self.run_length[channel] = 0;
+                }
+            }
+        }
+        let mut clamped = std::mem::take(&mut self.clamped);
+        clamped.clear();
+        clamped.extend_from_slice(chunk);
+        limit_audio_mix(&mut clamped);
+        // The `?` is deferred to the end so `clamped` — taken out of `self`
+        // to borrow it while `self.meter` is borrowed mutably — is always put
+        // back, and its buffer reused, on the error path too. The error is in
+        // practice unreachable: the feed is whole stereo frames, and
+        // `FamilyWindow::take` only ever slices on a frame boundary.
+        let pushed = self.meter.push(&clamped);
+        for frame in clamped.chunks_exact(channels) {
+            self.window_square_sum += frame
+                .iter()
+                .map(|sample| f64::from(*sample) * f64::from(*sample))
+                .sum::<f64>();
+            self.window_frames += 1;
+            if self.window_frames == AUDIO_QC_SILENCE_WINDOW_FRAMES {
+                self.close_window(AUDIO_QC_SILENCE_WINDOW_FRAMES);
+            }
+        }
+        self.clamped = clamped;
+        pushed.map(|_| ())
+    }
+}
+
+/// AU3 §3.10: the audio QC measurement of the post-clamp master over one
+/// project range, judged by core's `audio_qc_exceptions`.
+///
+/// # Errors
+///
+/// Returns [`MediaError::MixLoudnessRangeTooShort`] when the clamped range
+/// holds fewer than one 400 ms gating block (before anything is decoded), or
+/// a media error when the range is empty or the mix cannot be rendered.
+pub(crate) fn measure_audio_qc(
+    document: &Document,
+    request: &AudioQcRequest,
+) -> Result<AudioQcReport, MediaError> {
+    let range = clamped_measurement_range(document, request.range.clone(), "audio QC")?;
+    refuse_short_loudness_range(document, &range)?;
+    let settings = measurement_settings(document);
+    let mut observer = QcObserver::new()?;
+    mix_pass(
+        document,
+        range.clone(),
+        &settings,
+        MixCollect {
+            stems: false,
+            master: false,
+        },
+        &mut observer,
+    )?;
+    observer.finish(
+        range,
+        document.fps,
+        request.profile.map(DeliveryProfile::loudness_target),
+    )
 }
 
 /// AU1 §6.1 / AU2 §5.9: the clamped project range one measurement covers.
@@ -2354,5 +2787,54 @@ mod tests {
         assert_ne!(DELIVERY_INTERMEDIATE_WHITE, u16::MAX);
         let frame = ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, 16, 16);
         assert!(frame.stride(0) >= 16 * DELIVERY_INTERMEDIATE_BYTES_PER_PIXEL);
+    }
+
+    /// AU3 §7 item A11 (§3.8): a family window drops `skip` frames, then
+    /// passes exactly `remaining` frames, splitting the chunks that straddle
+    /// either boundary and never handing the observer a frame twice.
+    #[test]
+    fn a_family_window_splits_chunks_and_feeds_exactly_the_kept_frames() {
+        let channels = 2_usize;
+        let chunk_frames = 1_024_usize;
+        let total_frames = 6 * chunk_frames;
+        // Each sample encodes its frame index so the fed frames are checkable.
+        #[allow(clippy::cast_precision_loss)]
+        let programme = (0..total_frames)
+            .flat_map(|frame| [frame as f32, -(frame as f32)])
+            .collect::<Vec<_>>();
+        let skip = 1_500_usize;
+        let kept = 2_000_usize;
+        let mut window = FamilyWindow::new(skip, kept);
+        let mut fed = Vec::new();
+        let mut split_chunks = 0_usize;
+        for chunk in programme.chunks(chunk_frames * channels) {
+            let taken = window.take(chunk, channels);
+            if !taken.is_empty() && taken.len() != chunk.len() {
+                split_chunks += 1;
+            }
+            fed.extend_from_slice(taken);
+        }
+        assert_eq!(
+            fed.len(),
+            kept * channels,
+            "exactly T frames reach the observer"
+        );
+        assert_eq!(
+            split_chunks, 2,
+            "the chunks straddling both boundaries are split"
+        );
+        #[allow(clippy::cast_precision_loss)]
+        for (index, frame) in fed.chunks_exact(channels).enumerate() {
+            let expected = (skip + index) as f32;
+            assert_eq!(frame, [expected, -expected], "fed frame {index}");
+        }
+        // Exhausted: nothing more is fed.
+        assert!(window.take(&programme[..channels * 8], channels).is_empty());
+        // A window with no skip and unbounded remaining passes chunks whole.
+        let mut whole = FamilyWindow::new(0, usize::MAX);
+        assert_eq!(
+            whole.take(&programme[..channels * 8], channels).len(),
+            channels * 8
+        );
     }
 }

@@ -182,7 +182,65 @@ impl DeliveryProfile {
             cancellation,
         }
     }
+
+    /// The loudness target this profile delivers to (AU3 §2.3).
+    ///
+    /// A profile fact in the same spirit as `audio_bitrate`: the job axis
+    /// (whether an export normalizes to it) is orthogonal and lives on the
+    /// export settings, never here. `delivery_conformance` and `export_ready`
+    /// never read a target.
+    #[must_use]
+    pub const fn loudness_target(self) -> LoudnessTarget {
+        match self {
+            Self::SourceMaster => EBU_R128_PROGRAMME_TARGET,
+            Self::Youtube1080p | Self::VerticalShort | Self::SquareSocial => {
+                STREAMING_PLATFORM_TARGET
+            }
+        }
+    }
 }
+
+/// A delivery loudness target: integrated level with its tolerance, a
+/// true-peak ceiling, and an optional loudness-range maximum (AU3 §2.3).
+///
+/// Integers in hundredths so a target and a measurement compare exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LoudnessTarget {
+    pub integrated_lufs_hundredths: i32,
+    pub tolerance_lu_hundredths: i32,
+    pub true_peak_ceiling_dbtp_hundredths: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub loudness_range_max_lu_hundredths: Option<i32>,
+}
+
+/// EBU R128 programme loudness: −23 LUFS ±1 LU, −1 dBTP; R128 treats LRA as a
+/// descriptor, so no maximum. ATSC A/85 and ARIB TR-B32 (−24 LKFS) are the
+/// regional alternatives; a project that delivers to them picks the value by
+/// hand until targets become document state.
+pub const EBU_R128_PROGRAMME_TARGET: LoudnessTarget = LoudnessTarget {
+    integrated_lufs_hundredths: -2_300,
+    tolerance_lu_hundredths: 100,
+    true_peak_ceiling_dbtp_hundredths: -100,
+    loudness_range_max_lu_hundredths: None,
+};
+
+/// The streaming and social norm: platforms normalise to −14 LUFS and ask for
+/// −1 dBTP so a lossy re-encode does not clip. No platform publishes a
+/// tolerance; ±1 LU is a house number equal to the measurement's own
+/// resolution on short programmes.
+pub const STREAMING_PLATFORM_TARGET: LoudnessTarget = LoudnessTarget {
+    integrated_lufs_hundredths: -1_400,
+    tolerance_lu_hundredths: 100,
+    true_peak_ceiling_dbtp_hundredths: -100,
+    loudness_range_max_lu_hundredths: None,
+};
+
+/// The true-peak headroom held under a target's ceiling before a lossy encode,
+/// shared by the export step (AU3 §5.6) and the planner (AU3 §6.3).
+/// Re-baselined only from the §5.8 hot lanes' printed pre-encode and decoded
+/// true peaks, in CC6 §6.3's manner.
+pub const LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS: i32 = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeliveryConformanceReport {

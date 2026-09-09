@@ -13,7 +13,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 77] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 78] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -80,6 +80,10 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 77] = [
     // measurement it mirrors. `get_` infers `CapabilityKind::Inspector`, so
     // no `CAPABILITY_KIND_OVERRIDES` entry is needed here either.
     "get_audio_spectrum",
+    // AU3 §4.1: the evidence-only audio QC surface, beside the two
+    // measurements it extends. `get_` infers `CapabilityKind::Inspector`, so
+    // no `CAPABILITY_KIND_OVERRIDES` entry is needed here either.
+    "get_audio_qc",
     "plan_dialogue_assembly",
     "plan_beat_pacing",
     "plan_beat_montage",

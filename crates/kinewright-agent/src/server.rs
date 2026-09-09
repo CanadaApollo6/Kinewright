@@ -23,21 +23,21 @@ use kinewright_core::{
     CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, ColorNodeKind,
     ColorSourceError, Command, Core, DeliveryAspect, DeliveryEncodeDepth, DeliveryProfile,
     DeliveryVariant, Document, Effect, EffectId, Event, Export, ExportCancellation, Keyframe,
-    KeyframeInterpolation, LutAsset, MUSIC_STRUCTURE_DEFAULT_METER_BEATS,
-    MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId, MediaAsset, MediaAvailabilityKind,
-    MediaCacheFamily, MediaCacheInventory, MediaKind, MixLevelRequest, MixSpectrumPoint,
-    MixSpectrumRequest, Operation, ParamValue, Playback, Query, QueryResult, ReframeFocusBounds,
-    RelinkCandidate, SceneStatus, SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings,
-    SubjectCenterBasisPointSample, SubjectFocusBasisPointConstraint, SubjectReframeSettings,
-    SyncGroupId, ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState,
-    TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TitlePosition, Track, TrackId, TrackKind, TranscriptStatus, animated_caption_operations_at,
-    apply_batch, authored_caption_cues, beat_montage_plan,
-    beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors, beat_pacing_plan,
-    caption_cues, dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
-    document_for_delivery_variant, is_filler_word, map_source_range_to_project,
-    music_fit_plan_with_end_anchor, music_structure_analysis, plan_speaker_multicam,
-    plan_subject_reframe_basis_points_with_containment, qa_document,
+    KeyframeInterpolation, LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, LutAsset,
+    MUSIC_STRUCTURE_DEFAULT_METER_BEATS, MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId,
+    MediaAsset, MediaAvailabilityKind, MediaCacheFamily, MediaCacheInventory, MediaKind,
+    MixLevelRequest, MixSpectrumPoint, MixSpectrumRequest, Operation, ParamValue, Playback, Query,
+    QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus, SilenceStatus,
+    SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
+    SubjectFocusBasisPointConstraint, SubjectReframeSettings, SyncGroupId, ThreePointMode,
+    TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track, TrackId, TrackKind,
+    TranscriptStatus, animated_caption_operations_at, apply_batch, authored_caption_cues,
+    beat_montage_plan, beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors,
+    beat_pacing_plan, caption_cues, dedup_timeline_words, delivery_conformance,
+    document_for_delivery_profile, document_for_delivery_variant, is_filler_word,
+    map_source_range_to_project, music_fit_plan_with_end_anchor, music_structure_analysis,
+    plan_speaker_multicam, plan_subject_reframe_basis_points_with_containment, qa_document,
     validate_beat_montage_plan_cadence,
 };
 use rmcp::{
@@ -58,6 +58,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::{
+    audio_qc_tool::{AUDIO_QC_DESCRIPTION, AudioQcArgs, AudioQcRefusal, get_audio_qc},
     color_qc_tool::{COLOR_QC_DESCRIPTION, ColorQcArgs, get_color_qc},
     color_scopes::{
         AnalyzeColorShotArgs, PlanShotMatchArgs, ScopeError, VideoScopesV2Args, analyze_color_shot,
@@ -125,10 +126,9 @@ const MATTE_INVERT_PARAMETER: &str = "matte_invert";
 pub(crate) const REFRAME_SUBJECT_PROVENANCE_PREFIX: &str = "__kinewright_reframe_subject_v1:";
 const REFRAME_SUBJECT_PROVENANCE_HEADER_BYTES: usize = 18;
 const REFRAME_SUBJECT_PROVENANCE_SAMPLE_BYTES: usize = 16;
-/// AAC and other lossy encoders can overshoot a decoded sample ceiling. Keep
-/// deterministic pre-encode headroom while evaluating the public ceiling on
-/// the actual decoded delivery artifact.
-const LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS: i32 = 200;
+// AU3 §2.3: the lossy-codec peak headroom the normalization planner holds
+// under its ceiling is core's `LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS`,
+// shared with the export step; the agent keeps no copy of its own.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmationRequest {
@@ -922,6 +922,10 @@ impl KinewrightMcp {
             "get_color_qc" => {
                 let args: ColorQcArgs = decode_args("get_color_qc", arguments)?;
                 self.color_qc(&args)
+            }
+            "get_audio_qc" => {
+                let args: AudioQcArgs = decode_args("get_audio_qc", arguments)?;
+                self.audio_qc(&args)
             }
             "plan_shot_match" => {
                 let args: PlanShotMatchArgs = decode_args("plan_shot_match", arguments)?;
@@ -3359,6 +3363,10 @@ impl KinewrightMcp {
                     "denominator": settings.fps.denominator(),
                 },
                 "delivery_color": settings.delivery_color,
+                // AU3 §2.3 / F12: the profile's loudness target, the contract
+                // `get_audio_qc` judges against when given this profile and
+                // the export normalization step brings the master to.
+                "loudness_target": profile.loudness_target(),
             })
         });
         let structured = serde_json::json!({
@@ -3828,6 +3836,24 @@ impl KinewrightMcp {
                 value,
             )),
             Err(error) => Ok(color_scope_error_result("get_color_qc", &error)),
+        }
+    }
+
+    /// AU3 §4.1: measure the master over a project range and publish
+    /// evidence, nothing else.
+    ///
+    /// The revision is read once and republished; nothing on this path can
+    /// advance it. A stale revision is the uniform `stale_revision` envelope;
+    /// an inverted or sub-block range and any measurement failure are
+    /// tool-call text, as for `get_audio_levels`.
+    fn audio_qc(&self, args: &AudioQcArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        match get_audio_qc(&document, revision, self.analysis.as_ref(), args) {
+            Ok(response) => Ok(success_structured(response.text, response.value)),
+            Err(AudioQcRefusal::Stale(error)) => {
+                Ok(color_scope_error_result("get_audio_qc", &error))
+            }
+            Err(AudioQcRefusal::Text(text)) => Ok(error_text(text)),
         }
     }
 
@@ -7184,6 +7210,17 @@ impl KinewrightMcp {
         };
         let report = match self.analysis.mix_levels(&document, &request) {
             Ok(report) => report,
+            // AU3 §2.5 / Q3: a range shorter than one 400 ms gating block is
+            // refused before decoding, named as such so a caller can widen it
+            // rather than read the refusal as a backend failure.
+            Err(kinewright_core::MediaError::MixLoudnessRangeTooShort {
+                sample_frames,
+                required,
+            }) => {
+                return Ok(error_text(format!(
+                    "get_audio_levels needs at least one 400 ms gating block ({required} sample frames); got {sample_frames}"
+                )));
+            }
             Err(error) => {
                 return Ok(error_text(format!("could not measure mix levels: {error}")));
             }
@@ -7222,11 +7259,18 @@ impl KinewrightMcp {
                 render_optional_hundredths(bus.levels.sample_peak_dbfs_hundredths),
             );
         }
+        // AU3 §2.1: the master line also spells the four AU3 fields, `none`
+        // where the programme is too short to measure one (short-term needs
+        // 3 s, the range two gated windows) or is silent.
         let _ = write!(
             text,
-            "master lufs={} peak={}",
+            "master lufs={} peak={} momentary_max={} short_term_max={} lra={} true_peak={}",
             render_optional_hundredths(report.master.integrated_lufs_hundredths),
             render_optional_hundredths(report.master.sample_peak_dbfs_hundredths),
+            render_optional_hundredths(report.master.momentary_max_lufs_hundredths),
+            render_optional_hundredths(report.master.short_term_max_lufs_hundredths),
+            render_optional_hundredths(report.master.loudness_range_lu_hundredths),
+            render_optional_hundredths(report.master.true_peak_dbtp_hundredths),
         );
         // AU1 §2.1: `TrackMix` skips its neutral fields on the wire, so a
         // neutral track serialises as `{"track": 1}` here and a reader must
@@ -8275,9 +8319,9 @@ impl KinewrightMcp {
                 "timeline_revision": revision.0,
                 "target_lufs_hundredths": args.target_lufs_hundredths,
                 "maximum_sample_peak_dbfs_hundredths": args.maximum_sample_peak_dbfs_hundredths,
-                "lossy_codec_peak_headroom_hundredths": LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS,
+                "lossy_codec_peak_headroom_hundredths": LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS,
                 "processing_ceiling_dbfs_hundredths": args.maximum_sample_peak_dbfs_hundredths
-                    .saturating_sub(LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS),
+                    .saturating_sub(LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS),
                 "tolerance_hundredths": args.tolerance_hundredths,
                 "current": current,
                 "predicted": predicted,
@@ -8429,7 +8473,7 @@ fn verified_normalization_operation(
     for _ in 0..4 {
         let processing_ceiling = args
             .maximum_sample_peak_dbfs_hundredths
-            .saturating_sub(LOSSY_CODEC_PEAK_HEADROOM_HUNDREDTHS);
+            .saturating_sub(LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS);
         let bus = normalization_bus(
             context.bus_id,
             context.first_effect_id,
@@ -9989,7 +10033,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_audio_levels",
-            "Measure per-track, per-bus, and master loudness through the mix, including each track's gain, pan, mute, and solo state. Loudness and sample peak are reported in hundredths of a unit, and read `none` for a stem that decoded silent, which is what a muted or solo-suppressed track reports. Omit both frame bounds to measure the whole timeline; give either bound to measure a half-open project-frame window. This capability is read-only and produces no edit operations.",
+            "Measure per-track, per-bus, and master loudness through the mix, including each track's gain, pan, mute, and solo state. Loudness and sample peak are reported in hundredths of a unit, and read `none` for a stem that decoded silent, which is what a muted or solo-suppressed track reports. The master also reports its momentary and short-term maxima, loudness range, and true peak, `none` where the programme is too short to measure one. Omit both frame bounds to measure the whole timeline; give either bound to measure a half-open project-frame window; a range shorter than one 400 ms gating block is refused. This capability is read-only and produces no edit operations.",
             schema_object::<AudioLevelsArgs>(),
         )
         .with_annotations(read_only()),
@@ -9997,6 +10041,12 @@ fn inspector_tools() -> Vec<Tool> {
             "get_audio_spectrum",
             "Measure the third-octave spectrum of one mix point through the real mix path: 31 ISO nominal bands from 20 Hz to 20 kHz, reported in hundredths of a dBFS, where a full-scale sine inside one band reads 0. Measure the master by default, or one track's post-track-stage stem, or one bus's post-chain stem. The five bands below 63 Hz are narrower than the analysis window and are flagged window_limited. The range must cover at least 24576 sample frames (512 ms at 48 kHz). Omit both frame bounds to measure the whole timeline. Use it to justify an EQ move before proposing one. This capability is read-only and produces no edit operations.",
             schema_object::<AudioSpectrumArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "get_audio_qc",
+            AUDIO_QC_DESCRIPTION,
+            schema_object::<AudioQcArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -10127,7 +10177,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_delivery_profiles",
-            "List the stable source-master, YouTube 1080p, vertical-short, and square-social contracts using the current project frame rate, including exact raster, codecs, and bitrates.",
+            "List the stable source-master, YouTube 1080p, vertical-short, and square-social contracts using the current project frame rate, including exact raster, codecs, bitrates, and the loudness target normalization and QC read.",
             schema_object::<EmptyArgs>(),
         )
         .with_annotations(read_only()),
@@ -10810,8 +10860,9 @@ fn render_band_center_hertz(tenths: u32) -> String {
 
 /// AU1 §6.2: `none` for an unmeasurable (silent) stem, the raw hundredths
 /// otherwise, so the text summary and the structured report agree. AU2 §6.2
-/// reuses it for a band that measured silent.
-fn render_optional_hundredths(value: Option<i32>) -> String {
+/// reuses it for a band that measured silent; AU3 §4.1 for every optional
+/// field of the QC report.
+pub(crate) fn render_optional_hundredths(value: Option<i32>) -> String {
     value.map_or_else(|| "none".to_owned(), |value| value.to_string())
 }
 
@@ -13718,14 +13769,16 @@ fn render_plan_outcomes(
 mod tests {
     use super::*;
     use kinewright_core::{
-        AssetBeats, AssetId, AssetSceneChanges, AssetTranscript, BeatMarker, Clip, ColorBitDepth,
-        ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer,
-        ColorWhitePoint, FrameTexture, Marker, MarkerId, MediaAsset, MediaAvailabilityKind,
-        MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily, MediaCacheInventory,
-        MediaError, MediaEvent, MediaKind, MediaSourceFingerprint, MonitorProof,
-        MonitorProofMetadata, ParamValue, Rational, RgbaImage, SceneChange, SceneStatus,
-        SilenceSpan, SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Title, Track,
-        TrackId, TrackKind, TranscriptWord, VisualAssetResult,
+        AssetBeats, AssetId, AssetSceneChanges, AssetTranscript, AudioChannelClipping,
+        AudioClipping, AudioQcMeasurements, AudioQcProvenance, AudioQcReport, AudioQcRequest,
+        BeatMarker, Clip, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries,
+        ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, FrameTexture, Marker,
+        MarkerId, MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus,
+        MediaCacheClearResult, MediaCacheFamily, MediaCacheInventory, MediaError, MediaEvent,
+        MediaKind, MediaSourceFingerprint, MonitorProof, MonitorProofMetadata, ParamValue,
+        Rational, RgbaImage, STREAMING_PLATFORM_TARGET, SceneChange, SceneStatus, SilenceSpan,
+        SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Title, Track, TrackId, TrackKind,
+        TranscriptWord, VisualAssetResult, audio_qc_exceptions, audio_qc_technical_pass,
     };
     use serde_json::json;
     use std::{
@@ -13767,7 +13820,15 @@ mod tests {
         /// is what the production engine still returns, so both branches of
         /// every CC5 agent path are exercised.
         matte_coverage: Option<RgbaImage>,
+        /// AU3 §4.1: what this double answers `audio_qc` with. `None` keeps
+        /// the trait's `NotImplemented` default.
+        audio_qc: Option<AudioQcDouble>,
     }
+
+    /// AU3 §4.1: a scripted `Analysis::audio_qc`, so the agent's refusal
+    /// texts and its envelope are pinned without a decoder.
+    type AudioQcDouble =
+        Box<dyn Fn(&AudioQcRequest) -> Result<AudioQcReport, MediaError> + Send + Sync>;
 
     impl Playback for NoopMedia {
         fn set_document(&self, _doc: Arc<Document>) {}
@@ -13879,6 +13940,16 @@ mod tests {
             _minimum_source_frames: TimeCode,
         ) -> Result<Vec<TimelineSilenceSpan>, MediaError> {
             Ok(Vec::new())
+        }
+
+        fn audio_qc(
+            &self,
+            _document: &Document,
+            request: &AudioQcRequest,
+        ) -> Result<AudioQcReport, MediaError> {
+            self.audio_qc
+                .as_ref()
+                .map_or(Err(MediaError::NotImplemented), |double| double(request))
         }
 
         fn request_scene_detection(&self, asset: MediaAsset) {
@@ -19322,14 +19393,15 @@ mod tests {
                 "{name} must be read-only"
             );
         }
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 77);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 78);
 
         // M36: every colour planner and every CC5 tool stays inside the
         // kilobyte description budget, measured on the *registered* descriptor
         // rather than on a copy of the literal, so a descriptor-derived legend
         // that grows is caught here. `plan_secondary_correction` carries a
         // pointer to the matte legend, not the legend itself; the four other
-        // planners carry only `matte_parameter_pointer`.
+        // planners carry only `matte_parameter_pointer`. AU3 §4.2 adds the
+        // audio QC inspector to the same budget.
         for name in [
             "plan_primary_correction",
             "plan_color_wheels",
@@ -19342,6 +19414,7 @@ mod tests {
             "track_mask_region",
             "track_reframe_subject",
             "get_color_qc",
+            "get_audio_qc",
         ] {
             let tool = tools.iter().find(|tool| tool.name == name).unwrap();
             let description = tool.description.as_deref().unwrap_or_default();
@@ -19427,6 +19500,421 @@ mod tests {
             );
         }
         assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+
+        // AU3 §4.1: the audio twin is registered the same way — `get_`
+        // infers Inspector with no override entry, read-only, and its
+        // `deny_unknown_fields` args close the schema.
+        assert_eq!(
+            kind("get_audio_qc"),
+            crate::runtime::CapabilityKind::Inspector
+        );
+        let audio_qc = tools
+            .iter()
+            .find(|tool| tool.name == "get_audio_qc")
+            .unwrap();
+        let annotations = audio_qc.annotations.as_ref().unwrap();
+        assert_eq!(annotations.read_only_hint, Some(true));
+        assert_eq!(annotations.destructive_hint, Some(false));
+        let schema = serde_json::to_value(audio_qc.input_schema.as_ref()).unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+        for present in ["expected_revision", "start_frame", "end_frame", "profile"] {
+            assert!(
+                properties.contains_key(present),
+                "get_audio_qc must carry {present}"
+            );
+        }
+        assert_eq!(properties.len(), 4, "{schema}");
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert_eq!(
+            crate::schema::INSPECTOR_TOOL_NAMES
+                .iter()
+                .position(|name| *name == "get_audio_qc"),
+            crate::schema::INSPECTOR_TOOL_NAMES
+                .iter()
+                .position(|name| *name == "get_audio_spectrum")
+                .map(|index| index + 1),
+            "get_audio_qc is registered directly after get_audio_spectrum"
+        );
+    }
+
+    /// AU3 §2.3 / A2: the agent keeps no second copy of the lossy-codec
+    /// headroom. The normalization planner reads core's
+    /// `LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS`, the same constant the
+    /// export step holds under a target's ceiling, so the two cannot drift.
+    #[test]
+    fn au3_the_agent_has_no_second_lossy_codec_headroom_constant() {
+        let source = include_str!("server.rs");
+        let defined = source
+            .lines()
+            .filter(|line| {
+                let line = line.trim_start();
+                line.starts_with("const LOSSY_CODEC")
+                    || line.starts_with("pub const LOSSY_CODEC")
+                    || line.starts_with("pub(crate) const LOSSY_CODEC")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            defined.is_empty(),
+            "server.rs must not define its own headroom constant: {defined:?}"
+        );
+        assert!(
+            source.contains("LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS"),
+            "the planner reads core's constant"
+        );
+        assert_eq!(LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, 200);
+    }
+
+    /// AU3 §4.1: what the scripted `audio_qc` answers. A sub-block range is
+    /// the typed refusal; a profile earns a hot, clipped, imbalanced report
+    /// that raises every severity; anything else is digital silence.
+    fn scripted_audio_qc(request: &AudioQcRequest) -> Result<AudioQcReport, MediaError> {
+        let range = request
+            .range
+            .clone()
+            .unwrap_or(TimeCode::ZERO..TimeCode(60));
+        // The fixture is 30 fps, so one project frame is 1 600 sample frames
+        // at 48 kHz.
+        let sample_frames = u64::try_from(range.end.0 - range.start.0).unwrap() * 1_600;
+        if sample_frames < 19_200 {
+            return Err(MediaError::MixLoudnessRangeTooShort {
+                sample_frames,
+                required: 19_200,
+            });
+        }
+        let target = request.profile.map(DeliveryProfile::loudness_target);
+        let (master, clipping, balance) = if target.is_some() {
+            (
+                AudioLoudness {
+                    integrated_lufs_hundredths: Some(-1_806),
+                    sample_peak_dbfs_hundredths: Some(-50),
+                    sample_rate: 48_000,
+                    channels: 2,
+                    sample_frames,
+                    momentary_max_lufs_hundredths: Some(-1_790),
+                    short_term_max_lufs_hundredths: None,
+                    loudness_range_lu_hundredths: None,
+                    true_peak_dbtp_hundredths: Some(20),
+                },
+                AudioClipping {
+                    left: AudioChannelClipping {
+                        over_full_scale_samples: 12,
+                        clipped_runs: 2,
+                        basis_points: 1,
+                    },
+                    right: AudioChannelClipping::default(),
+                },
+                Some(350),
+            )
+        } else {
+            (
+                AudioLoudness {
+                    integrated_lufs_hundredths: None,
+                    sample_peak_dbfs_hundredths: None,
+                    sample_rate: 48_000,
+                    channels: 2,
+                    sample_frames,
+                    momentary_max_lufs_hundredths: None,
+                    short_term_max_lufs_hundredths: None,
+                    loudness_range_lu_hundredths: None,
+                    true_peak_dbtp_hundredths: None,
+                },
+                AudioClipping::default(),
+                None,
+            )
+        };
+        let trailing = if target.is_some() { 45 } else { 0 };
+        let measurements = AudioQcMeasurements {
+            master,
+            channel_balance_lu_hundredths: balance,
+            clipping,
+            leading_silence_frames: TimeCode::ZERO,
+            leading_silence_milliseconds: 0,
+            trailing_silence_frames: TimeCode(trailing),
+            trailing_silence_milliseconds: u64::try_from(trailing).unwrap() * 1_000 / 30,
+            target,
+        };
+        let exceptions = audio_qc_exceptions(&measurements);
+        Ok(AudioQcReport {
+            range,
+            master,
+            channel_balance_lu_hundredths: balance,
+            clipping,
+            leading_silence_frames: TimeCode::ZERO,
+            trailing_silence_frames: TimeCode(trailing),
+            target,
+            technical_pass: audio_qc_technical_pass(&exceptions),
+            exceptions,
+            evidence_only: true,
+            provenance: AudioQcProvenance::default(),
+        })
+    }
+
+    /// CC6's walk over the QC report, applied to the whole `get_audio_qc`
+    /// envelope: every leaf is an integer, a bool, a string, or null.
+    fn assert_integer_leaves(path: &str, value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Number(number) => assert!(
+                number.is_i64() || number.is_u64(),
+                "{path} = {number} is not an integer"
+            ),
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    assert_integer_leaves(&format!("{path}[{index}]"), item);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (key, item) in map {
+                    assert_integer_leaves(&format!("{path}.{key}"), item);
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::String(_) => {
+            }
+        }
+    }
+
+    /// AU3 §4.1 / A14, A15 through a scripted analysis: the stale-revision
+    /// envelope, the inverted-range and sub-block refusal texts, the closed
+    /// argument schema, the silent report's `integrated: null` with its lone
+    /// `audio_silent` warning, the profile's target and every exception
+    /// severity in the text, the fixed assumptions ending with the boundary,
+    /// an all-integer envelope, and a revision that never moves.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn au3_get_audio_qc_refuses_typed_and_publishes_integer_evidence() {
+        let (core, playback, _) = fixture();
+        let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia {
+            audio_qc: Some(Box::new(scripted_audio_qc)),
+            ..NoopMedia::default()
+        });
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let call = |arguments: serde_json::Value| {
+            service.call_blocking(
+                CallToolRequestParams::new("get_audio_qc")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+        };
+
+        // A stale revision is the uniform envelope, refused before measuring.
+        let stale = call(json!({"expected_revision": 7})).unwrap();
+        assert_eq!(stale.is_error, Some(true));
+        let body = stale.structured_content.as_ref().unwrap();
+        assert_eq!(body["code"], "stale_revision");
+        assert_eq!(body["applied"], false);
+        assert_eq!(body["evidence_only"], true);
+        assert_eq!(body["details"]["expected_revision"], 7);
+        assert_eq!(body["details"]["actual_revision"], 0);
+
+        // An inverted range is refused rather than clamped, as text.
+        let inverted = call(json!({"start_frame": 30, "end_frame": 10})).unwrap();
+        assert_eq!(inverted.is_error, Some(true));
+        assert_eq!(
+            inverted.content[0].as_text().unwrap().text,
+            "get_audio_qc needs start_frame < end_frame; got 30..10"
+        );
+        assert!(inverted.structured_content.is_none());
+
+        // Q3: a range shorter than one 400 ms gating block is the typed
+        // refusal, spelled with the frame counts. Either bound alone fills
+        // the other before the rule is applied.
+        for arguments in [
+            json!({"start_frame": 0, "end_frame": 1}),
+            json!({"end_frame": 1}),
+            json!({"start_frame": 59}),
+        ] {
+            let short = call(arguments.clone()).unwrap();
+            assert_eq!(short.is_error, Some(true), "{arguments}");
+            assert_eq!(
+                short.content[0].as_text().unwrap().text,
+                "get_audio_qc needs at least one 400 ms gating block (19200 sample frames); got 1600",
+                "{arguments}"
+            );
+        }
+
+        // `deny_unknown_fields`: a resolution knob of any spelling is a
+        // malformed request, not an ignored one.
+        assert!(call(json!({"resolution": "proxy"})).is_err());
+        assert!(call(json!({"range": {"start": 0, "end": 30}})).is_err());
+
+        // Digital silence measures rather than refuses: `integrated` is null
+        // and the lone `audio_silent` warning leaves `technical_pass` true.
+        let silent = call(json!({})).unwrap();
+        assert_eq!(silent.is_error, Some(false), "{silent:?}");
+        let body = silent.structured_content.as_ref().unwrap();
+        let mut keys = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "applied",
+                "assumptions",
+                "evidence_only",
+                "exceptions",
+                "report",
+                "timeline_revision"
+            ],
+            "CC6's envelope minus stage and full_resolution"
+        );
+        assert_eq!(body["timeline_revision"], 0);
+        assert_eq!(body["evidence_only"], true);
+        assert_eq!(body["applied"], false);
+        assert_eq!(body["report"]["evidence_only"], true);
+        assert!(body["report"]["master"]["integrated_lufs_hundredths"].is_null());
+        assert!(body["report"]["master"]["true_peak_dbtp_hundredths"].is_null());
+        assert_eq!(body["report"]["technical_pass"], true);
+        assert!(body["report"]["target"].is_null());
+        let exceptions = body["exceptions"].as_array().unwrap();
+        assert_eq!(exceptions.len(), 1, "{exceptions:?}");
+        assert_eq!(exceptions[0]["code"], "audio_silent");
+        assert_eq!(exceptions[0]["severity"], "warning");
+        assert_eq!(body["exceptions"], body["report"]["exceptions"]);
+        assert_eq!(body["assumptions"].as_array().unwrap().len(), 4);
+        assert_integer_leaves("envelope", body);
+        let text = &silent.content[0].as_text().unwrap().text;
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            [
+                "audio_qc range=0..60 profile=none target=none±none ceiling=none technical_pass=true",
+                "master lufs=none momentary_max=none short_term_max=none lra=none true_peak=none peak=none frames=96000",
+                "balance=none clipping L samples=0 runs=0 bp=0 R samples=0 runs=0 bp=0 leading_silence=0 trailing_silence=0",
+                "exception Warning audio_silent integrated_lufs_hundredths observed=none allowed=> -7000",
+            ]
+        );
+
+        // A profile binds the report to that profile's published target and
+        // adds exactly one assumption; every severity reaches the text.
+        let judged = call(json!({"profile": "youtube1080p"})).unwrap();
+        assert_eq!(judged.is_error, Some(false), "{judged:?}");
+        let body = judged.structured_content.as_ref().unwrap();
+        assert_eq!(
+            body["report"]["target"],
+            serde_json::to_value(STREAMING_PLATFORM_TARGET).unwrap()
+        );
+        assert_eq!(
+            body["report"]["target"]["integrated_lufs_hundredths"],
+            -1_400
+        );
+        assert_eq!(body["report"]["technical_pass"], false);
+        let codes = body["exceptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|exception| exception["code"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            [
+                "audio_clipping",
+                "audio_true_peak_over_ceiling",
+                "audio_channel_imbalance",
+                "audio_loudness_out_of_tolerance",
+                "audio_trailing_silence",
+            ],
+            "severity desc, code asc"
+        );
+        assert_integer_leaves("envelope", body);
+        let assumptions = body["assumptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|assumption| assumption.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(assumptions.len(), 5, "{assumptions:#?}");
+        assert!(assumptions[0].starts_with("Measured at 48 kHz stereo"));
+        assert!(assumptions[3].contains("get_delivery_profiles"));
+        assert!(
+            assumptions[4].ends_with("technical_pass is not export_ready."),
+            "{assumptions:#?}"
+        );
+        let text = &judged.content[0].as_text().unwrap().text;
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines[..3],
+            [
+                "audio_qc range=0..60 profile=youtube_1080p target=-1400±100 ceiling=-100 technical_pass=false",
+                "master lufs=-1806 momentary_max=-1790 short_term_max=none lra=none true_peak=20 peak=-50 frames=96000",
+                "balance=350 clipping L samples=12 runs=2 bp=1 R samples=0 runs=0 bp=0 leading_silence=0 trailing_silence=45",
+            ]
+        );
+        assert_eq!(
+            lines[3],
+            "exception Error audio_clipping clipping.left.clipped_runs observed=2 allowed=0"
+        );
+        assert_eq!(
+            lines[4],
+            "exception Error audio_true_peak_over_ceiling true_peak_dbtp_hundredths observed=20 allowed=<= -100"
+        );
+        assert_eq!(
+            lines[6],
+            "exception Warning audio_loudness_out_of_tolerance integrated_lufs_hundredths observed=-1806 allowed=-1500..=-1300"
+        );
+        assert_eq!(lines.len(), 8, "{text}");
+        assert!(!text.contains('"'), "{text}");
+
+        // Evidence only: nothing moved.
+        assert_eq!(service.snapshot().unwrap().0, TimelineRevision(0));
+    }
+
+    /// AU3 §2.3 / F12 / A15: `get_delivery_profiles` publishes each profile's
+    /// loudness target beside its raster and codecs, and its description
+    /// says so.
+    #[test]
+    fn au3_get_delivery_profiles_publishes_each_profiles_loudness_target() {
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let listed = service
+            .call_blocking(CallToolRequestParams::new("get_delivery_profiles"))
+            .unwrap();
+        assert_eq!(listed.is_error, Some(false), "{listed:?}");
+        let profiles = listed.structured_content.as_ref().unwrap()["profiles"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(profiles.len(), 4);
+        for profile in &profiles {
+            let expected = match profile["id"].as_str().unwrap() {
+                "source_master" => -2_300,
+                "youtube_1080p" | "vertical_short" | "square_social" => -1_400,
+                other => panic!("unexpected profile {other}"),
+            };
+            let target = &profile["loudness_target"];
+            assert_eq!(target["integrated_lufs_hundredths"], expected, "{profile}");
+            assert_eq!(target["tolerance_lu_hundredths"], 100, "{profile}");
+            assert_eq!(
+                target["true_peak_ceiling_dbtp_hundredths"], -100,
+                "{profile}"
+            );
+            assert!(
+                target.get("loudness_range_max_lu_hundredths").is_none(),
+                "no profile publishes a range maximum: {profile}"
+            );
+        }
+        let tools = KinewrightMcp::tools().unwrap();
+        let description = tools
+            .iter()
+            .find(|tool| tool.name == "get_delivery_profiles")
+            .unwrap()
+            .description
+            .clone()
+            .unwrap();
+        assert!(
+            description.ends_with("bitrates, and the loudness target normalization and QC read."),
+            "{description}"
+        );
+        let levels = tools
+            .iter()
+            .find(|tool| tool.name == "get_audio_levels")
+            .unwrap()
+            .description
+            .clone()
+            .unwrap();
+        assert!(levels.contains("which is what a muted or solo-suppressed track reports"));
+        assert!(levels.contains("a range shorter than one 400 ms gating block is refused"));
     }
 
     #[test]
@@ -21241,23 +21729,38 @@ mod tests {
         // 194 B for §6.1's bus fader sentence on the two bus tools (97 B x 2),
         // and 134 B for the law-neutral `set_track_mix` rewrite. Served stays
         // 5,660 B in both parts.
+        //
+        // AU3 §4.2 Part A adds one tool, the `get_audio_qc` inspector, so
+        // 52 + 78 = 130 and the registry grows by 3,355 B to 1,424,875 B =
+        // 1,295,138 B of input schemas + 108,413 B of descriptions. The
+        // +2,054 B of input schemas is `get_audio_qc`'s own schema entire: it
+        // embeds no `Operation`, and nothing else moved because none of the
+        // AU3 core types (`AudioLoudness`'s four new fields, `LoudnessTarget`,
+        // `AudioQcReport`) appears in any tool's arguments. The +1,142 B of
+        // descriptions splits exactly three ways: 890 B of `get_audio_qc`'s
+        // own prose, 205 B for `get_audio_levels`' four-field gloss and its
+        // sub-block refusal sentence, and 47 B for `get_delivery_profiles`'
+        // loudness-target clause. 2,054 + 890 = 2,944 B is `get_audio_qc`'s
+        // schema-plus-description share of the 3,103 B it costs serialized;
+        // the remaining 252 B are the two amended descriptions.
         assert_eq!(
             (
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_421_520, 5_660),
+            (1_424_875, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_293_084,
+            registry_metrics.input_schema_bytes, 1_295_138,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 107_271,
+            registry_metrics.description_bytes, 108_413,
             "registry={registry_metrics:?}"
         );
-        // AU2 §6.4/B15: the served quad, byte-identical to CC6's.
+        // AU2 §6.4/B15 and AU3 §4.2/A16: the served quad, byte-identical to
+        // CC6's.
         assert_eq!(
             (
                 served_metrics.tool_count,

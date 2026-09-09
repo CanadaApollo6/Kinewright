@@ -139,6 +139,19 @@ total and discards it, so output frame `k` still carries project frame
 `target + k` and the transport clock is unchanged. A live edit that changes any
 chain's lookahead stops and re-cues playback once.
 
+Level measurement streams. `mix_pass` hands each chunk to an observer (per
+track, per bus, and the pre-clamp master) inside the per-family windows the
+latency trims define, and one `LoudnessMeter` per family accumulates 100 ms
+block energies, so measuring a programme costs the decoded track buffers and a
+few thousand floats, not one stem per family. The live loudness meter runs on
+the post-clamp master at the device rate, but it is published by audible
+position: the feeder fills the ring up to a second ahead, so the worker keeps
+a small ring of per-block snapshots keyed by sample position and publishes
+the one at or behind the device clock on every tick. A pause truncates the
+integration state to what has actually been heard, so pausing and continuing
+counts nothing twice; a seek or a play from elsewhere resets it, as EBU Mode
+prescribes. Playback is never normalised; normalization is an export step.
+
 The worker mixes fixed 1,024-sample-frame chunks and lazily opens a decoder only
 when the feeder reaches its clip. Since the feeder fills to one second, this
 normally opens an upcoming boundary about a second before it is heard.

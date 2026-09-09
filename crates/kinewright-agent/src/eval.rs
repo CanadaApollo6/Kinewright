@@ -10317,6 +10317,10 @@ mod tests {
             sample_rate: 48_000,
             channels: 2,
             sample_frames: 4_800,
+            momentary_max_lufs_hundredths: None,
+            short_term_max_lufs_hundredths: None,
+            loudness_range_lu_hundredths: None,
+            true_peak_dbtp_hundredths: None,
         };
 
         assert!(!audio_tail_peak_passes(&measurement, -100));
@@ -10330,6 +10334,10 @@ mod tests {
             sample_rate: 48_000,
             channels: 2,
             sample_frames: 4_800,
+            momentary_max_lufs_hundredths: None,
+            short_term_max_lufs_hundredths: None,
+            loudness_range_lu_hundredths: None,
+            true_peak_dbtp_hundredths: None,
         };
         let silent = AudioLoudness {
             integrated_lufs_hundredths: None,
@@ -10337,6 +10345,10 @@ mod tests {
             sample_rate: 48_000,
             channels: 2,
             sample_frames: 4_800,
+            momentary_max_lufs_hundredths: None,
+            short_term_max_lufs_hundredths: None,
+            loudness_range_lu_hundredths: None,
+            true_peak_dbtp_hundredths: None,
         };
 
         assert!(audio_tail_peak_passes(&quiet, -100));
@@ -10484,6 +10496,10 @@ mod tests {
                 sample_rate: 48_000,
                 channels: 2,
                 sample_frames: 4_800,
+                momentary_max_lufs_hundredths: None,
+                short_term_max_lufs_hundredths: None,
+                loudness_range_lu_hundredths: None,
+                true_peak_dbtp_hundredths: None,
             },
             terminal_window_frames: TimeCode(30),
             maximum_sample_peak_dbfs_hundredths: -100,

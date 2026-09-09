@@ -14,7 +14,8 @@ use std::collections::BTreeMap;
 use eframe::egui;
 use kinewright_core::{
     AudioBus, AudioChain, AudioMaster, CHAIN_LOOKAHEAD_MILLISECONDS, Document, Effect, EffectId,
-    PanLaw, ParamValue, TimeCode, TrackId, chain_lookahead_milliseconds, effect_descriptor,
+    LoudnessSnapshot, LoudnessTarget, PanLaw, ParamValue, TimeCode, TrackId,
+    chain_lookahead_milliseconds, effect_descriptor,
 };
 
 use crate::{
@@ -77,13 +78,20 @@ impl<'a> MixerChain<'a> {
 }
 
 /// The chain pane beside the strips (AU2 §6.6).
+///
+/// `snapshot` and `target` feed the master pane's `LOUDNESS` section (AU3
+/// §4.4); a bus pane ignores them. Returns `true` when that section's `Reset`
+/// was clicked, which the caller answers with `Playback::reset_loudness` —
+/// telemetry, not an operation, so it does not travel through `edits`.
 pub(crate) fn chain_pane(
     ui: &mut egui::Ui,
     document: &Document,
     selection: MixerSelection,
     levels: &MixerMeterLevels,
+    snapshot: LoudnessSnapshot,
+    target: LoudnessTarget,
     edits: &mut MixerChainEdits,
-) {
+) -> bool {
     // The pane owns exactly one column. `set_max_width` alone does not hold a
     // `ScrollArea`, which sizes its viewport from the room it is offered, so
     // the column is allocated at the token's width and the scroll area is
@@ -103,11 +111,16 @@ pub(crate) fn chain_pane(
                         if let Some(bus) = document.audio_mix.bus(id) {
                             bus_pane(ui, document, bus, levels, edits);
                         }
+                        false
                     }
-                    MixerSelection::Master => master_pane(ui, document, levels, edits),
+                    MixerSelection::Master => {
+                        master_pane(ui, document, levels, snapshot, target, edits)
+                    }
                 }
-            });
-    });
+            })
+            .inner
+    })
+    .inner
 }
 
 fn bus_pane(
@@ -126,19 +139,25 @@ fn bus_pane(
     add_effect_menu(ui, chain, edits);
 }
 
+/// The master pane: the `LOUDNESS` section first, then the pan law and the
+/// chain (AU3 §4.4). Returns whether `Reset` was clicked.
 fn master_pane(
     ui: &mut egui::Ui,
     document: &Document,
     levels: &MixerMeterLevels,
+    snapshot: LoudnessSnapshot,
+    target: LoudnessTarget,
     edits: &mut MixerChainEdits,
-) {
+) -> bool {
     let master = &document.audio_mix.master;
     let chain = MixerChain::Master(master);
     pane_title(ui, "Master");
+    let reset_loudness = loudness_section(ui, snapshot, target);
     pan_law_rows(ui, document.audio_mix.pan_law, edits);
     ui.separator();
     chain_cards(ui, chain, levels, edits);
     add_effect_menu(ui, chain, edits);
+    reset_loudness
 }
 
 fn pane_title(ui: &mut egui::Ui, title: &str) {
@@ -325,6 +344,238 @@ fn pan_law_rows(ui: &mut egui::Ui, law: PanLaw, edits: &mut MixerChainEdits) {
             }
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Loudness (AU3 §4.4)
+// ---------------------------------------------------------------------------
+
+/// The lower edge of the momentary and short-term bars, in LUFS hundredths.
+/// The bars run −40…0 LUFS; anything quieter reads as empty.
+const LOUDNESS_BAR_FLOOR_HUNDREDTHS: i32 = -4_000;
+/// Width of the `M` / `S` label at the left of a loudness bar row.
+const LOUDNESS_BAR_LABEL_WIDTH: f32 = 16.0;
+/// Width of the numeric readout at the right of a loudness bar row.
+const LOUDNESS_BAR_READOUT_WIDTH: f32 = 56.0;
+/// The dash a readout shows for a value the meter has not measured yet:
+/// momentary under 400 ms, short-term under 3 s, integrated on silence, range
+/// under two gated windows, true peak on digital silence.
+pub(crate) const LOUDNESS_NONE: &str = "—";
+/// The muted sentence that closes the section (AU3 §4.4, F14/F21). Part B
+/// appends the export step's half.
+pub(crate) const LOUDNESS_MONITORING_NOTE: &str =
+    "monitoring is not delivery: playback is never normalised";
+
+/// The master pane's `LOUDNESS` section (AU3 §4.4): momentary and short-term
+/// as bars against the export dialog's current profile target, then one line
+/// of integrated, range, true peak, and programme time, then `Reset`.
+///
+/// Returns `true` when `Reset` was clicked. The caller answers with
+/// `Playback::reset_loudness`; no operation is pushed, because the meter is
+/// telemetry and not document state.
+pub(crate) fn loudness_section(
+    ui: &mut egui::Ui,
+    snapshot: LoudnessSnapshot,
+    target: LoudnessTarget,
+) -> bool {
+    ui.scope(|ui| {
+        // The section is one readout, not a stack of controls: its rows sit
+        // as close as a strip's do, and the readout row is as tall as its
+        // small button rather than a full control height. This is what keeps
+        // the section inside its 80 px budget (AU3 §4.4).
+        ui.spacing_mut().item_spacing.y = space::HALF;
+        ui.spacing_mut().interact_size.y = size::ICON_SM;
+        ui.label(theme::caps_label("LOUDNESS", color::TEXT_MUTED));
+        loudness_bar_row(ui, "M", snapshot.momentary_lufs_hundredths, target);
+        loudness_bar_row(ui, "S", snapshot.short_term_lufs_hundredths, target);
+        let reset = ui
+            .horizontal(|ui| {
+                loudness_readout_label(ui, snapshot, target);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let response = ui.small_button("Reset");
+                    record_strip_rect("reset_loudness", response.rect);
+                    response.clicked()
+                })
+                .inner
+            })
+            .inner;
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(LOUDNESS_MONITORING_NOTE)
+                    .font(theme::medium(type_size::MICRO))
+                    .color(color::TEXT_MUTED),
+            )
+            .wrap(),
+        );
+        reset
+    })
+    .inner
+}
+
+/// One bar row: a `MICRO` label, the bar, and a `MICRO` readout, painted into
+/// one allocation exactly a text row tall.
+fn loudness_bar_row(ui: &mut egui::Ui, label: &str, lufs: Option<i32>, target: LoudnessTarget) {
+    let font = theme::medium(type_size::MICRO);
+    let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
+    let (row, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), row_height),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(row);
+    painter.text(
+        row.left_center(),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font.clone(),
+        color::TEXT_MUTED,
+    );
+    let bar_left = row.left() + LOUDNESS_BAR_LABEL_WIDTH;
+    let bar_right = (row.right() - LOUDNESS_BAR_READOUT_WIDTH - space::ONE).max(bar_left);
+    let bar_rect = egui::Rect::from_center_size(
+        egui::pos2(f32::midpoint(bar_left, bar_right), row.center().y),
+        egui::vec2(bar_right - bar_left, size::MIXER_LOUDNESS_BAR_HEIGHT),
+    );
+    painter.rect_filled(bar_rect, 1.0, color::SURFACE_ACTIVE);
+    if let Some(fill_color) = loudness_bar_color(lufs, target) {
+        let fill = egui::Rect::from_min_size(
+            bar_rect.min,
+            egui::vec2(
+                bar_rect.width() * loudness_bar_fill(lufs),
+                bar_rect.height(),
+            ),
+        );
+        if fill.width() > 0.0 {
+            // A status colour against the target, never the accent
+            // (DESIGN.md): quiet is `text-secondary`, not a failure.
+            painter.rect_filled(fill, 1.0, fill_color);
+        }
+    }
+    painter.text(
+        row.right_center(),
+        egui::Align2::RIGHT_CENTER,
+        loudness_value(lufs),
+        font,
+        color::TEXT_SECONDARY,
+    );
+}
+
+/// The `I … · LRA … · TP … · m:ss` line, with `TP` in status-danger above the
+/// target's ceiling.
+fn loudness_readout_label(ui: &mut egui::Ui, snapshot: LoudnessSnapshot, target: LoudnessTarget) {
+    let font = theme::medium(type_size::MICRO);
+    let [before, true_peak, after] = loudness_readout_parts(snapshot);
+    let true_peak_color = true_peak_color(snapshot.true_peak_dbtp_hundredths, target);
+    let mut job = egui::text::LayoutJob::default();
+    for (text, text_color) in [
+        (before, color::TEXT_SECONDARY),
+        (true_peak, true_peak_color),
+        (after, color::TEXT_SECONDARY),
+    ] {
+        job.append(
+            &text,
+            0.0,
+            egui::TextFormat {
+                font_id: font.clone(),
+                color: text_color,
+                ..Default::default()
+            },
+        );
+    }
+    ui.label(job);
+}
+
+/// How full a momentary or short-term bar is over −40…0 LUFS: `0` for `None`,
+/// clamped at both ends.
+#[must_use]
+pub(crate) fn loudness_bar_fill(lufs: Option<i32>) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    lufs.map_or(0.0, |lufs| {
+        (lufs.saturating_sub(LOUDNESS_BAR_FLOOR_HUNDREDTHS) as f32
+            / -(LOUDNESS_BAR_FLOOR_HUNDREDTHS as f32))
+            .clamp(0.0, 1.0)
+    })
+}
+
+/// The colour of a loudness bar's fill against the target: `text-secondary`
+/// below `target − tolerance`, status-success inside the tolerance,
+/// status-warning above it, and no fill at all for `None`. Never the accent.
+#[must_use]
+pub(crate) fn loudness_bar_color(
+    lufs: Option<i32>,
+    target: LoudnessTarget,
+) -> Option<egui::Color32> {
+    let lufs = lufs?;
+    let low = target.integrated_lufs_hundredths - target.tolerance_lu_hundredths;
+    let high = target.integrated_lufs_hundredths + target.tolerance_lu_hundredths;
+    Some(if lufs < low {
+        color::TEXT_SECONDARY
+    } else if lufs > high {
+        color::STATUS_WARNING
+    } else {
+        color::STATUS_SUCCESS
+    })
+}
+
+/// The colour the `TP` figure is painted in: status-danger strictly above the
+/// target's true-peak ceiling, `text-secondary` at or below it and for a peak
+/// the meter has not measured. A peak exactly at the ceiling conforms.
+#[must_use]
+pub(crate) fn true_peak_color(dbtp: Option<i32>, target: LoudnessTarget) -> egui::Color32 {
+    if dbtp.is_some_and(|dbtp| dbtp > target.true_peak_ceiling_dbtp_hundredths) {
+        color::STATUS_DANGER
+    } else {
+        color::TEXT_SECONDARY
+    }
+}
+
+/// The section's readout line: `I −16.0 LUFS · LRA 6.2 LU · TP −1.3 dBTP ·
+/// 0:42`, with [`LOUDNESS_NONE`] in place of each value the meter has not
+/// measured.
+#[must_use]
+pub(crate) fn loudness_readout(snapshot: LoudnessSnapshot) -> String {
+    loudness_readout_parts(snapshot).concat()
+}
+
+/// The readout line in three pieces so the true-peak figure can carry its
+/// own colour: everything before it, the figure itself, and the rest.
+fn loudness_readout_parts(snapshot: LoudnessSnapshot) -> [String; 3] {
+    [
+        format!(
+            "I {} LUFS · LRA {} LU · TP ",
+            loudness_value(snapshot.integrated_lufs_hundredths),
+            loudness_value(snapshot.loudness_range_lu_hundredths),
+        ),
+        loudness_value(snapshot.true_peak_dbtp_hundredths),
+        format!(" dBTP · {}", programme_clock(snapshot.programme_seconds)),
+    ]
+}
+
+/// The master strip's one-line integrated readout: `I −16.0`, or `I —`
+/// (AU3 §4.5).
+#[must_use]
+pub(crate) fn integrated_strip_line(snapshot: LoudnessSnapshot) -> String {
+    format!("I {}", loudness_value(snapshot.integrated_lufs_hundredths))
+}
+
+/// One loudness figure to a tenth (`-18.3`), or [`LOUDNESS_NONE`].
+///
+/// The sign comes from the whole value, as the export dialog's `decibels`
+/// does, so `-5` hundredths reads `-0.1` and not `0.1`; the tenth is rounded
+/// half away from zero.
+#[must_use]
+pub(crate) fn loudness_value(hundredths: Option<i32>) -> String {
+    let Some(hundredths) = hundredths else {
+        return LOUDNESS_NONE.to_owned();
+    };
+    let sign = if hundredths < 0 { "-" } else { "" };
+    let tenths = (hundredths.unsigned_abs() + 5) / 10;
+    format!("{sign}{}.{}", tenths / 10, tenths % 10)
+}
+
+/// Whole seconds as `m:ss`; the minutes are not capped.
+#[must_use]
+pub(crate) fn programme_clock(seconds: u32) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,4 +1346,228 @@ fn add_effect_menu(ui: &mut egui::Ui, chain: MixerChain, edits: &mut MixerChainE
         }
     });
     record_strip_rect("add_effect", response.response.rect);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kinewright_core::{EBU_R128_PROGRAMME_TARGET, STREAMING_PLATFORM_TARGET};
+
+    fn snapshot() -> LoudnessSnapshot {
+        LoudnessSnapshot {
+            momentary_lufs_hundredths: Some(-1_830),
+            short_term_lufs_hundredths: Some(-1_705),
+            integrated_lufs_hundredths: Some(-1_600),
+            loudness_range_lu_hundredths: Some(620),
+            true_peak_dbtp_hundredths: Some(-130),
+            programme_seconds: 42,
+        }
+    }
+
+    /// AU3 §7 A18: the bar runs −40…0 LUFS, empty for `None`, clamped.
+    #[test]
+    fn loudness_bar_fill_spans_minus_forty_to_zero_lufs() {
+        for (lufs, expected, label) in [
+            (Some(-4_000), 0.0, "the floor"),
+            (Some(-2_000), 0.5, "halfway"),
+            (Some(0), 1.0, "the ceiling"),
+            (None, 0.0, "none"),
+            (Some(-9_000), 0.0, "clamped at the floor"),
+            (Some(300), 1.0, "clamped at the ceiling"),
+        ] {
+            let fill = loudness_bar_fill(lufs);
+            assert!(
+                (fill - expected).abs() < f32::EPSILON,
+                "{label}: {lufs:?} fills {fill}, expected {expected}"
+            );
+        }
+    }
+
+    /// AU3 §7 A18: the truth table against the dialog's profile target —
+    /// `text-secondary` below the tolerance, success inside it, warning
+    /// above, no fill for `None`; quiet is never a failure and the accent is
+    /// never used.
+    #[test]
+    fn loudness_bar_color_follows_the_target_tolerance() {
+        for (target, label) in [
+            (STREAMING_PLATFORM_TARGET, "streaming"),
+            (EBU_R128_PROGRAMME_TARGET, "R128"),
+        ] {
+            let centre = target.integrated_lufs_hundredths;
+            let tol = target.tolerance_lu_hundredths;
+            assert_eq!(loudness_bar_color(None, target), None, "{label}: none");
+            assert_eq!(
+                loudness_bar_color(Some(centre - tol - 1), target),
+                Some(color::TEXT_SECONDARY),
+                "{label}: just under the tolerance is quiet, not a failure"
+            );
+            for inside in [centre - tol, centre, centre + tol] {
+                assert_eq!(
+                    loudness_bar_color(Some(inside), target),
+                    Some(color::STATUS_SUCCESS),
+                    "{label}: {inside} is inside [t − tol, t + tol]"
+                );
+            }
+            assert_eq!(
+                loudness_bar_color(Some(centre + tol + 1), target),
+                Some(color::STATUS_WARNING),
+                "{label}: just over the tolerance warns"
+            );
+            assert_eq!(
+                loudness_bar_color(Some(0), target),
+                Some(color::STATUS_WARNING),
+                "{label}: full scale warns"
+            );
+        }
+        assert_ne!(
+            loudness_bar_color(Some(-1_400), STREAMING_PLATFORM_TARGET),
+            loudness_bar_color(Some(-1_400), EBU_R128_PROGRAMME_TARGET),
+            "the two targets disagree about −14 LUFS"
+        );
+        for lufs in [None, Some(-9_000), Some(-1_400), Some(0)] {
+            assert_ne!(
+                loudness_bar_color(lufs, STREAMING_PLATFORM_TARGET),
+                Some(color::ACCENT),
+                "never the accent"
+            );
+        }
+    }
+
+    /// AU3 §4.4 item 3: `TP` turns status-danger strictly above the target's
+    /// ceiling, so a peak exactly at the ceiling still conforms.
+    #[test]
+    fn true_peak_color_turns_danger_only_above_the_ceiling() {
+        for (target, label) in [
+            (STREAMING_PLATFORM_TARGET, "streaming"),
+            (EBU_R128_PROGRAMME_TARGET, "R128"),
+        ] {
+            let ceiling = target.true_peak_ceiling_dbtp_hundredths;
+            for (dbtp, description) in [
+                (None, "an unmeasured peak"),
+                (Some(ceiling - 1), "just under the ceiling"),
+                (Some(ceiling), "exactly at the ceiling"),
+            ] {
+                assert_eq!(
+                    true_peak_color(dbtp, target),
+                    color::TEXT_SECONDARY,
+                    "{label}: {description} is not a failure"
+                );
+            }
+            for (dbtp, description) in [(ceiling + 1, "just over the ceiling"), (0, "full scale")] {
+                assert_eq!(
+                    true_peak_color(Some(dbtp), target),
+                    color::STATUS_DANGER,
+                    "{label}: {description} is over the ceiling"
+                );
+            }
+        }
+    }
+
+    /// AU3 §7 A18: the readout line and the strip line, with `—` per `None`.
+    #[test]
+    fn loudness_readout_renders_a_dash_per_none() {
+        assert_eq!(
+            loudness_readout(snapshot()),
+            "I -16.0 LUFS · LRA 6.2 LU · TP -1.3 dBTP · 0:42"
+        );
+        assert_eq!(
+            loudness_readout(LoudnessSnapshot::default()),
+            "I — LUFS · LRA — LU · TP — dBTP · 0:00"
+        );
+        assert_eq!(
+            loudness_readout(LoudnessSnapshot {
+                integrated_lufs_hundredths: Some(-2_296),
+                loudness_range_lu_hundredths: None,
+                true_peak_dbtp_hundredths: Some(-5),
+                programme_seconds: 3_725,
+                ..LoudnessSnapshot::default()
+            }),
+            "I -23.0 LUFS · LRA — LU · TP -0.1 dBTP · 62:05",
+            "the tenth rounds half away from zero and the sign survives a value in (−1, 0)"
+        );
+        assert_eq!(integrated_strip_line(snapshot()), "I -16.0");
+        assert_eq!(integrated_strip_line(LoudnessSnapshot::default()), "I —");
+        assert_eq!(loudness_value(Some(0)), "0.0");
+        assert_eq!(loudness_value(Some(-1_835)), "-18.4");
+        assert_eq!(loudness_value(Some(1_234)), "12.3");
+        assert_eq!(programme_clock(59), "0:59");
+        assert_eq!(programme_clock(60), "1:00");
+    }
+
+    /// Lay the section out at the pane's width and report its height.
+    fn measure_loudness_section(snapshot: LoudnessSnapshot) -> f32 {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut measured = egui::Vec2::ZERO;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.vertical(|ui| {
+                ui.set_max_width(size::MIXER_CHAIN_PANE_WIDTH);
+                loudness_section(ui, snapshot, STREAMING_PLATFORM_TARGET);
+                measured = ui.min_rect().size();
+            });
+        });
+        measured.y
+    }
+
+    /// AU3 §7 A18: the section spends at most 80 px of the pane, measured
+    /// with every value present and with none — the pane scrolls, but the
+    /// section should be on screen before the first card in a 260 px dock.
+    /// Measured on this build: 74 px either way.
+    #[test]
+    fn the_loudness_section_fits_its_height_budget() {
+        const BUDGET: f32 = 80.0;
+        const MEASURED: f32 = 74.0;
+        for (label, snapshot) in [
+            ("measured", snapshot()),
+            ("unmeasured", LoudnessSnapshot::default()),
+        ] {
+            let height = measure_loudness_section(snapshot);
+            assert!(
+                height <= BUDGET,
+                "the {label} LOUDNESS section is {height} px tall, over the {BUDGET} px budget"
+            );
+            assert!(
+                (height - MEASURED).abs() <= 1.0,
+                "the doc comment says the {label} section measures {MEASURED} px; it measured {height}"
+            );
+        }
+    }
+
+    /// AU3 §7 A18: what the section says, headless — the caps label, both bar
+    /// labels with their readouts, the readout line, `Reset`, and the Part A
+    /// F21 sentence — and that it says `—` where the meter has nothing yet.
+    #[test]
+    fn the_loudness_section_paints_its_labels_and_dashes() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        for (snapshot, momentary, expect_reset) in [
+            (snapshot(), "-18.3", false),
+            (LoudnessSnapshot::default(), LOUDNESS_NONE, false),
+        ] {
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.set_max_width(size::MIXER_CHAIN_PANE_WIDTH);
+                let reset = loudness_section(ui, snapshot, STREAMING_PLATFORM_TARGET);
+                assert_eq!(reset, expect_reset, "nothing was clicked");
+            });
+            let painted = theme::painted_text(&output);
+            for expected in [
+                "LOUDNESS",
+                "M",
+                "S",
+                momentary,
+                "Reset",
+                LOUDNESS_MONITORING_NOTE,
+            ] {
+                assert!(
+                    painted.iter().any(|text| text == expected),
+                    "the section paints {expected:?}; it painted {painted:?}"
+                );
+            }
+            let line = loudness_readout(snapshot);
+            assert!(
+                painted.contains(&line),
+                "the readout line is drawn whole as {line:?}; it painted {painted:?}"
+            );
+        }
+    }
 }

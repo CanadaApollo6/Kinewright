@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock, RwLock,
-        atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
     thread,
     time::Duration,
@@ -12,28 +12,29 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use kinewright_core::{
-    Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, BeatStatus, ClipId,
-    DeliveryVerification, DeliveryVerificationRequest, Document, EffectId, Export,
-    ExportCancellation, ExportSettings, FrameTexture, LutAvailabilityKind, LutAvailabilityStatus,
-    MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE, MatteParams, MatteProof, MatteProofError,
-    MatteProofMetadata, MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus,
-    MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,
-    MediaError, MediaEvent, MixLevelReport, MixLevelRequest, MixPeaks, MixSpectrumReport,
-    MixSpectrumRequest, MonitorProof, Playback, PlaybackState, ProgressSink, Rational, RgbaImage,
-    SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TranscriptStatus, VisualAssetResult, WORKING_PROOF_ENCODING,
-    WORKING_PROOF_STAGE, WorkingProof, WorkingProofMetadata, export_lut_preflight_with,
+    Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, AudioQcReport, AudioQcRequest,
+    BeatStatus, ClipId, DeliveryVerification, DeliveryVerificationRequest, Document, EffectId,
+    Export, ExportCancellation, ExportSettings, FrameTexture, LoudnessSnapshot,
+    LutAvailabilityKind, LutAvailabilityStatus, MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE,
+    MatteParams, MatteProof, MatteProofError, MatteProofMetadata, MediaAsset,
+    MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,
+    MediaCacheFamilyStatus, MediaCacheInventory, MediaError, MediaEvent, MixLevelReport,
+    MixLevelRequest, MixPeaks, MixSpectrumReport, MixSpectrumRequest, MonitorProof, Playback,
+    PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode,
+    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TranscriptStatus, VisualAssetResult, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof,
+    WorkingProofMetadata, export_lut_preflight_with,
 };
 
 use crate::{
     analysis::VisualAssetService,
     audio::{AudioRuntime, MeterState, MixMeters, decode_audio_range},
-    clock::samples_to_frame,
+    clock::{frame_to_samples, samples_to_frame},
     compositor::GpuContext,
     decode::probe_path,
     derived::{DerivedAnalysisConfig, DerivedAnalysisService},
     derived_cache::CacheStats,
-    loudness::measure_loudness,
+    loudness::{LiveLoudnessMeter, LoudnessMeter},
     lut::CubeLut,
     lut_store::LutLibrary,
     render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
@@ -277,6 +278,9 @@ enum Control {
     UpdateAudioMix(Arc<Document>),
     Play(TimeCode),
     Pause,
+    /// AU3 §3.9: restart the integrated, range, and true-peak measurement at
+    /// the position the meter is being fed.
+    ResetLoudness,
     Thumbnail {
         document: Option<Arc<Document>>,
         at: TimeCode,
@@ -301,6 +305,9 @@ pub struct FfmpegMediaEngine {
     /// AU1 §4.1: the peak table the worker installs while it is playing, read
     /// by `Playback::mix_peaks`.
     mix_meters: Arc<RwLock<Arc<MixMeters>>>,
+    /// AU3 §3.9: the live loudness the worker publishes by audible position,
+    /// read by `Playback::loudness`.
+    loudness: Arc<LiveLoudness>,
     next_asset_id: AtomicU64,
     data_dir: PathBuf,
     gpu: GpuContext,
@@ -386,6 +393,8 @@ impl FfmpegMediaEngine {
         let worker_meter = Arc::clone(&meter);
         let mix_meters = Arc::new(RwLock::new(Arc::new(MixMeters::empty(Arc::clone(&meter)))));
         let worker_mix_meters = Arc::clone(&mix_meters);
+        let loudness = Arc::new(LiveLoudness::default());
+        let worker_loudness = Arc::clone(&loudness);
         let frames_drop_rx = frames_rx.clone();
         let events_drop_rx = events_rx.clone();
         // Scrub positions use shared atomics so rapid mouse movement is coalesced
@@ -409,6 +418,7 @@ impl FfmpegMediaEngine {
                     worker_clock,
                     worker_meter,
                     worker_mix_meters,
+                    worker_loudness,
                     worker_requested,
                     worker_gpu,
                     worker_lut_lattices,
@@ -427,6 +437,7 @@ impl FfmpegMediaEngine {
             clock,
             meter,
             mix_meters,
+            loudness,
             next_asset_id: AtomicU64::new(1),
             data_dir: data_dir_for_self,
             gpu,
@@ -692,6 +703,16 @@ impl Playback for FfmpegMediaEngine {
         }
         let _ = self.control_tx.send(Control::UpdateAudioMix(doc));
     }
+
+    /// AU3 §3.9: the snapshot the worker last published by audible position.
+    fn loudness(&self) -> LoudnessSnapshot {
+        self.loudness.load()
+    }
+
+    /// AU3 §3.9: restart the measurement (`Control::ResetLoudness`).
+    fn reset_loudness(&self) {
+        let _ = self.control_tx.send(Control::ResetLoudness);
+    }
 }
 
 impl Analysis for FfmpegMediaEngine {
@@ -770,7 +791,7 @@ impl Analysis for FfmpegMediaEngine {
             2,
             &ExportCancellation::default(),
         )?;
-        measure_loudness(&samples, 48_000, 2)
+        LoudnessMeter::measure(&samples, 48_000, 2)
     }
 
     fn timeline_loudness(&self, document: &Document) -> Result<AudioLoudness, MediaError> {
@@ -785,7 +806,7 @@ impl Analysis for FfmpegMediaEngine {
             cancellation: ExportCancellation::default(),
         };
         let samples = crate::export::mix_audio(document, &settings)?;
-        measure_loudness(&samples, 48_000, 2)
+        LoudnessMeter::measure(&samples, 48_000, 2)
     }
 
     fn mix_levels(
@@ -803,6 +824,16 @@ impl Analysis for FfmpegMediaEngine {
         request: &MixSpectrumRequest,
     ) -> Result<MixSpectrumReport, MediaError> {
         crate::export::measure_mix_spectrum(document, request)
+    }
+
+    /// AU3 §3.10: the post-clamp master over a project range, streamed
+    /// through `QcObserver` and judged by core.
+    fn audio_qc(
+        &self,
+        document: &Document,
+        request: &AudioQcRequest,
+    ) -> Result<AudioQcReport, MediaError> {
+        crate::export::measure_audio_qc(document, request)
     }
 
     fn request_beat_detection(&self, asset: MediaAsset) {
@@ -1276,6 +1307,216 @@ impl Export for FfmpegMediaEngine {
     }
 }
 
+/// AU3 §3.9: the live loudness, written once per publish on the worker
+/// thread (Release) and read by `Playback::loudness` (Acquire).
+///
+/// `i32::MIN` is "none"; `energy_loudness(0)` maps to it. A torn read pairs
+/// fields from different publishes; each field is individually current or
+/// newer and none is stale, which §3.9 accepts (F15) because the six values
+/// are displayed, never combined.
+pub(crate) struct LiveLoudness {
+    momentary: AtomicI32,
+    short_term: AtomicI32,
+    integrated: AtomicI32,
+    loudness_range: AtomicI32,
+    true_peak: AtomicI32,
+    programme_seconds: AtomicU32,
+}
+
+/// The atomic sentinel for an unmeasured field.
+const LIVE_LOUDNESS_NONE: i32 = i32::MIN;
+
+impl Default for LiveLoudness {
+    fn default() -> Self {
+        Self {
+            momentary: AtomicI32::new(LIVE_LOUDNESS_NONE),
+            short_term: AtomicI32::new(LIVE_LOUDNESS_NONE),
+            integrated: AtomicI32::new(LIVE_LOUDNESS_NONE),
+            loudness_range: AtomicI32::new(LIVE_LOUDNESS_NONE),
+            true_peak: AtomicI32::new(LIVE_LOUDNESS_NONE),
+            programme_seconds: AtomicU32::new(0),
+        }
+    }
+}
+
+impl LiveLoudness {
+    /// Store all six fields, Release.
+    pub(crate) fn publish(&self, snapshot: &LoudnessSnapshot) {
+        let store = |atomic: &AtomicI32, value: Option<i32>| {
+            atomic.store(value.unwrap_or(LIVE_LOUDNESS_NONE), Ordering::Release);
+        };
+        store(&self.momentary, snapshot.momentary_lufs_hundredths);
+        store(&self.short_term, snapshot.short_term_lufs_hundredths);
+        store(&self.integrated, snapshot.integrated_lufs_hundredths);
+        store(&self.loudness_range, snapshot.loudness_range_lu_hundredths);
+        store(&self.true_peak, snapshot.true_peak_dbtp_hundredths);
+        self.programme_seconds
+            .store(snapshot.programme_seconds, Ordering::Release);
+    }
+
+    /// Load all six fields, Acquire, sentinels mapped to `None`.
+    pub(crate) fn load(&self) -> LoudnessSnapshot {
+        let load = |atomic: &AtomicI32| {
+            let value = atomic.load(Ordering::Acquire);
+            (value != LIVE_LOUDNESS_NONE).then_some(value)
+        };
+        LoudnessSnapshot {
+            momentary_lufs_hundredths: load(&self.momentary),
+            short_term_lufs_hundredths: load(&self.short_term),
+            integrated_lufs_hundredths: load(&self.integrated),
+            loudness_range_lu_hundredths: load(&self.loudness_range),
+            true_peak_dbtp_hundredths: load(&self.true_peak),
+            programme_seconds: self.programme_seconds.load(Ordering::Acquire),
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        self.publish(&LoudnessSnapshot::default());
+    }
+}
+
+/// AU3 §3.9: the worker's side of the live meter — the device-rate
+/// [`LiveLoudnessMeter`] (which outlives the mixer and the runtime), the
+/// origin the ring keys count from, `paused_at`, and the publish step.
+///
+/// Keys are device sample frames since the last reset: the clock's absolute
+/// project-sample position minus `reset_sample`. The fill pushes the meter
+/// up to a second ahead of the loudspeaker; `publish_at` stores the ring
+/// entry at or behind the audible position, so nothing is published as
+/// current until the sound has been heard.
+pub(crate) struct WorkerLoudness {
+    shared: Arc<LiveLoudness>,
+    meter: Option<LiveLoudnessMeter>,
+    reset_sample: u64,
+    paused_at: Option<TimeCode>,
+    published_key: Option<u64>,
+}
+
+impl WorkerLoudness {
+    pub(crate) const fn new(shared: Arc<LiveLoudness>) -> Self {
+        Self {
+            shared,
+            meter: None,
+            reset_sample: 0,
+            paused_at: None,
+            published_key: None,
+        }
+    }
+
+    /// The clock position at the last `pause`, if playback has not restarted.
+    #[cfg(test)]
+    pub(crate) const fn paused_at(&self) -> Option<TimeCode> {
+        self.paused_at
+    }
+
+    /// The ring key (frames since reset) of the last published entry.
+    #[cfg(test)]
+    pub(crate) const fn published_key(&self) -> Option<u64> {
+        self.published_key
+    }
+
+    /// The meter's own head, for the lag pin.
+    #[cfg(test)]
+    pub(crate) fn fed_block_end(&self) -> Option<u64> {
+        self.meter
+            .as_ref()
+            .and_then(|meter| meter.meter().last_block_end())
+    }
+
+    pub(crate) const fn meter_mut(&mut self) -> Option<&mut LiveLoudnessMeter> {
+        self.meter.as_mut()
+    }
+
+    /// §3.9 continue and reset, at `start_playback`: the meter **continues**
+    /// when `from == paused_at` on an unchanged device format and **resets**
+    /// otherwise (a seek, `play(from)` elsewhere, a first play, or a device
+    /// rate change). Returns the meter the initial fill threads.
+    ///
+    /// # Errors
+    ///
+    /// As [`LiveLoudnessMeter::new`].
+    pub(crate) fn begin(
+        &mut self,
+        from: TimeCode,
+        sample_rate: u32,
+        output_channels: u16,
+        fps: Rational,
+    ) -> Result<&mut LiveLoudnessMeter, MediaError> {
+        let same_format = self.meter.as_ref().is_some_and(|meter| {
+            meter.sample_rate() == sample_rate && meter.channels() == output_channels.clamp(1, 2)
+        });
+        let continues = same_format && self.paused_at == Some(from);
+        if !same_format {
+            self.meter = Some(LiveLoudnessMeter::new(sample_rate, output_channels)?);
+        }
+        if !continues {
+            self.reset_to(frame_to_samples(from, sample_rate, fps));
+        }
+        self.paused_at = None;
+        Ok(self.meter.as_mut().expect("the meter was just ensured"))
+    }
+
+    /// The tick: convert the clock's absolute position to frames since reset
+    /// and store the ring entry at or behind it, once per new entry.
+    pub(crate) fn publish_at(&mut self, position_samples: u64) {
+        let Some(meter) = &self.meter else {
+            return;
+        };
+        let audible = position_samples.saturating_sub(self.reset_sample);
+        if let Some((key, snapshot)) = meter.published(audible)
+            && self.published_key != Some(key)
+        {
+            self.shared.publish(&snapshot);
+            self.published_key = Some(key);
+        }
+    }
+
+    /// §3.9 pause: `paused_at` is the clock position at the pause; the
+    /// integration is truncated to blocks ending at or before it and the
+    /// paused snapshot (momentary and short-term `None`) is published.
+    pub(crate) fn pause_at(&mut self, position: TimeCode, fps: Rational) {
+        self.paused_at = Some(position);
+        let reset_sample = self.reset_sample;
+        let Some(meter) = &mut self.meter else {
+            return;
+        };
+        let paused_sample = frame_to_samples(position, meter.sample_rate(), fps);
+        if paused_sample < reset_sample {
+            // A `reset_loudness` mid-play put the origin at the fed position
+            // and the sound never reached it: nothing measured was heard, so
+            // the origin moves back to the pause and a continue lines up.
+            self.reset_to(paused_sample);
+            return;
+        }
+        let audible = paused_sample - reset_sample;
+        meter.truncate_to(audible);
+        self.shared.publish(&meter.paused_snapshot());
+        self.published_key = Some(audible);
+    }
+
+    /// Reset everything (meter, ring, atomics) with the ring origin at
+    /// `fed_position_samples` — the mixer's fed *output* position while
+    /// playing (`cursor_sample − latency`, AU2 §3.7), so keys stay aligned
+    /// with the audio actually rendered; the paused position while
+    /// paused, so a continue at `paused_at` lines up; zero when stopped.
+    pub(crate) fn reset(&mut self, fed_position_samples: Option<u64>, fps: Rational) {
+        let origin = fed_position_samples.unwrap_or_else(|| match (self.paused_at, &self.meter) {
+            (Some(paused_at), Some(meter)) => frame_to_samples(paused_at, meter.sample_rate(), fps),
+            _ => 0,
+        });
+        self.reset_to(origin);
+    }
+
+    fn reset_to(&mut self, origin: u64) {
+        if let Some(meter) = &mut self.meter {
+            meter.reset();
+        }
+        self.reset_sample = origin;
+        self.published_key = None;
+        self.shared.clear();
+    }
+}
+
 struct Worker {
     control_rx: Receiver<Control>,
     frames_tx: Sender<(TimeCode, FrameTexture)>,
@@ -1301,6 +1542,8 @@ struct Worker {
     /// project it is not previewing.
     lut_library: Arc<LutLibrary>,
     audio: Option<AudioRuntime>,
+    /// AU3 §3.9: the live meter, ring, and publish state.
+    loudness: WorkerLoudness,
     playing: bool,
     last_position: Option<TimeCode>,
 }
@@ -1314,11 +1557,15 @@ struct WorkerChannels {
 }
 
 impl Worker {
+    // The worker's shared handles are constructed once, in the engine's
+    // constructor; a struct of eight `Arc`s would only move the count.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         channels: WorkerChannels,
         clock: Arc<SharedClock>,
         meter: Arc<MeterState>,
         mix_meters: Arc<RwLock<Arc<MixMeters>>>,
+        loudness: Arc<LiveLoudness>,
         requested: Arc<RequestedPositions>,
         gpu: GpuContext,
         lut_lattices: Arc<RwLock<PublishedLattices>>,
@@ -1340,6 +1587,7 @@ impl Worker {
             lut_lattices,
             lut_library: Arc::new(LutLibrary::default()),
             audio: None,
+            loudness: WorkerLoudness::new(loudness),
             playing: false,
             last_position: None,
         }
@@ -1373,6 +1621,7 @@ impl Worker {
             Control::UpdateAudioMix(doc) => self.update_audio_mix(doc),
             Control::Play(from) => self.start_playback(from),
             Control::Pause => self.pause(),
+            Control::ResetLoudness => self.reset_loudness(),
             Control::Thumbnail {
                 document,
                 at,
@@ -1483,6 +1732,8 @@ impl Worker {
 
     fn set_document(&mut self, doc: &Document) {
         self.pause();
+        // AU3 §3.9: a new document is a new programme.
+        self.loudness.reset(None, doc.fps);
         self.document = Arc::new(doc.clone());
         // CC4 2.4: the incoming document may belong to a different project, so
         // its looks are rebound before the first frame is presented.
@@ -1532,12 +1783,17 @@ impl Worker {
             &self.document,
             Arc::clone(&self.meter),
         ));
-        match self
-            .audio_for_position(from, Arc::clone(&mix_meters))
-            .and_then(|runtime| {
-                runtime.play()?;
-                Ok(runtime)
-            }) {
+        let fps = self.document.fps;
+        let opened = self.audio_for_position(from, Arc::clone(&mix_meters));
+        let loudness = &mut self.loudness;
+        match opened.and_then(|mut runtime| {
+            // AU3 §3.9: continue at `paused_at`, reset elsewhere; the meter
+            // is threaded through the initial fill before the stream starts.
+            let meter = loudness.begin(from, runtime.sample_rate(), runtime.channels(), fps)?;
+            runtime.fill(meter)?;
+            runtime.play()?;
+            Ok(runtime)
+        }) {
             Ok(runtime) => {
                 // AU1 §4.1: installed only once the runtime exists, so
                 // `mix_peaks()` stays empty when playback fails to start.
@@ -1561,6 +1817,11 @@ impl Worker {
         self.clock
             .fallback_frame
             .store(position.0, Ordering::Release);
+        // AU3 §3.9: `paused_at` is this same position; the integration is
+        // truncated to what was heard and the paused snapshot published.
+        if self.audio.is_some() {
+            self.loudness.pause_at(position, self.document.fps);
+        }
         self.audio = None;
         self.meter.clear();
         self.install_mix_meters(Arc::new(MixMeters::empty(Arc::clone(&self.meter))));
@@ -1583,12 +1844,15 @@ impl Worker {
             self.fail(MediaError::Backend("audio output stream failed".to_owned()));
             return;
         }
-        if let Some(audio) = &mut self.audio
-            && let Err(error) = audio.fill()
+        if let (Some(audio), Some(meter)) = (&mut self.audio, self.loudness.meter_mut())
+            && let Err(error) = audio.fill(meter)
         {
             self.fail(error);
             return;
         }
+        // AU3 §3.9: publish by the device clock's audible position.
+        self.loudness
+            .publish_at(self.clock.position_samples.load(Ordering::Acquire));
         let position = self.clock.position();
         if position >= self.document.duration {
             let end = self.document.duration;
@@ -1655,11 +1919,25 @@ impl Worker {
         if !self.playing {
             return;
         }
-        if let Some(audio) = &mut self.audio
-            && let Err(error) = audio.fill()
+        if let (Some(audio), Some(meter)) = (&mut self.audio, self.loudness.meter_mut())
+            && let Err(error) = audio.fill(meter)
         {
             self.fail(error);
         }
+    }
+
+    /// AU3 §3.9 / `Control::ResetLoudness`: restart the measurement. While
+    /// playing the ring origin is the mixer's fed position — the audio between
+    /// the loudspeaker and the fill is already rendered and cannot be
+    /// re-measured — so the atomics read `default()` until the sound reaches
+    /// it; while paused it is `paused_at`, so a continue lines up.
+    fn reset_loudness(&mut self) {
+        let fed = self
+            .audio
+            .as_ref()
+            .filter(|_| self.playing)
+            .map(AudioRuntime::fed_position_samples);
+        self.loudness.reset(fed, self.document.fps);
     }
 
     fn fail(&mut self, error: MediaError) {
@@ -1727,6 +2005,101 @@ mod tests {
         sha256::{sha256_bytes, source_fingerprint},
         test_support::{GeneratedMedia, TempDirectory, single_clip_document},
     };
+
+    /// AU3 §7 item A12 (§3.9): `Worker::reset_loudness`'s origin selection —
+    /// `Some(AudioRuntime::fed_position_samples())` while playing, `None`
+    /// otherwise — exercised device-free on `WorkerLoudness` itself.
+    ///
+    /// While playing the origin is the fed position, so the ≤ 1 s already
+    /// rendered publishes nothing until the loudspeaker reaches it; while
+    /// paused it is `paused_at`, so a continue lines up; stopped it is zero.
+    #[test]
+    fn a_loudness_reset_keys_from_the_fed_position_only_while_playing() {
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        fn stereo_tone(frames: usize) -> Vec<f32> {
+            (0..frames)
+                .flat_map(|frame| {
+                    let sample = (0.1
+                        * (2.0 * std::f64::consts::PI * 1_000.0 * frame as f64 / 48_000.0).sin())
+                        as f32;
+                    [sample, sample]
+                })
+                .collect()
+        }
+
+        let fps = Rational::new(10, 1).unwrap();
+        let shared = Arc::new(LiveLoudness::default());
+        let mut loudness = WorkerLoudness::new(Arc::clone(&shared));
+        loudness.begin(TimeCode::ZERO, 48_000, 2, fps).unwrap();
+
+        // Playing: the fill has metered 2 s and the loudspeaker has heard 1 s.
+        // (Each later push is one second — ten sub-blocks — so the whole run
+        // stays inside the 16-entry ring.)
+        let two_seconds = stereo_tone(96_000);
+        let one_second = &two_seconds[..96_000];
+        loudness
+            .meter_mut()
+            .unwrap()
+            .push_chunk(&two_seconds, 2)
+            .unwrap();
+        loudness.publish_at(48_000);
+        assert_eq!(loudness.published_key(), Some(48_000));
+        assert_ne!(shared.load(), LoudnessSnapshot::default());
+
+        // `Some(fed)`: the origin is the fed position, 96 000, so nothing is
+        // published until the loudspeaker has passed it by a whole sub-block.
+        loudness.reset(Some(96_000), fps);
+        assert_eq!(loudness.published_key(), None);
+        assert_eq!(shared.load(), LoudnessSnapshot::default());
+        loudness
+            .meter_mut()
+            .unwrap()
+            .push_chunk(one_second, 2)
+            .unwrap();
+        loudness.publish_at(100_799);
+        assert_eq!(
+            loudness.published_key(),
+            None,
+            "one frame short of the first sub-block past the fed origin"
+        );
+        loudness.publish_at(100_800);
+        assert_eq!(loudness.published_key(), Some(4_800));
+
+        // `None` while paused: the origin is `paused_at`. Pausing at frame 12
+        // (1.2 s at 10 fps) leaves the ring keyed from 57 600.
+        loudness.pause_at(TimeCode(12), fps);
+        assert_eq!(loudness.paused_at(), Some(TimeCode(12)));
+        loudness.reset(None, fps);
+        assert_eq!(loudness.published_key(), None);
+        loudness
+            .meter_mut()
+            .unwrap()
+            .push_chunk(one_second, 2)
+            .unwrap();
+        loudness.publish_at(57_600 + 4_799);
+        assert_eq!(loudness.published_key(), None);
+        loudness.publish_at(57_600 + 4_800);
+        assert_eq!(
+            loudness.published_key(),
+            Some(4_800),
+            "a paused reset keys from `paused_at`, so a continue lines up"
+        );
+
+        // `None` with no `paused_at` (stopped, or reset before a first play):
+        // the origin is zero.
+        loudness.begin(TimeCode(30), 48_000, 2, fps).unwrap();
+        assert_eq!(loudness.paused_at(), None);
+        loudness.reset(None, fps);
+        loudness
+            .meter_mut()
+            .unwrap()
+            .push_chunk(one_second, 2)
+            .unwrap();
+        loudness.publish_at(4_799);
+        assert_eq!(loudness.published_key(), None);
+        loudness.publish_at(4_800);
+        assert_eq!(loudness.published_key(), Some(4_800), "keyed from zero");
+    }
 
     fn asset(path: PathBuf, fingerprint: MediaSourceFingerprint) -> MediaAsset {
         MediaAsset {
@@ -2651,6 +3024,7 @@ mod tests {
             Arc::clone(&clock),
             Arc::clone(&meter),
             Arc::clone(&mix_meters),
+            Arc::new(LiveLoudness::default()),
             Arc::new(RequestedPositions::default()),
             fallback_gpu().context(),
             Arc::new(RwLock::new(PublishedLattices::default())),

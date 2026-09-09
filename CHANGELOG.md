@@ -41,12 +41,38 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   whatever is there.
 
 ### Changed
+- Integrated loudness gates on complete 400 ms blocks only, as BS.1770-4
+  specifies; the final partial block no longer contributes, so a programme
+  shorter than 400 ms has no integrated value, and `get_audio_levels` or
+  `get_audio_qc` over a range shorter than one gating block is refused with
+  `MixLoudnessRangeTooShort` instead of reporting a number from a truncated
+  block. `lufs=none` in `get_audio_levels` therefore means silent only.
+  `no_audible_media` now also fires for a timeline whose every audio-bearing
+  track is muted or solo-silenced, with a message that says so.
 - Unrouted tracks are now summed in document order in both playback and export;
   export audio may differ by one ulp per sample from earlier builds when two or
   more unrouted tracks are audible at once (previously nondeterministic run to
   run).
 
 ### Added
+- AU3 Part A, measurement: one streaming `LoudnessMeter` behind every loudness
+  reading — offline measurement, per-track/bus/master levels, the live
+  playback meter, audio QC, and (Part B) decoded delivery verification. It
+  reports BS.1770-4 integrated loudness with complete-block gating, momentary
+  (400 ms) and short-term (3 s) maxima, EBU Tech 3342 loudness range, and
+  true peak through an 8× oversampler whose phase-0 output is the input
+  itself, with K-weighting derived for any sample rate from the BS.1770
+  analogue prototypes (the 48 kHz table is reproduced to better than 1e-6).
+  Every delivery profile now declares a loudness target (`SourceMaster`
+  −23 LUFS ±1 LU / −1 dBTP; the streaming and social profiles −14 LUFS
+  ±1 LU / −1 dBTP), published by `get_delivery_profiles`. The agent gains
+  the read-only `get_audio_qc` over `Analysis::audio_qc`: clipping counted
+  per channel on the pre-clamp master, leading and trailing silence, channel
+  balance, and distance from a profile's target, all integer-reported and
+  evidence-only. The Mixer's master pane shows a `LOUDNESS` section fed by
+  `Playback::loudness()`, published by audible position so the bars never
+  lead the loudspeaker. Level measurements stream through a chunk observer
+  instead of holding every stem. See docs/AU3-LOUDNESS-AND-DELIVERY.md.
 - AU2 Part B, bus and master control: buses carry a post-effects fader
   (`AudioBus.gain_tenth_db`), the document gains a master chain
   (`AudioMix.master` with gain and effects, set by the idempotent

@@ -129,7 +129,10 @@ pub fn qa_document(document: &Document) -> QaReport {
     }
 
     let mut has_audible_media = false;
+    // AU3 §2.6: a clip that would have qualified had its track been audible.
+    let mut has_audio_bearing_clip = false;
     for track in &document.tracks {
+        let track_audible = document.track_audible(track.id);
         let mut previous_end = TimeCode::ZERO;
         let mut previous_was_media = false;
         for clip in &track.clips {
@@ -208,11 +211,15 @@ pub fn qa_document(document: &Document) -> QaReport {
                     ));
                 }
             }
-            has_audible_media |= matches!(clip.content, ClipContent::Media)
+            let audio_bearing = matches!(clip.content, ClipContent::Media)
                 && clip.speed_percent == 100
                 && document.asset(clip.asset).is_some_and(|asset| {
                     matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo)
                 });
+            has_audio_bearing_clip |= audio_bearing;
+            // AU3 §2.6: a muted or solo-suppressed track contributes nothing
+            // to the master, so its clips do not count as audible.
+            has_audible_media |= audio_bearing && track_audible;
             let duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
             let end = TimeCode(clip.timeline_start.0.saturating_add(duration.0));
             if clip.timeline_start > previous_end {
@@ -337,10 +344,15 @@ pub fn qa_document(document: &Document) -> QaReport {
         }
     }
     if document.duration > TimeCode::ZERO && !has_audible_media {
+        let message = if has_audio_bearing_clip {
+            "Every audio-bearing track is muted or silenced by another track's solo."
+        } else {
+            "The timeline has no real-time media clip with an audio stream."
+        };
         issues.push(issue(
             QaSeverity::Info,
             "no_audible_media",
-            "The timeline has no real-time media clip with an audio stream.",
+            message,
             None,
             None,
             None,

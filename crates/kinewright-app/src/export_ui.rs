@@ -130,7 +130,11 @@ impl CaptionFormat {
 /// The dialog offers a master export plus the three CC/delivery aspects; the
 /// agent export queue already gates on the matching profile, so the human path
 /// runs the same conformance contract.
-const fn export_delivery_profile(aspect: Option<DeliveryAspect>) -> DeliveryProfile {
+///
+/// `pub(crate)` since AU3 §4.4: the Mixer's `LOUDNESS` section reads this
+/// profile's `loudness_target()` so its bars and the export agree on the
+/// target without a second aspect-to-profile table.
+pub(crate) const fn export_delivery_profile(aspect: Option<DeliveryAspect>) -> DeliveryProfile {
     match aspect {
         None => DeliveryProfile::SourceMaster,
         Some(DeliveryAspect::Widescreen) => DeliveryProfile::Youtube1080p,

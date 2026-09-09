@@ -23,6 +23,7 @@ use crate::{
         BiquadCoefficients, BiquadSection, Boxcar, DelayLine, MeanSquareWindow, SlidingMinimum,
         TRUE_PEAK_GROUP_DELAY_FRAMES, TruePeakEstimator,
     },
+    loudness::LiveLoudnessMeter,
     timeline::timeline_audio_segments,
 };
 
@@ -2236,6 +2237,9 @@ struct AudioMixer {
     output_channels: usize,
     cursor_sample: u64,
     end_sample: u64,
+    /// AU2 §3.7: the processor's input-to-output delay in sample frames, so
+    /// callers can convert the input cursor to the output position.
+    latency: u64,
     meter: Option<Arc<MeterState>>,
     processor: AudioMixProcessor,
 }
@@ -2321,6 +2325,7 @@ impl AudioMixer {
             cursor_sample: frame_to_samples(decode_from, output_rate, document.fps),
             end_sample: frame_to_samples(project_end, output_rate, document.fps)
                 .saturating_add(latency),
+            latency,
             meter: None,
         };
         // AU2 §3.7: unconditional, including a seek to zero, where the loop
@@ -2337,6 +2342,20 @@ impl AudioMixer {
         }
         mixer.meter = meter;
         Ok(mixer)
+    }
+
+    /// AU2 §3.7: the processor's input-to-output latency in sample frames.
+    /// `cursor_sample` counts *input* frames consumed, so the newest **output**
+    /// frame the mixer has produced is `cursor_sample − latency_frames()`.
+    /// Zero for every document whose chains declare no lookahead.
+    const fn latency_frames(&self) -> u64 {
+        self.latency
+    }
+
+    /// AU2 §3.7: the project sample of the newest output frame produced —
+    /// the position the preroll aligned to `frame_to_samples(project_from)`.
+    const fn output_position_samples(&self) -> u64 {
+        self.cursor_sample.saturating_sub(self.latency_frames())
     }
 
     /// AU1 §4.1: install the peak table once preroll has finished.
@@ -2422,6 +2441,11 @@ impl AudioMixer {
 /// AU1 §5.3: push mixed audio into the output ring until it holds
 /// `target_samples`, the mix is exhausted, or the ring is full.
 ///
+/// AU3 §3.9: every post-clamp chunk taken from the mixer is pushed to the
+/// live `meter` (its first two channels) as it is taken — up to
+/// `LIVE_FILL_MILLISECONDS` ahead of the loudspeaker — and the worker
+/// publishes by audible position.
+///
 /// Device-free so the fill target is testable without an audio device.
 /// Returns `false` when the mixer has no more audio to deliver.
 fn fill_ring(
@@ -2430,6 +2454,7 @@ fn fill_ring(
     pending_index: &mut usize,
     mixer: &mut AudioMixer,
     target_samples: usize,
+    meter: &mut LiveLoudnessMeter,
 ) -> Result<bool, MediaError> {
     loop {
         let queued = producer
@@ -2448,6 +2473,7 @@ fn fill_ring(
         pending.clear();
         *pending_index = 0;
         if let Some(chunk) = mixer.next_chunk()? {
+            meter.push_chunk(&chunk, mixer.output_channels)?;
             *pending = chunk;
         } else {
             return Ok(false);
@@ -2463,6 +2489,8 @@ pub(crate) struct AudioRuntime {
     pending_index: usize,
     /// AU1 §5.3: `LIVE_FILL_MILLISECONDS` of audio at the device's rate.
     target_samples: usize,
+    sample_rate: u32,
+    channels: u16,
     pub(crate) error_flag: Arc<AtomicBool>,
 }
 
@@ -2511,17 +2539,43 @@ impl AudioRuntime {
             .saturating_mul(LIVE_FILL_MILLISECONDS)
             .saturating_div(1_000)
             .max(1);
-        let mut runtime = Self {
+        // AU3 §3.9: the initial fill is the worker's, through `fill(meter)`,
+        // once it has matched its live meter to this stream's rate and layout.
+        Ok(Self {
             stream,
             producer,
             mixer,
             pending: Vec::new(),
             pending_index: 0,
             target_samples,
+            sample_rate,
+            channels,
             error_flag,
-        };
-        runtime.fill()?;
-        Ok(runtime)
+        })
+    }
+
+    /// The device stream's rate.
+    pub(crate) const fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// The device stream's channel count.
+    pub(crate) const fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    /// AU3 §3.9: the absolute project sample (at the device rate) the mixer
+    /// has rendered — and the live meter has been fed — up to.
+    ///
+    /// This is the *output* position, not the mixer's input cursor: AU2 §3.7's
+    /// processor holds `latency_frames()` sample frames of the mix, and
+    /// `AudioMixer::open` prerolls the input cursor that far past the seek
+    /// target so the first frame *out* is `frame_to_samples(project_from)` —
+    /// which is exactly what the clock's `position_samples` starts at. Keying a
+    /// mid-play `reset_loudness` from the input cursor would put the ring
+    /// origin one graph latency ahead of the audio it keys.
+    pub(crate) const fn fed_position_samples(&self) -> u64 {
+        self.mixer.output_position_samples()
     }
 
     /// AU2 §5.8: apply a new audio mix without stopping the stream.
@@ -2543,13 +2597,16 @@ impl AudioRuntime {
         self.stream.pause().map_err(backend)
     }
 
-    pub(crate) fn fill(&mut self) -> Result<(), MediaError> {
+    /// AU1 §5.3: top the ring up to the live target, metering as it goes
+    /// (AU3 §3.9).
+    pub(crate) fn fill(&mut self, meter: &mut LiveLoudnessMeter) -> Result<(), MediaError> {
         fill_ring(
             &mut self.producer,
             &mut self.pending,
             &mut self.pending_index,
             &mut self.mixer,
             self.target_samples,
+            meter,
         )?;
         Ok(())
     }
@@ -3839,6 +3896,8 @@ mod tests {
         let chunk_samples = MIX_CHUNK_SAMPLE_FRAMES * 2;
         let mut pending = Vec::new();
         let mut pending_index = 0;
+        // AU3 §3.9: a scratch live meter; the fill pushes every chunk to it.
+        let mut scratch_meter = LiveLoudnessMeter::new(48_000, 2).unwrap();
 
         assert!(
             fill_ring(
@@ -3846,7 +3905,8 @@ mod tests {
                 &mut pending,
                 &mut pending_index,
                 &mut mixer,
-                target
+                target,
+                &mut scratch_meter,
             )
             .unwrap()
         );
@@ -3867,7 +3927,8 @@ mod tests {
                 &mut pending,
                 &mut pending_index,
                 &mut mixer,
-                target
+                target,
+                &mut scratch_meter,
             )
             .unwrap()
         );
@@ -3887,6 +3948,7 @@ mod tests {
                 &mut pending_index,
                 &mut mixer,
                 target,
+                &mut scratch_meter,
             )
             .unwrap()
             {
@@ -5675,9 +5737,11 @@ mod tests {
         }
     }
 
-    /// AU2 §7 item A16 (A2): `measure_mix_levels` over a one-frame range
-    /// containing one impulse reports it in the track stem, the bus stem, and
-    /// the master, and all three report the same `sample_frames`.
+    /// AU2 §7 item A16 (A2): `measure_mix_levels` over a range containing one
+    /// impulse reports it in the track stem, the bus stem, and the master, and
+    /// all three report the same `sample_frames`. AU3 §3.3 / A11: the range is
+    /// one gating block (`0..4` at 10 fps = 19 200 frames), the smallest a
+    /// loudness measurement accepts; it still contains the frame-0 impulse.
     #[test]
     fn measure_mix_levels_trims_every_stem_family_to_the_requested_range() {
         crate::initialize_ffmpeg().unwrap();
@@ -5689,19 +5753,19 @@ mod tests {
         let report = crate::export::measure_mix_levels(
             &document,
             &MixLevelRequest {
-                range: Some(TimeCode::ZERO..TimeCode(1)),
+                range: Some(TimeCode::ZERO..TimeCode(4)),
             },
         )
         .unwrap();
-        assert_eq!(report.range, TimeCode::ZERO..TimeCode(1));
+        assert_eq!(report.range, TimeCode::ZERO..TimeCode(4));
         assert_eq!(report.tracks.len(), 1);
         assert_eq!(report.buses.len(), 1);
 
         let track = report.tracks[0].levels;
         let bus = report.buses[0].levels;
-        assert_eq!(track.sample_frames, 4_800);
-        assert_eq!(bus.sample_frames, 4_800);
-        assert_eq!(report.master.sample_frames, 4_800);
+        assert_eq!(track.sample_frames, 19_200);
+        assert_eq!(bus.sample_frames, 19_200);
+        assert_eq!(report.master.sample_frames, 19_200);
         for (name, peak) in [
             ("track stem", track.sample_peak_dbfs_hundredths),
             ("bus stem", bus.sample_peak_dbfs_hundredths),
@@ -6772,5 +6836,1010 @@ mod tests {
             ),
             "the rejection must be typed, not a formatted string: {rejected}"
         );
+    }
+
+    // ---- AU3 Part A -------------------------------------------------------
+
+    use crate::{
+        engine::{LiveLoudness, WorkerLoudness},
+        export::{MixCollect, MixObserver, NoObserver, QcObserver, mix_audio_stems, mix_pass},
+        loudness::{LIVE_LOUDNESS_RING_ENTRIES, LoudnessMeter},
+    };
+    use kinewright_core::{
+        AudioMaster, AudioQcProvenance, AudioQcRequest, DeliveryProfile, LoudnessSnapshot,
+        QaSeverity,
+    };
+
+    /// A stereo 1 kHz tone at `peak` per channel, hand-written in `f32` so the
+    /// amplitude survives exactly.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn stereo_tone(frequency: f64, peak: f64, frames: usize) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|frame| {
+                let sample = (peak
+                    * (2.0 * std::f64::consts::PI * frequency * frame as f64 / 48_000.0).sin())
+                    as f32;
+                [sample, sample]
+            })
+            .collect()
+    }
+
+    /// One audio track carrying one clip of `frames` project frames at `fps`.
+    fn one_clip_document(source: &Path, fps: Rational, frames: i64) -> Document {
+        let mut asset = audio_asset(1, source, "au3", fps);
+        asset.duration = TimeCode(frames);
+        Document {
+            catalog: kinewright_core::MediaCatalog::default(),
+            audio_mix: AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
+            lut_assets: Vec::new(),
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Audio,
+                sync_lock: true,
+                clips: vec![audio_clip(1, 1, 0..frames, 0)],
+            }],
+            media_pool: vec![asset],
+            markers: Vec::new(),
+            fps,
+            resolution: (64, 64),
+            duration: TimeCode(frames),
+        }
+    }
+
+    /// A14's walk: every leaf of a serialized report is an integer, bool,
+    /// string, or null — never a float.
+    fn assert_integer_leaves(value: &serde_json::Value, path: &str) {
+        match value {
+            serde_json::Value::Number(number) => assert!(
+                number.is_i64() || number.is_u64(),
+                "{path} is a non-integer number: {number}"
+            ),
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    assert_integer_leaves(item, &format!("{path}[{index}]"));
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for (key, item) in fields {
+                    assert_integer_leaves(item, &format!("{path}.{key}"));
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::String(_) => {
+            }
+        }
+    }
+
+    fn qc(document: &Document, request: &AudioQcRequest) -> kinewright_core::AudioQcReport {
+        crate::export::measure_audio_qc(document, request).expect("the QC fixture should measure")
+    }
+
+    fn exception_codes(report: &kinewright_core::AudioQcReport) -> Vec<&str> {
+        report
+            .exceptions
+            .iter()
+            .map(|exception| exception.code.as_str())
+            .collect()
+    }
+
+    /// The observer-fed families equal `LoudnessMeter::measure` over the
+    /// corresponding whole stem — the whole `AudioLoudness`, `assert_eq!`.
+    fn assert_levels_equal_stems(document: &Document, range: std::ops::Range<TimeCode>) {
+        let settings = parity_settings(document.fps);
+        let report = crate::export::measure_mix_levels(
+            document,
+            &MixLevelRequest {
+                range: Some(range.clone()),
+            },
+        )
+        .unwrap();
+        let stems = mix_audio_stems(document, range.clone(), &settings).unwrap();
+        assert_eq!(report.range, range);
+        for (levels, (track, stem)) in report.tracks.iter().zip(&stems.tracks) {
+            assert_eq!(levels.track, *track);
+            assert_eq!(
+                levels.levels,
+                LoudnessMeter::measure(stem, 48_000, 2).unwrap(),
+                "track {} over {range:?}",
+                track.0
+            );
+        }
+        for (levels, (bus, stem)) in report.buses.iter().zip(&stems.buses) {
+            assert_eq!(levels.bus, *bus);
+            assert_eq!(
+                levels.levels,
+                LoudnessMeter::measure(stem, 48_000, 2).unwrap(),
+                "bus {} over {range:?}",
+                bus.0
+            );
+        }
+        assert_eq!(
+            report.master,
+            LoudnessMeter::measure(&stems.master, 48_000, 2).unwrap(),
+            "master over {range:?}"
+        );
+    }
+
+    /// AU3 §7 item A11 (§3.8): through the observer, `measure_mix_levels` is
+    /// `assert_eq!` to `LoudnessMeter::measure` over the corresponding
+    /// `mix_audio_stems` family on the AU1 level fixture, on
+    /// `impulse_document`, and on the AU2 master-chain parity document, over
+    /// whole and windowed ranges.
+    #[test]
+    fn measure_mix_levels_equals_the_meter_over_every_stem_family() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(10, 1).unwrap();
+        let steady = level_sine("au3-levels-steady", 440, "0.4");
+        let late = level_sine("au3-levels-late", 660, "0.2");
+        let levels = levels_document(steady.path(), late.path(), fps);
+        levels.validate().unwrap();
+        assert_levels_equal_stems(&levels, TimeCode::ZERO..TimeCode(20));
+        assert_levels_equal_stems(&levels, TimeCode(10)..TimeCode(20));
+        assert_levels_equal_stems(&levels, TimeCode(3)..TimeCode(17));
+
+        let impulses = impulse_media();
+        let impulse = impulse_document(impulses.path(), fps);
+        impulse.validate().unwrap();
+        assert_levels_equal_stems(&impulse, TimeCode::ZERO..TimeCode(20));
+        assert_levels_equal_stems(&impulse, TimeCode(2)..TimeCode(9));
+
+        let voice = loud_sine("au3-parity-voice", 440);
+        let bed = loud_sine("au3-parity-bed", 660);
+        let parity = transitioned(parity_document_with_master_chain(
+            voice.path(),
+            bed.path(),
+            fps,
+        ));
+        parity.validate().unwrap();
+        assert_levels_equal_stems(&parity, TimeCode::ZERO..TimeCode(30));
+        assert_levels_equal_stems(&parity, TimeCode(7)..TimeCode(23));
+    }
+
+    /// A master-recording observer: the pre-clamp master chunks, in order.
+    #[derive(Default)]
+    struct MasterRecorder {
+        master: Vec<f32>,
+        chunks: usize,
+    }
+
+    impl MixObserver for MasterRecorder {
+        fn master(&mut self, chunk: &[f32]) -> Result<(), MediaError> {
+            self.master.extend_from_slice(chunk);
+            self.chunks += 1;
+            Ok(())
+        }
+    }
+
+    /// AU3 §7 item A11: `mix_audio` on `parity_document_with_master_chain` is
+    /// the `NoObserver` / `mix_chunk` path with no stems collected; the
+    /// with-stems path and a clamp of the observer's pre-clamp master feed
+    /// are sample-identical to it, and the observer receives exactly the
+    /// document's length. (The output's SHA-256 was compared against the
+    /// pre-AU3 code on the same machine when this landed: unchanged.)
+    #[test]
+    fn mix_audio_is_bit_identical_through_the_observer_feed() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(10, 1).unwrap();
+        let voice = loud_sine("au3-identity-voice", 440);
+        let bed = loud_sine("au3-identity-bed", 660);
+        let settings = parity_settings(fps);
+        let document = transitioned(parity_document_with_master_chain(
+            voice.path(),
+            bed.path(),
+            fps,
+        ));
+        let exported = crate::export::mix_audio(&document, &settings).unwrap();
+        assert_eq!(exported.len(), 30 * 4_800 * 2);
+        let bytes = exported
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        println!(
+            "AU3_MIX_AUDIO_SHA256 parity_master_chain {}",
+            crate::sha256::sha256_bytes(&bytes)
+        );
+
+        let with_stems = mix_pass(
+            &document,
+            TimeCode::ZERO..document.duration,
+            &settings,
+            MixCollect {
+                stems: true,
+                master: true,
+            },
+            &mut NoObserver,
+        )
+        .unwrap();
+        assert!(
+            with_stems
+                .master
+                .iter()
+                .zip(&exported)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+
+        let mut recorder = MasterRecorder::default();
+        let uncollected = mix_pass(
+            &document,
+            TimeCode::ZERO..document.duration,
+            &settings,
+            MixCollect {
+                stems: false,
+                master: false,
+            },
+            &mut recorder,
+        )
+        .unwrap();
+        assert!(uncollected.master.is_empty() && uncollected.tracks.is_empty());
+        limit_audio_mix(&mut recorder.master);
+        assert_eq!(recorder.master.len(), exported.len());
+        assert!(
+            recorder
+                .master
+                .iter()
+                .zip(&exported)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the observer's clamped master feed must be the export"
+        );
+        // 144 000 frames plus 720 of latency: 142 chunks, the first split.
+        assert_eq!(recorder.chunks, (144_000_usize + 720).div_ceil(1_024));
+    }
+
+    /// AU3 §7 item A11 / A13 (Q3): a range shorter than one gating block is
+    /// refused typed **before decoding** — the fixture's asset path does not
+    /// exist, so any decode would have failed with a different error, as the
+    /// whole-range measurement shows.
+    #[test]
+    fn a_short_range_is_refused_before_anything_is_decoded() {
+        crate::initialize_ffmpeg().unwrap();
+        let missing = std::env::temp_dir().join("au3-does-not-exist-4f6cdd1d.wav");
+        let at_10 = one_clip_document(&missing, Rational::new(10, 1).unwrap(), 20);
+        let error = crate::export::measure_mix_levels(
+            &at_10,
+            &MixLevelRequest {
+                range: Some(TimeCode::ZERO..TimeCode(1)),
+            },
+        )
+        .expect_err("one frame at 10 fps is 4 800 frames");
+        assert_eq!(
+            error,
+            MediaError::MixLoudnessRangeTooShort {
+                sample_frames: 4_800,
+                required: 19_200,
+            }
+        );
+        let at_30 = one_clip_document(&missing, Rational::new(30, 1).unwrap(), 90);
+        let error = crate::export::measure_audio_qc(
+            &at_30,
+            &AudioQcRequest {
+                range: Some(TimeCode(10)..TimeCode(15)),
+                profile: None,
+            },
+        )
+        .expect_err("five frames at 30 fps are 8 000 frames");
+        assert_eq!(
+            error,
+            MediaError::MixLoudnessRangeTooShort {
+                sample_frames: 8_000,
+                required: 19_200,
+            }
+        );
+        // Exactly one block (12 frames at 30 fps) is not refused: it decodes,
+        // and the decode is what fails.
+        let error = crate::export::measure_audio_qc(
+            &at_30,
+            &AudioQcRequest {
+                range: Some(TimeCode::ZERO..TimeCode(12)),
+                profile: None,
+            },
+        )
+        .expect_err("the asset does not exist");
+        assert!(
+            !matches!(error, MediaError::MixLoudnessRangeTooShort { .. }),
+            "a one-block range reaches the decoder: {error}"
+        );
+        assert_eq!(error.recovery_code(), None);
+    }
+
+    /// AU3 §7 item A12: a device-free transport — the mixer, the ring, a
+    /// consumer standing in for the loudspeaker, and the worker's loudness
+    /// state — so the publish step runs against a simulated clock.
+    struct SimulatedTransport {
+        document: Document,
+        mixer: Option<AudioMixer>,
+        producer: Option<rtrb::Producer<f32>>,
+        consumer: Option<rtrb::Consumer<f32>>,
+        pending: Vec<f32>,
+        pending_index: usize,
+        /// The absolute project sample the loudspeaker has reached.
+        heard: u64,
+        loudness: WorkerLoudness,
+        shared: Arc<LiveLoudness>,
+    }
+
+    impl SimulatedTransport {
+        const TARGET_SAMPLES: usize = 48_000 * 2;
+
+        fn new(document: Document) -> Self {
+            let shared = Arc::new(LiveLoudness::default());
+            Self {
+                document,
+                mixer: None,
+                producer: None,
+                consumer: None,
+                pending: Vec::new(),
+                pending_index: 0,
+                heard: 0,
+                loudness: WorkerLoudness::new(Arc::clone(&shared)),
+                shared,
+            }
+        }
+
+        /// `Worker::start_playback`: open at `from`, continue or reset, and
+        /// run the initial fill.
+        fn play(&mut self, from: TimeCode) {
+            let fps = self.document.fps;
+            let (producer, consumer) = RingBuffer::<f32>::new(48_000 * 2 * 2);
+            self.mixer = Some(AudioMixer::open(&self.document, from, 48_000, 2, None).unwrap());
+            self.producer = Some(producer);
+            self.consumer = Some(consumer);
+            self.pending.clear();
+            self.pending_index = 0;
+            self.heard = frame_to_samples(from, 48_000, fps);
+            self.loudness.begin(from, 48_000, 2, fps).unwrap();
+            self.fill();
+        }
+
+        fn fill(&mut self) -> bool {
+            let meter = self.loudness.meter_mut().expect("playing");
+            fill_ring(
+                self.producer.as_mut().unwrap(),
+                &mut self.pending,
+                &mut self.pending_index,
+                self.mixer.as_mut().unwrap(),
+                Self::TARGET_SAMPLES,
+                meter,
+            )
+            .unwrap()
+        }
+
+        /// The loudspeaker consumes `frames`, the worker tops up and publishes.
+        fn advance(&mut self, frames: u64) {
+            let consumer = self.consumer.as_mut().unwrap();
+            let mut popped = 0_u64;
+            for _ in 0..frames * 2 {
+                if consumer.pop().is_ok() {
+                    popped += 1;
+                }
+            }
+            self.heard += popped / 2;
+            self.fill();
+            self.loudness.publish_at(self.heard);
+        }
+
+        /// `Worker::pause`: the clock position is the heard sample's frame.
+        fn pause(&mut self) -> TimeCode {
+            let position = samples_to_frame(self.heard, 48_000, self.document.fps);
+            self.loudness.pause_at(position, self.document.fps);
+            self.mixer = None;
+            position
+        }
+
+        fn published(&self) -> LoudnessSnapshot {
+            self.shared.load()
+        }
+
+        /// `AudioRuntime::fed_position_samples`: the newest *output* frame the
+        /// meter has been fed, which trails the input cursor by AU2 §3.7's
+        /// graph latency.
+        fn fed_position(&self) -> u64 {
+            self.mixer.as_ref().unwrap().output_position_samples()
+        }
+
+        fn input_cursor(&self) -> u64 {
+            self.mixer.as_ref().unwrap().cursor_sample
+        }
+    }
+
+    /// AU3 §7 item A12 (§3.9): a −20 LUFS tone converges to −2000 ±20 within
+    /// 3 s of *heard* programme with the true peak at the amplitude ±1; the
+    /// published entry never leads the clock and lags the meter's head by at
+    /// most ten sub-blocks; `integrated == None` under 400 ms and
+    /// `short_term == None` under 3 s of heard programme; `programme_seconds`
+    /// follows the published key.
+    #[test]
+    fn the_live_meter_converges_on_the_heard_prefix_and_never_leads() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(10, 1).unwrap();
+        let source = GeneratedMedia::from_bytes(
+            "au3-live-tone",
+            "wav",
+            &wav_f32(&stereo_tone(1_000.0, 0.1, 48_000 * 6), 48_000, 2),
+        );
+        let document = one_clip_document(source.path(), fps, 60);
+        document.validate().unwrap();
+        let mut transport = SimulatedTransport::new(document);
+        transport.play(TimeCode::ZERO);
+        // The fill ran a second ahead — 47 whole chunks queued plus the one
+        // `fill_ring` holds pending, all metered; nothing has been heard.
+        assert_eq!(
+            transport.fed_position(),
+            (48_000_u64.div_ceil(1_024) + 1) * 1_024
+        );
+        assert_eq!(transport.published(), LoudnessSnapshot::default());
+
+        // The fill leads the loudspeaker by the 1 s target plus at most two
+        // 1 024-frame chunks (one over-fill, one pending), and the published
+        // key is a block end up to one sub-block behind the heard position:
+        // the head-to-published lag is therefore under 48 000 + 2 048 + 4 800
+        // frames — eleven whole sub-blocks, well inside the 16-entry ring.
+        let lag_bound = 48_000 + 2 * 1_024 + 4_800;
+        let mut worst_lag = 0_u64;
+        let mut heard = 0_u64;
+        while heard < 48_000 * 6 {
+            transport.advance(480);
+            heard += 480;
+            let published = transport.published();
+            let key = transport.loudness.published_key();
+            assert!(
+                key.is_none_or(|key| key <= heard),
+                "the published key {key:?} leads the clock at {heard}"
+            );
+            if let (Some(key), Some(head)) = (key, transport.loudness.fed_block_end()) {
+                worst_lag = worst_lag.max(head - key);
+                assert!(
+                    head - key <= lag_bound,
+                    "the lag {} exceeds {lag_bound} frames",
+                    head - key
+                );
+                assert!(
+                    (head - key) / 4_800 < LIVE_LOUDNESS_RING_ENTRIES as u64,
+                    "the lag {} would outrun the ring",
+                    head - key
+                );
+            }
+            assert_eq!(
+                published.programme_seconds,
+                u32::try_from(key.unwrap_or(0) / 48_000).unwrap()
+            );
+            if heard < 19_200 {
+                assert_eq!(published.integrated_lufs_hundredths, None, "at {heard}");
+                assert_eq!(published.momentary_lufs_hundredths, None, "at {heard}");
+            }
+            if heard < 48_000 * 3 {
+                assert_eq!(published.short_term_lufs_hundredths, None, "at {heard}");
+            }
+            if heard == 48_000 * 3 {
+                let integrated = published.integrated_lufs_hundredths.expect("3 s heard");
+                assert!(
+                    (integrated + 2_000).abs() <= 20,
+                    "integrated {integrated} at 3 s"
+                );
+                let true_peak = published.true_peak_dbtp_hundredths.expect("3 s heard");
+                assert!(
+                    (true_peak + 2_000).abs() <= 1,
+                    "true peak {true_peak} at 3 s"
+                );
+                assert!(published.short_term_lufs_hundredths.is_some());
+                assert!(published.momentary_lufs_hundredths.is_some());
+                assert_eq!(published.programme_seconds, 3);
+            }
+        }
+        let end = transport.published();
+        assert_eq!(end.programme_seconds, 6);
+        assert!((end.integrated_lufs_hundredths.unwrap() + 2_000).abs() <= 20);
+        println!(
+            "AU3_LIVE_LAG_WORST_FRAMES {worst_lag} ({} sub-blocks)",
+            worst_lag / 4_800
+        );
+    }
+
+    /// AU3 §7 item A12 (§3.9 pause/continue): pause after N seconds then
+    /// continue at `paused_at`: `programme_seconds` and integrated exclude the
+    /// pre-rendered second exactly once and equal an uninterrupted run
+    /// within ±1 hundredth; `momentary == None` while paused; play elsewhere,
+    /// a seek, and `reset_loudness` reset the published shape to `default()`.
+    #[test]
+    fn the_live_meter_pauses_continues_and_resets_per_the_contract() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(10, 1).unwrap();
+        let source = GeneratedMedia::from_bytes(
+            "au3-live-pause",
+            "wav",
+            &wav_f32(&stereo_tone(1_000.0, 0.1, 48_000 * 6), 48_000, 2),
+        );
+        let document = one_clip_document(source.path(), fps, 60);
+        document.validate().unwrap();
+
+        let mut uninterrupted = SimulatedTransport::new(document.clone());
+        uninterrupted.play(TimeCode::ZERO);
+        for _ in 0..600 {
+            uninterrupted.advance(480);
+        }
+        let reference = uninterrupted.published();
+        assert_eq!(reference.programme_seconds, 6);
+
+        let mut paused = SimulatedTransport::new(document.clone());
+        paused.play(TimeCode::ZERO);
+        for _ in 0..250 {
+            paused.advance(480);
+        }
+        // 2.5 s heard, 3.5 s fed.
+        assert!(paused.fed_position() >= 48_000 * 3);
+        let paused_at = paused.pause();
+        assert_eq!(paused_at, TimeCode(25));
+        assert_eq!(paused.loudness.paused_at(), Some(TimeCode(25)));
+        let while_paused = paused.published();
+        assert_eq!(while_paused.momentary_lufs_hundredths, None);
+        assert_eq!(while_paused.short_term_lufs_hundredths, None);
+        assert_eq!(while_paused.programme_seconds, 2);
+        assert!(while_paused.integrated_lufs_hundredths.is_some());
+        assert!(while_paused.true_peak_dbtp_hundredths.is_some());
+        // Continue at `paused_at` (the app resumes from `Playback::position()`).
+        paused.play(paused_at);
+        assert_eq!(paused.loudness.paused_at(), None);
+        for _ in 0..350 {
+            paused.advance(480);
+        }
+        let resumed = paused.published();
+        assert_eq!(resumed.programme_seconds, reference.programme_seconds);
+        let (resumed_i, reference_i) = (
+            resumed.integrated_lufs_hundredths.unwrap(),
+            reference.integrated_lufs_hundredths.unwrap(),
+        );
+        assert!(
+            (resumed_i - reference_i).abs() <= 1,
+            "paused/continued read {resumed_i}, uninterrupted {reference_i}"
+        );
+        assert_eq!(
+            resumed.true_peak_dbtp_hundredths,
+            reference.true_peak_dbtp_hundredths
+        );
+
+        // Play elsewhere after a pause: reset.
+        paused.pause();
+        paused.play(TimeCode(10));
+        assert_eq!(paused.published(), LoudnessSnapshot::default());
+        assert_eq!(paused.loudness.published_key(), None);
+        for _ in 0..150 {
+            paused.advance(480);
+        }
+        assert_eq!(
+            paused.published().programme_seconds,
+            1,
+            "counted from the new origin"
+        );
+
+        // A seek while playing re-enters `start_playback` with no `paused_at`.
+        paused.play(TimeCode(30));
+        assert_eq!(paused.published(), LoudnessSnapshot::default());
+        for _ in 0..120 {
+            paused.advance(480);
+        }
+        assert_eq!(paused.published().programme_seconds, 1);
+
+        // `Playback::reset_loudness` while playing: the origin is the fed
+        // position, so nothing is published until the sound reaches it.
+        let fed = paused.fed_position();
+        paused.loudness.reset(Some(fed), fps);
+        assert_eq!(paused.published(), LoudnessSnapshot::default());
+        let mut steps = 0_u64;
+        while paused.published() == LoudnessSnapshot::default() && steps < 200 {
+            paused.advance(480);
+            steps += 1;
+        }
+        assert!(
+            paused.heard >= fed + 4_800,
+            "the first block after a reset is published once heard: heard {} fed {fed}",
+            paused.heard
+        );
+        assert_eq!(paused.published().programme_seconds, 0);
+    }
+
+    /// AU3 §7 item A12 (§3.9 reset) against AU2 §3.7's graph latency: on a
+    /// document whose master chain declares lookahead, a mid-play
+    /// `reset_loudness` keys the ring from the **fed output** position —
+    /// `cursor_sample − latency` — and not from the mixer's input cursor. The
+    /// first published key after the reset therefore lands within one
+    /// loudspeaker step of `heard − fed_output`; keying from the input cursor
+    /// would publish a whole graph latency (480 frames here) late.
+    #[test]
+    fn a_mid_play_loudness_reset_keys_from_the_fed_output_position() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(10, 1).unwrap();
+        let source = GeneratedMedia::from_bytes(
+            "au3-live-reset-lookahead",
+            "wav",
+            &wav_f32(&stereo_tone(1_000.0, 0.1, 48_000 * 6), 48_000, 2),
+        );
+        let mut document = one_clip_document(source.path(), fps, 60);
+        document.audio_mix.master.effects = vec![audio_effect(
+            1,
+            "audio_true_peak_limiter",
+            &[("ceiling_tenth_db", -10), ("lookahead_milliseconds", 10)],
+        )];
+        document.validate().unwrap();
+        let latency = u64::try_from(graph_latency_frames(
+            &document.audio_mix.lookahead_milliseconds(),
+            48_000,
+        ))
+        .unwrap();
+        assert_eq!(latency, 480, "10 ms of master lookahead at 48 kHz");
+
+        let mut transport = SimulatedTransport::new(document);
+        transport.play(TimeCode::ZERO);
+        assert_eq!(
+            transport.mixer.as_ref().unwrap().latency_frames(),
+            latency,
+            "the mixer reports the graph latency it prerolled"
+        );
+        // The mixer prerolled `latency` frames past the seek target, so the
+        // first frame *out* — and the first frame metered — is project sample
+        // zero, exactly where the clock starts.
+        assert_eq!(transport.fed_position() + latency, transport.input_cursor());
+
+        for _ in 0..250 {
+            transport.advance(480);
+        }
+        // The expected origin is derived from the input cursor so the final
+        // assertion measures the published key against the audio, not
+        // against `fed_position()` itself; that the graph really trails its
+        // input cursor by `latency` is pinned against an impulse by
+        // `a_lookahead_chain_delays_an_impulse_by_exactly_the_graph_latency`.
+        let fed_output = transport.input_cursor() - latency;
+        let fed = transport.fed_position();
+        assert!(fed > transport.heard, "the fill leads the loudspeaker");
+
+        transport.loudness.reset(Some(fed), fps);
+        assert_eq!(transport.published(), LoudnessSnapshot::default());
+        assert_eq!(transport.loudness.published_key(), None);
+
+        // A loudspeaker step well under the 480-frame graph latency, so the
+        // quantisation of `heard` cannot hide it.
+        let step = 160_u64;
+        let mut steps = 0_u64;
+        while transport.loudness.published_key().is_none() && steps < 1_000 {
+            transport.advance(step);
+            steps += 1;
+        }
+        let key = transport
+            .loudness
+            .published_key()
+            .expect("one sub-block past the reset origin is heard");
+        assert_eq!(key, 4_800, "the first sub-block after the reset");
+        let audible = transport.heard - fed_output;
+        assert!(
+            audible >= key && audible - key < step,
+            "the first key {key} after a mid-play reset must land within one \
+             loudspeaker step of heard−fed_output {audible} (heard {}, fed output \
+             {fed_output}); keying from the input cursor would publish {latency} \
+             frames late",
+            transport.heard
+        );
+        assert_eq!(transport.published().programme_seconds, 0);
+    }
+
+    /// AU3 §7 item A12: the six atomics round-trip a snapshot, the sentinel
+    /// reads as `None`, and `clear` restores `default()`.
+    #[test]
+    fn live_loudness_atomics_round_trip_every_field() {
+        let shared = LiveLoudness::default();
+        assert_eq!(shared.load(), LoudnessSnapshot::default());
+        let snapshot = LoudnessSnapshot {
+            momentary_lufs_hundredths: Some(-1_850),
+            short_term_lufs_hundredths: None,
+            integrated_lufs_hundredths: Some(-2_301),
+            loudness_range_lu_hundredths: Some(0),
+            true_peak_dbtp_hundredths: Some(-i32::MAX),
+            programme_seconds: 7,
+        };
+        shared.publish(&snapshot);
+        assert_eq!(shared.load(), snapshot);
+        shared.clear();
+        assert_eq!(shared.load(), LoudnessSnapshot::default());
+    }
+
+    /// AU3 §7 item A13 (§3.10): per-channel clipping on a full-scale 1 kHz
+    /// tone with a +6 dB `audio_gain` on the master — both channels'
+    /// `clipped_runs >= 1`, `audio_clipping` Errors, `technical_pass ==
+    /// false`, and the post-clamp `sample_peak == 0`.
+    #[test]
+    fn audio_qc_counts_clipping_per_channel_on_the_pre_clamp_master() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(30, 1).unwrap();
+        let source = GeneratedMedia::from_bytes(
+            "au3-qc-clip",
+            "wav",
+            &wav_f32(&stereo_tone(1_000.0, 1.0, 48_000 * 2), 48_000, 2),
+        );
+        let mut document = one_clip_document(source.path(), fps, 60);
+        document.audio_mix.master = AudioMaster {
+            gain_tenth_db: 0,
+            effects: vec![audio_effect(1, "audio_gain", &[("gain_tenth_db", 60)])],
+        };
+        document.validate().unwrap();
+        let report = qc(&document, &AudioQcRequest::default());
+        assert_eq!(report.range, TimeCode::ZERO..TimeCode(60));
+        assert!(report.clipping.left.clipped_runs >= 1);
+        assert!(report.clipping.right.clipped_runs >= 1);
+        assert!(report.clipping.left.over_full_scale_samples > 0);
+        assert!(report.clipping.left.basis_points > 0);
+        assert_eq!(
+            report.clipping.left, report.clipping.right,
+            "a dual-mono tone clips alike"
+        );
+        assert_eq!(
+            exception_codes(&report),
+            ["audio_clipping", "audio_clipping"]
+        );
+        assert!(
+            report
+                .exceptions
+                .iter()
+                .all(|e| e.severity == QaSeverity::Error)
+        );
+        assert_eq!(
+            report.exceptions[0].field.as_deref(),
+            Some("clipping.left.clipped_runs")
+        );
+        assert!(!report.technical_pass);
+        assert!(report.evidence_only);
+        assert_eq!(report.master.sample_peak_dbfs_hundredths, Some(0));
+        assert_eq!(
+            report.master.true_peak_dbtp_hundredths.map(|p| p >= 0),
+            Some(true)
+        );
+        assert_eq!(report.master.sample_frames, 96_000);
+    }
+
+    /// AU3 §7 item A13 (§3.10 F14): an L-only tone reads `Δ == None` with the
+    /// `audio_channel_imbalance` Warning; L at −20 and R at −26 LUFS read
+    /// `Δ == 600 ±5` and no imbalance.
+    #[test]
+    fn audio_qc_reports_channel_balance_over_the_gated_blocks() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(30, 1).unwrap();
+        let mut left_only = stereo_tone(1_000.0, 0.2, 48_000 * 2);
+        for sample in left_only.iter_mut().skip(1).step_by(2) {
+            *sample = 0.0;
+        }
+        let source =
+            GeneratedMedia::from_bytes("au3-qc-left-only", "wav", &wav_f32(&left_only, 48_000, 2));
+        let document = one_clip_document(source.path(), fps, 60);
+        document.validate().unwrap();
+        let report = qc(&document, &AudioQcRequest::default());
+        assert_eq!(report.channel_balance_lu_hundredths, None);
+        assert_eq!(exception_codes(&report), ["audio_channel_imbalance"]);
+        assert_eq!(report.exceptions[0].severity, QaSeverity::Warning);
+        assert_eq!(
+            report.exceptions[0].observed.as_deref(),
+            Some("none (one channel silent)")
+        );
+        assert!(report.technical_pass);
+
+        let mut unbalanced = stereo_tone(1_000.0, 0.2, 48_000 * 2);
+        let right_gain = 10.0_f64.powf(-6.0 / 20.0);
+        #[allow(clippy::cast_possible_truncation)]
+        for sample in unbalanced.iter_mut().skip(1).step_by(2) {
+            *sample = (f64::from(*sample) * right_gain) as f32;
+        }
+        let source = GeneratedMedia::from_bytes(
+            "au3-qc-unbalanced",
+            "wav",
+            &wav_f32(&unbalanced, 48_000, 2),
+        );
+        let document = one_clip_document(source.path(), fps, 60);
+        document.validate().unwrap();
+        let report = qc(&document, &AudioQcRequest::default());
+        let balance = report
+            .channel_balance_lu_hundredths
+            .expect("both sides carry energy");
+        assert!((balance - 600).abs() <= 5, "Δ read {balance}");
+        // Six LU is outside core's ±300 band, so the Warning is raised with
+        // the measured ratio as its observed value.
+        assert_eq!(exception_codes(&report), ["audio_channel_imbalance"]);
+        assert_eq!(report.exceptions[0].severity, QaSeverity::Warning);
+        assert_eq!(
+            report.exceptions[0].observed.as_deref(),
+            Some(balance.to_string().as_str())
+        );
+        assert_eq!(report.exceptions[0].allowed.as_deref(), Some("-300..=300"));
+        assert!(report.technical_pass);
+    }
+
+    /// AU3 §7 item A13 (§3.10 F13): 1.5 s of silence before a tone at 30 fps
+    /// reads `leading_silence_frames == 45` with the `audio_leading_silence`
+    /// Info; a programme opening on a full-scale tone reads 0; trailing
+    /// silence is symmetric.
+    #[test]
+    fn audio_qc_measures_leading_and_trailing_silence_in_the_sample_domain() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(30, 1).unwrap();
+        let mut late = vec![0.0_f32; 48_000 * 3];
+        late.extend(stereo_tone(1_000.0, 0.5, 48_000 * 3 / 2));
+        let source = GeneratedMedia::from_bytes("au3-qc-late", "wav", &wav_f32(&late, 48_000, 2));
+        let document = one_clip_document(source.path(), fps, 90);
+        document.validate().unwrap();
+        let report = qc(&document, &AudioQcRequest::default());
+        assert_eq!(report.leading_silence_frames, TimeCode(45));
+        assert_eq!(report.trailing_silence_frames, TimeCode::ZERO);
+        assert_eq!(exception_codes(&report), ["audio_leading_silence"]);
+        assert_eq!(report.exceptions[0].severity, QaSeverity::Info);
+        assert_eq!(
+            report.exceptions[0].observed.as_deref(),
+            Some("45 frames (1500 ms)")
+        );
+        assert!(report.technical_pass);
+
+        let mut early = stereo_tone(1_000.0, 1.0, 48_000 * 3 / 2);
+        early.extend(vec![0.0_f32; 48_000 * 3]);
+        let source = GeneratedMedia::from_bytes("au3-qc-early", "wav", &wav_f32(&early, 48_000, 2));
+        let document = one_clip_document(source.path(), fps, 90);
+        document.validate().unwrap();
+        let report = qc(&document, &AudioQcRequest::default());
+        assert_eq!(report.leading_silence_frames, TimeCode::ZERO);
+        assert_eq!(report.trailing_silence_frames, TimeCode(45));
+        assert_eq!(exception_codes(&report), ["audio_trailing_silence"]);
+    }
+
+    /// AU3 §7 item A13 (§3.10): with `profile: Some(Youtube1080p)` a −20 LUFS
+    /// tone raises `audio_loudness_out_of_tolerance` (`observed "-2000"`,
+    /// `allowed "-1500..=-1300"`) and a −0.50 dBTP peak raises
+    /// `audio_true_peak_over_ceiling` as an Error; the target is published.
+    #[test]
+    fn audio_qc_judges_against_the_profile_target() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(30, 1).unwrap();
+        let source = GeneratedMedia::from_bytes(
+            "au3-qc-target",
+            "wav",
+            &wav_f32(&stereo_tone(997.0, 0.1, 48_000 * 2), 48_000, 2),
+        );
+        let document = one_clip_document(source.path(), fps, 60);
+        document.validate().unwrap();
+        let request = AudioQcRequest {
+            range: None,
+            profile: Some(DeliveryProfile::Youtube1080p),
+        };
+        let report = qc(&document, &request);
+        assert_eq!(
+            report.target,
+            Some(DeliveryProfile::Youtube1080p.loudness_target())
+        );
+        assert_eq!(report.master.integrated_lufs_hundredths, Some(-2_000));
+        assert_eq!(
+            exception_codes(&report),
+            ["audio_loudness_out_of_tolerance"]
+        );
+        assert_eq!(report.exceptions[0].severity, QaSeverity::Warning);
+        assert_eq!(report.exceptions[0].observed.as_deref(), Some("-2000"));
+        assert_eq!(
+            report.exceptions[0].allowed.as_deref(),
+            Some("-1500..=-1300")
+        );
+        assert!(report.technical_pass);
+
+        let hot = GeneratedMedia::from_bytes(
+            "au3-qc-hot",
+            "wav",
+            &wav_f32(
+                &stereo_tone(1_000.0, 10.0_f64.powf(-0.5 / 20.0), 48_000 * 2),
+                48_000,
+                2,
+            ),
+        );
+        let document = one_clip_document(hot.path(), fps, 60);
+        document.validate().unwrap();
+        let report = qc(&document, &request);
+        assert_eq!(report.master.true_peak_dbtp_hundredths, Some(-50));
+        assert!(
+            exception_codes(&report).contains(&"audio_true_peak_over_ceiling"),
+            "{:?}",
+            exception_codes(&report)
+        );
+        assert_eq!(report.exceptions[0].code, "audio_true_peak_over_ceiling");
+        assert_eq!(report.exceptions[0].severity, QaSeverity::Error);
+        assert!(!report.technical_pass);
+        // No profile: the same programme raises nothing against a target.
+        let plain = qc(&document, &AudioQcRequest::default());
+        assert_eq!(plain.target, None);
+        assert!(plain.exceptions.is_empty());
+    }
+
+    /// AU3 §7 item A13 / A14 (§3.10): digital silence raises `audio_silent`
+    /// alone, as a Warning, with `technical_pass == true`; the provenance is
+    /// the eight §2.4 strings; every leaf of the serialized report is an
+    /// integer, bool, string, or null; `evidence_only` is always true.
+    #[test]
+    fn audio_qc_reports_silence_as_evidence_with_integer_leaves() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(30, 1).unwrap();
+        let source = GeneratedMedia::from_bytes(
+            "au3-qc-silent",
+            "wav",
+            &wav_f32(&vec![0.0_f32; 48_000 * 4], 48_000, 2),
+        );
+        let document = one_clip_document(source.path(), fps, 60);
+        document.validate().unwrap();
+        let report = qc(
+            &document,
+            &AudioQcRequest {
+                range: None,
+                profile: Some(DeliveryProfile::SourceMaster),
+            },
+        );
+        assert_eq!(exception_codes(&report), ["audio_silent"]);
+        assert_eq!(report.exceptions[0].severity, QaSeverity::Warning);
+        assert!(report.technical_pass);
+        assert!(report.evidence_only);
+        assert_eq!(report.master.integrated_lufs_hundredths, None);
+        assert_eq!(report.master.sample_peak_dbfs_hundredths, None);
+        assert_eq!(report.master.true_peak_dbtp_hundredths, None);
+        assert_eq!(report.channel_balance_lu_hundredths, None);
+        assert_eq!(report.leading_silence_frames, TimeCode(60));
+        assert_eq!(report.trailing_silence_frames, TimeCode(60));
+        assert_eq!(
+            report.provenance,
+            AudioQcProvenance {
+                engine: "kinewright_audio_qc_v1".to_owned(),
+                measurement_rate: 48_000,
+                k_weighting: "bs1770_4_bilinear_from_prototypes".to_owned(),
+                true_peak: "8x_polyphase_256_tap_blackman_harris".to_owned(),
+                true_peak_bias: "exact_on_grid_at_most_-0.042_db_between_grid_points".to_owned(),
+                gate: "bs1770_4_two_stage_complete_blocks".to_owned(),
+                loudness_range: "ebu_tech_3342_nearest_rank".to_owned(),
+                silence: "10ms_rms_-70_dbfs_post_clamp".to_owned(),
+                exception_order: "severity_desc_code_asc_field_asc".to_owned(),
+            }
+        );
+
+        let serialized = serde_json::to_value(&report).unwrap();
+        assert_integer_leaves(&serialized, "report");
+        assert_eq!(serialized["evidence_only"], serde_json::Value::Bool(true));
+    }
+
+    /// AU3 §7 item A13 (§3.10 F8): the silence window accumulator persists
+    /// across `master()` callbacks — `1 024 = 2 × 480 + 64`, so every chunk
+    /// boundary splits a window — and a window straddling a boundary is
+    /// counted once: chunked and whole feeds agree, at 150 windows = 45 frames.
+    #[test]
+    fn a_silence_window_straddling_a_chunk_boundary_is_counted_once() {
+        let fps = Rational::new(30, 1).unwrap();
+        let mut programme = vec![0.0_f32; 48_000 * 3];
+        programme.extend(stereo_tone(1_000.0, 0.5, 48_000 * 3 / 2));
+        let range = TimeCode::ZERO..TimeCode(90);
+        let mut chunked = QcObserver::new().unwrap();
+        for chunk in programme.chunks(1_024 * 2) {
+            chunked.master(chunk).unwrap();
+        }
+        let chunked = chunked.finish(range.clone(), fps, None).unwrap();
+        let mut whole = QcObserver::new().unwrap();
+        whole.master(&programme).unwrap();
+        let whole = whole.finish(range, fps, None).unwrap();
+        assert_eq!(chunked.leading_silence_frames, TimeCode(45));
+        assert_eq!(chunked.leading_silence_frames, whole.leading_silence_frames);
+        assert_eq!(
+            chunked.trailing_silence_frames,
+            whole.trailing_silence_frames
+        );
+        assert_eq!(chunked.master, whole.master);
+        assert_eq!(chunked.clipping, whole.clipping);
+        assert_eq!(chunked.exceptions, whole.exceptions);
+        // Clipping runs also carry across chunk boundaries: a full-scale run
+        // of three samples split 2 + 1 across two callbacks is one run.
+        let mut split = QcObserver::new().unwrap();
+        let mut first = vec![0.0_f32; 48_000 * 2];
+        first[48_000 * 2 - 4] = 1.0;
+        first[48_000 * 2 - 2] = 1.0;
+        split.master(&first).unwrap();
+        let mut second = vec![0.0_f32; 48_000 * 2];
+        second[0] = 1.0;
+        split.master(&second).unwrap();
+        let split = split
+            .finish(TimeCode::ZERO..TimeCode(60), fps, None)
+            .unwrap();
+        assert_eq!(split.clipping.left.over_full_scale_samples, 3);
+        assert_eq!(split.clipping.left.clipped_runs, 1);
+        assert_eq!(split.clipping.right.clipped_runs, 0);
     }
 }

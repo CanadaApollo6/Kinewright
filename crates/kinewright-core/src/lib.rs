@@ -2,6 +2,7 @@
 
 mod actor;
 mod agent;
+mod audio_qc;
 mod automation;
 mod captions;
 pub mod cc7_scenarios;
@@ -27,6 +28,13 @@ pub use actor::{Command, Core, CoreDisconnected, Event, Query, QueryResult, Time
 pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
+};
+pub use audio_qc::{
+    AUDIO_QC_CHANNEL_BALANCE_CLAMP_LU_HUNDREDTHS, AUDIO_QC_CHANNEL_IMBALANCE_LU_HUNDREDTHS,
+    AUDIO_QC_CLIPPED_RUN_SAMPLES, AUDIO_QC_ENGINE, AUDIO_QC_SILENCE_DBFS_HUNDREDTHS,
+    AUDIO_QC_SILENCE_INFO_MILLISECONDS, AUDIO_QC_SILENCE_WINDOW_MILLISECONDS, AudioChannelClipping,
+    AudioClipping, AudioQcException, AudioQcMeasurements, AudioQcProvenance, AudioQcReport,
+    AudioQcRequest, audio_qc_exceptions, audio_qc_technical_pass, loudness_target_exceptions,
 };
 pub use automation::{AutomationCurve, AutomationCurveError, Keyframe, KeyframeInterpolation};
 pub use captions::{
@@ -92,10 +100,11 @@ pub use delivery::{
     DeliveryComparison, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile,
     DeliveryTagCheck, DeliveryTagNotRepresentable, DeliveryTagSource, DeliveryVariant,
     DeliveryVariantError, DeliveryVerification, DeliveryVerificationError,
-    DeliveryVerificationRequest, H264_WHITE_POINT_NOT_REPRESENTABLE_REASON,
-    delivery_color_for_depth, delivery_color_mismatch, delivery_color_mismatches,
-    delivery_conformance, delivery_tag_check, document_for_delivery_profile,
-    document_for_delivery_variant,
+    DeliveryVerificationRequest, EBU_R128_PROGRAMME_TARGET,
+    H264_WHITE_POINT_NOT_REPRESENTABLE_REASON, LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS,
+    LoudnessTarget, STREAMING_PLATFORM_TARGET, delivery_color_for_depth, delivery_color_mismatch,
+    delivery_color_mismatches, delivery_conformance, delivery_tag_check,
+    document_for_delivery_profile, document_for_delivery_variant,
 };
 pub use editorial::ThreePointMode;
 pub use effect::{
@@ -135,7 +144,7 @@ pub use media::{
     AssetSilences, AssetTranscript, AudioChain, AudioLoudness, BeatMarker, BeatStatus, BusLevels,
     Export, ExportCancellation, ExportLutPreflightIssue, ExportLutPreflightReport,
     ExportMediaPreflightIssue, ExportMediaPreflightReport, ExportProgress, ExportSettings,
-    FrameTexture, LinearRgbaImage, LutAvailabilityKind, LutAvailabilityStatus,
+    FrameTexture, LinearRgbaImage, LoudnessSnapshot, LutAvailabilityKind, LutAvailabilityStatus,
     MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_HISTOGRAM_BUCKETS, MATTE_COVERAGE_SCALE,
     MatteCoverageError, MatteCoverageStatistics, MatteProof, MatteProofError, MatteProofMetadata,
     MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,

@@ -138,6 +138,7 @@ Mixer strips use their own size tokens:
 | `size-mixer-chain-pane-width` | 400 | Chain pane beside the strips |
 | `size-mixer-eq-curve-height` | 96 | Parametric EQ magnitude well |
 | `size-mixer-reduction-meter-height` | 6 | Gain-reduction bar on a dynamics card |
+| `size-mixer-loudness-bar-height` | 6 | Momentary and short-term loudness bars in the master pane |
 
 The default desktop viewport is 1,440 by 900 points. The minimum supported
 viewport is 1,100 by 700 points; below that size, the three-column editing
@@ -335,7 +336,7 @@ order, a `border-subtle` rule, one per bus (with a second rule only when buses
 exist), then the master strip. Each strip is `size-mixer-strip-width` wide and
 fits in 240 points of height in its tallest state: 232 for a track strip
 carrying both its `SILENCED` line and its button row, 215 for a bus strip
-whether it holds one node or six, and 196 for the master.
+whether it holds one node or six, and 210 for the master.
 
 A track strip reads top to bottom: the caption and kind icon at the track
 header's type size (plus `NO AUDIO` on the next line, in `text-muted`, for a
@@ -352,11 +353,11 @@ double-click reset. Neither micro label disables the strip's controls.
 
 A bus strip reads: name, member tracks, a node count with the full chain as its
 tooltip, one row carrying the meter pair and the vertical gain fader with its dB
-readout, and an `Edit` toggle. The master strip is the label `MASTER`, that same
-meter-and-fader row fed by the post-limiter master peaks, a node count, and its
-own `Edit` toggle. Each track strip carries a `+ Bus` button, disabled with its
-reason when the track has no audio or is already routed. Meters read zero
-whenever nothing is playing.
+readout, and an `Edit` toggle. The master strip is the label `MASTER`, a node
+count, that same meter-and-fader row fed by the post-limiter master peaks, the
+integrated loudness line, and its own `Edit` toggle. Each track strip carries a
+`+ Bus` button, disabled with its reason when the track has no audio or is
+already routed. Meters read zero whenever nothing is playing.
 
 `Edit` opens the chain pane beside the strips, inside the same dock — the Mixer
 adds no floating surface. The pane carries the chain's routing and sidechain
@@ -369,6 +370,16 @@ Hz, ms, ratio, Q), a read-only magnitude well on a parametric EQ, and a
 gain-reduction bar on a dynamics node. The gain-reduction bar is the one meter
 in the product that fills from the right, because it shows how far a signal has
 been pushed down; it uses status-warning and never accent.
+
+The master pane opens with a `LOUDNESS` section: momentary and short-term as
+horizontal bars over −40…0 LUFS, each `size-mixer-loudness-bar-height` tall,
+integrated, loudness range, and true peak as micro readouts, and a `Reset` that
+restarts integration. The readouts describe what has been heard, not what has
+been rendered ahead into the output ring. The bars carry a status colour
+against the export dialog's current profile target — success inside the
+target's tolerance, warning above it — and are `text-secondary` below it; quiet
+is never a failure. The master strip carries the integrated figure as one micro
+line under the fader. Monitoring is not delivery: playback is never normalised.
 
 ### Transcript and utility panels
 

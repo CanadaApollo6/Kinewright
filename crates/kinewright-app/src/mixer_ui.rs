@@ -23,13 +23,14 @@ use std::sync::Arc;
 use eframe::egui;
 use kinewright_core::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AudioBus,
-    AudioBusId, AudioChain, AudioMaster, Document, EffectId, MixPeaks, Operation, PanLaw,
-    TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, Track, TrackId,
-    TrackKind, TrackMix,
+    AudioBusId, AudioChain, AudioMaster, Document, EffectId, LoudnessSnapshot, LoudnessTarget,
+    MixPeaks, Operation, PanLaw, Playback, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
+    TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix,
 };
 
 use crate::{
     app::KinewrightApp,
+    export_ui::export_delivery_profile,
     icons::Icon,
     inspector_ui::{InspectorEdits, clip_carries_audio, effect_display_name, is_live_drag},
     mixer_pane_ui,
@@ -414,27 +415,67 @@ fn file_chain_edit(
     }
 }
 
-impl KinewrightApp {
-    /// The Mixer tab of the material strip (AU1 §5.1, AU2 §6.6).
-    pub(crate) fn mixer_panel(&mut self, ui: &mut egui::Ui) {
-        let document = Arc::clone(&self.focused().document);
-        // Peaks are telemetry from a running engine. A stopped transport has
-        // no signal to report, so the meters read what is true: silence.
-        let peaks = if self.playing {
-            self.playback.mix_peaks()
+/// What the Mixer reads from the engine each frame it is visible.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct MixerTelemetry {
+    /// Per-point peaks; silence while the transport is stopped.
+    pub(crate) peaks: MixPeaks,
+    /// The live loudness meter (AU3 §3.9), read playing or paused.
+    pub(crate) loudness: LoudnessSnapshot,
+}
+
+/// Read the Mixer's telemetry for one frame (AU1 §5.1, AU3 §4.4).
+///
+/// Peaks are telemetry from a running engine: a stopped transport has no
+/// signal to report, so the meters read what is true, silence. The loudness
+/// snapshot is different in kind — it describes what has been heard since the
+/// last reset, and the meter freezes it on pause (AU3 §3.9, F15) — so it is
+/// read every frame, playing or paused, and the frozen figures stay on
+/// screen.
+pub(crate) fn mixer_telemetry(playback: &dyn Playback, playing: bool) -> MixerTelemetry {
+    MixerTelemetry {
+        peaks: if playing {
+            playback.mix_peaks()
         } else {
             MixPeaks::default()
-        };
+        },
+        loudness: playback.loudness(),
+    }
+}
+
+/// What one frame of [`mixer_body`] hands back to its caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MixerFrame {
+    /// The selection the frame ends with; see [`mixer_body`].
+    pub(crate) selection: Option<MixerSelection>,
+    /// The `LOUDNESS` section's `Reset` was clicked (AU3 §4.4). Answered with
+    /// `Playback::reset_loudness`, never with an operation.
+    pub(crate) reset_loudness: bool,
+}
+
+impl KinewrightApp {
+    /// The Mixer tab of the material strip (AU1 §5.1, AU2 §6.6, AU3 §4.4).
+    pub(crate) fn mixer_panel(&mut self, ui: &mut egui::Ui) {
+        let document = Arc::clone(&self.focused().document);
+        let telemetry = mixer_telemetry(self.playback.as_ref(), self.playing);
+        // The bars measure against the export dialog's current profile target,
+        // whatever the dialog's other settings say (AU3 §4.4, F12/F20).
+        let target = export_delivery_profile(self.export_dialog.delivery_aspect).loudness_target();
         let mut edits = InspectorEdits::default();
-        self.mixer_selection = mixer_body(
+        let frame = mixer_body(
             ui,
             &document,
             self.mixer_selection,
-            &peaks,
+            &telemetry,
+            target,
             self.playing,
             &mut self.mixer_levels,
             &mut edits,
         );
+        self.mixer_selection = frame.selection;
+        if frame.reset_loudness {
+            self.playback.reset_loudness();
+        }
         self.submit_inspector_edits(edits);
     }
 }
@@ -449,22 +490,25 @@ impl KinewrightApp {
 /// Returns the selection the frame ends with — an `Edit` toggle is a control
 /// like any other and has to be able to change it, and a selection naming a
 /// bus the document no longer has is cleared here rather than left to paint
-/// an empty pane.
+/// an empty pane — and whether the loudness `Reset` was clicked (AU3 §4.4).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn mixer_body(
     ui: &mut egui::Ui,
     document: &Document,
     selection: Option<MixerSelection>,
-    peaks: &MixPeaks,
+    telemetry: &MixerTelemetry,
+    target: LoudnessTarget,
     playing: bool,
     levels: &mut MixerMeterLevels,
     edits: &mut InspectorEdits,
-) -> Option<MixerSelection> {
-    levels.advance(ui, peaks, playing);
+) -> MixerFrame {
+    levels.advance(ui, &telemetry.peaks, playing);
     let selection = match selection {
         Some(MixerSelection::Bus(bus)) if document.audio_mix.bus(bus).is_none() => None,
         other => other,
     };
     let mut requested = selection;
+    let mut reset_loudness = false;
     let mut chain = MixerChainEdits::default();
     ui.horizontal_top(|ui| {
         // The pane owns a fixed column on the right; the strips take what is
@@ -482,6 +526,7 @@ pub(crate) fn mixer_body(
                 document,
                 selection,
                 levels,
+                telemetry.loudness,
                 &mut requested,
                 &mut chain,
                 edits,
@@ -489,19 +534,32 @@ pub(crate) fn mixer_body(
         });
         if let Some(current) = selection {
             ui.separator();
-            mixer_pane_ui::chain_pane(ui, document, current, levels, &mut chain);
+            reset_loudness = mixer_pane_ui::chain_pane(
+                ui,
+                document,
+                current,
+                levels,
+                telemetry.loudness,
+                target,
+                &mut chain,
+            );
         }
     });
     chain.drain_into(document, edits);
-    requested
+    MixerFrame {
+        selection: requested,
+        reset_loudness,
+    }
 }
 
 /// Paint the strips: tracks, then buses, then master (AU1 §5.1).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn mixer_strips(
     ui: &mut egui::Ui,
     document: &Document,
     selection: Option<MixerSelection>,
     levels: &MixerMeterLevels,
+    loudness: LoudnessSnapshot,
     requested: &mut Option<MixerSelection>,
     chain: &mut MixerChainEdits,
     edits: &mut InspectorEdits,
@@ -524,7 +582,7 @@ pub(crate) fn mixer_strips(
                     }
                 }
                 ui.separator();
-                master_strip(ui, document, selection, levels, requested, chain);
+                master_strip(ui, document, selection, levels, loudness, requested, chain);
             });
         });
 }
@@ -708,12 +766,14 @@ fn bus_strip(
     });
 }
 
-/// The master strip: the post-limiter meter, the master fader, and `Edit`.
+/// The master strip: the post-limiter meter, the master fader, the integrated
+/// loudness line (AU3 §4.5), and `Edit`.
 fn master_strip(
     ui: &mut egui::Ui,
     document: &Document,
     selection: Option<MixerSelection>,
     levels: &MixerMeterLevels,
+    loudness: LoudnessSnapshot,
     requested: &mut Option<MixerSelection>,
     chain: &mut MixerChainEdits,
 ) {
@@ -737,6 +797,16 @@ fn master_strip(
             chain.master(master).gain_tenth_db = gain_tenth_db;
             chain.mark_live(is_live_drag(&fader));
         }
+
+        // The integrated figure, heard so far; `I —` until the meter has a
+        // complete gating block (AU3 §4.5). The strip is 72 px wide, so the
+        // full readout line is the tooltip and the pane's section.
+        ui.label(
+            egui::RichText::new(mixer_pane_ui::integrated_strip_line(loudness))
+                .font(theme::medium(type_size::MICRO))
+                .color(color::TEXT_MUTED),
+        )
+        .on_hover_text(mixer_pane_ui::loudness_readout(loudness));
 
         let selected = selection == Some(MixerSelection::Master);
         let toggle = edit_toggle(ui, selected, MixerSelection::Master, requested);
@@ -1187,13 +1257,15 @@ fn format_pan(pan_percent: i32) -> String {
 mod tests {
     use std::path::PathBuf;
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use kinewright_core::{
-        AssetId, AudioMix, Clip, ClipContent, ClipId, Effect, MediaAsset, MediaKind, ParamValue,
-        Rational, TimeCode,
+        AssetId, AudioMix, Clip, ClipContent, ClipId, DeliveryAspect, EBU_R128_PROGRAMME_TARGET,
+        Effect, MediaAsset, MediaKind, ParamValue, Rational, STREAMING_PLATFORM_TARGET, TimeCode,
     };
 
     use super::*;
-    use crate::mixer_pane_ui::{self, MixerChain, MixerUnit};
+    use crate::mixer_pane_ui::{self, LOUDNESS_MONITORING_NOTE, MixerChain, MixerUnit};
 
     fn asset() -> MediaAsset {
         MediaAsset {
@@ -1558,9 +1630,20 @@ mod tests {
 
     /// Paint the mixer with a chain selected, so the pane paints too.
     fn painted_mixer_with(document: &Document, selection: Option<MixerSelection>) -> Vec<String> {
+        painted_mixer_with_loudness(document, selection, LoudnessSnapshot::default())
+    }
+
+    fn painted_mixer_with_loudness(
+        document: &Document,
+        selection: Option<MixerSelection>,
+        loudness: LoudnessSnapshot,
+    ) -> Vec<String> {
         let ctx = egui::Context::default();
         theme::install(&ctx);
-        let peaks = MixPeaks::default();
+        let telemetry = MixerTelemetry {
+            peaks: MixPeaks::default(),
+            loudness,
+        };
         let mut levels = MixerMeterLevels::default();
         let mut edits = InspectorEdits::default();
         let output = ctx.run_ui(
@@ -1572,15 +1655,17 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                mixer_body(
+                let frame = mixer_body(
                     ui,
                     document,
                     selection,
-                    &peaks,
+                    &telemetry,
+                    STREAMING_PLATFORM_TARGET,
                     false,
                     &mut levels,
                     &mut edits,
                 );
+                assert!(!frame.reset_loudness, "nothing was clicked");
             },
         );
         assert!(
@@ -1752,10 +1837,14 @@ mod tests {
         /// exactly as they drive the app's own field.
         selection: Option<MixerSelection>,
         peaks: MixPeaks,
+        /// AU3 §4.4: the snapshot the pane's `LOUDNESS` section reads.
+        loudness: LoudnessSnapshot,
         playing: bool,
         levels: MixerMeterLevels,
         time: f64,
         rects: Vec<(String, egui::Rect)>,
+        /// Whether the last frame's `Reset` was clicked (AU3 §4.4).
+        reset_loudness: bool,
     }
 
     /// 20 ms a frame: long enough that a press and the release after it are
@@ -1772,10 +1861,12 @@ mod tests {
                 document,
                 selection: None,
                 peaks: MixPeaks::default(),
+                loudness: LoudnessSnapshot::default(),
                 playing: false,
                 levels: MixerMeterLevels::default(),
                 time: 0.0,
                 rects: Vec::new(),
+                reset_loudness: false,
             }
         }
 
@@ -1806,10 +1897,16 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            let peaks = self.peaks.clone();
+            let telemetry = MixerTelemetry {
+                peaks: self.peaks.clone(),
+                loudness: self.loudness,
+            };
             let playing = self.playing;
             let selection = self.selection;
-            let mut ended_with = selection;
+            let mut ended_with = MixerFrame {
+                selection,
+                reset_loudness: false,
+            };
             let mut edits = InspectorEdits::default();
             let levels = &mut self.levels;
             let document = &self.document;
@@ -1817,10 +1914,19 @@ mod tests {
                 // A discarded pass runs the closure again, so the record is
                 // cleared here rather than between frames.
                 STRIP_RECTS.with(|rects| rects.borrow_mut().clear());
-                ended_with =
-                    mixer_body(ui, document, selection, &peaks, playing, levels, &mut edits);
+                ended_with = mixer_body(
+                    ui,
+                    document,
+                    selection,
+                    &telemetry,
+                    STREAMING_PLATFORM_TARGET,
+                    playing,
+                    levels,
+                    &mut edits,
+                );
             });
-            self.selection = ended_with;
+            self.selection = ended_with.selection;
+            self.reset_loudness = ended_with.reset_loudness;
             self.rects = STRIP_RECTS.with(|rects| rects.borrow().clone());
             for operation in edits.operations() {
                 operation
@@ -2172,6 +2278,70 @@ mod tests {
         document
     }
 
+    /// A snapshot with every figure present, as a meter mid-programme reports.
+    fn measured_loudness() -> LoudnessSnapshot {
+        LoudnessSnapshot {
+            momentary_lufs_hundredths: Some(-1_830),
+            short_term_lufs_hundredths: Some(-1_705),
+            integrated_lufs_hundredths: Some(-1_600),
+            loudness_range_lu_hundredths: Some(620),
+            true_peak_dbtp_hundredths: Some(-130),
+            programme_seconds: 42,
+        }
+    }
+
+    /// A playback double that reports one fixed snapshot and counts the
+    /// resets and peak reads it receives (AU3 §4.4). The engine's meter is
+    /// media's to prove; the app only reads the snapshot and asks for resets.
+    struct FixedLoudnessPlayback {
+        snapshot: LoudnessSnapshot,
+        resets: AtomicUsize,
+        peak_reads: AtomicUsize,
+    }
+
+    impl FixedLoudnessPlayback {
+        fn new(snapshot: LoudnessSnapshot) -> Self {
+            Self {
+                snapshot,
+                resets: AtomicUsize::new(0),
+                peak_reads: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Playback for FixedLoudnessPlayback {
+        fn set_document(&self, _document: Arc<Document>) {}
+        fn request_frame(&self, _at: TimeCode) {}
+        fn frames(&self) -> crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)> {
+            crossbeam_channel::bounded(0).1
+        }
+        fn events(&self) -> crossbeam_channel::Receiver<kinewright_core::MediaEvent> {
+            crossbeam_channel::bounded(0).1
+        }
+        fn play(&self, _from: TimeCode) {}
+        fn pause(&self) {}
+        fn seek(&self, _to: TimeCode) {}
+        fn position(&self) -> TimeCode {
+            TimeCode::ZERO
+        }
+        fn output_peaks(&self) -> [f32; 2] {
+            [0.0, 0.0]
+        }
+        fn mix_peaks(&self) -> MixPeaks {
+            self.peak_reads.fetch_add(1, Ordering::SeqCst);
+            MixPeaks {
+                master: [0.5, 0.25],
+                ..MixPeaks::default()
+            }
+        }
+        fn loudness(&self) -> LoudnessSnapshot {
+            self.snapshot
+        }
+        fn reset_loudness(&self) {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     /// Track 1 routed to the bus, so `+ Bus` has something to refuse.
     fn routed_document() -> Document {
         let mut document = mixer_document();
@@ -2203,7 +2373,7 @@ mod tests {
         measured
     }
 
-    fn measure_master_strip(document: &Document) -> egui::Vec2 {
+    fn measure_master_strip(document: &Document, loudness: LoudnessSnapshot) -> egui::Vec2 {
         let ctx = egui::Context::default();
         theme::install(&ctx);
         let levels = MixerMeterLevels::default();
@@ -2212,7 +2382,15 @@ mod tests {
         let mut measured = egui::Vec2::ZERO;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.vertical(|ui| {
-                master_strip(ui, document, None, &levels, &mut requested, &mut chain);
+                master_strip(
+                    ui,
+                    document,
+                    None,
+                    &levels,
+                    loudness,
+                    &mut requested,
+                    &mut chain,
+                );
                 measured = ui.min_rect().size();
             });
         });
@@ -2248,27 +2426,53 @@ mod tests {
     ///
     /// Measured on this build: a bus strip is 215 px whether it carries one
     /// node or six, because the node count is one line either way, and the
-    /// master strip is 196 px. The track strip, which gained the `+ Bus`
-    /// button, is 218 px plain and 232 px in both of its loaded states.
+    /// master strip is 210 px with AU3 §4.5's integrated line under the fader
+    /// (196 before it), whether that line reads `I —` or a figure. The track
+    /// strip, which gained the `+ Bus` button, is 218 px plain and 232 px in
+    /// both of its loaded states.
     #[test]
     fn a_bus_and_master_strip_fit_the_mixer_dock() {
         const BUDGET: f32 = 240.0;
+        // DESIGN.md's `210 for the master`, held to a pixel so the document's
+        // number and the real layout cannot drift apart silently.
+        const MASTER: f32 = 210.0;
+        // DESIGN.md's `215 for a bus strip`, held the same way.
+        const BUS: f32 = 215.0;
         let mut worst_case = chain_document();
         worst_case.audio_mix.master = AudioMaster {
             gain_tenth_db: -30,
             effects: chain_effects(&["audio_gain", "audio_true_peak_limiter"]),
         };
-        for (label, measured) in [
-            ("plain bus", measure_bus_strip(&mixer_document(), 0)),
-            ("six-node bus", measure_bus_strip(&worst_case, 0)),
-            ("plain master", measure_master_strip(&mixer_document())),
-            ("loaded master", measure_master_strip(&worst_case)),
+        for (label, measured, expected) in [
+            (
+                "plain bus",
+                measure_bus_strip(&mixer_document(), 0),
+                Some(BUS),
+            ),
+            ("six-node bus", measure_bus_strip(&worst_case, 0), Some(BUS)),
+            (
+                "plain master",
+                measure_master_strip(&mixer_document(), LoudnessSnapshot::default()),
+                Some(MASTER),
+            ),
+            (
+                "loaded master",
+                measure_master_strip(&worst_case, measured_loudness()),
+                Some(MASTER),
+            ),
         ] {
             assert!(
                 measured.y <= BUDGET,
                 "a {label} strip is {} px tall, over the {BUDGET} px budget",
                 measured.y
             );
+            if let Some(expected) = expected {
+                assert!(
+                    (measured.y - expected).abs() <= 1.0,
+                    "DESIGN.md says `{expected}` for this strip; a {label} strip measured {} px",
+                    measured.y
+                );
+            }
             assert!(
                 (measured.x - size::MIXER_STRIP_WIDTH).abs() <= 1.0,
                 "a {label} strip is one column wide: {} px",
@@ -2294,7 +2498,15 @@ mod tests {
             },
             |ui| {
                 ui.horizontal_top(|ui| {
-                    mixer_pane_ui::chain_pane(ui, document, selection, &levels, &mut edits);
+                    mixer_pane_ui::chain_pane(
+                        ui,
+                        document,
+                        selection,
+                        &levels,
+                        measured_loudness(),
+                        STREAMING_PLATFORM_TARGET,
+                        &mut edits,
+                    );
                     measured = ui.min_rect().size();
                 });
             },
@@ -3578,6 +3790,99 @@ mod tests {
             !mixer.contains("Bus controls arrive with AU2"),
             "the strip no longer says so either"
         );
+
+        // AU3 §4.6 and §7 A19: the LOUDNESS paragraph, the measured master
+        // figure, and the new token.
+        for expected in [
+            "The master pane opens with a `LOUDNESS` section",
+            "horizontal bars over −40…0 LUFS",
+            "a `Reset` that",
+            "restarts integration",
+            "what has been heard, not what has",
+            "success inside the",
+            "target's tolerance, warning above it",
+            "is never a failure",
+            "integrated figure as one micro",
+            "Monitoring is not delivery: playback is",
+            "never normalised",
+            "and 210 for the master",
+        ] {
+            assert!(
+                mixer.contains(expected),
+                "DESIGN.md's Mixer section must state: {expected}"
+            );
+        }
+        assert!(
+            !mixer.contains("196 for the master"),
+            "the master figure is the measured one, with the integrated line"
+        );
+        assert!(
+            DESIGN.contains("size-mixer-loudness-bar-height"),
+            "DESIGN.md must list the token `size-mixer-loudness-bar-height`"
+        );
+    }
+
+    /// AU3 §4.4 F12/F20: the bars and the export read one table. The Mixer
+    /// builds its target from `export_delivery_profile(delivery_aspect)`, so
+    /// that mapping is pinned here rather than assumed by every test that
+    /// passes a target by hand.
+    #[test]
+    fn the_mixer_target_follows_the_export_dialog_aspect() {
+        assert_eq!(
+            export_delivery_profile(None).loudness_target(),
+            EBU_R128_PROGRAMME_TARGET,
+            "a master export monitors against the programme target"
+        );
+        for aspect in DeliveryAspect::ALL {
+            assert_eq!(
+                export_delivery_profile(Some(aspect)).loudness_target(),
+                STREAMING_PLATFORM_TARGET,
+                "{aspect:?} delivers to a platform, so the bars follow the platform target"
+            );
+        }
+    }
+
+    /// AU3 §7 A19: the docs that describe the Part A surface say what it does.
+    /// Pinned as hard-wrapped phrases, as the DESIGN.md test does.
+    #[test]
+    fn the_au3_part_a_docs_describe_the_mixer_loudness_section() {
+        const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
+        const MEDIA_POLICY: &str = include_str!("../../../docs/MEDIA-POLICY.md");
+        const AU1: &str = include_str!("../../../docs/AU1-MANUAL-MIX.md");
+        const AU2: &str = include_str!("../../../docs/AU2-EQ-AND-DYNAMICS.md");
+        const M36: &str = include_str!("../../../docs/M36-AGENT-RUNTIME-EFFICIENCY.md");
+        assert!(
+            CHANGELOG.contains("The Mixer's master pane shows a `LOUDNESS` section fed by"),
+            "CHANGELOG.md names the LOUDNESS section"
+        );
+        assert!(
+            CHANGELOG.contains("published by audible position"),
+            "CHANGELOG.md says the live meter publishes by audible position"
+        );
+        assert!(
+            MEDIA_POLICY.contains("hands each chunk to an observer"),
+            "MEDIA-POLICY.md carries the observer paragraph"
+        );
+        assert!(
+            AU1.contains("docs/AU3-LOUDNESS-AND-DELIVERY.md"),
+            "AU1's deferral list points at the AU3 contract"
+        );
+        assert!(
+            AU2.contains("(AU3 §3.6 resolved this by pinning"),
+            "AU2's true-peak deferral points at its AU3 resolution"
+        );
+        assert!(
+            AU2.contains("(AU3 §3.8 delivered it for"),
+            "AU2's per-chunk accumulator deferral points at its AU3 delivery"
+        );
+        assert!(
+            M36.contains("(2026-09-09, after AU3 Part A)"),
+            "M36 carries the Part A capability-budget rows"
+        );
+        assert!(
+            M36.contains("| 130 |"),
+            "M36's internal registry row still counts 130 capabilities"
+        );
     }
 
     /// AU2 §6.7: the move buttons are `▲` and `▼`, so the installed font
@@ -3635,9 +3940,157 @@ mod tests {
         assert!((size::MIXER_CHAIN_PANE_WIDTH - 400.0).abs() < f32::EPSILON);
         assert!((size::MIXER_EQ_CURVE_HEIGHT - 96.0).abs() < f32::EPSILON);
         assert!((size::MIXER_REDUCTION_METER_HEIGHT - 6.0).abs() < f32::EPSILON);
+        // AU3 §7 A19.
+        assert!((size::MIXER_LOUDNESS_BAR_HEIGHT - 6.0).abs() < f32::EPSILON);
         assert!((MIXER_REDUCTION_METER_RANGE_DB - 24.0).abs() < f32::EPSILON);
         const {
             assert!(size::MIXER_CHAIN_PANE_WIDTH > size::MIXER_STRIP_WIDTH * 4.0);
         }
+    }
+
+    /// AU3 §4.4 and §7 A18: the snapshot is polled while paused. Peaks read
+    /// silence on a stopped transport, as AU1 §5.1 says, but the loudness
+    /// figures are what has been heard and stay on screen frozen (F15).
+    #[test]
+    fn the_loudness_snapshot_is_polled_while_paused() {
+        let playback = FixedLoudnessPlayback::new(measured_loudness());
+
+        let paused = mixer_telemetry(&playback, false);
+        assert_eq!(
+            paused.peaks,
+            MixPeaks::default(),
+            "a paused transport is silent"
+        );
+        assert_eq!(
+            paused.loudness,
+            measured_loudness(),
+            "the frozen figures show"
+        );
+        assert_eq!(
+            playback.peak_reads.load(Ordering::SeqCst),
+            0,
+            "peaks are not read while paused"
+        );
+
+        let playing = mixer_telemetry(&playback, true);
+        assert!(
+            playing
+                .peaks
+                .master
+                .iter()
+                .zip([0.5, 0.25])
+                .all(|(read, fed)| (read - fed).abs() < f32::EPSILON),
+            "a playing transport reads the engine's peaks: {:?}",
+            playing.peaks.master
+        );
+        assert_eq!(playing.loudness, measured_loudness());
+        assert_eq!(playback.peak_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            playback.resets.load(Ordering::SeqCst),
+            0,
+            "reading never resets"
+        );
+    }
+
+    /// AU3 §4.4 and §7 A18: the master pane paints `LOUDNESS`, `M`, `S`,
+    /// `Reset`, the readout line, and the Part A F21 sentence; the master strip
+    /// beside it carries the integrated figure.
+    #[test]
+    fn the_master_pane_paints_the_loudness_section() {
+        let painted = painted_mixer_with_loudness(
+            &chain_document_with_master(),
+            Some(MixerSelection::Master),
+            measured_loudness(),
+        );
+        for expected in [
+            "LOUDNESS",
+            "M",
+            "S",
+            "-18.3",
+            "-17.1",
+            "I -16.0 LUFS · LRA 6.2 LU · TP -1.3 dBTP · 0:42",
+            "Reset",
+            LOUDNESS_MONITORING_NOTE,
+            "I -16.0",
+        ] {
+            assert!(
+                painted.iter().any(|text| text == expected),
+                "the master pane paints {expected:?}; it painted {painted:?}"
+            );
+        }
+        assert!(
+            !LOUDNESS_MONITORING_NOTE.contains("export step"),
+            "Part A carries only the monitoring half of the F21 sentence"
+        );
+
+        let bus_pane = painted_mixer_with_loudness(
+            &chain_document_with_master(),
+            Some(MixerSelection::Bus(AudioBusId(1))),
+            measured_loudness(),
+        );
+        assert!(
+            !bus_pane.iter().any(|text| text == "LOUDNESS"),
+            "a bus pane has no LOUDNESS section"
+        );
+    }
+
+    /// AU3 §4.5 and §7 A18: the master strip paints `I —` before the meter has
+    /// an integrated figure, and the figure once it has.
+    #[test]
+    fn the_master_strip_carries_the_integrated_line() {
+        let painted = painted_mixer_with(&mixer_document(), None);
+        assert!(
+            painted.iter().any(|text| text == "I —"),
+            "the strip says `I —` with nothing measured; it painted {painted:?}"
+        );
+        assert!(
+            !painted.iter().any(|text| text == "LOUDNESS"),
+            "the section itself lives in the pane, not the strip"
+        );
+        let painted = painted_mixer_with_loudness(&mixer_document(), None, measured_loudness());
+        assert!(
+            painted.iter().any(|text| text == "I -16.0"),
+            "the strip carries the integrated figure; it painted {painted:?}"
+        );
+    }
+
+    /// AU3 §4.4: `Reset` asks the engine to restart integration and pushes no
+    /// operation — the meter is telemetry, not document state — and leaves the
+    /// selection where it was.
+    #[test]
+    fn the_loudness_reset_reaches_the_engine_and_writes_nothing() {
+        let mut harness =
+            MixerHarness::new(chain_document_with_master()).editing(MixerSelection::Master);
+        harness.loudness = measured_loudness();
+        let _ = harness.frame(Vec::new());
+        assert!(!harness.reset_loudness, "nothing was clicked yet");
+        let before = harness.document.clone();
+
+        let reset = harness.rect("reset_loudness");
+        let _ = harness.frame(vec![moved(reset.center()), pointer(reset.center(), true)]);
+        let edits = harness.frame(vec![pointer(reset.center(), false)]);
+        assert!(
+            harness.reset_loudness,
+            "the click is reported to the caller"
+        );
+        assert!(
+            edits.operations().is_empty(),
+            "a loudness reset writes no operation: {:?}",
+            edits.operations()
+        );
+        assert_eq!(harness.document, before, "and the document is untouched");
+        assert_eq!(harness.selection, Some(MixerSelection::Master));
+
+        // `mixer_panel` turns this flag into one `Playback::reset_loudness()`;
+        // that two-line seam is not reachable from a test, because
+        // `KinewrightApp::new` needs a live GPU media engine. What is proved
+        // here is that the flag rises exactly on the click and falls the next
+        // frame, and that no `Operation` is emitted on any of the three frames.
+
+        let _ = harness.frame(Vec::new());
+        assert!(
+            !harness.reset_loudness,
+            "the flag is one frame's answer, not a latch"
+        );
     }
 }

@@ -464,6 +464,18 @@ impl Analysis for BaselineProofAnalysis {
         self.inner.mix_spectrum(document, request)
     }
 
+    /// AU3 §4.3: the audio QC measurement forwards exactly as `mix_spectrum`
+    /// does. Without this arm the proxy would answer `NotImplemented` while
+    /// the engine behind it can measure, which is the one way this wrapper can
+    /// change an answer rather than only sharing a working proof.
+    fn audio_qc(
+        &self,
+        document: &Document,
+        request: &kinewright_core::AudioQcRequest,
+    ) -> Result<kinewright_core::AudioQcReport, MediaError> {
+        self.inner.audio_qc(document, request)
+    }
+
     fn request_beat_detection(&self, asset: kinewright_core::MediaAsset) {
         self.inner.request_beat_detection(asset);
     }
@@ -2587,5 +2599,152 @@ mod tests {
         assert_eq!(millionths(0), "0.000000");
         assert_eq!(centidegrees(12_339), "123.39°");
         assert_eq!(centidegrees(-100), "-1.00°");
+    }
+
+    /// An [`Analysis`] whose `audio_qc` answers the typed short-range refusal
+    /// with the request echoed through the error's fields (A17's double).
+    struct ShortRangeAnalysis;
+
+    impl Analysis for ShortRangeAnalysis {
+        fn probe(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<kinewright_core::MediaAsset, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+        fn thumbnail_at(
+            &self,
+            _at: TimeCode,
+            _max_width: u32,
+        ) -> Result<kinewright_core::RgbaImage, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+        fn request_transcription(&self, _asset: kinewright_core::MediaAsset) {}
+        fn transcript_status(
+            &self,
+            _asset: &kinewright_core::MediaAsset,
+        ) -> kinewright_core::TranscriptStatus {
+            kinewright_core::TranscriptStatus::NotRequested
+        }
+        fn timeline_transcript(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+        ) -> Result<Vec<kinewright_core::TimelineTranscriptWord>, MediaError> {
+            Ok(Vec::new())
+        }
+        fn request_silence_detection(&self, _asset: kinewright_core::MediaAsset) {}
+        fn silence_status(
+            &self,
+            _asset: &kinewright_core::MediaAsset,
+        ) -> kinewright_core::SilenceStatus {
+            kinewright_core::SilenceStatus::NotRequested
+        }
+        fn timeline_silences(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+            _minimum_source_frames: TimeCode,
+        ) -> Result<Vec<kinewright_core::TimelineSilenceSpan>, MediaError> {
+            Ok(Vec::new())
+        }
+        fn request_scene_detection(&self, _asset: kinewright_core::MediaAsset) {}
+        fn scene_status(
+            &self,
+            _asset: &kinewright_core::MediaAsset,
+        ) -> kinewright_core::SceneStatus {
+            kinewright_core::SceneStatus::NotRequested
+        }
+        fn timeline_scene_changes(
+            &self,
+            _document: &Document,
+            _range: Option<std::ops::Range<TimeCode>>,
+            _minimum_confidence_basis_points: u16,
+        ) -> Result<Vec<kinewright_core::TimelineSceneChange>, MediaError> {
+            Ok(Vec::new())
+        }
+        fn request_waveform(
+            &self,
+            _asset: kinewright_core::MediaAsset,
+            _request_generation: u64,
+        ) -> bool {
+            false
+        }
+        fn request_thumbnail(
+            &self,
+            _asset: kinewright_core::MediaAsset,
+            _source_at: TimeCode,
+            _max_width: u32,
+            _request_generation: u64,
+        ) -> bool {
+            false
+        }
+        fn visual_asset_results(
+            &self,
+        ) -> crossbeam_channel::Receiver<kinewright_core::VisualAssetResult> {
+            crossbeam_channel::bounded(0).1
+        }
+        fn audio_qc(
+            &self,
+            _document: &Document,
+            request: &kinewright_core::AudioQcRequest,
+        ) -> Result<kinewright_core::AudioQcReport, MediaError> {
+            // Echo the request through the typed error's fields.
+            let sample_frames = request
+                .range
+                .as_ref()
+                .map_or(0, |range| range.end.0.unsigned_abs());
+            let required =
+                u64::from(request.profile == Some(kinewright_core::DeliveryProfile::Youtube1080p));
+            Err(MediaError::MixLoudnessRangeTooShort {
+                sample_frames,
+                required,
+            })
+        }
+    }
+
+    /// AU3 §7 A17: `BaselineProofAnalysis` forwards `audio_qc` to the engine
+    /// behind it rather than answering the trait's `NotImplemented` default.
+    ///
+    /// The double answers with the typed short-range refusal so the assertion
+    /// can tell "forwarded" from "defaulted" by the error alone; the request
+    /// is echoed back through the error's fields to prove it arrived intact.
+    #[test]
+    fn au3_the_baseline_proof_analysis_forwards_audio_qc() {
+        use kinewright_core::{AudioQcRequest, DeliveryProfile};
+
+        let document = document();
+        let key = WorkingProofKey {
+            session_id: 1,
+            revision: 1,
+            frame: TimeCode(0),
+        };
+        let proxy = BaselineProofAnalysis {
+            inner: Arc::new(ShortRangeAnalysis),
+            cache: Arc::new(WorkingProofCache::default()),
+            document: Arc::clone(&document),
+            key,
+            baseline: Mutex::new(None),
+        };
+        let request = AudioQcRequest {
+            range: Some(TimeCode(30)..TimeCode(60)),
+            profile: Some(DeliveryProfile::Youtube1080p),
+        };
+        let forwarded = proxy.audio_qc(&document, &request);
+        assert!(
+            matches!(
+                forwarded,
+                Err(MediaError::MixLoudnessRangeTooShort {
+                    sample_frames: 60,
+                    required: 1,
+                })
+            ),
+            "the proxy forwards audio_qc with its request intact; it answered {forwarded:?}"
+        );
+        assert_eq!(
+            proxy.baseline_metadata(),
+            None,
+            "a measurement forward renders no working proof"
+        );
     }
 }

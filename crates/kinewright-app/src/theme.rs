@@ -96,6 +96,9 @@ pub(crate) mod size {
     pub const MIXER_EQ_CURVE_HEIGHT: f32 = 96.0;
     /// Height of a gain-reduction bar on an expanded dynamics card (AU2 §6.7).
     pub const MIXER_REDUCTION_METER_HEIGHT: f32 = 6.0;
+    /// Height of a momentary or short-term loudness bar in the master pane's
+    /// `LOUDNESS` section (AU3 §4.4).
+    pub const MIXER_LOUDNESS_BAR_HEIGHT: f32 = 6.0;
 }
 
 pub(crate) mod motion {

@@ -2186,6 +2186,8 @@ DESIGN.md:328-333's "strip 72 wide fits 240 tall" is edited to match whatever §
 - **The true-peak detector is not BS.1770-4 conformant.** It has the Annex 2 structure with this
   contract's own Blackman windowed-sinc coefficients and reads within about 0.3 dB of a 16x
   reference; conformance of the delivered file needs the ITU coefficient table (AU3, OPEN-4).
+  (AU3 §3.6 resolved this by pinning the measurement true-peak meter against EBU Tech 3341's
+  tolerance cases rather than a coefficient table.)
 - **Degenerate rates.** Below about 7 kHz a 1 ms lookahead gives fewer than
   `TRUE_PEAK_GROUP_DELAY_FRAMES + 1` sample frames, so the limiter falls back to sample-peak
   detection; below 1 kHz `stage_latency_frames` truncates a 1 ms chain to zero frames and the
@@ -2208,7 +2210,9 @@ DESIGN.md:328-333's "strip 72 wide fits 240 tall" is edited to match whatever §
   one card is expanded at a time to keep that rare (§6.7).
 - **`measure_mix_levels` and `mix_spectrum` hold stems in memory.** Roughly `(2 x tracks +
   buses) x 48 000 x 2 x 4` bytes per second of `range.end`, about 1.8 GB for four tracks over ten
-  minutes (AU1 §0). A per-chunk accumulator is the AU3 remedy.
+  minutes (AU1 §0). A per-chunk accumulator is the AU3 remedy. (AU3 §3.8 delivered it for
+  `measure_mix_levels` and audio QC through `MixObserver`; `mix_spectrum` remains the whole-stem
+  path.)
 - **A playback device not running at 48 kHz gets different coefficients from export.** Every
   filter is designed from the runtime rate, so a 44.1 kHz device's bilinear warping puts a band a
   fraction of a decibel from where export puts it, and a 20 kHz band is clamped to `0.45 x rate`.

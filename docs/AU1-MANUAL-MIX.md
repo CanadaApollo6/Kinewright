@@ -88,7 +88,8 @@ Out of scope (named deferrals, later AU slices):
 - Master fader, master gain state (AU2).
 - Loudness meters beyond peak, loudness targets, normalization on export, audio QC;
   QA (`qa.rs`) does not consider mute/solo — a fully muted timeline still passes
-  `no_audible_media` until AU3.
+  `no_audible_media` until AU3. (AU3 delivered all of these; see
+  `docs/AU3-LOUDNESS-AND-DELIVERY.md`.)
 - Track gain automation, clip gain envelopes (AU4).
 - Pan modes other than the balance law (constant-power is an AU2/AU4 mode), surround,
   pan automation.

@@ -309,7 +309,9 @@ fn true_peak_taps() -> &'static [f64; TRUE_PEAK_TAPS] {
 /// This has the *structure* of ITU-R BS.1770-4 Annex 2 — 48 taps in four
 /// phases of twelve — with this contract's own Blackman windowed-sinc
 /// coefficients. It is not the ITU coefficient table and reads within about
-/// 0.3 dB of a 16x reference (§6.10).
+/// 0.3 dB of a 16x reference (§6.10). It is the limiter's detector only: the
+/// measurement path in `loudness.rs` is an 8× meter conformant by Tech 3341
+/// tolerance (AU3 §3.6).
 #[derive(Debug, Clone)]
 pub(crate) struct TruePeakEstimator {
     history: Vec<[f64; TRUE_PEAK_PHASE_TAPS]>,

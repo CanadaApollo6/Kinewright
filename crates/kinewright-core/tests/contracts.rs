@@ -5259,3 +5259,94 @@ fn clip_speed_change_is_one_undo_step() {
     };
     assert_eq!(*doc, original);
 }
+
+/// AU3 exit-gate clause 2: every leaf of a serialized QC report is an
+/// integer, a boolean, a string, or null — never a float.
+fn assert_integer_leaves(value: &serde_json::Value, path: &str) {
+    match value {
+        serde_json::Value::Number(number) => {
+            assert!(!number.is_f64(), "{path} is a float: {number}");
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                assert_integer_leaves(item, &format!("{path}[{index}]"));
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (key, item) in fields {
+                assert_integer_leaves(item, &format!("{path}.{key}"));
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::String(_) => {}
+    }
+}
+
+/// AU3 §2.1, §2.3, §2.4: every Part A type is additive on the wire. A
+/// pre-AU3 `AudioLoudness` loads unchanged and re-serializes to the same
+/// bytes; the QC types skip every absent `Option`; a serialized report holds
+/// only integers, booleans, strings, and nulls (exit-gate clause 2).
+#[test]
+fn au3_audio_loudness_and_audio_qc_wire_shapes_are_additive() {
+    let pre_au3 = r#"{"integrated_lufs_hundredths":-1600,"sample_peak_dbfs_hundredths":-99,"sample_rate":48000,"channels":2,"sample_frames":4800}"#;
+    let loudness: kinewright_core::AudioLoudness = serde_json::from_str(pre_au3).unwrap();
+    assert_eq!(loudness.momentary_max_lufs_hundredths, None);
+    assert_eq!(loudness.short_term_max_lufs_hundredths, None);
+    assert_eq!(loudness.loudness_range_lu_hundredths, None);
+    assert_eq!(loudness.true_peak_dbtp_hundredths, None);
+    assert_eq!(serde_json::to_string(&loudness).unwrap(), pre_au3);
+
+    let schema = serde_json::to_value(schema_for!(kinewright_core::AudioLoudness)).unwrap();
+    let required = schema["required"].as_array().unwrap();
+    for field in [
+        "momentary_max_lufs_hundredths",
+        "short_term_max_lufs_hundredths",
+        "loudness_range_lu_hundredths",
+        "true_peak_dbtp_hundredths",
+    ] {
+        assert!(schema["properties"][field].is_object(), "{field}");
+        assert!(
+            !required.iter().any(|name| name == field),
+            "{field} must stay optional"
+        );
+    }
+
+    let exception = kinewright_core::AudioQcException {
+        code: "audio_silent".to_owned(),
+        severity: kinewright_core::QaSeverity::Warning,
+        message: "silent".to_owned(),
+        field: None,
+        observed: None,
+        allowed: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&exception).unwrap(),
+        r#"{"code":"audio_silent","severity":"warning","message":"silent"}"#
+    );
+
+    let report = kinewright_core::AudioQcReport {
+        range: TimeCode(0)..TimeCode(300),
+        master: loudness,
+        channel_balance_lu_hundredths: Some(-12),
+        clipping: kinewright_core::AudioClipping::default(),
+        leading_silence_frames: TimeCode::ZERO,
+        trailing_silence_frames: TimeCode(3),
+        target: Some(kinewright_core::DeliveryProfile::VerticalShort.loudness_target()),
+        exceptions: vec![exception],
+        technical_pass: true,
+        evidence_only: true,
+        provenance: kinewright_core::AudioQcProvenance::default(),
+    };
+    let encoded = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        serde_json::from_value::<kinewright_core::AudioQcReport>(encoded.clone()).unwrap(),
+        report
+    );
+    assert_eq!(encoded["evidence_only"], serde_json::json!(true));
+    assert!(
+        encoded["target"]
+            .get("loudness_range_max_lu_hundredths")
+            .is_none()
+    );
+
+    assert_integer_leaves(&encoded, "report");
+}

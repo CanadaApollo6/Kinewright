@@ -89,7 +89,7 @@ pub use kinewright_core::{
     MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,
     ThumbnailFrame, ThumbnailKey, VisualAssetResult, VisualRequestKind, WaveformData, WaveformPeak,
 };
-pub use loudness::measure_loudness;
+pub use loudness::{LOUDNESS_GATING_BLOCK_FRAMES, LoudnessMeter, measure_loudness};
 pub use lut::{
     CubeLut, LutParseError, LutParseErrorCode, MAX_CUBE_SIZE, MIN_CUBE_SIZE, parse_cube_lut,
     parse_cube_lut_bytes, parse_cube_lut_typed,

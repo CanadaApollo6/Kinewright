@@ -2472,6 +2472,9 @@ async fn cc7_prepare_commit_and_compare(
 /// generated operations + 77 inspectors = 129. The served seven still do not
 /// move a byte, because none of them embeds the `Operation` schema and none
 /// of the three is served.
+///
+/// AU3 §4.2 Part A (A16) adds one: the `get_audio_qc` inspector, registered
+/// directly after `get_audio_spectrum`, so 52 + 78 = 130. Served: unchanged.
 #[tokio::test(flavor = "multi_thread")]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let core = Core::spawn(Document::default()).unwrap();
@@ -2484,7 +2487,11 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
 
     // The served surface, over the live endpoint.
     let tools = client.list_tools(None).await.unwrap().tools;
-    assert_eq!(tools.len(), 7, "no part of AU1 or AU2 adds a served tool");
+    assert_eq!(
+        tools.len(),
+        7,
+        "no part of AU1, AU2, or AU3 adds a served tool"
+    );
     assert_eq!(
         tools
             .iter()
@@ -2493,19 +2500,20 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 129 tools, of which `INSPECTOR_TOOL_NAMES` is 77.
+    // The internal registry: 130 tools, of which `INSPECTOR_TOOL_NAMES` is 78.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        129,
+        130,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
-         AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum"
+         AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
+         AU3 Part A adds get_audio_qc"
     );
     assert_eq!(
         operations.len(),
         52,
-        "AU2 Part B generates two more mutators"
+        "AU2 Part B generates two more mutators; AU3 Part A generates none"
     );
     for name in [
         "set_track_mix",
@@ -2513,19 +2521,30 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         "set_audio_master",
         "set_pan_law",
         "get_audio_spectrum",
+        "get_audio_qc",
     ] {
         assert!(registry.iter().any(|entry| entry == name), "missing {name}");
     }
     assert_eq!(
         registry.len() - operations.len(),
-        77,
-        "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum"
+        78,
+        "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
+         AU3 Part A adds get_audio_qc"
+    );
+    let spectrum = registry
+        .iter()
+        .position(|entry| entry == "get_audio_spectrum")
+        .unwrap();
+    assert_eq!(
+        registry.get(spectrum + 1).map(String::as_str),
+        Some("get_audio_qc"),
+        "AU3 §4.2: get_audio_qc is registered directly after get_audio_spectrum"
     );
 
-    // The served byte counts CC6 recorded, asserted byte-identically: no AU1
-    // or AU2 tool is served, and the seven served tools do not embed the
-    // `Operation` schema, so neither the generated mutators nor AU2's new
-    // audio descriptor rows and prose reach them.
+    // The served byte counts CC6 recorded, asserted byte-identically: no AU1,
+    // AU2, or AU3 tool is served, and the seven served tools do not embed the
+    // `Operation` schema, so neither the generated mutators nor the new
+    // audio descriptor rows, prose, and QC schema reach them.
     let metrics = server.tool_surface_metrics();
     assert_eq!(metrics.tool_count, 7);
     assert_eq!(metrics.serialized_bytes, 5_660, "{metrics:?}");
@@ -3195,6 +3214,598 @@ async fn au2_get_audio_spectrum_measures_the_real_mix() {
     assert_eq!(
         both.content[0].as_text().unwrap().text,
         "get_audio_spectrum takes at most one of track and bus"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU3: one managed clip carrying a 440 Hz sine at lavfi's default amplitude
+/// (1/8 full scale, about -18 dBFS), 60 frames at exactly 30 fps so one
+/// project frame is exactly 1 600 sample frames at 48 kHz and the whole
+/// 2 s programme is 96 000. The AU1/AU2 fixture pattern with an integer rate.
+fn au3_sine_media() -> GeneratedMedia {
+    let mut arguments = vec![
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=30",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=48000",
+        "-frames:v",
+        "60",
+        "-t",
+        "2.002",
+    ];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    arguments.extend(["-c:a", "aac", "-shortest"]);
+    GeneratedMedia::ffmpeg("au3-audio-qc", &arguments, "mp4")
+}
+
+/// CC6's walk over the QC report, applied to the whole `get_audio_qc`
+/// envelope: every leaf is an integer, a bool, a string, or null (AU3 A14).
+fn assert_integer_leaves(path: &str, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Number(number) => assert!(
+            number.is_i64() || number.is_u64(),
+            "{path} = {number} is not an integer"
+        ),
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                assert_integer_leaves(&format!("{path}[{index}]"), item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                assert_integer_leaves(&format!("{path}.{key}"), item);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::String(_) => {}
+    }
+}
+
+/// AU3 §7 items A14 and A15: `get_audio_qc` is integer-reported and
+/// evidence-only over the live endpoint.
+///
+/// The closed argument schema, the stale-revision envelope, the inverted-range
+/// refusal, and `get_delivery_profiles`' published targets need no decoder
+/// and come first; the sub-block refusal text, the four text lines, the
+/// all-integer envelope, and the profile-bound report are measured on the
+/// real 440 Hz fixture. Nothing on this path moves the revision.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au3_get_audio_qc_is_evidence_only_and_revision_gated() {
+    let generated = au3_sine_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let document = single_clip_document(asset);
+    let duration = document.duration.0;
+    assert_eq!(duration, 60, "the fixture is exactly 60 frames at 30 fps");
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let before = query_document(&core);
+    let revision = invoke_capability(&client, "get_color_context", json!({}))
+        .await
+        .structured_content
+        .as_ref()
+        .unwrap()["timeline_revision"]
+        .as_u64()
+        .unwrap();
+
+    // The published schema: an inspector with exactly the four AU3 §4.1
+    // arguments and nothing else accepted.
+    let opened = client
+        .call_tool(
+            CallToolRequestParams::new("get_capability")
+                .with_arguments(json!({"name": "get_audio_qc"}).as_object().unwrap().clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened.is_error, Some(false));
+    let opened = opened.structured_content.as_ref().unwrap();
+    assert_eq!(opened["capability"]["kind"], "inspector");
+    let properties = opened["input_schema"]["properties"].as_object().unwrap();
+    for present in ["expected_revision", "start_frame", "end_frame", "profile"] {
+        assert!(properties.contains_key(present), "missing {present}");
+    }
+    assert_eq!(properties.len(), 4, "{opened}");
+    assert_eq!(opened["input_schema"]["additionalProperties"], json!(false));
+    // `get_capability` publishes the description's first sentence as the
+    // summary; the full description's 1 KB budget is pinned in-crate.
+    let summary = opened["capability"]["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("Measure evidence-only audio QC of the master mix")
+            && summary.ends_with("every value an integer in hundredths."),
+        "{summary}"
+    );
+
+    // A stale revision is the uniform envelope, refused before any decode.
+    let stale = invoke_capability(
+        &client,
+        "get_audio_qc",
+        json!({"expected_revision": revision + 7}),
+    )
+    .await;
+    assert_eq!(stale.is_error, Some(true));
+    let stale_body = stale.structured_content.as_ref().unwrap();
+    assert_eq!(stale_body["code"], "stale_revision");
+    assert_eq!(stale_body["applied"], false);
+    assert_eq!(stale_body["evidence_only"], true);
+    assert_eq!(stale_body["details"]["expected_revision"], revision + 7);
+    assert_eq!(stale_body["details"]["actual_revision"], revision);
+
+    // An inverted range is refused rather than clamped.
+    let inverted = invoke_capability(
+        &client,
+        "get_audio_qc",
+        json!({"start_frame": 30, "end_frame": 10}),
+    )
+    .await;
+    assert_eq!(inverted.is_error, Some(true));
+    assert_eq!(
+        inverted.content[0].as_text().unwrap().text,
+        "get_audio_qc needs start_frame < end_frame; got 30..10"
+    );
+
+    // `deny_unknown_fields`: a resolution knob of any spelling is a malformed
+    // request, surfaced as a protocol error rather than silently ignored.
+    let unknown = client
+        .call_tool(
+            CallToolRequestParams::new("invoke_capability").with_arguments(
+                json!({"name": "get_audio_qc", "arguments": {"resolution": "proxy"}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await;
+    assert!(unknown.is_err(), "{unknown:?}");
+
+    // F12: every delivery profile publishes its loudness target, and the
+    // description says so.
+    let profiles = invoke_capability(&client, "get_delivery_profiles", json!({})).await;
+    assert_eq!(profiles.is_error, Some(false), "{profiles:?}");
+    let profiles = profiles.structured_content.as_ref().unwrap()["profiles"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(profiles.len(), 4);
+    for profile in &profiles {
+        let expected = match profile["id"].as_str().unwrap() {
+            "source_master" => -2_300,
+            "youtube_1080p" | "vertical_short" | "square_social" => -1_400,
+            other => panic!("unexpected profile {other}"),
+        };
+        let target = &profile["loudness_target"];
+        assert_eq!(target["integrated_lufs_hundredths"], expected, "{profile}");
+        assert_eq!(target["tolerance_lu_hundredths"], 100, "{profile}");
+        assert_eq!(
+            target["true_peak_ceiling_dbtp_hundredths"], -100,
+            "{profile}"
+        );
+    }
+    let opened = client
+        .call_tool(
+            CallToolRequestParams::new("get_capability").with_arguments(
+                json!({"name": "get_delivery_profiles"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    // The description is one sentence, so the published summary is all of it.
+    let summary = opened.structured_content.as_ref().unwrap()["capability"]["summary"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        summary.ends_with("bitrates, and the loudness target normalization and QC read."),
+        "{summary}"
+    );
+
+    // Q3: a range shorter than one 400 ms gating block is refused, typed,
+    // with the frame counts. One frame at 30 fps is 1 600 sample frames.
+    let short = invoke_capability(
+        &client,
+        "get_audio_qc",
+        json!({"start_frame": 0, "end_frame": 1}),
+    )
+    .await;
+    assert_eq!(short.is_error, Some(true), "{short:?}");
+    assert_eq!(
+        short.content[0].as_text().unwrap().text,
+        "get_audio_qc needs at least one 400 ms gating block (19200 sample frames); got 1600"
+    );
+
+    // The measurement itself. `expected_revision` is deliberately absent:
+    // this is an inspector, not a planner.
+    let report = invoke_capability(&client, "get_audio_qc", json!({})).await;
+    assert_eq!(report.is_error, Some(false), "{report:?}");
+    let body = report.structured_content.as_ref().unwrap();
+    assert_eq!(body["evidence_only"], true);
+    assert_eq!(body["applied"], false);
+    assert_eq!(body["timeline_revision"], revision);
+    assert!(
+        body.get("stage").is_none(),
+        "a mix measurement has no stage"
+    );
+    assert!(body.get("full_resolution").is_none());
+    let qc = &body["report"];
+    assert_eq!(qc["evidence_only"], true);
+    assert_eq!(qc["range"], json!({"start": 0, "end": duration}));
+    assert_eq!(qc["provenance"]["engine"], "kinewright_audio_qc_v1");
+    assert_eq!(qc["provenance"]["measurement_rate"], 48_000);
+    assert!(qc["target"].is_null(), "no profile, no target: {qc}");
+    assert_eq!(body["exceptions"], qc["exceptions"]);
+    // A14: every leaf of the report and of the envelope is an integer, a
+    // bool, a string, or null.
+    assert_integer_leaves("envelope", body);
+    // A15: the four text lines of §4.1, none of them quoted JSON.
+    let text = report.content[0].as_text().unwrap().text.clone();
+    let lines = text.lines().collect::<Vec<_>>();
+    assert!(lines.len() >= 3, "{text}");
+    assert!(
+        lines[0].starts_with(&format!(
+            "audio_qc range=0..{duration} profile=none target=none±none ceiling=none technical_pass="
+        )),
+        "{text}"
+    );
+    assert!(lines[1].starts_with("master lufs="), "{text}");
+    assert!(
+        lines[1].contains(" true_peak=") && lines[1].contains(" frames=96000"),
+        "{text}"
+    );
+    assert!(lines[2].starts_with("balance="), "{text}");
+    assert!(lines[2].contains(" clipping L samples="), "{text}");
+    for line in &lines[3..] {
+        assert!(line.starts_with("exception "), "{text}");
+    }
+    assert!(!text.contains('"'), "{text}");
+    let assumptions = body["assumptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|assumption| assumption.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(assumptions.len(), 4, "{assumptions:#?}");
+    assert!(assumptions[0].starts_with("Measured at 48 kHz stereo"));
+    assert!(
+        assumptions[3].ends_with("technical_pass is not export_ready."),
+        "{assumptions:#?}"
+    );
+
+    // A profile binds the report to that profile's published target and adds
+    // exactly one assumption. The wire spelling is serde's `youtube1080p`;
+    // the text echoes `get_delivery_profiles`' id.
+    let judged =
+        invoke_capability(&client, "get_audio_qc", json!({"profile": "youtube1080p"})).await;
+    assert_eq!(judged.is_error, Some(false), "{judged:?}");
+    let body = judged.structured_content.as_ref().unwrap();
+    assert_eq!(
+        body["report"]["target"],
+        json!({
+            "integrated_lufs_hundredths": -1_400,
+            "tolerance_lu_hundredths": 100,
+            "true_peak_ceiling_dbtp_hundredths": -100
+        })
+    );
+    assert_integer_leaves("envelope", body);
+    let assumptions = body["assumptions"].as_array().unwrap();
+    assert_eq!(assumptions.len(), 5, "{assumptions:#?}");
+    assert!(
+        assumptions[3]
+            .as_str()
+            .unwrap()
+            .contains("get_delivery_profiles")
+    );
+    let text = judged.content[0].as_text().unwrap().text.clone();
+    assert!(
+        text.starts_with(&format!(
+            "audio_qc range=0..{duration} profile=youtube_1080p target=-1400±100 ceiling=-100 technical_pass="
+        )),
+        "{text}"
+    );
+
+    // Whatever was measured, nothing moved.
+    assert_eq!(
+        query_document(&core),
+        before,
+        "get_audio_qc must never mutate the timeline"
+    );
+    assert_eq!(
+        invoke_capability(&client, "get_color_context", json!({}))
+            .await
+            .structured_content
+            .as_ref()
+            .unwrap()["timeline_revision"]
+            .as_u64()
+            .unwrap(),
+        revision,
+        "an evidence-only measurement must leave the revision unchanged"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU3 §7 items A13–A15 (agent half): `get_audio_qc` measures the real mix.
+///
+/// On the 440 Hz fixture the master reads a programme loudness with its true
+/// peak at or above its sample peak, no short-term maximum and no range on a
+/// 2 s programme, a centred balance, no clipping, and no exception; a −6 dB
+/// track gain moves loudness and both peaks by −600 hundredths; a streaming
+/// profile raises exactly the out-of-tolerance warning; exactly one gating
+/// block measures while one frame is refused; and a muted track is digital
+/// silence — `integrated: null` with the lone `audio_silent` warning and
+/// `technical_pass` still true. `get_audio_levels` carries the same four new
+/// fields and the same sub-block refusal.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au3_get_audio_qc_measures_the_real_mix() {
+    let generated = au3_sine_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let document = single_clip_document(asset);
+    let duration = document.duration.0;
+    assert_eq!(duration, 60, "the fixture is exactly 60 frames at 30 fps");
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let baseline = invoke_capability(&client, "get_audio_qc", json!({})).await;
+    assert_eq!(
+        baseline.is_error,
+        Some(false),
+        "get_audio_qc must measure the real mix: {baseline:?}"
+    );
+    let qc = baseline.structured_content.as_ref().unwrap()["report"].clone();
+    let master = &qc["master"];
+    assert_eq!(master["sample_rate"], 48_000, "{master}");
+    assert_eq!(master["channels"], 2, "{master}");
+    assert_eq!(master["sample_frames"], 96_000, "{master}");
+    let before = master["integrated_lufs_hundredths"]
+        .as_i64()
+        .expect("a -18 dBFS sine measures a programme loudness");
+    let sample_peak = master["sample_peak_dbfs_hundredths"].as_i64().unwrap();
+    let true_peak = master["true_peak_dbtp_hundredths"]
+        .as_i64()
+        .expect("a non-silent programme has a true peak");
+    assert!(
+        true_peak >= sample_peak,
+        "true peak {true_peak} reads at or above the sample peak {sample_peak}"
+    );
+    let momentary = master["momentary_max_lufs_hundredths"]
+        .as_i64()
+        .expect("a 2 s programme has complete 400 ms windows");
+    assert!(
+        momentary + 1 >= before,
+        "the loudest window {momentary} is at or above the gated mean {before}"
+    );
+    // §2.1 / §6.9: the 2.002 s fixture reports no short-term maximum and no
+    // loudness range, both of which need complete 3 s windows.
+    assert!(
+        master["short_term_max_lufs_hundredths"].is_null(),
+        "{master}"
+    );
+    assert!(master["loudness_range_lu_hundredths"].is_null(), "{master}");
+    // A mono sine panned centre lands equally on both channels.
+    let balance = qc["channel_balance_lu_hundredths"].as_i64().unwrap();
+    assert!(balance.abs() <= 5, "balance {balance}");
+    for side in ["left", "right"] {
+        assert_eq!(qc["clipping"][side]["clipped_runs"], 0, "{qc}");
+        assert_eq!(qc["clipping"][side]["over_full_scale_samples"], 0, "{qc}");
+    }
+    assert!(qc["leading_silence_frames"].as_i64().unwrap() <= 3, "{qc}");
+    assert!(qc["trailing_silence_frames"].as_i64().unwrap() <= 3, "{qc}");
+    assert_eq!(qc["exceptions"], json!([]), "{qc}");
+    assert_eq!(qc["technical_pass"], true);
+
+    // A streaming profile: a -18 dBFS sine is far under -14 LUFS, so exactly
+    // the out-of-tolerance warning is raised, the peak is under the ceiling,
+    // and technical_pass stays true because no Error was raised.
+    let judged =
+        invoke_capability(&client, "get_audio_qc", json!({"profile": "youtube1080p"})).await;
+    assert_eq!(judged.is_error, Some(false), "{judged:?}");
+    let qc = judged.structured_content.as_ref().unwrap()["report"].clone();
+    assert_eq!(qc["target"]["integrated_lufs_hundredths"], -1_400);
+    let exceptions = qc["exceptions"].as_array().unwrap();
+    assert_eq!(exceptions.len(), 1, "{exceptions:?}");
+    assert_eq!(exceptions[0]["code"], "audio_loudness_out_of_tolerance");
+    assert_eq!(exceptions[0]["severity"], "warning");
+    assert_eq!(exceptions[0]["field"], "integrated_lufs_hundredths");
+    assert_eq!(exceptions[0]["observed"], before.to_string());
+    assert_eq!(exceptions[0]["allowed"], "-1500..=-1300");
+    assert_eq!(qc["technical_pass"], true);
+    let text = judged.content[0].as_text().unwrap().text.clone();
+    assert!(
+        text.contains(&format!("exception Warning audio_loudness_out_of_tolerance integrated_lufs_hundredths observed={before} allowed=-1500..=-1300")),
+        "{text}"
+    );
+    let mastered =
+        invoke_capability(&client, "get_audio_qc", json!({"profile": "source_master"})).await;
+    assert_eq!(mastered.is_error, Some(false), "{mastered:?}");
+    assert_eq!(
+        mastered.structured_content.as_ref().unwrap()["report"]["target"]["integrated_lufs_hundredths"],
+        -2_300
+    );
+
+    // Exactly one gating block (12 frames at 30 fps = 19 200 sample frames)
+    // measures; one frame is refused before anything is decoded.
+    let one_block = invoke_capability(
+        &client,
+        "get_audio_qc",
+        json!({"start_frame": 0, "end_frame": 12}),
+    )
+    .await;
+    assert_eq!(one_block.is_error, Some(false), "{one_block:?}");
+    let qc = one_block.structured_content.as_ref().unwrap()["report"].clone();
+    assert_eq!(qc["master"]["sample_frames"], 19_200, "{qc}");
+    assert!(
+        qc["master"]["integrated_lufs_hundredths"].is_i64(),
+        "one complete block is gated in: {qc}"
+    );
+    // An `end_frame` past the timeline is clamped, not refused: the report's
+    // range and the first text line both show the clamped bounds.
+    let over_long = invoke_capability(
+        &client,
+        "get_audio_qc",
+        json!({"start_frame": 0, "end_frame": 600}),
+    )
+    .await;
+    assert_eq!(over_long.is_error, Some(false), "{over_long:?}");
+    let over_long_text = over_long.content[0].as_text().unwrap().text.clone();
+    assert!(
+        over_long_text.starts_with("audio_qc range=0..60 "),
+        "{over_long_text}"
+    );
+    assert_eq!(
+        over_long.structured_content.as_ref().unwrap()["report"]["master"]["sample_frames"],
+        96_000,
+        "{over_long_text}"
+    );
+    let one_frame = invoke_capability(
+        &client,
+        "get_audio_qc",
+        json!({"start_frame": 0, "end_frame": 1}),
+    )
+    .await;
+    assert_eq!(one_frame.is_error, Some(true), "{one_frame:?}");
+    assert_eq!(
+        one_frame.content[0].as_text().unwrap().text,
+        "get_audio_qc needs at least one 400 ms gating block (19200 sample frames); got 1600"
+    );
+    let levels_short = invoke_capability(
+        &client,
+        "get_audio_levels",
+        json!({"start_frame": 0, "end_frame": 1}),
+    )
+    .await;
+    assert_eq!(levels_short.is_error, Some(true), "{levels_short:?}");
+    assert_eq!(
+        levels_short.content[0].as_text().unwrap().text,
+        "get_audio_levels needs at least one 400 ms gating block (19200 sample frames); got 1600"
+    );
+
+    // -60 tenth-dB is -6 dB, so loudness and both peaks fall by 600.
+    let prepared = prepare_plan(
+        &client,
+        0,
+        json!([{
+            "op": "set_track_mix",
+            "track": 1,
+            "gain_tenth_db": -60,
+            "pan_percent": 0,
+            "mute": false,
+            "solo": false
+        }]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(0, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+    let attenuated = invoke_capability(&client, "get_audio_qc", json!({})).await;
+    assert_eq!(attenuated.is_error, Some(false), "{attenuated:?}");
+    let body = attenuated.structured_content.as_ref().unwrap();
+    assert_eq!(body["timeline_revision"], 1);
+    let master = &body["report"]["master"];
+    let after = master["integrated_lufs_hundredths"].as_i64().unwrap();
+    assert!(
+        (after - before + 600).abs() <= 5,
+        "a -60 tenth-dB track gain must move the master by -600 LUFS hundredths, \
+         measured {before} -> {after}"
+    );
+    let after_true_peak = master["true_peak_dbtp_hundredths"].as_i64().unwrap();
+    assert!(
+        (after_true_peak - true_peak + 600).abs() <= 5,
+        "true peak {true_peak} -> {after_true_peak}"
+    );
+    let after_sample_peak = master["sample_peak_dbfs_hundredths"].as_i64().unwrap();
+    assert!(
+        (after_sample_peak - sample_peak + 600).abs() <= 5,
+        "sample peak {sample_peak} -> {after_sample_peak}"
+    );
+
+    // AU3 §2.1 gloss on `get_audio_levels`: the master line spells the four
+    // new fields, `none` for the two a 2 s programme cannot measure.
+    let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(levels.is_error, Some(false), "{levels:?}");
+    let levels_text = levels.content[0].as_text().unwrap().text.clone();
+    let master_line = levels_text
+        .lines()
+        .find(|line| line.starts_with("master "))
+        .unwrap();
+    assert!(
+        master_line.contains(&format!(
+            " momentary_max={}",
+            master["momentary_max_lufs_hundredths"].as_i64().unwrap()
+        )) && master_line.contains(" short_term_max=none lra=none true_peak=")
+            && master_line.ends_with(&format!("true_peak={after_true_peak}")),
+        "{master_line}"
+    );
+
+    // A muted track is digital silence: measured, not refused, with
+    // `integrated: null`, the lone `audio_silent` warning, and no Error.
+    let prepared = prepare_plan(
+        &client,
+        1,
+        json!([{
+            "op": "set_track_mix",
+            "track": 1,
+            "gain_tenth_db": 0,
+            "pan_percent": 0,
+            "mute": true,
+            "solo": false
+        }]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(1, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+    let muted =
+        invoke_capability(&client, "get_audio_qc", json!({"profile": "youtube1080p"})).await;
+    assert_eq!(muted.is_error, Some(false), "{muted:?}");
+    let qc = muted.structured_content.as_ref().unwrap()["report"].clone();
+    assert!(qc["master"]["integrated_lufs_hundredths"].is_null(), "{qc}");
+    assert!(
+        qc["master"]["sample_peak_dbfs_hundredths"].is_null(),
+        "{qc}"
+    );
+    assert!(qc["master"]["true_peak_dbtp_hundredths"].is_null(), "{qc}");
+    assert!(qc["channel_balance_lu_hundredths"].is_null(), "{qc}");
+    let exceptions = qc["exceptions"].as_array().unwrap();
+    assert_eq!(
+        exceptions.len(),
+        1,
+        "audio_silent suppresses the target checks: {exceptions:?}"
+    );
+    assert_eq!(exceptions[0]["code"], "audio_silent");
+    assert_eq!(exceptions[0]["severity"], "warning");
+    assert_eq!(qc["technical_pass"], true);
+    let text = muted.content[0].as_text().unwrap().text.clone();
+    assert!(
+        text.contains("master lufs=none momentary_max=none short_term_max=none lra=none true_peak=none peak=none frames=96000"),
+        "{text}"
+    );
+    assert!(
+        text.contains("exception Warning audio_silent integrated_lufs_hundredths observed=none allowed=> -7000"),
+        "{text}"
     );
 
     client.cancel().await.unwrap();

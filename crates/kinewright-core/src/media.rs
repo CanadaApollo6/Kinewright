@@ -10,10 +10,10 @@ use crossbeam_channel::{Receiver, Sender};
 use thiserror::Error;
 
 use crate::{
-    AssetId, AudioBusId, ClipId, ColorDescription, DeliveryVerification,
-    DeliveryVerificationRequest, Document, EffectId, LutAsset, LutAssetId, MediaAsset,
-    MediaSourceFingerprint, NormalizedRoi, Rational, SCOPE_BASIS_POINTS, TimeCode, TrackId,
-    TrackKind, TrackMix,
+    AssetId, AudioBusId, AudioQcReport, AudioQcRequest, ClipId, ColorDescription,
+    DeliveryVerification, DeliveryVerificationRequest, Document, EffectId, LutAsset, LutAssetId,
+    MediaAsset, MediaSourceFingerprint, NormalizedRoi, Rational, SCOPE_BASIS_POINTS, TimeCode,
+    TrackId, TrackKind, TrackMix,
 };
 
 /// The runtime truth about whether an imported source can currently be read.
@@ -1054,6 +1054,36 @@ pub struct AudioLoudness {
     pub sample_rate: u32,
     pub channels: u16,
     pub sample_frames: u64,
+    /// AU3 §2.1: the loudest complete 400 ms window. `None` under 400 ms or
+    /// when silent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub momentary_max_lufs_hundredths: Option<i32>,
+    /// AU3 §2.1: the loudest complete 3 s window. `None` under 3 s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub short_term_max_lufs_hundredths: Option<i32>,
+    /// AU3 §2.1: EBU Tech 3342 loudness range. `None` under two gated windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub loudness_range_lu_hundredths: Option<i32>,
+    /// AU3 §2.1 / §3.6: oversampled true peak. `None` means digital silence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub true_peak_dbtp_hundredths: Option<i32>,
+}
+
+/// Live loudness telemetry (AU3 §3.9). Integers only; not serialized, like
+/// [`MixPeaks`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LoudnessSnapshot {
+    pub momentary_lufs_hundredths: Option<i32>,
+    pub short_term_lufs_hundredths: Option<i32>,
+    pub integrated_lufs_hundredths: Option<i32>,
+    pub loudness_range_lu_hundredths: Option<i32>,
+    pub true_peak_dbtp_hundredths: Option<i32>,
+    /// Whole seconds measured since the last reset, as of the audible position.
+    pub programme_seconds: u32,
 }
 
 /// Which processing chain a mix point belongs to (AU2 §3.8).
@@ -1550,6 +1580,14 @@ pub enum MediaError {
     /// tell "the range is too short" from a backend failure and widen it.
     #[error("mix spectrum needs at least {required} sample frames; got {sample_frames}")]
     MixSpectrumRangeTooShort { sample_frames: u64, required: u64 },
+    /// AU3 §2.5: a loudness range shorter than one 400 ms gating block
+    /// (19 200 sample frames at 48 kHz), refused before anything is decoded.
+    ///
+    /// Typed like its sibling so that, after a refusal-free measurement,
+    /// `integrated_lufs_hundredths == None` means the range was gated out
+    /// entirely — silent — and nothing else.
+    #[error("mix loudness needs at least {required} sample frames; got {sample_frames}")]
+    MixLoudnessRangeTooShort { sample_frames: u64, required: u64 },
     #[error("media backend error: {0}")]
     Backend(String),
 }
@@ -1566,6 +1604,7 @@ impl MediaError {
             Self::NotImplemented
             | Self::Cancelled
             | Self::MixSpectrumRangeTooShort { .. }
+            | Self::MixLoudnessRangeTooShort { .. }
             | Self::Backend(_) => None,
         }
     }
@@ -1597,6 +1636,15 @@ pub trait Playback: Send + Sync {
     fn update_audio_mix(&self, doc: Arc<Document>) {
         self.set_document(doc);
     }
+    /// AU3 §2.2 / §3.9: the live loudness snapshot published by audible
+    /// position. Default: [`LoudnessSnapshot::default`] so test doubles need
+    /// no change.
+    fn loudness(&self) -> LoudnessSnapshot {
+        LoudnessSnapshot::default()
+    }
+    /// AU3 §2.2: restart the integrated, range, and true-peak measurement at
+    /// the audible position. Default: nothing to reset.
+    fn reset_loudness(&self) {}
 }
 
 pub trait Analysis: Send + Sync {
@@ -1859,6 +1907,22 @@ pub trait Analysis: Send + Sync {
         document: &Document,
         request: &MixSpectrumRequest,
     ) -> Result<MixSpectrumReport, MediaError> {
+        let _ = (document, request);
+        Err(MediaError::NotImplemented)
+    }
+    /// Measure the post-clamp master over a project range and report the
+    /// evidence-only audio QC findings (AU3 §2.4, §3.10).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MediaError::MixLoudnessRangeTooShort`] when the clamped
+    /// range holds fewer than one 400 ms gating block, or a media error when
+    /// the range is invalid or the mix cannot be rendered or measured.
+    fn audio_qc(
+        &self,
+        document: &Document,
+        request: &AudioQcRequest,
+    ) -> Result<AudioQcReport, MediaError> {
         let _ = (document, request);
         Err(MediaError::NotImplemented)
     }
@@ -2367,9 +2431,16 @@ mod tests {
     /// defaulted trait methods, so a backend that can render neither fails
     /// typed rather than inventing a proof or a pass.
     #[test]
-    fn working_proof_and_delivery_verification_default_to_not_implemented() {
+    fn working_proof_delivery_verification_and_audio_qc_default_to_not_implemented() {
         let analysis = MinimalAnalysis::new();
         let document = Arc::new(document_with_video_audio_and_unused());
+        // AU3 §2.5: the audio QC measurement defaults the same way.
+        assert_eq!(
+            analysis
+                .audio_qc(&document, &AudioQcRequest::default())
+                .err(),
+            Some(MediaError::NotImplemented)
+        );
         let settings = crate::DeliveryProfile::SourceMaster.export_settings(
             &document,
             crate::DeliveryEncodeDepth::Eight,
