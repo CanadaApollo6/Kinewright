@@ -3252,6 +3252,54 @@ fn au3_sine_media() -> GeneratedMedia {
     GeneratedMedia::ffmpeg("au3-audio-qc", &arguments, "mp4")
 }
 
+/// AU3: `au3_sine_media`'s 440 Hz sine at -20 dBFS with a hot 0.5 ms 2 kHz
+/// tick at 0.9 full scale every 100 ms on top, so the delivery limiter has
+/// something to do. Same container, rate, and 60-frame length as its sibling,
+/// which keeps the QC pins on `au3_sine_media` untouched.
+///
+/// Making the sine *louder* would not do it. Loudness normalization is
+/// level-independent: the planner asks for `target - measured_lufs` dB of
+/// gain, so the peak arriving at the limiter is
+/// `source_peak - source_lufs + target` — the source's peak-to-loudness ratio
+/// plus the target, whatever the file's absolute level. A steady sine's PLR is
+/// about 5.7 dB, so at -1600 its normalized peak sits roughly 13 dB under the
+/// -300 processing ceiling however hot the file is, and `volume=12dB` only
+/// drives the plan to a *negative* gain, leaving the limiter idler still.
+/// Crest is what engages it, and the tick is what supplies crest: the file
+/// measures about -0.4 dBTP against -21.4 LUFS, a PLR near 21 dB (about 18 dB
+/// once the mono clip is panned into the stereo mix), which puts the
+/// normalized peak over the ceiling.
+///
+/// The split of duties is deliberate. The steady tone carries the loudness, so
+/// the four-iteration convergence loop still lands inside the tolerance (it
+/// stops at -1660, 40 hundredths inside the requested +/-100); the
+/// tick carries the peak, and at 0.5 ms it is far shorter than the emitted
+/// compressor's 5 ms attack, so the compressor cannot swallow it and the
+/// true-peak limiter is what holds the ceiling. A denser or louder tick makes
+/// the tick itself carry the programme loudness, and then limiting it costs
+/// more loudness than the loop can win back: at 5 ms bursts every 100 ms with
+/// no tone the plan lands at -1687, and at 2 ms bursts it fails outright with
+/// "normalization could not satisfy the delivery contract".
+fn au3_hot_sine_media() -> GeneratedMedia {
+    let mut arguments = vec![
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=30",
+        "-f",
+        "lavfi",
+        "-i",
+        "aevalsrc=0.10*sin(2*PI*440*t)+0.9*sin(2*PI*2000*t)*lt(mod(t\\,0.1)\\,0.0005):s=48000",
+        "-frames:v",
+        "60",
+        "-t",
+        "2.002",
+    ];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    arguments.extend(["-c:a", "aac", "-shortest"]);
+    GeneratedMedia::ffmpeg("au3-audio-hot", &arguments, "mp4")
+}
+
 /// CC6's walk over the QC report, applied to the whole `get_audio_qc`
 /// envelope: every leaf is an integer, a bool, a string, or null (AU3 A14).
 fn assert_integer_leaves(path: &str, value: &serde_json::Value) {
@@ -3957,6 +4005,252 @@ async fn au3_plan_audio_normalization_converges_through_the_real_engine() {
     assert!(
         true_peak <= -100,
         "the true-peak limiter must hold the requested ceiling: {true_peak}"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU3 §6.3 / §7 B11, review nit: the same planner path on hot, high-crest
+/// material, where the true-peak limiter is doing real work.
+///
+/// The sibling test above converges on the steady sine, whose normalized peak
+/// sits about 13 dB under the processing ceiling — so its `true_peak <= -100`
+/// assertion would hold even with the limiter bypassed. `au3_hot_sine_media`
+/// has a peak-to-loudness ratio near 17 dB, so at the same -1600 / -100 / 100
+/// contract the gain the planner needs pushes the programme peak *over* the
+/// ceiling and the limiter has to pull it back. The proof is differential: the
+/// committed bus is re-upserted with its last node removed and the mix is
+/// measured again, so the number compared against is the same chain, the same
+/// compressor, and the same gain, with only the limiter gone.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au3_plan_audio_normalization_engages_the_true_peak_limiter_on_hot_material() {
+    let generated = au3_hot_sine_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    // The fixture as the engine measures it, before any processing.
+    let source = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(source.is_error, Some(false), "{source:?}");
+    let source_master = &source.structured_content.as_ref().unwrap()["report"]["master"];
+    let source_lufs = source_master["integrated_lufs_hundredths"]
+        .as_i64()
+        .expect("the hot fixture is not silent");
+    let source_sample_peak = source_master["sample_peak_dbfs_hundredths"]
+        .as_i64()
+        .expect("the hot fixture has a sample peak");
+    let source_true_peak = source_master["true_peak_dbtp_hundredths"]
+        .as_i64()
+        .expect("the hot fixture has a true peak");
+    println!(
+        "au3 hot fixture: integrated={source_lufs} sample_peak={source_sample_peak} true_peak={source_true_peak} peak_to_loudness={}",
+        source_true_peak - source_lufs
+    );
+    assert!(
+        source_true_peak - source_lufs > 1_300,
+        "the fixture only engages the limiter if its peak-to-loudness ratio clears \
+         ceiling - target = 1300 hundredths: {source_true_peak} over {source_lufs}"
+    );
+
+    let planned = invoke_capability(
+        &client,
+        "plan_audio_normalization",
+        json!({
+            "track_ids": [1],
+            "target_lufs_hundredths": -1_600,
+            "maximum_sample_peak_dbfs_hundredths": -100,
+            "tolerance_hundredths": 100
+        }),
+    )
+    .await;
+    assert_eq!(
+        planned.is_error,
+        Some(false),
+        "the planner must converge on the hot fixture too: {planned:?}"
+    );
+    let body = planned.structured_content.as_ref().unwrap();
+    let revision = body["timeline_revision"].as_u64().unwrap();
+    assert_eq!(body["processing_ceiling_dbfs_hundredths"], -300);
+    let current_lufs = body["current"]["integrated_lufs_hundredths"]
+        .as_i64()
+        .unwrap();
+    let current_peak = body["current"]["sample_peak_dbfs_hundredths"]
+        .as_i64()
+        .unwrap();
+    let predicted_lufs = body["predicted"]["integrated_lufs_hundredths"]
+        .as_i64()
+        .expect("a converged plan predicts a programme loudness");
+    let predicted_peak = body["predicted"]["true_peak_dbtp_hundredths"]
+        .as_i64()
+        .expect("a converged plan predicts a true peak");
+    assert!(
+        (predicted_lufs + 1_600).abs() <= 100,
+        "the plan is only returned inside the tolerance: {predicted_lufs}"
+    );
+    println!(
+        "au3 hot plan: current={current_lufs} predicted={predicted_lufs} predicted_true_peak={predicted_peak}"
+    );
+
+    let plan_id = body["prepared_edit_plan"]["plan_id"].clone();
+    let committed = client
+        .call_tool(
+            CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                json!({"plan_id": plan_id, "expected_revision": revision})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        committed.is_error,
+        Some(false),
+        "{:?}",
+        committed.structured_content
+    );
+
+    // The same chain contract the steady-sine test pins, on hot material: a
+    // true-peak limiter last, never the legacy sample-peak clamp, and 5 ms of
+    // the 20 ms re-cue budget.
+    let document = query_document(&core);
+    let bus = document
+        .audio_mix
+        .buses
+        .last()
+        .expect("the plan commits one delivery bus")
+        .clone();
+    let names = bus
+        .effects
+        .iter()
+        .map(|effect| effect.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !names.contains(&"audio_limiter"),
+        "the legacy clamp must not reach a committed document: {names:?}"
+    );
+    assert_eq!(names.last(), Some(&"audio_true_peak_limiter"), "{names:?}");
+    assert_eq!(
+        kinewright_core::chain_lookahead_milliseconds(&bus.effects),
+        5,
+        "F17b: one re-cue, 5 ms of the 20 ms budget"
+    );
+    // The compressor is engaged, not the 1:1 pass-through the steady sine
+    // gets: this is the branch whose peak the limiter has to finish.
+    let compressor = bus
+        .effects
+        .first()
+        .expect("the positive-gain branch leads with the compressor");
+    assert_eq!(compressor.name, "audio_compressor");
+    assert_eq!(
+        compressor.static_integer_parameter("ratio_hundredths"),
+        Some(400),
+        "the hot fixture must take the compression-required branch: {:?}",
+        compressor.parameters
+    );
+    let planned_gain_tenth_db = bus
+        .effects
+        .iter()
+        .filter_map(|effect| match effect.name.as_str() {
+            "audio_compressor" => effect.static_integer_parameter("makeup_gain_tenth_db"),
+            "audio_gain" => effect.static_integer_parameter("gain_tenth_db"),
+            _ => None,
+        })
+        .sum::<i64>();
+    println!(
+        "au3 hot chain: {names:?} planned_gain_tenth_db={planned_gain_tenth_db} compressor_threshold_tenth_db={:?}",
+        compressor.static_integer_parameter("threshold_tenth_db")
+    );
+    // The planner's own compression-required test, restated on the numbers it
+    // published: the gain it committed carries the measured peak over the
+    // processing ceiling, which is exactly why the compressor is engaged and
+    // why the limiter below has a peak left to catch.
+    assert!(
+        current_peak + planned_gain_tenth_db * 10 > -300,
+        "measured peak {current_peak} plus {planned_gain_tenth_db} tenth dB must clear the -300 processing ceiling"
+    );
+
+    // What the committed chain, limiter included, actually measures.
+    let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(levels.is_error, Some(false), "{levels:?}");
+    let master = &levels.structured_content.as_ref().unwrap()["report"]["master"];
+    let limited_integrated = master["integrated_lufs_hundredths"]
+        .as_i64()
+        .expect("the normalized master is not silent");
+    assert!(
+        (limited_integrated + 1_600).abs() <= 100,
+        "master {limited_integrated} is outside -1600 +/- 100"
+    );
+    let limited_true_peak = master["true_peak_dbtp_hundredths"]
+        .as_i64()
+        .expect("the normalized master has a true peak");
+    assert!(
+        limited_true_peak <= -100,
+        "the true-peak limiter must hold the requested ceiling: {limited_true_peak}"
+    );
+
+    // The differential: the same bus with only the limiter removed. If the
+    // limiter were a no-op, this would measure the same peak.
+    let mut unlimited_bus = bus.clone();
+    let removed = unlimited_bus
+        .effects
+        .pop()
+        .expect("the limiter is the node under test");
+    assert_eq!(removed.name, "audio_true_peak_limiter");
+    let prepared = prepare_plan(
+        &client,
+        revision + 1,
+        json!([{
+            "op": "upsert_audio_bus",
+            "bus": serde_json::to_value(&unlimited_bus).unwrap()
+        }]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(revision + 1, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+    assert_eq!(
+        query_document(&core)
+            .audio_mix
+            .buses
+            .last()
+            .unwrap()
+            .effects
+            .last()
+            .unwrap()
+            .name,
+        "audio_compressor",
+        "the comparison chain must be the committed one minus its limiter"
+    );
+
+    let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(levels.is_error, Some(false), "{levels:?}");
+    let master = &levels.structured_content.as_ref().unwrap()["report"]["master"];
+    let unlimited_true_peak = master["true_peak_dbtp_hundredths"]
+        .as_i64()
+        .expect("the unlimited master has a true peak");
+    let unlimited_integrated = master["integrated_lufs_hundredths"].as_i64().unwrap();
+    println!(
+        "au3 hot delivery: limited integrated={limited_integrated} true_peak={limited_true_peak}; unlimited integrated={unlimited_integrated} true_peak={unlimited_true_peak}; reduction={}",
+        unlimited_true_peak - limited_true_peak
+    );
+    assert!(
+        unlimited_true_peak - limited_true_peak >= 200,
+        "the limiter must move the delivered peak: limited {limited_true_peak}, unlimited {unlimited_true_peak}"
+    );
+    assert!(
+        unlimited_true_peak > -100,
+        "without the limiter the same gain overshoots the requested ceiling: {unlimited_true_peak}"
     );
 
     client.cancel().await.unwrap();
