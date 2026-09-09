@@ -1,4 +1,5 @@
-//! AU3 loudness and delivery — core contract tests (AU3 §7 items A1 to A4).
+//! AU3 loudness and delivery — core contract tests (AU3 §7 items A1 to A4
+//! and B1 to B3).
 
 use std::sync::Arc;
 
@@ -6,14 +7,18 @@ use crossbeam_channel::Receiver;
 use kinewright_core::{
     AUDIO_QC_CHANNEL_BALANCE_CLAMP_LU_HUNDREDTHS, AUDIO_QC_CHANNEL_IMBALANCE_LU_HUNDREDTHS,
     AUDIO_QC_CLIPPED_RUN_SAMPLES, AUDIO_QC_ENGINE, AUDIO_QC_SILENCE_DBFS_HUNDREDTHS,
-    AUDIO_QC_SILENCE_INFO_MILLISECONDS, AUDIO_QC_SILENCE_WINDOW_MILLISECONDS, AssetId,
+    AUDIO_QC_SILENCE_INFO_MILLISECONDS, AUDIO_QC_SILENCE_WINDOW_MILLISECONDS, Analysis, AssetId,
     AudioChannelClipping, AudioClipping, AudioLoudness, AudioMix, AudioQcException,
     AudioQcMeasurements, AudioQcProvenance, AudioQcRequest, ColorContext, ColorDescription,
-    DeliveryProfile, Document, EBU_R128_PROGRAMME_TARGET, FrameTexture,
-    LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, LoudnessSnapshot, LoudnessTarget, MediaAsset,
-    MediaCatalog, MediaError, MediaEvent, MediaKind, MediaSourceFingerprint, Operation, Playback,
-    QaSeverity, Rational, STREAMING_PLATFORM_TARGET, TimeCode, Track, TrackId, TrackKind,
-    audio_qc_exceptions, audio_qc_technical_pass, loudness_target_exceptions, qa_document,
+    DeliveryAudioVerification, DeliveryEncodeDepth, DeliveryProfile, Document,
+    EBU_R128_PROGRAMME_TARGET, Export, ExportAudioReport, ExportCancellation, ExportReport,
+    ExportSettings, FrameTexture, LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, LoudnessSnapshot,
+    LoudnessTarget, MediaAsset, MediaCatalog, MediaError, MediaEvent, MediaKind,
+    MediaSourceFingerprint, Operation, Playback, ProgressSink, QaSeverity, Rational, RgbaImage,
+    STREAMING_PLATFORM_TARGET, SceneStatus, SilenceStatus, TimeCode, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, Track, TrackId, TrackKind, TranscriptStatus,
+    VisualAssetResult, audio_qc_exceptions, audio_qc_technical_pass, delivery_audio_exceptions,
+    loudness_target_exceptions, qa_document,
 };
 
 /// The pre-AU3 five-key measurement, exactly as `AudioLoudness` serialized
@@ -560,4 +565,413 @@ fn no_audible_media_names_mute_and_solo_and_the_defaults_hold() {
         provenance.exception_order,
         "severity_desc_code_asc_field_asc"
     );
+}
+
+// ===========================================================================
+// Part B — delivery (AU3 §7 items B1 to B3)
+// ===========================================================================
+
+/// The pre-AU3 export settings wire, exactly as `ExportSettings` serialized
+/// before Part B (`Youtube1080p`, the 8-bit lane, 30 fps).
+const PRE_AU3_EXPORT_SETTINGS_JSON: &str = r#"{"fps":{"numerator":30,"denominator":1},"resolution":[1920,1080],"delivery_color":{"primaries":"bt709","transfer":"bt709","matrix":"bt709","range":"limited","white_point":"d65","bit_depth":8,"confidence_basis_points":10000,"provenance":"application_default"},"video_codec":"libx264","audio_codec":"aac","video_bitrate":8000000,"audio_bitrate":384000}"#;
+
+/// AU3 §7 item B1.
+#[test]
+fn export_settings_normalize_only_when_the_job_asks_and_stay_wire_compatible() {
+    let document = empty_timeline(Rational::new(30, 1).unwrap());
+
+    // The job axis is orthogonal to the profile: no profile, on either depth
+    // lane, materialises a normalization request.
+    for profile in DeliveryProfile::ALL {
+        for depth in DeliveryEncodeDepth::ALL {
+            let settings = profile.export_settings(&document, depth, ExportCancellation::default());
+            assert_eq!(
+                settings.loudness_normalization,
+                None,
+                "{} on the {} lane must leave normalization to the caller",
+                profile.as_str(),
+                depth.as_str()
+            );
+            let encoded = serde_json::to_string(&settings).unwrap();
+            assert_eq!(
+                encoded,
+                serde_json::to_string(&settings).unwrap(),
+                "two serializations are byte-identical"
+            );
+            assert!(
+                !encoded.contains("loudness_normalization"),
+                "an absent target is skipped, not written as null: {encoded}"
+            );
+            assert!(!encoded.contains("cancellation"), "{encoded}");
+        }
+    }
+
+    // The pre-AU3 wire loads unchanged and re-serializes to the same bytes.
+    let settings: ExportSettings = serde_json::from_str(PRE_AU3_EXPORT_SETTINGS_JSON).unwrap();
+    assert_eq!(settings.loudness_normalization, None);
+    assert_eq!(
+        serde_json::to_string(&settings).unwrap(),
+        PRE_AU3_EXPORT_SETTINGS_JSON
+    );
+    assert_eq!(
+        serde_json::to_string(&DeliveryProfile::Youtube1080p.export_settings(
+            &document,
+            DeliveryEncodeDepth::Eight,
+            ExportCancellation::default(),
+        ))
+        .unwrap(),
+        PRE_AU3_EXPORT_SETTINGS_JSON,
+        "an unnormalized job encodes exactly what it encoded before AU3"
+    );
+
+    // A requested target round-trips, and the target is the profile's own.
+    let asked = ExportSettings {
+        loudness_normalization: Some(DeliveryProfile::Youtube1080p.loudness_target()),
+        ..settings.clone()
+    };
+    assert_eq!(
+        asked.loudness_normalization,
+        Some(STREAMING_PLATFORM_TARGET)
+    );
+    let encoded = serde_json::to_string(&asked).unwrap();
+    assert!(
+        encoded.contains(
+            r#""loudness_normalization":{"integrated_lufs_hundredths":-1400,"tolerance_lu_hundredths":100,"true_peak_ceiling_dbtp_hundredths":-100}"#
+        ),
+        "{encoded}"
+    );
+    // `ExportCancellation` compares by handle identity (CC6 §9.5), so the
+    // round trip is asserted field by field, as `cc6_core.rs` does.
+    let restored: ExportSettings = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        restored.loudness_normalization,
+        asked.loudness_normalization
+    );
+    assert_eq!(
+        ExportSettings {
+            cancellation: asked.cancellation.clone(),
+            ..restored.clone()
+        },
+        asked
+    );
+    assert!(!restored.cancellation.is_cancelled());
+
+    let schema = serde_json::to_value(schemars::schema_for!(ExportSettings)).unwrap();
+    assert!(schema["properties"]["loudness_normalization"].is_object());
+    assert!(
+        !schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "loudness_normalization"),
+        "the field must stay optional"
+    );
+}
+
+/// An `Export` implementing only the required method, so the AU3 default is
+/// what a double that predates the slice observes. It counts its calls.
+#[derive(Default)]
+struct CountingExport {
+    exports: std::sync::atomic::AtomicUsize,
+    fail: bool,
+}
+
+impl Export for CountingExport {
+    fn export(
+        &self,
+        _out: &std::path::Path,
+        _settings: ExportSettings,
+        _progress: ProgressSink,
+    ) -> Result<(), MediaError> {
+        self.exports
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if self.fail {
+            return Err(MediaError::Backend("no encoder".to_owned()));
+        }
+        Ok(())
+    }
+}
+
+/// AU3 §7 item B2.
+#[test]
+fn export_document_reporting_defaults_to_the_plain_export_and_an_empty_report() {
+    // The empty report is `{}` on the wire: every field is optional.
+    assert_eq!(
+        serde_json::to_string(&ExportReport::default()).unwrap(),
+        "{}"
+    );
+    assert_eq!(
+        serde_json::from_str::<ExportReport>("{}").unwrap(),
+        ExportReport::default()
+    );
+    assert_eq!(ExportReport::default().audio, None);
+
+    let audio = ExportAudioReport {
+        target: EBU_R128_PROGRAMME_TARGET,
+        before: loudness(Some(-3_900), 2),
+        after: loudness(Some(-2_300), 2),
+        applied_gain_hundredths: 1_600,
+        limiter_passes: 1,
+        peak_reduction_hundredths: 0,
+        on_target: true,
+        skipped_reason: None,
+    };
+    let encoded = serde_json::to_string(&audio).unwrap();
+    assert!(
+        !encoded.contains("skipped_reason"),
+        "an absent reason is skipped: {encoded}"
+    );
+    assert_eq!(
+        serde_json::from_str::<ExportAudioReport>(&encoded).unwrap(),
+        audio
+    );
+
+    let skipped = ExportAudioReport {
+        before: loudness(None, 2),
+        after: loudness(None, 2),
+        applied_gain_hundredths: 0,
+        limiter_passes: 0,
+        on_target: false,
+        skipped_reason: Some("shorter than one 400 ms gating block".to_owned()),
+        ..audio.clone()
+    };
+    let report = ExportReport {
+        audio: Some(skipped.clone()),
+    };
+    let encoded = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        encoded["audio"]["skipped_reason"],
+        serde_json::json!("shorter than one 400 ms gating block")
+    );
+    assert_eq!(
+        serde_json::from_value::<ExportReport>(encoded.clone()).unwrap(),
+        report
+    );
+    assert_integer_leaves(&encoded, "export_report");
+
+    // The default delegates to `export_document`, which itself defaults to
+    // `export`: one call, and a report that claims nothing.
+    let exporter = CountingExport::default();
+    let (progress, _drain) = crossbeam_channel::unbounded();
+    let document = Arc::new(empty_timeline(Rational::new(30, 1).unwrap()));
+    let settings: ExportSettings = serde_json::from_str(PRE_AU3_EXPORT_SETTINGS_JSON).unwrap();
+    assert_eq!(
+        exporter
+            .export_document_reporting(
+                Arc::clone(&document),
+                std::path::Path::new("never-written.mp4"),
+                settings.clone(),
+                progress.clone(),
+            )
+            .unwrap(),
+        ExportReport::default()
+    );
+    assert_eq!(
+        exporter.exports.load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "the default exports exactly once"
+    );
+
+    // A failing export reports nothing at all: the error is the result.
+    let failing = CountingExport {
+        exports: std::sync::atomic::AtomicUsize::new(0),
+        fail: true,
+    };
+    assert_eq!(
+        failing
+            .export_document_reporting(
+                document,
+                std::path::Path::new("never-written.mp4"),
+                settings,
+                progress,
+            )
+            .err(),
+        Some(MediaError::Backend("no encoder".to_owned()))
+    );
+    assert_eq!(
+        failing.exports.load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+}
+
+/// An `Analysis` implementing only the required methods, so the AU3 Part B
+/// default is what a double that predates the slice observes.
+struct MinimalAnalysis;
+
+impl Analysis for MinimalAnalysis {
+    fn probe(&self, _path: &std::path::Path) -> Result<MediaAsset, MediaError> {
+        Err(MediaError::NotImplemented)
+    }
+    fn thumbnail_at(&self, _t: TimeCode, _max_w: u32) -> Result<RgbaImage, MediaError> {
+        Err(MediaError::NotImplemented)
+    }
+    fn request_transcription(&self, _asset: MediaAsset) {}
+    fn transcript_status(&self, _asset: &MediaAsset) -> TranscriptStatus {
+        TranscriptStatus::NotRequested
+    }
+    fn request_silence_detection(&self, _asset: MediaAsset) {}
+    fn silence_status(&self, _asset: &MediaAsset) -> SilenceStatus {
+        SilenceStatus::NotRequested
+    }
+    fn request_scene_detection(&self, _asset: MediaAsset) {}
+    fn scene_status(&self, _asset: &MediaAsset) -> SceneStatus {
+        SceneStatus::NotRequested
+    }
+    fn timeline_transcript(
+        &self,
+        _document: &Document,
+        _range: Option<std::ops::Range<TimeCode>>,
+    ) -> Result<Vec<TimelineTranscriptWord>, MediaError> {
+        Ok(Vec::new())
+    }
+    fn timeline_silences(
+        &self,
+        _document: &Document,
+        _range: Option<std::ops::Range<TimeCode>>,
+        _minimum_source_frames: TimeCode,
+    ) -> Result<Vec<TimelineSilenceSpan>, MediaError> {
+        Ok(Vec::new())
+    }
+    fn timeline_scene_changes(
+        &self,
+        _document: &Document,
+        _range: Option<std::ops::Range<TimeCode>>,
+        _minimum_confidence_basis_points: u16,
+    ) -> Result<Vec<TimelineSceneChange>, MediaError> {
+        Ok(Vec::new())
+    }
+    fn request_waveform(&self, _asset: MediaAsset, _request_generation: u64) -> bool {
+        false
+    }
+    fn request_thumbnail(
+        &self,
+        _asset: MediaAsset,
+        _source_at: TimeCode,
+        _max_width: u32,
+        _request_generation: u64,
+    ) -> bool {
+        false
+    }
+    fn visual_asset_results(&self) -> Receiver<VisualAssetResult> {
+        crossbeam_channel::unbounded().1
+    }
+}
+
+/// AU3 §7 item B3.
+#[test]
+fn delivery_audio_verification_round_trips_and_judges_only_against_a_target() {
+    // Over ceiling, out of tolerance, and over the range maximum at once.
+    let target = LoudnessTarget {
+        integrated_lufs_hundredths: -1_400,
+        tolerance_lu_hundredths: 100,
+        true_peak_ceiling_dbtp_hundredths: -100,
+        loudness_range_max_lu_hundredths: Some(800),
+    };
+    let mut measured = loudness(Some(-2_300), 2);
+    measured.true_peak_dbtp_hundredths = Some(20);
+    measured.loudness_range_lu_hundredths = Some(1_200);
+    let exceptions = delivery_audio_exceptions(&measured, Some(target));
+    assert_eq!(
+        codes(&exceptions),
+        [
+            "delivery_true_peak_over_ceiling",
+            "delivery_loudness_out_of_tolerance",
+            "delivery_loudness_range_over_maximum",
+        ]
+    );
+    assert_eq!(exceptions[0].severity, QaSeverity::Error);
+    assert_eq!(exceptions[1].severity, QaSeverity::Warning);
+    assert_eq!(exceptions[2].severity, QaSeverity::Warning);
+    assert!(!audio_qc_technical_pass(&exceptions));
+
+    // A silent — or sub-block — file reads as one ambiguous Warning, said so
+    // in the message, and never clears the true-peak Error beside it.
+    let silent = delivery_audio_exceptions(&loudness(None, 2), Some(target));
+    assert_eq!(codes(&silent), ["delivery_audio_silent"]);
+    assert_eq!(silent[0].severity, QaSeverity::Warning);
+    assert_eq!(
+        silent[0].message,
+        "The written file's audio reported no gated loudness: it is silent, or shorter than one 400 ms gating block."
+    );
+    assert_eq!(
+        silent[0].field.as_deref(),
+        Some("integrated_lufs_hundredths")
+    );
+    assert_eq!(silent[0].observed.as_deref(), Some("none"));
+    assert_eq!(silent[0].allowed.as_deref(), Some("> -7000"));
+    assert!(audio_qc_technical_pass(&silent));
+
+    // With no target the verification is a measurement: it raises nothing,
+    // whatever it read.
+    assert_eq!(delivery_audio_exceptions(&measured, None), Vec::new());
+    assert_eq!(
+        delivery_audio_exceptions(&loudness(None, 2), None),
+        Vec::new()
+    );
+
+    let verification = DeliveryAudioVerification {
+        output_path: std::path::PathBuf::from("out.mp4"),
+        measured,
+        sample_rate: 48_000,
+        channels: 2,
+        sample_frames: 480_000,
+        target: Some(target),
+        exceptions: exceptions.clone(),
+        technical_pass: audio_qc_technical_pass(&exceptions),
+    };
+    let encoded = serde_json::to_value(&verification).unwrap();
+    assert_eq!(
+        serde_json::from_value::<DeliveryAudioVerification>(encoded.clone()).unwrap(),
+        verification
+    );
+    assert_eq!(encoded["technical_pass"], serde_json::json!(false));
+    assert_integer_leaves(&encoded, "delivery_audio_verification");
+
+    let reference = DeliveryAudioVerification {
+        target: None,
+        exceptions: Vec::new(),
+        technical_pass: true,
+        ..verification
+    };
+    let encoded = serde_json::to_value(&reference).unwrap();
+    assert_eq!(encoded["target"], serde_json::Value::Null);
+    assert_eq!(
+        serde_json::from_value::<DeliveryAudioVerification>(encoded).unwrap(),
+        reference
+    );
+
+    // The trait default: a backend that predates Part B answers nothing.
+    assert_eq!(
+        MinimalAnalysis
+            .verify_delivery_audio(std::path::Path::new("never-read.mp4"), Some(target))
+            .err(),
+        Some(MediaError::NotImplemented)
+    );
+    assert_eq!(
+        MinimalAnalysis
+            .verify_delivery_audio(std::path::Path::new("never-read.mp4"), None)
+            .err(),
+        Some(MediaError::NotImplemented)
+    );
+}
+
+/// AU3 exit-gate clause 2, applied to Part B's wire: every leaf of a
+/// serialized report is an integer, a boolean, a string, or null.
+fn assert_integer_leaves(value: &serde_json::Value, path: &str) {
+    match value {
+        serde_json::Value::Number(number) => {
+            assert!(!number.is_f64(), "{path} is a float: {number}");
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                assert_integer_leaves(item, &format!("{path}[{index}]"));
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (key, item) in fields {
+                assert_integer_leaves(item, &format!("{path}.{key}"));
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::String(_) => {}
+    }
 }

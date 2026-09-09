@@ -379,7 +379,8 @@ been rendered ahead into the output ring. The bars carry a status colour
 against the export dialog's current profile target — success inside the
 target's tolerance, warning above it — and are `text-secondary` below it; quiet
 is never a failure. The master strip carries the integrated figure as one micro
-line under the fader. Monitoring is not delivery: playback is never normalised.
+line under the fader. Monitoring is not delivery: playback is never normalised;
+the export step normalises the file.
 
 ### Transcript and utility panels
 
@@ -393,6 +394,13 @@ Dialogs use `surface-raised`, `radius-lg`, `elevation-2`, and a 1 px
 `border-strong` outline. Labels align in a compact grid. The primary action uses
 the accent selection treatment. Cancel remains neutral. Destructive actions use
 `status-danger` text and `border-danger`; they never use the accent fill.
+
+The export dialog's `Loudness` row is a checkbox naming the profile's target in
+LUFS and dBTP; like the delivery depth it is a job parameter and never a
+document edit, and its muted line says that monitoring is not delivery. After
+an export the verification block carries an `AUDIO` sub-block whose own status
+line reads `AUDIO VERIFIED`, `AUDIO OFF TARGET`, `AUDIO OVER CEILING`,
+`AUDIO MEASURED`, or `AUDIO NOT VERIFIED`; only the ceiling is danger.
 
 ## Performance contract
 

@@ -3925,9 +3925,11 @@ fn primary_parameter_readout(name: &str, value: i64) -> String {
 ///
 /// AU2 §6.7 adds all eight audio nodes, and the mixer's chain cards share this
 /// table so a node cannot be called two things in two docks. The two legacy
-/// pairs carry `(legacy)` because a plan produced by `plan_audio_normalization`
-/// always ends in an `audio_limiter`, and a chain listing `Limiter` beside
-/// `True-peak limiter` with nothing to tell them apart is unreadable.
+/// pairs keep `(legacy)` for a different reason since AU3 §6.3: the planner
+/// now ends its bus in an `audio_true_peak_limiter`, so an `audio_limiter` in
+/// a chain is a node an older plan or an older project left there, and a chain
+/// listing `Limiter` beside `True-peak limiter` with nothing to tell them
+/// apart is unreadable.
 pub(crate) fn effect_display_name(name: &str) -> &str {
     match name {
         "primary_correction" => "Primary correction",

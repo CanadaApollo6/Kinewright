@@ -3806,6 +3806,8 @@ mod tests {
             "Monitoring is not delivery: playback is",
             "never normalised",
             "and 210 for the master",
+            // AU3 §6.8: Part B's half of the F21 sentence.
+            "the export step normalises the file",
         ] {
             assert!(
                 mixer.contains(expected),
@@ -4019,8 +4021,13 @@ mod tests {
             );
         }
         assert!(
-            !LOUDNESS_MONITORING_NOTE.contains("export step"),
-            "Part A carries only the monitoring half of the F21 sentence"
+            LOUDNESS_MONITORING_NOTE.contains("the export step normalises the file"),
+            "AU3 §6.8: Part B carries both halves of the F21 sentence"
+        );
+        assert!(
+            !LOUDNESS_MONITORING_NOTE.contains("  "),
+            "the continued literal keeps no run of spaces: \
+             {LOUDNESS_MONITORING_NOTE:?}"
         );
 
         let bus_pane = painted_mixer_with_loudness(

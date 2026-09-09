@@ -124,12 +124,15 @@ M34 is complete when:
   metadata. It does not infer camera identity from pixels.
 - Template reframe can lose a subject through occlusion, large scale changes,
   or hard cuts. Low confidence is surfaced for review instead of hidden.
-- Delivery profiles do not yet include loudness normalization, HDR metadata,
-  caption sidecars, platform upload APIs, or hardware-encoder selection. Since
-  CC6 (2026-08-25) every profile can be exported at 8 or 10 bits
-  (`DeliveryEncodeDepth`), and a finished export is decoded and compared
-  against the delivery reference with the result on the job record; see
-  `CC6-QC-AND-MANAGED-DELIVERY.md` §4 and §6.
+- Delivery profiles do not yet include HDR metadata, caption sidecars,
+  platform upload APIs, or hardware-encoder selection. Since CC6 (2026-08-25)
+  every profile can be exported at 8 or 10 bits (`DeliveryEncodeDepth`), and a
+  finished export is decoded and compared against the delivery reference with
+  the result on the job record; see `CC6-QC-AND-MANAGED-DELIVERY.md` §4 and
+  §6. Since AU3 (2026-09-09) every profile publishes a loudness target, an
+  export can normalise to it as an explicit job setting (off by default), and
+  the written file's loudness and true peak are decoded and verified beside
+  the video check; see `AU3-LOUDNESS-AND-DELIVERY.md` §5–§6.
 - Export jobs are process-local and retained in memory. A durable queue that
   survives application restart is future work.
 

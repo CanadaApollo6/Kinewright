@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -11,17 +11,18 @@ use kinewright_core::{
     AUDIO_QC_SILENCE_WINDOW_MILLISECONDS, AudioBusId, AudioChannelClipping, AudioClipping,
     AudioQcMeasurements, AudioQcProvenance, AudioQcReport, AudioQcRequest, BusLevels,
     ColorDescription, DELIVERY_BIT_DEPTH_ALLOWED, DeliveryColorError, DeliveryColorMismatch,
-    DeliveryEncodeDepth, DeliveryProfile, Document, ExportCancellation, ExportProgress,
-    ExportSettings, FrameRounding, MediaError, MixLevelReport, MixLevelRequest, MixSpectrumPoint,
-    MixSpectrumReport, MixSpectrumRequest, ProgressSink, TimeCode, TrackId, TrackLevels,
-    audio_qc_exceptions, audio_qc_technical_pass, delivery_color_mismatches,
-    map_frames_with_rounding,
+    DeliveryEncodeDepth, DeliveryProfile, Document, Effect, EffectId, ExportAudioReport,
+    ExportCancellation, ExportProgress, ExportReport, ExportSettings, FrameRounding,
+    LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, LoudnessTarget, MediaError, MixLevelReport,
+    MixLevelRequest, MixSpectrumPoint, MixSpectrumReport, MixSpectrumRequest, ParamValue,
+    ProgressSink, TimeCode, TrackId, TrackLevels, audio_qc_exceptions, audio_qc_technical_pass,
+    delivery_color_mismatches, map_frames_with_rounding,
 };
 
 use crate::{
     audio::{
         AudioMixProcessor, ClipAudioShaping, decode_audio_range, graph_latency_frames,
-        limit_audio_mix,
+        limit_audio_mix, process_buffer_static,
     },
     clock::{frame_to_samples, samples_to_frame},
     compositor::GpuContext,
@@ -57,6 +58,7 @@ pub(crate) fn export_document(
         gpu,
         Arc::new(LutLibrary::default()),
     )
+    .map(|_| ())
 }
 
 /// Export with the verified CC4 LUT library (CC4 2.4).
@@ -78,7 +80,7 @@ pub(crate) fn export_document_with_luts(
     progress: &ProgressSink,
     gpu: GpuContext,
     library: Arc<LutLibrary>,
-) -> Result<(), MediaError> {
+) -> Result<ExportReport, MediaError> {
     export_document_inner(
         document,
         out,
@@ -114,6 +116,7 @@ pub(crate) fn export_document_with_zero_packet_durations(
         Arc::new(LutLibrary::default()),
         VideoPacketDuration::Zero,
     )
+    .map(|_| ())
 }
 
 fn export_document_inner(
@@ -124,7 +127,7 @@ fn export_document_inner(
     gpu: GpuContext,
     library: Arc<LutLibrary>,
     packet_duration: VideoPacketDuration,
-) -> Result<(), MediaError> {
+) -> Result<ExportReport, MediaError> {
     validate_settings(document, out, settings)?;
     let temporary = temporary_output(out);
     if temporary.exists() {
@@ -139,11 +142,209 @@ fn export_document_inner(
         library,
         packet_duration,
     );
-    if let Err(error) = result {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+    };
+    replace_output(&temporary, out)?;
+    Ok(report)
+}
+
+/// AU3 §5.6 step 1 / N4 Q3: the skip reason for a programme with no complete
+/// gating block.
+///
+/// Deliberately distinct from [`NORMALIZATION_SILENT_REASON`]: a measurement
+/// that refuses to gate because the programme is too short is a different
+/// fact from a programme that is digitally silent, and the operator is told
+/// which one happened.
+pub(crate) const NORMALIZATION_SHORT_PROGRAMME_REASON: &str =
+    "shorter than one 400 ms gating block";
+
+/// AU3 §5.6 step 2: the skip reason for a master with no gated loudness at all.
+pub(crate) const NORMALIZATION_SILENT_REASON: &str = "silent";
+
+/// AU3 §5.6 step 3: the normalization gain range, the planner's guard
+/// (`server.rs` `plan_audio_normalization`) spelled once more on the export
+/// side so a job that asks for an impossible move is skipped rather than
+/// attempted.
+const NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS: i32 = -6_000;
+const NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS: i32 = 3_600;
+
+/// The `ceiling_tenth_db` descriptor's lower bound (`effect.rs`), so a target
+/// with an implausible ceiling cannot hand the node an out-of-range parameter.
+const TRUE_PEAK_CEILING_MINIMUM_TENTH_DB: i64 = -120;
+
+/// AU3 §5.6: bring the finished master to `target` before it is encoded.
+///
+/// The step runs between `mix_audio` and `encode_audio` (§5.5) and is entered
+/// only when `settings.loudness_normalization` is `Some`, so an export that
+/// does not ask for it encodes `mix_audio`'s bytes exactly.
+///
+/// A skip is not a failure: the three skip paths (no complete gating block, a
+/// silent master, a gain outside the guard) each return a report naming the
+/// reason with `before == after`, and the export continues with the mix
+/// untouched. A miss after two passes is not a failure either (§5.6 F11): the
+/// report says `on_target: false` and the delivery verification warns.
+///
+/// # Errors
+///
+/// Returns a media error when the master cannot be measured, when the target's
+/// ceiling is outside the limiter node's range, when the node cannot be run
+/// over the master, or when the export was cancelled between passes.
+fn normalize_master(
+    mix: &mut Vec<f32>,
+    target: LoudnessTarget,
+    settings: &ExportSettings,
+) -> Result<ExportAudioReport, MediaError> {
+    let before = LoudnessMeter::measure(mix, AUDIO_RATE, AUDIO_CHANNELS)?;
+    let skipped = |reason: String| ExportAudioReport {
+        target,
+        before,
+        after: before,
+        applied_gain_hundredths: 0,
+        limiter_passes: 0,
+        peak_reduction_hundredths: 0,
+        on_target: false,
+        skipped_reason: Some(reason),
+    };
+    let sample_frames = u64::try_from(mix.len() / usize::from(AUDIO_CHANNELS)).unwrap_or(u64::MAX);
+    if sample_frames < LOUDNESS_GATING_BLOCK_FRAMES {
+        return Ok(skipped(NORMALIZATION_SHORT_PROGRAMME_REASON.to_owned()));
     }
-    replace_output(&temporary, out)
+    let Some(integrated) = before.integrated_lufs_hundredths else {
+        return Ok(skipped(NORMALIZATION_SILENT_REASON.to_owned()));
+    };
+    let gain = target.integrated_lufs_hundredths - integrated;
+    if !(NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS..=NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS)
+        .contains(&gain)
+    {
+        return Ok(skipped(format!(
+            "required gain {gain} hundredths exceeds \
+             {NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS}..={NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS}"
+        )));
+    }
+
+    // The ceiling is validated before the master is touched, so a refused
+    // target leaves `mix` exactly as it was.
+    let ceiling_tenth_db = delivery_limiter_ceiling_tenth_db(target)?;
+    check_cancelled(settings)?;
+    apply_gain(mix, gain);
+    *mix = limit_to_delivery_ceiling(mix, ceiling_tenth_db)?;
+    let mut limiter_passes = 1_u8;
+    let mut applied_gain_hundredths = gain;
+    let mut after = LoudnessMeter::measure(mix, AUDIO_RATE, AUDIO_CHANNELS)?;
+
+    // AU3 §5.6 step 6: one corrective pass, and only when the programme
+    // reads under `target − tolerance`, which for a well-formed non-negative
+    // tolerance is the only direction a limiter can produce. Two passes is
+    // the ceiling.
+    if let Some(measured) = after.integrated_lufs_hundredths
+        && measured < target.integrated_lufs_hundredths - target.tolerance_lu_hundredths
+    {
+        check_cancelled(settings)?;
+        let correction = target.integrated_lufs_hundredths - measured;
+        apply_gain(mix, correction);
+        *mix = limit_to_delivery_ceiling(mix, ceiling_tenth_db)?;
+        limiter_passes = 2;
+        applied_gain_hundredths += correction;
+        after = LoudnessMeter::measure(mix, AUDIO_RATE, AUDIO_CHANNELS)?;
+    }
+
+    let on_target = after.integrated_lufs_hundredths.is_some_and(|measured| {
+        (measured - target.integrated_lufs_hundredths).abs() <= target.tolerance_lu_hundredths
+    });
+    // AU3 §5.2: derived from the two meter readings, so it is 0 when the
+    // limiter was an identity and positive exactly when it did work.
+    let peak_reduction_hundredths = match (
+        before.true_peak_dbtp_hundredths,
+        after.true_peak_dbtp_hundredths,
+    ) {
+        (Some(before_peak), Some(after_peak)) => {
+            (before_peak + applied_gain_hundredths - after_peak).max(0)
+        }
+        _ => 0,
+    };
+    Ok(ExportAudioReport {
+        target,
+        before,
+        after,
+        applied_gain_hundredths,
+        limiter_passes,
+        peak_reduction_hundredths,
+        on_target,
+        skipped_reason: None,
+    })
+}
+
+/// AU3 §5.6 step 4: scale every sample by `gain_hundredths` hundredths of a
+/// decibel.
+// The gain is a decibel ratio, not a count: `f32` is the buffer's own
+// precision and the conversion is exactly the one `db_gain` performs per node.
+#[allow(clippy::cast_possible_truncation)]
+fn apply_gain(mix: &mut [f32], gain_hundredths: i32) {
+    let gain = 10f64.powf(f64::from(gain_hundredths) / 2_000.0) as f32;
+    for sample in mix {
+        *sample *= gain;
+    }
+}
+
+/// AU3 §5.6 step 5: the limiter ceiling for one target, in tenth-decibels.
+///
+/// Every §2.3 target has a −1 dBTP ceiling and the headroom constant is 200
+/// hundredths, so the node is asked for −30 tenth-dB in production. But
+/// `LoudnessTarget` is a public `Deserialize` struct with public fields, so a
+/// hand-built one can name a ceiling outside the `ceiling_tenth_db`
+/// descriptor's declared `−120..=0` range; that is refused by name rather
+/// than quietly normalised into range, which would limit the master to a
+/// ceiling nobody asked for.
+///
+/// # Errors
+///
+/// Returns a media error when the target's ceiling falls outside the
+/// descriptor's `−120..=0` tenth-decibel range.
+fn delivery_limiter_ceiling_tenth_db(target: LoudnessTarget) -> Result<i64, MediaError> {
+    let ceiling = i64::from(
+        target
+            .true_peak_ceiling_dbtp_hundredths
+            .saturating_sub(LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS)
+            .div_euclid(10),
+    );
+    if !(TRUE_PEAK_CEILING_MINIMUM_TENTH_DB..=0).contains(&ceiling) {
+        return Err(MediaError::Backend(format!(
+            "delivery limiter ceiling {ceiling} tenth-dB is outside -120..=0"
+        )));
+    }
+    Ok(ceiling)
+}
+
+/// AU3 §5.6 step 5: one AU2 true-peak limiter pass at
+/// [`delivery_limiter_ceiling_tenth_db`], run over the whole master as a
+/// static node.
+///
+/// # Errors
+///
+/// Returns a media error when the node cannot be run over the buffer. The
+/// ceiling is validated by the caller through
+/// [`delivery_limiter_ceiling_tenth_db`] before the master is gained.
+fn limit_to_delivery_ceiling(mix: &[f32], ceiling_tenth_db: i64) -> Result<Vec<f32>, MediaError> {
+    let limiter = Effect {
+        id: EffectId(1),
+        name: "audio_true_peak_limiter".to_owned(),
+        parameters: BTreeMap::from([
+            (
+                "ceiling_tenth_db".to_owned(),
+                ParamValue::Integer(ceiling_tenth_db),
+            ),
+            ("lookahead_milliseconds".to_owned(), ParamValue::Integer(5)),
+            ("release_milliseconds".to_owned(), ParamValue::Integer(50)),
+            ("true_peak".to_owned(), ParamValue::Integer(1)),
+        ]),
+        keyframes: BTreeMap::new(),
+    };
+    process_buffer_static(&limiter, AUDIO_RATE, usize::from(AUDIO_CHANNELS), mix)
 }
 
 // Encoder and muxer setup must stay in one ownership scope through trailer finalization.
@@ -156,7 +357,7 @@ fn export_to_temporary(
     gpu: GpuContext,
     library: Arc<LutLibrary>,
     packet_duration: VideoPacketDuration,
-) -> Result<(), MediaError> {
+) -> Result<ExportReport, MediaError> {
     check_cancelled(settings)?;
     let total_frames = map_frames_with_rounding(
         document.duration,
@@ -169,8 +370,16 @@ fn export_to_temporary(
         .map_err(|_| MediaError::Backend("export frame count is invalid".to_owned()))?;
     send_progress(progress, 0, total_frames);
 
-    let audio_mix = mix_audio(document, settings)?;
+    // AU3 §5.5, normative: the normalization step sits between `mix_audio`
+    // and `encode_audio`, and only the `Some` arm allocates. With `None` the
+    // `map` is not entered and `encode_audio` receives `mix_audio`'s bytes
+    // exactly (B6).
+    let mut audio_mix = mix_audio(document, settings)?;
     check_cancelled(settings)?;
+    let audio = settings
+        .loudness_normalization
+        .map(|target| normalize_master(&mut audio_mix, target, settings))
+        .transpose()?;
 
     let mut muxer = ffmpeg::format::output(out).map_err(backend)?;
     let global_header = muxer
@@ -359,7 +568,7 @@ fn export_to_temporary(
     )?;
     muxer.write_trailer().map_err(backend)?;
     send_progress(progress, total_frames, total_frames);
-    Ok(())
+    Ok(ExportReport { audio })
 }
 
 struct DeliveryFilter {
@@ -1583,6 +1792,7 @@ fn measurement_settings(document: &Document) -> ExportSettings {
         audio_codec: "aac".to_owned(),
         video_bitrate: 1,
         audio_bitrate: 1,
+        loudness_normalization: None,
         cancellation: ExportCancellation::default(),
     }
 }
@@ -2836,5 +3046,294 @@ mod tests {
             whole.take(&programme[..channels * 8], channels).len(),
             channels * 8
         );
+    }
+
+    // ---- AU3 §5.6: the export's loudness normalization step ---------------
+
+    /// AU3 §3.2/N1: the contract's calibration frequency. The Tech 3341 tone
+    /// is "1 kHz per the standard; 997 Hz in this contract's calibration
+    /// pins", and only at 997 Hz does the K-weighting gain cancel the −0.691
+    /// offset exactly, which is what makes §5.6's `gain == 1_600` an equality
+    /// rather than a tolerance.
+    const CALIBRATION_HERTZ: f64 = 997.0;
+
+    /// A stereo calibration sine at `amplitude`, at the export lane's rate.
+    #[allow(clippy::cast_precision_loss)]
+    fn normalization_tone(amplitude: f32, frames: usize) -> Vec<f32> {
+        let mut samples = Vec::with_capacity(frames * usize::from(AUDIO_CHANNELS));
+        for frame in 0..frames {
+            let phase =
+                std::f64::consts::TAU * CALIBRATION_HERTZ * frame as f64 / f64::from(AUDIO_RATE);
+            #[allow(clippy::cast_possible_truncation)]
+            let value = amplitude * phase.sin() as f32;
+            samples.push(value);
+            samples.push(value);
+        }
+        samples
+    }
+
+    /// A stereo calibration sine whose integrated loudness is
+    /// `lufs_hundredths`.
+    ///
+    /// AU3 §3.2/N1's calibration: the K-weighting gain at 997 Hz cancels the
+    /// −0.691 offset and the two channels' mean-square halves sum to one, so
+    /// a stereo sine of amplitude `A` reads `20·log10(A)` LUFS.
+    fn normalization_tone_at_lufs(lufs_hundredths: i32, frames: usize) -> Vec<f32> {
+        #[allow(clippy::cast_possible_truncation)]
+        let amplitude = 10f64.powf(f64::from(lufs_hundredths) / 2_000.0) as f32;
+        normalization_tone(amplitude, frames)
+    }
+
+    /// The step reads only `cancellation` from its settings (it is handed the
+    /// target directly), so a minimal settings value stands in for a job's.
+    fn normalization_settings() -> ExportSettings {
+        ExportSettings {
+            fps: Rational::new(25, 1).unwrap(),
+            resolution: (64, 64),
+            delivery_color: ColorContext::sdr_rec709().delivery,
+            video_codec: "libx264".to_owned(),
+            audio_codec: "aac".to_owned(),
+            video_bitrate: 1,
+            audio_bitrate: 1,
+            loudness_normalization: None,
+            cancellation: ExportCancellation::default(),
+        }
+    }
+
+    /// AU3 §7 B5: the §5.6 pin — a −30 LUFS tone to the streaming target is
+    /// +16 dB, one limiter pass, and the limiter is a bit-exact identity
+    /// because the gained tone sits 11 dB under the node's ceiling.
+    #[test]
+    fn au3_normalizing_a_quiet_tone_is_one_gain_and_an_identity_limiter_pass() {
+        let frames = 5 * AUDIO_RATE as usize;
+        let mut mix = normalization_tone_at_lufs(-3_000, frames);
+        let mut gained = mix.clone();
+        apply_gain(&mut gained, 1_600);
+        let target = kinewright_core::STREAMING_PLATFORM_TARGET;
+        let report = normalize_master(&mut mix, target, &normalization_settings())
+            .expect("a five-second tone must normalize");
+        println!(
+            "AU3_NORMALIZE case=quiet_tone before={:?} after={:?} gain={} passes={} reduction={} on_target={}",
+            report.before.integrated_lufs_hundredths,
+            report.after.integrated_lufs_hundredths,
+            report.applied_gain_hundredths,
+            report.limiter_passes,
+            report.peak_reduction_hundredths,
+            report.on_target,
+        );
+        assert_eq!(report.skipped_reason, None);
+        assert_eq!(report.before.integrated_lufs_hundredths, Some(-3_000));
+        assert_eq!(report.applied_gain_hundredths, 1_600);
+        assert_eq!(report.limiter_passes, 1);
+        assert_eq!(
+            report.peak_reduction_hundredths, 0,
+            "an under-ceiling programme leaves the true peak exactly where the gain put it"
+        );
+        assert!(report.on_target, "{report:?}");
+        let integrated = report
+            .after
+            .integrated_lufs_hundredths
+            .expect("a gained tone is not silent");
+        assert!(
+            (integrated + 1_400).abs() <= 5,
+            "the normalized tone must land on -14.00 LUFS: {integrated}"
+        );
+        assert_eq!(
+            mix, gained,
+            "AU2 A27: with every sample under the node's ceiling the limiter is a bit-exact \
+             identity, so the encoded master is the gained mix and nothing else"
+        );
+    }
+
+    /// AU3 §7 B5: the impulse programme — the limiter has real work, so the
+    /// step takes its one corrective pass and reports the reduction it made.
+    #[test]
+    fn au3_normalizing_an_impulse_programme_takes_a_second_corrective_pass() {
+        let frames = 5 * AUDIO_RATE as usize;
+        let mut mix = normalization_tone_at_lufs(-3_000, frames);
+        // A 0 dBFS impulse every 500 ms, replacing the tone sample rather than
+        // adding to it so the fixture's peak is exactly full scale.
+        for frame in (0..frames).step_by(AUDIO_RATE as usize / 2) {
+            mix[frame * usize::from(AUDIO_CHANNELS)] = 1.0;
+            mix[frame * usize::from(AUDIO_CHANNELS) + 1] = 1.0;
+        }
+        let target = kinewright_core::STREAMING_PLATFORM_TARGET;
+        let report = normalize_master(&mut mix, target, &normalization_settings())
+            .expect("the impulse programme must normalize");
+        println!(
+            "AU3_NORMALIZE case=impulse before={:?} before_true_peak={:?} after={:?} after_true_peak={:?} gain={} passes={} reduction={} on_target={}",
+            report.before.integrated_lufs_hundredths,
+            report.before.true_peak_dbtp_hundredths,
+            report.after.integrated_lufs_hundredths,
+            report.after.true_peak_dbtp_hundredths,
+            report.applied_gain_hundredths,
+            report.limiter_passes,
+            report.peak_reduction_hundredths,
+            report.on_target,
+        );
+        assert_eq!(report.skipped_reason, None);
+        assert_eq!(report.limiter_passes, 2, "{report:?}");
+        assert!(report.on_target, "{report:?}");
+        assert!(
+            report.peak_reduction_hundredths > 0,
+            "the limiter pulled the impulses down, so the reduction cannot be zero: {report:?}"
+        );
+        let ceiling = target.true_peak_ceiling_dbtp_hundredths
+            - kinewright_core::LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS;
+        let after_peak = report
+            .after
+            .true_peak_dbtp_hundredths
+            .expect("a limited programme is not silent");
+        assert!(
+            after_peak <= ceiling + 5,
+            "the pre-encode true peak must sit at the node's {ceiling} hundredths ceiling: \
+             {after_peak}"
+        );
+        let first_gain = 1_600;
+        assert!(
+            report.applied_gain_hundredths > first_gain,
+            "`applied_gain_hundredths` is the sum of the two passes' gains: {report:?}"
+        );
+    }
+
+    /// AU3 §7 B5 / N4 Q3: the three skips are distinct, and a skip is not a
+    /// failure — the report carries both measurements and the export goes on.
+    #[test]
+    fn au3_normalization_names_its_three_skips_distinctly() {
+        let target = kinewright_core::STREAMING_PLATFORM_TARGET;
+        let settings = normalization_settings();
+
+        // 300 ms: no complete 400 ms gating block exists, which is a different
+        // fact from silence and says so.
+        let mut short = normalization_tone_at_lufs(-2_000, 3 * AUDIO_RATE as usize / 10);
+        let short_report = normalize_master(&mut short, target, &settings)
+            .expect("a short programme is not an error");
+        assert_eq!(
+            short_report.skipped_reason.as_deref(),
+            Some(NORMALIZATION_SHORT_PROGRAMME_REASON)
+        );
+        assert_eq!(
+            short_report.skipped_reason.as_deref(),
+            Some("shorter than one 400 ms gating block")
+        );
+
+        // Digital silence, well over one gating block.
+        let mut silent = vec![0.0_f32; 5 * AUDIO_RATE as usize * usize::from(AUDIO_CHANNELS)];
+        let silent_report =
+            normalize_master(&mut silent, target, &settings).expect("silence is not an error");
+        assert_eq!(
+            silent_report.skipped_reason.as_deref(),
+            Some(NORMALIZATION_SILENT_REASON)
+        );
+        assert_eq!(silent_report.skipped_reason.as_deref(), Some("silent"));
+        assert!(silent.iter().all(|sample| *sample == 0.0));
+
+        // A +46 dB request: outside the planner's -6000..=3600 guard.
+        let mut faint = normalization_tone_at_lufs(-6_000, 5 * AUDIO_RATE as usize);
+        let faint_before = faint.clone();
+        let faint_report = normalize_master(&mut faint, target, &settings)
+            .expect("an impossible gain is not an error");
+        assert_eq!(
+            faint_report.skipped_reason.as_deref(),
+            Some("required gain 4600 hundredths exceeds -6000..=3600"),
+            "{faint_report:?}"
+        );
+        assert_eq!(
+            faint, faint_before,
+            "a skipped step leaves the master alone"
+        );
+
+        for report in [&short_report, &silent_report, &faint_report] {
+            assert_eq!(report.before, report.after, "{report:?}");
+            assert_eq!(report.applied_gain_hundredths, 0, "{report:?}");
+            assert_eq!(report.limiter_passes, 0, "{report:?}");
+            assert_eq!(report.peak_reduction_hundredths, 0, "{report:?}");
+            assert!(!report.on_target, "{report:?}");
+        }
+        let reasons = [&short_report, &silent_report, &faint_report]
+            .iter()
+            .filter_map(|report| report.skipped_reason.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(reasons.len(), 3, "the three skip reasons must be distinct");
+    }
+
+    /// AU3 §7 B7: every §2.3 target is a −1 dBTP ceiling, so the node is
+    /// handed −30 tenth-dB, inside its descriptor's `−120..=0` range.
+    #[test]
+    fn au3_the_delivery_limiter_ceiling_is_minus_thirty_tenth_decibels_for_every_target() {
+        for profile in [
+            DeliveryProfile::SourceMaster,
+            DeliveryProfile::Youtube1080p,
+            DeliveryProfile::VerticalShort,
+            DeliveryProfile::SquareSocial,
+        ] {
+            let ceiling = delivery_limiter_ceiling_tenth_db(profile.loudness_target())
+                .expect("every shipped profile's ceiling is inside the node's range");
+            assert_eq!(ceiling, -30, "{profile:?}");
+            assert!((-120..=0).contains(&ceiling), "{profile:?}");
+        }
+        for target in [
+            kinewright_core::EBU_R128_PROGRAMME_TARGET,
+            kinewright_core::STREAMING_PLATFORM_TARGET,
+        ] {
+            assert_eq!(
+                delivery_limiter_ceiling_tenth_db(target)
+                    .expect("a shipped target's ceiling is inside the node's range"),
+                -30
+            );
+        }
+    }
+
+    /// AU3 §7 B7 / review F3: `LoudnessTarget` is a public `Deserialize`
+    /// struct with public fields, so a hand-built target can name a ceiling
+    /// the node's descriptor does not accept. It is refused by name, never
+    /// clamped into range and limited to a ceiling nobody asked for.
+    #[test]
+    fn au3_a_ceiling_outside_the_limiter_nodes_range_is_refused_not_clamped() {
+        let target = LoudnessTarget {
+            integrated_lufs_hundredths: -1_400,
+            tolerance_lu_hundredths: 100,
+            true_peak_ceiling_dbtp_hundredths: -20_000,
+            loudness_range_max_lu_hundredths: None,
+        };
+        let error = delivery_limiter_ceiling_tenth_db(target)
+            .expect_err("a −200 dBTP ceiling is outside the descriptor's −120..=0 range");
+        let message = error.to_string();
+        assert!(
+            message.contains("-2020") && message.contains("-120..=0"),
+            "the refusal must name the offending ceiling and the range it is outside: {message}"
+        );
+
+        // And the step itself refuses rather than normalizing against a
+        // ceiling the caller did not ask for.
+        let mut mix = normalization_tone_at_lufs(-2_000, 5 * AUDIO_RATE as usize);
+        let before = mix.clone();
+        let error = normalize_master(&mut mix, target, &normalization_settings())
+            .expect_err("the out-of-range ceiling must propagate out of the step");
+        assert!(
+            error.to_string().contains("delivery limiter ceiling"),
+            "{error}"
+        );
+        assert_eq!(
+            mix, before,
+            "a refused normalization leaves the master untouched"
+        );
+    }
+
+    /// AU3 §5.6: a master already on target takes a gain of exactly zero,
+    /// which is inside the inclusive guard, so the limiter still runs and the
+    /// report says one pass — the boundary between the skip paths (zero
+    /// passes) and the acting path.
+    #[test]
+    fn au3_a_master_already_on_target_still_takes_one_limiter_pass() {
+        let mut mix = normalization_tone_at_lufs(-1_400, 5 * AUDIO_RATE as usize);
+        let target = kinewright_core::STREAMING_PLATFORM_TARGET;
+        let report = normalize_master(&mut mix, target, &normalization_settings())
+            .expect("an on-target tone must normalize");
+        assert_eq!(report.skipped_reason, None);
+        assert_eq!(report.applied_gain_hundredths, 0);
+        assert_eq!(report.limiter_passes, 1);
+        assert_eq!(report.peak_reduction_hundredths, 0);
+        assert!(report.on_target, "{report:?}");
     }
 }

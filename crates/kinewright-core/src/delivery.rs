@@ -179,6 +179,10 @@ impl DeliveryProfile {
             audio_codec: "aac".to_owned(),
             video_bitrate,
             audio_bitrate,
+            // AU3 §5.1: normalization is a job parameter, never a profile
+            // fact. `loudness_target()` publishes the target; asking for it is
+            // the caller's decision.
+            loudness_normalization: None,
             cancellation,
         }
     }

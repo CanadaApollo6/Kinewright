@@ -153,6 +153,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             audio_codec: "aac".to_owned(),
             video_bitrate: 2_000_000,
             audio_bitrate: 192_000,
+            loudness_normalization: None,
             cancellation: ExportCancellation::default(),
         },
         progress,

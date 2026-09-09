@@ -344,7 +344,9 @@ impl KinewrightApp {
             last_window_title: String::new(),
             status: "Ready".to_owned(),
             export_dialog: ExportDialog {
-                open: false,
+                open: screenshot_export_dialog_open(
+                    std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").ok().as_deref(),
+                ),
                 output: "export.mp4".to_owned(),
                 width: resolution.0,
                 height: resolution.1,
@@ -355,7 +357,10 @@ impl KinewrightApp {
                 focus_y_percent: 50,
                 conformance_cache: None,
                 delivery_bit_depth: kinewright_core::DeliveryEncodeDepth::default(),
+                normalize_loudness: false,
                 verification: None,
+                audio_verification: None,
+                audio_report: None,
             },
             export_job: None,
             help_open: false,
@@ -1909,6 +1914,16 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
 /// press an `Edit` toggle. `mixer` keeps AU1's behaviour: the tab, the strips,
 /// and no pane. A document with no bus falls back to the master chain, which
 /// every document has.
+/// Whether the screenshot harness asked for the export dialog (AU3 §6.7).
+///
+/// The dialog is a summoned surface: no startup interaction reaches it in a
+/// static capture, so the harness pre-raises it exactly as it pre-raises the
+/// settings window. It opens on the controls only — the harness can seed no
+/// finished export, so this lane never captures the verification block.
+fn screenshot_export_dialog_open(show: Option<&str>) -> bool {
+    matches!(show, Some("export"))
+}
+
 fn screenshot_mixer_selection(
     show: Option<&str>,
     document: &Document,
@@ -2171,6 +2186,34 @@ mod tests {
             ),
             "the same latency on both sides is the live case, whatever the figure"
         );
+    }
+
+    /// AU3 §6.7 and §7 B14: the screenshot harness can raise the export
+    /// dialog, and no other value opens it.
+    ///
+    /// The recognised set is `settings`, `timeline`, `transcript`, `mixer`,
+    /// `mixer-chain`, and now `export`; an unknown value raises nothing, which
+    /// is what keeps a typo from silently capturing the default window.
+    #[test]
+    fn the_screenshot_harness_can_raise_the_export_dialog() {
+        use super::screenshot_export_dialog_open;
+
+        assert!(screenshot_export_dialog_open(Some("export")));
+        for other in [
+            None,
+            Some("settings"),
+            Some("timeline"),
+            Some("transcript"),
+            Some("mixer"),
+            Some("mixer-chain"),
+            Some("Export"),
+            Some(""),
+        ] {
+            assert!(
+                !screenshot_export_dialog_open(other),
+                "{other:?} does not open the export dialog"
+            );
+        }
     }
 
     /// AU2 §6.6: the screenshot harness can raise the Mixer with the chain

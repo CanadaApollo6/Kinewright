@@ -13,22 +13,24 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use kinewright_core::{
     Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, AudioQcReport, AudioQcRequest,
-    BeatStatus, ClipId, DeliveryVerification, DeliveryVerificationRequest, Document, EffectId,
-    Export, ExportCancellation, ExportSettings, FrameTexture, LoudnessSnapshot,
-    LutAvailabilityKind, LutAvailabilityStatus, MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE,
-    MatteParams, MatteProof, MatteProofError, MatteProofMetadata, MediaAsset,
-    MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,
-    MediaCacheFamilyStatus, MediaCacheInventory, MediaError, MediaEvent, MixLevelReport,
-    MixLevelRequest, MixPeaks, MixSpectrumReport, MixSpectrumRequest, MonitorProof, Playback,
-    PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode,
-    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TranscriptStatus, VisualAssetResult, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof,
-    WorkingProofMetadata, export_lut_preflight_with,
+    BeatStatus, ClipId, DeliveryAudioVerification, DeliveryVerification,
+    DeliveryVerificationRequest, Document, EffectId, Export, ExportCancellation, ExportReport,
+    ExportSettings, FrameTexture, LoudnessSnapshot, LoudnessTarget, LutAvailabilityKind,
+    LutAvailabilityStatus, MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE, MatteParams, MatteProof,
+    MatteProofError, MatteProofMetadata, MediaAsset, MediaAvailabilityKind,
+    MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus,
+    MediaCacheInventory, MediaError, MediaEvent, MediaKind, MixLevelReport, MixLevelRequest,
+    MixPeaks, MixSpectrumReport, MixSpectrumRequest, MonitorProof, Playback, PlaybackState,
+    ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat,
+    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus,
+    VisualAssetResult, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof,
+    WorkingProofMetadata, audio_qc_technical_pass, delivery_audio_exceptions,
+    export_lut_preflight_with,
 };
 
 use crate::{
     analysis::VisualAssetService,
-    audio::{AudioRuntime, MeterState, MixMeters, decode_audio_range},
+    audio::{AudioDecoder, AudioRuntime, MeterState, MixMeters, decode_audio_range},
     clock::{frame_to_samples, samples_to_frame},
     compositor::GpuContext,
     decode::probe_path,
@@ -43,6 +45,11 @@ use crate::{
 };
 
 const WORKER_TICK: Duration = Duration::from_millis(5);
+
+/// AU3 §5.3: the delivery audio measurement lane. Every loudness figure this
+/// engine publishes is measured at 48 kHz stereo, whatever the file carries.
+const AUDIO_MEASUREMENT_RATE: u32 = 48_000;
+const AUDIO_MEASUREMENT_CHANNELS: u16 = 2;
 
 struct SharedClock {
     position_samples: Arc<AtomicU64>,
@@ -803,6 +810,7 @@ impl Analysis for FfmpegMediaEngine {
             audio_codec: "aac".to_owned(),
             video_bitrate: 1,
             audio_bitrate: 1,
+            loudness_normalization: None,
             cancellation: ExportCancellation::default(),
         };
         let samples = crate::export::mix_audio(document, &settings)?;
@@ -1076,6 +1084,50 @@ impl Analysis for FfmpegMediaEngine {
         )
     }
 
+    fn verify_delivery_audio(
+        &self,
+        path: &Path,
+        target: Option<LoudnessTarget>,
+    ) -> Result<DeliveryAudioVerification, MediaError> {
+        // AU3 §5.7: the same bare-path probe `verify_delivery_output` uses,
+        // so the written file is described by the production prober rather
+        // than by a document that may not name it.
+        let asset = probe_path(path, AssetId(0))?;
+        if asset.kind == MediaKind::Video {
+            return Err(MediaError::Backend(format!(
+                "{} has no audio stream to verify",
+                path.display()
+            )));
+        }
+        let end_sample = frame_to_samples(asset.duration, AUDIO_MEASUREMENT_RATE, asset.fps);
+        let mut decoder = AudioDecoder::open(
+            path,
+            AUDIO_MEASUREMENT_RATE,
+            AUDIO_MEASUREMENT_CHANNELS,
+            0,
+            end_sample,
+        )?;
+        // Streamed: `decode_audio_range` would materialise the whole delivery
+        // as one `Vec`, and a delivery is as long as the programme.
+        let mut meter = LoudnessMeter::new(AUDIO_MEASUREMENT_RATE, AUDIO_MEASUREMENT_CHANNELS)?;
+        while let Some(chunk) = decoder.next_chunk()? {
+            meter.push(&chunk)?;
+        }
+        let measured = meter.finish()?;
+        let exceptions = delivery_audio_exceptions(&measured, target);
+        let technical_pass = audio_qc_technical_pass(&exceptions);
+        Ok(DeliveryAudioVerification {
+            output_path: path.to_path_buf(),
+            measured,
+            sample_rate: AUDIO_MEASUREMENT_RATE,
+            channels: AUDIO_MEASUREMENT_CHANNELS,
+            sample_frames: measured.sample_frames,
+            target,
+            exceptions,
+            technical_pass,
+        })
+    }
+
     fn request_waveform(&self, asset: MediaAsset, request_generation: u64) -> bool {
         self.visual_assets
             .request_waveform(asset, request_generation)
@@ -1283,6 +1335,7 @@ impl Export for FfmpegMediaEngine {
             self.gpu.clone(),
             library,
         )
+        .map(|_| ())
     }
 
     fn export_document(
@@ -1292,6 +1345,20 @@ impl Export for FfmpegMediaEngine {
         settings: ExportSettings,
         progress: ProgressSink,
     ) -> Result<(), MediaError> {
+        self.export_document_reporting(document, out, settings, progress)
+            .map(|_| ())
+    }
+
+    /// AU3 §5.2: the same export, returning what the loudness normalization
+    /// step did. `export_document` is this method with the report discarded,
+    /// so the two cannot describe different encodes.
+    fn export_document_reporting(
+        &self,
+        document: Arc<Document>,
+        out: &Path,
+        settings: ExportSettings,
+        progress: ProgressSink,
+    ) -> Result<ExportReport, MediaError> {
         // CC4 2.4: an export queue outlives focus, so the library is bound to
         // the immutable document being encoded rather than to whichever
         // project published last.

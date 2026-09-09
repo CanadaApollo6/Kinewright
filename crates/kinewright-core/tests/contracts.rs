@@ -5350,3 +5350,93 @@ fn au3_audio_loudness_and_audio_qc_wire_shapes_are_additive() {
 
     assert_integer_leaves(&encoded, "report");
 }
+
+/// AU3 §5.1, §5.2, §5.3: Part B is additive on the wire too. A pre-AU3
+/// `ExportSettings` loads unchanged and re-serializes to the same bytes, an
+/// export that reports nothing is `{}`, and the delivery audio verification
+/// carries only integers, booleans, strings, and nulls (exit-gate clause 2).
+#[test]
+fn au3_export_settings_and_delivery_audio_wire_shapes_are_additive() {
+    const PRE_AU3_SETTINGS: &str = r#"{"fps":{"numerator":30,"denominator":1},"resolution":[1920,1080],"delivery_color":{"primaries":"bt709","transfer":"bt709","matrix":"bt709","range":"limited","white_point":"d65","bit_depth":8,"confidence_basis_points":10000,"provenance":"application_default"},"video_codec":"libx264","audio_codec":"aac","video_bitrate":8000000,"audio_bitrate":384000}"#;
+
+    let settings: kinewright_core::ExportSettings = serde_json::from_str(PRE_AU3_SETTINGS).unwrap();
+    assert_eq!(settings.loudness_normalization, None);
+    assert_eq!(serde_json::to_string(&settings).unwrap(), PRE_AU3_SETTINGS);
+
+    let schema = serde_json::to_value(schema_for!(kinewright_core::ExportSettings)).unwrap();
+    assert!(schema["properties"]["loudness_normalization"].is_object());
+    assert!(
+        !schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "loudness_normalization"),
+        "loudness_normalization must stay optional"
+    );
+
+    // An export that normalizes nothing reports nothing.
+    assert_eq!(
+        serde_json::to_string(&kinewright_core::ExportReport::default()).unwrap(),
+        "{}"
+    );
+    let schema = serde_json::to_value(schema_for!(kinewright_core::ExportReport)).unwrap();
+    assert!(schema["properties"]["audio"].is_object());
+    assert!(
+        schema
+            .get("required")
+            .and_then(|required| required.as_array())
+            .is_none_or(std::vec::Vec::is_empty),
+        "every field of the export report is optional: {schema}"
+    );
+
+    let target = kinewright_core::DeliveryProfile::SourceMaster.loudness_target();
+    let measured = kinewright_core::AudioLoudness {
+        integrated_lufs_hundredths: Some(-2_301),
+        sample_peak_dbfs_hundredths: Some(-120),
+        sample_rate: 48_000,
+        channels: 2,
+        sample_frames: 480_000,
+        momentary_max_lufs_hundredths: Some(-1_900),
+        short_term_max_lufs_hundredths: Some(-2_100),
+        loudness_range_lu_hundredths: Some(500),
+        true_peak_dbtp_hundredths: Some(-101),
+    };
+    let audio = kinewright_core::ExportAudioReport {
+        target,
+        before: measured,
+        after: measured,
+        applied_gain_hundredths: 0,
+        limiter_passes: 0,
+        peak_reduction_hundredths: 0,
+        on_target: true,
+        skipped_reason: None,
+    };
+    let encoded = serde_json::to_string(&audio).unwrap();
+    assert!(!encoded.contains("skipped_reason"), "{encoded}");
+    let report = kinewright_core::ExportReport { audio: Some(audio) };
+    let encoded = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        serde_json::from_value::<kinewright_core::ExportReport>(encoded.clone()).unwrap(),
+        report
+    );
+    assert_integer_leaves(&encoded, "export_report");
+
+    let verification = kinewright_core::DeliveryAudioVerification {
+        output_path: std::path::PathBuf::from("out.mp4"),
+        measured,
+        sample_rate: 48_000,
+        channels: 2,
+        sample_frames: 480_000,
+        target: Some(target),
+        exceptions: kinewright_core::delivery_audio_exceptions(&measured, Some(target)),
+        technical_pass: true,
+    };
+    let encoded = serde_json::to_value(&verification).unwrap();
+    assert_eq!(
+        serde_json::from_value::<kinewright_core::DeliveryAudioVerification>(encoded.clone())
+            .unwrap(),
+        verification
+    );
+    assert_eq!(encoded["exceptions"], serde_json::json!([]));
+    assert_integer_leaves(&encoded, "delivery_audio_verification");
+}

@@ -152,6 +152,150 @@ the `pub(crate)` entries are named (§3.9, §5.6, §5.7). No OPEN note remains.
 - **E25. A13's L −20 / R −26 dBFS case also raises `audio_channel_imbalance`** (Δ = 600 > §2.4's
   300); the test asserts the Δ pin and the exception with its `observed`/`allowed`.
 
+**Implementation errata (Part B core, 2026-09-09):**
+
+- **E26. `delivery_audio_exceptions(&AudioLoudness, Option<LoudnessTarget>) -> Vec<AudioQcException>`
+  is a core addition.** §5.3 describes the delivery exception list in prose while B3 asks the core
+  test to pin `delivery_audio_silent`'s message, so the rule lives in core (E7's precedent): it is
+  `loudness_target_exceptions(.., "delivery")` plus the silent Warning, re-sorted. Unlike
+  `audio_silent`, it does not suppress the target checks: a silent-gated file whose true peak is
+  over the ceiling still raises `delivery_true_peak_over_ceiling`.
+- **E27. Sixteen `ExportSettings` literals in ten files, not seventeen in eleven.** §5.1's table
+  credits `cc6_fixtures.rs` with a literal; `cc6_delivery_settings` calls
+  `DeliveryProfile::export_settings` and needed no change.
+- **E28. `delivery_audio_silent`'s message** is "The written file's audio reported no gated
+  loudness: it is silent, or shorter than one 400 ms gating block." §5.3 gave only the
+  parenthetical.
+- **E29. `ExportSettings` is not compared with `assert_eq!` after a round trip**: `ExportCancellation`'s
+  `PartialEq` is `Arc::ptr_eq` (CC6 §9.5), so B1 asserts the field and compares with the original
+  handle substituted in, as cc6_core.rs does.
+- **E30. `DeliveryAudioVerification.target` is a required key** (`null` when absent) rather than a
+  skipped optional, as §5.3's struct is written, so an absent target is explicit on the wire for the
+  app's "no target" label.
+- **E31. `tests/au3_core.rs` carries its own `assert_integer_leaves`**, a copy of contracts.rs's;
+  integration test targets are separate binaries and core has no shared test helper crate.
+
+**Implementation errata (Part B agent, 2026-09-09):**
+
+- **E32. `verifying` is true for every post-encode wait.** §6.2 makes the audio measurement
+  unconditional, so `set_verifying(state, id, true)` replaces `work.verify`; terminal records still
+  carry `verifying: false`, so CC6's pins hold.
+- **E33. `get_export_jobs`' audio line renders `target=` as the target's integrated LUFS hundredths
+  and `ceiling=` as its true-peak ceiling** (or `none`); §6.4 wrote `target={t|none}` without
+  naming the projection.
+- **E34. The planner's re-cue warning is in the description's first sentence.** §6.3's text put it
+  second, but `get_capability`/`search_capabilities` publish only `first_sentence(description)`, so
+  the sentence an agent needs before committing was invisible; the description is one sentence
+  with no embedded dot, and the §6.4 byte split is regenerated accordingly (planner +124 B, not
+  +120: the fold added four bytes, against a second sentence that reached no agent at all).
+- **E35. The success path is `verify_and_settle`** (drift → video → audio → settle, unchanged order)
+  with `run_work_item(&WorkItem)`; `export_job_lines(&[ExportJobRecord]) -> String` is a free
+  function so the text is unit-testable; `NormalizationContext` derives `Debug` for the refusal
+  test.
+- **E36. A job cancelled during the audio measurement carries neither `audio_verification` nor a
+  reason**, CC6's "nothing to report" shape for an abandoned export, matching the video lane;
+  cancel-after-encode carries `EXPORT_CANCELLED_BEFORE_VERIFICATION` in the audio reason as §6.2
+  says, and never a stale `audio_report`.
+
+**Implementation errata (Part B app, 2026-09-09):**
+
+- **E37. `audio_verification_lines(v, report, profile: DeliveryProfile)`**, not a bare
+  `LoudnessTarget`: §6.6's own no-target line prints `({profile})`, which a target cannot render;
+  the target is derived inside via `loudness_target()`, so one table still feeds the row, the
+  block, and the Mixer.
+- **E38. The Mixer `LOUDNESS` budget is 90 px (measured 86), not E9's 80.** §4.6's Part B suffix
+  ("; the export step normalises the file") wraps the muted F21 line to two `MICRO` rows at the
+  pane width (+12 px). E9 cut the layout to fit the budget; here the sentence is contract text, so
+  the budget moved instead. The pane still fits a 260 px dock and scrolls. §4.4 and A18 are
+  amended.
+- **E39. `ExportOutcome` is a struct** `{ path, result: Result<ExportReport, MediaError>,
+  verification, audio_verification }` and `poll_export` reads `report.audio`;
+  `verification_block(ui, verification, audio, report, profile)` gained the audio arguments, so
+  its two call sites changed. `ExportAudioVerification { Measured(Box<..>), Unavailable(String) }`.
+- **E40. `cancelled_before_verification -> Option<&'static str>`**, and picture and sound share
+  `contained_measurement`, so the cancel / refusal / panic rules cannot diverge between the two
+  halves; `worker_verification` and `run_export_after_preflight` are generic over the encode's
+  payload.
+- **E41. `audio_verification_status` checks severity before the target.** Core raises nothing
+  without a target, so on real data the two orders agree; an `Error` that ever reached the app
+  reads `AUDIO OVER CEILING` rather than hiding behind `AUDIO MEASURED`. `technical_pass` is
+  carried and not rendered: the status label is its equivalent (only the ceiling is an Error).
+- **E42. B14 is pinned on `export_loudness_target(bool, Option<DeliveryAspect>)` plus a real
+  pointer click on `loudness_row`**; `start_export` needs a `KinewrightApp`, which no app test can
+  build, and the field assignment is the one expression the compiler ties to that function.
+- **E43. `KINEWRIGHT_SCREENSHOT_SHOW=export` opens the dialog on its controls only.** The harness
+  has no way to seed a finished `ExportOutcome`, so the `AUDIO` block is painted headless by
+  `au3_the_audio_block_measures_when_no_target_was_asked_for` instead. The dialog body scrolls at
+  `EXPORT_DIALOG_MAX_BODY_HEIGHT` (420, a viewport, not a content bound; CC6 behaviour); the
+  measured body heights are recorded in E44.
+- **E44. The verification block shows when either half is present**, and its status line is
+  `Exported {path} · {video} · {audio}`. Measured at the 460 px harness width: `Loudness` row 96 px,
+  widest `AUDIO` block 196 px; the whole body measures **572 px pre-verification** (no export
+  running) and **1 480 px worst case** (non-conforming picture verification + widest `AUDIO` block +
+  normalization line), pinned ±1 px by `au3_the_export_dialog_body_measures_past_its_scroll_viewport`,
+  which lays the body out inside a real `ScrollArea` at the 420 px viewport on the first frame
+  (before the floating scrollbar takes its 6 px, so the running app wraps a few px taller). The body
+  has scrolled since CC6; the screenshot lane therefore shows the controls down to the `Loudness`
+  row, with the muted note clipped at the scroll edge and `Export MP4` one scroll below at any window
+  size (capture: target/review/au3/au3-export-dialog.png). To make the body
+  measurable, it is extracted verbatim into `export_dialog_body(ui, &mut ExportDialog,
+  &ExportDialogBodyContext) -> Vec<ExportDialogRequest>`; the six click flags became that enum,
+  re-applied by `show_export_dialog` in the original order. The LRA line carries no verdict because
+  every shipped profile's range maximum is `None`.
+
+**Implementation errata (Part B media, 2026-09-09):**
+
+- **E45. §5.6's steps 1 and 2 are exchanged**: the measurement precedes the length check, the
+  only order under which step 1's own `after = before` is defined, and a short-programme skip
+  therefore carries real `true_peak`/`sample_peak` readings. Skip precedence is unchanged (a
+  sub-400 ms programme has `integrated == None` anyway, so the short reason still wins) and the
+  three reason strings — `"shorter than one 400 ms gating block"`, `"silent"`,
+  `"required gain {g} hundredths exceeds -6000..=3600"` — are pinned distinct.
+- **E46. The §5.6 / §5.8 pin tones are 997 Hz, not 1 kHz** (N1's rule): at 1 kHz the tone reads
+  −29.99 LUFS and `gain == 1_600` would be 1 599; at 997 Hz the reading is exactly −3000.
+- **E47. The hot-noise lane's pink noise is low-passed at 200 Hz and made up 3 dB.** The
+  provisioned FFmpeg's `anoisesrc` pink is ~9 dB crest and would not reach the −3 dBTP ceiling
+  after the move — the idle lane N4 Q2's self-checks exist to prevent. The lane's evidence is its
+  asserted self-checks (`limiter_passes ≥ 1`, `peak_reduction > 0`, pre-encode peak within 0.5 dB
+  of the ceiling), not a crest figure.
+- **E48. The "no limiting needed" lane is the tone alone**, without §5.8's white noise 10 dB down:
+  the provisioned `amix` halves both inputs whatever `normalize` says, which would make the lane's
+  level a build fact. Its peak sits 11 dB under the ceiling; `peak_reduction == 0` and
+  `limiter_passes == 1` are asserted.
+- **E49. Fixture tones use `aevalsrc`, not `sine`** (the provisioned `sine` emits −18 dBFS, so
+  `sine,volume=0.1` is a −38 dBFS programme); sources are `pcm_s16le` in `.mov` with the managed
+  BT.709 encode arguments rather than AAC sources (an AAC source pre-smears the impulse lane and an
+  untagged `testsrc2` is refused before any audio is mixed); the lanes export at the source raster,
+  overriding `export_settings`' 1080p, since they gate audio only.
+- **E50. The B8 verification fixture is 320 kbit/s** (192 kbit/s AAC adds 0.46 dB of true peak to a
+  pure tone) and its decoded-tone term has its own budget,
+  `VERIFY_TONE_TRUE_PEAK_BUDGET_HUNDREDTHS = 80` (observed 30), distinct from the hot lanes'
+  `FIXTURE_AAC_OVERSHOOT_BUDGET_HUNDREDTHS`, which §5.8 F10 reserves for the pre-encode/decoded
+  pair.
+- **E51. `tests/au3_fixtures.rs` is not `cfg(feature = "test-util")`-gated**; an integration test
+  cannot see a `src` feature-gated module, so it uses the `#[path = "../src/test_support.rs"]`
+  include generated_media.rs uses. Consequence: the four lanes run in the default
+  `cargo test -p kinewright-media` lane and add about 51 s to it.
+- **E52. An out-of-range limiter ceiling is refused, not clamped.** `delivery_limiter_ceiling_tenth_db`
+  returns a typed `MediaError::Backend` for a ceiling outside `−120..=0` tenth-dB (§5.6 step 5
+  cites the range as a descriptor fact); it is −30 for every shipped target, asserted. The ceiling
+  is validated before the master is gained, so a refused target leaves `mix` untouched (asserted
+  by equality, not length), and the subtraction under it saturates. A master already on target
+  takes a gain of exactly zero and still one limiter pass (pinned).
+- **E53. `process_buffer_static`'s length guard fires only on unaligned input**, the only reachable
+  form (`process_frame` works in place); `channels == 0` is a second typed refusal. Neither panics.
+- **E54. B6 is three real exports** (off vs off for determinism, off vs skipped-`Some`, off vs
+  acting-`Some`); comparing to `mix_audio`'s bytes is not observable through a lossy encode, and the
+  third export is what stops the first two from being vacuous.
+- **E55. The hot-noise LU margin is the exit gate's thinnest number** (deviation 37 hundredths
+  against a 100 budget, ≥ 2× bar = 50), dominated by the limiter's loudness pull rather than the AAC
+  round trip; the budget equals the streaming tolerance, so the bar is stricter than conformance. If
+  the Windows lane reds on this term, the response is a per-OS note on the constant's doc comment
+  in CC6 §6.3's manner, never a `cfg`.
+- **E56. The corrective gain is not range-checked** against −6000..=3600 (§5.6 step 6 does not ask
+  for it); there is no runaway — the pass count is a straight-line `if`, the correction fires only
+  in the direction a limiter can produce, and the limiter re-clamps whatever the gain does.
+
 ## 1. Scope
 
 ### 1.1 The editor job
@@ -840,7 +984,7 @@ target) -> bool` after `pane_title` and before `pan_law_rows`. `snapshot` is the
 frozen figures show. `target` is **always** `export_delivery_profile(self.export_dialog.
 delivery_aspect).loudness_target()` (export_ui.rs:133-140; the `const fn` becomes `pub(crate)`) —
 the dialog's current profile target, regardless of any checkbox (F12, F20). Geometry, top to
-bottom, height budget **80 px** pinned by a `measure_loudness_section` helper (F20; the dock is
+bottom, height budget **90 px** (80 before Part B; E38) pinned by a `measure_loudness_section` helper (F20; the dock is
 320 default / 260 minimum, app.rs:1583-1587, and the pane scrolls, mixer_pane_ui.rs:96-101):
 
 1. caps label `LOUDNESS` (`TEXT_MUTED`);
@@ -1269,7 +1413,10 @@ ceiling is danger."* The Mixer sentence of §4.6 gains "; the export step normal
 - **AAC overshoot is held by headroom, not measured before encode**; the decoded true peak of the
   two hot lanes is the fixtures' evidence, and priming/padding is not aligned sample-exactly (§5.8).
 - **`measure_mix_spectrum` holds whole stems** and `mix_pass` holds one decoded buffer per track on
-  every path (R2).
+  every path (R2). **Each `normalize_master` limiter pass transiently holds a second master
+  buffer** (`limit_to_delivery_ceiling` returns a fresh `Vec` of `len + Lh·channels` and the old one
+  is freed on assignment), so the step peaks at about twice the master's footprint on top of
+  `mix_pass`'s per-track buffers; two passes do this sequentially, so the peak is 2×, not 3×.
 - **Conformance is by Tech 3341/3342 tolerance, not the ITU table** (§3.6); the limiter's detector
   is a different, unchanged 4× filter.
 - **The planner's gate is the sample peak** its argument names; the true peak is reported beside it.
@@ -1362,7 +1509,7 @@ A18. `loudness_bar_fill` (−4000 → 0, −2000 → 0.5, 0 → 1, `None` → 0,
      `loudness_bar_color`'s truth table against the dialog's profile target; `loudness_readout`
      renders `—` per `None`; `chain_pane` and `measure_chain_pane` take the snapshot and target; the
      master pane paints `LOUDNESS`, `M`, `S`, `Reset`, and the Part A F21 sentence;
-     `measure_loudness_section ≤ 80`; the snapshot is polled while paused; the master strip paints
+     `measure_loudness_section ≤ 90` (80 before Part B; E38); the snapshot is polled while paused; the master strip paints
      `I —` and `a_bus_and_master_strip_fit_the_mixer_dock` records it under 240 — app `mixer_ui.rs`,
      `mixer_pane_ui.rs`.
 A19. `MIXER_LOUDNESS_BAR_HEIGHT` resolves; DESIGN.md contains the §4.6 sentences and the measured

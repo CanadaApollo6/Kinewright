@@ -112,6 +112,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-08, after AU2 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-09, after AU3 Part A) | 130 | 1,424,875 B | 1,295,138 B | 108,413 B |
 | Served MCP runtime (2026-09-09, after AU3 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-09, after AU3 Part B) | 130 | 1,425,658 B | 1,295,459 B | 108,875 B |
+| Served MCP runtime (2026-09-09, after AU3 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
 
 That is a 99.1% reduction in initially advertised serialized tool metadata at
 the M36 baseline, 99.4% at the 2026-08-24 measurement, 99.56% after CC6
@@ -171,6 +173,26 @@ own prose, 205 B for `get_audio_levels`' four-field gloss and its sub-block
 refusal sentence, and 47 B for `get_delivery_profiles`' loudness-target clause.
 The served quad is byte-identical again at 7 / 5,660 B / 3,510 B / 998 B: a
 99.60% reduction that holds at 5,660 B served against a 1,424,875 B registry.
+
+AU3 Part B adds no tool at all: the counts stay 52 generated operations + 78
+inspectors = 130, and the registry grows by 783 B to 1,425,658 B. The 321 B of
+new input schema is `QueueExportArgs`' `normalize_loudness` boolean and nothing
+else — Part B's other new state (`ExportSettings.loudness_normalization`, the
+three `ExportJobRecord` audio fields, `ExportAudioReport`,
+`DeliveryAudioVerification`) is all *output*, and no tool takes an
+`ExportJobRecord` or an `ExportSettings` as an argument, so none of it reaches
+a schema the registry measures. The 462 B of new descriptions splits exactly
+three ways: 124 B for `plan_audio_normalization`'s true-peak-limiter rename and
+its re-cue clause, 267 B for `queue_export`'s `normalize_loudness` clause,
+and 71 B for `get_export_jobs`' audio-verification and normalization-report
+clauses. The planner's clause costs 4 B more than the standalone sentence it
+replaced, and buys the only thing that matters: `get_capability` and
+`search_capabilities` publish `first_sentence(description)` and drop the rest,
+so a re-cue warning in a second sentence is 120 B no agent ever reads. The
+served quad is byte-identical for the eighth consecutive measurement at
+7 / 5,660 B / 3,510 B / 998 B — `queue_export`, `get_export_jobs` and
+`plan_audio_normalization` are all registry-only tools — so the reduction
+holds at 99.60%, 5,660 B served against a 1,425,658 B registry.
 
 The registry grew with the colour tools; the served surface stays at seven
 tools. The `color_curves` descriptor (133

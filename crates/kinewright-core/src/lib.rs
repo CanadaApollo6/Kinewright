@@ -34,7 +34,8 @@ pub use audio_qc::{
     AUDIO_QC_CLIPPED_RUN_SAMPLES, AUDIO_QC_ENGINE, AUDIO_QC_SILENCE_DBFS_HUNDREDTHS,
     AUDIO_QC_SILENCE_INFO_MILLISECONDS, AUDIO_QC_SILENCE_WINDOW_MILLISECONDS, AudioChannelClipping,
     AudioClipping, AudioQcException, AudioQcMeasurements, AudioQcProvenance, AudioQcReport,
-    AudioQcRequest, audio_qc_exceptions, audio_qc_technical_pass, loudness_target_exceptions,
+    AudioQcRequest, audio_qc_exceptions, audio_qc_technical_pass, delivery_audio_exceptions,
+    loudness_target_exceptions,
 };
 pub use automation::{AutomationCurve, AutomationCurveError, Keyframe, KeyframeInterpolation};
 pub use captions::{
@@ -142,9 +143,10 @@ pub use journal::JournalCommand;
 pub use media::{
     Analysis, AnalysisJobStatus, AnalysisKind, AnalysisPhase, AssetBeats, AssetSceneChanges,
     AssetSilences, AssetTranscript, AudioChain, AudioLoudness, BeatMarker, BeatStatus, BusLevels,
-    Export, ExportCancellation, ExportLutPreflightIssue, ExportLutPreflightReport,
-    ExportMediaPreflightIssue, ExportMediaPreflightReport, ExportProgress, ExportSettings,
-    FrameTexture, LinearRgbaImage, LoudnessSnapshot, LutAvailabilityKind, LutAvailabilityStatus,
+    DeliveryAudioVerification, Export, ExportAudioReport, ExportCancellation,
+    ExportLutPreflightIssue, ExportLutPreflightReport, ExportMediaPreflightIssue,
+    ExportMediaPreflightReport, ExportProgress, ExportReport, ExportSettings, FrameTexture,
+    LinearRgbaImage, LoudnessSnapshot, LutAvailabilityKind, LutAvailabilityStatus,
     MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_HISTOGRAM_BUCKETS, MATTE_COVERAGE_SCALE,
     MatteCoverageError, MatteCoverageStatistics, MatteProof, MatteProofError, MatteProofMetadata,
     MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,

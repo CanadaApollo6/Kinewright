@@ -1207,6 +1207,62 @@ impl AudioEffectRuntime {
     }
 }
 
+/// AU3 §5.6: run one static audio node over a whole interleaved buffer.
+///
+/// Builds a fresh [`AudioEffectRuntime`] from `effect`, calls `process_frame`
+/// with `project_at = TimeCode::ZERO` on every frame — so every automation
+/// curve is read at one project frame and the node behaves as a static one —
+/// feeds `Lh` zero frames after the input so the lookahead delay line is
+/// flushed, and drops the first `Lh` output frames so the returned buffer is
+/// aligned with the input it was handed. The master carries no sidechain, so
+/// the tap reads exact zeros, exactly as `AudioMixProcessor` does on the
+/// master chain.
+///
+/// # Errors
+///
+/// Returns `MediaError::Backend` when `channels` is zero, or — per AU3 §5.6's
+/// F11 bullet, which forbids a panic here — when the assembled output length
+/// differs from the input's, which is what an unaligned `input` produces.
+pub(crate) fn process_buffer_static(
+    effect: &Effect,
+    sample_rate: u32,
+    channels: usize,
+    input: &[f32],
+) -> Result<Vec<f32>, MediaError> {
+    if channels == 0 {
+        return Err(MediaError::Backend(
+            "a static audio node needs at least one channel".to_owned(),
+        ));
+    }
+    let mut runtime = AudioEffectRuntime::new(effect, channels, sample_rate);
+    let latency_frames = runtime.latency_frames;
+    let silence = vec![0.0_f32; channels];
+    let mut frame = vec![0.0_f32; channels];
+    let mut output = Vec::with_capacity(input.len().saturating_add(latency_frames * channels));
+    for source in input.chunks_exact(channels) {
+        frame.copy_from_slice(source);
+        runtime.process_frame(&mut frame, &silence, TimeCode::ZERO, sample_rate);
+        output.extend_from_slice(&frame);
+    }
+    // AU2 §3.5: the node's total signal delay is exactly `Lh` frames, so `Lh`
+    // zero frames flush the last real frame out of the delay line.
+    for _ in 0..latency_frames {
+        frame.fill(0.0);
+        runtime.process_frame(&mut frame, &silence, TimeCode::ZERO, sample_rate);
+        output.extend_from_slice(&frame);
+    }
+    let dropped = latency_frames.saturating_mul(channels);
+    if dropped > output.len() || output.len() - dropped != input.len() {
+        return Err(MediaError::Backend(format!(
+            "a static audio node changed its buffer length: {} input samples became {}",
+            input.len(),
+            output.len().saturating_sub(dropped)
+        )));
+    }
+    output.drain(..dropped);
+    Ok(output)
+}
+
 /// AU2 §5.8: one node's contribution to a chain's **structure** — its id, its
 /// effect name, and its static `lookahead_milliseconds`.
 ///
@@ -2682,7 +2738,7 @@ fn render_output<T>(
     );
 }
 
-struct AudioDecoder {
+pub(crate) struct AudioDecoder {
     path: PathBuf,
     input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Audio,
@@ -2700,7 +2756,7 @@ struct AudioDecoder {
 }
 
 impl AudioDecoder {
-    fn open(
+    pub(crate) fn open(
         path: &Path,
         output_rate: u32,
         output_channels: u16,
@@ -2751,7 +2807,7 @@ impl AudioDecoder {
         })
     }
 
-    fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
+    pub(crate) fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
         loop {
             if self.finished {
                 return Ok(None);
@@ -3242,6 +3298,7 @@ mod tests {
             audio_codec: "aac".to_owned(),
             video_bitrate: 1_000_000,
             audio_bitrate: 128_000,
+            loudness_normalization: None,
             cancellation: ExportCancellation::default(),
         };
 
@@ -3431,6 +3488,7 @@ mod tests {
             audio_codec: "aac".to_owned(),
             video_bitrate: 1_000_000,
             audio_bitrate: 128_000,
+            loudness_normalization: None,
             cancellation: ExportCancellation::default(),
         }
     }
@@ -4450,6 +4508,87 @@ mod tests {
     /// AU2 §3.6: the latency tests' shared helper.
     fn latency_offset(document: &Document, rate: u32) -> usize {
         graph_latency_frames(&document.audio_mix.lookahead_milliseconds(), rate)
+    }
+
+    /// AU3 §7 B7: `process_buffer_static` is length-preserving, latency-
+    /// compensated, a bit-exact identity on an under-ceiling buffer, and
+    /// returns an error rather than panicking when the output length would
+    /// differ from the input's.
+    #[test]
+    fn au3_process_buffer_static_preserves_length_and_alignment() {
+        // AU2 §3.5: the node's total delay is exactly `Lh`, which is 240
+        // frames for the export step's 5 ms lookahead at 48 kHz.
+        assert_eq!(stage_latency_frames(5, 48_000), 240);
+        let limiter = audio_effect(
+            1,
+            "audio_true_peak_limiter",
+            &[
+                ("ceiling_tenth_db", -30),
+                ("lookahead_milliseconds", 5),
+                ("release_milliseconds", 50),
+                ("true_peak", 1),
+            ],
+        );
+        // A 997 Hz tone at 0.5 with a 0.5 impulse on the very first frame:
+        // every sample is under the node's `10^(-30/200) = 0.708` ceiling, so
+        // the limiter is an identity, and the impulse's position is what a
+        // wrong `Lh` drop would move.
+        let mut input = Vec::new();
+        for sample in tone(997.0, 0.5, 48_000, 48_000) {
+            input.push(sample);
+            input.push(sample);
+        }
+        input[0] = 0.5;
+        input[1] = 0.5;
+        let output = process_buffer_static(&limiter, 48_000, 2, &input)
+            .expect("an aligned buffer must run through a static node");
+        assert_eq!(output.len(), input.len());
+        // The alignment claim, asserted independently of the identity below:
+        // the tone's own frame 0 is `sin(0) = 0`, so only the impulse can put
+        // 0.5 on the first frame. A buffer still carrying its `Lh` frames of
+        // latency would read the node's silent lookahead priming here.
+        assert!(
+            (output[0] - 0.5).abs() < f32::EPSILON && (output[1] - 0.5).abs() < f32::EPSILON,
+            "the first `Lh` = 240 output frames must have been dropped, leaving the impulse on \
+             frame 0: {} {}",
+            output[0],
+            output[1]
+        );
+        assert_eq!(
+            output, input,
+            "AU2 A27: an under-ceiling buffer passes through the limiter bit-identically, and it \
+             does so in place — the first `Lh` output frames were dropped, so the impulse is \
+             still on frame 0"
+        );
+    }
+
+    /// AU3 §7 B7 / §5.6's F11 bullet: a length change is an error, never a
+    /// panic. An input that is not aligned to the channel count is the
+    /// reachable case.
+    #[test]
+    fn au3_process_buffer_static_refuses_a_length_change_without_panicking() {
+        let limiter = audio_effect(
+            1,
+            "audio_true_peak_limiter",
+            &[("ceiling_tenth_db", -30), ("lookahead_milliseconds", 5)],
+        );
+        let unaligned = vec![0.25_f32; 5];
+        let error = process_buffer_static(&limiter, 48_000, 2, &unaligned)
+            .expect_err("an unaligned buffer cannot come back the length it went in");
+        match &error {
+            MediaError::Backend(message) => {
+                assert!(message.contains("changed its buffer length"), "{message}");
+            }
+            other => panic!("a length change must be a typed backend error: {other}"),
+        }
+        let error = process_buffer_static(&limiter, 48_000, 0, &unaligned)
+            .expect_err("a zero-channel buffer has no frames to run");
+        match &error {
+            MediaError::Backend(message) => {
+                assert!(message.contains("at least one channel"), "{message}");
+            }
+            other => panic!("a zero channel count must be a typed backend error: {other}"),
+        }
     }
 
     #[allow(clippy::cast_precision_loss)]

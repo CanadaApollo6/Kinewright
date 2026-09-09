@@ -55,6 +55,21 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- AU3 Part B, delivery: `ExportSettings.loudness_normalization` — off by
+  default, never a document edit — normalises the mixed master to the
+  delivery profile's loudness target between the mixdown and the encode,
+  through the true-peak limiter held under the target's ceiling by the lossy
+  codec headroom, and reports what it did (`ExportAudioReport`: before,
+  after, applied gain, limiter passes, peak reduction, on-target, or the
+  reason it skipped). After every export the written file's audio is decoded
+  and its loudness and true peak verified against the same target
+  (`DeliveryAudioVerification`, `AUDIO VERIFIED` / `OFF TARGET` / `OVER
+  CEILING` / `MEASURED` / `NOT VERIFIED`); like the video check it never
+  fails a job. The agent's `queue_export` gains `normalize_loudness` and its
+  job records carry the audio report and verification;
+  `plan_audio_normalization` now plans on the true-peak limiter. The export
+  dialog gains a `Loudness` row and an `AUDIO` verification sub-block. See
+  docs/AU3-LOUDNESS-AND-DELIVERY.md.
 - AU3 Part A, measurement: one streaming `LoudnessMeter` behind every loudness
   reading — offline measurement, per-track/bus/master levels, the live
   playback meter, audio QC, and (Part B) decoded delivery verification. It

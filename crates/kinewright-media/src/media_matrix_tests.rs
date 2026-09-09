@@ -877,6 +877,7 @@ fn validate_mixed_export(
         audio_codec: "aac".to_owned(),
         video_bitrate: 750_000,
         audio_bitrate: 128_000,
+        loudness_normalization: None,
         cancellation: ExportCancellation::default(),
     };
     export_document(&document, &output, &settings, &progress, gpu).unwrap();

@@ -476,6 +476,18 @@ impl Analysis for BaselineProofAnalysis {
         self.inner.audio_qc(document, request)
     }
 
+    /// AU3 §4.3: the delivery audio verification forwards for the same reason
+    /// `audio_qc` does. The export worker measures the written file through
+    /// whatever `Analysis` the app holds, and that is this proxy whenever a
+    /// working proof is being shared.
+    fn verify_delivery_audio(
+        &self,
+        path: &std::path::Path,
+        target: Option<kinewright_core::LoudnessTarget>,
+    ) -> Result<kinewright_core::DeliveryAudioVerification, MediaError> {
+        self.inner.verify_delivery_audio(path, target)
+    }
+
     fn request_beat_detection(&self, asset: kinewright_core::MediaAsset) {
         self.inner.request_beat_detection(asset);
     }
@@ -2684,6 +2696,19 @@ mod tests {
         ) -> crossbeam_channel::Receiver<kinewright_core::VisualAssetResult> {
             crossbeam_channel::bounded(0).1
         }
+        /// AU3 §5.3: echo the path and whether a target arrived through the
+        /// error, so a forwarded call is distinguishable from the default.
+        fn verify_delivery_audio(
+            &self,
+            path: &std::path::Path,
+            target: Option<kinewright_core::LoudnessTarget>,
+        ) -> Result<kinewright_core::DeliveryAudioVerification, MediaError> {
+            Err(MediaError::Backend(format!(
+                "{} target={}",
+                path.display(),
+                target.map_or(-1, |target| target.integrated_lufs_hundredths)
+            )))
+        }
         fn audio_qc(
             &self,
             _document: &Document,
@@ -2703,14 +2728,15 @@ mod tests {
         }
     }
 
-    /// AU3 §7 A17: `BaselineProofAnalysis` forwards `audio_qc` to the engine
-    /// behind it rather than answering the trait's `NotImplemented` default.
+    /// AU3 §7 A17 and B14: `BaselineProofAnalysis` forwards `audio_qc` and
+    /// `verify_delivery_audio` to the engine behind it rather than answering
+    /// the trait's `NotImplemented` default.
     ///
     /// The double answers with the typed short-range refusal so the assertion
     /// can tell "forwarded" from "defaulted" by the error alone; the request
     /// is echoed back through the error's fields to prove it arrived intact.
     #[test]
-    fn au3_the_baseline_proof_analysis_forwards_audio_qc() {
+    fn au3_the_baseline_proof_analysis_forwards_the_audio_measurements() {
         use kinewright_core::{AudioQcRequest, DeliveryProfile};
 
         let document = document();
@@ -2741,6 +2767,27 @@ mod tests {
             ),
             "the proxy forwards audio_qc with its request intact; it answered {forwarded:?}"
         );
+
+        // AU3 §7 B14: and `verify_delivery_audio` the same way. The export
+        // worker measures the written file through whatever `Analysis` the app
+        // holds, so an arm missing here would answer `NotImplemented` while
+        // the engine behind it can decode the file.
+        let forwarded = proxy.verify_delivery_audio(
+            std::path::Path::new("/tmp/export.mp4"),
+            Some(kinewright_core::STREAMING_PLATFORM_TARGET),
+        );
+        assert!(
+            matches!(&forwarded, Err(MediaError::Backend(message))
+                if message == "/tmp/export.mp4 target=-1400"),
+            "the proxy forwards the path and the target it ran under; it answered {forwarded:?}"
+        );
+        let untargeted = proxy.verify_delivery_audio(std::path::Path::new("/tmp/export.mp4"), None);
+        assert!(
+            matches!(&untargeted, Err(MediaError::Backend(message))
+                if message == "/tmp/export.mp4 target=-1"),
+            "including the absence of one; it answered {untargeted:?}"
+        );
+
         assert_eq!(
             proxy.baseline_metadata(),
             None,

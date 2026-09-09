@@ -344,6 +344,38 @@ pub fn loudness_target_exceptions(
     exceptions
 }
 
+/// The delivery audio verification's exceptions (AU3 §5.3).
+///
+/// With `None` the verification is a reference measurement and raises
+/// nothing. With a target it is [`loudness_target_exceptions`] under the
+/// `delivery` prefix, plus `delivery_audio_silent` (`Warning`) when the
+/// decoded file has no gated block at all. Unlike the QC report, a delivery
+/// measurement is never length-refused, so that reading is ambiguous between a
+/// silent programme and one shorter than a single gating block; the message
+/// says both.
+#[must_use]
+pub fn delivery_audio_exceptions(
+    measured: &AudioLoudness,
+    target: Option<LoudnessTarget>,
+) -> Vec<AudioQcException> {
+    let Some(target) = target else {
+        return Vec::new();
+    };
+    let mut exceptions = loudness_target_exceptions(measured, target, "delivery");
+    if measured.integrated_lufs_hundredths.is_none() {
+        exceptions.push(AudioQcException {
+            code: "delivery_audio_silent".to_owned(),
+            severity: QaSeverity::Warning,
+            message: "The written file's audio reported no gated loudness: it is silent, or shorter than one 400 ms gating block.".to_owned(),
+            field: Some("integrated_lufs_hundredths".to_owned()),
+            observed: Some("none".to_owned()),
+            allowed: Some(format!("> {AUDIO_QC_SILENCE_DBFS_HUNDREDTHS}")),
+        });
+    }
+    sort_exceptions(&mut exceptions);
+    exceptions
+}
+
 /// `technical_pass`: no `Error`-severity exception. Warnings do not clear it.
 #[must_use]
 pub fn audio_qc_technical_pass(exceptions: &[AudioQcException]) -> bool {

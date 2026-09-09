@@ -10,10 +10,10 @@ use crossbeam_channel::{Receiver, Sender};
 use thiserror::Error;
 
 use crate::{
-    AssetId, AudioBusId, AudioQcReport, AudioQcRequest, ClipId, ColorDescription,
-    DeliveryVerification, DeliveryVerificationRequest, Document, EffectId, LutAsset, LutAssetId,
-    MediaAsset, MediaSourceFingerprint, NormalizedRoi, Rational, SCOPE_BASIS_POINTS, TimeCode,
-    TrackId, TrackKind, TrackMix,
+    AssetId, AudioBusId, AudioQcException, AudioQcReport, AudioQcRequest, ClipId, ColorDescription,
+    DeliveryVerification, DeliveryVerificationRequest, Document, EffectId, LoudnessTarget,
+    LutAsset, LutAssetId, MediaAsset, MediaSourceFingerprint, NormalizedRoi, Rational,
+    SCOPE_BASIS_POINTS, TimeCode, TrackId, TrackKind, TrackMix,
 };
 
 /// The runtime truth about whether an imported source can currently be read.
@@ -1033,6 +1033,13 @@ pub struct ExportSettings {
     pub audio_codec: String,
     pub video_bitrate: u64,
     pub audio_bitrate: u64,
+    /// AU3 §5.6: when `Some`, the export brings the finished master to this
+    /// target before encoding. A job parameter rather than a profile fact:
+    /// [`DeliveryProfile::export_settings`](crate::DeliveryProfile::export_settings)
+    /// leaves it `None`, so every existing call site encodes byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub loudness_normalization: Option<LoudnessTarget>,
     /// Runtime cancellation token. Deliberately **not** serialized: it is a
     /// live handle, not a setting, and a deserialized value reconstructs a
     /// fresh, uncancelled token (CC6 §9.5).
@@ -1071,6 +1078,75 @@ pub struct AudioLoudness {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(default)]
     pub true_peak_dbtp_hundredths: Option<i32>,
+}
+
+/// What the export's loudness normalization step did (AU3 §5.2).
+///
+/// Present only when the job asked for normalization
+/// ([`ExportSettings::loudness_normalization`]); a skipped step still reports
+/// its two measurements and names the reason it was skipped.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct ExportAudioReport {
+    pub target: LoudnessTarget,
+    pub before: AudioLoudness,
+    /// Equal to `before` when the step was skipped.
+    /// `after.true_peak_dbtp_hundredths` is the pre-encode true peak.
+    pub after: AudioLoudness,
+    /// Sum of the passes' gains; 0 when skipped.
+    pub applied_gain_hundredths: i32,
+    /// 0 (skipped), 1, or 2.
+    pub limiter_passes: u8,
+    /// `max(0, before.true_peak + applied_gain - after.true_peak)`: how far
+    /// the limiter pulled the true peak down, derived from the two meter
+    /// readings. 0 when the limiter was an identity or the step was skipped.
+    pub peak_reduction_hundredths: i32,
+    /// `after.integrated` within `target ± tolerance`. A miss still exports
+    /// (AU3 §5.6 F11): this field is what says so.
+    pub on_target: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub skipped_reason: Option<String>,
+}
+
+/// What an export reports about itself beyond the written file (AU3 §5.2).
+///
+/// Deliberately all-optional: [`Export::export_document_reporting`]'s default
+/// returns [`ExportReport::default`], which serializes to `{}`.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct ExportReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub audio: Option<ExportAudioReport>,
+}
+
+/// A measurement of the written file's audio (AU3 §5.3).
+///
+/// Like [`DeliveryVerification`], a verification is a measurement: it never
+/// moves, renames, or deletes the file.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct DeliveryAudioVerification {
+    pub output_path: PathBuf,
+    pub measured: AudioLoudness,
+    /// The measurement lane: always 48 000.
+    pub sample_rate: u32,
+    /// The measurement lane: always 2.
+    pub channels: u16,
+    /// Decoded frames at 48 kHz; may differ from the source by AAC priming and
+    /// padding (AU3 §5.8).
+    pub sample_frames: u64,
+    /// `settings.loudness_normalization` as the job ran (AU3 §5.3): `Some`
+    /// only when normalization was asked for. With `None` the verification is
+    /// a reference measurement and raises nothing.
+    pub target: Option<LoudnessTarget>,
+    pub exceptions: Vec<AudioQcException>,
+    /// No `Error`-severity exception.
+    pub technical_pass: bool,
 }
 
 /// Live loudness telemetry (AU3 §3.9). Integers only; not serialized, like
@@ -1809,6 +1885,25 @@ pub trait Analysis: Send + Sync {
     ) -> Result<DeliveryVerification, MediaError> {
         Err(MediaError::NotImplemented)
     }
+    /// Measure the audio of a written delivery file and raise the delivery
+    /// exceptions its target asks for (AU3 §5.3).
+    ///
+    /// `target` is the job's [`ExportSettings::loudness_normalization`]: with
+    /// `None` the verification is a reference measurement with no exceptions.
+    /// The file is only read.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when the file cannot be opened, holds no audio
+    /// stream, or cannot be decoded or measured.
+    fn verify_delivery_audio(
+        &self,
+        path: &Path,
+        target: Option<LoudnessTarget>,
+    ) -> Result<DeliveryAudioVerification, MediaError> {
+        let _ = (path, target);
+        Err(MediaError::NotImplemented)
+    }
     /// Queue derived speech recognition without blocking the caller. Repeated
     /// requests for the same asset are coalesced by the implementation.
     fn request_transcription(&self, asset: MediaAsset);
@@ -2205,6 +2300,27 @@ pub trait Export: Send + Sync {
         progress: ProgressSink,
     ) -> Result<(), MediaError> {
         self.export(out, settings, progress)
+    }
+
+    /// Export an explicit immutable document and report what the export did
+    /// beyond writing the file (AU3 §5.2).
+    ///
+    /// The default delegates to [`Export::export_document`] and reports
+    /// nothing, so a backend that performs no loudness normalization needs no
+    /// change.
+    ///
+    /// # Errors
+    ///
+    /// Returns a media error when export fails or is cancelled.
+    fn export_document_reporting(
+        &self,
+        document: Arc<Document>,
+        out: &Path,
+        settings: ExportSettings,
+        progress: ProgressSink,
+    ) -> Result<ExportReport, MediaError> {
+        self.export_document(document, out, settings, progress)
+            .map(|()| ExportReport::default())
     }
 }
 

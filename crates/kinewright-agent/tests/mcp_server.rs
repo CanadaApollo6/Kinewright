@@ -2475,6 +2475,10 @@ async fn cc7_prepare_commit_and_compare(
 ///
 /// AU3 §4.2 Part A (A16) adds one: the `get_audio_qc` inspector, registered
 /// directly after `get_audio_spectrum`, so 52 + 78 = 130. Served: unchanged.
+///
+/// AU3 §6.4 Part B (B13) adds none — it grows `queue_export`'s arguments by one
+/// boolean and rewrites three descriptions — so the counts hold at 52 + 78 and
+/// the served quad is byte-identical for the eighth consecutive measurement.
 #[tokio::test(flavor = "multi_thread")]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let core = Core::spawn(Document::default()).unwrap();
@@ -2508,12 +2512,12 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         130,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
-         AU3 Part A adds get_audio_qc"
+         AU3 Part A adds get_audio_qc; AU3 Part B adds none"
     );
     assert_eq!(
         operations.len(),
         52,
-        "AU2 Part B generates two more mutators; AU3 Part A generates none"
+        "AU2 Part B generates two more mutators; neither part of AU3 generates one"
     );
     for name in [
         "set_track_mix",
@@ -2529,7 +2533,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         registry.len() - operations.len(),
         78,
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
-         AU3 Part A adds get_audio_qc"
+         AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector"
     );
     let spectrum = registry
         .iter()
@@ -2544,7 +2548,11 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     // The served byte counts CC6 recorded, asserted byte-identically: no AU1,
     // AU2, or AU3 tool is served, and the seven served tools do not embed the
     // `Operation` schema, so neither the generated mutators nor the new
-    // audio descriptor rows, prose, and QC schema reach them.
+    // audio descriptor rows, prose, and QC schema reach them. AU3 Part B
+    // (§6.4/B13) moves the registry by 783 B — `QueueExportArgs`'
+    // `normalize_loudness` boolean and three rewritten descriptions — and none
+    // of it is served: `queue_export`, `get_export_jobs` and
+    // `plan_audio_normalization` are all registry-only tools.
     let metrics = server.tool_surface_metrics();
     assert_eq!(metrics.tool_count, 7);
     assert_eq!(metrics.serialized_bytes, 5_660, "{metrics:?}");
@@ -3810,6 +3818,333 @@ async fn au3_get_audio_qc_measures_the_real_mix() {
 
     client.cancel().await.unwrap();
     server.shutdown();
+}
+
+/// AU3 §6.3 / §7 B11: the normalization planner converges through the real
+/// engine, and what it commits is a true-peak limiter.
+///
+/// The plan is built by measuring, applying, and re-measuring the candidate in
+/// memory, so a planner that emitted the wrong node would still converge on
+/// *loudness*; the true-peak assertion is what separates the two. The
+/// committed bus is read back from the document — node names, ids, and the
+/// limiter's four parameters — and then the mix is re-measured through
+/// `get_audio_levels`, whose master line carries the decoded true peak AU3
+/// Part A added.
+///
+/// F17b: the bus declares 5 ms of `CHAIN_LOOKAHEAD_MILLISECONDS`' 20 ms
+/// budget, so committing it re-cues a running playback exactly once.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au3_plan_audio_normalization_converges_through_the_real_engine() {
+    let generated = au3_sine_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let planned = invoke_capability(
+        &client,
+        "plan_audio_normalization",
+        json!({
+            "track_ids": [1],
+            "target_lufs_hundredths": -1_600,
+            "maximum_sample_peak_dbfs_hundredths": -100,
+            "tolerance_hundredths": 100
+        }),
+    )
+    .await;
+    assert_eq!(
+        planned.is_error,
+        Some(false),
+        "the planner must converge on the real 440 Hz fixture: {planned:?}"
+    );
+    let body = planned.structured_content.as_ref().unwrap();
+    let revision = body["timeline_revision"].as_u64().unwrap();
+    // AU3 §6.3: the headroom is core's, and the processing ceiling is the
+    // requested ceiling minus it.
+    assert_eq!(body["lossy_codec_peak_headroom_hundredths"], 200);
+    assert_eq!(body["processing_ceiling_dbfs_hundredths"], -300);
+    // The predicted measurement carries AU3's true peak through `AudioLoudness`.
+    assert!(
+        body["predicted"]["true_peak_dbtp_hundredths"].is_i64(),
+        "{body}"
+    );
+    let predicted = body["predicted"]["integrated_lufs_hundredths"]
+        .as_i64()
+        .expect("a converged plan predicts a programme loudness");
+    assert!(
+        (predicted + 1_600).abs() <= 100,
+        "the plan is only returned inside the tolerance: {predicted}"
+    );
+
+    let plan_id = body["prepared_edit_plan"]["plan_id"].clone();
+    let committed = client
+        .call_tool(
+            CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                json!({"plan_id": plan_id, "expected_revision": revision})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        committed.is_error,
+        Some(false),
+        "{:?}",
+        committed.structured_content
+    );
+
+    // What landed in the document: one delivery bus whose last node is the
+    // inter-sample-aware limiter, never the legacy sample-peak clamp.
+    let document = query_document(&core);
+    let bus = document
+        .audio_mix
+        .buses
+        .last()
+        .expect("the plan commits one delivery bus");
+    assert_eq!(bus.name, "Delivery normalization");
+    assert_eq!(bus.tracks, vec![TrackId(1)]);
+    let names = bus
+        .effects
+        .iter()
+        .map(|effect| effect.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !names.contains(&"audio_limiter"),
+        "the legacy clamp must not reach a committed document: {names:?}"
+    );
+    assert_eq!(names.last(), Some(&"audio_true_peak_limiter"), "{names:?}");
+    let limiter = bus.effects.last().unwrap();
+    for (parameter, value) in [
+        ("ceiling_tenth_db", -30),
+        ("lookahead_milliseconds", 5),
+        ("release_milliseconds", 50),
+        ("true_peak", 1),
+    ] {
+        assert_eq!(
+            limiter.static_integer_parameter(parameter),
+            Some(value),
+            "{parameter}"
+        );
+    }
+    assert_eq!(
+        kinewright_core::chain_lookahead_milliseconds(&bus.effects),
+        5,
+        "F17b: one re-cue, 5 ms of the 20 ms budget"
+    );
+
+    // The committed mix really measures where the plan said it would, and its
+    // decoded true peak is under the requested ceiling.
+    let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(levels.is_error, Some(false), "{levels:?}");
+    let master = &levels.structured_content.as_ref().unwrap()["report"]["master"];
+    let integrated = master["integrated_lufs_hundredths"]
+        .as_i64()
+        .expect("the normalized master is not silent");
+    assert!(
+        (integrated + 1_600).abs() <= 100,
+        "master {integrated} is outside -1600 +/- 100"
+    );
+    let true_peak = master["true_peak_dbtp_hundredths"]
+        .as_i64()
+        .expect("the normalized master has a true peak");
+    assert!(
+        true_peak <= -100,
+        "the true-peak limiter must hold the requested ceiling: {true_peak}"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU3 §6.1/§6.2/§6.4 and §7 B10: `queue_export` normalizes and the job record
+/// carries both the report and the decoded measurement of the written file.
+///
+/// This is the whole Part B agent path end to end through the real engine: the
+/// request's `normalize_loudness` becomes `settings.loudness_normalization =
+/// profile.loudness_target()`, the export reports what its normalization step
+/// did, the finished file is decoded and measured against that same target,
+/// and `get_export_jobs` renders §6.4's two lines. A `NotImplemented` failure
+/// here means the media half of Part B is missing, not that this path is a
+/// stub.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au3_queue_export_normalizes_and_verifies_audio() {
+    let generated = au3_sine_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let directory = std::env::temp_dir().join(format!(
+        "kinewright-au3-queue-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let output = directory.join("normalized.mp4");
+
+    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let server =
+        McpServer::start_with_exporter(core.clone(), media.clone(), media.clone(), media.clone())
+            .unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    // The target is never on the request: the request says yes, the profile
+    // says what to. `get_delivery_profiles` publishes the same number.
+    let profiles = invoke_capability(&client, "get_delivery_profiles", json!({})).await;
+    let published = profiles.structured_content.as_ref().unwrap()["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|profile| profile["id"] == "source_master")
+        .cloned()
+        .expect("source_master is published");
+    assert_eq!(
+        published["loudness_target"]["integrated_lufs_hundredths"],
+        kinewright_core::DeliveryProfile::SourceMaster
+            .loudness_target()
+            .integrated_lufs_hundredths
+    );
+
+    let queued = invoke_capability(
+        &client,
+        "queue_export",
+        json!({
+            "expected_revision": 0,
+            "output_path": output,
+            "profile": "source_master",
+            "verify": false,
+            "normalize_loudness": true
+        }),
+    )
+    .await;
+    assert_eq!(
+        queued.is_error,
+        Some(false),
+        "{:?}",
+        queued.structured_content
+    );
+
+    // Poll the queue rather than sleeping on a fixed budget: a real encode
+    // plus a real decode is the slowest thing in this file.
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    let job = loop {
+        let jobs = invoke_capability(&client, "get_export_jobs", json!({})).await;
+        assert_eq!(jobs.is_error, Some(false), "{jobs:?}");
+        let record = jobs.structured_content.as_ref().unwrap()["jobs"][0].clone();
+        let text = jobs.content[0].as_text().unwrap().text.clone();
+        if matches!(
+            record["state"].as_str(),
+            Some("completed" | "failed" | "cancelled")
+        ) {
+            break (record, text);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the export never settled: {record}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let (record, text) = job;
+    assert_eq!(record["state"], "completed", "{record}");
+    assert_eq!(record["error"], serde_json::Value::Null);
+    assert!(
+        output.is_file(),
+        "the deliverable is where it was asked for"
+    );
+
+    // AU3 §5.2: the export reported what its normalization step did.
+    let report = record["audio_report"].clone();
+    let target = kinewright_core::DeliveryProfile::SourceMaster.loudness_target();
+    assert_eq!(
+        report["target"]["integrated_lufs_hundredths"], target.integrated_lufs_hundredths,
+        "{record}"
+    );
+    assert_eq!(
+        report["skipped_reason"],
+        serde_json::Value::Null,
+        "{record}"
+    );
+    assert_eq!(report["on_target"], true, "{record}");
+    let after = report["after"]["integrated_lufs_hundredths"]
+        .as_i64()
+        .unwrap();
+    assert!(
+        (after - i64::from(target.integrated_lufs_hundredths)).abs()
+            <= i64::from(target.tolerance_lu_hundredths),
+        "the pre-encode master is on target: {after}"
+    );
+
+    // AU3 §5.3: the written file was decoded and measured against that target,
+    // independently of `verify: false`.
+    assert_eq!(
+        record["audio_verification_unavailable_reason"],
+        serde_json::Value::Null,
+        "{record}"
+    );
+    let verification = record["audio_verification"].clone();
+    assert_eq!(
+        verification["target"]["integrated_lufs_hundredths"],
+        target.integrated_lufs_hundredths
+    );
+    assert_eq!(verification["sample_rate"], 48_000);
+    assert_eq!(verification["channels"], 2);
+    assert_eq!(verification["technical_pass"], true, "{verification}");
+    let decoded = verification["measured"]["integrated_lufs_hundredths"]
+        .as_i64()
+        .expect("the written file is not silent");
+    assert!(
+        (decoded - i64::from(target.integrated_lufs_hundredths)).abs() <= 100,
+        "the decoded delivery is on target: {decoded}"
+    );
+    let decoded_peak = verification["measured"]["true_peak_dbtp_hundredths"]
+        .as_i64()
+        .expect("the written file has a true peak");
+    assert!(
+        decoded_peak <= i64::from(target.true_peak_ceiling_dbtp_hundredths),
+        "the delivered true peak is under the ceiling: {decoded_peak}"
+    );
+    // `verify: false` still governs the video comparison only.
+    assert_eq!(record["verification"], serde_json::Value::Null);
+
+    // AU3 §6.4: the two text lines, in order, beside CC6's unchanged count.
+    let lines = text.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "1 retained export job(s)", "{text}");
+    assert_eq!(
+        lines[1],
+        format!(
+            "job 1 audio lufs={decoded} true_peak={decoded_peak} lra={} target={} \
+             ceiling={} technical_pass=true",
+            verification["measured"]["loudness_range_lu_hundredths"]
+                .as_i64()
+                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+            target.integrated_lufs_hundredths,
+            target.true_peak_ceiling_dbtp_hundredths
+        ),
+        "{text}"
+    );
+    assert_eq!(
+        lines[2],
+        format!(
+            "job 1 normalization gain={} passes={} reduction={} on_target=true skipped=none",
+            report["applied_gain_hundredths"].as_i64().unwrap(),
+            report["limiter_passes"].as_i64().unwrap(),
+            report["peak_reduction_hundredths"].as_i64().unwrap()
+        ),
+        "{text}"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
 }
 
 /// CC7 §5.2 (a) — mixed-camera interview.

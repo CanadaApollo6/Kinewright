@@ -1914,6 +1914,7 @@ mod tests {
             audio_codec: "aac".to_owned(),
             video_bitrate: 20_000_000,
             audio_bitrate: 192_000,
+            loudness_normalization: None,
             cancellation: ExportCancellation::default(),
         }
     }
@@ -2330,6 +2331,7 @@ mod tests {
             audio_codec: "aac".to_owned(),
             video_bitrate: 20_000_000,
             audio_bitrate: 192_000,
+            loudness_normalization: None,
             cancellation: ExportCancellation::default(),
         };
         (Arc::new(document), settings)

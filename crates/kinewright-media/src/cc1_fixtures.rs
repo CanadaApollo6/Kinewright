@@ -3937,6 +3937,7 @@ fn cc1_h264_yuv420p_delivery_is_measured_separately_from_gpu_gate() {
         audio_codec: "aac".to_owned(),
         video_bitrate: 20_000_000,
         audio_bitrate: 192_000,
+        loudness_normalization: None,
         cancellation: ExportCancellation::default(),
     };
     let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();

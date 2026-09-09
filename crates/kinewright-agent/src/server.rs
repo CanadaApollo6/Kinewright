@@ -77,7 +77,9 @@ use crate::{
         plan_primary_correction, plan_secondary_correction, plan_technical_lut,
         primary_parameter_summary, raw_only_conflict,
     },
-    export_queue::{ExportJobId, ExportQueue, ExportQueueError, QueueExportRequest},
+    export_queue::{
+        ExportJobId, ExportJobRecord, ExportQueue, ExportQueueError, QueueExportRequest,
+    },
     pacing::{DialoguePacingGap, dialogue_pacing_gaps},
     render::{
         cuttable_timeline_silences, render_asset_scene_changes, render_asset_silences,
@@ -3628,6 +3630,7 @@ impl KinewrightMcp {
                 overwrite: args.overwrite,
                 verify: args.verify,
                 delivery_bit_depth: args.delivery_bit_depth,
+                normalize_loudness: args.normalize_loudness,
             },
         ) {
             Ok(record) => record,
@@ -3655,10 +3658,7 @@ impl KinewrightMcp {
             );
         };
         let jobs = queue.list();
-        success_structured(
-            format!("{} retained export job(s)", jobs.len()),
-            serde_json::json!({"jobs": jobs}),
-        )
+        success_structured(export_job_lines(&jobs), serde_json::json!({"jobs": jobs}))
     }
 
     fn cancel_export(&self, job_id: ExportJobId) -> CallToolResult {
@@ -8386,6 +8386,7 @@ fn timeline_contains_asset(
     })
 }
 
+#[derive(Debug)]
 struct NormalizationContext {
     tracks: Vec<TrackId>,
     bus_id: AudioBusId,
@@ -8437,12 +8438,18 @@ fn normalization_context(
     // this call site's former inline loop. There is deliberately no matching
     // document-wide effect-id helper (N1), so the scan below stays local.
     let bus_id = document.audio_mix.next_bus_id();
+    // AU3 §6.3: the master chain is scanned too, for symmetry rather than
+    // correctness — effect ids are unique per owner (AU2 N1), so a master
+    // effect could never have collided with a bus effect's id. Scanning it
+    // means the one place that allocates audio effect ids reads every audio
+    // effect the document has.
     let first_effect_id = document
         .tracks
         .iter()
         .flat_map(|track| &track.clips)
         .flat_map(|clip| &clip.effects)
         .chain(document.audio_mix.buses.iter().flat_map(|bus| &bus.effects))
+        .chain(document.audio_mix.master.effects.iter())
         .map(|effect| effect.id.0)
         .max()
         .unwrap_or(0)
@@ -8601,13 +8608,26 @@ fn normalization_bus(
         ));
         next_effect_id = next_effect_id.saturating_add(1);
     }
+    // AU3 §6.3: the delivery limiter is the inter-sample-aware one. The legacy
+    // `audio_limiter` clamps sample peaks only, so a chain that satisfied it
+    // could still overshoot the target's true-peak ceiling after a lossy
+    // encode — which is the one thing this plan exists to prevent. The
+    // parameters are the descriptor's own neutrals (AU2 §2.2): 5 ms of
+    // lookahead, a 50 ms release, and the true-peak detector on. The
+    // compressor above declares none, so the bus declares 5 ms of
+    // `chain_lookahead_milliseconds`' 20 ms budget.
     effects.push(static_audio_effect(
         EffectId(next_effect_id),
-        "audio_limiter",
-        &[(
-            "ceiling_tenth_db",
-            i64::from(ceiling_hundredths).div_euclid(10),
-        )],
+        "audio_true_peak_limiter",
+        &[
+            (
+                "ceiling_tenth_db",
+                i64::from(ceiling_hundredths).div_euclid(10),
+            ),
+            ("lookahead_milliseconds", 5),
+            ("release_milliseconds", 50),
+            ("true_peak", 1),
+        ],
     ));
     Ok(AudioBus {
         id: bus_id,
@@ -9081,6 +9101,12 @@ struct QueueExportArgs {
     /// colour contract.
     #[serde(default)]
     delivery_bit_depth: DeliveryEncodeDepth,
+    /// AU3 §5.6: bring the finished master to the profile's loudness target
+    /// (`get_delivery_profiles`) under a true-peak limiter before encoding.
+    /// Defaults to false. A job parameter, not a document edit; the source is
+    /// untouched, so no confirmation gate.
+    #[serde(default)]
+    normalize_loudness: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -10117,7 +10143,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "plan_audio_normalization",
-            "Measure the rendered timeline mix, build compressor/gain/limiter processing with lossy-codec peak headroom for selected source tracks, render and remeasure the candidate in memory, and return a revision-gated plan only when it meets the requested LUFS target and sample-peak ceiling.",
+            "Measure the rendered timeline mix, build compressor/gain/true-peak-limiter processing with lossy-codec peak headroom for selected source tracks, render and remeasure the candidate in memory, and return a revision-gated plan only when it meets the requested LUFS target and sample-peak ceiling, on a bus that declares 5 ms of lookahead so a running playback stops and re-cues once when the plan is committed.",
             schema_object::<AudioNormalizationPlanArgs>(),
         )
         .with_annotations(read_only()),
@@ -10189,7 +10215,7 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "queue_export",
-            "Queue a serial export of an immutable revision-gated branch snapshot using one stable delivery profile at the eight- or ten-bit delivery lane. New files require no confirmation; overwrite=true always enters the human confirmation broker and source media can never be targeted. verify (default true) decodes the finished encode and records its tags, luma and RGB differences, PSNR, and decoded legality on the job record; that measurement never fails the job and never moves, renames, or deletes the output.",
+            "Queue a serial export of an immutable revision-gated branch snapshot using one stable delivery profile at the eight- or ten-bit delivery lane. New files require no confirmation; overwrite=true always enters the human confirmation broker and source media can never be targeted. verify (default true) decodes the finished encode and records its tags, luma and RGB differences, PSNR, and decoded legality on the job record; that measurement never fails the job and never moves, renames, or deletes the output. normalize_loudness (default false) brings the finished master to the profile's loudness target under a true-peak limiter before encoding, as a job parameter rather than a document edit; every finished encode is measured for decoded loudness and true peak either way.",
             schema_object::<QueueExportArgs>(),
         )
         .with_annotations(
@@ -10201,7 +10227,7 @@ fn inspector_tools() -> Vec<Tool> {
         ),
         Tool::new(
             "get_export_jobs",
-            "Return every retained export job in enqueue order with immutable request, delivery lane, conformance, progress, terminal state, error data, and - for a verified job - the decoded post-export verification or the reason one could not run.",
+            "Return every retained export job in enqueue order with immutable request, delivery lane, conformance, progress, terminal state, error data, and - for a verified job - the decoded post-export verification or the reason one could not run, the decoded audio loudness verification, and the normalization report.",
             schema_object::<EmptyArgs>(),
         )
         .with_annotations(read_only()),
@@ -10856,6 +10882,62 @@ fn render_band_center_hertz(tenths: u32) -> String {
     } else {
         format!("{}.{}", tenths / 10, tenths % 10)
     }
+}
+
+/// AU3 §6.4: the `get_export_jobs` text, one line per fact rather than one
+/// paragraph per job.
+///
+/// The first line is CC6's count, unchanged, so a caller that reads only the
+/// summary reads exactly what it used to. A job then contributes an `audio`
+/// line when its file was measured and a `normalization` line when the export
+/// reported what it did — two independent facts: a job can be measured without
+/// having been normalized (the common case, `target=none`), and a normalization
+/// report can exist beside an unavailable measurement.
+///
+/// The target renders as both of its halves — `target=` for the integrated
+/// LUFS and `ceiling=` for the true-peak ceiling — so the `true_peak=` beside
+/// them has the one number it is judged against on the same line.
+///
+/// Every optional integer renders through [`render_optional_hundredths`], so a
+/// silent file reads `lufs=none` rather than a zero it never measured. The
+/// unavailable reasons are deliberately *not* rendered here: they are strings
+/// of arbitrary length that would drown the summary, and they are on the
+/// structured record for a caller that wants them.
+fn export_job_lines(jobs: &[ExportJobRecord]) -> String {
+    let mut lines = vec![format!("{} retained export job(s)", jobs.len())];
+    for job in jobs {
+        if let Some(audio) = &job.audio_verification {
+            lines.push(format!(
+                "job {} audio lufs={} true_peak={} lra={} target={} ceiling={} \
+                 technical_pass={}",
+                job.id.0,
+                render_optional_hundredths(audio.measured.integrated_lufs_hundredths),
+                render_optional_hundredths(audio.measured.true_peak_dbtp_hundredths),
+                render_optional_hundredths(audio.measured.loudness_range_lu_hundredths),
+                render_optional_hundredths(
+                    audio.target.map(|target| target.integrated_lufs_hundredths)
+                ),
+                render_optional_hundredths(
+                    audio
+                        .target
+                        .map(|target| target.true_peak_ceiling_dbtp_hundredths)
+                ),
+                audio.technical_pass,
+            ));
+        }
+        if let Some(report) = &job.audio_report {
+            lines.push(format!(
+                "job {} normalization gain={} passes={} reduction={} on_target={} skipped={}",
+                job.id.0,
+                report.applied_gain_hundredths,
+                report.limiter_passes,
+                report.peak_reduction_hundredths,
+                report.on_target,
+                report.skipped_reason.as_deref().unwrap_or("none"),
+            ));
+        }
+    }
+    lines.join("\n")
 }
 
 /// AU1 §6.2: `none` for an unmeasurable (silent) stem, the raw hundredths
@@ -21743,24 +21825,42 @@ mod tests {
         // loudness-target clause. 2,054 + 890 = 2,944 B is `get_audio_qc`'s
         // schema-plus-description share of the 3,103 B it costs serialized;
         // the remaining 252 B are the two amended descriptions.
+        //
+        // AU3 §6.4 Part B adds no tool: the counts stay 52 + 78 = 130 and the
+        // registry grows by 783 B to 1,425,658 B = 1,295,459 B of input
+        // schemas + 108,875 B of descriptions. The +321 B of input schemas is
+        // `QueueExportArgs`' `normalize_loudness` boolean and nothing else —
+        // the three new `ExportJobRecord` fields and `ExportSettings`'
+        // `loudness_normalization` are *outputs*, and no tool takes an
+        // `ExportJobRecord` or an `ExportSettings` as an argument. The +462 B
+        // of descriptions splits exactly three ways: 124 B for
+        // `plan_audio_normalization`'s true-peak rename and its re-cue clause,
+        // 267 B for `queue_export`'s `normalize_loudness` clause, and 71 B for
+        // `get_export_jobs`' two new report clauses. The planner's clause is
+        // 4 B dearer than the standalone sentence it replaced because it has
+        // to live *inside* the first sentence: `get_capability` and
+        // `search_capabilities` publish only `first_sentence(description)`, so
+        // a second sentence would have cost 120 B and reached no agent. Served
+        // is byte-identical again: `queue_export` is not served, and the seven
+        // served tools embed no export argument schema at all.
         assert_eq!(
             (
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_424_875, 5_660),
+            (1_425_658, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_295_138,
+            registry_metrics.input_schema_bytes, 1_295_459,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 108_413,
+            registry_metrics.description_bytes, 108_875,
             "registry={registry_metrics:?}"
         );
-        // AU2 §6.4/B15 and AU3 §4.2/A16: the served quad, byte-identical to
-        // CC6's.
+        // AU2 §6.4/B15, AU3 §4.2/A16 and AU3 §6.4/B13: the served quad,
+        // byte-identical to CC6's through every part of both programmes.
         assert_eq!(
             (
                 served_metrics.tool_count,
@@ -24599,5 +24699,455 @@ mod tests {
             "the fixture's default source description is what stops this proof, \
              not the LUT node: {structured}"
         );
+    }
+
+    /// AU3 §6.3/B11: a document with two audio tracks, an existing bus, and a
+    /// master chain — the three id spaces `first_effect_id` has to see.
+    fn au3_normalization_document() -> Document {
+        let Event::QueryResult(QueryResult::Document(seed)) = fixture()
+            .0
+            .request(Command::Query(Query::Document))
+            .unwrap()
+        else {
+            panic!("expected fixture document");
+        };
+        let mut document = (*seed).clone();
+        for (index, id) in [TrackId(2), TrackId(3)].into_iter().enumerate() {
+            document.tracks.push(Track {
+                id,
+                kind: TrackKind::Audio,
+                sync_lock: true,
+                clips: vec![Clip {
+                    id: ClipId(100 + u64::try_from(index).unwrap()),
+                    asset: AssetId(1),
+                    source_range: TimeCode::ZERO..TimeCode(60),
+                    content: kinewright_core::ClipContent::Media,
+                    timeline_start: TimeCode::ZERO,
+                    effects: Vec::new(),
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                }],
+            });
+        }
+        document
+    }
+
+    fn au3_plan_args(track_ids: Vec<TrackId>) -> AudioNormalizationPlanArgs {
+        AudioNormalizationPlanArgs {
+            track_ids,
+            target_lufs_hundredths: -1_600,
+            maximum_sample_peak_dbfs_hundredths: -100,
+            tolerance_hundredths: 100,
+        }
+    }
+
+    /// AU3 §6.3/B11: every malformed argument `normalization_context` refuses,
+    /// with its exact text.
+    ///
+    /// The planner is a `read_only` tool whose only output on a bad argument is
+    /// this string, so the strings are the contract. They were previously
+    /// pinned by nothing at all.
+    #[test]
+    fn normalization_context_refuses_each_malformed_argument() {
+        let mut document = au3_normalization_document();
+        for (args, expected) in [
+            (
+                au3_plan_args(Vec::new()),
+                "track_ids must contain at least one audio source track",
+            ),
+            (
+                au3_plan_args(vec![TrackId(2), TrackId(2)]),
+                "track_ids must not contain duplicates",
+            ),
+            (au3_plan_args(vec![TrackId(77)]), "track 77 does not exist"),
+            (
+                AudioNormalizationPlanArgs {
+                    target_lufs_hundredths: -2_401,
+                    ..au3_plan_args(vec![TrackId(2)])
+                },
+                "target_lufs_hundredths must be in -2400..=-900",
+            ),
+            (
+                AudioNormalizationPlanArgs {
+                    maximum_sample_peak_dbfs_hundredths: 1,
+                    ..au3_plan_args(vec![TrackId(2)])
+                },
+                "maximum_sample_peak_dbfs_hundredths must be in -300..=0",
+            ),
+            (
+                AudioNormalizationPlanArgs {
+                    tolerance_hundredths: 24,
+                    ..au3_plan_args(vec![TrackId(2)])
+                },
+                "tolerance_hundredths must be in 25..=300",
+            ),
+        ] {
+            assert_eq!(
+                normalization_context(&document, &args).unwrap_err(),
+                expected
+            );
+        }
+
+        // A track with no clips is a different refusal from a track that does
+        // not exist: one is a typo, the other is an empty lane.
+        document.tracks.push(Track {
+            id: TrackId(4),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: Vec::new(),
+        });
+        assert_eq!(
+            normalization_context(&document, &au3_plan_args(vec![TrackId(4)])).unwrap_err(),
+            "track 4 contains no audio source clips"
+        );
+
+        // An existing bus that already owns one of the tracks is refused by
+        // name, because silently re-routing a deliberate mix is the one thing
+        // a delivery plan must not do.
+        document.audio_mix.buses.push(kinewright_core::AudioBus {
+            id: kinewright_core::AudioBusId(7),
+            name: "Dialogue".to_owned(),
+            tracks: vec![TrackId(3)],
+            gain_tenth_db: 0,
+            effects: Vec::new(),
+            ducking_sidechain_tracks: Vec::new(),
+        });
+        assert_eq!(
+            normalization_context(&document, &au3_plan_args(vec![TrackId(3)])).unwrap_err(),
+            "track selection already intersects audio bus 7 (Dialogue); remove or deliberately \
+             revise that mix before normalizing"
+        );
+    }
+
+    /// AU3 §6.3/B11: the plan's limiter is the inter-sample-aware one, in every
+    /// branch, and it declares 5 ms of the 20 ms chain lookahead budget.
+    ///
+    /// The legacy `audio_limiter` clamps sample peaks only, so a chain that
+    /// satisfied it could still overshoot the target's true-peak ceiling after
+    /// a lossy encode — the exact failure this plan exists to prevent. The
+    /// test asserts the node name is nowhere in any branch, not merely that
+    /// the new one is present.
+    #[test]
+    fn normalization_bus_emits_a_true_peak_limiter_and_never_the_legacy_clamp() {
+        // A positive gain that fits under the ceiling: gain node, no
+        // compression curve; a positive gain that does not: a real threshold
+        // and a 4:1 ratio; a negative gain: one attenuation node.
+        for (label, gain, peak, expected_names) in [
+            (
+                "positive, no compression needed",
+                600,
+                -1_500,
+                vec!["audio_compressor", "audio_true_peak_limiter"],
+            ),
+            (
+                "positive, compression needed",
+                2_800,
+                -200,
+                vec!["audio_compressor", "audio_gain", "audio_true_peak_limiter"],
+            ),
+            (
+                "negative",
+                -900,
+                -150,
+                vec!["audio_gain", "audio_true_peak_limiter"],
+            ),
+        ] {
+            let bus = normalization_bus(
+                kinewright_core::AudioBusId(3),
+                42,
+                vec![TrackId(2)],
+                gain,
+                peak,
+                -300,
+            )
+            .unwrap();
+            let names = bus
+                .effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, expected_names, "{label}");
+            assert!(
+                !names.contains(&"audio_limiter"),
+                "{label}: the legacy sample-peak clamp must not be planned"
+            );
+            // Ids are allocated from `first_effect_id` upward, in chain order.
+            assert_eq!(
+                bus.effects
+                    .iter()
+                    .map(|effect| effect.id.0)
+                    .collect::<Vec<_>>(),
+                (42..42 + u64::try_from(names.len()).unwrap()).collect::<Vec<_>>(),
+                "{label}"
+            );
+
+            let limiter = bus.effects.last().unwrap();
+            for (parameter, value) in [
+                ("ceiling_tenth_db", -30),
+                ("lookahead_milliseconds", 5),
+                ("release_milliseconds", 50),
+                ("true_peak", 1),
+            ] {
+                assert_eq!(
+                    limiter.static_integer_parameter(parameter),
+                    Some(value),
+                    "{label}: {parameter}"
+                );
+            }
+            // AU3 §6.3/F17b: the compressor declares no lookahead, so the whole
+            // bus costs 5 ms of `CHAIN_LOOKAHEAD_MILLISECONDS`' 20.
+            assert_eq!(
+                kinewright_core::chain_lookahead_milliseconds(&bus.effects),
+                5,
+                "{label}"
+            );
+            assert_eq!(bus.gain_tenth_db, 0, "{label}");
+            assert_eq!(bus.name, "Delivery normalization", "{label}");
+        }
+    }
+
+    /// AU3 §6.3/B11: `first_effect_id` sees the master chain too.
+    ///
+    /// Effect ids are unique per owner (AU2 N1), so a master id could never
+    /// have collided with a bus id; scanning it is symmetry, not a fix. What
+    /// the test pins is that the one place allocating audio effect ids reads
+    /// every audio effect the document has, so the plan's ids never repeat a
+    /// number a reader can already see on screen.
+    #[test]
+    fn first_effect_id_scans_the_master_chain() {
+        let mut document = au3_normalization_document();
+        let baseline = normalization_context(&document, &au3_plan_args(vec![TrackId(2)]))
+            .unwrap()
+            .first_effect_id;
+        assert_eq!(baseline, 1, "an untouched fixture allocates from 1");
+
+        document.audio_mix.master.effects.push(static_audio_effect(
+            EffectId(31),
+            "audio_gain",
+            &[("gain_tenth_db", -20)],
+        ));
+        assert_eq!(
+            normalization_context(&document, &au3_plan_args(vec![TrackId(2)]))
+                .unwrap()
+                .first_effect_id,
+            32,
+            "the master chain's highest id is one the plan must not reuse"
+        );
+    }
+
+    /// AU3 §6.3/B11 and §6.4/B10: the three rewritten Part B descriptions say
+    /// what changed under them.
+    ///
+    /// The planner's re-cue clause (F17b) is the one an agent needs before it
+    /// commits: a bus that declares lookahead stops and re-cues a running
+    /// playback, and a caller that does not know that reads the gap as a bug.
+    /// It is therefore folded into the *first* sentence, because that is all
+    /// `get_capability` and `search_capabilities` publish — they carry
+    /// `first_sentence(description)` as the summary and drop the rest — so a
+    /// second sentence would reach no agent on either compact surface. The
+    /// test pins the published summary, not the raw description, so a later
+    /// edit that splits the clause back out fails here.
+    #[test]
+    fn au3_part_b_tool_descriptions_name_the_lookahead_and_the_audio_report() {
+        let tools = KinewrightMcp::tools().unwrap();
+        let description = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} is registered"))
+                .description
+                .clone()
+                .unwrap_or_else(|| panic!("{name} carries a description"))
+                .to_string()
+        };
+        let planner = description("plan_audio_normalization");
+        assert!(
+            planner.contains("compressor/gain/true-peak-limiter processing"),
+            "{planner}"
+        );
+        assert!(!planner.contains("compressor/gain/limiter"), "{planner}");
+        assert!(
+            planner.contains(
+                "on a bus that declares 5 ms of lookahead so a running playback stops and \
+                 re-cues once when the plan is committed."
+            ),
+            "{planner}"
+        );
+
+        // The compact surfaces publish only the first sentence, so the re-cue
+        // clause has to live in it. `capabilities` is what `get_capability`
+        // and `search_capabilities` both project through.
+        let summary = crate::runtime::capabilities(&tools)
+            .into_iter()
+            .find(|capability| capability.name == "plan_audio_normalization")
+            .expect("the planner is a capability")
+            .summary;
+        assert!(
+            summary.contains("re-cues"),
+            "the re-cue warning must survive first_sentence: {summary}"
+        );
+        assert_eq!(summary, planner, "the description is one sentence");
+
+        let queue = description("queue_export");
+        assert!(
+            queue.contains("normalize_loudness (default false)"),
+            "{queue}"
+        );
+        assert!(
+            queue.contains("every finished encode is measured for decoded loudness and true peak"),
+            "{queue}"
+        );
+
+        let jobs = description("get_export_jobs");
+        assert!(
+            jobs.contains("the decoded audio loudness verification, and the normalization report"),
+            "{jobs}"
+        );
+    }
+
+    /// AU3 §6.4/B10: what `get_export_jobs` says about a job's audio.
+    ///
+    /// Two independent lines: a job can be measured without having been
+    /// normalized (`target=none`, the common case) and a normalization report
+    /// can sit beside a measurement that could not run. Both halves of the
+    /// target are on the audio line, so `true_peak=` is never printed without
+    /// the `ceiling=` it is judged against. The unavailable reasons
+    /// stay off the text — arbitrary-length strings that would drown the
+    /// summary — and live on the structured record instead.
+    #[test]
+    fn au3_export_job_lines_render_the_audio_measurement_and_the_report() {
+        let target = DeliveryProfile::SourceMaster.loudness_target();
+        let measured = kinewright_core::AudioLoudness {
+            integrated_lufs_hundredths: Some(-2_298),
+            sample_peak_dbfs_hundredths: Some(-320),
+            sample_rate: 48_000,
+            channels: 2,
+            sample_frames: 240_000,
+            momentary_max_lufs_hundredths: Some(-2_100),
+            short_term_max_lufs_hundredths: Some(-2_200),
+            loudness_range_lu_hundredths: Some(430),
+            true_peak_dbtp_hundredths: Some(-300),
+        };
+        let mut record = au3_export_job_record(ExportJobId(4));
+        record.audio_verification = Some(kinewright_core::DeliveryAudioVerification {
+            output_path: record.output_path.clone(),
+            measured,
+            sample_rate: 48_000,
+            channels: 2,
+            sample_frames: 240_000,
+            target: Some(target),
+            exceptions: Vec::new(),
+            technical_pass: true,
+        });
+        record.audio_report = Some(kinewright_core::ExportAudioReport {
+            target,
+            before: measured,
+            after: measured,
+            applied_gain_hundredths: 640,
+            limiter_passes: 1,
+            peak_reduction_hundredths: 0,
+            on_target: true,
+            skipped_reason: None,
+        });
+
+        assert_eq!(
+            export_job_lines(std::slice::from_ref(&record)),
+            "1 retained export job(s)\n\
+             job 4 audio lufs=-2298 true_peak=-300 lra=430 target=-2300 ceiling=-100 \
+             technical_pass=true\n\
+             job 4 normalization gain=640 passes=1 reduction=0 on_target=true skipped=none"
+        );
+
+        // A reference measurement of a job that asked for no normalization: no
+        // target, no report line, and a silent file reads `none` rather than a
+        // zero it never measured.
+        let mut reference = au3_export_job_record(ExportJobId(5));
+        reference.audio_verification = Some(kinewright_core::DeliveryAudioVerification {
+            output_path: reference.output_path.clone(),
+            measured: kinewright_core::AudioLoudness {
+                integrated_lufs_hundredths: None,
+                sample_peak_dbfs_hundredths: None,
+                loudness_range_lu_hundredths: None,
+                true_peak_dbtp_hundredths: None,
+                ..measured
+            },
+            sample_rate: 48_000,
+            channels: 2,
+            sample_frames: 240_000,
+            target: None,
+            exceptions: Vec::new(),
+            technical_pass: true,
+        });
+        assert_eq!(
+            export_job_lines(std::slice::from_ref(&reference)),
+            "1 retained export job(s)\n\
+             job 5 audio lufs=none true_peak=none lra=none target=none ceiling=none \
+             technical_pass=true"
+        );
+
+        // A skipped normalization is still a report, and it names its reason.
+        let mut skipped = au3_export_job_record(ExportJobId(6));
+        skipped.audio_report = Some(kinewright_core::ExportAudioReport {
+            target,
+            before: measured,
+            after: measured,
+            applied_gain_hundredths: 0,
+            limiter_passes: 0,
+            peak_reduction_hundredths: 0,
+            on_target: false,
+            skipped_reason: Some("shorter than one 400 ms gating block".to_owned()),
+        });
+        skipped.audio_verification_unavailable_reason = Some("not implemented".to_owned());
+        assert_eq!(
+            export_job_lines(std::slice::from_ref(&skipped)),
+            "1 retained export job(s)\n\
+             job 6 normalization gain=0 passes=0 reduction=0 on_target=false \
+             skipped=shorter than one 400 ms gating block"
+        );
+
+        // A queue with nothing measured yet reads exactly as CC6 left it.
+        assert_eq!(
+            export_job_lines(&[au3_export_job_record(ExportJobId(1))]),
+            "1 retained export job(s)"
+        );
+        assert_eq!(export_job_lines(&[]), "0 retained export job(s)");
+    }
+
+    /// A completed, unmeasured job record: CC6's shape with AU3's three fields
+    /// absent, which is what a job that has only encoded looks like.
+    fn au3_export_job_record(id: ExportJobId) -> ExportJobRecord {
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let (_, document) = service.snapshot().unwrap();
+        ExportJobRecord {
+            id,
+            output_path: PathBuf::from("/tmp/kinewright-au3.mp4"),
+            profile: DeliveryProfile::SourceMaster,
+            focus_x_percent: 50,
+            focus_y_percent: 50,
+            overwrite: false,
+            state: crate::export_queue::ExportJobState::Completed,
+            progress: crate::export_queue::ExportJobProgress::default(),
+            conformance: kinewright_core::delivery_conformance(
+                &document,
+                DeliveryProfile::SourceMaster,
+                DeliveryEncodeDepth::Eight,
+                50,
+                50,
+            )
+            .unwrap(),
+            delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            error: None,
+            verification: None,
+            verification_unavailable_reason: None,
+            verifying: false,
+            audio_report: None,
+            audio_verification: None,
+            audio_verification_unavailable_reason: None,
+        }
     }
 }

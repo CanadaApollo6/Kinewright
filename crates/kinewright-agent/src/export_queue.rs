@@ -12,10 +12,11 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender};
 use kinewright_core::{
-    Analysis, AssetId, DELIVERY_VERIFICATION_FRAME_COUNT, DeliveryBudgets,
-    DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile, DeliveryVerification,
-    DeliveryVerificationRequest, Document, Export, ExportCancellation, ExportLutPreflightReport,
-    ExportMediaPreflightIssue, ExportMediaPreflightReport, ExportProgress, ExportSettings,
+    Analysis, AssetId, DELIVERY_VERIFICATION_FRAME_COUNT, DeliveryAudioVerification,
+    DeliveryBudgets, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile,
+    DeliveryVerification, DeliveryVerificationRequest, Document, Export, ExportAudioReport,
+    ExportCancellation, ExportLutPreflightReport, ExportMediaPreflightIssue,
+    ExportMediaPreflightReport, ExportProgress, ExportSettings, LoudnessTarget,
     MediaAvailabilityKind, MediaError, MediaSourceFingerprint, delivery_conformance,
     document_for_delivery_profile, export_lut_preflight_with, export_media_preflight,
     lut_node_may_be_active,
@@ -68,6 +69,14 @@ pub struct QueueExportRequest {
     /// 8-bit lane, so a pre-CC6 request means exactly what it used to.
     #[serde(default)]
     pub delivery_bit_depth: DeliveryEncodeDepth,
+    /// AU3 §5.6: bring the finished master to the profile's loudness target
+    /// (`get_delivery_profiles`) under a true-peak limiter before encoding.
+    /// Defaults to **false**, so a pre-AU3 request encodes byte-identically.
+    ///
+    /// A job parameter, not a document edit; the source is untouched, so no
+    /// confirmation gate.
+    #[serde(default)]
+    pub normalize_loudness: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -160,6 +169,36 @@ pub struct ExportJobRecord {
     /// written before CC6 — serializes byte-identically.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub verifying: bool,
+    /// AU3 §5.2: what the export's loudness normalization step did.
+    ///
+    /// `None` when the job did not ask for normalization, has not finished, or
+    /// ran against a backend that reports nothing. A skipped step is still a
+    /// report — it names its reason — so an absent report never means "the
+    /// normalization was skipped", only "no normalization was asked for".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_report: Option<ExportAudioReport>,
+    /// AU3 §5.3: the decoded measurement of the written file's audio.
+    ///
+    /// Independent of [`QueueExportRequest::verify`], which governs the video
+    /// comparison only: every finished encode is measured, and a job that
+    /// asked for no normalization gets a reference measurement whose `target`
+    /// is `None` and whose exception list is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_verification: Option<DeliveryAudioVerification>,
+    /// Why [`Self::audio_verification`] is absent. Never invents a pass.
+    ///
+    /// **Normative (CC6 §6.5 errata E31's sole-carrier rule, AU3 §6.2/R6):**
+    /// this field is the only carrier of an unavailable audio verification.
+    /// There is no `audio_verification_unavailable` exception anywhere — the
+    /// exceptions that exist live inside [`DeliveryAudioVerification`], which
+    /// is absent exactly when this reason is present. A surface that wants to
+    /// render NOT MEASURED reads this field.
+    ///
+    /// A job cancelled after its encode finished carries
+    /// [`EXPORT_CANCELLED_BEFORE_VERIFICATION`] here whatever `verify` asked
+    /// for, because the audio measurement is never opted out of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_verification_unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -267,6 +306,8 @@ struct WorkItem {
     verify: bool,
     /// CC6 §4.1: the delivery lane the settings are materialized at.
     depth: DeliveryEncodeDepth,
+    /// AU3 §6.1: normalize the finished master to the profile's target.
+    normalize_loudness: bool,
     cancellation: ExportCancellation,
     /// The live source identity observed when this job passed preflight.
     ///
@@ -550,6 +591,7 @@ impl ExportQueue {
             overwrite,
             verify,
             delivery_bit_depth,
+            normalize_loudness,
         } = request;
         if focus_x_percent > 100 || focus_y_percent > 100 {
             return Err(ExportQueueError::InvalidFocus {
@@ -632,6 +674,9 @@ impl ExportQueue {
                 verification: None,
                 verification_unavailable_reason: None,
                 verifying: false,
+                audio_report: None,
+                audio_verification: None,
+                audio_verification_unavailable_reason: None,
             };
             jobs.insert(
                 id,
@@ -651,6 +696,7 @@ impl ExportQueue {
             overwrite,
             verify,
             depth: delivery_bit_depth,
+            normalize_loudness,
             cancellation,
             verified_sources,
         };
@@ -703,15 +749,15 @@ impl ExportQueue {
 
 fn worker_loop(state: &Arc<QueueState>, work_rx: &Receiver<WorkItem>) {
     while let Ok(work) = work_rx.recv() {
-        run_work_item(state, work);
+        run_work_item(state, &work);
     }
 }
 
-fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
+fn run_work_item(state: &Arc<QueueState>, work: &WorkItem) {
     if work.cancellation.is_cancelled() || !mark_running(state, work.id) {
         // Nothing was encoded, so there is no file a verification could have
         // measured and no reason to record about one.
-        mark_cancelled(state, work.id, None);
+        mark_cancelled(state, work.id, None, None);
         return;
     }
     let media_preflight = export_media_preflight(&work.document, state.analysis.as_ref());
@@ -735,12 +781,21 @@ fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
         return;
     }
 
-    let settings =
+    let mut settings =
         work.profile
             .export_settings(&work.document, work.depth, work.cancellation.clone());
+    // AU3 §6.1: normalization is a job parameter, so it is written onto the
+    // profile's settings here rather than baked into `export_settings`, which
+    // every other caller shares. The target is the profile's own
+    // (`get_delivery_profiles`); the request carries only the yes/no.
+    settings.loudness_normalization = work
+        .normalize_loudness
+        .then(|| work.profile.loudness_target());
     // CC6 §6.5: the verification compares the written file against the exact
     // settings the encode ran under, so the settings are captured here rather
-    // than re-materialized afterwards.
+    // than re-materialized afterwards. AU3 §6.2: the audio verification reads
+    // its target from the same capture, so it can never check the file
+    // against a target the encode did not run.
     let verification_settings = settings.clone();
     let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
     let (stop_tx, stop_rx) = crossbeam_channel::bounded(1);
@@ -750,11 +805,16 @@ fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
         .name(format!("kinewright-export-progress-{}", work.id.0))
         .spawn(move || monitor_progress(&progress_state, progress_id, &progress_rx, &stop_rx));
 
-    let document = Arc::clone(&work.document);
+    // AU3 §5.2: the reporting call is the same export with one extra return
+    // value; its default implementation delegates to `export_document`, so a
+    // backend that normalizes nothing reports nothing and behaves as before.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state
-            .exporter
-            .export_document(work.document, &work.output_path, settings, progress_tx)
+        state.exporter.export_document_reporting(
+            Arc::clone(&work.document),
+            &work.output_path,
+            settings,
+            progress_tx,
+        )
     }));
     let _ = stop_tx.send(());
     if let Ok(progress_thread) = progress_thread {
@@ -769,56 +829,24 @@ fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
         // can still honour once the file is written, and an absent
         // `verification` with no reason beside it is the shape a caller reads
         // as "nothing to report".
+        // AU3 §6.2: the audio measurement is never opted out of, so a
+        // finished-and-cancelled encode always owes the audio reason, whatever
+        // `verify` asked of the video comparison.
         mark_cancelled(
             state,
             work.id,
             work.verify
                 .then(|| EXPORT_CANCELLED_BEFORE_VERIFICATION.to_owned()),
+            Some(EXPORT_CANCELLED_BEFORE_VERIFICATION.to_owned()),
         );
         return;
     }
     match result {
-        // Close the time-of-check/time-of-use gap: a source that was swapped
-        // while the encode ran would otherwise produce a job reported as
-        // completed against fingerprints the output does not actually contain.
-        Ok(Ok(())) => {
-            match source_identity_drift(&document, state.analysis.as_ref(), &work.verified_sources)
-            {
-                None => {
-                    // CC6 §6.5: verification runs only after the encode
-                    // succeeded *and* the source identity re-check passed, so
-                    // it never measures an output the queue has already
-                    // refused to vouch for.
-                    // CC6 §6.5: the encode is finished and the frame counter
-                    // has stopped moving, so say which wait this is rather
-                    // than leaving a caller to guess from a stalled Running.
-                    set_verifying(state, work.id, work.verify);
-                    let outcome = verify_output(
-                        state,
-                        work.verify,
-                        work.depth,
-                        &work.output_path,
-                        Arc::clone(&document),
-                        &verification_settings,
-                    );
-                    mark_completed(state, work.id, outcome);
-                }
-                Some(reason) => {
-                    let quarantine = quarantine_untrusted_output(&work.output_path);
-                    mark_failed(
-                        state,
-                        work.id,
-                        format!(
-                            "{}; {quarantine}",
-                            ExportQueueError::SourceIdentityChanged(reason)
-                        ),
-                    );
-                }
-            }
-        }
+        // The file is written: re-check the source identity, then measure it.
+        Ok(Ok(report)) => verify_and_settle(state, work, &verification_settings, report.audio),
         // The exporter itself stopped: no complete file was written, so there
         // is no skipped measurement to explain.
-        Ok(Err(MediaError::Cancelled)) => mark_cancelled(state, work.id, None),
+        Ok(Err(MediaError::Cancelled)) => mark_cancelled(state, work.id, None, None),
         Ok(Err(error)) => mark_failed(state, work.id, error.to_string()),
         Err(payload) => mark_failed(
             state,
@@ -829,6 +857,62 @@ fn run_work_item(state: &Arc<QueueState>, work: WorkItem) {
             ),
         ),
     }
+}
+
+/// Re-check the source identity, then measure the finished encode and settle
+/// the job (CC6 §6.5, AU3 §6.2).
+///
+/// Lifted out of [`run_work_item`] so the encode's own error handling stays
+/// readable beside it; the order is normative — drift first, because a
+/// verification must never measure an output the queue has already refused to
+/// vouch for, then the video comparison, then the audio measurement.
+fn verify_and_settle(
+    state: &Arc<QueueState>,
+    work: &WorkItem,
+    verification_settings: &ExportSettings,
+    audio_report: Option<ExportAudioReport>,
+) {
+    // Close the time-of-check/time-of-use gap: a source that was swapped while
+    // the encode ran would otherwise produce a job reported as completed
+    // against fingerprints the output does not actually contain.
+    if let Some(reason) = source_identity_drift(
+        &work.document,
+        state.analysis.as_ref(),
+        &work.verified_sources,
+    ) {
+        let quarantine = quarantine_untrusted_output(&work.output_path);
+        mark_failed(
+            state,
+            work.id,
+            format!(
+                "{}; {quarantine}",
+                ExportQueueError::SourceIdentityChanged(reason)
+            ),
+        );
+        return;
+    }
+    // CC6 §6.5: the encode is finished and the frame counter has stopped
+    // moving, so say which wait this is rather than leaving a caller to guess
+    // from a stalled Running. AU3 §6.2: the audio measurement always runs, so
+    // there is always a post-encode wait to name.
+    set_verifying(state, work.id, true);
+    let outcome = verify_output(
+        state,
+        work.verify,
+        work.depth,
+        &work.output_path,
+        Arc::clone(&work.document),
+        verification_settings,
+    );
+    // AU3 §6.2: the audio verification is independent of `verify` and runs
+    // after the video comparison, against the target the encode actually ran
+    // under rather than against anything the request said.
+    let audio = verify_audio_output(
+        state,
+        &work.output_path,
+        verification_settings.loudness_normalization,
+    );
+    mark_completed(state, work.id, outcome, audio, audio_report);
 }
 
 fn monitor_progress(
@@ -954,6 +1038,52 @@ fn verify_output(
     }
 }
 
+/// What one job's post-encode audio measurement produced (AU3 §5.3/§6.2).
+///
+/// Two outcomes, not three: unlike the video comparison there is no "not asked
+/// for". Every finished encode is measured, and a job that asked for no
+/// normalization gets a reference measurement whose `target` is `None`.
+#[derive(Debug)]
+enum AudioVerificationOutcome {
+    /// A decoded measurement was produced. It may carry exceptions and a false
+    /// `technical_pass`; that is reported, never acted on.
+    Measured(Box<DeliveryAudioVerification>),
+    /// The measurement could not run at all.
+    Unavailable(String),
+}
+
+/// Decode the finished encode's audio and measure it against the target the
+/// job ran under (AU3 §5.3/§6.2).
+///
+/// **This is a measurement.** Like [`verify_output`] it never moves, renames,
+/// deletes, or quarantines the file it read, for any outcome — including a
+/// target the file misses by a mile.
+///
+/// `target` is `settings.loudness_normalization` as the encode ran: `Some`
+/// exactly when normalization was asked for. With `None` the backend returns a
+/// reference measurement and raises nothing, which is why this runs for every
+/// job rather than only for normalized ones — the loudness of a delivered file
+/// is worth knowing whether or not the export set it.
+fn verify_audio_output(
+    state: &Arc<QueueState>,
+    output_path: &Path,
+    target: Option<LoudnessTarget>,
+) -> AudioVerificationOutcome {
+    // A backend that panics while measuring must not take down the worker or
+    // destroy a finished encode either.
+    let measured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state.analysis.verify_delivery_audio(output_path, target)
+    }));
+    match measured {
+        Ok(Ok(verification)) => AudioVerificationOutcome::Measured(Box::new(verification)),
+        Ok(Err(error)) => AudioVerificationOutcome::Unavailable(error.to_string()),
+        Err(payload) => AudioVerificationOutcome::Unavailable(format!(
+            "delivery audio verification panicked: {}",
+            panic_message(payload.as_ref())
+        )),
+    }
+}
+
 /// Complete a job and record its verification outcome.
 ///
 /// **Normative (CC6 §6.5): verification never fails a job.** A budget overrun
@@ -968,7 +1098,19 @@ fn verify_output(
 /// the result arrives, and a measurement of an export the caller abandoned is
 /// discarded rather than reported. The `verifying` flag is cleared either way,
 /// because by the time this runs the verification really has stopped.
-fn mark_completed(state: &Arc<QueueState>, id: ExportJobId, verification: VerificationOutcome) {
+///
+/// **AU3 §6.2: the audio verification never fails a job either.** A file that
+/// misses its loudness target leaves the job `Completed`, `error: None`, and
+/// `audio_verification.technical_pass == false`; a normalization that missed
+/// twice still wrote a real deliverable, and the two readings on the record
+/// are what say so.
+fn mark_completed(
+    state: &Arc<QueueState>,
+    id: ExportJobId,
+    verification: VerificationOutcome,
+    audio: AudioVerificationOutcome,
+    audio_report: Option<ExportAudioReport>,
+) {
     let mut jobs = lock_jobs(state);
     let Some(job) = jobs.get_mut(&id) else {
         return;
@@ -991,6 +1133,17 @@ fn mark_completed(state: &Arc<QueueState>, id: ExportJobId, verification: Verifi
                 job.record.verification_unavailable_reason = Some(reason);
             }
         }
+        match audio {
+            AudioVerificationOutcome::Measured(measured) => {
+                job.record.audio_verification = Some(*measured);
+                job.record.audio_verification_unavailable_reason = None;
+            }
+            AudioVerificationOutcome::Unavailable(reason) => {
+                job.record.audio_verification = None;
+                job.record.audio_verification_unavailable_reason = Some(reason);
+            }
+        }
+        job.record.audio_report = audio_report;
         if job.record.progress.total_frames > 0 {
             job.record.progress.completed_frames = job.record.progress.total_frames;
         }
@@ -1020,11 +1173,14 @@ fn mark_failed(state: &Arc<QueueState>, id: ExportJobId, error: String) {
 /// cancellation: the file exists, nothing measured it, and the record says so
 /// rather than presenting an absent measurement a caller could read as a pass.
 /// A job cancelled before or during its encode wrote no file to verify, so it
-/// carries no such reason.
+/// carries no such reason. AU3 §6.2: the audio reason follows the same rule
+/// with one difference — the audio measurement is never opted out of, so a
+/// finished encode always owes it, `verify` or not.
 fn mark_cancelled(
     state: &Arc<QueueState>,
     id: ExportJobId,
     verification_unavailable_reason: Option<String>,
+    audio_verification_unavailable_reason: Option<String>,
 ) {
     if let Some(job) = lock_jobs(state).get_mut(&id) {
         job.cancellation.cancel();
@@ -1032,6 +1188,8 @@ fn mark_cancelled(
         job.record.error = None;
         job.record.verification = None;
         job.record.verification_unavailable_reason = verification_unavailable_reason;
+        job.record.audio_verification = None;
+        job.record.audio_verification_unavailable_reason = audio_verification_unavailable_reason;
     }
 }
 
@@ -1157,11 +1315,11 @@ mod tests {
     };
 
     use kinewright_core::{
-        Analysis, AssetId, Clip, ClipContent, ColorContext, MediaAsset, MediaAvailabilityKind,
-        MediaAvailabilityStatus, MediaError, MediaKind, MediaSourceFingerprint, Rational,
-        RgbaImage, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-        TimelineTranscriptWord, Title, Track, TrackId, TrackKind, TranscriptStatus,
-        VisualAssetResult,
+        Analysis, AssetId, AudioLoudness, Clip, ClipContent, ColorContext, ExportReport,
+        MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus, MediaError, MediaKind,
+        MediaSourceFingerprint, Rational, RgbaImage, SilenceStatus, TimeCode, TimelineSceneChange,
+        TimelineSilenceSpan, TimelineTranscriptWord, Title, Track, TrackId, TrackKind,
+        TranscriptStatus, VisualAssetResult,
     };
 
     use super::*;
@@ -1190,6 +1348,21 @@ mod tests {
         },
     }
 
+    /// What the AU3 audio verification test double returns (AU3 §6.2).
+    ///
+    /// Four outcomes, not five: unlike the video comparison there is no
+    /// "asked for" axis to model, because the audio measurement always runs.
+    #[derive(Default)]
+    enum AudioVerificationDouble {
+        #[default]
+        NotImplemented,
+        Measured(Box<DeliveryAudioVerification>),
+        Refused(String),
+        /// A backend that unwinds instead of returning. The worker must
+        /// survive it, and the encode must survive it too.
+        Panics,
+    }
+
     #[derive(Default)]
     struct AvailabilityAnalysis {
         statuses: Mutex<BTreeMap<AssetId, MediaAvailabilityStatus>>,
@@ -1198,6 +1371,12 @@ mod tests {
         /// Every verification call, so "was it called at all" is asserted
         /// rather than inferred from an absent field.
         verification_calls: Mutex<Vec<(PathBuf, DeliveryVerificationRequest, ExportSettings)>>,
+        /// AU3 §6.2: the canned `verify_delivery_audio` result.
+        audio_verification: Mutex<AudioVerificationDouble>,
+        /// Every audio verification call with the target it was handed, so the
+        /// "target comes from the settings the encode ran under" rule is
+        /// asserted at the call rather than inferred from the record.
+        audio_verification_calls: Mutex<Vec<(PathBuf, Option<LoudnessTarget>)>>,
     }
 
     impl AvailabilityAnalysis {
@@ -1220,6 +1399,20 @@ mod tests {
                 verification: Mutex::new(double),
                 ..Self::default()
             }
+        }
+
+        fn with_audio_verification(double: AudioVerificationDouble) -> Self {
+            Self {
+                audio_verification: Mutex::new(double),
+                ..Self::default()
+            }
+        }
+
+        fn audio_verification_calls(&self) -> Vec<(PathBuf, Option<LoudnessTarget>)> {
+            self.audio_verification_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
 
         fn verification_calls(
@@ -1299,6 +1492,31 @@ mod tests {
                         .recv_timeout(Duration::from_secs(5))
                         .expect("the test releases the verification");
                     Ok((**verification).clone())
+                }
+            }
+        }
+
+        fn verify_delivery_audio(
+            &self,
+            path: &Path,
+            target: Option<LoudnessTarget>,
+        ) -> Result<DeliveryAudioVerification, MediaError> {
+            self.audio_verification_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((path.to_owned(), target));
+            match &*self
+                .audio_verification
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                AudioVerificationDouble::NotImplemented => Err(MediaError::NotImplemented),
+                AudioVerificationDouble::Measured(verification) => Ok((**verification).clone()),
+                AudioVerificationDouble::Refused(reason) => {
+                    Err(MediaError::Backend(reason.clone()))
+                }
+                AudioVerificationDouble::Panics => {
+                    panic!("this audio verification backend unwinds instead of returning")
                 }
             }
         }
@@ -1967,6 +2185,7 @@ mod tests {
             // verification, so they keep the default lane and opt out.
             verify: false,
             delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            normalize_loudness: false,
         }
     }
 
@@ -2145,6 +2364,25 @@ mod tests {
             settings.cancellation.cancel();
             Ok(())
         }
+
+        /// AU3 §5.2: it reports a real normalization, so the record's
+        /// `audio_report: None` after a cancel is a dropped report rather than
+        /// a report that was never made.
+        fn export_document_reporting(
+            &self,
+            _document: Arc<Document>,
+            out: &Path,
+            settings: ExportSettings,
+            _progress: kinewright_core::ProgressSink,
+        ) -> Result<ExportReport, MediaError> {
+            fs::write(out, self.bytes).unwrap();
+            settings.cancellation.cancel();
+            Ok(ExportReport {
+                audio: Some(au3_audio_report(
+                    DeliveryProfile::SourceMaster.loudness_target(),
+                )),
+            })
+        }
     }
 
     fn verified_request(
@@ -2160,6 +2398,7 @@ mod tests {
             overwrite: false,
             verify,
             delivery_bit_depth,
+            normalize_loudness: false,
         }
     }
 
@@ -2545,6 +2784,28 @@ mod tests {
                 "a job that asked to be verified says why it was not; one that did not asks \
                  nothing and is owed no explanation"
             );
+            // AU3 §6.2/B9: the audio measurement is never opted out of, so the
+            // audio reason is owed whatever `verify` asked for.
+            assert!(finished.audio_verification.is_none());
+            assert_eq!(
+                finished.audio_verification_unavailable_reason.as_deref(),
+                Some(EXPORT_CANCELLED_BEFORE_VERIFICATION),
+                "the audio measurement is never opted out of, so a finished-and-cancelled \
+                 encode always owes its reason"
+            );
+            assert!(
+                analysis.audio_verification_calls().is_empty(),
+                "skipping the measurement is the one thing cancellation can still honour"
+            );
+            // AU3 §6.2: the encode reported a normalization, and the cancel
+            // path drops it. `mark_completed` is the only writer of
+            // `audio_report` and it writes inside its `state != Cancelled`
+            // guard, so a cancelled job can never carry a stale report beside
+            // a measurement that was never taken.
+            assert_eq!(
+                finished.audio_report, None,
+                "a cancelled job publishes no normalization report"
+            );
             assert!(!finished.verifying, "nothing is in flight");
             assert!(
                 analysis.verification_calls().is_empty(),
@@ -2620,6 +2881,13 @@ mod tests {
         );
         assert_eq!(settled.verification_unavailable_reason, None);
         assert_eq!(analysis.verification_calls().len(), 1);
+        // AU3 E36: the audio lane behaves the same way — the measurement ran
+        // and was discarded, so the record carries neither a verification nor
+        // a reason, and never a stale report.
+        assert!(settled.audio_verification.is_none());
+        assert_eq!(settled.audio_verification_unavailable_reason, None);
+        assert_eq!(settled.audio_report, None);
+        assert_eq!(analysis.audio_verification_calls().len(), 1);
         cleanup_directory(&directory);
     }
 
@@ -2669,6 +2937,432 @@ mod tests {
         assert_eq!(restored, finished);
         cleanup_directory(&directory);
     }
+
+    /// AU3 §5.2: an exporter that reports what its normalization step did.
+    ///
+    /// `export_document` and `export_document_reporting` record into different
+    /// lists on purpose: the worker must call the reporting method, and a
+    /// silent fall-through to the plain one — which is exactly what the trait's
+    /// default does — would otherwise look identical from the record.
+    struct ReportingExporter {
+        bytes: &'static [u8],
+        report: ExportReport,
+        plain_calls: Mutex<Vec<PathBuf>>,
+        reporting_calls: Mutex<Vec<ExportSettings>>,
+    }
+
+    impl ReportingExporter {
+        fn new(report: ExportReport) -> Self {
+            Self {
+                bytes: b"a complete-looking encode",
+                report,
+                plain_calls: Mutex::new(Vec::new()),
+                reporting_calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn reporting_calls(&self) -> Vec<ExportSettings> {
+            self.reporting_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl Export for ReportingExporter {
+        fn export(
+            &self,
+            _out: &Path,
+            _settings: ExportSettings,
+            _progress: kinewright_core::ProgressSink,
+        ) -> Result<(), MediaError> {
+            unreachable!("tests exercise immutable document export")
+        }
+
+        fn export_document(
+            &self,
+            _document: Arc<Document>,
+            out: &Path,
+            _settings: ExportSettings,
+            _progress: kinewright_core::ProgressSink,
+        ) -> Result<(), MediaError> {
+            self.plain_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(out.to_owned());
+            fs::write(out, self.bytes).unwrap();
+            Ok(())
+        }
+
+        fn export_document_reporting(
+            &self,
+            _document: Arc<Document>,
+            out: &Path,
+            settings: ExportSettings,
+            _progress: kinewright_core::ProgressSink,
+        ) -> Result<ExportReport, MediaError> {
+            self.reporting_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(settings);
+            fs::write(out, self.bytes).unwrap();
+            Ok(self.report.clone())
+        }
+    }
+
+    fn au3_loudness(integrated: Option<i32>, true_peak: Option<i32>) -> AudioLoudness {
+        AudioLoudness {
+            integrated_lufs_hundredths: integrated,
+            sample_peak_dbfs_hundredths: true_peak.map(|peak| peak - 20),
+            sample_rate: 48_000,
+            channels: 2,
+            sample_frames: 240_000,
+            momentary_max_lufs_hundredths: integrated.map(|value| value + 200),
+            short_term_max_lufs_hundredths: integrated.map(|value| value + 100),
+            loudness_range_lu_hundredths: Some(450),
+            true_peak_dbtp_hundredths: true_peak,
+        }
+    }
+
+    /// A canned report for a one-pass normalization that landed on target.
+    fn au3_audio_report(target: LoudnessTarget) -> ExportAudioReport {
+        ExportAudioReport {
+            target,
+            before: au3_loudness(Some(-3_000), Some(-800)),
+            after: au3_loudness(Some(target.integrated_lufs_hundredths), Some(-300)),
+            applied_gain_hundredths: 700,
+            limiter_passes: 1,
+            peak_reduction_hundredths: 200,
+            on_target: true,
+            skipped_reason: None,
+        }
+    }
+
+    /// A canned measurement whose exceptions are core's own, so a test can
+    /// never assert a pass core would not have produced.
+    fn au3_audio_verification(
+        output: &Path,
+        target: Option<LoudnessTarget>,
+        measured: AudioLoudness,
+    ) -> DeliveryAudioVerification {
+        let exceptions = kinewright_core::delivery_audio_exceptions(&measured, target);
+        DeliveryAudioVerification {
+            output_path: output.to_owned(),
+            measured,
+            sample_rate: 48_000,
+            channels: 2,
+            sample_frames: measured.sample_frames,
+            target,
+            technical_pass: kinewright_core::audio_qc_technical_pass(&exceptions),
+            exceptions,
+        }
+    }
+
+    /// The AU3 queue: a reporting exporter and an audio-verifying analysis,
+    /// both retained by the test so its assertions can read the calls.
+    fn au3_queue(exporter: Arc<dyn Export>, analysis: &Arc<AvailabilityAnalysis>) -> ExportQueue {
+        let shared: Arc<dyn Analysis> = analysis.clone();
+        ExportQueue::new(exporter, shared).unwrap()
+    }
+
+    fn normalizing_request(output_path: PathBuf, normalize_loudness: bool) -> QueueExportRequest {
+        QueueExportRequest {
+            output_path,
+            profile: DeliveryProfile::SourceMaster,
+            focus_x_percent: 50,
+            focus_y_percent: 50,
+            overwrite: false,
+            verify: false,
+            delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            normalize_loudness,
+        }
+    }
+
+    /// AU3 §6.1/§6.2, B9: `normalize_loudness` writes the **profile's** target
+    /// onto the settings the encode runs under, the worker calls the reporting
+    /// export, and the report it returns lands on the record beside a
+    /// measurement taken against that same target.
+    ///
+    /// The target is never carried on the request: the request says yes or no
+    /// and the profile says what to. That is why the assertion below compares
+    /// against `DeliveryProfile::loudness_target()` rather than a literal.
+    #[test]
+    fn au3_a_normalizing_job_runs_the_profile_target_and_records_its_report() {
+        let directory = test_directory("au3-normalize");
+        let output = directory.join("normalized.mp4");
+        let target = DeliveryProfile::SourceMaster.loudness_target();
+        let report = au3_audio_report(target);
+        let exporter = Arc::new(ReportingExporter::new(ExportReport {
+            audio: Some(report.clone()),
+        }));
+        let analysis = Arc::new(AvailabilityAnalysis::with_audio_verification(
+            AudioVerificationDouble::Measured(Box::new(au3_audio_verification(
+                &output,
+                Some(target),
+                au3_loudness(Some(-2_310), Some(-150)),
+            ))),
+        ));
+        let queue = au3_queue(exporter.clone(), &analysis);
+        let job = queue
+            .enqueue(
+                &renderable_document(10),
+                normalizing_request(output.clone(), true),
+            )
+            .unwrap();
+
+        let finished = wait_for_terminal(&queue, job.id);
+        assert_eq!(finished.state, ExportJobState::Completed);
+        assert_eq!(finished.error, None);
+
+        // The encode ran under the profile's own target.
+        let calls = exporter.reporting_calls();
+        assert_eq!(calls.len(), 1, "the worker calls the reporting export once");
+        assert_eq!(calls[0].loudness_normalization, Some(target));
+        assert!(
+            exporter
+                .plain_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "the worker must not fall through to the non-reporting export"
+        );
+
+        // The report is published verbatim; the queue derives nothing from it.
+        assert_eq!(finished.audio_report, Some(report));
+
+        // The measurement was taken against the same target, from the settings
+        // the encode ran under rather than from the request.
+        let audio_calls = analysis.audio_verification_calls();
+        assert_eq!(audio_calls.len(), 1);
+        assert_eq!(audio_calls[0].0, output);
+        assert_eq!(audio_calls[0].1, Some(target));
+        let verification = finished
+            .audio_verification
+            .expect("a finished encode is always measured");
+        assert_eq!(verification.target, Some(target));
+        assert!(verification.technical_pass);
+        assert_eq!(finished.audio_verification_unavailable_reason, None);
+        cleanup_directory(&directory);
+    }
+
+    /// AU3 §6.2, B9: the audio measurement is independent of `verify` and of
+    /// `normalize_loudness`. Every finished encode is measured; a job that
+    /// asked for no normalization gets a reference measurement — `target:
+    /// None`, no exceptions, `technical_pass` — and no report at all.
+    #[test]
+    fn au3_every_finished_encode_is_measured_whatever_verify_asked_for() {
+        for verify in [false, true] {
+            let directory = test_directory("au3-measure-always");
+            let output = directory.join("measured.mp4");
+            let analysis = Arc::new(AvailabilityAnalysis::with_audio_verification(
+                AudioVerificationDouble::Measured(Box::new(au3_audio_verification(
+                    &output,
+                    None,
+                    au3_loudness(Some(-3_150), Some(-40)),
+                ))),
+            ));
+            let exporter = Arc::new(ReportingExporter::new(ExportReport::default()));
+            let queue = au3_queue(exporter.clone(), &analysis);
+            let mut request = normalizing_request(output.clone(), false);
+            request.verify = verify;
+            let job = queue.enqueue(&renderable_document(10), request).unwrap();
+
+            let finished = wait_for_terminal(&queue, job.id);
+            assert_eq!(finished.state, ExportJobState::Completed);
+            assert_eq!(exporter.reporting_calls()[0].loudness_normalization, None);
+            assert_eq!(
+                finished.audio_report, None,
+                "a job that asked for no normalization has nothing to report"
+            );
+            let audio_calls = analysis.audio_verification_calls();
+            assert_eq!(
+                audio_calls.len(),
+                1,
+                "verify={verify} governs the video comparison only"
+            );
+            assert_eq!(audio_calls[0].1, None);
+            let verification = finished
+                .audio_verification
+                .expect("verify={verify} must not skip the audio measurement");
+            assert_eq!(verification.target, None);
+            assert!(
+                verification.exceptions.is_empty(),
+                "a reference measurement raises nothing"
+            );
+            assert!(verification.technical_pass);
+            // The video comparison still follows `verify` exactly as CC6 left it.
+            assert_eq!(analysis.verification_calls().len(), usize::from(verify));
+            cleanup_directory(&directory);
+        }
+    }
+
+    /// AU3 §6.2/R6, B9: an audio measurement that could not run records its
+    /// reason in the sole carrier and never invents a pass — including when the
+    /// backend unwinds instead of returning, which must not take down the
+    /// worker or touch the finished encode.
+    #[test]
+    fn au3_an_unavailable_audio_verification_records_its_reason_instead_of_a_pass() {
+        for (double, expected) in [
+            (
+                AudioVerificationDouble::Refused("no audio stream in the output".to_owned()),
+                "no audio stream in the output",
+            ),
+            (AudioVerificationDouble::Panics, "panicked"),
+            (AudioVerificationDouble::NotImplemented, "not implemented"),
+        ] {
+            let directory = test_directory("au3-unavailable");
+            let output = directory.join("unmeasured.mp4");
+            let analysis = Arc::new(AvailabilityAnalysis::with_audio_verification(double));
+            let queue = au3_queue(
+                Arc::new(ReportingExporter::new(ExportReport::default())),
+                &analysis,
+            );
+            let job = queue
+                .enqueue(
+                    &renderable_document(10),
+                    normalizing_request(output.clone(), true),
+                )
+                .unwrap();
+
+            let finished = wait_for_terminal(&queue, job.id);
+            assert_eq!(
+                finished.state,
+                ExportJobState::Completed,
+                "a measurement that could not run is not a failed export"
+            );
+            assert_eq!(finished.error, None);
+            assert!(finished.audio_verification.is_none());
+            let reason = finished
+                .audio_verification_unavailable_reason
+                .expect("an unavailable audio verification must say why");
+            assert!(
+                reason.to_ascii_lowercase().contains(expected),
+                "{reason} does not name {expected}"
+            );
+            assert_eq!(analysis.audio_verification_calls().len(), 1);
+            // A measurement never acts on the file it read, for any outcome.
+            assert_eq!(
+                fs::read(&output).unwrap(),
+                b"a complete-looking encode".to_vec()
+            );
+            cleanup_directory(&directory);
+        }
+    }
+
+    /// AU3 §6.2, normative, B9: a missed target is a measurement, not a
+    /// verdict. The job completes with `error: None` and the failure lives
+    /// entirely in `technical_pass` and the exception list.
+    #[test]
+    fn au3_a_missed_loudness_target_never_fails_the_job() {
+        let directory = test_directory("au3-miss");
+        let output = directory.join("over-ceiling.mp4");
+        let target = DeliveryProfile::Youtube1080p.loudness_target();
+        // Over the ceiling by 150 hundredths and 900 out of tolerance: one
+        // Error and one Warning, straight from core.
+        let measured = au3_loudness(Some(-2_300), Some(50));
+        let analysis = Arc::new(AvailabilityAnalysis::with_audio_verification(
+            AudioVerificationDouble::Measured(Box::new(au3_audio_verification(
+                &output,
+                Some(target),
+                measured,
+            ))),
+        ));
+        let queue = au3_queue(
+            Arc::new(ReportingExporter::new(ExportReport {
+                audio: Some(ExportAudioReport {
+                    on_target: false,
+                    limiter_passes: 2,
+                    ..au3_audio_report(target)
+                }),
+            })),
+            &analysis,
+        );
+        let mut request = normalizing_request(output.clone(), true);
+        request.profile = DeliveryProfile::Youtube1080p;
+        request.output_path = output.clone();
+        let job = queue.enqueue(&renderable_document(10), request).unwrap();
+
+        let finished = wait_for_terminal(&queue, job.id);
+        assert_eq!(finished.state, ExportJobState::Completed);
+        assert_eq!(finished.error, None, "a target miss is never a failure");
+        let verification = finished.audio_verification.expect("the file was measured");
+        assert!(!verification.technical_pass);
+        let codes = verification
+            .exceptions
+            .iter()
+            .map(|exception| exception.code.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            [
+                "delivery_true_peak_over_ceiling",
+                "delivery_loudness_out_of_tolerance"
+            ],
+            "severity desc, then code asc"
+        );
+        assert_eq!(
+            finished.audio_report.map(|report| report.on_target),
+            Some(false)
+        );
+        assert!(
+            output.is_file(),
+            "the deliverable is still where it was asked for"
+        );
+        cleanup_directory(&directory);
+    }
+
+    /// AU3 §6.1/§6.2, B4: a pre-AU3 request and a pre-AU3 record still read,
+    /// and a record with the three audio fields absent still writes what it
+    /// used to.
+    #[test]
+    fn au3_pre_au3_requests_and_records_round_trip() {
+        let legacy_request = serde_json::json!({
+            "output_path": "/tmp/legacy.mp4",
+            "profile": "source_master",
+            "focus_x_percent": 50,
+            "focus_y_percent": 50,
+            "overwrite": false,
+            "verify": true,
+            "delivery_bit_depth": "eight",
+        });
+        let request: QueueExportRequest = serde_json::from_value(legacy_request).unwrap();
+        assert!(
+            !request.normalize_loudness,
+            "a pre-AU3 request encodes exactly as it used to"
+        );
+
+        let directory = test_directory("au3-legacy-record");
+        let output = directory.join("legacy.mp4");
+        let queue = queue(Arc::new(WritingExporter { bytes: b"legacy" }));
+        let job = queue
+            .enqueue(&renderable_document(10), normalizing_request(output, false))
+            .unwrap();
+        let mut finished = wait_for_terminal(&queue, job.id);
+        // The fail-closed analysis reports no audio backend at all, so the
+        // sole carrier is populated; clear it to model a record written before
+        // AU3 existed.
+        finished.audio_verification_unavailable_reason = None;
+
+        let serialized = serde_json::to_value(&finished).unwrap();
+        let object = serialized.as_object().unwrap();
+        for key in [
+            "audio_report",
+            "audio_verification",
+            "audio_verification_unavailable_reason",
+        ] {
+            assert!(
+                !object.contains_key(key),
+                "an absent {key} must serialize away entirely"
+            );
+        }
+        let restored: ExportJobRecord = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored.audio_report, None);
+        assert_eq!(restored.audio_verification, None);
+        assert_eq!(restored.audio_verification_unavailable_reason, None);
+        assert_eq!(restored, finished);
+        cleanup_directory(&directory);
+    }
+
     /// Swap one source's live identity from inside the encode so the queue has
     /// to observe the change after the exporter returns.
     struct SourceSwappingExporter {

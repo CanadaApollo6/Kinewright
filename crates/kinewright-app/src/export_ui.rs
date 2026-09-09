@@ -8,10 +8,11 @@ use std::{
 use eframe::egui;
 use kinewright_core::{
     CaptionCue, ColorDescription, DELIVERY_VERIFICATION_FRAME_COUNT, DeliveryAspect,
-    DeliveryBudgets, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile,
-    DeliveryVariant, DeliveryVariantError, DeliveryVerification, DeliveryVerificationRequest,
-    Document, ExportCancellation, ExportLutPreflightReport, ExportMediaPreflightReport,
-    ExportProgress, ExportSettings, LutAsset, LutAssetSource, LutAvailabilityKind,
+    DeliveryAudioVerification, DeliveryBudgets, DeliveryConformanceReport, DeliveryEncodeDepth,
+    DeliveryProfile, DeliveryVariant, DeliveryVariantError, DeliveryVerification,
+    DeliveryVerificationRequest, Document, ExportAudioReport, ExportCancellation,
+    ExportLutPreflightReport, ExportMediaPreflightReport, ExportProgress, ExportReport,
+    ExportSettings, LoudnessTarget, LutAsset, LutAssetSource, LutAvailabilityKind,
     LutAvailabilityStatus, MediaError, Operation, QaIssue, QaSeverity, Rational, TimeCode,
     delivery_conformance, document_for_delivery_variant, export_lut_preflight_with,
     export_media_preflight, srt, vtt,
@@ -33,6 +34,14 @@ const MAX_ADVISORY_LINES: usize = 6;
 
 /// Height budget for the scrollable dialog body.
 const EXPORT_DIALOG_MAX_BODY_HEIGHT: f32 = 420.0;
+
+/// The muted line under the `Loudness` row (AU3 §6.5, F21).
+///
+/// Two facts the operator needs before they tick the box: the export writes a
+/// normalized file without touching the project, and the mix they have been
+/// listening to is not what changes.
+pub(crate) const EXPORT_LOUDNESS_NOTE: &str = "a job parameter, not a document edit · monitoring \
+     is not delivery: playback stays as mixed";
 
 pub(crate) struct ExportDialog {
     pub(crate) open: bool,
@@ -57,12 +66,31 @@ pub(crate) struct ExportDialog {
     /// its own 8-bit delivery contract and only
     /// `ExportSettings.delivery_color.bit_depth` moves.
     pub(crate) delivery_bit_depth: DeliveryEncodeDepth,
+    /// Whether the next export brings the finished master to the delivery
+    /// profile's loudness target before encoding (AU3 §6.5).
+    ///
+    /// A **job** parameter, not a document edit, exactly as
+    /// `delivery_bit_depth` is: the mix the operator hears is untouched, and
+    /// only `ExportSettings.loudness_normalization` moves. Off by default,
+    /// because normalizing a master nobody asked to normalize is a change to
+    /// the delivered file.
+    pub(crate) normalize_loudness: bool,
     /// The last finished export's verification (CC6 §6, §8.4).
     ///
     /// A measurement of a file that already exists. Whatever it says, the
     /// encode succeeded and the file is where the operator asked for it: a
     /// verification never blocks, moves, renames, or alters an export.
     pub(crate) verification: Option<ExportVerification>,
+    /// The last finished export's decoded audio verification (AU3 §6.6).
+    ///
+    /// Measured on the written file, with the same target the job ran under,
+    /// so a `None` target reads as a measurement rather than a claim.
+    pub(crate) audio_verification: Option<ExportAudioVerification>,
+    /// What the last export's normalization step did (AU3 §6.6).
+    ///
+    /// `None` when the job did not ask for normalization at all, which is a
+    /// different statement from a step that ran and was skipped.
+    pub(crate) audio_report: Option<ExportAudioReport>,
 }
 
 /// The outcome of the post-export verification pass (CC6 §6.5).
@@ -72,6 +100,19 @@ pub(crate) enum ExportVerification {
     Measured(Box<DeliveryVerification>),
     /// Verification could not run at all, with the reason. It never invents a
     /// pass and never attributes the fact to a later measurement.
+    Unavailable(String),
+}
+
+/// The outcome of the post-export decoded audio measurement (AU3 §6.6).
+///
+/// [`ExportVerification`]'s shape for the audio half, and for the same reason:
+/// "nobody measured" is a third state that must never be rendered as a pass or
+/// as a failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExportAudioVerification {
+    /// The written file's audio was decoded at 48 kHz stereo and measured.
+    Measured(Box<DeliveryAudioVerification>),
+    /// The measurement could not run at all, with the reason.
     Unavailable(String),
 }
 
@@ -92,9 +133,21 @@ pub(crate) struct ConformanceKey {
     delivery_bit_depth: DeliveryEncodeDepth,
 }
 
-/// One finished export: where it went, whether it encoded, and — only when it
-/// encoded — what decoding it back said.
-pub(crate) type ExportOutcome = (PathBuf, Result<(), MediaError>, Option<ExportVerification>);
+/// One finished export: where it went, whether it encoded and what the encode
+/// reported about itself, and — only when it encoded — what decoding it back
+/// said about the picture and about the audio.
+///
+/// A struct rather than CC6's tuple since AU3 §6.6: four members, two of them
+/// `Option`s of different verification types, is past what a positional
+/// destructuring can be read at a glance.
+pub(crate) struct ExportOutcome {
+    pub(crate) path: PathBuf,
+    /// The encode, carrying [`ExportReport`] — the normalization step's report
+    /// when the job asked for one (AU3 §5.2).
+    pub(crate) result: Result<ExportReport, MediaError>,
+    pub(crate) verification: Option<ExportVerification>,
+    pub(crate) audio_verification: Option<ExportAudioVerification>,
+}
 
 pub(crate) struct ExportJob {
     pub(crate) cancellation: ExportCancellation,
@@ -275,12 +328,12 @@ fn export_conformance_report(
 
 /// Re-check every fail-closed gate on the worker, against the exact documents
 /// and sources the encoder is about to read.
-fn run_export_after_preflight(
+fn run_export_after_preflight<T>(
     conformance: &ExportConformance,
     media: &ExportMediaPreflightReport,
     looks: &ExportLutPreflightReport,
-    export: impl FnOnce() -> Result<(), MediaError>,
-) -> Result<(), MediaError> {
+    export: impl FnOnce() -> Result<T, MediaError>,
+) -> Result<T, MediaError> {
     if !conformance.export_ready() {
         return Err(MediaError::Backend(conformance.summary()));
     }
@@ -691,10 +744,283 @@ pub(crate) fn verification_lines(
     lines
 }
 
+// ---------------------------------------------------------------------------
+// AU3 §6.5: the `Loudness` row
+// ---------------------------------------------------------------------------
+
+/// The loudness target one export job runs under (AU3 §6.5).
+///
+/// `None` — the default — leaves `ExportSettings.loudness_normalization`
+/// unset, and the export encodes the master exactly as it is mixed. `Some` is
+/// always the delivery profile's own published target, from the one
+/// aspect-to-profile table the Mixer's bars read, so the figure the operator
+/// monitored against is the figure the file is brought to.
+#[must_use]
+pub(crate) fn export_loudness_target(
+    normalize: bool,
+    aspect: Option<DeliveryAspect>,
+) -> Option<LoudnessTarget> {
+    normalize.then(|| export_delivery_profile(aspect).loudness_target())
+}
+
+/// The `Loudness` checkbox's label for one delivery profile (AU3 §6.5).
+///
+/// The target is named in the sentence rather than left to a tooltip: ticking
+/// a box called "normalize" without seeing the number it normalizes to is the
+/// operator agreeing to something they cannot read.
+#[must_use]
+pub(crate) fn export_loudness_label(profile: DeliveryProfile) -> String {
+    let target = profile.loudness_target();
+    format!(
+        "Normalize to {} target ({} LUFS, {} dBTP)",
+        profile.as_str(),
+        decibels(target.integrated_lufs_hundredths),
+        decibels(target.true_peak_ceiling_dbtp_hundredths)
+    )
+}
+
+/// The dialog's `Loudness` row: the checkbox and the muted line under it.
+///
+/// Free rather than inline, like [`export_job_body`], so a headless test can
+/// measure, paint, and click the row the operator sees without a
+/// `KinewrightApp`. Returns the checkbox's response for the same reason.
+fn loudness_row(
+    ui: &mut egui::Ui,
+    normalize: &mut bool,
+    profile: DeliveryProfile,
+) -> egui::Response {
+    let response = ui
+        .horizontal_wrapped(|ui| {
+            ui.label("Loudness");
+            ui.checkbox(normalize, export_loudness_label(profile))
+        })
+        .inner;
+    ui.add(
+        egui::Label::new(egui::RichText::new(EXPORT_LOUDNESS_NOTE).color(color::TEXT_MUTED)).wrap(),
+    );
+    response
+}
+
+// ---------------------------------------------------------------------------
+// AU3 §6.6: the audio half of the verification block
+// ---------------------------------------------------------------------------
+
+/// Hundredths of a decibel with an explicit sign, for a **change** rather than
+/// a level: `+6.40 dB` of applied gain reads as a direction, `6.40` does not.
+#[must_use]
+fn signed_decibels(hundredths: i32) -> String {
+    if hundredths < 0 {
+        decibels(hundredths)
+    } else {
+        format!("+{}", decibels(hundredths))
+    }
+}
+
+/// A measured figure in hundredths, or the dash the Mixer's readouts use for a
+/// value the meter never produced (AU3 §4.4, E10).
+#[must_use]
+fn optional_decibels(hundredths: Option<i32>) -> String {
+    hundredths.map_or_else(|| crate::mixer_pane_ui::LOUDNESS_NONE.to_owned(), decibels)
+}
+
+/// The one-word verdict of the decoded audio measurement (AU3 §6.6).
+///
+/// Five labels, four styles, and its **own** line: the picture verdict's four
+/// labels (CC6 §8.4) describe a comparison against difference budgets, and
+/// folding a loudness reading into them would make one word answer two
+/// unrelated questions. `AUDIO MEASURED` is the no-target case: without a
+/// target there is nothing to conform to, so the block reports a measurement
+/// and claims nothing (AU3 §5.3 F8).
+#[must_use]
+pub(crate) fn audio_verification_status(
+    verification: Option<&ExportAudioVerification>,
+) -> VerificationStatus {
+    let Some(ExportAudioVerification::Measured(verification)) = verification else {
+        return VerificationStatus {
+            label: "AUDIO NOT VERIFIED",
+            color: color::STATUS_WARNING,
+        };
+    };
+    // Severity first, target second: a target-less measurement carries no
+    // exceptions today (`delivery_audio_exceptions` returns an empty list), and
+    // if one ever reaches here it is evidence, not something a softer word
+    // should hide.
+    if verification
+        .exceptions
+        .iter()
+        .any(|exception| exception.severity == QaSeverity::Error)
+    {
+        // The only `Error` a delivery audio verification can raise is
+        // `delivery_true_peak_over_ceiling` (AU3 §5.3), so the word names it.
+        return VerificationStatus {
+            label: "AUDIO OVER CEILING",
+            color: color::STATUS_DANGER,
+        };
+    }
+    if !verification.exceptions.is_empty() {
+        return VerificationStatus {
+            label: "AUDIO OFF TARGET",
+            color: color::STATUS_WARNING,
+        };
+    }
+    if verification.target.is_none() {
+        return VerificationStatus {
+            label: "AUDIO MEASURED",
+            color: color::TEXT_SECONDARY,
+        };
+    }
+    VerificationStatus {
+        label: "AUDIO VERIFIED",
+        color: color::STATUS_SUCCESS,
+    }
+}
+
+/// The two readings a verification with a target reports: how far the decoded
+/// file landed from it, and whether it stayed under its ceiling.
+fn target_readings(
+    measured: &kinewright_core::AudioLoudness,
+    target: LoudnessTarget,
+) -> Vec<VerificationLine> {
+    let integrated = measured.integrated_lufs_hundredths;
+    // A file with no gated loudness never counts as within the target: there
+    // is no reading to be within it.
+    let within = integrated.is_some_and(|value| {
+        (value - target.integrated_lufs_hundredths).abs() <= target.tolerance_lu_hundredths
+    });
+    let peak = measured.true_peak_dbtp_hundredths;
+    // Digital silence has no true peak, which is under every ceiling.
+    let under_ceiling = peak.is_none_or(|value| value <= target.true_peak_ceiling_dbtp_hundredths);
+    vec![
+        VerificationLine {
+            text: format!(
+                "integrated {} LUFS · target {} ±{} · {}",
+                optional_decibels(integrated),
+                decibels(target.integrated_lufs_hundredths),
+                decibels(target.tolerance_lu_hundredths),
+                if within { "within" } else { "OFF" }
+            ),
+            color: if within {
+                color::TEXT_SECONDARY
+            } else {
+                color::STATUS_WARNING
+            },
+        },
+        VerificationLine {
+            text: format!(
+                "true peak {} dBTP · ceiling {} · {}",
+                optional_decibels(peak),
+                decibels(target.true_peak_ceiling_dbtp_hundredths),
+                if under_ceiling { "within" } else { "OVER" }
+            ),
+            color: if under_ceiling {
+                color::TEXT_SECONDARY
+            } else {
+                color::STATUS_DANGER
+            },
+        },
+    ]
+}
+
+/// The same two readings when nothing was asked for: the profile's target is
+/// printed beside them as a reference, and neither line carries a verdict.
+fn reference_readings(
+    measured: &kinewright_core::AudioLoudness,
+    profile: DeliveryProfile,
+) -> Vec<VerificationLine> {
+    let reference = profile.loudness_target();
+    vec![
+        VerificationLine::muted(format!(
+            "integrated {} LUFS · reference {} ±{} ({}) · not normalized",
+            optional_decibels(measured.integrated_lufs_hundredths),
+            decibels(reference.integrated_lufs_hundredths),
+            decibels(reference.tolerance_lu_hundredths),
+            profile.as_str()
+        )),
+        VerificationLine::muted(format!(
+            "true peak {} dBTP · reference {}",
+            optional_decibels(measured.true_peak_dbtp_hundredths),
+            decibels(reference.true_peak_ceiling_dbtp_hundredths)
+        )),
+    ]
+}
+
+/// Every line the `AUDIO` sub-block renders, in order (AU3 §6.6).
+///
+/// Pure, like [`verification_lines`], and uncapped for the same reason.
+/// `profile` is the dialog's current delivery profile: with no target its
+/// published loudness target is printed as a **reference** the operator can
+/// read the file against, never as a budget the file was held to.
+#[must_use]
+pub(crate) fn audio_verification_lines(
+    verification: Option<&ExportAudioVerification>,
+    report: Option<&ExportAudioReport>,
+    profile: DeliveryProfile,
+) -> Vec<VerificationLine> {
+    let status = audio_verification_status(verification);
+    let mut lines = vec![VerificationLine {
+        text: status.label.to_owned(),
+        color: status.color,
+    }];
+    let verification = match verification {
+        None => {
+            lines.push(VerificationLine::muted(
+                "No export has had its audio verified in this session.".to_owned(),
+            ));
+            return lines;
+        }
+        Some(ExportAudioVerification::Unavailable(reason)) => {
+            // The encode is not in question here: only the measurement is.
+            lines.push(VerificationLine::muted(format!(
+                "The encode succeeded and the file is untouched; audio verification could not \
+                 run: {reason}"
+            )));
+            return lines;
+        }
+        Some(ExportAudioVerification::Measured(verification)) => verification,
+    };
+    let measured = &verification.measured;
+    lines.extend(verification.target.map_or_else(
+        || reference_readings(measured, profile),
+        |target| target_readings(measured, target),
+    ));
+    lines.push(VerificationLine::muted(format!(
+        "loudness range {} LU",
+        optional_decibels(measured.loudness_range_lu_hundredths)
+    )));
+    lines.push(VerificationLine::muted(match report {
+        None => "normalization off".to_owned(),
+        Some(report) => match &report.skipped_reason {
+            Some(reason) => format!("normalization skipped: {reason}"),
+            None => format!(
+                "normalization gain {} dB · limiter passes {} · reduction {} dB · {}",
+                signed_decibels(report.applied_gain_hundredths),
+                report.limiter_passes,
+                decibels(report.peak_reduction_hundredths),
+                if report.on_target {
+                    "on target"
+                } else {
+                    "off target"
+                }
+            ),
+        },
+    }));
+    for exception in &verification.exceptions {
+        lines.push(VerificationLine {
+            text: format!(
+                "{:?} · {} · {}",
+                exception.severity, exception.code, exception.message
+            ),
+            color: crate::color_qc_ui::severity_color(exception.severity),
+        });
+    }
+    lines
+}
+
 /// The reason a cancelled export reports no verification (CC6 §6.5).
 pub(crate) const EXPORT_CANCELLED_BEFORE_VERIFICATION: &str = "cancelled before verification";
 
-/// The verification of a finished encode the operator cancelled, if they did.
+/// The reason a finished encode the operator cancelled reports no
+/// verification, if they cancelled it.
 ///
 /// `Some` means the operator pressed Cancel while the encode was finishing, so
 /// no verification was started: the file is written and untouched, and the
@@ -702,10 +1028,10 @@ pub(crate) const EXPORT_CANCELLED_BEFORE_VERIFICATION: &str = "cancelled before 
 /// or a frozen progress bar. Cancellation cannot un-write a finished file, and
 /// this never tries to.
 #[must_use]
-fn cancelled_before_verification(cancellation: &ExportCancellation) -> Option<ExportVerification> {
+fn cancelled_before_verification(cancellation: &ExportCancellation) -> Option<&'static str> {
     cancellation
         .is_cancelled()
-        .then(|| ExportVerification::Unavailable(EXPORT_CANCELLED_BEFORE_VERIFICATION.to_owned()))
+        .then_some(EXPORT_CANCELLED_BEFORE_VERIFICATION)
 }
 
 /// What the export worker reports about the file it just wrote (CC6 §6.5).
@@ -725,26 +1051,69 @@ fn cancelled_before_verification(cancellation: &ExportCancellation) -> Option<Ex
 /// cancelling is the operator saying "stop working", the encode has already
 /// succeeded, and skipping the verification is the only thing left that
 /// cancellation can honour.
-fn worker_verification(
-    encode: &Result<(), MediaError>,
+fn worker_verification<T>(
+    encode: &Result<T, MediaError>,
     cancellation: &ExportCancellation,
     measure: impl FnOnce() -> Result<DeliveryVerification, MediaError>,
 ) -> Option<ExportVerification> {
+    Some(
+        match contained_measurement(encode, cancellation, "delivery verification", measure)? {
+            Ok(verification) => ExportVerification::Measured(Box::new(verification)),
+            Err(reason) => ExportVerification::Unavailable(reason),
+        },
+    )
+}
+
+/// What the export worker reports about the written file's audio (AU3 §6.5).
+///
+/// [`worker_verification`]'s twin, under the same rules and through the same
+/// containment: a decoded audio measurement never fails an export, never moves
+/// or alters the file, and never crosses the worker as a panic. It runs
+/// whether or not normalization was asked for, with exactly the target the job
+/// ran under, so `None` produces a measurement rather than a conformance
+/// claim.
+fn worker_audio_verification<T>(
+    encode: &Result<T, MediaError>,
+    cancellation: &ExportCancellation,
+    measure: impl FnOnce() -> Result<DeliveryAudioVerification, MediaError>,
+) -> Option<ExportAudioVerification> {
+    Some(
+        match contained_measurement(encode, cancellation, "delivery audio verification", measure)? {
+            Ok(verification) => ExportAudioVerification::Measured(Box::new(verification)),
+            Err(reason) => ExportAudioVerification::Unavailable(reason),
+        },
+    )
+}
+
+/// One contained post-export measurement: `None` when the encode wrote no file
+/// to measure, `Err(reason)` when the measurement could not run, `Ok` when it
+/// did.
+///
+/// Both verification halves share this so a panicking backend, a refusal, and
+/// a cancellation are contained identically on each, and neither can grow its
+/// own rule for the same three outcomes.
+fn contained_measurement<T, V>(
+    encode: &Result<T, MediaError>,
+    cancellation: &ExportCancellation,
+    what: &str,
+    measure: impl FnOnce() -> Result<V, MediaError>,
+) -> Option<Result<V, String>> {
     if encode.is_err() {
         return None;
     }
-    if let Some(cancelled) = cancelled_before_verification(cancellation) {
-        return Some(cancelled);
+    if let Some(reason) = cancelled_before_verification(cancellation) {
+        return Some(Err(reason.to_owned()));
     }
-    let measured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(measure));
-    Some(match measured {
-        Ok(Ok(verification)) => ExportVerification::Measured(Box::new(verification)),
-        Ok(Err(error)) => ExportVerification::Unavailable(error.to_string()),
-        Err(payload) => ExportVerification::Unavailable(format!(
-            "delivery verification panicked: {}",
-            panic_message(payload.as_ref())
-        )),
-    })
+    Some(
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(measure)) {
+            Ok(Ok(measured)) => Ok(measured),
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(payload) => Err(format!(
+                "{what} panicked: {}",
+                panic_message(payload.as_ref())
+            )),
+        },
+    )
 }
 
 /// The message a panic payload carries, when it carries one at all.
@@ -844,8 +1213,15 @@ pub(crate) fn color_qc_link(ui: &mut egui::Ui) -> egui::Response {
 }
 
 /// Draw the verification block. Every line, uncapped, in the order
-/// [`verification_lines`] produced them.
-pub(crate) fn verification_block(ui: &mut egui::Ui, verification: Option<&ExportVerification>) {
+/// [`verification_lines`] produced them, then the `AUDIO` sub-block in the
+/// order [`audio_verification_lines`] produced its own (AU3 §6.6).
+pub(crate) fn verification_block(
+    ui: &mut egui::Ui,
+    verification: Option<&ExportVerification>,
+    audio: Option<&ExportAudioVerification>,
+    report: Option<&ExportAudioReport>,
+    profile: DeliveryProfile,
+) {
     ui.label(theme::caps_label(
         "DELIVERY VERIFICATION",
         color::TEXT_MUTED,
@@ -853,6 +1229,315 @@ pub(crate) fn verification_block(ui: &mut egui::Ui, verification: Option<&Export
     for line in verification_lines(verification) {
         ui.add(egui::Label::new(egui::RichText::new(line.text).color(line.color)).wrap());
     }
+    // A sub-heading rather than a second block: one export, one verification,
+    // measured on the one file, with the picture and the sound reported under
+    // their own verdicts.
+    ui.label(theme::caps_label("AUDIO", color::TEXT_MUTED));
+    for line in audio_verification_lines(audio, report, profile) {
+        ui.add(egui::Label::new(egui::RichText::new(line.text).color(line.color)).wrap());
+    }
+}
+
+/// Everything the export dialog's body paints that [`ExportDialog`] does not
+/// itself carry, gathered once so the body can be a free function.
+struct ExportDialogBodyContext<'a> {
+    project_color_pipeline: &'a [String],
+    color_pipeline_reset_needed: bool,
+    conformance: &'a Result<ExportConformance, String>,
+    export_blocked: bool,
+    caption_cues: &'a Result<Vec<CaptionCue>, String>,
+    /// The running export's latest progress, when one is running.
+    job_progress: Option<&'a ExportProgress>,
+    verification: Option<&'a ExportVerification>,
+    audio_verification: Option<&'a ExportAudioVerification>,
+    audio_report: Option<&'a ExportAudioReport>,
+}
+
+/// One thing the body's widgets asked for on this frame.
+///
+/// Collected rather than acted on inside the window, because every one of them
+/// needs the `&mut KinewrightApp` the window body has borrowed away.
+#[derive(Clone, Copy)]
+enum ExportDialogRequest {
+    Browse,
+    Start,
+    Cancel,
+    ResetColorPipeline,
+    OpenColorQc,
+    SaveCaptions(CaptionFormat),
+}
+
+/// The scrolling body of the export dialog (CC6 §8.4, AU3 §6.5-§6.7).
+///
+/// A free function over `&mut ExportDialog` rather than a `KinewrightApp`
+/// method: `KinewrightApp::new` needs a live GPU media engine, so this is the
+/// only shape in which a headless test can paint the whole body at a chosen
+/// width and measure what it costs.
+#[allow(clippy::too_many_lines)]
+fn export_dialog_body(
+    ui: &mut egui::Ui,
+    dialog: &mut ExportDialog,
+    cx: &ExportDialogBodyContext<'_>,
+) -> Vec<ExportDialogRequest> {
+    let &ExportDialogBodyContext {
+        project_color_pipeline,
+        color_pipeline_reset_needed,
+        conformance,
+        export_blocked,
+        caption_cues,
+        job_progress,
+        verification,
+        audio_verification,
+        audio_report,
+    } = cx;
+    let mut requests = Vec::new();
+    ui.label(theme::caps_label("DELIVERABLE", color::TEXT_MUTED));
+    ui.label(
+        egui::RichText::new("H.264 video · AAC audio · MP4 container").color(color::TEXT_SECONDARY),
+    );
+    ui.add_space(space::TWO);
+    ui.label(theme::caps_label("COLOR PIPELINE", color::TEXT_MUTED));
+    for stage in project_color_pipeline {
+        ui.add(egui::Label::new(egui::RichText::new(stage).color(color::TEXT_SECONDARY)).wrap());
+    }
+    if color_pipeline_reset_needed {
+        ui.colored_label(
+            color::STATUS_DANGER,
+            "BLOCKED · Managed SDR export requires a compatible project colour pipeline.",
+        );
+        if ui
+            .add(
+                egui::Button::new("Reset to Managed SDR")
+                    .fill(color::ACCENT_WASH)
+                    .stroke(egui::Stroke::new(1.0, color::STATUS_DANGER)),
+            )
+            .clicked()
+        {
+            requests.push(ExportDialogRequest::ResetColorPipeline);
+        }
+    }
+    match conformance {
+        Ok(conformance) => {
+            for issue in &conformance.blocking {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "BLOCKED · {} ({})",
+                            issue.message, issue.code
+                        ))
+                        .color(color::STATUS_DANGER),
+                    )
+                    .wrap(),
+                );
+            }
+            // The window is fixed-size, so an unbounded advisory
+            // list would push the Export button out of reach. The
+            // remainder is counted rather than silently dropped.
+            for issue in conformance.advisory.iter().take(MAX_ADVISORY_LINES) {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("REVIEW · {} ({})", issue.message, issue.code))
+                            .color(color::STATUS_WARNING),
+                    )
+                    .wrap(),
+                );
+            }
+            if let Some(hidden) = conformance
+                .advisory
+                .len()
+                .checked_sub(MAX_ADVISORY_LINES)
+                .filter(|hidden| *hidden > 0)
+            {
+                ui.colored_label(
+                    color::TEXT_MUTED,
+                    format!("… and {hidden} more advisory finding(s)"),
+                );
+            }
+        }
+        Err(error) => {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "BLOCKED · delivery conformance could not run: {error}"
+                    ))
+                    .color(color::STATUS_DANGER),
+                )
+                .wrap(),
+            );
+        }
+    }
+    ui.add_space(space::TWO);
+    let before_aspect = dialog.delivery_aspect;
+    ui.horizontal(|ui| {
+        ui.label("Delivery");
+        egui::ComboBox::from_id_salt("export-delivery-aspect")
+            .selected_text(
+                dialog
+                    .delivery_aspect
+                    .map_or("Master", DeliveryAspect::as_str),
+            )
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut dialog.delivery_aspect, None, "Master");
+                for aspect in DeliveryAspect::ALL {
+                    ui.selectable_value(&mut dialog.delivery_aspect, Some(aspect), aspect.as_str());
+                }
+            });
+        if dialog.delivery_aspect.is_some() {
+            ui.label("Focal point");
+            ui.add(
+                egui::DragValue::new(&mut dialog.focus_x_percent)
+                    .range(0..=100)
+                    .suffix("% x"),
+            );
+            ui.add(
+                egui::DragValue::new(&mut dialog.focus_y_percent)
+                    .range(0..=100)
+                    .suffix("% y"),
+            );
+        }
+    });
+    if dialog.delivery_aspect != before_aspect
+        && let Some(aspect) = dialog.delivery_aspect
+    {
+        (dialog.width, dialog.height) = aspect.resolution();
+    }
+    // CC6 §4.1/§8.4: one orthogonal lane choice, not eight
+    // profiles. It writes `ExportSettings.delivery_color.bit_depth`
+    // and nothing else — the project's own delivery contract is
+    // untouched, and `get_color_context` keeps reporting it.
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Delivery depth");
+        for depth in DeliveryEncodeDepth::ALL {
+            ui.radio_value(
+                &mut dialog.delivery_bit_depth,
+                depth,
+                match depth {
+                    DeliveryEncodeDepth::Eight => "8-bit H.264",
+                    DeliveryEncodeDepth::Ten => "10-bit H.264",
+                },
+            );
+        }
+        ui.colored_label(color::TEXT_MUTED, "a job parameter, not a document edit");
+    });
+    // AU3 §6.5: the second job parameter, in the same shape. Read
+    // after the aspect combo above, so the label follows the
+    // aspect on the frame it changes.
+    let loudness_profile = export_delivery_profile(dialog.delivery_aspect);
+    loudness_row(ui, &mut dialog.normalize_loudness, loudness_profile);
+    ui.add_space(space::TWO);
+    egui::Grid::new("export-settings")
+        .num_columns(2)
+        .spacing(egui::vec2(space::THREE, space::TWO))
+        .show(ui, |ui| {
+            ui.label("Output");
+            ui.horizontal(|ui| {
+                ui.scope(|ui| {
+                    theme::apply_input_visuals(ui);
+                    ui.add(egui::TextEdit::singleline(&mut dialog.output).desired_width(320.0));
+                });
+                if ui
+                    .add(
+                        egui::Button::image_and_text(Icon::Folder.image(size::ICON_MD), "Browse…")
+                            .fill(color::SURFACE_RAISED),
+                    )
+                    .clicked()
+                {
+                    requests.push(ExportDialogRequest::Browse);
+                }
+            });
+            ui.end_row();
+            ui.label("Frame size");
+            ui.horizontal(|ui| {
+                // The conformance gate validates the delivery
+                // profile's raster, but the encoder renders this
+                // value. An editable frame size under a delivery
+                // aspect lets those disagree, so the profile's
+                // raster is shown read-only instead.
+                if let Some(aspect) = dialog.delivery_aspect {
+                    let (width, height) = aspect.resolution();
+                    ui.colored_label(color::TEXT_SECONDARY, format!("{width} × {height}"));
+                    ui.colored_label(
+                        color::TEXT_MUTED,
+                        format!("locked by the {} delivery profile", aspect.as_str()),
+                    );
+                } else {
+                    ui.add(egui::DragValue::new(&mut dialog.width).range(2..=16_384));
+                    ui.label("×");
+                    ui.add(egui::DragValue::new(&mut dialog.height).range(2..=16_384));
+                }
+            });
+            ui.end_row();
+            ui.label("FPS");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut dialog.fps_numerator).range(1..=120_000));
+                ui.label("/");
+                ui.add(egui::DragValue::new(&mut dialog.fps_denominator).range(1..=10_000));
+            });
+            ui.end_row();
+            ui.label("Captions");
+            ui.horizontal(|ui| {
+                let enabled = caption_cues.is_ok();
+                let disabled_reason = caption_cues.as_ref().err().map_or("", String::as_str);
+                if ui
+                    .add_enabled(enabled, egui::Button::new("Save .srt"))
+                    .on_disabled_hover_text(disabled_reason)
+                    .clicked()
+                {
+                    requests.push(ExportDialogRequest::SaveCaptions(CaptionFormat::Srt));
+                }
+                if ui
+                    .add_enabled(enabled, egui::Button::new("Save .vtt"))
+                    .on_disabled_hover_text(disabled_reason)
+                    .clicked()
+                {
+                    requests.push(ExportDialogRequest::SaveCaptions(CaptionFormat::Vtt));
+                }
+            });
+            ui.end_row();
+        });
+    ui.separator();
+    if let Some(progress) = job_progress {
+        if export_job_body(ui, progress) {
+            requests.push(ExportDialogRequest::Cancel);
+        }
+    } else {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(
+                    !export_blocked,
+                    egui::Button::image_and_text(Icon::Export.image(size::ICON_MD), "Export MP4")
+                        .fill(color::ACCENT_WASH)
+                        .stroke(egui::Stroke::new(1.0, color::ACCENT_DIM_BORDER)),
+                )
+                .on_disabled_hover_text(if color_pipeline_reset_needed {
+                    "Reset the project colour pipeline before exporting."
+                } else {
+                    "Resolve every blocking delivery-conformance issue before exporting."
+                })
+                .clicked()
+            {
+                requests.push(ExportDialogRequest::Start);
+            }
+        });
+    }
+    // Nothing to report before the first export of the session.
+    if verification.is_some() || audio_verification.is_some() {
+        ui.separator();
+        // Uncapped, deliberately: MAX_ADVISORY_LINES governs
+        // preflight advisories, and a truncated verification result
+        // would be worse than none (CC6 §8.4).
+        verification_block(
+            ui,
+            verification,
+            audio_verification,
+            audio_report,
+            loudness_profile,
+        );
+        if color_qc_link(ui).clicked() {
+            requests.push(ExportDialogRequest::OpenColorQc);
+        }
+    }
+    requests
 }
 
 impl KinewrightApp {
@@ -1048,6 +1733,10 @@ impl KinewrightApp {
             audio_codec: "aac".to_owned(),
             video_bitrate: 8_000_000,
             audio_bitrate: 192_000,
+            loudness_normalization: export_loudness_target(
+                self.export_dialog.normalize_loudness,
+                self.export_dialog.delivery_aspect,
+            ),
             cancellation: cancellation.clone(),
         };
         let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
@@ -1081,7 +1770,13 @@ impl KinewrightApp {
                             &media_preflight,
                             &lut_preflight,
                             || {
-                                media.export_document(
+                                // AU3 §5.2: the reporting call, so the
+                                // normalization step's own report reaches the
+                                // dialog. Its default is `export_document`
+                                // plus an empty report, so a backend that
+                                // normalizes nothing behaves exactly as
+                                // before.
+                                media.export_document_reporting(
                                     worker_document,
                                     &worker_output,
                                     settings,
@@ -1104,7 +1799,23 @@ impl KinewrightApp {
                             request,
                         )
                     });
-                let _ = result_tx.send((worker_output, result, verification));
+                // AU3 §6.5: the same target the job ran under, never the
+                // dialog's current one — the checkbox may have moved while the
+                // encode ran, and a verification describes the file that was
+                // written.
+                let audio_verification =
+                    worker_audio_verification(&result, &verify_settings.cancellation, || {
+                        worker_analysis.verify_delivery_audio(
+                            &worker_output,
+                            verify_settings.loudness_normalization,
+                        )
+                    });
+                let _ = result_tx.send(ExportOutcome {
+                    path: worker_output,
+                    result,
+                    verification,
+                    audio_verification,
+                });
             });
         if let Err(error) = spawn {
             self.record_error("Export", format!("Could not start export: {error}"));
@@ -1114,6 +1825,8 @@ impl KinewrightApp {
         // A new run's verification is the new run's; the previous file's
         // measurement must never be read as this one's.
         self.export_dialog.verification = None;
+        self.export_dialog.audio_verification = None;
+        self.export_dialog.audio_report = None;
         self.export_job = Some(ExportJob {
             cancellation,
             progress_rx,
@@ -1179,29 +1892,44 @@ impl KinewrightApp {
             match job.result_rx.try_recv() {
                 Ok(result) => completed = Some(result),
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    completed = Some((
-                        PathBuf::from(&self.export_dialog.output),
-                        Err(MediaError::Backend("export worker stopped".to_owned())),
-                        None,
-                    ));
+                    // The worker died without sending: there is no encode to
+                    // report and therefore nothing was measured, of the
+                    // picture or of the sound.
+                    completed = Some(ExportOutcome {
+                        path: PathBuf::from(&self.export_dialog.output),
+                        result: Err(MediaError::Backend("export worker stopped".to_owned())),
+                        verification: None,
+                        audio_verification: None,
+                    });
                 }
                 Err(mpsc::TryRecvError::Empty) => {
                     ctx.request_repaint_after(Duration::from_millis(50));
                 }
             }
         }
-        if let Some((path, result, verification)) = completed {
+        if let Some(ExportOutcome {
+            path,
+            result,
+            verification,
+            audio_verification,
+        }) = completed
+        {
             self.export_job = None;
             match result {
-                Ok(()) => {
+                Ok(report) => {
                     // CC6 §8.4: the bare "Exported …" line is replaced by the
                     // verification block in the dialog. The status bar keeps a
-                    // one-word verdict so a closed dialog still says something.
+                    // one-word verdict so a closed dialog still says something
+                    // — since AU3 §6.6, one per half.
                     self.export_dialog.verification = verification;
+                    self.export_dialog.audio_verification = audio_verification;
+                    self.export_dialog.audio_report = report.audio;
                     self.status = format!(
-                        "Exported {} · {}",
+                        "Exported {} · {} · {}",
                         path.display(),
-                        verification_status(self.export_dialog.verification.as_ref()).label
+                        verification_status(self.export_dialog.verification.as_ref()).label,
+                        audio_verification_status(self.export_dialog.audio_verification.as_ref())
+                            .label
                     );
                 }
                 Err(MediaError::Cancelled) => {
@@ -1213,19 +1941,12 @@ impl KinewrightApp {
     }
 
     // Export settings, validation, progress, and cancellation share one immediate-mode dialog.
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn show_export_dialog(&mut self, ctx: &egui::Context) {
         if !self.export_dialog.open {
             return;
         }
         let mut open = self.export_dialog.open;
-        let mut browse = false;
-        let mut start = false;
-        let mut cancel = false;
-        let mut reset_color_pipeline = false;
-        let mut open_color_qc = false;
         let caption_cues = self.timeline_caption_cues();
-        let mut caption_format = None;
         let project_color_pipeline = color_pipeline_summary(&self.focused().document.color_context);
         let color_pipeline_reset_needed =
             managed_sdr_reset_needed(&self.focused().document.color_context);
@@ -1242,297 +1963,54 @@ impl KinewrightApp {
         // Cloned out before the window borrows `self` mutably: the block is a
         // read-only report of a file that already exists.
         let verification = self.export_dialog.verification.clone();
+        let audio_verification = self.export_dialog.audio_verification.clone();
+        let audio_report = self.export_dialog.audio_report.clone();
+        // Borrowed field-wise: the closure below takes `self.export_dialog`
+        // mutably, so everything else the body reads is gathered first.
+        let job_progress = self.export_job.as_ref().map(|job| &job.progress);
+        let body = ExportDialogBodyContext {
+            project_color_pipeline: &project_color_pipeline,
+            color_pipeline_reset_needed,
+            conformance: &conformance,
+            export_blocked,
+            caption_cues: &caption_cues,
+            job_progress,
+            verification: verification.as_ref(),
+            audio_verification: audio_verification.as_ref(),
+            audio_report: audio_report.as_ref(),
+        };
+        let mut requests = Vec::new();
         egui::Window::new("Export")
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
-              // The window is not resizable and the findings list is
-              // data-dependent, so the body scrolls rather than growing past
-              // the screen and hiding the Export button.
-              egui::ScrollArea::vertical()
-                .max_height(EXPORT_DIALOG_MAX_BODY_HEIGHT)
-                .show(ui, |ui| {
-                ui.label(theme::caps_label("DELIVERABLE", color::TEXT_MUTED));
-                ui.label(
-                    egui::RichText::new("H.264 video · AAC audio · MP4 container")
-                        .color(color::TEXT_SECONDARY),
-                );
-                ui.add_space(space::TWO);
-                ui.label(theme::caps_label("COLOR PIPELINE", color::TEXT_MUTED));
-                for stage in &project_color_pipeline {
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(stage).color(color::TEXT_SECONDARY))
-                            .wrap(),
-                    );
-                }
-                if color_pipeline_reset_needed {
-                    ui.colored_label(
-                        color::STATUS_DANGER,
-                        "BLOCKED · Managed SDR export requires a compatible project colour pipeline.",
-                    );
-                    if ui
-                        .add(
-                            egui::Button::new("Reset to Managed SDR")
-                                .fill(color::ACCENT_WASH)
-                                .stroke(egui::Stroke::new(1.0, color::STATUS_DANGER)),
-                        )
-                        .clicked()
-                    {
-                        reset_color_pipeline = true;
-                    }
-                }
-                match &conformance {
-                    Ok(conformance) => {
-                        for issue in &conformance.blocking {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(format!(
-                                        "BLOCKED · {} ({})",
-                                        issue.message, issue.code
-                                    ))
-                                    .color(color::STATUS_DANGER),
-                                )
-                                .wrap(),
-                            );
-                        }
-                        // The window is fixed-size, so an unbounded advisory
-                        // list would push the Export button out of reach. The
-                        // remainder is counted rather than silently dropped.
-                        for issue in conformance.advisory.iter().take(MAX_ADVISORY_LINES) {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(format!(
-                                        "REVIEW · {} ({})",
-                                        issue.message, issue.code
-                                    ))
-                                    .color(color::STATUS_WARNING),
-                                )
-                                .wrap(),
-                            );
-                        }
-                        if let Some(hidden) = conformance
-                            .advisory
-                            .len()
-                            .checked_sub(MAX_ADVISORY_LINES)
-                            .filter(|hidden| *hidden > 0)
-                        {
-                            ui.colored_label(
-                                color::TEXT_MUTED,
-                                format!("… and {hidden} more advisory finding(s)"),
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!(
-                                    "BLOCKED · delivery conformance could not run: {error}"
-                                ))
-                                .color(color::STATUS_DANGER),
-                            )
-                            .wrap(),
-                        );
-                    }
-                }
-                ui.add_space(space::TWO);
-                let before_aspect = self.export_dialog.delivery_aspect;
-                ui.horizontal(|ui| {
-                    ui.label("Delivery");
-                    egui::ComboBox::from_id_salt("export-delivery-aspect")
-                        .selected_text(
-                            self.export_dialog
-                                .delivery_aspect
-                                .map_or("Master", DeliveryAspect::as_str),
-                        )
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.export_dialog.delivery_aspect,
-                                None,
-                                "Master",
-                            );
-                            for aspect in DeliveryAspect::ALL {
-                                ui.selectable_value(
-                                    &mut self.export_dialog.delivery_aspect,
-                                    Some(aspect),
-                                    aspect.as_str(),
-                                );
-                            }
-                        });
-                    if self.export_dialog.delivery_aspect.is_some() {
-                        ui.label("Focal point");
-                        ui.add(
-                            egui::DragValue::new(&mut self.export_dialog.focus_x_percent)
-                                .range(0..=100)
-                                .suffix("% x"),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut self.export_dialog.focus_y_percent)
-                                .range(0..=100)
-                                .suffix("% y"),
-                        );
-                    }
-                });
-                if self.export_dialog.delivery_aspect != before_aspect
-                    && let Some(aspect) = self.export_dialog.delivery_aspect
-                {
-                    (self.export_dialog.width, self.export_dialog.height) = aspect.resolution();
-                }
-                // CC6 §4.1/§8.4: one orthogonal lane choice, not eight
-                // profiles. It writes `ExportSettings.delivery_color.bit_depth`
-                // and nothing else — the project's own delivery contract is
-                // untouched, and `get_color_context` keeps reporting it.
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Delivery depth");
-                    for depth in DeliveryEncodeDepth::ALL {
-                        ui.radio_value(
-                            &mut self.export_dialog.delivery_bit_depth,
-                            depth,
-                            match depth {
-                                DeliveryEncodeDepth::Eight => "8-bit H.264",
-                                DeliveryEncodeDepth::Ten => "10-bit H.264",
-                            },
-                        );
-                    }
-                    ui.colored_label(
-                        color::TEXT_MUTED,
-                        "a job parameter, not a document edit",
-                    );
-                });
-                ui.add_space(space::TWO);
-                egui::Grid::new("export-settings")
-                    .num_columns(2)
-                    .spacing(egui::vec2(space::THREE, space::TWO))
+                // The window is not resizable and the findings list is
+                // data-dependent, so the body scrolls rather than growing past
+                // the screen and hiding the Export button.
+                egui::ScrollArea::vertical()
+                    .max_height(EXPORT_DIALOG_MAX_BODY_HEIGHT)
                     .show(ui, |ui| {
-                        ui.label("Output");
-                        ui.horizontal(|ui| {
-                            ui.scope(|ui| {
-                                theme::apply_input_visuals(ui);
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.export_dialog.output)
-                                        .desired_width(320.0),
-                                );
-                            });
-                            if ui
-                                .add(
-                                    egui::Button::image_and_text(
-                                        Icon::Folder.image(size::ICON_MD),
-                                        "Browse…",
-                                    )
-                                    .fill(color::SURFACE_RAISED),
-                                )
-                                .clicked()
-                            {
-                                browse = true;
-                            }
-                        });
-                        ui.end_row();
-                        ui.label("Frame size");
-                        ui.horizontal(|ui| {
-                            // The conformance gate validates the delivery
-                            // profile's raster, but the encoder renders this
-                            // value. An editable frame size under a delivery
-                            // aspect lets those disagree, so the profile's
-                            // raster is shown read-only instead.
-                            if let Some(aspect) = self.export_dialog.delivery_aspect {
-                                let (width, height) = aspect.resolution();
-                                ui.colored_label(
-                                    color::TEXT_SECONDARY,
-                                    format!("{width} × {height}"),
-                                );
-                                ui.colored_label(
-                                    color::TEXT_MUTED,
-                                    format!(
-                                        "locked by the {} delivery profile",
-                                        aspect.as_str()
-                                    ),
-                                );
-                            } else {
-                                ui.add(
-                                    egui::DragValue::new(&mut self.export_dialog.width)
-                                        .range(2..=16_384),
-                                );
-                                ui.label("×");
-                                ui.add(
-                                    egui::DragValue::new(&mut self.export_dialog.height)
-                                        .range(2..=16_384),
-                                );
-                            }
-                        });
-                        ui.end_row();
-                        ui.label("FPS");
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::DragValue::new(&mut self.export_dialog.fps_numerator)
-                                    .range(1..=120_000),
-                            );
-                            ui.label("/");
-                            ui.add(
-                                egui::DragValue::new(&mut self.export_dialog.fps_denominator)
-                                    .range(1..=10_000),
-                            );
-                        });
-                        ui.end_row();
-                        ui.label("Captions");
-                        ui.horizontal(|ui| {
-                            let enabled = caption_cues.is_ok();
-                            let disabled_reason =
-                                caption_cues.as_ref().err().map_or("", String::as_str);
-                            if ui
-                                .add_enabled(enabled, egui::Button::new("Save .srt"))
-                                .on_disabled_hover_text(disabled_reason)
-                                .clicked()
-                            {
-                                caption_format = Some(CaptionFormat::Srt);
-                            }
-                            if ui
-                                .add_enabled(enabled, egui::Button::new("Save .vtt"))
-                                .on_disabled_hover_text(disabled_reason)
-                                .clicked()
-                            {
-                                caption_format = Some(CaptionFormat::Vtt);
-                            }
-                        });
-                        ui.end_row();
+                        requests = export_dialog_body(ui, &mut self.export_dialog, &body);
                     });
-                ui.separator();
-                if let Some(job) = &self.export_job {
-                    cancel = export_job_body(ui, &job.progress);
-                } else {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(
-                                !export_blocked,
-                                egui::Button::image_and_text(
-                                    Icon::Export.image(size::ICON_MD),
-                                    "Export MP4",
-                                )
-                                .fill(color::ACCENT_WASH)
-                                .stroke(egui::Stroke::new(1.0, color::ACCENT_DIM_BORDER)),
-                            )
-                            .on_disabled_hover_text(if color_pipeline_reset_needed {
-                                "Reset the project colour pipeline before exporting."
-                            } else {
-                                "Resolve every blocking delivery-conformance issue before exporting."
-                            })
-                            .clicked()
-                        {
-                            start = true;
-                        }
-                    });
-                }
-                // Nothing to report before the first export of the session.
-                if verification.is_some() {
-                    ui.separator();
-                    // Uncapped, deliberately: MAX_ADVISORY_LINES governs
-                    // preflight advisories, and a truncated verification result
-                    // would be worse than none (CC6 §8.4).
-                    verification_block(ui, verification.as_ref());
-                    if color_qc_link(ui).clicked() {
-                        open_color_qc = true;
-                    }
-                }
-                });
             });
+        // Read back into the flags below so the requests are applied in the
+        // order the dialog has always applied them, not in paint order.
+        let mut browse = false;
+        let mut start = false;
+        let mut cancel = false;
+        let mut reset_color_pipeline = false;
+        let mut open_color_qc = false;
+        let mut caption_format = None;
+        for request in requests {
+            match request {
+                ExportDialogRequest::Browse => browse = true,
+                ExportDialogRequest::Start => start = true,
+                ExportDialogRequest::Cancel => cancel = true,
+                ExportDialogRequest::ResetColorPipeline => reset_color_pipeline = true,
+                ExportDialogRequest::OpenColorQc => open_color_qc = true,
+                ExportDialogRequest::SaveCaptions(format) => caption_format = Some(format),
+            }
+        }
         // The dialog is a window, and closing it is not cancelling: the export
         // worker keeps going and the status bar keeps reporting it. Forcing it
         // open for the life of the job left the close button inert for the
@@ -2384,6 +2862,13 @@ mod tests {
             "an overrun names the measurement, the budget, and the direction"
         );
 
+        // AU3 §6.6: the audio verdict is appended to the status line, never
+        // folded into the picture's.
+        assert!(
+            !statuses.contains(&audio_verification_status(None).label),
+            "the audio verdict is its own word, never one of the picture's"
+        );
+
         // And every case lays out through a headless context, the way the
         // dialog will draw it.
         let ctx = egui::Context::default();
@@ -2396,7 +2881,7 @@ mod tests {
             None,
         ] {
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-                verification_block(ui, case);
+                verification_block(ui, case, None, None, DeliveryProfile::SourceMaster);
             });
         }
     }
@@ -2484,12 +2969,13 @@ mod tests {
         );
 
         cancellation.cancel();
-        let verification =
+        let reason =
             cancelled_before_verification(&cancellation).expect("a cancelled export skips it");
-        assert_eq!(
-            verification,
-            ExportVerification::Unavailable(EXPORT_CANCELLED_BEFORE_VERIFICATION.to_owned())
-        );
+        assert_eq!(reason, EXPORT_CANCELLED_BEFORE_VERIFICATION);
+        // AU3 §6.5: the reason, not the verification, because both halves of
+        // the block are skipped by one cancellation and each states it in its
+        // own type.
+        let verification = ExportVerification::Unavailable(reason.to_owned());
         assert_eq!(
             verification_status(Some(&verification)).label,
             "NOT VERIFIED",
@@ -2573,9 +3059,11 @@ mod tests {
             "and a refusal is reported as its own reason"
         );
         assert_eq!(
-            worker_verification(&Err(MediaError::Cancelled), &cancellation, || {
-                panic!("no file exists, so nothing may be measured")
-            }),
+            worker_verification(
+                &Err::<ExportReport, _>(MediaError::Cancelled),
+                &cancellation,
+                || panic!("no file exists, so nothing may be measured")
+            ),
             None,
             "an encode that did not finish wrote no file to verify"
         );
@@ -2835,5 +3323,717 @@ mod tests {
             kinewright_core::ColorBitDepth::Eight,
             "and the document keeps declaring its own 8-bit delivery"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // AU3 Part B: the `Loudness` row and the `AUDIO` block
+    // -----------------------------------------------------------------------
+
+    /// One decoded audio verification of a written file.
+    ///
+    /// The exceptions are **derived by core**, never transcribed: the dialog's
+    /// verdict has to follow the same rule `verify_delivery_audio` publishes,
+    /// so a re-baselined exception moves the fixture and its expectation
+    /// together.
+    fn audio_verification(
+        target: Option<LoudnessTarget>,
+        integrated: Option<i32>,
+        true_peak: Option<i32>,
+    ) -> ExportAudioVerification {
+        let measured = kinewright_core::AudioLoudness {
+            integrated_lufs_hundredths: integrated,
+            sample_peak_dbfs_hundredths: true_peak.map(|peak| peak - 20),
+            sample_rate: 48_000,
+            channels: 2,
+            sample_frames: 576_000,
+            momentary_max_lufs_hundredths: integrated.map(|value| value + 300),
+            short_term_max_lufs_hundredths: integrated.map(|value| value + 150),
+            loudness_range_lu_hundredths: Some(620),
+            true_peak_dbtp_hundredths: true_peak,
+        };
+        let exceptions = kinewright_core::delivery_audio_exceptions(&measured, target);
+        ExportAudioVerification::Measured(Box::new(kinewright_core::DeliveryAudioVerification {
+            output_path: PathBuf::from("/tmp/export.mp4"),
+            measured,
+            sample_rate: 48_000,
+            channels: 2,
+            sample_frames: 576_000,
+            target,
+            technical_pass: kinewright_core::audio_qc_technical_pass(&exceptions),
+            exceptions,
+        }))
+    }
+
+    /// One normalization report, as the export step's would arrive.
+    fn audio_report(gain: i32, passes: u8, reduction: i32, on_target: bool) -> ExportAudioReport {
+        let target = DeliveryProfile::Youtube1080p.loudness_target();
+        let before = kinewright_core::AudioLoudness {
+            integrated_lufs_hundredths: Some(target.integrated_lufs_hundredths - gain),
+            sample_peak_dbfs_hundredths: Some(-1_000),
+            sample_rate: 48_000,
+            channels: 2,
+            sample_frames: 576_000,
+            momentary_max_lufs_hundredths: None,
+            short_term_max_lufs_hundredths: None,
+            loudness_range_lu_hundredths: Some(620),
+            true_peak_dbtp_hundredths: Some(-900),
+        };
+        ExportAudioReport {
+            target,
+            before,
+            after: kinewright_core::AudioLoudness {
+                integrated_lufs_hundredths: Some(target.integrated_lufs_hundredths),
+                true_peak_dbtp_hundredths: Some(-300),
+                ..before
+            },
+            applied_gain_hundredths: gain,
+            limiter_passes: passes,
+            peak_reduction_hundredths: reduction,
+            on_target,
+            skipped_reason: None,
+        }
+    }
+
+    /// Every line one audio block renders, as one string.
+    fn audio_text(
+        verification: Option<&ExportAudioVerification>,
+        report: Option<&ExportAudioReport>,
+        profile: DeliveryProfile,
+    ) -> String {
+        audio_verification_lines(verification, report, profile)
+            .iter()
+            .map(|line| line.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// AU3 §6.5 and §7 B14: the checkbox is a job parameter that writes the
+    /// **profile's own** target into the export settings, and its label names
+    /// the figure the operator is agreeing to.
+    ///
+    /// The mapping is pinned rather than the built `ExportSettings`, because
+    /// `start_export` needs a `KinewrightApp`; the field itself is one
+    /// expression and the compiler ties it to this function.
+    #[test]
+    fn au3_the_loudness_checkbox_carries_the_profile_target_into_the_job() {
+        for aspect in std::iter::once(None).chain(DeliveryAspect::ALL.map(Some)) {
+            assert_eq!(
+                export_loudness_target(false, aspect),
+                None,
+                "{aspect:?}: off is off, and an unasked-for normalization is a changed deliverable"
+            );
+            assert_eq!(
+                export_loudness_target(true, aspect),
+                Some(export_delivery_profile(aspect).loudness_target()),
+                "{aspect:?}: the target is the profile's published one"
+            );
+        }
+        assert_eq!(
+            export_loudness_target(true, None),
+            Some(kinewright_core::EBU_R128_PROGRAMME_TARGET),
+            "a master export normalizes to the programme target"
+        );
+        assert_eq!(
+            export_loudness_target(true, Some(DeliveryAspect::Widescreen)),
+            Some(kinewright_core::STREAMING_PLATFORM_TARGET),
+            "a platform aspect normalizes to the platform target"
+        );
+
+        // The label follows the aspect, and names both numbers.
+        for aspect in std::iter::once(None).chain(DeliveryAspect::ALL.map(Some)) {
+            let profile = export_delivery_profile(aspect);
+            let target = profile.loudness_target();
+            let label = export_loudness_label(profile);
+            for expected in [
+                profile.as_str().to_owned(),
+                format!("{} LUFS", decibels(target.integrated_lufs_hundredths)),
+                format!(
+                    "{} dBTP",
+                    decibels(target.true_peak_ceiling_dbtp_hundredths)
+                ),
+            ] {
+                assert!(
+                    label.contains(&expected),
+                    "{label:?} must name {expected:?}"
+                );
+            }
+        }
+        assert_ne!(
+            export_loudness_label(DeliveryProfile::SourceMaster),
+            export_loudness_label(DeliveryProfile::Youtube1080p),
+            "two profiles with two targets never read the same"
+        );
+        assert!(
+            EXPORT_LOUDNESS_NOTE.contains("monitoring is not delivery"),
+            "the muted line says what the checkbox does not change: \
+             {EXPORT_LOUDNESS_NOTE}"
+        );
+        assert!(
+            EXPORT_LOUDNESS_NOTE.contains("a job parameter, not a document edit"),
+            "and that it is a job parameter: {EXPORT_LOUDNESS_NOTE}"
+        );
+        assert!(
+            !EXPORT_LOUDNESS_NOTE.contains("  "),
+            "{EXPORT_LOUDNESS_NOTE:?}"
+        );
+    }
+
+    /// AU3 §6.5 and §7 B14: the row paints what it claims and a real click
+    /// flips the flag `start_export` reads.
+    #[test]
+    fn au3_the_loudness_row_is_a_checkbox_a_click_can_reach() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut normalize = false;
+        let mut rect = egui::Rect::NOTHING;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.set_max_width(EXPORT_DIALOG_MEASURED_WIDTH);
+            rect = loudness_row(ui, &mut normalize, DeliveryProfile::Youtube1080p).rect;
+        });
+        let painted = crate::theme::painted_text(&output);
+        for expected in [
+            "Loudness".to_owned(),
+            export_loudness_label(DeliveryProfile::Youtube1080p),
+            EXPORT_LOUDNESS_NOTE.to_owned(),
+        ] {
+            assert!(
+                painted.contains(&expected),
+                "the row paints {expected:?}; it painted {painted:?}"
+            );
+        }
+        assert!(!normalize, "the box starts clear: off by default");
+
+        let centre = rect.center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: centre,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let input = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(centre),
+                button(true),
+                button(false),
+            ],
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            ui.set_max_width(EXPORT_DIALOG_MEASURED_WIDTH);
+            let _ = loudness_row(ui, &mut normalize, DeliveryProfile::Youtube1080p);
+        });
+        assert!(
+            normalize,
+            "clicking the row is what asks the next export to normalize"
+        );
+    }
+
+    /// The width the dialog's rows are measured at: a conservatively narrow
+    /// width; the real dialog auto-sizes wider (`egui::Window` sets no
+    /// `default_width` and grows to its widest child, the `Output` field's
+    /// `TextEdit` plus its `Browse…` button), so these heights are upper
+    /// bounds.
+    const EXPORT_DIALOG_MEASURED_WIDTH: f32 = 460.0;
+
+    /// AU3 §6.7: what the Part B rows cost the dialog body.
+    ///
+    /// What the two AU3 additions cost on their own, at
+    /// `EXPORT_DIALOG_MEASURED_WIDTH`, where both the checkbox label and the
+    /// muted line wrap. Measured on this build: the `Loudness` row is 96 px
+    /// and the widest `AUDIO` block — a status, three readings, the
+    /// normalization line, and the two exceptions a delivery audio
+    /// verification can raise (the range maximum is `None` on every profile,
+    /// so there is no third) — is 196 px.
+    /// `EXPORT_DIALOG_MAX_BODY_HEIGHT` is unchanged: the body scrolls, the
+    /// verification block already scrolls with it, and the two additions
+    /// together are inside the scroll viewport even fully wrapped. What the
+    /// whole body measures against that viewport is
+    /// `au3_the_export_dialog_body_measures_past_its_scroll_viewport`.
+    #[test]
+    fn au3_the_loudness_row_and_audio_block_fit_the_dialog_body() {
+        const ROW: f32 = 96.0;
+        const BLOCK: f32 = 196.0;
+
+        let measure = |add: &mut dyn FnMut(&mut egui::Ui)| {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let mut measured = egui::Vec2::ZERO;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.vertical(|ui| {
+                    ui.set_max_width(EXPORT_DIALOG_MEASURED_WIDTH);
+                    add(ui);
+                    measured = ui.min_rect().size();
+                });
+            });
+            measured.y
+        };
+
+        let mut normalize = false;
+        let row = measure(&mut |ui| {
+            let _ = loudness_row(ui, &mut normalize, DeliveryProfile::Youtube1080p);
+        });
+        // The loudest block this dialog can draw: a target, an over-ceiling
+        // Error, and the two Warnings beside it.
+        let worst = audio_verification(
+            Some(DeliveryProfile::Youtube1080p.loudness_target()),
+            None,
+            Some(400),
+        );
+        let report = audio_report(1_600, 2, 250, false);
+        let block = measure(&mut |ui| {
+            for line in
+                audio_verification_lines(Some(&worst), Some(&report), DeliveryProfile::Youtube1080p)
+            {
+                ui.add(egui::Label::new(egui::RichText::new(line.text).color(line.color)).wrap());
+            }
+        });
+        for (label, measured, recorded) in
+            [("Loudness row", row, ROW), ("AUDIO block", block, BLOCK)]
+        {
+            assert!(
+                (measured - recorded).abs() <= 1.0,
+                "the doc comment says the {label} measures {recorded} px; it measured {measured}"
+            );
+        }
+        assert!(
+            row + block <= EXPORT_DIALOG_MAX_BODY_HEIGHT,
+            "AU3 adds {} px to a body budgeted at {EXPORT_DIALOG_MAX_BODY_HEIGHT} px",
+            row + block
+        );
+    }
+
+    /// The export dialog exactly as `KinewrightApp::new` opens it on a fresh
+    /// project: the document's own raster and rate, nothing exported yet.
+    ///
+    /// The raster and the rate are read from `Document` rather than
+    /// transcribed, so a re-defaulted project moves the fixture with it.
+    fn fresh_export_dialog() -> ExportDialog {
+        let document = Document::default();
+        ExportDialog {
+            open: true,
+            output: "export.mp4".to_owned(),
+            width: document.resolution.0,
+            height: document.resolution.1,
+            fps_numerator: document.fps.numerator(),
+            fps_denominator: document.fps.denominator(),
+            delivery_aspect: None,
+            focus_x_percent: 50,
+            focus_y_percent: 50,
+            conformance_cache: None,
+            delivery_bit_depth: DeliveryEncodeDepth::default(),
+            normalize_loudness: false,
+            verification: None,
+            audio_verification: None,
+            audio_report: None,
+        }
+    }
+
+    /// AU3 §6.7: the measured height of the **whole** dialog body, before any
+    /// verification and at the worst case one can produce.
+    ///
+    /// Measured on this build at `EXPORT_DIALOG_MEASURED_WIDTH`, with a ready
+    /// conformance and nothing blocking: the pre-verification body — every
+    /// control down to `Export MP4`, with no verification block at all — is
+    /// **572 px**, and the tallest a verification can then make it — a
+    /// non-conforming, over-budget picture verification plus the widest
+    /// `AUDIO` block and its normalization line — is **1480 px**.
+    ///
+    /// Both are past `EXPORT_DIALOG_MAX_BODY_HEIGHT`, and that is not a
+    /// regression: 420 is the `ScrollArea`'s **viewport**, not a bound on the
+    /// content, and CC6 chose the scroll deliberately so a data-dependent
+    /// findings list could never push the `Export MP4` button off-screen. The
+    /// figure is left unchanged; what it costs is that the operator scrolls to
+    /// read a verification, exactly as they already did for CC6's.
+    #[test]
+    fn au3_the_export_dialog_body_measures_past_its_scroll_viewport() {
+        const PRE_VERIFICATION: f32 = 572.0;
+        const WORST_CASE: f32 = 1_480.0;
+
+        let measure = |verification: Option<&ExportVerification>,
+                       audio: Option<&ExportAudioVerification>,
+                       report: Option<&ExportAudioReport>| {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let project_color_pipeline = color_pipeline_summary(&ColorContext::sdr_rec709());
+            let conformance = Ok(ready_conformance());
+            let caption_cues = Ok(Vec::new());
+            let mut dialog = fresh_export_dialog();
+            let mut measured = 0.0;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.vertical(|ui| {
+                    ui.set_max_width(EXPORT_DIALOG_MEASURED_WIDTH);
+                    // Painted inside the dialog's own scroll viewport, so the
+                    // body is laid out under exactly the height the app gives
+                    // it and `content_size` is what it actually needed. It is
+                    // measured on the first frame, before the floating
+                    // scrollbar allocates its 6 px, so the running app wraps
+                    // a few px taller; no export is running, so the
+                    // `Export MP4` tail is measured, not the taller job body.
+                    let scrolled = egui::ScrollArea::vertical()
+                        .max_height(EXPORT_DIALOG_MAX_BODY_HEIGHT)
+                        .show(ui, |ui| {
+                            export_dialog_body(
+                                ui,
+                                &mut dialog,
+                                &ExportDialogBodyContext {
+                                    project_color_pipeline: &project_color_pipeline,
+                                    color_pipeline_reset_needed: false,
+                                    conformance: &conformance,
+                                    export_blocked: false,
+                                    caption_cues: &caption_cues,
+                                    job_progress: None,
+                                    verification,
+                                    audio_verification: audio,
+                                    audio_report: report,
+                                },
+                            )
+                        });
+                    assert!(
+                        scrolled.inner.is_empty(),
+                        "painting the body without input asks for nothing"
+                    );
+                    measured = scrolled.content_size.y;
+                });
+            });
+            measured
+        };
+
+        let pre_verification = measure(None, None, None);
+        let picture = verification(false, false);
+        let worst_audio = audio_verification(
+            Some(DeliveryProfile::Youtube1080p.loudness_target()),
+            None,
+            Some(400),
+        );
+        let report = audio_report(1_600, 2, 250, false);
+        let worst_case = measure(Some(&picture), Some(&worst_audio), Some(&report));
+
+        for (label, measured, recorded) in [
+            ("pre-verification body", pre_verification, PRE_VERIFICATION),
+            ("worst-case body", worst_case, WORST_CASE),
+        ] {
+            assert!(
+                (measured - recorded).abs() <= 1.0,
+                "the doc comment says the {label} measures {recorded} px; it measured {measured}"
+            );
+        }
+        assert!(
+            pre_verification > EXPORT_DIALOG_MAX_BODY_HEIGHT,
+            "the body already scrolls before a verification arrives: \
+             {pre_verification} px against a {EXPORT_DIALOG_MAX_BODY_HEIGHT} px viewport"
+        );
+        assert!(
+            worst_case > pre_verification,
+            "a verification only ever adds to the body"
+        );
+    }
+
+    /// AU3 §6.6 and §7 B15: the `AUDIO` block reports one unambiguous verdict
+    /// per outcome, and says which figure produced it.
+    #[test]
+    fn au3_the_audio_block_reports_every_outcome() {
+        let target = DeliveryProfile::Youtube1080p.loudness_target();
+        let on_target = audio_verification(Some(target), Some(-1_400), Some(-150));
+        let off_target = audio_verification(Some(target), Some(-1_800), Some(-150));
+        let over_ceiling = audio_verification(Some(target), Some(-1_400), Some(40));
+        let measured_only = audio_verification(None, Some(-1_950), Some(-320));
+        let unavailable =
+            ExportAudioVerification::Unavailable("the file has no audio stream".to_owned());
+
+        let statuses = [
+            Some(&on_target),
+            Some(&off_target),
+            Some(&over_ceiling),
+            Some(&measured_only),
+            Some(&unavailable),
+            None,
+        ]
+        .map(audio_verification_status);
+        assert_eq!(
+            statuses.map(|status| status.label),
+            [
+                "AUDIO VERIFIED",
+                "AUDIO OFF TARGET",
+                "AUDIO OVER CEILING",
+                "AUDIO MEASURED",
+                "AUDIO NOT VERIFIED",
+                "AUDIO NOT VERIFIED",
+            ],
+            "each outcome gets its own word, and nothing measured is never a pass"
+        );
+        let distinct: std::collections::HashSet<_> =
+            statuses.iter().map(|status| status.label).collect();
+        assert_eq!(distinct.len(), 5, "five outcomes, five distinct statuses");
+        assert_eq!(
+            statuses.map(|status| status.color),
+            [
+                color::STATUS_SUCCESS,
+                color::STATUS_WARNING,
+                color::STATUS_DANGER,
+                color::TEXT_SECONDARY,
+                color::STATUS_WARNING,
+                color::STATUS_WARNING,
+            ],
+            "only the ceiling is danger, and a measurement claims nothing so it is not \
+             coloured like a verdict"
+        );
+
+        // Normalized and on target: the reading, the target it was held to,
+        // and what the step did to get there.
+        let report = audio_report(640, 1, 0, true);
+        let youtube =
+            |verification, report| audio_text(verification, report, DeliveryProfile::Youtube1080p);
+        let text = youtube(Some(&on_target), Some(&report));
+        for expected in [
+            "integrated -14.00 LUFS · target -14.00 ±1.00 · within",
+            "true peak -1.50 dBTP · ceiling -1.00 · within",
+            "loudness range 6.20 LU",
+            "normalization gain +6.40 dB · limiter passes 1 · reduction 0.00 dB · on target",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+        }
+
+        // Normalized and off target: the export still succeeded, and the block
+        // says by how much and in which direction.
+        let missed = audio_report(640, 2, 180, false);
+        let text = youtube(Some(&off_target), Some(&missed));
+        for expected in [
+            "integrated -18.00 LUFS · target -14.00 ±1.00 · OFF",
+            "normalization gain +6.40 dB · limiter passes 2 · reduction 1.80 dB · off target",
+            "delivery_loudness_out_of_tolerance",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+        }
+        assert!(
+            audio_verification_lines(
+                Some(&off_target),
+                Some(&missed),
+                DeliveryProfile::Youtube1080p
+            )
+            .iter()
+            .any(|line| line.text.contains("· OFF") && line.color == color::STATUS_WARNING),
+            "a miss is a warning: the file exists and is delivered"
+        );
+
+        // Over the ceiling: the one Error a delivery audio verification has.
+        let text = youtube(Some(&over_ceiling), Some(&report));
+        assert!(
+            text.contains("true peak 0.40 dBTP · ceiling -1.00 · OVER"),
+            "the overrun names the reading, the ceiling, and the direction:\n{text}"
+        );
+        assert!(
+            audio_verification_lines(
+                Some(&over_ceiling),
+                Some(&report),
+                DeliveryProfile::Youtube1080p
+            )
+            .iter()
+            .any(|line| line.text.contains("delivery_true_peak_over_ceiling")
+                && line.color == color::STATUS_DANGER),
+            "and the exception is drawn at its own severity"
+        );
+    }
+
+    /// AU3 §6.6 and §7 B15: with no target the block is a **measurement** —
+    /// the profile's figures appear as a reference and no line claims
+    /// conformance — and the three states with nothing to read say which one
+    /// they are.
+    #[test]
+    fn au3_the_audio_block_measures_when_no_target_was_asked_for() {
+        let target = DeliveryProfile::Youtube1080p.loudness_target();
+        let on_target = audio_verification(Some(target), Some(-1_400), Some(-150));
+        let off_target = audio_verification(Some(target), Some(-1_800), Some(-150));
+        let over_ceiling = audio_verification(Some(target), Some(-1_400), Some(40));
+        let measured_only = audio_verification(None, Some(-1_950), Some(-320));
+        let unavailable =
+            ExportAudioVerification::Unavailable("the file has no audio stream".to_owned());
+        let report = audio_report(640, 1, 0, true);
+
+        // Not normalized: a measurement with the profile's target beside it as
+        // a reference, and no claim of conformance.
+        let text = audio_text(Some(&measured_only), None, DeliveryProfile::Youtube1080p);
+        for expected in [
+            "integrated -19.50 LUFS · reference -14.00 ±1.00 (youtube_1080p) · not normalized",
+            "true peak -3.20 dBTP · reference -1.00",
+            "normalization off",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+        }
+        assert!(
+            !text.contains("OFF") && !text.contains("OVER") && !text.contains("within"),
+            "a reference is never a verdict:\n{text}"
+        );
+        assert!(
+            audio_text(Some(&measured_only), None, DeliveryProfile::SourceMaster)
+                .contains("reference -23.00 ±1.00 (source_master)"),
+            "and the reference follows the dialog's profile"
+        );
+
+        // A skipped step names its reason rather than reporting a gain of 0.
+        let skipped = ExportAudioReport {
+            skipped_reason: Some("shorter than one 400 ms gating block".to_owned()),
+            applied_gain_hundredths: 0,
+            limiter_passes: 0,
+            on_target: false,
+            ..audio_report(0, 0, 0, false)
+        };
+        let text = audio_text(
+            Some(&on_target),
+            Some(&skipped),
+            DeliveryProfile::Youtube1080p,
+        );
+        assert!(
+            text.contains("normalization skipped: shorter than one 400 ms gating block"),
+            "a skip states which skip it was:\n{text}"
+        );
+        assert!(
+            !text.contains("limiter passes"),
+            "and never also reports a step that did not run:\n{text}"
+        );
+
+        // Unavailable, and nothing measured at all.
+        let text = audio_text(Some(&unavailable), None, DeliveryProfile::Youtube1080p);
+        assert!(
+            text.contains("the file is untouched")
+                && text.contains("audio verification could not run: the file has no audio stream"),
+            "the encode is not in question, only the measurement:\n{text}"
+        );
+        let text = audio_text(None, None, DeliveryProfile::Youtube1080p);
+        assert!(
+            text.contains("No export has had its audio verified in this session."),
+            "and before the first export the block says so:\n{text}"
+        );
+
+        // A silent file is a warning with both readings it could mean.
+        let silent = audio_verification(Some(target), None, None);
+        let text = audio_text(Some(&silent), Some(&report), DeliveryProfile::Youtube1080p);
+        assert_eq!(
+            audio_verification_status(Some(&silent)).label,
+            "AUDIO OFF TARGET"
+        );
+        assert!(
+            text.contains("integrated — LUFS") && text.contains("delivery_audio_silent"),
+            "a file with no gated loudness reads as a dash and an exception:\n{text}"
+        );
+
+        // And every case lays out through a headless context, under an `AUDIO`
+        // sub-heading of the one verification block.
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        for case in [
+            Some(&on_target),
+            Some(&off_target),
+            Some(&over_ceiling),
+            Some(&measured_only),
+            Some(&unavailable),
+            None,
+        ] {
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                verification_block(ui, None, case, Some(&report), DeliveryProfile::Youtube1080p);
+            });
+            let painted = crate::theme::painted_text(&output);
+            assert!(
+                painted.iter().any(|text| text == "AUDIO"),
+                "the block draws its AUDIO sub-heading; it painted {painted:?}"
+            );
+            assert!(
+                painted
+                    .iter()
+                    .any(|text| text == audio_verification_status(case).label),
+                "and the verdict for {:?}; it painted {painted:?}",
+                audio_verification_status(case).label
+            );
+        }
+    }
+
+    /// AU3 §7 B15, in `a_sub_decibel_psnr_keeps_its_sign`'s manner: an
+    /// applied gain is a **change**, so it carries its direction, and a value
+    /// in `(-1, 0)` keeps its sign the way PSNR does.
+    #[test]
+    fn au3_a_sub_decibel_normalization_gain_keeps_its_sign() {
+        assert_eq!(signed_decibels(-50), "-0.50");
+        assert_eq!(signed_decibels(-1), "-0.01");
+        assert_eq!(signed_decibels(0), "+0.00");
+        assert_eq!(signed_decibels(1), "+0.01");
+        assert_eq!(signed_decibels(1_600), "+16.00");
+        assert_eq!(optional_decibels(None), crate::mixer_pane_ui::LOUDNESS_NONE);
+        assert_eq!(optional_decibels(Some(-1_400)), "-14.00");
+
+        let mut report = audio_report(640, 1, 0, true);
+        report.applied_gain_hundredths = -50;
+        let text = audio_text(
+            Some(&audio_verification(
+                Some(DeliveryProfile::Youtube1080p.loudness_target()),
+                Some(-1_400),
+                Some(-150),
+            )),
+            Some(&report),
+            DeliveryProfile::Youtube1080p,
+        );
+        assert!(
+            text.contains("normalization gain -0.50 dB"),
+            "the sign survives into the block: {text}"
+        );
+    }
+
+    /// AU3 §6.8 and §7 B16: DESIGN.md's Dialogs section describes the Part B
+    /// surface, in the words the dialog actually paints.
+    ///
+    /// The five labels are pinned from the functions that produce them, so a
+    /// renamed verdict is a documentation change the compiler and this test
+    /// notice together.
+    #[test]
+    fn au3_the_design_note_states_the_export_loudness_rules() {
+        const DESIGN: &str = include_str!("../../../docs/DESIGN.md");
+        let dialogs = DESIGN
+            .split_once("### Dialogs and confirmations")
+            .expect("DESIGN.md has a Dialogs section")
+            .1
+            .split_once("\n## ")
+            .expect("the Dialogs section ends at the next heading")
+            .0;
+        // The file is hard-wrapped, so each phrase is one that fits a line.
+        for expected in [
+            "The export dialog's `Loudness` row is a checkbox naming the profile's target in",
+            "LUFS and dBTP; like the delivery depth it is a job parameter and never a",
+            "document edit, and its muted line says that monitoring is not delivery.",
+            "verification block carries an `AUDIO` sub-block",
+            "only the ceiling is danger",
+        ] {
+            assert!(
+                dialogs.contains(expected),
+                "DESIGN.md's Dialogs section must state: {expected}"
+            );
+        }
+        let target = DeliveryProfile::Youtube1080p.loudness_target();
+        let labels = [
+            audio_verification_status(Some(&audio_verification(
+                Some(target),
+                Some(-1_400),
+                Some(-150),
+            )))
+            .label,
+            audio_verification_status(Some(&audio_verification(
+                Some(target),
+                Some(-1_800),
+                Some(-150),
+            )))
+            .label,
+            audio_verification_status(Some(&audio_verification(
+                Some(target),
+                Some(-1_400),
+                Some(40),
+            )))
+            .label,
+            audio_verification_status(Some(&audio_verification(None, Some(-1_950), Some(-320))))
+                .label,
+            audio_verification_status(None).label,
+        ];
+        for label in labels {
+            assert!(
+                dialogs.contains(&format!("`{label}`")),
+                "DESIGN.md's Dialogs section must name the `{label}` verdict"
+            );
+        }
     }
 }
