@@ -5,9 +5,9 @@ use kinewright_core::{
     COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS, ColorCurveChannel, EFFECT_DESCRIPTORS,
     EffectParameterDescriptor, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER,
     MATTE_HUE_WIDTH_DISABLE_CENTIDEGREES, MATTE_MIX_BASIS_POINTS_MAX, MATTE_PARAMETER_COUNT,
-    MATTE_WINDOW_LIMIT, Operation, TITLE_PARAMETER_DESCRIPTORS, TRANSITION_DESCRIPTORS,
-    TimelineRevision, is_lut_color_node, is_matte_capable_color_node, is_matte_parameter,
-    matte_parameters, matte_window_parameters,
+    MATTE_WINDOW_LIMIT, Operation, TITLE_PARAMETER_DESCRIPTORS, TRACK_AUTOMATION_PARAMETERS,
+    TRANSITION_DESCRIPTORS, TimelineRevision, is_lut_color_node, is_matte_capable_color_node,
+    is_matte_parameter, matte_parameters, matte_window_parameters,
 };
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
@@ -282,6 +282,7 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::RemoveTrack { .. } => "remove_track",
         Operation::SetTrackSyncLock { .. } => "set_track_sync_lock",
         Operation::SetTrackMix { .. } => "set_track_mix",
+        Operation::SetTrackAutomation { .. } => "set_track_automation",
         Operation::AddClip { .. } => "add_clip",
         Operation::AddTitle { .. } => "add_title",
         Operation::SplitClip { .. } => "split_clip",
@@ -320,6 +321,7 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::RemoveLutAsset { .. } => "remove_lut_asset",
         Operation::SetTitleParam { .. } => "set_title_param",
         Operation::SetClipAudio { .. } => "set_clip_audio",
+        Operation::SetClipGainEnvelope { .. } => "set_clip_gain_envelope",
         Operation::AddTransition { .. } => "add_transition",
         Operation::RemoveTransition { .. } => "remove_transition",
         Operation::SetMarkerParam { .. } => "set_marker_param",
@@ -390,17 +392,40 @@ fn operation_tool(
             name.as_str(),
             "delete_clip" | "ripple_delete_clip" | "remove_track"
         ))
+        // AU4 §4.3 rule 84: the two new curve tools replace one owner's whole
+        // curve, so re-sending the same arguments cannot compound — the same
+        // reason `set_clip_audio` and `set_track_mix` are annotated. F23:
+        // `set_effect_keyframes` joins them in the same edit; it is the
+        // whole-curve-replace precedent the two new tools copy, and its
+        // absence here was an inherited oversight rather than a decision.
         .idempotent(matches!(
             name.as_str(),
             "set_clip_audio"
+                | "set_clip_gain_envelope"
                 | "set_track_mix"
+                | "set_track_automation"
+                | "set_effect_keyframes"
                 | "upsert_audio_bus"
                 | "set_audio_master"
                 | "set_pan_law"
         ))
         .open_world(false);
+    // AU4 §4.3 / F2: `get_capability` and `search_capabilities` publish only
+    // `first_sentence(description)`, so anything an agent must know *before*
+    // it writes has to live inside the opening sentence — AU3 Part B's idiom
+    // (`au3_part_b_tool_descriptions_name_the_lookahead_and_the_audio_report`).
+    // These clauses are spliced into the opening sentence ahead of its full
+    // stop and must therefore contain no `.` of their own.
+    let opening_clause = match variant.as_str() {
+        "SetTrackAutomation" => format!(
+            ", where parameter is exactly one of {} or {} and the required curve replaces the track's whole ride in project frames: null is the only clear, and an omitted curve is an error, never a silent clear",
+            TRACK_AUTOMATION_PARAMETERS[0], TRACK_AUTOMATION_PARAMETERS[1],
+        ),
+        "SetClipGainEnvelope" => ", where the required curve replaces this clip's whole gain envelope in clip-local frames: null is the only clear, and an omitted curve is an error, never a silent clear".to_owned(),
+        _ => String::new(),
+    };
     let mut description = format!(
-        "Apply Operation::{variant} to the live timeline only at expected_revision from get_timeline_state. All frame values are exact integers."
+        "Apply Operation::{variant} to the live timeline only at expected_revision from get_timeline_state{opening_clause}. All frame values are exact integers."
     );
     if matches!(
         variant.as_str(),
@@ -454,6 +479,25 @@ fn operation_tool(
         ),
         "SetTrackMix" => description.push_str(
             " gain_tenth_db is an integer number of tenths of a decibel in -600..=120; pan_percent is an integer in -100..=100; -100 is hard left and 100 is hard right. How a position becomes per-channel gains is a document-level setting, set_pan_law: under the default balance law 0 is an exact identity, and under constant_power 0 is -3.01 dB on both channels. mute silences the track everywhere including ducking sidechains; any solo silences every non-solo track. The operation replaces all four values; sending neutral values removes the track's entry.",
+        ),
+        // AU4 §4.3: the two curve tools' prose. The essentials — the closed
+        // parameter vocabulary, that `null` is the clear, and that the field
+        // is required — live in `opening_clause` above, inside the *first*
+        // sentence, because that is the only part `get_capability` and
+        // `search_capabilities` publish. Everything appended here is
+        // refinement that reaches an agent only through `tools/list` on the
+        // internal registry or `get_capability`'s input schema.
+        "SetTrackAutomation" => {
+            write!(
+                description,
+                " parameter is spelled exactly as the set_track_mix field the curve parks on: {} values are integer tenths of a decibel in -600..=120 and {} values are integer percent in -100..=100, hard left to hard right. Keyframes must be non-negative, strictly ordered, and inside the project duration. Interpolation is hold, linear, ease_in, ease_out, or ease_in_out and applies from each keyframe to the next. While a curve exists it replaces the matching set_track_mix scalar, which becomes the parked value the track returns to when the curve is cleared; set_track_mix keeps both curves, so nudging a fader never deletes a ride, and clearing the last curve on an otherwise neutral track removes the entry. Read the current curves from get_timeline_state, which spells them gain_curve:[at:value:Interp,...] and pan_curve:[...] in the track's mix= suffix.",
+                TRACK_AUTOMATION_PARAMETERS[0],
+                TRACK_AUTOMATION_PARAMETERS[1],
+            )
+            .expect("writing track automation documentation to a String cannot fail");
+        }
+        "SetClipGainEnvelope" => description.push_str(
+            " Clip-local frames are counted from the clip's own start. Values are integer tenths of a decibel in -600..=120; keyframes must be non-negative, strictly ordered, and inside the clip's project duration. Interpolation is hold, linear, ease_in, ease_out, or ease_in_out and applies from each keyframe to the next. While an envelope exists it replaces set_clip_audio's gain_tenth_db, which becomes the parked value, so the two never multiply; the clip's fades and any transition audio ramp still compose on top. Title and freeze clips carry no audio and are rejected. Read the current envelope from get_timeline_state, which spells it envelope:[at:value:Interp,...] in the clip's audio= suffix.",
         ),
         "LinkClips" | "UnlinkClips" => description.push_str(
             " Links are metadata: moving, trimming, or deleting a member requires an atomic plan covering its whole link group.",
@@ -850,6 +894,9 @@ mod tests {
                 "remove_track",
                 "set_track_sync_lock",
                 "set_track_mix",
+                // AU4 §4.3: declared immediately after `SetTrackMix`, in
+                // `Operation` declaration order.
+                "set_track_automation",
                 "add_clip",
                 "add_title",
                 "split_clip",
@@ -879,6 +926,8 @@ mod tests {
                 "remove_lut_asset",
                 "set_title_param",
                 "set_clip_audio",
+                // AU4 §4.3: declared immediately after `SetClipAudio`.
+                "set_clip_gain_envelope",
                 "add_transition",
                 "remove_transition",
                 "set_marker_param",
@@ -1042,6 +1091,194 @@ mod tests {
         );
     }
 
+    /// AU4 §7 item A1, the agent half: both curve tools publish `curve` as
+    /// **required** even though it is an `Option`, and `set_track_automation`
+    /// publishes the closed parameter vocabulary as an inlined `enum` read
+    /// from Core's own constant.
+    ///
+    /// The pair is load-bearing together with the core wire test: the schema
+    /// says "you must send this field" and the deserializer enforces it, so an
+    /// omitted `curve` is an error rather than a silent clear (AU4 §0 E1).
+    ///
+    /// Required is only half of it. `null` is the *only* clear, so the
+    /// published field must keep its null branch; bare `#[schemars(required)]`
+    /// strips it, which is what F1 caught, so the `anyOf` is asserted here.
+    #[test]
+    fn au4_curve_tools_publish_a_required_curve_and_the_closed_parameter_vocabulary() {
+        let tools = operation_tools().unwrap();
+        let variant_schema = |name: &str| {
+            let definition = tools
+                .iter()
+                .find(|definition| definition.tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be generated"));
+            serde_json::to_value(&*definition.tool.input_schema).unwrap()["allOf"][0].clone()
+        };
+
+        for name in ["set_clip_gain_envelope", "set_track_automation"] {
+            let schema = variant_schema(name);
+            let required = schema["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} must publish a required list: {schema}"));
+            assert!(
+                required.iter().any(|entry| entry == "curve"),
+                "{name} must publish curve as required: {schema}"
+            );
+            // F1/F3: `#[schemars(required)]` alone strips the null branch,
+            // which would make E1's one documented clear schema-invalid. The
+            // published field must be an `anyOf` that still admits `null`.
+            let curve = &schema["properties"]["curve"];
+            assert!(
+                curve["anyOf"]
+                    .as_array()
+                    .is_some_and(|branches| branches.iter().any(|branch| branch["type"] == "null")),
+                "{name} must publish curve as nullable: `null` is the clear (AU4 §0 E1): {schema}"
+            );
+            assert!(
+                curve["anyOf"].as_array().is_some_and(|branches| branches
+                    .iter()
+                    .any(|branch| branch["$ref"] == "#/$defs/AutomationCurve")),
+                "{name} must publish curve's non-null branch as AutomationCurve: {schema}"
+            );
+            assert!(
+                curve["description"]
+                    .as_str()
+                    .is_some_and(|description| description.contains("`null` clears it")),
+                "{name} must carry the field doc comment that says null clears: {schema}"
+            );
+        }
+
+        let track = variant_schema("set_track_automation");
+        assert_eq!(
+            track["properties"]["parameter"]["enum"],
+            serde_json::json!(TRACK_AUTOMATION_PARAMETERS),
+            "set_track_automation must inline Core's parameter vocabulary: {track}"
+        );
+        let required = track["required"].as_array().unwrap();
+        for field in ["track", "parameter", "curve"] {
+            assert!(
+                required.iter().any(|entry| entry == field),
+                "set_track_automation must publish {field} as required: {track}"
+            );
+        }
+        let clip = variant_schema("set_clip_gain_envelope");
+        let required = clip["required"].as_array().unwrap();
+        for field in ["clip", "curve"] {
+            assert!(
+                required.iter().any(|entry| entry == field),
+                "set_clip_gain_envelope must publish {field} as required: {clip}"
+            );
+        }
+    }
+
+    /// AU4 §4.3: the two new tools' prose carries what an agent must know
+    /// before it writes a curve, and all three whole-curve-replace tools are
+    /// annotated idempotent (rule 84 / F23).
+    ///
+    /// The essentials are pinned twice: once in the full description, and once
+    /// in the summary `crate::runtime::capabilities` publishes, which is
+    /// `first_sentence(description)` and all that `get_capability` and
+    /// `search_capabilities` ever show. An edit that pushes the vocabulary,
+    /// the clear, or the requiredness past the first full stop fails here.
+    #[test]
+    fn au4_curve_tool_descriptions_and_idempotent_annotations() {
+        let tools = operation_tools().unwrap();
+        let tool = |name: &str| {
+            tools
+                .iter()
+                .find(|definition| definition.tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be generated"))
+        };
+
+        let track = tool("set_track_automation");
+        let description = track.tool.description.as_deref().unwrap();
+        for clause in [
+            "parameter is exactly one of gain_tenth_db or pan_percent",
+            "null is the only clear, and an omitted curve is an error, never a silent clear",
+            "spelled exactly as the set_track_mix field the curve parks on",
+            "-600..=120",
+            "-100..=100",
+            "inside the project duration",
+            "set_track_mix keeps both curves",
+            "gain_curve:[at:value:Interp,...]",
+        ] {
+            assert!(
+                description.contains(clause),
+                "missing {clause:?}: {description}"
+            );
+        }
+
+        let clip = tool("set_clip_gain_envelope");
+        let description = clip.tool.description.as_deref().unwrap();
+        for clause in [
+            "replaces this clip's whole gain envelope in clip-local frames",
+            "null is the only clear, and an omitted curve is an error, never a silent clear",
+            "Clip-local frames are counted from the clip's own start",
+            "-600..=120",
+            "replaces set_clip_audio's gain_tenth_db",
+            "Title and freeze clips carry no audio and are rejected",
+            "envelope:[at:value:Interp,...]",
+        ] {
+            assert!(
+                description.contains(clause),
+                "missing {clause:?}: {description}"
+            );
+        }
+
+        // F2: `get_capability` and `search_capabilities` publish only
+        // `first_sentence(description)`, so the essentials have to survive the
+        // cut. `crate::runtime::capabilities` is what both project through.
+        let published = tools
+            .iter()
+            .map(|definition| definition.tool.clone())
+            .collect::<Vec<_>>();
+        let summary = |name: &str| {
+            crate::runtime::capabilities(&published)
+                .into_iter()
+                .find(|capability| capability.name == name)
+                .unwrap_or_else(|| panic!("{name} must be a capability"))
+                .summary
+        };
+        let track_summary = summary("set_track_automation");
+        for clause in [
+            "parameter is exactly one of gain_tenth_db or pan_percent",
+            "the required curve replaces the track's whole ride in project frames",
+            "null is the only clear, and an omitted curve is an error, never a silent clear",
+        ] {
+            assert!(
+                track_summary.contains(clause),
+                "missing {clause:?} from the published summary: {track_summary}"
+            );
+        }
+        let clip_summary = summary("set_clip_gain_envelope");
+        for clause in [
+            "the required curve replaces this clip's whole gain envelope in clip-local frames",
+            "null is the only clear, and an omitted curve is an error, never a silent clear",
+        ] {
+            assert!(
+                clip_summary.contains(clause),
+                "missing {clause:?} from the published summary: {clip_summary}"
+            );
+        }
+
+        for name in [
+            "set_clip_gain_envelope",
+            "set_track_automation",
+            "set_effect_keyframes",
+        ] {
+            let serialized = serde_json::to_value(&tool(name).tool).unwrap();
+            assert_eq!(
+                serialized["annotations"]["idempotentHint"],
+                serde_json::Value::Bool(true),
+                "{name} replaces one owner's whole curve and must be idempotent"
+            );
+            assert_eq!(
+                serialized["annotations"]["destructiveHint"],
+                serde_json::Value::Bool(false),
+                "{name} is undoable and not destructive"
+            );
+        }
+    }
+
     #[test]
     fn operation_exhaustiveness_guard_requires_new_variants_to_be_acknowledged() {
         assert_eq!(
@@ -1074,6 +1311,7 @@ mod tests {
                 master: kinewright_core::AudioMaster {
                     gain_tenth_db: -30,
                     effects: Vec::new(),
+                    gain_curve: None,
                 },
             }),
             "set_audio_master"

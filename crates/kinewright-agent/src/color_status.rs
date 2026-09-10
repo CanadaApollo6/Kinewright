@@ -5641,6 +5641,7 @@ mod tests {
                     audio_fade_in_frames: kinewright_core::TimeCode(0),
                     audio_fade_out_frames: kinewright_core::TimeCode(0),
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             }],
             media_pool: vec![asset],
@@ -5959,6 +5960,7 @@ mod tests {
                 audio_fade_in_frames: kinewright_core::TimeCode(0),
                 audio_fade_out_frames: kinewright_core::TimeCode(0),
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         });
 

@@ -712,6 +712,7 @@ mod tests {
                         audio_fade_in_frames: TimeCode::ZERO,
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 200,
+                        audio_gain_curve: None,
                     },
                     Clip {
                         id: ClipId(2),
@@ -730,6 +731,7 @@ mod tests {
                         audio_fade_in_frames: TimeCode::ZERO,
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
+                        audio_gain_curve: None,
                     },
                 ],
             }],
@@ -776,6 +778,7 @@ mod tests {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         };
         let document = Document {
             tracks: vec![
@@ -948,6 +951,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             }],
             duration: TimeCode(30),

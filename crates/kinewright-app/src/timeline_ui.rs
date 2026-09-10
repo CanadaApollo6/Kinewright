@@ -1006,9 +1006,9 @@ fn paint_mix_toggles(
                 egui::Sense::click(),
             )
             .on_hover_text(toggle.tooltip());
-        paint_mix_toggle(painter, rect, toggle, toggle.is_on(mix));
+        paint_mix_toggle(painter, rect, toggle, toggle.is_on(&mix));
         if response.clicked() {
-            pending = Some(track_mix_toggle_operation(mix, toggle));
+            pending = Some(track_mix_toggle_operation(&mix, toggle));
         }
     }
     pending
@@ -2264,6 +2264,7 @@ mod tests {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         };
         Document {
             catalog: kinewright_core::MediaCatalog::default(),
@@ -2562,6 +2563,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 },
                 Clip {
                     id: ClipId(2),
@@ -2576,6 +2578,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 },
             ],
         });

@@ -9,6 +9,10 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Fixed
+- A split no longer slides the right half's clip-local automation curves; both
+  halves evaluate to the same values at the same project frames as the original.
+- Shortening a project no longer rejects the edit when a bus or master effect
+  curve keys past the new duration; the curve is clamped to the new last frame.
 - Every H.264 export lost its last frame on playback: video packets were
   muxed without a duration, so the MP4 muxer computed a track duration one
   frame short and wrote an edit list that hid the final coded picture
@@ -41,6 +45,15 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   whatever is there.
 
 ### Changed
+- A trim, split, roll, slide or speed change that shortens a clip past a
+  keyframe now clamps the curve (preserving the value audible at the new edge)
+  instead of failing with `EffectKeyframeOutsideClip`; a written curve that
+  over-runs its clip is still rejected.
+- A trim or split that would over-run a clip's audio fades now clamps them
+  instead of failing with `AudioFadesTooLong`; a split gives the left half the
+  fade-in and the right half the fade-out.
+- Increasing a clip's speed now drops the envelope keys past the clip's new,
+  shorter duration; only undo restores them (docs/AU4 §2.4).
 - Integrated loudness gates on complete 400 ms blocks only, as BS.1770-4
   specifies; the final partial block no longer contributes, so a programme
   shorter than 400 ms has no integrated value, and `get_audio_levels` or
@@ -55,6 +68,22 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- AU4 Part A, automation model: five automation curve owners — a clip's gain
+  envelope (`Clip.audio_gain_curve`, clip-local frames), a track's gain and pan
+  (`TrackMix.gain_curve` / `pan_curve`), and the bus and master faders
+  (`AudioBus.gain_curve`, `AudioMaster.gain_curve`, project frames) — all
+  reusing `AutomationCurve`, absent by default so every existing document is
+  byte-unchanged. A curve replaces its scalar; the scalar is the parked value.
+  Two whole-curve operations, `set_clip_gain_envelope` and
+  `set_track_automation` (`null` clears; the field is required); the bus and
+  master curves ride inside `upsert_audio_bus` / `set_audio_master`. Evaluation
+  is integer-exact per project frame with one shared per-sample ramp in both
+  the playback and export mix paths, `Hold` segments stay flat and step at the
+  next key's first sample with a 5 ms forward declick, and every clip-moving
+  operation rebases a curve so the value at a new edge is what was audible
+  there. Clip-audio edits (`set_clip_audio`, `set_clip_gain_envelope`) now take
+  the live playback path instead of re-cueing. See
+  docs/AU4-CLIP-ENVELOPES-AND-AUTOMATION.md.
 - AU3 Part B, delivery: `ExportSettings.loudness_normalization` — off by
   default, never a document edit — normalises the mixed master to the
   delivery profile's loudness target between the mixdown and the encode,

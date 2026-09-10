@@ -424,6 +424,7 @@ fn bus_with(effects: Vec<Effect>) -> AudioBus {
         gain_tenth_db: 0,
         effects,
         ducking_sidechain_tracks: Vec::new(),
+        gain_curve: None,
     }
 }
 
@@ -905,6 +906,7 @@ fn master_with(gain_tenth_db: i32, effects: Vec<Effect>) -> AudioMaster {
     AudioMaster {
         gain_tenth_db,
         effects,
+        gain_curve: None,
     }
 }
 
@@ -1346,6 +1348,7 @@ fn next_bus_id_allocates_max_plus_one_and_agrees_with_the_former_inline_scan() {
         gain_tenth_db: 0,
         effects: Vec::new(),
         ducking_sidechain_tracks: Vec::new(),
+        gain_curve: None,
     };
     Operation::UpsertAudioBus {
         bus: sparse.clone(),

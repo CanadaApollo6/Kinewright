@@ -2016,6 +2016,7 @@ fn edit_plan_document() -> Document {
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         }],
         media_pool: vec![asset],
@@ -2479,6 +2480,12 @@ async fn cc7_prepare_commit_and_compare(
 /// AU3 §6.4 Part B (B13) adds none — it grows `queue_export`'s arguments by one
 /// boolean and rewrites three descriptions — so the counts hold at 52 + 78 and
 /// the served quad is byte-identical for the eighth consecutive measurement.
+///
+/// AU4 §4.3 Part A (A19) adds two generated mutators, `set_clip_gain_envelope`
+/// and `set_track_automation`, so 54 + 78 = 132. `INSPECTOR_TOOL_NAMES` does
+/// not move in Part A, and neither does the served quad: the two new tools are
+/// registry-only and the seven served tools embed no `Operation` schema, so
+/// this is the ninth consecutive byte-identical measurement.
 #[tokio::test(flavor = "multi_thread")]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let core = Core::spawn(Document::default()).unwrap();
@@ -2494,7 +2501,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     assert_eq!(
         tools.len(),
         7,
-        "no part of AU1, AU2, or AU3 adds a served tool"
+        "no part of AU1, AU2, AU3, or AU4 adds a served tool"
     );
     assert_eq!(
         tools
@@ -2504,20 +2511,22 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 130 tools, of which `INSPECTOR_TOOL_NAMES` is 78.
+    // The internal registry: 132 tools, of which `INSPECTOR_TOOL_NAMES` is 78.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        130,
+        132,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
-         AU3 Part A adds get_audio_qc; AU3 Part B adds none"
+         AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
+         AU4 Part A adds set_clip_gain_envelope and set_track_automation"
     );
     assert_eq!(
         operations.len(),
-        52,
-        "AU2 Part B generates two more mutators; neither part of AU3 generates one"
+        54,
+        "AU2 Part B generates two more mutators; neither part of AU3 generates one; \
+         AU4 Part A generates two more"
     );
     for name in [
         "set_track_mix",
@@ -2526,6 +2535,8 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         "set_pan_law",
         "get_audio_spectrum",
         "get_audio_qc",
+        "set_clip_gain_envelope",
+        "set_track_automation",
     ] {
         assert!(registry.iter().any(|entry| entry == name), "missing {name}");
     }
@@ -2533,7 +2544,8 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         registry.len() - operations.len(),
         78,
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
-         AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector"
+         AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector; \
+         AU4 Part A adds no inspector"
     );
     let spectrum = registry
         .iter()
@@ -2544,15 +2556,32 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         Some("get_audio_qc"),
         "AU3 §4.2: get_audio_qc is registered directly after get_audio_spectrum"
     );
+    // AU4 §4.3: each new mutator is generated directly after the scalar tool
+    // whose owner it automates, because `operation_tools` follows `Operation`
+    // declaration order and the two variants were declared there.
+    for (scalar, curve) in [
+        ("set_track_mix", "set_track_automation"),
+        ("set_clip_audio", "set_clip_gain_envelope"),
+    ] {
+        let index = registry.iter().position(|entry| entry == scalar).unwrap();
+        assert_eq!(
+            registry.get(index + 1).map(String::as_str),
+            Some(curve),
+            "AU4 §4.3: {curve} is registered directly after {scalar}"
+        );
+    }
 
     // The served byte counts CC6 recorded, asserted byte-identically: no AU1,
-    // AU2, or AU3 tool is served, and the seven served tools do not embed the
-    // `Operation` schema, so neither the generated mutators nor the new
+    // AU2, AU3, or AU4 tool is served, and the seven served tools do not embed
+    // the `Operation` schema, so neither the generated mutators nor the new
     // audio descriptor rows, prose, and QC schema reach them. AU3 Part B
     // (§6.4/B13) moves the registry by 783 B — `QueueExportArgs`'
     // `normalize_loudness` boolean and three rewritten descriptions — and none
     // of it is served: `queue_export`, `get_export_jobs` and
-    // `plan_audio_normalization` are all registry-only tools.
+    // `plan_audio_normalization` are all registry-only tools. AU4 Part A
+    // (§4.3/A19) moves it by 93,394 B — two generated mutators and 820 B of
+    // shared `$defs` field growth on every tool that embeds `Operation` — and
+    // none of that is served either, for the same structural reason.
     let metrics = server.tool_surface_metrics();
     assert_eq!(metrics.tool_count, 7);
     assert_eq!(metrics.serialized_bytes, 5_660, "{metrics:?}");
@@ -2703,6 +2732,7 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         }],
     });
     let duration = document.duration.0;
@@ -2985,6 +3015,519 @@ async fn au2_set_audio_master_and_pan_law_round_trip_through_edit_plans_and_stat
     assert!(!text.contains("audio_pan_law"), "{text}");
     assert!(!text.contains("audio_master"), "{text}");
     assert!(!text.contains("gain="), "{text}");
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU4 §4.1: one rendered `[at:value:Interp,...]` list turned back into the
+/// JSON curve a mutator takes, so a test can prove the agent can read a curve
+/// out of `get_timeline_state` and write it straight back (rule 34).
+fn curve_from_rendered(rendered: &str) -> serde_json::Value {
+    let keyframes = rendered
+        .split(',')
+        .map(|keyframe| {
+            let mut fields = keyframe.split(':');
+            let at: i64 = fields.next().unwrap().parse().unwrap();
+            let value: i64 = fields.next().unwrap().parse().unwrap();
+            let interpolation = fields.next().unwrap();
+            assert!(fields.next().is_none(), "{keyframe} has a fourth field");
+            json!({
+                "at": at,
+                "value": value,
+                "interpolation": pascal_to_snake(interpolation)
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({"keyframes": keyframes})
+}
+
+/// `EaseInOut` -> `ease_in_out`: the rendering prints the `Debug` name and the
+/// wire takes serde's `snake_case` one.
+fn pascal_to_snake(value: &str) -> String {
+    let mut snake = String::new();
+    for (index, character) in value.char_indices() {
+        if character.is_uppercase() && index != 0 {
+            snake.push('_');
+        }
+        snake.extend(character.to_lowercase());
+    }
+    snake
+}
+
+/// The `[...]` payload of one rendered curve field, by its key.
+fn rendered_curve(text: &str, key: &str) -> String {
+    let start = text
+        .find(key)
+        .unwrap_or_else(|| panic!("{key} must be rendered: {text}"))
+        + key.len();
+    let end = start
+        + text[start..]
+            .find(']')
+            .expect("every rendered curve closes its bracket");
+    text[start..end].to_owned()
+}
+
+/// AU4 §7 item A17: the two new curve mutators survive the whole agent round
+/// trip — plan preparation, commit, the compact state rendering, and the
+/// clear — on the AU1/AU2 template
+/// (`au1_set_track_mix_round_trips_through_edit_plans_and_state`,
+/// `au2_set_audio_master_and_pan_law_round_trip_through_edit_plans_and_state`).
+///
+/// The two refusals at the end are the wire half of AU4 §0 E1 and of rule 39:
+/// an omitted `curve` is an error rather than a silent clear, and an unknown
+/// `parameter` gets the closed vocabulary back.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au4_set_clip_gain_envelope_and_track_automation_round_trip_through_edit_plans_and_state() {
+    let core = Core::spawn(edit_plan_document()).unwrap();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    // One plan, all three curve writes: the clip envelope in clip-local
+    // frames and both track rides in project frames.
+    let prepared = prepare_plan(
+        &client,
+        0,
+        json!([
+            {
+                "op": "set_clip_gain_envelope",
+                "clip": 1,
+                "curve": {"keyframes": [
+                    {"at": 0, "value": 0, "interpolation": "linear"},
+                    {"at": 30, "value": -60, "interpolation": "hold"},
+                    {"at": 59, "value": -120, "interpolation": "ease_in_out"}
+                ]}
+            },
+            {
+                "op": "set_track_automation",
+                "track": 1,
+                "parameter": "gain_tenth_db",
+                "curve": {"keyframes": [
+                    {"at": 0, "value": 0, "interpolation": "linear"},
+                    {"at": 45, "value": -45, "interpolation": "hold"}
+                ]}
+            },
+            {
+                "op": "set_track_automation",
+                "track": 1,
+                "parameter": "pan_percent",
+                "curve": {"keyframes": [
+                    {"at": 0, "value": -100, "interpolation": "ease_in"},
+                    {"at": 59, "value": 100, "interpolation": "linear"}
+                ]}
+            }
+        ]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(0, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+
+    let document = query_document(&core);
+    let clip = &document.tracks[0].clips[0];
+    assert_eq!(
+        clip.audio_gain_curve
+            .as_ref()
+            .expect("the envelope must be stored")
+            .keyframes
+            .len(),
+        3
+    );
+    // AU4 §2.5 rule 32a: a `SetTrackAutomation` on an un-mixed track pushes a
+    // new entry, and the five scalars stay neutral.
+    assert_eq!(document.audio_mix.tracks.len(), 1);
+    let mix = document.track_mix(TrackId(1));
+    assert_eq!(mix.gain_tenth_db, 0);
+    assert_eq!(mix.pan_percent, 0);
+    assert!(mix.gain_curve.is_some() && mix.pan_curve.is_some());
+    // AU4 §2.1 rule 11: a curve-bearing entry is not neutral, which is the
+    // only reason the `mix=` suffix below exists at all.
+    assert!(!mix.is_neutral());
+
+    let state = client
+        .call_tool(CallToolRequestParams::new("get_timeline_state"))
+        .await
+        .unwrap();
+    let text = &state.content[0].as_text().unwrap().text;
+    assert!(
+        text.contains(
+            "track 1 video sync_lock=true clips=1 mix=gain:0,pan:0,mute:false,solo:false,gain_curve:[0:0:Linear,45:-45:Hold],pan_curve:[0:-100:EaseIn,59:100:Linear]\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            " audio=gain:0,fade_in:0f,fade_out:0f,envelope:[0:0:Linear,30:-60:Hold,59:-120:EaseInOut]"
+        ),
+        "{text}"
+    );
+
+    // Clearing every curve removes both suffixes, and rule 32a removes the
+    // whole entry, so the document is the one that never carried a curve.
+    let prepared = prepare_plan(
+        &client,
+        1,
+        json!([
+            {"op": "set_clip_gain_envelope", "clip": 1, "curve": null},
+            {"op": "set_track_automation", "track": 1, "parameter": "gain_tenth_db", "curve": null},
+            {"op": "set_track_automation", "track": 1, "parameter": "pan_percent", "curve": null}
+        ]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(1, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+
+    let cleared = query_document(&core);
+    assert!(cleared.tracks[0].clips[0].audio_gain_curve.is_none());
+    assert!(cleared.audio_mix.tracks.is_empty());
+    assert_eq!(
+        serde_json::to_string(&cleared).unwrap(),
+        serde_json::to_string(&edit_plan_document()).unwrap(),
+        "clearing the last curve must leave the document byte-identical to one that never had one"
+    );
+
+    let state = client
+        .call_tool(CallToolRequestParams::new("get_timeline_state"))
+        .await
+        .unwrap();
+    let text = &state.content[0].as_text().unwrap().text;
+    assert!(
+        text.contains("track 1 video sync_lock=true clips=1\n"),
+        "{text}"
+    );
+    for absent in [
+        "mix=gain:",
+        "envelope:",
+        "gain_curve",
+        "pan_curve",
+        " audio=",
+    ] {
+        assert!(!text.contains(absent), "{absent} in {text}");
+    }
+
+    // AU4 §0 E1: an omitted `curve` is an error, never a silent clear.
+    let omitted = prepare_plan(
+        &client,
+        2,
+        json!([{"op": "set_clip_gain_envelope", "clip": 1}]),
+    )
+    .await;
+    assert_eq!(omitted.is_error, Some(true), "{omitted:?}");
+    let text = &omitted.content[0].as_text().unwrap().text;
+    assert!(text.contains("missing field `curve`"), "{text}");
+    let omitted = prepare_plan(
+        &client,
+        2,
+        json!([{"op": "set_track_automation", "track": 1, "parameter": "gain_tenth_db"}]),
+    )
+    .await;
+    assert_eq!(omitted.is_error, Some(true), "{omitted:?}");
+    let text = &omitted.content[0].as_text().unwrap().text;
+    assert!(text.contains("missing field `curve`"), "{text}");
+
+    // AU4 §2.6 rule 39: the vocabulary comes back with the refusal, and it is
+    // raised before the curve is even validated.
+    let unknown = prepare_plan(
+        &client,
+        2,
+        json!([{
+            "op": "set_track_automation",
+            "track": 1,
+            "parameter": "loudness",
+            "curve": {"keyframes": [{"at": 0, "value": 0}]}
+        }]),
+    )
+    .await;
+    assert_eq!(unknown.is_error, Some(true), "{unknown:?}");
+    let text = &unknown.content[0].as_text().unwrap().text;
+    assert!(
+        text.contains("unknown track automation parameter")
+            && text.contains("gain_tenth_db")
+            && text.contains("pan_percent"),
+        "{text}"
+    );
+    // Nothing was applied by any refusal.
+    assert_eq!(
+        serde_json::to_string(&query_document(&core)).unwrap(),
+        serde_json::to_string(&edit_plan_document()).unwrap()
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU4 §7 item A17, rule 34: whole-owner-set semantics on `upsert_audio_bus`
+/// and `set_audio_master`, made recoverable by the `render_*` spelling.
+///
+/// A curve-bearing bus round-trips: the fader ride read out of
+/// `get_timeline_state` is written straight back and the document does not
+/// move a byte. Then the same call with `gain_curve` **omitted** clears it,
+/// exactly as an omitted `effects` clears the chain — which is the reason the
+/// rendering has to carry the curve in the first place.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au4_audio_bus_and_master_fader_curves_round_trip_and_clear_when_omitted() {
+    let core = Core::spawn(edit_plan_document()).unwrap();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let prepared = prepare_plan(
+        &client,
+        0,
+        json!([
+            {
+                "op": "upsert_audio_bus",
+                "bus": {
+                    "id": 1,
+                    "name": "Dialogue",
+                    "tracks": [1],
+                    "gain_tenth_db": -35,
+                    "gain_curve": {"keyframes": [
+                        {"at": 0, "value": -35, "interpolation": "linear"},
+                        {"at": 30, "value": 0, "interpolation": "ease_out"}
+                    ]}
+                }
+            },
+            {
+                "op": "set_audio_master",
+                "master": {
+                    "gain_tenth_db": 15,
+                    "gain_curve": {"keyframes": [{"at": 0, "value": 15, "interpolation": "hold"}]}
+                }
+            }
+        ]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(0, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+
+    let state = client
+        .call_tool(CallToolRequestParams::new("get_timeline_state"))
+        .await
+        .unwrap();
+    let text = state.content[0].as_text().unwrap().text.clone();
+    assert!(
+        text.contains(
+            "  audio_bus 1 \"Dialogue\" tracks=1 gain=-35 gain_curve=[0:-35:Linear,30:0:EaseOut] sidechain=none effects=none\naudio_master gain=15 gain_curve=[0:15:Hold] effects=none"
+        ),
+        "{text}"
+    );
+
+    // The round trip: read the rendered ride back, write it straight into
+    // `upsert_audio_bus`, and the document does not move.
+    let before = query_document(&core);
+    let bus_curve = curve_from_rendered(&rendered_curve(&text, "gain_curve=["));
+    let prepared = prepare_plan(
+        &client,
+        1,
+        json!([{
+            "op": "upsert_audio_bus",
+            "bus": {
+                "id": 1,
+                "name": "Dialogue",
+                "tracks": [1],
+                "gain_tenth_db": -35,
+                "gain_curve": bus_curve
+            }
+        }]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(1, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+    assert_eq!(
+        serde_json::to_string(&query_document(&core)).unwrap(),
+        serde_json::to_string(&before).unwrap(),
+        "writing back the rendered fader curve must be the identity"
+    );
+
+    // Rule 34: an omitted `gain_curve` clears it, exactly as an omitted
+    // `effects` clears the chain.
+    let prepared = prepare_plan(
+        &client,
+        2,
+        json!([
+            {
+                "op": "upsert_audio_bus",
+                "bus": {"id": 1, "name": "Dialogue", "tracks": [1], "gain_tenth_db": -35}
+            },
+            {"op": "set_audio_master", "master": {"gain_tenth_db": 15}}
+        ]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(2, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+
+    let document = query_document(&core);
+    assert!(
+        document
+            .audio_mix
+            .bus(kinewright_core::AudioBusId(1))
+            .expect("the bus survives the clear")
+            .gain_curve
+            .is_none(),
+        "an omitted gain_curve must clear the bus fader ride"
+    );
+    assert!(
+        document.audio_mix.master.gain_curve.is_none(),
+        "an omitted gain_curve must clear the master fader ride"
+    );
+
+    let state = client
+        .call_tool(CallToolRequestParams::new("get_timeline_state"))
+        .await
+        .unwrap();
+    let text = &state.content[0].as_text().unwrap().text;
+    assert!(
+        text.contains(
+            "  audio_bus 1 \"Dialogue\" tracks=1 gain=-35 sidechain=none effects=none\naudio_master gain=15 effects=none"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("gain_curve"), "{text}");
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU4 §7 item A18: `get_audio_levels`' golden pair.
+///
+/// `measure_mix_levels` puts `document.track_mix(track.id)` straight into
+/// `TrackLevels.mix`, so the two new `Option` fields reach the agent's
+/// structured content automatically. They are default-omitted, so a curve-free
+/// report carries neither key — which is why the AU1 golden
+/// (`au1_get_audio_levels_measures_the_real_mix`) is byte-unchanged — and a
+/// curve-bearing one carries both, with every leaf still an integer, boolean,
+/// string or null.
+///
+/// The measurement runs on the real `FfmpegMediaEngine`, but this test asserts
+/// the report's *shape*, not the audible effect of the ride: how automation
+/// changes the measured stem is AU4 §3's media evidence (A10-A12), not the
+/// agent's.
+#[tokio::test(flavor = "multi_thread")]
+async fn au4_get_audio_levels_reports_both_track_automation_curves() {
+    let generated = au3_sine_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let document = single_clip_document(asset);
+    let duration = document.duration.0;
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    // Without a curve: neither key appears anywhere in the report.
+    let baseline = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(baseline.is_error, Some(false), "{baseline:?}");
+    let report = baseline
+        .structured_content
+        .as_ref()
+        .expect("get_audio_levels must publish the machine-readable report")["report"]
+        .clone();
+    let serialized = serde_json::to_string(&report).unwrap();
+    for absent in ["gain_curve", "pan_curve"] {
+        assert!(
+            !serialized.contains(absent),
+            "an absent curve must be omitted: {serialized}"
+        );
+    }
+    assert_integer_leaves("report", &report);
+    let baseline_mix = report["tracks"][0]["mix"].clone();
+
+    let prepared = prepare_plan(
+        &client,
+        0,
+        json!([
+            {
+                "op": "set_track_automation",
+                "track": 1,
+                "parameter": "gain_tenth_db",
+                "curve": {"keyframes": [
+                    {"at": 0, "value": 0, "interpolation": "linear"},
+                    {"at": duration - 1, "value": -60, "interpolation": "linear"}
+                ]}
+            },
+            {
+                "op": "set_track_automation",
+                "track": 1,
+                "parameter": "pan_percent",
+                "curve": {"keyframes": [{"at": 0, "value": -50, "interpolation": "hold"}]}
+            }
+        ]),
+    )
+    .await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(0, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false), "{committed:?}");
+
+    let automated = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(automated.is_error, Some(false), "{automated:?}");
+    let report = automated.structured_content.as_ref().unwrap()["report"].clone();
+    let mix = &report["tracks"][0]["mix"];
+    assert_eq!(
+        mix["gain_curve"]["keyframes"],
+        json!([
+            {"at": 0, "value": 0, "interpolation": "linear"},
+            {"at": duration - 1, "value": -60, "interpolation": "linear"}
+        ]),
+        "{report}"
+    );
+    assert_eq!(
+        mix["pan_curve"]["keyframes"],
+        json!([{"at": 0, "value": -50, "interpolation": "hold"}]),
+        "{report}"
+    );
+    // AU3 A14's walk, applied to the automated report: an envelope adds no
+    // float to the wire.
+    assert_integer_leaves("report", &report);
+
+    // The golden half: stripping the two new keys gives back the pre-AU4
+    // `mix` object byte for byte, so the only shape change AU4 makes to this
+    // report is the two default-omitted fields. Compared on the `mix` object
+    // rather than the whole report because the *measurement* is media's to
+    // change once automation is evaluated (AU4 §3), while `mix` is document
+    // state and must not move at all.
+    let mut stripped = mix.clone();
+    let stripped = stripped.as_object_mut().unwrap();
+    stripped.remove("gain_curve");
+    stripped.remove("pan_curve");
+    assert_eq!(
+        serde_json::to_string(&serde_json::Value::Object(stripped.clone())).unwrap(),
+        serde_json::to_string(&baseline_mix).unwrap(),
+        "the two Option fields are the only change AU4 makes to TrackLevels.mix"
+    );
 
     client.cancel().await.unwrap();
     server.shutdown();

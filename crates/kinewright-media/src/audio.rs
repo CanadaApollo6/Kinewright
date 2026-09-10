@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
@@ -10,9 +11,9 @@ use std::{
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
-    AudioBus, AudioBusId, AudioChain, AudioMaster, ChainLookahead, Clip, Document, Effect,
-    EffectId, ExportCancellation, MediaError, MixPeaks, PanLaw, Rational, TRACK_MIX_PAN_MAX,
-    TRACK_MIX_PAN_MIN, TimeCode, TrackId,
+    AudioBus, AudioBusId, AudioChain, AudioMaster, AutomationCurve, ChainLookahead, Clip, ClipId,
+    Document, Effect, EffectId, ExportCancellation, MediaError, MixPeaks, PanLaw, Rational,
+    TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, TimeCode, TrackId,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -435,12 +436,33 @@ fn audio_gain_ramp(
     })
 }
 
-#[derive(Debug, Clone, Copy)]
+/// AU4 §3.2: the clip's own gain envelope and its three multiplicative ramps.
+///
+/// Loses `Copy` (rule 50): the per-clip `Vec<Keyframe>` clone is once per clip
+/// per export, not per sample.
+#[derive(Debug, Clone)]
 pub(crate) struct ClipAudioShaping {
     constant_gain: f32,
     fade_in: Option<AudioGainRamp>,
     fade_out: Option<AudioGainRamp>,
     transition: Option<AudioGainRamp>,
+    /// AU4 §3.2: the envelope, keyed **clip-local**, so `origin` is the clip's
+    /// `timeline_start`.
+    curve: Option<AutomationCurve>,
+    origin: TimeCode,
+    /// The clip's own `audio_gain_tenth_db`, `automation_step`'s static
+    /// fallback. When a curve exists it **replaces** the scalar, so
+    /// `constant_gain` is 1.0 in that case (rule 52).
+    gain_tenth_db: i64,
+    /// AU4 §3.1 rule 46: bumped **unconditionally** by a rebuild.
+    curve_epoch: u32,
+    /// `gain_at` takes `&self` (rule 50), so the per-frame anchor memo lives
+    /// behind a [`Cell`]. Nothing here crosses a thread: the mixer is driven by
+    /// `fill_ring` from the worker and the cpal callback only drains the ring
+    /// (rule 76).
+    memo: Cell<AnchorMemo<f32>>,
+    sample_rate: u32,
+    project_fps: Rational,
 }
 
 impl ClipAudioShaping {
@@ -457,8 +479,15 @@ impl ClipAudioShaping {
         let fade_out_start = clip_end
             .checked_sub(clip.audio_fade_out_frames)
             .unwrap_or(clip.timeline_start);
+        // AU4 §3.2 rule 52: a curve **replaces** the scalar rather than
+        // multiplying with it, so the constant is exactly 1.0 whenever one
+        // exists — the envelope is never gained twice (A13).
         #[allow(clippy::cast_precision_loss)]
-        let constant_gain = 10.0_f32.powf(clip.audio_gain_tenth_db as f32 / 200.0);
+        let constant_gain = if clip.audio_gain_curve.is_some() {
+            1.0
+        } else {
+            10.0_f32.powf(clip.audio_gain_tenth_db as f32 / 200.0)
+        };
         Self {
             constant_gain,
             fade_in: audio_gain_ramp(
@@ -474,11 +503,26 @@ impl ClipAudioShaping {
                 project_fps,
             ),
             transition: transition_audio_ramp(clip, sample_rate, project_fps),
+            curve: clip.audio_gain_curve.clone(),
+            origin: clip.timeline_start,
+            gain_tenth_db: i64::from(clip.audio_gain_tenth_db),
+            curve_epoch: 0,
+            memo: Cell::new(AnchorMemo::new()),
+            sample_rate,
+            project_fps,
         }
     }
 
-    pub(crate) fn gain_at(self, project_sample: u64) -> f32 {
-        let gain = self.constant_gain;
+    /// AU4 §3.2 rule 51: **one** new factor, evaluated first so the three
+    /// existing ramps multiply into it unchanged. With no curve the factor is
+    /// skipped entirely and the returned float is bit-identical to pre-AU4.
+    ///
+    /// Rule 53: one implementation, two call sites — export `mix_pass` and live
+    /// `AudioMixSource::add_samples` — and both already pass the same absolute
+    /// project sample index, so identity is by construction, not by tolerance.
+    pub(crate) fn gain_at(&self, project_sample: u64) -> f32 {
+        let gain = self.envelope_at(project_sample);
+        let gain = gain * self.constant_gain;
         let gain = gain
             * self
                 .fade_in
@@ -490,6 +534,41 @@ impl ClipAudioShaping {
         gain * self
             .transition
             .map_or(1.0, |ramp| ramp.gain_at(project_sample))
+    }
+
+    fn envelope_at(&self, project_sample: u64) -> f32 {
+        let Some(curve) = self.curve.as_ref() else {
+            return 1.0;
+        };
+        let step = automation_step(
+            Some(curve),
+            self.gain_tenth_db,
+            self.origin,
+            project_sample,
+            self.sample_rate,
+            self.project_fps,
+        );
+        let frame = automation_frame(
+            self.origin,
+            project_sample,
+            self.sample_rate,
+            self.project_fps,
+        );
+        let mut memo = self.memo.get();
+        let anchors = memo.anchors(frame, self.curve_epoch, || {
+            (db_gain(step.v0), db_gain(step.v1))
+        });
+        self.memo.set(memo);
+        automated_gain(&step, anchors)
+    }
+
+    /// AU4 §3.8 rule 73: rebuild one source's shaping in place from a new
+    /// document, bumping the epoch so the memo cannot hold pre-edit anchors for
+    /// the rest of the project frame (rule 46).
+    fn rebuild(&mut self, clip: &Clip, clip_duration: TimeCode) {
+        let epoch = self.curve_epoch.wrapping_add(1);
+        *self = Self::new(clip, clip_duration, self.sample_rate, self.project_fps);
+        self.curve_epoch = epoch;
     }
 }
 
@@ -1327,6 +1406,7 @@ impl AudioMasterRuntime {
         master: &AudioMaster,
         channels: usize,
         sample_rate: u32,
+        project_fps: Rational,
         ramp_frames: usize,
         master_stage_frames: usize,
     ) -> Self {
@@ -1340,7 +1420,13 @@ impl AudioMasterRuntime {
             .map(|effect| effect.latency_frames)
             .sum::<usize>();
         Self {
-            gain: GainRamp::settled(db_gain(i64::from(master.gain_tenth_db)), ramp_frames),
+            gain: GainRamp::settled(
+                master.gain_tenth_db,
+                master.gain_curve.as_ref(),
+                ramp_frames,
+                sample_rate,
+                project_fps,
+            ),
             effects,
             pad: DelayLine::new(master_stage_frames.saturating_sub(node_frames), channels),
             silence: Vec::new(),
@@ -1348,10 +1434,10 @@ impl AudioMasterRuntime {
     }
 
     /// AU2 §5.8: adopt a same-structure master chain in place.
-    fn retarget(&mut self, master: &AudioMaster, ramp_frames: usize) {
+    fn retarget(&mut self, master: &AudioMaster) {
         retarget_chain(&mut self.effects, &master.effects);
         self.gain
-            .retarget(db_gain(i64::from(master.gain_tenth_db)), ramp_frames);
+            .retarget(master.gain_tenth_db, master.gain_curve.as_ref());
     }
 }
 
@@ -1373,6 +1459,7 @@ impl AudioBusRuntime {
         bus: &AudioBus,
         channels: usize,
         sample_rate: u32,
+        project_fps: Rational,
         ramp_frames: usize,
         bus_stage_frames: usize,
     ) -> Self {
@@ -1392,7 +1479,13 @@ impl AudioBusRuntime {
             tracks: bus.tracks.clone(),
             sidechain_tracks: bus.ducking_sidechain_tracks.clone(),
             effects,
-            gain: GainRamp::settled(db_gain(i64::from(bus.gain_tenth_db)), ramp_frames),
+            gain: GainRamp::settled(
+                bus.gain_tenth_db,
+                bus.gain_curve.as_ref(),
+                ramp_frames,
+                sample_rate,
+                project_fps,
+            ),
             pad: DelayLine::new(bus_stage_frames.saturating_sub(node_frames), channels),
         }
     }
@@ -1401,7 +1494,7 @@ impl AudioBusRuntime {
     ///
     /// Routing and sidechain taps are re-read on every update, the chain is
     /// retargeted node by node, and the fader ramps over the 5 ms constant.
-    fn retarget(&mut self, bus: &AudioBus, ramp_frames: usize) {
+    fn retarget(&mut self, bus: &AudioBus) {
         self.tracks.clear();
         self.tracks.extend_from_slice(&bus.tracks);
         self.sidechain_tracks.clear();
@@ -1409,7 +1502,7 @@ impl AudioBusRuntime {
             .extend_from_slice(&bus.ducking_sidechain_tracks);
         retarget_chain(&mut self.effects, &bus.effects);
         self.gain
-            .retarget(db_gain(i64::from(bus.gain_tenth_db)), ramp_frames);
+            .retarget(bus.gain_tenth_db, bus.gain_curve.as_ref());
     }
 }
 
@@ -1420,6 +1513,223 @@ fn track_mix_ramp_frames(sample_rate: u32) -> usize {
         .saturating_mul(TRACK_MIX_RAMP_MILLISECONDS as usize)
         .saturating_div(1_000)
         .max(1)
+}
+
+/// AU4 §3.1: the forward declick applied to a `Hold` step, in milliseconds.
+///
+/// Deliberately equal to AU1's `TRACK_MIX_RAMP_MILLISECONDS` and deliberately a
+/// **separate** constant: AU1's ramp is a playback-only transient that export
+/// never runs (AU1 §3.4), while this one is derived from the document and is
+/// therefore present in export, in playback, and in every measurement.
+pub(crate) const AUTOMATION_HOLD_DECLICK_MILLISECONDS: u32 = 5;
+
+/// AU4 §3.1: 240 sample frames at 48 kHz.
+fn automation_hold_declick_frames(sample_rate: u32) -> u64 {
+    u64::from(sample_rate).saturating_mul(u64::from(AUTOMATION_HOLD_DECLICK_MILLISECONDS)) / 1_000
+}
+
+/// AU4 §3.1: the two integer frame anchors bracketing one absolute project
+/// sample, the weight between them, and the `Hold` declick term.
+///
+/// Integer in, three floats out; the same call in both mix paths.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AutomationStep {
+    /// The owner's value at the project frame containing `project_sample`.
+    pub v0: i64,
+    /// The value at the next frame, or `v0` when the segment holds.
+    pub v1: i64,
+    /// The weight between the two anchors, in `0.0..=1.0`.
+    pub t: f32,
+    /// `Some((held, w))` asks the consumer for one more lerp, from the amplitude
+    /// of `held` toward the value it just computed, at weight `w` in `0.0..=1.0`.
+    pub declick: Option<(i64, f32)>,
+}
+
+/// AU4 §3.1 rule 41: the one place automation becomes a float.
+///
+/// `origin` is the owner's time base — a clip envelope subtracts the clip's
+/// `timeline_start`, every project-frame owner passes [`TimeCode::ZERO`].
+// Rule 68: every boundary above this line is integral; `t` is the intentional
+// integer-to-float conversion and the sample counts it divides are bounded by
+// one project frame.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn automation_step(
+    curve: Option<&AutomationCurve>,
+    static_value: i64,
+    origin: TimeCode,
+    project_sample: u64,
+    sample_rate: u32,
+    project_fps: Rational,
+) -> AutomationStep {
+    // Rule 41.1: `frame_to_samples` returns 0 for a non-positive frame, so a
+    // negative local frame is clamped *here* and never by it.
+    let local = samples_to_frame(project_sample, sample_rate, project_fps)
+        .0
+        .saturating_sub(origin.0);
+    let before_origin = local < 0;
+    let frame = local.max(0);
+    // Rule 41.2: both bounds are exact u128 floors.
+    let s0 = frame_to_samples(
+        TimeCode(frame.saturating_add(origin.0)),
+        sample_rate,
+        project_fps,
+    );
+    let s1 = frame_to_samples(
+        TimeCode(frame.saturating_add(origin.0).saturating_add(1)),
+        sample_rate,
+        project_fps,
+    );
+    // Rule 41.3 and 41.4: `v1` is **segment-aware**, which is what makes a
+    // `Hold` segment flat.
+    let v0 = curve
+        .and_then(|curve| curve.value_at(TimeCode(frame)))
+        .unwrap_or(static_value);
+    let v1 = if curve.is_none_or(|curve| curve.holds_at(TimeCode(frame))) {
+        v0
+    } else {
+        curve
+            .and_then(|curve| curve.value_at(TimeCode(frame.saturating_add(1))))
+            .unwrap_or(static_value)
+    };
+    let offset = project_sample.saturating_sub(s0);
+    let frame_span = s1.saturating_sub(s0);
+    // Rule 41.5, with rule 41.1's `t = 0.0` for a negative local frame.
+    let t = if before_origin || s1 <= s0 + 1 {
+        0.0
+    } else {
+        (offset as f32 / frame_span as f32).clamp(0.0, 1.0)
+    };
+    // Rule 41.6: the forward declick.
+    let declick = curve
+        .and_then(|curve| curve.hold_step_at(TimeCode(frame)))
+        .and_then(|step| {
+            // Both extra `min` terms are **defensive**: keys are strictly
+            // increasing, so `next_key >= at + 1` and `segment_span >=
+            // s1 - s0` always, and one project frame is 1 600 sample frames at
+            // 30 fps / 48 kHz. They are written down so the formula stays
+            // correct above 200 fps, not because either binds today.
+            let segment_span = match step.next_key {
+                Some(next) => frame_to_samples(
+                    TimeCode(next.0.saturating_add(origin.0)),
+                    sample_rate,
+                    project_fps,
+                )
+                .saturating_sub(s0),
+                None => frame_span,
+            };
+            let declick_frames = automation_hold_declick_frames(sample_rate)
+                .min(frame_span)
+                .min(segment_span)
+                .max(1);
+            (offset < declick_frames).then(|| {
+                (
+                    step.previous_value,
+                    (offset.saturating_add(1)) as f32 / declick_frames as f32,
+                )
+            })
+        });
+    AutomationStep { v0, v1, t, declick }
+}
+
+/// AU4 §3.1 rule 46: one **curve's** per-project-frame memo of its two anchor
+/// values, keyed `(frame_index, curve_epoch)`.
+///
+/// The AU2 per-frame cache idiom (audio.rs:818-828) applied one level down: the
+/// memo cannot be keyed per *owner* because a track stage owns **two** curves
+/// and a frame-indexed per-owner memo would collide between gain and pan.
+/// Export never retargets, so the epoch is constant there and the memo changes
+/// nothing observable; live, it is what makes an edit audible on the next
+/// sample frame rather than up to 1 599 samples later.
+#[derive(Debug, Clone, Copy)]
+struct AnchorMemo<T: Copy> {
+    key: Option<(i64, u32)>,
+    anchors: (T, T),
+}
+
+impl<T: Copy + Default> AnchorMemo<T> {
+    fn new() -> Self {
+        Self {
+            key: None,
+            anchors: (T::default(), T::default()),
+        }
+    }
+
+    fn anchors(&mut self, frame: i64, epoch: u32, build: impl FnOnce() -> (T, T)) -> (T, T) {
+        if self.key == Some((frame, epoch)) {
+            return self.anchors;
+        }
+        let anchors = build();
+        self.key = Some((frame, epoch));
+        self.anchors = anchors;
+        anchors
+    }
+}
+
+/// AU4 §3.1 rule 46: the memo key — the owner-local frame index the two anchors
+/// were read at, clamped exactly as [`automation_step`] clamps it.
+fn automation_frame(
+    origin: TimeCode,
+    project_sample: u64,
+    sample_rate: u32,
+    project_fps: Rational,
+) -> i64 {
+    samples_to_frame(project_sample, sample_rate, project_fps)
+        .0
+        .saturating_sub(origin.0)
+        .max(0)
+}
+
+/// AU4 §3.1 rule 42: the gain composition — `a + (b - a) * t`, then the forward
+/// declick, whose `w >= 1.0` arm returns `target` **exactly**.
+///
+/// The two-rounding form `(1 - t) * a + t * b` is the one an implementer
+/// reaches for first and it does **not** have the property that makes a
+/// constant curve free: `a + (a - a) * t == a` bit-exactly for every finite
+/// `t`. The `w >= 1.0` arm is normative, not an optimisation: `h + (target -
+/// h)` is up to ~500 ulps from `target` on a -60 dB duck, and the value at the
+/// end of a declick is *defined* to be the automated value exactly.
+fn automated_gain(step: &AutomationStep, anchors: (f32, f32)) -> f32 {
+    let (a0, a1) = anchors;
+    let target = a0 + (a1 - a0) * step.t;
+    match step.declick {
+        Some((held, weight)) if weight < 1.0 => {
+            let held = db_gain(held);
+            held + (target - held) * weight
+        }
+        _ => target,
+    }
+}
+
+/// AU4 §3.1 rule 42: the same two-step composition, per channel, over two
+/// [`pan_channel_ratios`] pairs.
+fn automated_pan(step: &AutomationStep, anchors: ([f32; 2], [f32; 2]), law: PanLaw) -> [f32; 2] {
+    let (p0, p1) = anchors;
+    let mut target = [
+        p0[0] + (p1[0] - p0[0]) * step.t,
+        p0[1] + (p1[1] - p0[1]) * step.t,
+    ];
+    if let Some((held, weight)) = step.declick
+        && weight < 1.0
+    {
+        let held = pan_channel_ratios(law, pan_percent_of(held));
+        for (channel, target) in target.iter_mut().enumerate() {
+            *target = held[channel] + (*target - held[channel]) * weight;
+        }
+    }
+    target
+}
+
+/// AU4 §3.1: a curve value read as a pan position. Validation bounds every
+/// stored key to `TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX`; a hand-edited
+/// document that escaped it clamps rather than panicking.
+fn pan_percent_of(value: i64) -> i32 {
+    i32::try_from(value)
+        .unwrap_or(if value < 0 {
+            TRACK_MIX_PAN_MIN
+        } else {
+            TRACK_MIX_PAN_MAX
+        })
+        .clamp(TRACK_MIX_PAN_MIN, TRACK_MIX_PAN_MAX)
 }
 
 /// AU2 §5.7: one scalar gain with the [`TrackStageRuntime`] ramp discipline.
@@ -1434,28 +1744,72 @@ struct GainRamp {
     current: f32,
     ramp_start: f32,
     ramp_index: usize,
+    /// AU4 §3.4 rule 61: the parked scalar this fader's curve replaces, kept
+    /// for rule 59's document comparison and as `automation_step`'s fallback.
+    gain_tenth_db: i32,
+    /// AU4 §3.4 rule 61: project-frame keyed, so the origin is
+    /// [`TimeCode::ZERO`] — exactly what the chain nodes beside it already do.
+    curve: Option<AutomationCurve>,
+    /// AU4 §3.1 rule 46: bumped **unconditionally** by `retarget`.
+    curve_epoch: u32,
+    memo: AnchorMemo<f32>,
+    sample_rate: u32,
+    project_fps: Rational,
 }
 
 impl GainRamp {
-    fn settled(target: f32, ramp_frames: usize) -> Self {
+    fn settled(
+        gain_tenth_db: i32,
+        curve: Option<&AutomationCurve>,
+        ramp_frames: usize,
+        sample_rate: u32,
+        project_fps: Rational,
+    ) -> Self {
+        let target = db_gain(i64::from(gain_tenth_db));
         Self {
             target,
             current: target,
             ramp_start: target,
             ramp_index: ramp_frames,
+            gain_tenth_db,
+            curve: curve.cloned(),
+            curve_epoch: 0,
+            memo: AnchorMemo::new(),
+            sample_rate,
+            project_fps,
         }
     }
 
     /// AU2 §5.7: restart from the current interpolated value when the new
     /// target differs from it, exactly as [`TrackStageRuntime::retarget`] does.
+    ///
+    /// AU4 §3.4 rule 61 / §3.3 rule 59: the comparison is against the
+    /// **document tuple** `(gain_tenth_db, curve)`, not against the derived
+    /// amplitude, because `update_audio_mix` retargets every fader on every mix
+    /// edit and an unconditional ramp would modulate faders the editor did not
+    /// touch.
     // The comparison is an exact identity test, not a tolerance question: an
     // unchanged target must not restart the ramp.
-    #[allow(clippy::float_cmp)]
-    fn retarget(&mut self, target: f32, ramp_frames: usize) {
-        self.target = target;
-        if target == self.current {
-            self.ramp_index = ramp_frames;
-        } else {
+    fn retarget(&mut self, gain_tenth_db: i32, curve: Option<&AutomationCurve>) {
+        let unchanged = self.gain_tenth_db == gain_tenth_db && self.curve.as_ref() == curve;
+        self.gain_tenth_db = gain_tenth_db;
+        self.target = db_gain(i64::from(gain_tenth_db));
+        if self.curve.as_ref() != curve {
+            self.curve = curve.cloned();
+        }
+        // AU4 §3.1 rule 46: unconditional, exactly as `AudioEffectNode::retarget`
+        // bumps `parameter_epoch`.
+        self.curve_epoch = self.curve_epoch.wrapping_add(1);
+        // AU4 §0 E24: the unchanged arm leaves the ramp **exactly as it is**
+        // rather than forcing `ramp_index = ramp_frames`. AU1's arm could force
+        // it because its condition was `target == self.current`, so settling
+        // was a no-op; under rule 59's document comparison an unchanged owner
+        // caught mid-ramp — every other track when one fader moves — would
+        // freeze at the interpolated value forever, because the settled arm of
+        // `apply` reads `current` and only `advance` ever assigns `target` to
+        // it. Leaving it alone satisfies AU1's rule as written ("an unchanged
+        // target must not **restart** the ramp") and lets the ramp finish.
+        if !unchanged {
             self.ramp_start = self.current;
             self.ramp_index = 0;
         }
@@ -1464,6 +1818,29 @@ impl GainRamp {
     #[cfg(test)]
     fn is_settled(&self, ramp_frames: usize) -> bool {
         self.ramp_index >= ramp_frames
+    }
+
+    /// AU4 §3.4 rule 61: the automated target at one absolute input sample.
+    fn automated_target(&mut self, project_sample: u64) -> f32 {
+        let step = automation_step(
+            self.curve.as_ref(),
+            i64::from(self.gain_tenth_db),
+            TimeCode::ZERO,
+            project_sample,
+            self.sample_rate,
+            self.project_fps,
+        );
+        let frame = automation_frame(
+            TimeCode::ZERO,
+            project_sample,
+            self.sample_rate,
+            self.project_fps,
+        );
+        let epoch = self.curve_epoch;
+        let anchors = self
+            .memo
+            .anchors(frame, epoch, || (db_gain(step.v0), db_gain(step.v1)));
+        automated_gain(&step, anchors)
     }
 
     // The ramp position is an integer sample-frame index converted once per frame.
@@ -1480,12 +1857,54 @@ impl GainRamp {
         }
     }
 
+    /// AU4 §3.3 rule 57: the automated target is the *target*; the live ramp
+    /// runs on top of it and `current` records the value last applied
+    /// (rule 58).
+    fn advance_automated(&mut self, target: f32, ramp_frames: usize) {
+        if self.ramp_index >= ramp_frames {
+            self.current = target;
+            return;
+        }
+        // The ramp position is an integer sample-frame index converted once.
+        #[allow(clippy::cast_precision_loss)]
+        let progress = (self.ramp_index + 1) as f32 / ramp_frames as f32;
+        self.current = self.ramp_start + (target - self.ramp_start) * progress;
+        self.ramp_index += 1;
+        if self.ramp_index >= ramp_frames {
+            self.current = target;
+        }
+    }
+
     /// Multiply one interleaved chunk by this gain, advancing the ramp once per
     /// sample frame while it runs.
+    ///
+    /// AU4 §3.4 rule 61: `start_sample` is the chunk's absolute **input**
+    /// sample index (§3.5 rule 64), and the automated arm is taken whenever a
+    /// curve exists — so the two fast paths below stay bit-identical to pre-AU4
+    /// for every curve-free document (A13).
     // A settled unity gain is an exact identity: `x * 1.0 == x` in IEEE 754, so
     // a neutral fader stays bit-identical to a pass-through.
     #[allow(clippy::float_cmp)]
-    fn apply(&mut self, samples: &mut [f32], channels: usize, ramp_frames: usize) {
+    fn apply(
+        &mut self,
+        samples: &mut [f32],
+        channels: usize,
+        ramp_frames: usize,
+        start_sample: u64,
+    ) {
+        if self.curve.is_some() {
+            for (index, frame) in samples.chunks_mut(channels.max(1)).enumerate() {
+                let project_sample =
+                    start_sample.saturating_add(u64::try_from(index).unwrap_or(u64::MAX));
+                let target = self.automated_target(project_sample);
+                self.advance_automated(target, ramp_frames);
+                let gain = self.current;
+                for sample in frame.iter_mut() {
+                    *sample *= gain;
+                }
+            }
+            return;
+        }
         if self.ramp_index >= ramp_frames {
             if self.current == 1.0 {
                 return;
@@ -1579,13 +1998,36 @@ struct TrackStageRuntime {
     /// Equal to the processor's ramp length when settled (AU1 §3.4).
     ramp_index: usize,
     gain: f32,
+    /// AU4 §3.3 rule 55: the parked scalars a curve replaces, and the document
+    /// inputs rule 59 compares. `pan_law` is in the tuple because
+    /// `track_stage_parameters` reads it and `SetPanLaw` takes the live path.
+    gain_tenth_db: i32,
+    pan_percent: i32,
+    pan_law: PanLaw,
+    /// AU4 §2.1: **project**-frame keyed, so the origin is [`TimeCode::ZERO`].
+    gain_curve: Option<AutomationCurve>,
+    pan_curve: Option<AutomationCurve>,
+    /// AU4 §3.1 rule 46: bumped **unconditionally** by `retarget`.
+    curve_epoch: u32,
+    gain_memo: AnchorMemo<f32>,
+    pan_memo: AnchorMemo<[f32; 2]>,
+    channels: usize,
+    sample_rate: u32,
+    project_fps: Rational,
 }
 
 impl TrackStageRuntime {
     /// A freshly built stage is settled, so export and a newly opened playback
     /// mixer never ramp (AU1 §3.4).
-    fn new(document: &Document, track: TrackId, channels: usize, ramp_frames: usize) -> Self {
+    fn new(
+        document: &Document,
+        track: TrackId,
+        channels: usize,
+        ramp_frames: usize,
+        sample_rate: u32,
+    ) -> Self {
         let (audible, gain, target) = track_stage_parameters(document, track, channels);
+        let mix = document.track_mix(track);
         Self {
             track,
             audible,
@@ -1594,24 +2036,139 @@ impl TrackStageRuntime {
             ramp_start: target,
             ramp_index: ramp_frames,
             gain,
+            gain_tenth_db: mix.gain_tenth_db,
+            pan_percent: mix.pan_percent,
+            pan_law: document.audio_mix.pan_law,
+            gain_curve: mix.gain_curve,
+            pan_curve: mix.pan_curve,
+            curve_epoch: 0,
+            gain_memo: AnchorMemo::new(),
+            pan_memo: AnchorMemo::new(),
+            channels,
+            sample_rate,
+            project_fps: document.fps,
         }
+    }
+
+    /// AU4 §3.3 rule 56: whether this stage evaluates a curve at all. The AU1
+    /// fast paths are taken only when both curves are `None`, so a curve-free
+    /// document stays bit-identical (A13).
+    const fn automated(&self) -> bool {
+        self.gain_curve.is_some() || self.pan_curve.is_some()
     }
 
     /// AU1 §3.4: retarget, ramping from the current interpolated value when
     /// the new target differs from it.
+    ///
+    /// AU4 §3.3 rule 59: the comparison is against the **document tuple**
+    /// `(audible, gain_tenth_db, pan_percent, gain_curve, pan_curve, pan_law)`
+    /// — every input `track_stage_parameters` reads — because
+    /// `update_audio_mix` retargets **every** stage on every mix edit, and an
+    /// unconditional `pending_ramp` would restart a 5 ms ramp on every other
+    /// automated track whenever one fader moved. `pan_law` is in the tuple
+    /// because a law change moves the derived target without moving any
+    /// per-track field; omitting it would make a live `Balance` / `ConstantPower`
+    /// switch a no-op on every track.
     // The comparison is an exact identity test, not a tolerance question: an
     // unchanged target must not restart the ramp.
-    #[allow(clippy::float_cmp)]
-    fn retarget(&mut self, document: &Document, channels: usize, ramp_frames: usize) {
-        let (audible, gain, target) = track_stage_parameters(document, self.track, channels);
+    fn retarget(&mut self, document: &Document) {
+        let (audible, gain, target) = track_stage_parameters(document, self.track, self.channels);
+        let mix = document.track_mix(self.track);
+        let pan_law = document.audio_mix.pan_law;
+        let unchanged = self.audible == audible
+            && self.gain_tenth_db == mix.gain_tenth_db
+            && self.pan_percent == mix.pan_percent
+            && self.gain_curve == mix.gain_curve
+            && self.pan_curve == mix.pan_curve
+            && self.pan_law == pan_law;
         self.audible = audible;
         self.gain = gain;
         self.target = target;
-        if target == self.current {
-            self.ramp_index = ramp_frames;
-        } else {
+        self.gain_tenth_db = mix.gain_tenth_db;
+        self.pan_percent = mix.pan_percent;
+        self.pan_law = pan_law;
+        self.gain_curve = mix.gain_curve;
+        self.pan_curve = mix.pan_curve;
+        // AU4 §3.1 rule 46: unconditional, exactly as `AudioEffectNode::retarget`
+        // bumps `parameter_epoch`.
+        self.curve_epoch = self.curve_epoch.wrapping_add(1);
+        // AU4 §0 E24: see [`GainRamp::retarget`] — the unchanged arm leaves the
+        // ramp running rather than forcing it settled at a stale `current`.
+        if !unchanged {
             self.ramp_start = self.current;
             self.ramp_index = 0;
+        }
+    }
+
+    /// AU4 §3.3 rule 56: the automated per-channel target at one absolute input
+    /// sample, plus the scalar gain channels >= 2 read.
+    ///
+    /// Rule 43 pins the multiply order: `track_stage_parameters` returns
+    /// `[gain * pan[0], gain * pan[1]]`, so the automated arm composes
+    /// `gain * pan[ch]` in that order — never `pan * gain`, never a fused
+    /// three-way product.
+    fn automated_target(&mut self, project_sample: u64) -> (f32, [f32; 2]) {
+        if !self.audible {
+            return (0.0, [0.0, 0.0]);
+        }
+        let frame = automation_frame(
+            TimeCode::ZERO,
+            project_sample,
+            self.sample_rate,
+            self.project_fps,
+        );
+        let epoch = self.curve_epoch;
+        let gain_step = automation_step(
+            self.gain_curve.as_ref(),
+            i64::from(self.gain_tenth_db),
+            TimeCode::ZERO,
+            project_sample,
+            self.sample_rate,
+            self.project_fps,
+        );
+        let gain_anchors = self.gain_memo.anchors(frame, epoch, || {
+            (db_gain(gain_step.v0), db_gain(gain_step.v1))
+        });
+        let gain = automated_gain(&gain_step, gain_anchors);
+        if self.channels < 2 {
+            return (gain, [gain, gain]);
+        }
+        let law = self.pan_law;
+        let pan_step = automation_step(
+            self.pan_curve.as_ref(),
+            i64::from(self.pan_percent),
+            TimeCode::ZERO,
+            project_sample,
+            self.sample_rate,
+            self.project_fps,
+        );
+        let pan_anchors = self.pan_memo.anchors(frame, epoch, || {
+            (
+                pan_channel_ratios(law, pan_percent_of(pan_step.v0)),
+                pan_channel_ratios(law, pan_percent_of(pan_step.v1)),
+            )
+        });
+        let pan = automated_pan(&pan_step, pan_anchors, law);
+        (gain, [gain * pan[0], gain * pan[1]])
+    }
+
+    /// AU4 §3.3 rules 57 and 58: the automated value is the *target*, the live
+    /// ramp runs on top of it, and `current` records the value last applied.
+    fn advance_automated(&mut self, target: [f32; 2], ramp_frames: usize) {
+        if self.ramp_index >= ramp_frames {
+            self.current = target;
+            return;
+        }
+        // The ramp position is an integer sample-frame index converted once per frame.
+        #[allow(clippy::cast_precision_loss)]
+        let progress = (self.ramp_index + 1) as f32 / ramp_frames as f32;
+        for (channel, current) in self.current.iter_mut().enumerate() {
+            *current =
+                self.ramp_start[channel] + (target[channel] - self.ramp_start[channel]) * progress;
+        }
+        self.ramp_index += 1;
+        if self.ramp_index >= ramp_frames {
+            self.current = target;
         }
     }
 
@@ -1651,22 +2208,53 @@ impl TrackStageRuntime {
     /// The ramp is defined over output frames, not over frames in which this
     /// track has audio, so a live change made during a gap has settled by the
     /// time the next clip starts instead of blipping through its first 5 ms.
+    ///
+    /// AU4 §3.3 rule 60: on a **curve-bearing** stage the completion assignment
+    /// becomes `automated_target(n_end)` — the automated value at the last
+    /// output frame of the silent chunk — so rule 58's definition of `current`
+    /// holds across gaps as well as across audible chunks. Parking `current` at
+    /// the scalar during silence would make a live mix edit made in a gap ramp
+    /// the first audible chunk of the next clip from a stale value: exactly the
+    /// click rule 58 exists to prevent, moved into the gap. The silent arm still
+    /// writes **no samples**; only `current` moves. `start_sample` is the
+    /// chunk's absolute input sample index (AU4 §0 E22).
     // The ramp position is an integer sample-frame index converted once.
     #[allow(clippy::cast_precision_loss)]
-    fn skip_ramp(&mut self, frames: usize, ramp_frames: usize) {
+    fn skip_ramp(&mut self, start_sample: u64, frames: usize, ramp_frames: usize) {
+        if !self.automated() {
+            if self.ramp_index >= ramp_frames {
+                return;
+            }
+            let index = self.ramp_index.saturating_add(frames);
+            if index >= ramp_frames {
+                self.ramp_index = ramp_frames;
+                self.current = self.target;
+                return;
+            }
+            let progress = index as f32 / ramp_frames as f32;
+            for channel in 0..2 {
+                self.current[channel] = self.ramp_start[channel]
+                    + (self.target[channel] - self.ramp_start[channel]) * progress;
+            }
+            self.ramp_index = index;
+            return;
+        }
+        let last = u64::try_from(frames.max(1).saturating_sub(1)).unwrap_or(u64::MAX);
+        let (_, target) = self.automated_target(start_sample.saturating_add(last));
         if self.ramp_index >= ramp_frames {
+            self.current = target;
             return;
         }
         let index = self.ramp_index.saturating_add(frames);
         if index >= ramp_frames {
             self.ramp_index = ramp_frames;
-            self.current = self.target;
+            self.current = target;
             return;
         }
         let progress = index as f32 / ramp_frames as f32;
-        for channel in 0..2 {
-            self.current[channel] = self.ramp_start[channel]
-                + (self.target[channel] - self.ramp_start[channel]) * progress;
+        for (channel, current) in self.current.iter_mut().enumerate() {
+            *current =
+                self.ramp_start[channel] + (target[channel] - self.ramp_start[channel]) * progress;
         }
         self.ramp_index = index;
     }
@@ -1687,10 +2275,44 @@ impl TrackStageRuntime {
         &mut self,
         source: &[f32],
         destination: &mut [f32],
-        channels: usize,
         ramp_frames: usize,
+        start_sample: u64,
     ) {
-        let channels = channels.max(1);
+        let channels = self.channels.max(1);
+        // AU4 §3.3 rule 56: the automated arm, walked per source frame. The two
+        // neutral fast paths below are taken **only** when both curves are
+        // `None`, so a curve-free document stays bit-identical (A13).
+        if self.automated() {
+            // AU1 §3.1 is not a fast path but an invariant: a **gated** track
+            // writes exact zeros. `sample * 0.0` is `-0.0` for a negative
+            // sample, which is a different bit pattern from `fill(0.0)`, so a
+            // silenced automated track would not be byte-identical to a
+            // silenced un-automated one (AU4 §0 E23).
+            if !self.audible && self.ramp_index >= ramp_frames {
+                self.current = [0.0, 0.0];
+                destination.fill(0.0);
+                return;
+            }
+            for (index, (out_frame, source_frame)) in destination
+                .chunks_mut(channels)
+                .zip(source.chunks(channels))
+                .enumerate()
+            {
+                let project_sample =
+                    start_sample.saturating_add(u64::try_from(index).unwrap_or(u64::MAX));
+                let (wide, target) = self.automated_target(project_sample);
+                self.advance_automated(target, ramp_frames);
+                for (channel, (out, sample)) in out_frame.iter_mut().zip(source_frame).enumerate() {
+                    *out = sample
+                        * if channel < 2 {
+                            self.current[channel]
+                        } else {
+                            wide
+                        };
+                }
+            }
+            return;
+        }
         if self.ramp_index >= ramp_frames {
             // AU1 §3.1: a gated track writes exact zeros. A settled stage has
             // `current == target`, and `!audible` targets `[0.0, 0.0]`.
@@ -1777,7 +2399,9 @@ impl AudioMixProcessor {
             .collect::<Vec<_>>();
         let stages = track_order
             .iter()
-            .map(|track| TrackStageRuntime::new(document, *track, channels, ramp_frames))
+            .map(|track| {
+                TrackStageRuntime::new(document, *track, channels, ramp_frames, sample_rate)
+            })
             .collect();
         let scratch = track_order.iter().map(|_| Vec::new()).collect();
         // AU2 §3.6: latency is derived from the document once, here, and held
@@ -1794,13 +2418,21 @@ impl AudioMixProcessor {
                 .buses
                 .iter()
                 .map(|bus| {
-                    AudioBusRuntime::new(bus, channels, sample_rate, ramp_frames, bus_stage_frames)
+                    AudioBusRuntime::new(
+                        bus,
+                        channels,
+                        sample_rate,
+                        document.fps,
+                        ramp_frames,
+                        bus_stage_frames,
+                    )
                 })
                 .collect(),
             master: AudioMasterRuntime::new(
                 &document.audio_mix.master,
                 channels,
                 sample_rate,
+                document.fps,
                 ramp_frames,
                 master_stage_frames,
             ),
@@ -1843,9 +2475,10 @@ impl AudioMixProcessor {
         let channels = self.channels;
         let ramp_frames = self.ramp_frames;
         let sample_rate = self.sample_rate;
+        let project_fps = self.project_fps;
         // 1. Track stages, which now also fold the document's pan law.
         for stage in &mut self.stages {
-            stage.retarget(document, channels, ramp_frames);
+            stage.retarget(document);
         }
         // 2. Routing, recomputed on every update.
         self.routed_tracks = document
@@ -1880,7 +2513,7 @@ impl AudioMixProcessor {
                 match matched {
                     Some((index, true)) => {
                         let mut runtime = existing.remove(index);
-                        runtime.retarget(bus, ramp_frames);
+                        runtime.retarget(bus);
                         runtime
                     }
                     // 5. The fader is continuous across a chain rebuild: only
@@ -1891,18 +2524,21 @@ impl AudioMixProcessor {
                             bus,
                             channels,
                             sample_rate,
+                            project_fps,
                             ramp_frames,
                             bus_stage_frames,
                         );
-                        let target = runtime.gain.target;
                         runtime.gain = gain;
-                        runtime.gain.retarget(target, ramp_frames);
+                        runtime
+                            .gain
+                            .retarget(bus.gain_tenth_db, bus.gain_curve.as_ref());
                         runtime
                     }
                     None => AudioBusRuntime::new(
                         bus,
                         channels,
                         sample_rate,
+                        project_fps,
                         ramp_frames,
                         bus_stage_frames,
                     ),
@@ -1911,20 +2547,24 @@ impl AudioMixProcessor {
             .collect();
         // 4. The master chain, by the same rule.
         if chain_structure_matches(&self.master.effects, &document.audio_mix.master.effects) {
-            self.master
-                .retarget(&document.audio_mix.master, ramp_frames);
+            self.master.retarget(&document.audio_mix.master);
         } else {
             let mut master = AudioMasterRuntime::new(
                 &document.audio_mix.master,
                 channels,
                 sample_rate,
+                project_fps,
                 ramp_frames,
                 self.master_stage_frames,
             );
-            let target = master.gain.target;
-            master.gain =
-                std::mem::replace(&mut self.master.gain, GainRamp::settled(1.0, ramp_frames));
-            master.gain.retarget(target, ramp_frames);
+            master.gain = std::mem::replace(
+                &mut self.master.gain,
+                GainRamp::settled(0, None, ramp_frames, sample_rate, project_fps),
+            );
+            master.gain.retarget(
+                document.audio_mix.master.gain_tenth_db,
+                document.audio_mix.master.gain_curve.as_ref(),
+            );
             self.master = master;
         }
     }
@@ -1970,7 +2610,7 @@ impl AudioMixProcessor {
             let Some(samples) = track_buffers.get(&track) else {
                 // AU1 §3.4: the ramp runs on output frames, so it keeps running
                 // while this track is silent.
-                self.stages[index].skip_ramp(sample_frames, ramp_frames);
+                self.stages[index].skip_ramp(start_sample, sample_frames, ramp_frames);
                 if collect_stems {
                     let staged = &mut self.staged[index];
                     staged.clear();
@@ -1994,8 +2634,8 @@ impl AudioMixProcessor {
                 stage.apply(
                     &samples[..length],
                     &mut staged[..length],
-                    channels,
                     ramp_frames,
+                    start_sample,
                 );
                 staged[length..].fill(0.0);
             }
@@ -2053,7 +2693,8 @@ impl AudioMixProcessor {
             // AU2 §5.6: the bus fader sits after the chain and before the pad,
             // so the bus stem, the bus meter, and the master sum all read the
             // faded signal. Settled at unity it is an exact pass-through.
-            bus.gain.apply(&mut signal, channels, ramp_frames);
+            bus.gain
+                .apply(&mut signal, channels, ramp_frames, start_sample);
             // AU2 §3.6: the alignment pad brings this chain up to `L_bus`, so
             // the bus stem, the bus meter, and the master sum all see the same
             // stage latency whatever the chain's own split.
@@ -2088,7 +2729,9 @@ impl AudioMixProcessor {
             let project_fps = self.project_fps;
             let frame_channels = self.channels;
             let runtime = &mut self.master;
-            runtime.gain.apply(&mut master, channels, ramp_frames);
+            runtime
+                .gain
+                .apply(&mut master, channels, ramp_frames, start_sample);
             if !runtime.effects.is_empty() {
                 // The master carries no sidechain, so `audio_ducking` is
                 // rejected on it (AU2 §5.4) and the tap reads exact zeros.
@@ -2194,6 +2837,9 @@ fn smooth_gain(
 
 struct AudioMixSource {
     track: TrackId,
+    /// AU4 §3.8 rule 73: the clip this segment came from, so a live shaping
+    /// update can match the segment layout before rebuilding in place.
+    clip: ClipId,
     path: PathBuf,
     output_rate: u32,
     output_channels: u16,
@@ -2298,6 +2944,10 @@ struct AudioMixer {
     latency: u64,
     meter: Option<Arc<MeterState>>,
     processor: AudioMixProcessor,
+    /// AU4 §3.8 rule 73: the two inputs `open` derived the segment list from,
+    /// so a live shaping update can re-derive exactly the same list.
+    decode_from: TimeCode,
+    output_rate: u32,
 }
 
 impl AudioMixer {
@@ -2340,6 +2990,7 @@ impl AudioMixer {
                 .map_err(|error| MediaError::Backend(error.to_string()))?;
             sources.push(AudioMixSource {
                 track: segment.track,
+                clip: segment.clip,
                 path: asset.path.clone(),
                 output_rate,
                 output_channels,
@@ -2383,6 +3034,8 @@ impl AudioMixer {
                 .saturating_add(latency),
             latency,
             meter: None,
+            decode_from,
+            output_rate,
         };
         // AU2 §3.7: unconditional, including a seek to zero, where the loop
         // body only executes at all once a chain declares lookahead.
@@ -2423,6 +3076,75 @@ impl AudioMixer {
     /// chain, and the pan law — to a running mixer.
     fn update_audio_mix(&mut self, document: &Document) {
         self.processor.update_audio_mix(document);
+    }
+
+    /// AU4 §3.8 rule 73: rebuild each source's [`ClipAudioShaping`] **in
+    /// place** from a new document, or refuse.
+    ///
+    /// The `chain_structure_matches` idiom one level over: the layout matches
+    /// when the source count, the `clip` ids in order, every segment's asset
+    /// path, and every segment's project and source sample bounds are
+    /// unchanged. `false` asks the caller to fall back to stop-and-re-cue,
+    /// exactly as the chain path already does.
+    /// Neither `SetClipAudio` nor `SetClipGainEnvelope` can change a clip
+    /// boundary, an asset, or the declared lookahead (rule 74), so a `false`
+    /// here means the batch carried something else.
+    ///
+    /// Rule 76: this runs on the worker thread, not the audio callback, so the
+    /// per-source `Vec<Keyframe>` clone is not a realtime allocation.
+    fn update_clip_shaping(&mut self, document: &Document) -> bool {
+        let output_rate = self.output_rate;
+        let project_end = document.duration;
+        let Ok(segments) = timeline_audio_segments(document, self.decode_from..project_end) else {
+            return false;
+        };
+        if segments.len() != self.sources.len() {
+            return false;
+        }
+        let mut rebuilt = Vec::with_capacity(segments.len());
+        for (segment, source) in segments.iter().zip(&self.sources) {
+            if segment.clip != source.clip || segment.track != source.track {
+                return false;
+            }
+            let Some(clip) = document.clip(segment.clip) else {
+                return false;
+            };
+            let Some(asset) = document.asset(segment.asset) else {
+                return false;
+            };
+            // Defence in depth: rule 74 keeps a relink off the live path, and
+            // the worker does not verify the app's predicate, so the layout
+            // check compares the decoded file itself rather than trusting it.
+            if asset.path != source.path {
+                return false;
+            }
+            let clip_project_start =
+                frame_to_samples(clip.timeline_start, output_rate, document.fps);
+            let project_sample_start =
+                frame_to_samples(segment.project.start, output_rate, document.fps);
+            let project_sample_end =
+                frame_to_samples(segment.project.end, output_rate, document.fps);
+            let source_clip_start =
+                frame_to_samples(clip.source_range.start, output_rate, asset.fps);
+            let source_sample_end = frame_to_samples(clip.source_range.end, output_rate, asset.fps);
+            let source_sample_start = source_clip_start
+                .saturating_add(project_sample_start.saturating_sub(clip_project_start));
+            if project_sample_start != source.project_sample_start
+                || project_sample_end != source.project_sample_end
+                || source_sample_start != source.source_sample_start
+                || source_sample_end != source.source_sample_end
+            {
+                return false;
+            }
+            let Ok(clip_duration) = document.clip_duration(clip) else {
+                return false;
+            };
+            rebuilt.push((clip, clip_duration));
+        }
+        for (source, (clip, clip_duration)) in self.sources.iter_mut().zip(rebuilt) {
+            source.shaping.rebuild(clip, clip_duration);
+        }
+        true
     }
 
     fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
@@ -2637,6 +3359,12 @@ impl AudioRuntime {
     /// AU2 §5.8: apply a new audio mix without stopping the stream.
     pub(crate) fn update_audio_mix(&mut self, document: &Document) {
         self.mixer.update_audio_mix(document);
+    }
+
+    /// AU4 §3.8 rule 73: apply new clip audio shaping without stopping the
+    /// stream. `false` asks the worker to fall back to stop-and-re-cue.
+    pub(crate) fn update_clip_shaping(&mut self, document: &Document) -> bool {
+        self.mixer.update_clip_shaping(document)
     }
 
     /// AU2 §5.8: install a rebuilt peak table on a running stream, in the same
@@ -3053,6 +3781,7 @@ mod tests {
                 gain_tenth_db: 0,
                 effects: vec![gain],
                 ducking_sidechain_tracks: Vec::new(),
+                gain_curve: None,
             }],
         );
         let tracks = HashMap::from([(TrackId(1), vec![1.0; 11])]);
@@ -3098,6 +3827,7 @@ mod tests {
                         ),
                     ],
                     ducking_sidechain_tracks: vec![TrackId(2)],
+                    gain_curve: None,
                 },
                 AudioBus {
                     id: AudioBusId(2),
@@ -3106,6 +3836,7 @@ mod tests {
                     gain_tenth_db: 0,
                     effects: vec![audio_effect(4, "audio_gain", &[("gain_tenth_db", -600)])],
                     ducking_sidechain_tracks: Vec::new(),
+                    gain_curve: None,
                 },
             ],
         );
@@ -3141,6 +3872,7 @@ mod tests {
                     &[("ceiling_tenth_db", -10)],
                 )],
                 ducking_sidechain_tracks: Vec::new(),
+                gain_curve: None,
             }],
         );
         let tracks = HashMap::from([(TrackId(1), vec![2.0, -2.0])]);
@@ -3434,6 +4166,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             }],
             media_pool: vec![MediaAsset {
@@ -3469,6 +4202,8 @@ mod tests {
             pan_percent,
             mute,
             solo,
+            gain_curve: None,
+            pan_curve: None,
         }
     }
 
@@ -3574,6 +4309,7 @@ mod tests {
                 ],
             )],
             ducking_sidechain_tracks: vec![TrackId(2)],
+            gain_curve: None,
         }
     }
 
@@ -3603,6 +4339,7 @@ mod tests {
             gain_tenth_db: 0,
             effects: vec![audio_effect(2, "audio_gain", &[("gain_tenth_db", -600)])],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         };
 
         let ducking = mix_document(Vec::new(), vec![bus.clone(), monitor.clone()]);
@@ -3871,6 +4608,7 @@ mod tests {
             gain_tenth_db: 0,
             effects: vec![audio_effect(1, "audio_gain", &[("gain_tenth_db", -60)])],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         };
         let document = mix_document(vec![track_mix(1, -60, 0, false, false)], vec![bus]);
         let master = Arc::new(MeterState::default());
@@ -4042,6 +4780,7 @@ mod tests {
             gain_tenth_db: 0,
             effects: vec![audio_effect(1, "audio_gain", &[("gain_tenth_db", -60)])],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         }];
         assert!(needs_seek_preroll(&with_bus, TimeCode(5)));
         assert!(!needs_seek_preroll(&with_bus, TimeCode::ZERO));
@@ -4090,6 +4829,7 @@ mod tests {
                         audio_effect(13, "audio_gain", &[("gain_tenth_db", 120)]),
                     ],
                     ducking_sidechain_tracks: vec![TrackId(1)],
+                    gain_curve: None,
                 }],
                 ..AudioMix::default()
             },
@@ -4391,6 +5131,7 @@ mod tests {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         }
     }
 
@@ -4458,6 +5199,7 @@ mod tests {
             gain_tenth_db: 0,
             effects,
             ducking_sidechain_tracks: vec![TrackId(2)],
+            gain_curve: None,
         }
     }
 
@@ -5703,6 +6445,7 @@ mod tests {
                 audio_effect(21, "audio_limiter", &[("ceiling_tenth_db", -20)]),
             ],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         });
         document
     }
@@ -5806,6 +6549,7 @@ mod tests {
                         ],
                     )],
                     ducking_sidechain_tracks: Vec::new(),
+                    gain_curve: None,
                 }],
                 ..AudioMix::default()
             },
@@ -6175,6 +6919,7 @@ mod tests {
             gain_tenth_db: 0,
             effects,
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         }
     }
 
@@ -6511,6 +7256,7 @@ mod tests {
                     ],
                 ),
             ],
+            gain_curve: None,
         };
         document.audio_mix.pan_law = PanLaw::ConstantPower;
         document.audio_mix.tracks = vec![track_mix(2, 0, 25, false, false)];
@@ -7695,6 +8441,7 @@ mod tests {
         document.audio_mix.master = AudioMaster {
             gain_tenth_db: 0,
             effects: vec![audio_effect(1, "audio_gain", &[("gain_tenth_db", 60)])],
+            gain_curve: None,
         };
         document.validate().unwrap();
         let report = qc(&document, &AudioQcRequest::default());
@@ -7980,5 +8727,1181 @@ mod tests {
         assert_eq!(split.clipping.left.over_full_scale_samples, 3);
         assert_eq!(split.clipping.left.clipped_runs, 1);
         assert_eq!(split.clipping.right.clipped_runs, 0);
+    }
+
+    // ---------------------------------------------------------------------
+    // AU4 §3 Part A media
+    // ---------------------------------------------------------------------
+
+    fn au4_curve(points: &[(i64, i64)], interpolation: KeyframeInterpolation) -> AutomationCurve {
+        AutomationCurve {
+            keyframes: points
+                .iter()
+                .map(|(at, value)| Keyframe {
+                    at: TimeCode(*at),
+                    value: *value,
+                    interpolation,
+                })
+                .collect(),
+        }
+    }
+
+    /// A `Hold` step: `{first: a}` held, then `{second: b}`.
+    fn au4_hold_step_curve(first: i64, a: i64, second: i64, b: i64) -> AutomationCurve {
+        AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(first),
+                    value: a,
+                    interpolation: KeyframeInterpolation::Hold,
+                },
+                Keyframe {
+                    at: TimeCode(second),
+                    value: b,
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+            ],
+        }
+    }
+
+    /// AU4 §7 item A9 (rules 41, 43): the two anchors, the weight, the negative
+    /// local frame, the degenerate frame span, and the static fallback.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn automation_step_brackets_the_frame_and_falls_back_to_the_scalar() {
+        let rate = 48_000_u32;
+        let fps = Rational::new(30, 1).unwrap();
+        // Rule 44's arithmetic, asserted rather than assumed.
+        assert_eq!(automation_hold_declick_frames(rate), 240);
+        assert_eq!(
+            frame_to_samples(TimeCode(1), rate, fps) - frame_to_samples(TimeCode::ZERO, rate, fps),
+            1_600
+        );
+
+        let curve = au4_curve(&[(0, 0), (10, -600)], KeyframeInterpolation::Linear);
+        // The two anchors of frame 5 are `value_at(5)` and `value_at(6)`.
+        let step = automation_step(Some(&curve), 0, TimeCode::ZERO, 5 * 1_600, rate, fps);
+        assert_eq!(step.v0, curve.value_at(TimeCode(5)).unwrap());
+        assert_eq!(step.v1, curve.value_at(TimeCode(6)).unwrap());
+        assert_eq!(step.t, 0.0, "the first sample of a frame weighs zero");
+        assert_eq!(step.declick, None);
+
+        // Rule 41.5 over the frame's first, middle and last sample.
+        let middle = automation_step(Some(&curve), 0, TimeCode::ZERO, 5 * 1_600 + 800, rate, fps);
+        assert_eq!(middle.t, 0.5);
+        let last = automation_step(
+            Some(&curve),
+            0,
+            TimeCode::ZERO,
+            5 * 1_600 + 1_599,
+            rate,
+            fps,
+        );
+        assert_eq!(last.t, 1_599.0 / 1_600.0);
+        assert!(last.t < 1.0);
+
+        // Rule 41.1: a negative local frame is clamped **before**
+        // `frame_to_samples`, which would return 0 for it.
+        let local = automation_step(Some(&curve), 0, TimeCode(10), 0, rate, fps);
+        assert_eq!(local.t, 0.0);
+        assert_eq!(local.v0, curve.value_at(TimeCode::ZERO).unwrap());
+        assert_eq!(local.v1, curve.value_at(TimeCode(1)).unwrap());
+
+        // Rule 41.5's `s1 <= s0 + 1` arm: one project frame is one sample.
+        let dense = Rational::new(48_000, 1).unwrap();
+        let degenerate = automation_step(Some(&curve), 0, TimeCode::ZERO, 5, rate, dense);
+        assert_eq!(degenerate.t, 0.0);
+
+        // No curve: both anchors are the scalar and nothing declicks, so the
+        // weight is computed but multiplies a zero difference.
+        let none = automation_step(None, -123, TimeCode::ZERO, 5 * 1_600 + 400, rate, fps);
+        assert_eq!(
+            (none.v0, none.v1, none.t, none.declick),
+            (-123, -123, 0.25, None)
+        );
+        let scalar = db_gain(-123);
+        assert_eq!(
+            automated_gain(&none, (scalar, scalar)).to_bits(),
+            scalar.to_bits()
+        );
+
+        // A curve whose `value_at` cannot answer falls back to the scalar too.
+        let empty = AutomationCurve { keyframes: vec![] };
+        let fallback = automation_step(Some(&empty), 77, TimeCode::ZERO, 0, rate, fps);
+        assert_eq!((fallback.v0, fallback.v1), (77, 77));
+    }
+
+    /// AU4 §7 item A9 (rules 3, 44, 45): a `Hold` segment is flat, the value
+    /// changes at the next key's first sample, and the forward declick has no
+    /// seam.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn a_hold_segment_is_flat_and_its_step_declicks_forward_without_a_seam() {
+        let rate = 48_000_u32;
+        let fps = Rational::new(30, 1).unwrap();
+        // Rule 44's pinned example: `{10: 0, Hold}, {100: -600}`.
+        let curve = au4_hold_step_curve(10, 0, 100, -600);
+        let boundary = frame_to_samples(TimeCode(100), rate, fps);
+        assert_eq!(boundary, 160_000);
+
+        // Every sample of frames 10..=99 reads the held value exactly.
+        for frame in 10..100 {
+            for offset in [0_u64, 1, 799, 1_599] {
+                let sample = frame_to_samples(TimeCode(frame), rate, fps) + offset;
+                let step = automation_step(Some(&curve), 0, TimeCode::ZERO, sample, rate, fps);
+                assert_eq!(step.v0, 0);
+                assert_eq!(step.v1, 0, "a Hold segment is flat at frame {frame}");
+                assert_eq!(step.declick, None);
+                let gain = automated_gain(&step, (db_gain(step.v0), db_gain(step.v1)));
+                assert_eq!(gain.to_bits(), db_gain(0).to_bits());
+            }
+        }
+
+        let held = db_gain(0);
+        let target = db_gain(-600);
+        let value = |sample: u64| {
+            let step = automation_step(Some(&curve), 0, TimeCode::ZERO, sample, rate, fps);
+            automated_gain(&step, (db_gain(step.v0), db_gain(step.v1)))
+        };
+
+        // The declick window: 240 frames, weights `1/240 ..= 240/240`.
+        let mut previous = held;
+        for offset in 0..239_u64 {
+            let step = automation_step(
+                Some(&curve),
+                0,
+                TimeCode::ZERO,
+                boundary + offset,
+                rate,
+                fps,
+            );
+            let (declick_held, weight) = step.declick.expect("inside the declick window");
+            assert_eq!(declick_held, 0);
+            #[allow(clippy::cast_precision_loss)]
+            let expected = (offset + 1) as f32 / 240.0;
+            assert_eq!(weight, expected);
+            let current = value(boundary + offset);
+            assert!(
+                current < previous && current > target,
+                "the declick interior is strictly between {held} and {target} and monotone; \
+                 sample {} read {current} after {previous}",
+                boundary + offset
+            );
+            previous = current;
+        }
+
+        // Rule 30/45: the `w >= 1.0` arm returns `target` **exactly**, so the
+        // last declick sample is `to_bits()`-identical to the first undeclicked
+        // one and there is no seam to bound.
+        let reached = boundary + 239;
+        let exact = boundary + 240;
+        let last_declick = automation_step(Some(&curve), 0, TimeCode::ZERO, reached, rate, fps);
+        assert_eq!(last_declick.declick, Some((0, 1.0)));
+        assert_eq!(
+            automation_step(Some(&curve), 0, TimeCode::ZERO, exact, rate, fps).declick,
+            None
+        );
+        assert_eq!(value(reached).to_bits(), value(exact).to_bits());
+        assert_eq!(value(reached).to_bits(), target.to_bits());
+        // The naive `h + (target - h)` is the form the arm exists to avoid.
+        assert_ne!((held + (target - held)).to_bits(), target.to_bits());
+
+        println!("AU4_HOLD_STEP boundary={boundary} reached={reached} exact={exact}");
+        println!(
+            "AU4_HOLD_SEAM reached={reached} bits_equal={}",
+            value(reached).to_bits() == value(exact).to_bits()
+        );
+    }
+
+    /// AU4 §7 item A9 (rules 7, 42, 43, 49): both lerps are `a + (b - a) * t`,
+    /// the automated multiply order is `gain * pan[ch]`, and the constant-power
+    /// centre is not unity.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn the_lerp_form_makes_a_constant_curve_free_and_pins_the_multiply_order() {
+        let rate = 48_000_u32;
+        let fps = Rational::new(30, 1).unwrap();
+        assert_eq!(
+            pan_channel_ratios(PanLaw::ConstantPower, 0),
+            [
+                std::f32::consts::FRAC_1_SQRT_2,
+                std::f32::consts::FRAC_1_SQRT_2
+            ]
+        );
+        assert_eq!(pan_channel_ratios(PanLaw::Balance, 0), [1.0, 1.0]);
+
+        // `a + (a - a) * t == a` bit-exactly for every finite `t`, under both
+        // laws, which is the property that makes a constant curve cost nothing.
+        for anchor in [-600_i64, -237, -1, 0, 37, 120] {
+            let amplitude = db_gain(anchor);
+            for step_index in 0..=1_000_u32 {
+                #[allow(clippy::cast_precision_loss)]
+                let t = f32::from(u16::try_from(step_index).unwrap()) / 1_000.0;
+                let step = AutomationStep {
+                    v0: anchor,
+                    v1: anchor,
+                    t,
+                    declick: None,
+                };
+                assert_eq!(
+                    automated_gain(&step, (amplitude, amplitude)).to_bits(),
+                    amplitude.to_bits()
+                );
+                for law in [PanLaw::Balance, PanLaw::ConstantPower] {
+                    let ratios = pan_channel_ratios(law, 25);
+                    let panned = automated_pan(&step, (ratios, ratios), law);
+                    assert_eq!(panned[0].to_bits(), ratios[0].to_bits());
+                    assert_eq!(panned[1].to_bits(), ratios[1].to_bits());
+                }
+            }
+        }
+
+        // Rule 43: at every project frame's first sample `t == 0.0`, so the
+        // automated arm equals `db_gain(value_at(f))` bit-exactly.
+        let curve = au4_curve(&[(0, -300), (20, 120)], KeyframeInterpolation::EaseInOut);
+        for frame in 0..25_i64 {
+            let sample = frame_to_samples(TimeCode(frame), rate, fps);
+            let step = automation_step(Some(&curve), 0, TimeCode::ZERO, sample, rate, fps);
+            assert_eq!(step.t, 0.0);
+            let anchors = (db_gain(step.v0), db_gain(step.v1));
+            assert_eq!(
+                automated_gain(&step, anchors).to_bits(),
+                db_gain(curve.value_at(TimeCode(frame)).unwrap()).to_bits()
+            );
+        }
+
+        // Rule 43: `track_stage_parameters` returns `[gain * pan[0], gain *
+        // pan[1]]`, so the automated arm composes in that order.
+        let document = {
+            let mut document = processor_document(fps, 30, Vec::new());
+            document.audio_mix.pan_law = PanLaw::ConstantPower;
+            document.audio_mix.tracks = vec![track_mix(1, -37, 41, false, false)];
+            document
+        };
+        let (_, _, parked) = track_stage_parameters(&document, TrackId(1), 2);
+        let mut stage = TrackStageRuntime::new(&document, TrackId(1), 2, 240, rate);
+        stage.gain_curve = Some(au4_curve(&[(0, -37)], KeyframeInterpolation::Linear));
+        stage.pan_curve = Some(au4_curve(&[(0, 41)], KeyframeInterpolation::Linear));
+        let (_, automated) = stage.automated_target(0);
+        assert_eq!(automated[0].to_bits(), parked[0].to_bits());
+        assert_eq!(automated[1].to_bits(), parked[1].to_bits());
+        let gain = db_gain(-37);
+        let pan = pan_channel_ratios(PanLaw::ConstantPower, 41);
+        assert_eq!(automated[0].to_bits(), (gain * pan[0]).to_bits());
+        assert_eq!(automated[1].to_bits(), (gain * pan[1]).to_bits());
+        // Multiplication is commutative in IEEE 754 but **not associative**,
+        // which is why rule 43 forbids a fused three-way product: the stage
+        // multiplies the sample by the *folded* `gain * pan[ch]`, never by
+        // `gain` and then `pan[ch]`.
+        let sample = 0.1_f32;
+        assert_ne!(
+            (sample * (gain * pan[0])).to_bits(),
+            ((sample * gain) * pan[0]).to_bits(),
+            "the fold order is observable, which is what makes it pinnable"
+        );
+    }
+
+    /// AU4 §7 item A9 (rule 48, R50): the constant-power chord bound, swept over
+    /// every integer pan step and printed.
+    ///
+    /// The sweep measures the **geometry** — the chord across the arc that
+    /// rule 48 bounds — in `f64`, because at `delta = 1` the sagitta is
+    /// `7.7e-6` and one `f32` ulp near `0.7` is `6.0e-8`, so a measurement made
+    /// in `f32` reads the anchors' own representation error and not the chord.
+    /// The `f32` path that ships is then checked against the same chord, which
+    /// is the only thing `f32` can be held to here.
+    #[test]
+    fn the_constant_power_chord_stays_inside_its_sagitta_at_every_pan_step() {
+        let theta = |percent: f64| (percent / 100.0 + 1.0) * std::f64::consts::FRAC_PI_4;
+        for delta in 1..=200_i32 {
+            let angle = f64::from(delta) * std::f64::consts::PI / 400.0;
+            let bound = 1.0 - angle.cos();
+            let sagitta = 1.0 - (angle / 2.0).cos();
+            let mut measured = 0.0_f64;
+            let mut float_error = 0.0_f64;
+            for start in TRACK_MIX_PAN_MIN..=(TRACK_MIX_PAN_MAX - delta) {
+                let end = start + delta;
+                let exact_anchors = [theta(f64::from(start)), theta(f64::from(end))]
+                    .map(|angle| [angle.cos(), angle.sin()]);
+                let anchors = (
+                    pan_channel_ratios(PanLaw::ConstantPower, start),
+                    pan_channel_ratios(PanLaw::ConstantPower, end),
+                );
+                for index in 0..=100_u32 {
+                    let t = f64::from(index) / 100.0;
+                    let arc = theta(f64::from(start) + t * f64::from(delta));
+                    let exact = [arc.cos(), arc.sin()];
+                    #[allow(clippy::cast_possible_truncation)]
+                    let step = AutomationStep {
+                        v0: i64::from(start),
+                        v1: i64::from(end),
+                        t: t as f32,
+                        declick: None,
+                    };
+                    let shipped = automated_pan(&step, anchors, PanLaw::ConstantPower);
+                    for channel in 0..2 {
+                        // The chord rule 48 bounds: `a + (b - a) * t` over the
+                        // two exact arc endpoints.
+                        let chord = exact_anchors[0][channel]
+                            + (exact_anchors[1][channel] - exact_anchors[0][channel]) * t;
+                        measured = measured.max((chord - exact[channel]).abs());
+                        float_error = float_error.max((f64::from(shipped[channel]) - chord).abs());
+                    }
+                }
+            }
+            assert!(
+                measured <= sagitta && sagitta <= bound,
+                "delta={delta}: measured={measured} sagitta={sagitta} bound={bound}"
+            );
+            assert!(
+                float_error <= 8.0 * f64::from(f32::EPSILON),
+                "delta={delta}: the shipped f32 chord is {float_error} from the exact chord"
+            );
+            println!("AU4_PAN_CHORD delta={delta} bound={bound:.6e} measured={measured:.6e}");
+        }
+        // Rule 48's two pinned figures.
+        let ten = 10.0_f64 * std::f64::consts::PI / 400.0;
+        assert!(((1.0 - ten.cos()) - 3.083e-3).abs() < 1.0e-6);
+        assert!(((1.0 - (ten / 2.0).cos()) - 7.710e-4).abs() < 1.0e-7);
+        let hundred = 100.0_f64 * std::f64::consts::PI / 400.0;
+        assert!(((1.0 - hundred.cos()) - 0.293).abs() < 1.0e-3);
+        assert!(((1.0 - (hundred / 2.0).cos()) - 0.0761).abs() < 1.0e-4);
+    }
+
+    /// AU4 §7 item A10 (rules 18, 47): per-project-frame evaluation against a
+    /// per-sample reference — bit-identity at every frame's first sample and
+    /// monotonicity across its interior, for gain and for pan under both laws.
+    #[test]
+    fn per_project_frame_automation_matches_a_per_sample_reference() {
+        let rate = 48_000_u32;
+        let fps = Rational::new(30, 1).unwrap();
+        let gain_curve = au4_curve(&[(0, -600), (20, 120)], KeyframeInterpolation::Linear);
+        let pan_curve = au4_curve(&[(0, -100), (20, 100)], KeyframeInterpolation::Linear);
+
+        for frame in 0..24_i64 {
+            let first = frame_to_samples(TimeCode(frame), rate, fps);
+            let next = frame_to_samples(TimeCode(frame + 1), rate, fps);
+
+            // (b) part one: bit-identity at the frame's first sample.
+            let step = automation_step(Some(&gain_curve), 0, TimeCode::ZERO, first, rate, fps);
+            let anchors = (db_gain(step.v0), db_gain(step.v1));
+            assert_eq!(
+                automated_gain(&step, anchors).to_bits(),
+                db_gain(gain_curve.value_at(TimeCode(frame)).unwrap()).to_bits(),
+                "gain at the first sample of frame {frame}"
+            );
+
+            // (b) part two: monotone between the two anchors on the interior.
+            let mut previous = automated_gain(&step, anchors);
+            for sample in (first + 1)..next {
+                let step = automation_step(Some(&gain_curve), 0, TimeCode::ZERO, sample, rate, fps);
+                let current = automated_gain(&step, (db_gain(step.v0), db_gain(step.v1)));
+                assert!(
+                    current >= previous,
+                    "a rising gain curve must not fall inside frame {frame}"
+                );
+                previous = current;
+            }
+            let end = automation_step(Some(&gain_curve), 0, TimeCode::ZERO, next - 1, rate, fps);
+            let a1 = db_gain(end.v1);
+            assert!(previous <= a1, "the interior stays inside its two anchors");
+
+            for law in [PanLaw::Balance, PanLaw::ConstantPower] {
+                let step = automation_step(Some(&pan_curve), 0, TimeCode::ZERO, first, rate, fps);
+                let anchors = (
+                    pan_channel_ratios(law, pan_percent_of(step.v0)),
+                    pan_channel_ratios(law, pan_percent_of(step.v1)),
+                );
+                let exact = pan_channel_ratios(
+                    law,
+                    i32::try_from(pan_curve.value_at(TimeCode(frame)).unwrap()).unwrap(),
+                );
+                let read = automated_pan(&step, anchors, law);
+                assert_eq!(read[0].to_bits(), exact[0].to_bits());
+                assert_eq!(read[1].to_bits(), exact[1].to_bits());
+
+                let mut previous = read;
+                for sample in (first + 1)..next {
+                    let step =
+                        automation_step(Some(&pan_curve), 0, TimeCode::ZERO, sample, rate, fps);
+                    let anchors = (
+                        pan_channel_ratios(law, pan_percent_of(step.v0)),
+                        pan_channel_ratios(law, pan_percent_of(step.v1)),
+                    );
+                    let current = automated_pan(&step, anchors, law);
+                    assert!(
+                        current[0] <= previous[0] && current[1] >= previous[1],
+                        "a left-to-right pan sweep is monotone per channel inside frame {frame}"
+                    );
+                    previous = current;
+                }
+            }
+        }
+    }
+
+    /// AU4 §7 items A11/A12: `parity_document` with **all five** owners
+    /// carrying a curve — a clip envelope, both track curves, a bus fader curve
+    /// and a master fader curve.
+    fn parity_document_with_automation(voice: &Path, bed: &Path, fps: Rational) -> Document {
+        let mut document = parity_document_with_track_mix(voice, bed, fps);
+        // The clip envelope is keyed **clip-local**; clip 4 runs 10 frames from
+        // `timeline_start` 20 and already carries `audio_gain_tenth_db = -60`,
+        // which rule 52 says the curve replaces.
+        document.tracks[2].clips[0].audio_gain_curve = Some(au4_curve(
+            &[(0, -240), (5, 0), (9, -180)],
+            KeyframeInterpolation::Linear,
+        ));
+        document.audio_mix.tracks[0].gain_curve = Some(au4_curve(
+            &[(0, -120), (12, 60), (29, -300)],
+            KeyframeInterpolation::Linear,
+        ));
+        document.audio_mix.tracks[0].pan_curve = Some(au4_curve(
+            &[(0, -80), (14, 0), (29, 90)],
+            KeyframeInterpolation::EaseInOut,
+        ));
+        document.audio_mix.buses[0].gain_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Hold,
+                },
+                Keyframe {
+                    at: TimeCode(8),
+                    value: -90,
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+                Keyframe {
+                    at: TimeCode(29),
+                    value: 30,
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+            ],
+        });
+        document.audio_mix.master.gain_curve = Some(au4_curve(
+            &[(0, -60), (20, 0)],
+            KeyframeInterpolation::Linear,
+        ));
+        document
+    }
+
+    /// AU4 §7 item A11 (rules 70, 71): a document carrying all five owners'
+    /// curves mixes deterministically, the stems path and the clamped observer
+    /// feed agree with `mix_audio` bit for bit, and the SHA-256 of the mix is
+    /// **printed** beside AU3's family rather than pinned across systems.
+    #[test]
+    fn mix_audio_with_every_automated_owner_is_bit_identical_through_both_paths() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(10, 1).unwrap();
+        let voice = loud_sine("au4-automation-voice", 440);
+        let bed = loud_sine("au4-automation-bed", 660);
+        let settings = parity_settings(fps);
+        let document = transitioned(parity_document_with_automation(
+            voice.path(),
+            bed.path(),
+            fps,
+        ));
+
+        let exported = crate::export::mix_audio(&document, &settings).unwrap();
+        assert_eq!(exported.len(), 30 * 4_800 * 2);
+        let again = crate::export::mix_audio(&document, &settings).unwrap();
+        assert!(
+            exported
+                .iter()
+                .zip(&again)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "automation evaluation must be deterministic"
+        );
+        let bytes = exported
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        println!(
+            "AU4_AUTOMATION_SHA256 parity_all_five_owners {}",
+            crate::sha256::sha256_bytes(&bytes)
+        );
+
+        let with_stems = mix_pass(
+            &document,
+            TimeCode::ZERO..document.duration,
+            &settings,
+            MixCollect {
+                stems: true,
+                master: true,
+            },
+            &mut NoObserver,
+        )
+        .unwrap();
+        assert!(
+            with_stems
+                .master
+                .iter()
+                .zip(&exported)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the stems path must be the export"
+        );
+
+        let mut recorder = MasterRecorder::default();
+        mix_pass(
+            &document,
+            TimeCode::ZERO..document.duration,
+            &settings,
+            MixCollect {
+                stems: false,
+                master: false,
+            },
+            &mut recorder,
+        )
+        .unwrap();
+        limit_audio_mix(&mut recorder.master);
+        assert_eq!(recorder.master.len(), exported.len());
+        assert!(
+            recorder
+                .master
+                .iter()
+                .zip(&exported)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the observer's clamped master feed must be the export"
+        );
+    }
+
+    /// AU4 §7 item A12 (rules 67, 71): playback matches export on an
+    /// automation-bearing fixture through AU1's nine windows and its frame-5
+    /// seek arm, and a **windowed** measurement reads the same samples the
+    /// full-range pass does over that window — rule 67's regression.
+    #[test]
+    fn playback_matches_export_and_a_windowed_pass_keys_automation_from_project_zero() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(10, 1).unwrap();
+        let voice = loud_sine("au4-parity-voice", 440);
+        let bed = loud_sine("au4-parity-bed", 660);
+        let settings = parity_settings(fps);
+        let document = transitioned(parity_document_with_automation(
+            voice.path(),
+            bed.path(),
+            fps,
+        ));
+
+        let exported = crate::export::mix_audio(&document, &settings).unwrap();
+        assert_playback_matches_export(&document, &exported, fps);
+
+        // Rule 67: `mix_pass` always starts its chunk loop at project sample 0
+        // and trims the head afterwards, so a windowed pass keys every
+        // automated owner at the true project frame. Compared bit for bit
+        // against the same window of the full-range mix.
+        let window = TimeCode(10)..TimeCode(20);
+        let windowed = mix_pass(
+            &document,
+            window.clone(),
+            &settings,
+            MixCollect {
+                stems: false,
+                master: true,
+            },
+            &mut NoObserver,
+        )
+        .unwrap()
+        .master;
+        let samples = interleaved_sample_range(10..20, fps, 48_000, 2);
+        assert_eq!(windowed.len(), samples.end - samples.start);
+        assert!(
+            windowed
+                .iter()
+                .zip(&exported[samples.clone()])
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "a windowed automated pass must read the full-range pass restricted to that window"
+        );
+
+        // And the same statement one level up, through `measure_mix_levels`.
+        let report = crate::export::measure_mix_levels(
+            &document,
+            &MixLevelRequest {
+                range: Some(window),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            report.master,
+            crate::loudness::measure_loudness(&exported[samples], 48_000, 2).unwrap()
+        );
+    }
+
+    /// Every scalar owner of `document` gains a one-key **constant** curve of
+    /// exactly the value it already carries.
+    fn au4_constant_curves(document: &Document) -> Document {
+        let mut document = document.clone();
+        for track in &mut document.tracks {
+            for clip in &mut track.clips {
+                clip.audio_gain_curve = Some(au4_curve(
+                    &[(0, i64::from(clip.audio_gain_tenth_db))],
+                    KeyframeInterpolation::Linear,
+                ));
+            }
+        }
+        for entry in &mut document.audio_mix.tracks {
+            entry.gain_curve = Some(au4_curve(
+                &[(0, i64::from(entry.gain_tenth_db))],
+                KeyframeInterpolation::Linear,
+            ));
+            entry.pan_curve = Some(au4_curve(
+                &[(0, i64::from(entry.pan_percent))],
+                KeyframeInterpolation::Linear,
+            ));
+        }
+        for bus in &mut document.audio_mix.buses {
+            bus.gain_curve = Some(au4_curve(
+                &[(0, i64::from(bus.gain_tenth_db))],
+                KeyframeInterpolation::Linear,
+            ));
+        }
+        document.audio_mix.master.gain_curve = Some(au4_curve(
+            &[(0, i64::from(document.audio_mix.master.gain_tenth_db))],
+            KeyframeInterpolation::Linear,
+        ));
+        document
+    }
+
+    /// AU4 §7 item A13 (rules 42, 51, 52, 56, 70): neutrality is bit-exact.
+    #[test]
+    fn a_curve_free_document_and_a_constant_curve_document_export_identically() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(10, 1).unwrap();
+        let voice = loud_sine("au4-neutral-voice", 440);
+        let bed = loud_sine("au4-neutral-bed", 660);
+        let settings = parity_settings(fps);
+        let document = transitioned(parity_document_with_track_mix(
+            voice.path(),
+            bed.path(),
+            fps,
+        ));
+
+        // The fast paths still fire: a curve-free stage and a curve-free fader
+        // never take the automated arm.
+        let processor = AudioMixProcessor::new(&document, 48_000, 2, None);
+        assert!(processor.stages.iter().all(|stage| !stage.automated()));
+        assert!(processor.buses.iter().all(|bus| bus.gain.curve.is_none()));
+        assert!(processor.master.gain.curve.is_none());
+
+        let exported = crate::export::mix_audio(&document, &settings).unwrap();
+        let bytes = exported
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        println!(
+            "AU4_AUTOMATION_SHA256 parity_track_mix_curve_free {}",
+            crate::sha256::sha256_bytes(&bytes)
+        );
+
+        // Rule 42's lerp form is what makes this exact: `a + (a - a) * t == a`
+        // bit-exactly for every finite `t`, so replacing every scalar with a
+        // one-key constant curve changes no byte of the export — the automated
+        // arm and the scalar arm agree everywhere.
+        let constant = au4_constant_curves(&document);
+        constant.validate().unwrap();
+        let automated = crate::export::mix_audio(&constant, &settings).unwrap();
+        assert_eq!(automated.len(), exported.len());
+        let differing = exported
+            .iter()
+            .zip(&automated)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert_eq!(
+            differing, 0,
+            "a constant curve must cost nothing: {differing} samples differ"
+        );
+
+        // Rule 51: with no curve the envelope factor is skipped entirely and
+        // `gain_at` is the pre-AU4 product exactly.
+        let clip = &document.tracks[2].clips[0];
+        let shaping = ClipAudioShaping::new(clip, TimeCode(10), 48_000, fps);
+        assert!(shaping.curve.is_none());
+        for sample in (0..48_000_u64).step_by(97) {
+            let reference = shaping.constant_gain
+                * shaping.fade_in.map_or(1.0, |ramp| ramp.gain_at(sample))
+                * shaping
+                    .fade_out
+                    .map_or(1.0, |ramp| 1.0 - ramp.gain_at(sample))
+                * shaping.transition.map_or(1.0, |ramp| ramp.gain_at(sample));
+            assert_eq!(shaping.gain_at(sample).to_bits(), reference.to_bits());
+        }
+    }
+
+    /// AU4 §7 item A13 (rule 52): the envelope is **not gained twice**.
+    #[test]
+    fn a_clip_envelope_replaces_the_clip_scalar_rather_than_multiplying_it() {
+        let fps = Rational::new(10, 1).unwrap();
+        let curve = au4_curve(&[(0, -180), (9, 0)], KeyframeInterpolation::Linear);
+        let mut quiet = audio_clip(1, 1, 0..10, 0);
+        quiet.audio_gain_tenth_db = -600;
+        quiet.audio_gain_curve = Some(curve.clone());
+        let mut unity = audio_clip(1, 1, 0..10, 0);
+        unity.audio_gain_tenth_db = 0;
+        unity.audio_gain_curve = Some(curve);
+
+        let quiet = ClipAudioShaping::new(&quiet, TimeCode(10), 48_000, fps);
+        let unity = ClipAudioShaping::new(&unity, TimeCode(10), 48_000, fps);
+        assert_eq!(quiet.constant_gain.to_bits(), 1.0_f32.to_bits());
+        assert_eq!(unity.constant_gain.to_bits(), 1.0_f32.to_bits());
+        for sample in 0..48_000_u64 {
+            assert_eq!(
+                quiet.gain_at(sample).to_bits(),
+                unity.gain_at(sample).to_bits(),
+                "the scalar must not survive beside its own curve at sample {sample}"
+            );
+        }
+        // And the envelope really is the curve, evaluated by `automation_step`.
+        assert_eq!(unity.gain_at(0).to_bits(), db_gain(-180).to_bits());
+        assert_eq!(
+            unity
+                .gain_at(frame_to_samples(TimeCode(9), 48_000, fps))
+                .to_bits(),
+            db_gain(0).to_bits()
+        );
+    }
+
+    /// AU4 §7 item A14: mix one track through a processor in export's own
+    /// 1 024-frame chunks and drop the whole graph latency from the head,
+    /// exactly as `mix_pass` does, so the result is indexed by final position.
+    fn au4_master_at_final_position(
+        document: &Document,
+        rate: u32,
+        input: &[f32],
+        frames: usize,
+    ) -> Vec<f32> {
+        let channels = 2_usize;
+        let mut processor = AudioMixProcessor::new(document, rate, channels, None);
+        let mut mixed = Vec::with_capacity(frames * channels);
+        let mut start = 0_usize;
+        while start < frames {
+            let count = MIX_CHUNK_SAMPLE_FRAMES.min(frames - start);
+            let chunk = input[start * channels..(start + count) * channels].to_vec();
+            let out = processor
+                .mix_chunk(
+                    &HashMap::from([(TrackId(1), chunk)]),
+                    u64::try_from(start).unwrap(),
+                    count,
+                )
+                .expect("the chunk should mix");
+            mixed.extend_from_slice(&out);
+            start += count;
+        }
+        let latency = graph_latency_frames(&document.audio_mix.lookahead_milliseconds(), rate)
+            .saturating_mul(channels)
+            .min(mixed.len());
+        mixed.drain(..latency);
+        mixed
+    }
+
+    /// The final-position sample frame at which two runs first differ.
+    fn au4_first_difference(reference: &[f32], probe: &[f32], channels: usize) -> u64 {
+        let index = reference
+            .iter()
+            .zip(probe)
+            .position(|(a, b)| a.to_bits() != b.to_bits())
+            .expect("an automated run must differ from its un-automated reference");
+        u64::try_from(index / channels).unwrap()
+    }
+
+    /// AU4 §7 item A14 (rules 25, 64, 65): the automation key is the **input**
+    /// frame, so the offset against the audible result is **per owner** — 0 for
+    /// the clip envelope and the track stage, the bus chain's own node latency
+    /// for the bus fader, and `stage_latency_frames(L_bus)` for the master
+    /// fader — and 0 for all four without declared lookahead.
+    #[test]
+    fn the_automation_offset_against_the_audible_result_is_per_owner() {
+        let rate = 48_000_u32;
+        let channels = 2_usize;
+        let fps = Rational::new(10, 1).unwrap();
+        let frames = 30_000_usize;
+        let key = TimeCode(5);
+        let boundary = frame_to_samples(key, rate, fps);
+        let step = || au4_hold_step_curve(0, 0, key.0, -600);
+
+        for declared in [0_i64, kinewright_core::CHAIN_LOOKAHEAD_MILLISECONDS] {
+            let lookahead_node = |id: u64| {
+                audio_effect(
+                    id,
+                    "audio_compressor",
+                    &[
+                        // Ratio 1:1 with the threshold at full scale: a pure
+                        // delay, so the probe measures the fader's placement
+                        // and nothing else.
+                        ("threshold_tenth_db", 0),
+                        ("ratio_hundredths", 100),
+                        ("lookahead_milliseconds", declared),
+                    ],
+                )
+            };
+            let base_document = || {
+                let mut document = processor_document(fps, 20, vec![]);
+                document.audio_mix.buses = vec![AudioBus {
+                    id: AudioBusId(1),
+                    name: "Chain".to_owned(),
+                    tracks: vec![TrackId(1)],
+                    gain_tenth_db: 0,
+                    effects: vec![lookahead_node(1)],
+                    ducking_sidechain_tracks: Vec::new(),
+                    gain_curve: None,
+                }];
+                document.audio_mix.master.effects = vec![lookahead_node(2)];
+                document
+            };
+            let document = base_document();
+            let lookahead = document.audio_mix.lookahead_milliseconds();
+            let bus_node_frames = stage_latency_frames(declared, rate);
+            let master_offset = stage_latency_frames(lookahead.bus_stage, rate);
+            assert_eq!(bus_node_frames, if declared == 0 { 0 } else { 960 });
+            assert_eq!(master_offset, if declared == 0 { 0 } else { 960 });
+
+            let flat = vec![0.25_f32; frames * channels];
+            let reference = au4_master_at_final_position(&document, rate, &flat, frames);
+
+            let mut cases: Vec<(&str, Vec<f32>, Document, u64)> = Vec::new();
+
+            // The clip envelope is applied to the raw input chunk **before**
+            // any chain, in both mix paths, so it is probed exactly there.
+            let mut clip = audio_clip(1, 1, 0..20, 0);
+            clip.audio_gain_curve = Some(step());
+            let shaping = ClipAudioShaping::new(&clip, TimeCode(20), rate, fps);
+            let mut enveloped = flat.clone();
+            for (index, frame) in enveloped.chunks_mut(channels).enumerate() {
+                let gain = shaping.gain_at(u64::try_from(index).unwrap());
+                for sample in frame.iter_mut() {
+                    *sample *= gain;
+                }
+            }
+            cases.push(("clip_envelope", enveloped, base_document(), 0));
+
+            let mut track_gain = base_document();
+            track_gain.audio_mix.tracks = vec![TrackMix {
+                gain_curve: Some(step()),
+                ..TrackMix::neutral(TrackId(1))
+            }];
+            cases.push(("track_gain", flat.clone(), track_gain, 0));
+
+            let mut track_pan = base_document();
+            track_pan.audio_mix.tracks = vec![TrackMix {
+                pan_curve: Some(au4_hold_step_curve(0, 0, key.0, -100)),
+                ..TrackMix::neutral(TrackId(1))
+            }];
+            cases.push(("track_pan", flat.clone(), track_pan, 0));
+
+            let mut bus_fader = base_document();
+            bus_fader.audio_mix.buses[0].gain_curve = Some(step());
+            cases.push((
+                "bus_fader",
+                flat.clone(),
+                bus_fader,
+                u64::try_from(bus_node_frames).unwrap(),
+            ));
+
+            let mut master_fader = base_document();
+            master_fader.audio_mix.master.gain_curve = Some(step());
+            cases.push((
+                "master_fader",
+                flat.clone(),
+                master_fader,
+                u64::try_from(master_offset).unwrap(),
+            ));
+
+            for (owner, input, document, expected) in cases {
+                let probe = au4_master_at_final_position(&document, rate, &input, frames);
+                let first = au4_first_difference(&reference, &probe, channels);
+                // A curve that became audible *late* must fail loudly here, not
+                // saturate to an offset of 0 that the three zero-offset owners
+                // would accept (review-pass2-media-a F1).
+                assert!(
+                    first <= boundary,
+                    "{owner} at {declared} ms: the step keyed at sample {boundary} \
+                     became audible LATE, at final position {first}"
+                );
+                let offset = boundary - first;
+                assert_eq!(
+                    offset, expected,
+                    "{owner} at {declared} ms: the step keyed at sample {boundary} \
+                     became audible at final position {first}"
+                );
+                println!("AU4_LATENCY owner={owner} declared_ms={declared} offset_frames={offset}");
+            }
+        }
+    }
+
+    /// AU4 §7 item A15 (rules 46, 59): a live curve edit retargets every stage,
+    /// bumps the per-curve epoch, and is audible on the **next sample frame**
+    /// rather than at the next project-frame boundary.
+    #[test]
+    fn a_mid_frame_curve_edit_is_audible_on_the_next_sample_frame() {
+        let rate = 48_000_u32;
+        let fps = Rational::new(10, 1).unwrap();
+        let mut document = processor_document(fps, 20, Vec::new());
+        document.audio_mix.tracks = vec![TrackMix {
+            gain_curve: Some(au4_curve(
+                &[(0, 0), (10, -600)],
+                KeyframeInterpolation::Linear,
+            )),
+            ..TrackMix::neutral(TrackId(1))
+        }];
+        let mut stage = TrackStageRuntime::new(&document, TrackId(1), 2, 240, rate);
+
+        // Read the anchors mid-project-frame, so the memo is warm for frame 2.
+        let frame = frame_to_samples(TimeCode(2), rate, fps);
+        let mid = frame + 1_000;
+        let before = stage.automated_target(mid).0;
+        assert_eq!(stage.gain_memo.key.unwrap().0, 2);
+        let epoch = stage.curve_epoch;
+
+        let mut edited = document.clone();
+        edited.audio_mix.tracks[0].gain_curve = Some(au4_curve(
+            &[(0, -600), (10, 0)],
+            KeyframeInterpolation::Linear,
+        ));
+        stage.retarget(&edited);
+        assert_eq!(stage.curve_epoch, epoch.wrapping_add(1));
+
+        // The very next sample of the same project frame reads the new curve.
+        let after = stage.automated_target(mid + 1).0;
+        assert_ne!(before.to_bits(), after.to_bits());
+        let expected = automation_step(
+            edited.audio_mix.tracks[0].gain_curve.as_ref(),
+            0,
+            TimeCode::ZERO,
+            mid + 1,
+            rate,
+            fps,
+        );
+        assert_eq!(
+            after.to_bits(),
+            automated_gain(&expected, (db_gain(expected.v0), db_gain(expected.v1))).to_bits()
+        );
+
+        // Rule 59: an unchanged document tuple must not **restart** the ramp,
+        // and (AU4 §0 E24) must not cut it short either.
+        let running = stage.ramp_index;
+        stage.retarget(&edited);
+        assert_eq!(
+            stage.ramp_index, running,
+            "an unchanged tuple leaves the ramp exactly where it was"
+        );
+        let mut moved = edited.clone();
+        moved.audio_mix.pan_law = PanLaw::ConstantPower;
+        stage.retarget(&moved);
+        assert_eq!(stage.ramp_index, 0, "a pan law change must retarget");
+    }
+
+    /// AU4 §7 item A15 (rule 60): an edit made while an automated track is
+    /// silent leaves `current` at the **automated** value, so the first audible
+    /// chunk of the next clip does not ramp from the parked scalar.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn skip_ramp_completes_to_the_automated_value_across_a_gap() {
+        let rate = 48_000_u32;
+        let fps = Rational::new(10, 1).unwrap();
+        let mut document = processor_document(fps, 20, Vec::new());
+        document.audio_mix.tracks = vec![TrackMix {
+            gain_tenth_db: -600,
+            gain_curve: Some(au4_curve(
+                &[(0, 0), (10, 120)],
+                KeyframeInterpolation::Linear,
+            )),
+            ..TrackMix::neutral(TrackId(1))
+        }];
+        let mut stage = TrackStageRuntime::new(&document, TrackId(1), 2, 240, rate);
+        // The parked scalar the pre-AU4 completion would have used.
+        let parked = stage.target;
+        assert_eq!(parked[0].to_bits(), db_gain(-600).to_bits());
+
+        let start = frame_to_samples(TimeCode(4), rate, fps);
+        let frames = 1_024_usize;
+        stage.skip_ramp(start, frames, 240);
+        let last = start + u64::try_from(frames - 1).unwrap();
+        let mut probe = TrackStageRuntime::new(&document, TrackId(1), 2, 240, rate);
+        let expected = probe.automated_target(last).1;
+        assert_eq!(stage.current[0].to_bits(), expected[0].to_bits());
+        assert_ne!(stage.current[0].to_bits(), parked[0].to_bits());
+
+        // A curve-free stage keeps AU1's behaviour exactly.
+        let plain = processor_document(fps, 20, Vec::new());
+        let mut plain_stage = TrackStageRuntime::new(&plain, TrackId(1), 2, 240, rate);
+        let before = plain_stage.current;
+        plain_stage.skip_ramp(start, frames, 240);
+        assert_eq!(plain_stage.current, before);
+    }
+
+    /// AU4 §7 item A15 (rules 28, 59): a live `SetPanLaw` retargets **both** an
+    /// automated and a non-automated stage, and is audible in the next chunk
+    /// without a re-cue.
+    #[test]
+    fn a_live_pan_law_change_retargets_an_automated_and_a_plain_stage() {
+        let rate = 48_000_u32;
+        let channels = 2_usize;
+        let fps = Rational::new(10, 1).unwrap();
+        let mut document = processor_document(fps, 20, Vec::new());
+        document.audio_mix.tracks = vec![
+            TrackMix {
+                pan_curve: Some(au4_curve(
+                    &[(0, -50), (10, 50)],
+                    KeyframeInterpolation::Linear,
+                )),
+                ..TrackMix::neutral(TrackId(1))
+            },
+            TrackMix {
+                pan_percent: 40,
+                ..TrackMix::neutral(TrackId(2))
+            },
+        ];
+        let frames = 2_048_usize;
+        let signal = vec![0.25_f32; frames * channels];
+        let tracks = HashMap::from([(TrackId(1), signal.clone()), (TrackId(2), signal.clone())]);
+
+        let mut processor = AudioMixProcessor::new(&document, rate, channels, None);
+        let before = processor
+            .mix_chunk_with_stems(&tracks, 0, frames)
+            .unwrap()
+            .tracks;
+
+        let mut switched = document.clone();
+        switched.audio_mix.pan_law = PanLaw::ConstantPower;
+        let mut retargeted = AudioMixProcessor::new(&document, rate, channels, None);
+        // Prime the chunk the edit lands in, then retarget and read the next.
+        retargeted.mix_chunk_with_stems(&tracks, 0, frames).unwrap();
+        retargeted.update_audio_mix(&switched);
+        let after = retargeted
+            .mix_chunk_with_stems(&tracks, u64::try_from(frames).unwrap(), frames)
+            .unwrap()
+            .tracks;
+
+        // Both stages moved: the ramp is running on both, so the very first
+        // frame of the next chunk already differs from the Balance reading.
+        for (index, name) in [(0_usize, "automated"), (1, "plain")] {
+            assert_ne!(
+                before[index][0].to_bits(),
+                after[index][0].to_bits(),
+                "the {name} stage must hear the pan law change"
+            );
+        }
+        // And the pan law reaches the automated stage's own anchors.
+        assert_eq!(retargeted.stages[0].pan_law, PanLaw::ConstantPower);
+        assert_eq!(retargeted.stages[1].pan_law, PanLaw::ConstantPower);
+    }
+
+    /// AU4 §7 item A15 (rules 73, 74, 77): a running mixer retargets its clip
+    /// shaping in place for both `SetClipGainEnvelope` and the AU1 clip-gain
+    /// drag, and refuses — falling back to stop-and-re-cue — when the segment
+    /// layout changed.
+    #[test]
+    fn update_clip_shaping_retargets_in_place_or_refuses_on_a_layout_change() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(10, 1).unwrap();
+        let voice = loud_sine("au4-live-voice", 440);
+        let bed = loud_sine("au4-live-bed", 660);
+        let document = transitioned(parity_document(voice.path(), bed.path(), fps));
+
+        let mut mixer = AudioMixer::open(&document, TimeCode::ZERO, 48_000, 2, None).unwrap();
+        let plain = mixer.next_chunk().unwrap().unwrap();
+
+        // Rule 77's AU1 debt: a plain `SetClipAudio` gain drag retargets.
+        let mut gained = document.clone();
+        gained.tracks[0].clips[0].audio_gain_tenth_db = -120;
+        gained.validate().unwrap();
+        assert!(mixer.update_clip_shaping(&gained));
+        let after_gain = mixer.next_chunk().unwrap().unwrap();
+
+        // A `SetClipGainEnvelope` on the same clip retargets too, and is
+        // audible: the second chunk differs from the un-edited mixer's.
+        let mut enveloped = gained.clone();
+        enveloped.tracks[0].clips[0].audio_gain_curve = Some(au4_curve(
+            &[(0, -600), (5, 0)],
+            KeyframeInterpolation::Linear,
+        ));
+        enveloped.validate().unwrap();
+        assert!(mixer.update_clip_shaping(&enveloped));
+
+        let mut reference = AudioMixer::open(&document, TimeCode::ZERO, 48_000, 2, None).unwrap();
+        let reference_first = reference.next_chunk().unwrap().unwrap();
+        assert_eq!(plain.len(), reference_first.len());
+        let reference_second = reference.next_chunk().unwrap().unwrap();
+        assert_ne!(
+            after_gain
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            reference_second
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            "a retargeted clip gain must be audible without a re-cue"
+        );
+
+        // Rule 73: a layout change is refused, and the caller re-cues.
+        let mut moved = enveloped.clone();
+        moved.tracks[0].clips[1].timeline_start = TimeCode(17);
+        moved.validate().unwrap();
+        assert!(!mixer.update_clip_shaping(&moved));
+
+        let mut trimmed = enveloped.clone();
+        trimmed.tracks[1].clips[0].source_range = TimeCode(4)..TimeCode(13);
+        trimmed.validate().unwrap();
+        assert!(!mixer.update_clip_shaping(&trimmed));
+    }
+
+    /// AU4 §0 E24 (rule 59): an owner whose document inputs did **not** change
+    /// keeps its in-flight ramp instead of freezing at the interpolated value.
+    ///
+    /// `update_audio_mix` retargets every stage and every fader on every mix
+    /// edit, so this is the ordinary case: one fader moves while another is
+    /// still 3 ms into its own 5 ms ramp. AU1's arm could force `ramp_index =
+    /// ramp_frames` because its condition was `target == self.current`; under
+    /// rule 59's document comparison that would settle the ramp at a value
+    /// `advance` never assigns `target` to, and the fader would stay there.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn an_unchanged_document_tuple_lets_an_in_flight_ramp_finish() {
+        let rate = 48_000_u32;
+        let fps = Rational::new(10, 1).unwrap();
+        let ramp_frames = 240_usize;
+
+        let mut fader = GainRamp::settled(0, None, ramp_frames, rate, fps);
+        fader.retarget(-120, None);
+        assert_eq!(fader.ramp_index, 0);
+        let mut chunk = vec![1.0_f32; 100 * 2];
+        fader.apply(&mut chunk, 2, ramp_frames, 0);
+        assert!(!fader.is_settled(ramp_frames));
+        let mid = fader.current;
+        assert_ne!(mid.to_bits(), fader.target.to_bits());
+
+        // A second edit elsewhere retargets this fader with the same inputs.
+        fader.retarget(-120, None);
+        assert_eq!(fader.current.to_bits(), mid.to_bits(), "no discontinuity");
+        assert!(
+            !fader.is_settled(ramp_frames),
+            "the ramp must not be cut short"
+        );
+        let mut rest = vec![1.0_f32; 200 * 2];
+        fader.apply(&mut rest, 2, ramp_frames, 200);
+        assert!(fader.is_settled(ramp_frames));
+        assert_eq!(
+            fader.current.to_bits(),
+            db_gain(-120).to_bits(),
+            "the ramp must land on the document's own target"
+        );
+
+        // The same for a track stage.
+        let mut document = processor_document(fps, 20, Vec::new());
+        document.audio_mix.tracks = vec![track_mix(1, 0, 0, false, false)];
+        let mut stage = TrackStageRuntime::new(&document, TrackId(1), 2, ramp_frames, rate);
+        let mut moved = document.clone();
+        moved.audio_mix.tracks = vec![track_mix(1, -120, 0, false, false)];
+        stage.retarget(&moved);
+        let mut source = vec![1.0_f32; 100 * 2];
+        let mut destination = vec![0.0_f32; 100 * 2];
+        stage.apply(&source, &mut destination, ramp_frames, 0);
+        let mid = stage.current;
+        assert_ne!(mid[0].to_bits(), stage.target[0].to_bits());
+        stage.retarget(&moved);
+        assert_eq!(stage.current[0].to_bits(), mid[0].to_bits());
+        source.resize(200 * 2, 1.0);
+        destination.resize(200 * 2, 0.0);
+        stage.apply(&source, &mut destination, ramp_frames, 200);
+        assert_eq!(stage.current[0].to_bits(), stage.target[0].to_bits());
     }
 }

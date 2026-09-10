@@ -1807,6 +1807,7 @@ fn cc1_core_migration_fixture_preserves_effect_order_and_parameters() {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         }],
     });
     let wire = serde_json::to_value(&document).expect("migration document should serialize");
@@ -3543,6 +3544,7 @@ pub(crate) fn simple_document(asset: MediaAsset, resolution: (u32, u32)) -> Docu
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         }],
         media_pool: vec![asset],

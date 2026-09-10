@@ -320,6 +320,10 @@ and per channel. Export and a freshly opened playback mixer never ramp, so stead
 parity is untouched; the ramp exists only to avoid clicks after a live mixer edit. It is
 not document state and is not observable through any facet.
 
+(AU4 §3.3 layers automation under this ramp: the automated value is the target, `current`
+becomes "the value last applied", and a retarget restarts the ramp only when the document
+inputs changed; see `docs/AU4-CLIP-ENVELOPES-AND-AUTOMATION.md`.)
+
 ## 4. Meters
 
 ### 4.1 `MixMeters`

@@ -485,6 +485,7 @@ mod tests {
                         audio_fade_in_frames: TimeCode::ZERO,
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
+                        audio_gain_curve: None,
                     },
                     Clip {
                         id: ClipId(2),
@@ -499,6 +500,7 @@ mod tests {
                         audio_fade_in_frames: TimeCode::ZERO,
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
+                        audio_gain_curve: None,
                     },
                 ],
             }],
@@ -635,6 +637,7 @@ mod tests {
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         });
 
@@ -726,6 +729,7 @@ mod tests {
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         });
         document.validate().unwrap();
@@ -784,6 +788,7 @@ mod tests {
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         }];
         document.duration = TimeCode(10);
@@ -830,6 +835,7 @@ mod tests {
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         }];
         document.duration = TimeCode(10);
@@ -886,6 +892,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             },
             Track {
@@ -905,6 +912,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             },
         ]);

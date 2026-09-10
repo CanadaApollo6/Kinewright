@@ -5,10 +5,11 @@ use std::{
 };
 
 use kinewright_core::{
-    AssetId, AssetTranscript, ClipContent, ClipId, Document, Effect, FrameRounding, LinkId, PanLaw,
-    ParamValue, Rational, SceneStatus, SilenceSpan, SilenceStatus, TimeCode, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, Title, TrackKind, TranscriptStatus,
-    map_frames_with_rounding, map_source_range_to_project,
+    AssetId, AssetTranscript, AutomationCurve, ClipContent, ClipId, Document, Effect,
+    FrameRounding, LinkId, PanLaw, ParamValue, Rational, SceneStatus, SilenceSpan, SilenceStatus,
+    TRACK_AUTOMATION_PARAMETERS, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, Title, TrackKind, TranscriptStatus, map_frames_with_rounding,
+    map_source_range_to_project,
 };
 
 use crate::shrink_silence_span_for_cutting_with_transcript;
@@ -406,18 +407,70 @@ fn render_title(title: &Title) -> String {
     )
 }
 
+/// AU4 §4.1 rule 78: the envelope joins the existing audio suffix, and its
+/// presence alone is enough to print the whole suffix. A curve-free clip
+/// renders exactly the bytes it did before AU4.
 fn render_clip_audio(clip: &kinewright_core::Clip) -> String {
     if clip.audio_gain_tenth_db == 0
         && clip.audio_fade_in_frames == TimeCode::ZERO
         && clip.audio_fade_out_frames == TimeCode::ZERO
+        && clip.audio_gain_curve.is_none()
     {
         String::new()
     } else {
         format!(
-            " audio=gain:{},fade_in:{}f,fade_out:{}f",
-            clip.audio_gain_tenth_db, clip.audio_fade_in_frames.0, clip.audio_fade_out_frames.0
+            " audio=gain:{},fade_in:{}f,fade_out:{}f{}",
+            clip.audio_gain_tenth_db,
+            clip.audio_fade_in_frames.0,
+            clip.audio_fade_out_frames.0,
+            render_named_curve(",envelope:", clip.audio_gain_curve.as_ref()),
         )
     }
+}
+
+/// AU4 §4.1: the two `mix=` keys, in the same order as
+/// [`TRACK_AUTOMATION_PARAMETERS`], which is what rule 81's pin uses to keep
+/// the wire tokens and the rendered keys from drifting apart.
+const TRACK_AUTOMATION_RENDER_KEYS: [&str; TRACK_AUTOMATION_PARAMETERS.len()] =
+    ["gain_curve", "pan_curve"];
+
+/// AU4 §4.1 rule 81: the one mapping from a `set_track_automation` parameter
+/// token to the key `get_timeline_state` spells it with.
+///
+/// Private until Part B needs it; every caller is in this file.
+#[must_use]
+fn track_automation_render_key(parameter: &str) -> Option<&'static str> {
+    TRACK_AUTOMATION_PARAMETERS
+        .iter()
+        .position(|token| *token == parameter)
+        .map(|index| TRACK_AUTOMATION_RENDER_KEYS[index])
+}
+
+/// AU4 §4.1: `{prefix}[at:value:Interp,…]` when the curve exists, and nothing
+/// at all when it does not. Every AU4 render field is default-omitted through
+/// this one helper, so no golden moves until a curve does.
+fn render_named_curve(prefix: &str, curve: Option<&AutomationCurve>) -> String {
+    curve.map_or_else(String::new, |curve| {
+        format!("{prefix}{}", render_curve(curve))
+    })
+}
+
+/// AU4 §4.1: `render_effects`' own keyframe spelling, hoisted so the clip,
+/// track, bus and master renderings cannot drift from it.
+fn render_curve(curve: &AutomationCurve) -> String {
+    let mut rendered = String::from("[");
+    for (index, keyframe) in curve.keyframes.iter().enumerate() {
+        if index != 0 {
+            rendered.push(',');
+        }
+        let _ = write!(
+            rendered,
+            "{}:{}:{:?}",
+            keyframe.at.0, keyframe.value, keyframe.interpolation
+        );
+    }
+    rendered.push(']');
+    rendered
 }
 
 /// The one spelling of a track kind in every agent rendering. Shared with
@@ -435,9 +488,27 @@ pub(crate) const fn track_kind_name(kind: TrackKind) -> &'static str {
 fn track_mix_fields(document: &Document, track: &kinewright_core::Track) -> Option<String> {
     let mix = document.track_mix(track.id);
     (!mix.is_neutral()).then(|| {
+        // AU4 §4.1 rule 79: each curve is present only when it is, and
+        // `is_neutral` is false for a curve-bearing entry, so an automated
+        // track keeps its suffix even at unity scalars. The key is looked up
+        // from the wire token rather than written twice, which is rule 81's
+        // guarantee on the rendering side.
+        let curve_field = |parameter: &str, curve: Option<&AutomationCurve>| {
+            // Both call sites pass a `TRACK_AUTOMATION_PARAMETERS` constant,
+            // so the lookup cannot miss. Saying so beats the `map_or_else`
+            // that would have rendered nothing at all for an unknown token.
+            let key = track_automation_render_key(parameter)
+                .expect("every call site passes a TRACK_AUTOMATION_PARAMETERS token (rule 81)");
+            render_named_curve(&format!(",{key}:"), curve)
+        };
         format!(
-            "gain:{},pan:{},mute:{},solo:{}",
-            mix.gain_tenth_db, mix.pan_percent, mix.mute, mix.solo
+            "gain:{},pan:{},mute:{},solo:{}{}{}",
+            mix.gain_tenth_db,
+            mix.pan_percent,
+            mix.mute,
+            mix.solo,
+            curve_field(TRACK_AUTOMATION_PARAMETERS[0], mix.gain_curve.as_ref()),
+            curve_field(TRACK_AUTOMATION_PARAMETERS[1], mix.pan_curve.as_ref()),
         )
     })
 }
@@ -649,7 +720,7 @@ fn render_audio_mix(output: &mut String, document: &Document) {
             .join(",");
         let _ = writeln!(
             output,
-            "  audio_bus {} {:?} tracks={}{} sidechain={} effects={}",
+            "  audio_bus {} {:?} tracks={}{}{} sidechain={} effects={}",
             bus.id,
             bus.name,
             tracks,
@@ -657,6 +728,11 @@ fn render_audio_mix(output: &mut String, document: &Document) {
             // A zero fader is the overwhelming default and the bus line is
             // already the longest in the compact state.
             render_audio_gain(bus.gain_tenth_db),
+            // AU4 §4.1 rule 80: the fader ride sits directly after the fader,
+            // and is what makes rule 34's whole-owner-set semantics
+            // recoverable — the agent can read the curve before it rewrites
+            // the bus.
+            render_named_curve(" gain_curve=", bus.gain_curve.as_ref()),
             if sidechain.is_empty() {
                 "none"
             } else {
@@ -668,8 +744,9 @@ fn render_audio_mix(output: &mut String, document: &Document) {
     if !mix.master.is_neutral() {
         let _ = writeln!(
             output,
-            "audio_master gain={} effects={}",
+            "audio_master gain={}{} effects={}",
             mix.master.gain_tenth_db,
+            render_named_curve(" gain_curve=", mix.master.gain_curve.as_ref()),
             render_effects(&mix.master.effects),
         );
     }
@@ -955,18 +1032,9 @@ fn render_effects(effects: &[Effect]) -> String {
                 if curve_index != 0 {
                     rendered.push('|');
                 }
-                let _ = write!(rendered, "{name}[");
-                for (keyframe_index, keyframe) in curve.keyframes.iter().enumerate() {
-                    if keyframe_index != 0 {
-                        rendered.push(',');
-                    }
-                    let _ = write!(
-                        rendered,
-                        "{}:{}:{:?}",
-                        keyframe.at.0, keyframe.value, keyframe.interpolation
-                    );
-                }
-                rendered.push(']');
+                // AU4 §4.1: the shared spelling, so the clip, track, bus and
+                // master curves render exactly as an effect curve does.
+                let _ = write!(rendered, "{name}{}", render_curve(curve));
             }
         }
         rendered.push(')');
@@ -1010,9 +1078,9 @@ mod tests {
 
     use kinewright_core::{
         AssetId, AssetSilences, AssetTranscript, CaptionCue, CaptionMotion, CaptionPreset, Clip,
-        Effect, EffectId, LinkId, Marker, MarkerId, MediaAsset, MediaKind, ParamValue, SilenceSpan,
-        TimelineTranscriptWord, Track, TrackId, TranscriptStatus, Transition,
-        animated_caption_operations, apply_batch,
+        Effect, EffectId, KeyframeInterpolation, LinkId, Marker, MarkerId, MediaAsset, MediaKind,
+        ParamValue, SilenceSpan, TimelineTranscriptWord, Track, TrackId, TranscriptStatus,
+        Transition, animated_caption_operations, apply_batch,
     };
 
     use super::*;
@@ -1051,6 +1119,7 @@ mod tests {
                         audio_fade_in_frames: TimeCode::ZERO,
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
+                        audio_gain_curve: None,
                     },
                     Clip {
                         id: ClipId(11),
@@ -1065,6 +1134,7 @@ mod tests {
                         audio_fade_in_frames: TimeCode::ZERO,
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
+                        audio_gain_curve: None,
                     },
                 ],
             }],
@@ -1200,6 +1270,8 @@ assets:
             pan_percent: 25,
             mute: false,
             solo: true,
+            gain_curve: None,
+            pan_curve: None,
         }];
         let rendered = render_timeline_state(&document);
         assert!(
@@ -1241,6 +1313,7 @@ assets:
                 keyframes: std::collections::BTreeMap::new(),
             }],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         }];
         document.audio_mix.master = kinewright_core::AudioMaster {
             gain_tenth_db: 15,
@@ -1252,6 +1325,7 @@ assets:
                     .collect(),
                 keyframes: std::collections::BTreeMap::new(),
             }],
+            gain_curve: None,
         };
 
         let rendered = render_timeline_state(&document);
@@ -1288,6 +1362,7 @@ assets:
             gain_tenth_db: 0,
             effects: Vec::new(),
             ducking_sidechain_tracks: vec![TrackId(7)],
+            gain_curve: None,
         }];
         let rendered = render_timeline_state(&document);
         assert!(
@@ -1305,6 +1380,7 @@ assets:
         document.audio_mix.master = kinewright_core::AudioMaster {
             gain_tenth_db: -60,
             effects: Vec::new(),
+            gain_curve: None,
         };
         assert!(
             render_timeline_state(&document).contains("audio_master gain=-60 effects=none"),
@@ -1318,12 +1394,246 @@ assets:
                 parameters: std::collections::BTreeMap::new(),
                 keyframes: std::collections::BTreeMap::new(),
             }],
+            gain_curve: None,
         };
         assert!(
             render_timeline_state(&document)
                 .contains("audio_master gain=0 effects=[22:audio_gate()]"),
             "an effects-only master must render"
         );
+    }
+
+    /// AU4 §4.1 rule 82, the present half of the golden pair: one document
+    /// carrying all five owners' curves renders every one of them, in
+    /// `render_effects`' own `at:value:Interp` spelling.
+    ///
+    /// The track entry's five scalars are all neutral, so this golden is also
+    /// the agent-side witness for rule 11: `is_neutral` is false for a
+    /// curve-bearing entry, which is the only reason the `mix=` suffix exists
+    /// on this line at all.
+    #[test]
+    fn au4_timeline_state_renders_every_owner_curve() {
+        let mut document = fixture();
+        let clip = document
+            .tracks
+            .iter_mut()
+            .flat_map(|track| &mut track.clips)
+            .find(|clip| clip.id == ClipId(11))
+            .unwrap();
+        clip.audio_gain_curve = Some(curve(&[
+            (0, 0, KeyframeInterpolation::Linear),
+            (30, -60, KeyframeInterpolation::Hold),
+            (59, -120, KeyframeInterpolation::EaseInOut),
+        ]));
+        document.audio_mix.tracks = vec![kinewright_core::TrackMix {
+            track: TrackId(7),
+            gain_tenth_db: 0,
+            pan_percent: 0,
+            mute: false,
+            solo: false,
+            gain_curve: Some(curve(&[
+                (0, 0, KeyframeInterpolation::Linear),
+                (90, -45, KeyframeInterpolation::Hold),
+            ])),
+            pan_curve: Some(curve(&[
+                (0, -100, KeyframeInterpolation::EaseIn),
+                (179, 100, KeyframeInterpolation::Linear),
+            ])),
+        }];
+        document.audio_mix.buses = vec![kinewright_core::AudioBus {
+            id: kinewright_core::AudioBusId(1),
+            name: "Dialogue".to_owned(),
+            tracks: vec![TrackId(7)],
+            gain_tenth_db: -35,
+            effects: Vec::new(),
+            ducking_sidechain_tracks: Vec::new(),
+            gain_curve: Some(curve(&[
+                (0, -35, KeyframeInterpolation::Linear),
+                (120, 0, KeyframeInterpolation::EaseOut),
+            ])),
+        }];
+        document.audio_mix.master = kinewright_core::AudioMaster {
+            gain_tenth_db: 15,
+            effects: Vec::new(),
+            gain_curve: Some(curve(&[(0, 15, KeyframeInterpolation::Hold)])),
+        };
+
+        let rendered = render_timeline_state(&document);
+        // The clip envelope joins the existing audio suffix, which now prints
+        // even though gain and both fades are still at their defaults.
+        assert!(
+            rendered.contains(
+                " effects=none transition_in=none audio=gain:0,fade_in:0f,fade_out:0f,envelope:[0:0:Linear,30:-60:Hold,59:-120:EaseInOut]"
+            ),
+            "missing clip envelope: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "track 7 video sync_lock=true clips=2 mix=gain:0,pan:0,mute:false,solo:false,gain_curve:[0:0:Linear,90:-45:Hold],pan_curve:[0:-100:EaseIn,179:100:Linear]\n"
+            ),
+            "missing track curves: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "  audio_bus 1 \"Dialogue\" tracks=7 gain=-35 gain_curve=[0:-35:Linear,120:0:EaseOut] sidechain=none effects=none\naudio_master gain=15 gain_curve=[0:15:Hold] effects=none"
+            ),
+            "missing bus or master fader curve, or out of order: {rendered}"
+        );
+
+        // AU4 §4.1: the spelling is `render_effects`' own, so an effect curve
+        // carrying the same keys renders the same bytes between its brackets.
+        let effect_spelling = render_effects(&[Effect {
+            id: kinewright_core::EffectId(9),
+            name: "audio_gain".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: [(
+                "gain_tenth_db".to_owned(),
+                curve(&[(0, 15, KeyframeInterpolation::Hold)]),
+            )]
+            .into_iter()
+            .collect(),
+        }]);
+        assert!(
+            effect_spelling.contains("gain_tenth_db[0:15:Hold]"),
+            "{effect_spelling}"
+        );
+    }
+
+    /// AU4 §4.1 rule 82, the absent half of the golden pair: every AU4 field
+    /// is default-omitted, so the stored pre-AU4 golden does not move a byte.
+    #[test]
+    fn au4_timeline_state_omits_every_absent_curve() {
+        let mut document = fixture();
+        // The five new fields, spelled out explicitly at their defaults.
+        for clip in document
+            .tracks
+            .iter_mut()
+            .flat_map(|track| &mut track.clips)
+        {
+            clip.audio_gain_curve = None;
+        }
+        document.audio_mix.master = kinewright_core::AudioMaster {
+            gain_tenth_db: 0,
+            effects: Vec::new(),
+            gain_curve: None,
+        };
+        let rendered = render_timeline_state(&document);
+        assert_eq!(
+            rendered, COMPACT_GOLDEN,
+            "an absent curve on any of the five owners must not move a byte of the stored golden"
+        );
+        for absent in ["envelope:", "gain_curve", "pan_curve"] {
+            assert!(!rendered.contains(absent), "{absent} in {rendered}");
+        }
+
+        // A curve-free track entry, bus and master render exactly the AU1/AU2
+        // bytes they did before AU4.
+        document.audio_mix.tracks = vec![kinewright_core::TrackMix {
+            track: TrackId(7),
+            gain_tenth_db: -60,
+            pan_percent: 25,
+            mute: false,
+            solo: true,
+            gain_curve: None,
+            pan_curve: None,
+        }];
+        document.audio_mix.buses = vec![kinewright_core::AudioBus {
+            id: kinewright_core::AudioBusId(1),
+            name: "Dialogue".to_owned(),
+            tracks: vec![TrackId(7)],
+            gain_tenth_db: -35,
+            effects: Vec::new(),
+            ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
+        }];
+        document.audio_mix.master = kinewright_core::AudioMaster {
+            gain_tenth_db: 15,
+            effects: Vec::new(),
+            gain_curve: None,
+        };
+        let rendered = render_timeline_state(&document);
+        assert!(
+            rendered.contains(
+                "track 7 video sync_lock=true clips=2 mix=gain:-60,pan:25,mute:false,solo:true\n"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "  audio_bus 1 \"Dialogue\" tracks=7 gain=-35 sidechain=none effects=none\naudio_master gain=15 effects=none"
+            ),
+            "{rendered}"
+        );
+        for absent in ["envelope:", "gain_curve", "pan_curve"] {
+            assert!(!rendered.contains(absent), "{absent} in {rendered}");
+        }
+    }
+
+    /// AU4 §4.1 rule 81: the two `set_track_automation` parameter tokens and
+    /// the two `mix=` render keys are pinned to each other, both derived from
+    /// Core's `TRACK_AUTOMATION_PARAMETERS`, so a rename cannot drift them
+    /// apart and leave the agent unable to read back what it wrote.
+    #[test]
+    fn au4_track_automation_parameters_pin_the_render_keys() {
+        assert_eq!(
+            TRACK_AUTOMATION_PARAMETERS.len(),
+            TRACK_AUTOMATION_RENDER_KEYS.len()
+        );
+        assert_eq!(
+            track_automation_render_key(TRACK_AUTOMATION_PARAMETERS[0]),
+            Some("gain_curve")
+        );
+        assert_eq!(
+            track_automation_render_key(TRACK_AUTOMATION_PARAMETERS[1]),
+            Some("pan_curve")
+        );
+        assert_eq!(track_automation_render_key("gain_curve"), None);
+        assert_eq!(track_automation_render_key(""), None);
+
+        // Each render key is the parameter token with its scalar suffix
+        // replaced by `_curve`, which is the invariant a rename must keep.
+        assert_eq!(
+            track_automation_render_key("gain_tenth_db"),
+            Some("gain_curve")
+        );
+        assert_eq!(
+            track_automation_render_key("pan_percent"),
+            Some("pan_curve")
+        );
+
+        // And the keys the renderer actually prints are those two, in that
+        // order, on one entry carrying both curves.
+        let mut document = fixture();
+        document.audio_mix.tracks = vec![kinewright_core::TrackMix {
+            track: TrackId(7),
+            gain_tenth_db: 0,
+            pan_percent: 0,
+            mute: false,
+            solo: false,
+            gain_curve: Some(curve(&[(0, -10, KeyframeInterpolation::Linear)])),
+            pan_curve: Some(curve(&[(0, -10, KeyframeInterpolation::Linear)])),
+        }];
+        let rendered = render_timeline_state(&document);
+        let gain = rendered
+            .find(&format!(",{}:", TRACK_AUTOMATION_RENDER_KEYS[0]))
+            .expect("the gain render key must be printed");
+        let pan = rendered
+            .find(&format!(",{}:", TRACK_AUTOMATION_RENDER_KEYS[1]))
+            .expect("the pan render key must be printed");
+        assert!(gain < pan, "{rendered}");
+    }
+
+    fn curve(keyframes: &[(i64, i64, KeyframeInterpolation)]) -> AutomationCurve {
+        AutomationCurve {
+            keyframes: keyframes
+                .iter()
+                .map(|(at, value, interpolation)| kinewright_core::Keyframe {
+                    at: TimeCode(*at),
+                    value: *value,
+                    interpolation: *interpolation,
+                })
+                .collect(),
+        }
     }
 
     #[test]
@@ -1360,6 +1670,7 @@ assets:
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         });
         document.tracks.push(Track {
@@ -1381,6 +1692,7 @@ assets:
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         });
         let non_neutral = |track| kinewright_core::TrackMix {
@@ -1389,6 +1701,8 @@ assets:
             pan_percent: 25,
             mute: false,
             solo: true,
+            gain_curve: None,
+            pan_curve: None,
         };
         document.audio_mix.tracks = vec![
             non_neutral(TrackId(7)),
@@ -1476,6 +1790,7 @@ assets:
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         });
         let timeline = render_timeline_state(&document);
@@ -1524,6 +1839,7 @@ assets:
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         });
 

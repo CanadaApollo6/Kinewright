@@ -1243,6 +1243,18 @@ pub(crate) fn mix_pass(
         .iter()
         .map(|bus| (*bus, Vec::<f32>::new()))
         .collect::<Vec<_>>();
+    // AU4 §3.6 rule 67, normative and load-bearing: this loop **must** keep
+    // starting at project sample 0 whatever `range.start` is. Every track
+    // buffer above is built at the absolute offset
+    // `frame_to_samples(segment.project.start)`, so `start_frame` is the
+    // absolute project sample index the processor keys every automated owner
+    // by — the clip envelope, both track curves, and the bus and master faders.
+    // The head is trimmed afterwards via `keep_from`/`drop_leading_samples`.
+    // `measure_mix_levels` and `measure_audio_qc` go through this same pass, so
+    // a **windowed** measurement mixes from project sample 0 and reads every
+    // curve at the true project frame. A future optimisation that started the
+    // loop at `range.start` would break automation, playback/export parity and
+    // AU2's latency trim in one move.
     let mut start_frame = 0_u64;
     while start_frame < total_sample_frames {
         check_cancelled(settings)?;

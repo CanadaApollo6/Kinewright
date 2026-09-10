@@ -37,7 +37,10 @@ pub use audio_qc::{
     AudioQcRequest, audio_qc_exceptions, audio_qc_technical_pass, delivery_audio_exceptions,
     loudness_target_exceptions,
 };
-pub use automation::{AutomationCurve, AutomationCurveError, Keyframe, KeyframeInterpolation};
+pub use automation::{
+    AutomationCurve, AutomationCurveError, HoldStep, Keyframe, KeyframeInterpolation,
+    clamp_project_curve, rebase_clip_curve,
+};
 pub use captions::{
     CaptionCue, CaptionMotion, CaptionPlanError, animated_caption_operations,
     animated_caption_operations_at, authored_caption_cues, caption_cues, caption_title_operations,
@@ -146,7 +149,7 @@ pub use media::{
     DeliveryAudioVerification, Export, ExportAudioReport, ExportCancellation,
     ExportLutPreflightIssue, ExportLutPreflightReport, ExportMediaPreflightIssue,
     ExportMediaPreflightReport, ExportProgress, ExportReport, ExportSettings, FrameTexture,
-    LinearRgbaImage, LoudnessSnapshot, LutAvailabilityKind, LutAvailabilityStatus,
+    LinearRgbaImage, LiveAudioChange, LoudnessSnapshot, LutAvailabilityKind, LutAvailabilityStatus,
     MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_HISTOGRAM_BUCKETS, MATTE_COVERAGE_SCALE,
     MatteCoverageError, MatteCoverageStatistics, MatteProof, MatteProofError, MatteProofMetadata,
     MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,
@@ -163,13 +166,15 @@ pub use media::{
 pub use model::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AssetId,
     AudioBus, AudioBusId, AudioMaster, AudioMix, BinId, CHAIN_LOOKAHEAD_MILLISECONDS,
-    ChainLookahead, Clip, ClipContent, ClipId, Document, Effect, EffectId, FreezeFrame,
-    LUT_ASSET_ID_MAX, LUT_SIZE_MAX, LUT_SIZE_MIN, LinkId, LutAsset, LutAssetId, LutAssetKind,
-    LutAssetSource, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaCatalog,
-    MediaKind, MediaSourceFingerprint, PanLaw, ParamValue, RelinkCandidate, SourceSelect,
-    StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember, TRACK_MIX_GAIN_MAX,
-    TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix,
-    Transition, chain_lookahead_milliseconds, clip_effective_fps, validate_lut_asset,
+    ChainLookahead, Clip, ClipContent, ClipId, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect,
+    EffectId, FreezeFrame, LUT_ASSET_ID_MAX, LUT_SIZE_MAX, LUT_SIZE_MIN, LinkId, LutAsset,
+    LutAssetId, LutAssetKind, LutAssetSource, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId,
+    MediaAsset, MediaBin, MediaCatalog, MediaKind, MediaSourceFingerprint, PanLaw, ParamValue,
+    RelinkCandidate, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
+    TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX,
+    TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix, Transition,
+    chain_lookahead_milliseconds, clip_effective_fps, envelope_coalesce_key,
+    track_automation_coalesce_key, validate_lut_asset,
 };
 pub use multicam::{
     ReframeFocusBounds, SpeakerAngleAssignment, SpeakerMulticamCut, SpeakerMulticamError,
@@ -179,7 +184,7 @@ pub use multicam::{
     plan_subject_reframe, plan_subject_reframe_basis_points,
     plan_subject_reframe_basis_points_with_containment, stabilize_tracked_centres_basis_points,
 };
-pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch};
+pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch, is_hold_only_parameter};
 pub use qa::{QaIssue, QaReport, QaSeverity, qa_document};
 pub use scopes::{
     ChannelStatistics, ChannelStatisticsDelta, ClippingBasisPoints, ClippingDelta, LumaWaveform,

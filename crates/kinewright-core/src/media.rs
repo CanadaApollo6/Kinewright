@@ -1686,6 +1686,26 @@ impl MediaError {
     }
 }
 
+/// AU4 §4.4: what a document change asks the running engine to do without
+/// re-cueing.
+///
+/// Defined here rather than in the app because the engine's
+/// `Control::UpdateAudio(LiveAudioChange, Arc<Document>)` (AU4 §3.8 rule 75)
+/// carries it across the crate boundary; the app computes it from a journal
+/// command and sends it, and `kinewright-media` branches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LiveAudioChange {
+    /// Re-cue: this change is not one the running engine can absorb.
+    #[default]
+    None,
+    /// `AudioMixProcessor::update_audio_mix` only.
+    Mix,
+    /// `AudioMixer::update_clip_shaping` only.
+    ClipShaping,
+    /// Both, mix first, from the same document.
+    Both,
+}
+
 pub trait Playback: Send + Sync {
     fn set_document(&self, doc: Arc<Document>);
     fn request_frame(&self, t: TimeCode);
@@ -1711,6 +1731,37 @@ pub trait Playback: Send + Sync {
     /// `self.set_document(doc)`.
     fn update_audio_mix(&self, doc: Arc<Document>) {
         self.set_document(doc);
+    }
+    /// AU4 §3.8 rule 75: apply a document that differs only in clip audio
+    /// shaping (`SetClipAudio`, `SetClipGainEnvelope`) without stopping
+    /// playback; the engine re-cues instead when the segment layout changed.
+    /// Default: `self.set_document(doc)`, so test doubles need no change.
+    fn update_clip_shaping(&self, doc: Arc<Document>) {
+        self.set_document(doc);
+    }
+    /// AU4 §3.8 rule 75 / §4.4 rule 89: apply **one** live-audio change,
+    /// whichever halves it names, from **one** document.
+    ///
+    /// This is the method the app calls, and it is the reason
+    /// `Control::UpdateAudio` carries the kind beside the document: a `Both`
+    /// batch — one Mixer operation and one inspector operation inside a single
+    /// coalesced gesture — must cross the control channel once, so the two
+    /// halves cannot interleave with each other or with a re-cue. Sending
+    /// `Mix` and then `ClipShaping` as two calls would give exactly the
+    /// interleaving rule 89 forbids.
+    ///
+    /// Default: dispatch to the two halves, so a test double that overrides
+    /// neither still behaves and a double that overrides one still sees it.
+    fn update_audio(&self, change: LiveAudioChange, doc: Arc<Document>) {
+        match change {
+            LiveAudioChange::None => self.set_document(doc),
+            LiveAudioChange::Mix => self.update_audio_mix(doc),
+            LiveAudioChange::ClipShaping => self.update_clip_shaping(doc),
+            LiveAudioChange::Both => {
+                self.update_audio_mix(Arc::clone(&doc));
+                self.update_clip_shaping(doc);
+            }
+        }
     }
     /// AU3 §2.2 / §3.9: the live loudness snapshot published by audible
     /// position. Default: [`LoudnessSnapshot::default`] so test doubles need
@@ -2357,6 +2408,7 @@ mod tests {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         }
     }
 

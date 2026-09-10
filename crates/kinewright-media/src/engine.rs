@@ -15,15 +15,15 @@ use kinewright_core::{
     Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, AudioQcReport, AudioQcRequest,
     BeatStatus, ClipId, DeliveryAudioVerification, DeliveryVerification,
     DeliveryVerificationRequest, Document, EffectId, Export, ExportCancellation, ExportReport,
-    ExportSettings, FrameTexture, LoudnessSnapshot, LoudnessTarget, LutAvailabilityKind,
-    LutAvailabilityStatus, MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE, MatteParams, MatteProof,
-    MatteProofError, MatteProofMetadata, MediaAsset, MediaAvailabilityKind,
-    MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus,
-    MediaCacheInventory, MediaError, MediaEvent, MediaKind, MixLevelReport, MixLevelRequest,
-    MixPeaks, MixSpectrumReport, MixSpectrumRequest, MonitorProof, Playback, PlaybackState,
-    ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat,
-    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus,
-    VisualAssetResult, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof,
+    ExportSettings, FrameTexture, LiveAudioChange, LoudnessSnapshot, LoudnessTarget,
+    LutAvailabilityKind, LutAvailabilityStatus, MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE,
+    MatteParams, MatteProof, MatteProofError, MatteProofMetadata, MediaAsset,
+    MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,
+    MediaCacheFamilyStatus, MediaCacheInventory, MediaError, MediaEvent, MediaKind, MixLevelReport,
+    MixLevelRequest, MixPeaks, MixSpectrumReport, MixSpectrumRequest, MonitorProof, Playback,
+    PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode,
+    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TranscriptStatus, VisualAssetResult, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof,
     WorkingProofMetadata, audio_qc_technical_pass, delivery_audio_exceptions,
     export_lut_preflight_with,
 };
@@ -280,9 +280,15 @@ enum Control {
     /// itself never crosses this channel: it is rebuilt from the worker's own
     /// document, which is the only document the worker may resolve looks for.
     LutLatticesPublished,
-    /// AU1 §5.3: a document that differs only in `audio_mix.tracks`, applied to
-    /// the running mixer without pausing, reseeking, or touching video state.
-    UpdateAudioMix(Arc<Document>),
+    /// AU1 §5.3 / AU4 §3.8 rule 75: a document the running engine can absorb
+    /// without pausing, reseeking, or touching video state, carrying **which**
+    /// halves to apply beside it.
+    ///
+    /// One control, not two: the worker's single arm applies mix then shaping
+    /// from the **same** `Arc<Document>`, so the two halves cannot interleave
+    /// with a re-cue or with each other. Draining two controls in send order
+    /// gives nothing observable that this does not.
+    UpdateAudio(LiveAudioChange, Arc<Document>),
     Play(TimeCode),
     Pause,
     /// AU3 §3.9: restart the integrated, range, and true-peak measurement at
@@ -628,6 +634,18 @@ impl FfmpegMediaEngine {
     }
 }
 
+impl FfmpegMediaEngine {
+    /// AU4 §3.8 rule 75: refresh the export document and send the **one**
+    /// `Control::UpdateAudio`, so both live-audio halves cross the channel
+    /// together with the document they were computed from.
+    fn publish_live_audio(&self, kind: LiveAudioChange, doc: Arc<Document>) {
+        if let Ok(mut export_document) = self.export_document.write() {
+            *export_document = Arc::clone(&doc);
+        }
+        let _ = self.control_tx.send(Control::UpdateAudio(kind, doc));
+    }
+}
+
 #[derive(Default)]
 struct RequestedPositions {
     frame: AtomicI64,
@@ -705,10 +723,25 @@ impl Playback for FfmpegMediaEngine {
     /// The export document is refreshed exactly as `set_document` does; the
     /// clock, the next asset id, and the worker's video state are untouched.
     fn update_audio_mix(&self, doc: Arc<Document>) {
-        if let Ok(mut export_document) = self.export_document.write() {
-            *export_document = Arc::clone(&doc);
-        }
-        let _ = self.control_tx.send(Control::UpdateAudioMix(doc));
+        self.publish_live_audio(LiveAudioChange::Mix, doc);
+    }
+
+    /// AU4 §3.8 rule 75: publish a document that differs only in clip audio
+    /// shaping, through the same one control.
+    fn update_clip_shaping(&self, doc: Arc<Document>) {
+        self.publish_live_audio(LiveAudioChange::ClipShaping, doc);
+    }
+
+    /// AU4 §3.8 rule 75 / §4.4 rule 89: **one** control carries both halves.
+    ///
+    /// The default would send two, and a `Both` batch would then be two
+    /// controls the worker could drain around a re-cue. This override collapses
+    /// every kind — `Both` included — into the single
+    /// `Control::UpdateAudio(kind, document)` the worker's one arm branches on,
+    /// which is what makes "mix then shaping from the **same**
+    /// `Arc<Document>`" a guarantee rather than an ordering convention.
+    fn update_audio(&self, change: LiveAudioChange, doc: Arc<Document>) {
+        self.publish_live_audio(change, doc);
     }
 
     /// AU3 §3.9: the snapshot the worker last published by audible position.
@@ -1685,7 +1718,7 @@ impl Worker {
         match control {
             Control::SetDocument(doc) => self.set_document(&doc),
             Control::LutLatticesPublished => self.rebind_lut_library(),
-            Control::UpdateAudioMix(doc) => self.update_audio_mix(doc),
+            Control::UpdateAudio(kind, doc) => self.update_audio(kind, doc),
             Control::Play(from) => self.start_playback(from),
             Control::Pause => self.pause(),
             Control::ResetLoudness => self.reset_loudness(),
@@ -1752,32 +1785,82 @@ impl Worker {
 
     /// AU2 §5.8: the document differs only in `audio_mix`, which no video path
     /// reads, so nothing is paused, reseeked, or rebound. The app's
-    /// `is_live_audio_mix_change` predicate is the contract; the worker does not
-    /// verify it, with one exception.
+    /// `live_audio_change` predicate (AU4 §4.4 rule 88) is the contract; the
+    /// worker does not verify it, with one exception.
     ///
     /// **The latency guard (A34).** `L` is fixed for a processor's life, so a
     /// document whose declared lookahead differs cannot be applied to a running
     /// one: the worker falls back to `set_document` and re-cues to the position
     /// it was at, rather than retargeting. Defensive, because the app predicate
     /// already refuses the live path in that case.
-    fn update_audio_mix(&mut self, doc: Arc<Document>) {
+    /// AU4 §3.8 rule 75 / §4.4 rule 89: the single live-audio arm.
+    ///
+    /// `Mix` retargets the processor, `ClipShaping` rebuilds the running
+    /// mixer's per-source shaping, `Both` does **both, mix then shaping, from
+    /// the same `Arc<Document>`** — the real guarantee is the single document
+    /// applied twice inside one control, so the two halves cannot interleave
+    /// with each other or with a re-cue. `None` re-cues.
+    fn update_audio(&mut self, kind: LiveAudioChange, doc: Arc<Document>) {
+        match kind {
+            LiveAudioChange::None => self.recue_audio(&doc),
+            LiveAudioChange::Mix => {
+                self.update_audio_mix(doc);
+            }
+            LiveAudioChange::ClipShaping => self.update_clip_shaping(doc),
+            LiveAudioChange::Both => {
+                if self.update_audio_mix(doc.clone()) {
+                    self.update_clip_shaping(doc);
+                }
+            }
+        }
+    }
+
+    /// AU4 §3.8 rule 73: rebuild the running mixer's clip shaping in place, or
+    /// fall back to the same pause-and-re-cue branch the chain path uses.
+    fn update_clip_shaping(&mut self, doc: Arc<Document>) {
         if !can_retarget_audio_mix(&self.document, &doc) {
             // AU2 §5.8: "a pause and re-cue", not a rewind. `set_document`
             // lands the transport on frame 0, so the position is captured
             // first and restored afterwards exactly as the paused branch of
             // `handle_coalesced_requests` does — the same place the app's own
             // non-live path leaves it.
-            let at = self.clock.position();
-            self.set_document(&doc);
-            let at = TimeCode(at.0.clamp(0, self.document.duration.0.saturating_sub(1)));
-            self.clock.set_frame(at);
-            self.emit(MediaEvent::Position(at));
-            self.present(at);
+            self.recue_audio(&doc);
             return;
+        }
+        let applied = self
+            .audio
+            .as_mut()
+            .is_some_and(|audio| audio.update_clip_shaping(&doc));
+        if applied || self.audio.is_none() {
+            self.document = doc;
+            return;
+        }
+        self.recue_audio(&doc);
+    }
+
+    /// AU2 §5.8: "a pause and re-cue", not a rewind.
+    fn recue_audio(&mut self, doc: &Arc<Document>) {
+        let at = self.clock.position();
+        self.set_document(doc);
+        let at = TimeCode(at.0.clamp(0, self.document.duration.0.saturating_sub(1)));
+        self.clock.set_frame(at);
+        self.emit(MediaEvent::Position(at));
+        self.present(at);
+    }
+
+    fn update_audio_mix(&mut self, doc: Arc<Document>) -> bool {
+        if !can_retarget_audio_mix(&self.document, &doc) {
+            // AU2 §5.8: "a pause and re-cue", not a rewind. `set_document`
+            // lands the transport on frame 0, so the position is captured
+            // first and restored afterwards exactly as the paused branch of
+            // `handle_coalesced_requests` does — the same place the app's own
+            // non-live path leaves it.
+            self.recue_audio(&doc);
+            return false;
         }
         self.document = doc;
         if self.audio.is_none() {
-            return;
+            return true;
         }
         // AU2 §5.8/R8: the peak table is rebuilt only when its key set stops
         // describing the document, so a fader drag does not zero every meter on
@@ -1795,6 +1878,7 @@ impl Worker {
         if let Some(meters) = rebuilt {
             self.install_mix_meters(meters);
         }
+        true
     }
 
     fn set_document(&mut self, doc: &Document) {
@@ -2056,7 +2140,7 @@ fn mix_meters_for_update(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, sync::atomic::AtomicUsize};
 
     use kinewright_core::{
         AutomationCurve, Clip, ClipContent, Effect, Keyframe, KeyframeInterpolation, LutAsset,
@@ -2257,6 +2341,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             }],
             lut_assets: vec![asset],
@@ -2972,6 +3057,7 @@ mod tests {
                 keyframes: std::collections::BTreeMap::new(),
             }],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         }];
 
         let master = Arc::new(MeterState::default());
@@ -3029,6 +3115,7 @@ mod tests {
             gain_tenth_db: 0,
             effects,
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         };
         let mut document = Document {
             fps: Rational::new(10, 1).unwrap(),
@@ -3126,6 +3213,7 @@ mod tests {
                 gain_tenth_db: 0,
                 effects: vec![limiter(milliseconds)],
                 ducking_sidechain_tracks: Vec::new(),
+                gain_curve: None,
             }];
             Arc::new(document)
         };
@@ -3157,5 +3245,209 @@ mod tests {
         worker.update_audio_mix(Arc::new(faded));
         assert_eq!(worker.clock.position(), TimeCode(10));
         assert_eq!(worker.document.audio_mix.buses[0].gain_tenth_db, -60);
+    }
+
+    /// AU4 §7 item A15 (§4.4 rule 89): the defaulted `Playback::update_audio`
+    /// dispatches every kind, so a test double that overrides neither half
+    /// still behaves and `Both` reaches both.
+    #[test]
+    fn the_default_update_audio_dispatches_every_live_audio_change() {
+        #[derive(Default)]
+        struct PlainDouble(AtomicUsize);
+        impl Playback for PlainDouble {
+            fn set_document(&self, _doc: Arc<Document>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+            fn request_frame(&self, _t: TimeCode) {}
+            fn frames(&self) -> Receiver<(TimeCode, FrameTexture)> {
+                unbounded().1
+            }
+            fn events(&self) -> Receiver<MediaEvent> {
+                unbounded().1
+            }
+            fn play(&self, _from: TimeCode) {}
+            fn pause(&self) {}
+            fn seek(&self, _to: TimeCode) {}
+            fn position(&self) -> TimeCode {
+                TimeCode::ZERO
+            }
+            fn output_peaks(&self) -> [f32; 2] {
+                [0.0, 0.0]
+            }
+        }
+
+        #[derive(Default)]
+        struct CountingPlayback {
+            documents: AtomicUsize,
+            mixes: AtomicUsize,
+            shapings: AtomicUsize,
+        }
+
+        impl Playback for CountingPlayback {
+            fn set_document(&self, _doc: Arc<Document>) {
+                self.documents.fetch_add(1, Ordering::Relaxed);
+            }
+            fn request_frame(&self, _t: TimeCode) {}
+            fn frames(&self) -> Receiver<(TimeCode, FrameTexture)> {
+                unbounded().1
+            }
+            fn events(&self) -> Receiver<MediaEvent> {
+                unbounded().1
+            }
+            fn play(&self, _from: TimeCode) {}
+            fn pause(&self) {}
+            fn seek(&self, _to: TimeCode) {}
+            fn position(&self) -> TimeCode {
+                TimeCode::ZERO
+            }
+            fn output_peaks(&self) -> [f32; 2] {
+                [0.0, 0.0]
+            }
+            fn update_audio_mix(&self, _doc: Arc<Document>) {
+                self.mixes.fetch_add(1, Ordering::Relaxed);
+            }
+            fn update_clip_shaping(&self, _doc: Arc<Document>) {
+                self.shapings.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let double = CountingPlayback::default();
+        let doc = || Arc::new(Document::default());
+        double.update_audio(LiveAudioChange::None, doc());
+        assert_eq!(double.documents.load(Ordering::Relaxed), 1);
+        double.update_audio(LiveAudioChange::Mix, doc());
+        assert_eq!(double.mixes.load(Ordering::Relaxed), 1);
+        double.update_audio(LiveAudioChange::ClipShaping, doc());
+        assert_eq!(double.shapings.load(Ordering::Relaxed), 1);
+        double.update_audio(LiveAudioChange::Both, doc());
+        assert_eq!(double.mixes.load(Ordering::Relaxed), 2);
+        assert_eq!(double.shapings.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            double.documents.load(Ordering::Relaxed),
+            1,
+            "no live kind re-cues"
+        );
+
+        // And a double that overrides neither half falls all the way back to
+        // `set_document`, so nothing in the workspace has to change.
+        let plain = PlainDouble::default();
+        plain.update_audio(LiveAudioChange::Both, doc());
+        assert_eq!(plain.0.load(Ordering::Relaxed), 2);
+    }
+
+    /// AU4 §7 item A15 (§3.8 rule 75): **one** `Control::UpdateAudio(kind,
+    /// document)` carries both halves, and the worker's single arm applies mix
+    /// then shaping from the same `Arc<Document>`. A `Both` batch that fails
+    /// the latency guard re-cues once and does not then apply half of itself.
+    #[test]
+    fn one_update_audio_control_carries_both_live_audio_halves() {
+        use kinewright_core::{AudioBus, AudioBusId, ParamValue};
+
+        let (control_tx, control_rx) = unbounded::<Control>();
+        let (frames_tx, frames_rx) = bounded(2);
+        let (events_tx, events_rx) = bounded(16);
+        let clock = Arc::new(SharedClock::new());
+        let meter = Arc::new(MeterState::default());
+        let mix_meters = Arc::new(RwLock::new(Arc::new(MixMeters::empty(Arc::clone(&meter)))));
+        let mut worker = Worker::new(
+            WorkerChannels {
+                control_rx: control_rx.clone(),
+                frames_tx,
+                frames_drop_rx: frames_rx.clone(),
+                events_tx,
+                events_drop_rx: events_rx.clone(),
+            },
+            Arc::clone(&clock),
+            Arc::clone(&meter),
+            Arc::clone(&mix_meters),
+            Arc::new(LiveLoudness::default()),
+            Arc::new(RequestedPositions::default()),
+            fallback_gpu().context(),
+            Arc::new(RwLock::new(PublishedLattices::default())),
+        );
+
+        let limiter = |milliseconds: i64| Effect {
+            id: EffectId(1),
+            name: "audio_true_peak_limiter".to_owned(),
+            parameters: std::collections::BTreeMap::from([(
+                "lookahead_milliseconds".to_owned(),
+                ParamValue::Integer(milliseconds),
+            )]),
+            keyframes: std::collections::BTreeMap::new(),
+        };
+        let document = |milliseconds: i64, gain: i32| {
+            let mut document = Document {
+                fps: Rational::new(10, 1).unwrap(),
+                duration: TimeCode(30),
+                resolution: (64, 64),
+                tracks: vec![Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                }],
+                ..Document::default()
+            };
+            document.audio_mix.buses = vec![AudioBus {
+                id: AudioBusId(1),
+                name: "Bed".to_owned(),
+                tracks: vec![TrackId(1)],
+                gain_tenth_db: gain,
+                effects: vec![limiter(milliseconds)],
+                ducking_sidechain_tracks: Vec::new(),
+                gain_curve: None,
+            }];
+            Arc::new(document)
+        };
+
+        worker.document = document(10, 0);
+        worker.playing = true;
+        worker.clock.set_fps(worker.document.fps);
+        worker.clock.set_frame(TimeCode(10));
+
+        // One send, one control drained: a `Both` batch never crosses the
+        // channel as two.
+        let both = document(10, -60);
+        control_tx
+            .send(Control::UpdateAudio(
+                LiveAudioChange::Both,
+                Arc::clone(&both),
+            ))
+            .unwrap();
+        let drained = control_rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(drained.len(), 1, "a Both batch is one control");
+        for control in drained {
+            worker.handle_control(control);
+        }
+        assert_eq!(worker.document.audio_mix, both.audio_mix);
+        assert_eq!(
+            worker.clock.position(),
+            TimeCode(10),
+            "a live kind must not re-cue"
+        );
+        assert!(worker.playing);
+
+        // The latency guard still wins inside `Both`: the mix half re-cues and
+        // the shaping half is not applied on top of a re-cued transport.
+        let deeper = document(4, -60);
+        worker.handle_control(Control::UpdateAudio(
+            LiveAudioChange::Both,
+            Arc::clone(&deeper),
+        ));
+        assert_eq!(worker.clock.position(), TimeCode(10));
+        assert!(!worker.playing, "the fallback pauses the transport");
+        assert_eq!(worker.document.audio_mix, deeper.audio_mix);
+
+        // And `None` is the existing stop-and-re-cue.
+        worker.playing = true;
+        worker.clock.set_frame(TimeCode(7));
+        let plain = document(4, 0);
+        worker.handle_control(Control::UpdateAudio(
+            LiveAudioChange::None,
+            Arc::clone(&plain),
+        ));
+        assert_eq!(worker.clock.position(), TimeCode(7));
+        assert!(!worker.playing);
+        assert_eq!(worker.document.audio_mix, plain.audio_mix);
     }
 }

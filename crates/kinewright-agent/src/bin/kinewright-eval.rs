@@ -2414,6 +2414,7 @@ fn cc7_timeline_document(assets: Vec<MediaAsset>) -> Result<Document, EvalError>
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         });
         timeline_start = timeline_start
             .checked_add(duration)
@@ -3512,6 +3513,7 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             },
             Track {
@@ -3532,6 +3534,7 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             },
         ],
@@ -4496,6 +4499,7 @@ fn timeline_document(
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         });
         timeline_start = timeline_start
             .checked_add(duration)

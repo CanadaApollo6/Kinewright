@@ -1687,6 +1687,7 @@ fn managed_document_with_tracks(effects_per_track: &[Vec<Effect>]) -> Document {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             }
         })
@@ -2341,6 +2342,7 @@ fn track_document(clips: &[(u64, TimeCode)]) -> Document {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         })
         .collect();
     Document {

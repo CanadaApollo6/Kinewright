@@ -2532,6 +2532,7 @@ fn audio_tail_document(
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         }],
         media_pool: vec![asset.clone()],
@@ -8466,6 +8467,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             }],
             media_pool: vec![asset],
@@ -8539,6 +8541,7 @@ mod tests {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         }
     }
 
@@ -10251,6 +10254,7 @@ mod tests {
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         });
         let mut context = FixtureContext::default();

@@ -114,6 +114,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-09, after AU3 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-09, after AU3 Part B) | 130 | 1,425,658 B | 1,295,459 B | 108,875 B |
 | Served MCP runtime (2026-09-09, after AU3 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-09, after AU4 Part A) | 132 | 1,519,052 B | 1,386,288 B | 111,103 B |
+| Served MCP runtime (2026-09-09, after AU4 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 
 That is a 99.1% reduction in initially advertised serialized tool metadata at
 the M36 baseline, 99.4% at the 2026-08-24 measurement, 99.56% after CC6
@@ -193,6 +195,52 @@ served quad is byte-identical for the eighth consecutive measurement at
 7 / 5,660 B / 3,510 B / 998 B — `queue_export`, `get_export_jobs` and
 `plan_audio_normalization` are all registry-only tools — so the reduction
 holds at 99.60%, 5,660 B served against a 1,425,658 B registry.
+
+AU4 Part A adds two generated mutators, `set_clip_gain_envelope` and
+`set_track_automation`, so the counts go to 54 generated operations + 78
+inspectors = 132 and the registry grows by 93,394 B to 1,519,052 B. The
+90,829 B of new input schema splits exactly three ways:
+
+- **45,878 B**, the two new mutators' own schemas (22,842 B + 23,036 B), each
+  carrying its own copy of the shared curve `$defs`;
+- **42,640 B**, 820 B of shared `$defs` growth on each of the 52 pre-existing
+  generated tools;
+- **2,311 B** on `apply_edit_plan`, the one non-generated tool that embeds
+  `Operation`: the same 820 B of `$defs` growth plus 1,491 B for the two new
+  `oneOf` variants its inlined definition gains (844 B + 645 B + the two
+  separating commas).
+
+That is 45,878 + 52 x 820 + 2,311 = 90,829. The 820 B figure is the whole
+point of AU4's reuse rule: it is *field* growth on the three
+`Operation`-reachable types that gained a curve — `Clip.audio_gain_curve`
+(347 B), `AudioBus.gain_curve` (234 B) and `AudioMaster.gain_curve` (236 B),
+plus three separating commas; `TrackMix` is not `Operation`-reachable, so its
+two curves cost the registry nothing — and not a new `$defs`
+type, because `AutomationCurve`, `Keyframe` and `KeyframeInterpolation` are
+already reachable through `SetEffectKeyframes`. AU2 Part B paid 1,195 B per
+tool for two genuinely new definitions; AU4 pays 820 B for five new fields on
+types that were already there. A second pair of variants modelled as
+`Set…`/`Clear…` instead of one `Option<AutomationCurve>` would have cost two
+more whole tool schemas, roughly 44 kB, and taught an agent nothing extra.
+
+Each of the four published `curve` occurrences — one in each new tool's own
+variant schema, one in each of `apply_edit_plan`'s two new `oneOf` variants —
+is an `anyOf` of a `$ref` to `AutomationCurve` and `null`, not an inlined
+curve object. Required and nullable are both load-bearing: `null` is the only
+clear, so a schema that admits only the object would forbid the one documented
+way to remove a ride. The `anyOf` is also 96 B cheaper per occurrence.
+
+The 2,228 B of new descriptions is the two new tools' prose entire (1,003 B +
+1,225 B); no existing description was touched, and the sum being exact is what
+proves it. Serialized, the two tools cost 48,444 B whole plus the same
+44,951 B of schema growth on the 53 pre-existing `Operation`-embedding tools,
+**minus one byte**: `set_effect_keyframes` joins the `.idempotent(...)` list in
+the same edit, and `"idempotentHint":true` is one byte shorter than the
+`"idempotentHint":false` it replaces. The served quad is byte-identical for the
+ninth consecutive measurement at 7 / 5,660 B / 3,510 B / 998 B — neither new
+tool is served, and the seven served tools embed no `Operation` schema, so a
+model change cannot reach them at all — so the reduction holds at 99.63%,
+5,660 B served against a 1,519,052 B registry.
 
 The registry grew with the colour tools; the served surface stays at seven
 tools. The `color_curves` descriptor (133

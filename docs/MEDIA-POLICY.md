@@ -152,6 +152,18 @@ integration state to what has actually been heard, so pausing and continuing
 counts nothing twice; a seek or a play from elsewhere resets it, as EBU Mode
 prescribes. Playback is never normalised; normalization is an export step.
 
+Automation is evaluated once. Every automated value — a clip's gain envelope,
+a track's gain and pan, a bus or master fader — is an integer at every project
+frame (`AutomationCurve::value_at`), and `automation_step` turns the two
+anchors bracketing a sample into one per-sample ramp, `a + (b − a) * t`, that
+is bit-identical at each frame's first sample to the static value. Both mix
+paths call it with the same absolute project sample, so playback and export
+agree by construction rather than by tolerance. A `Hold` segment stays flat,
+steps at the next key's first sample, and is declicked forward over 5 ms; the
+automation key is the processor's input frame, so a clip envelope and a track
+ride are exactly aligned with the picture and a bus or master fader ride leads
+the audible result by that chain's own declared lookahead.
+
 The worker mixes fixed 1,024-sample-frame chunks and lazily opens a decoder only
 when the feeder reaches its clip. Since the feeder fills to one second, this
 normally opens an upcoming boundary about a second before it is heard.

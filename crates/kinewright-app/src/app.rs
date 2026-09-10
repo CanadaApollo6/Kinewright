@@ -9,8 +9,8 @@ use eframe::egui;
 use kinewright_agent::{ClaudeCodeDriver, CodexDriver, CursorAcpDriver};
 use kinewright_core::{
     AgentDriver, Analysis, Command, Document, Event, Export, HarnessInfo, JournalCommand,
-    MediaAsset, MediaError, MediaEvent, Operation, Playback, PlaybackState, TimeCode, Track,
-    TrackId, TrackKind,
+    LiveAudioChange, MediaAsset, MediaError, MediaEvent, Operation, Playback, PlaybackState,
+    TimeCode, Track, TrackId, TrackKind,
 };
 use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits};
 
@@ -1072,11 +1072,8 @@ impl KinewrightApp {
                     // status line below, and after `previous_document` is
                     // fetched, because the predicate compares both documents.
                     let previous_document = Arc::clone(&self.projects[project_index].document);
-                    let live_audio_mix = is_live_audio_mix_change(
-                        journal_command.as_ref(),
-                        &previous_document,
-                        &doc,
-                    );
+                    let live_audio =
+                        live_audio_change(journal_command.as_ref(), &previous_document, &doc);
                     let media_changed_assets = doc
                         .media_pool
                         .iter()
@@ -1176,18 +1173,14 @@ impl KinewrightApp {
                         if !media_changed_assets.is_empty() {
                             self.texture = None;
                         }
-                        if live_audio_mix {
-                            // The document differs only in `audio_mix`, which
-                            // no video path reads, and declares the same
-                            // processing latency, so the running processor can
-                            // be retargeted in place (AU2 §6.8).
-                            self.playback.update_audio_mix(Arc::clone(&doc));
-                        } else {
+                        let position = self.projects[project_index].position;
+                        if !apply_live_audio_change(
+                            self.playback.as_ref(),
+                            live_audio,
+                            &doc,
+                            position,
+                        ) {
                             self.playing = false;
-                            let position = self.projects[project_index].position;
-                            self.playback.set_document(Arc::clone(&doc));
-                            self.playback.seek(position);
-                            self.playback.request_frame(position);
                         }
                     }
                     if let Some(Operation::AddAsset { asset }) = &last_op {
@@ -1676,15 +1669,18 @@ pub(crate) fn review_preroll_frames(fps: kinewright_core::Rational) -> i64 {
     nominal.max(1) * 2
 }
 
-/// Whether one operation only ever edits `audio_mix` (AU2 §6.8).
+/// Whether one operation only ever edits `audio_mix` (AU2 §6.8, AU4 §4.4).
 ///
 /// Every variant here is an idempotent full set of one mix target, and
 /// `audio_mix` is read by exactly the mix processor, the mixer panel, core
 /// validation, and one line of the renderer — never by a video or clip path.
+/// AU4 adds `SetTrackAutomation`, which parks its curve on the same
+/// `TrackMix` entry the other track operation writes (AU4 §2.5 rule 32a).
 const fn is_audio_mix_operation(operation: &Operation) -> bool {
     matches!(
         operation,
         Operation::SetTrackMix { .. }
+            | Operation::SetTrackAutomation { .. }
             | Operation::UpsertAudioBus { .. }
             | Operation::RemoveAudioBus { .. }
             | Operation::SetAudioMaster { .. }
@@ -1692,14 +1688,38 @@ const fn is_audio_mix_operation(operation: &Operation) -> bool {
     )
 }
 
-/// Whether a document change is a live mixer edit and nothing else (AU2 §6.8).
+/// Whether one operation only ever edits one clip's audio shaping (AU4 §4.4).
 ///
-/// True only for a history command whose every operation edits `audio_mix`
-/// and nothing else: a lone `Do`, or a batch — coalesced or not — that carries
-/// nothing else. Undo, redo, the initial snapshot (`None`), and any batch that
-/// mixes a mix edit with another operation take the ordinary stop-and-re-cue
-/// path, because only the all-mix case is known to leave every video and clip
-/// structure untouched.
+/// Both variants are idempotent full sets of one clip's audio, and neither can
+/// move a clip boundary, change its asset, or declare a lookahead, so the
+/// running mixer can rebuild its per-source shaping in place instead of
+/// stopping (AU4 §3.8 rules 73–74).
+const fn is_clip_audio_operation(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::SetClipAudio { .. } | Operation::SetClipGainEnvelope { .. }
+    )
+}
+
+/// What a document change asks of a running engine (AU2 §6.8, AU4 §4.4).
+///
+/// The app is the only place that decides the kind; core owns the
+/// [`LiveAudioChange`] type because the engine's `Control::UpdateAudio` carries
+/// it across the crate boundary (AU4 §3.8 rule 75).
+///
+/// A history command qualifies only when *every* one of its operations falls
+/// into one of the two live sets: [`is_audio_mix_operation`] or
+/// [`is_clip_audio_operation`]. The returned kind then says which sets were
+/// touched — `Mix`, `ClipShaping`, or `Both`. Undo, redo, the initial
+/// snapshot (`None`), an empty batch, and any batch carrying one operation
+/// outside both sets are `LiveAudioChange::None` and take the ordinary
+/// stop-and-re-cue path, because only the all-live case is known to leave
+/// every video and clip structure untouched.
+///
+/// A mixed batch is deliberately **not** demoted to the half it can serve: a
+/// widened bool that took the live path and then applied only the mix half of
+/// a Mixer-plus-inspector gesture would be silently worse than the re-cue it
+/// replaced (AU4 §4.4 rule 89).
 ///
 /// The lookahead comparison is the second half of the claim (AU2 §5.8,
 /// OPEN-3). `L` is derived from the document and fixed for a processor's life,
@@ -1707,27 +1727,106 @@ const fn is_audio_mix_operation(operation: &Operation) -> bool {
 /// limiter, removing one, retuning a compressor's lookahead — cannot be
 /// retargeted into a running processor and takes the stop-and-re-cue path even
 /// though every one of its operations is eligible.
-pub(crate) fn is_live_audio_mix_change(
+pub(crate) fn live_audio_change(
     journal_command: Option<&JournalCommand>,
     old: &Document,
     new: &Document,
-) -> bool {
-    fn all_audio_mix(operations: &[Operation]) -> bool {
+) -> LiveAudioChange {
+    fn classify(operations: &[Operation]) -> LiveAudioChange {
         // An empty batch changes nothing; taking the ordinary path for it
         // costs one re-cue that nobody can hear and keeps the predicate a
         // positive claim about operations that are actually present.
-        !operations.is_empty() && operations.iter().all(is_audio_mix_operation)
+        let mut mix = false;
+        let mut clip_shaping = false;
+        for operation in operations {
+            if is_audio_mix_operation(operation) {
+                mix = true;
+            } else if is_clip_audio_operation(operation) {
+                clip_shaping = true;
+            } else {
+                return LiveAudioChange::None;
+            }
+        }
+        match (mix, clip_shaping) {
+            (false, false) => LiveAudioChange::None,
+            (true, false) => LiveAudioChange::Mix,
+            (false, true) => LiveAudioChange::ClipShaping,
+            (true, true) => LiveAudioChange::Both,
+        }
     }
 
     let eligible = match journal_command {
-        Some(JournalCommand::Do(operation)) => is_audio_mix_operation(operation),
+        Some(JournalCommand::Do(operation)) => classify(std::slice::from_ref(operation)),
         Some(
             JournalCommand::DoBatch(operations)
             | JournalCommand::DoBatchCoalesced { operations, .. },
-        ) => all_audio_mix(operations),
-        Some(JournalCommand::Undo | JournalCommand::Redo) | None => false,
+        ) => classify(operations),
+        Some(JournalCommand::Undo | JournalCommand::Redo) | None => LiveAudioChange::None,
     };
-    eligible && old.audio_mix.lookahead_milliseconds() == new.audio_mix.lookahead_milliseconds()
+    if old.audio_mix.lookahead_milliseconds() == new.audio_mix.lookahead_milliseconds() {
+        eligible
+    } else {
+        LiveAudioChange::None
+    }
+}
+
+/// Hand one document change to the running engine (AU4 §4.4 rule 89).
+///
+/// Returns whether playback survived: `true` when the engine was retargeted in
+/// place, `false` when the change re-cued and the caller must stop the
+/// transport. Extracted from `poll_background` because it is the whole
+/// observable half of the live path and `KinewrightApp::new` needs a live GPU
+/// engine, so this is the only seam a counting `Playback` double can reach.
+fn apply_live_audio_change(
+    playback: &dyn Playback,
+    change: LiveAudioChange,
+    doc: &Arc<Document>,
+    position: TimeCode,
+) -> bool {
+    match change {
+        // Every live kind is one call, because the engine carries the kind
+        // beside the document in one `Control::UpdateAudio` (AU4 §3.8 rule
+        // 75). `Mix` retargets the audio processor in place, since the
+        // document differs only in `audio_mix` — which no video path reads —
+        // and declares the same latency (AU2 §6.8). `ClipShaping` rebuilds
+        // the mixer's per-source shaping in place, since no shaping operation
+        // can move a clip boundary, an asset, or the declared lookahead (AU4
+        // §3.8 rules 73–74, 77). `Both` applies one document to both halves
+        // with no re-cue between them, and sending it as two calls is exactly
+        // the interleaving AU4 §4.4 rule 89 forbids.
+        LiveAudioChange::Mix | LiveAudioChange::ClipShaping | LiveAudioChange::Both => {
+            playback.update_audio(change, Arc::clone(doc));
+        }
+        LiveAudioChange::None => {
+            playback.set_document(Arc::clone(doc));
+            playback.seek(position);
+            playback.request_frame(position);
+            return false;
+        }
+    }
+    true
+}
+
+/// AU4 §2.5: the status line spells `SetTrackAutomation.parameter` the way a
+/// person reads it, not the way the wire carries it.
+///
+/// `operation_status` also previews an agent's *proposed* operations
+/// (`chat_ui.rs`), which core has not validated yet, so an unknown key falls
+/// back to itself rather than being asserted away.
+fn track_automation_label(parameter: &str) -> &str {
+    match parameter {
+        "gain_tenth_db" => "gain",
+        "pan_percent" => "pan",
+        other => other,
+    }
+}
+
+/// The `s` a keyframe count needs, so a one-key curve reads "1 keyframe".
+///
+/// AU4 §2.5 only: the effect count next door is long-standing wording and is
+/// pinned as it stands.
+fn plural_s(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1793,6 +1892,23 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
             "Set mix on track {track} (gain {:+.1} dB, pan {pan_percent}, mute {mute}, solo {solo})",
             f64::from(*gain_tenth_db) / 10.0
         ),
+        Operation::SetTrackAutomation {
+            track,
+            parameter,
+            curve,
+        } => {
+            let label = track_automation_label(parameter);
+            curve.as_ref().map_or_else(
+                || format!("Cleared {label} automation on track {track}"),
+                |curve| {
+                    let keys = curve.keyframes.len();
+                    format!(
+                        "Set {keys} {label} automation keyframe{} on track {track}",
+                        plural_s(keys)
+                    )
+                },
+            )
+        }
         Operation::AddClip { asset, .. } => format!("Added asset {asset} to timeline"),
         Operation::AddTitle { title, .. } => format!("Added title {:?}", title.text),
         Operation::AddFreezeFrame {
@@ -1891,6 +2007,16 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
             format!("Set {name} on title clip {clip}")
         }
         Operation::SetClipAudio { clip, .. } => format!("Set audio on clip {clip}"),
+        Operation::SetClipGainEnvelope { clip, curve } => curve.as_ref().map_or_else(
+            || format!("Cleared the gain envelope on clip {clip}"),
+            |curve| {
+                let keys = curve.keyframes.len();
+                format!(
+                    "Set {keys} gain envelope keyframe{} on clip {clip}",
+                    plural_s(keys)
+                )
+            },
+        ),
         Operation::AddTransition { clip, transition } => {
             format!("Added {} transition to clip {clip}", transition.name)
         }
@@ -2058,30 +2184,79 @@ mod tests {
         }
     }
 
-    /// AU2 §6.8: only a history command made entirely of `audio_mix`
-    /// operations that leaves the declared processing latency alone keeps the
-    /// transport running. Everything else re-cues, because only that case is
-    /// known to leave the video and clip structure — and the running
-    /// processor's fixed latency — untouched.
+    fn set_track_automation(track: u64) -> super::Operation {
+        super::Operation::SetTrackAutomation {
+            track: super::TrackId(track),
+            parameter: "gain_tenth_db".to_owned(),
+            curve: Some(curve()),
+        }
+    }
+
+    fn set_clip_audio(clip: u64) -> super::Operation {
+        super::Operation::SetClipAudio {
+            clip: kinewright_core::ClipId(clip),
+            gain_tenth_db: -60,
+            fade_in_frames: kinewright_core::TimeCode::ZERO,
+            fade_out_frames: kinewright_core::TimeCode::ZERO,
+        }
+    }
+
+    fn set_clip_gain_envelope(clip: u64) -> super::Operation {
+        super::Operation::SetClipGainEnvelope {
+            clip: kinewright_core::ClipId(clip),
+            curve: Some(curve()),
+        }
+    }
+
+    fn curve() -> kinewright_core::AutomationCurve {
+        kinewright_core::AutomationCurve {
+            keyframes: vec![kinewright_core::Keyframe {
+                at: kinewright_core::TimeCode::ZERO,
+                value: -60,
+                interpolation: kinewright_core::KeyframeInterpolation::Linear,
+            }],
+        }
+    }
+
+    fn two_key_curve() -> kinewright_core::AutomationCurve {
+        kinewright_core::AutomationCurve {
+            keyframes: vec![
+                kinewright_core::Keyframe {
+                    at: kinewright_core::TimeCode::ZERO,
+                    value: -60,
+                    interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                },
+                kinewright_core::Keyframe {
+                    at: kinewright_core::TimeCode(12),
+                    value: 0,
+                    interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                },
+            ],
+        }
+    }
+
+    /// AU2 §6.8 and AU4 §7 A15: the `live_audio_change` truth table.
+    ///
+    /// A history command keeps the transport running only when every one of
+    /// its operations is in one of the two live sets, and the kind it returns
+    /// says which sets were touched. Everything else re-cues, because only
+    /// that case is known to leave the video and clip structure — and the
+    /// running processor's fixed latency — untouched.
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn only_an_all_audio_mix_change_at_one_latency_takes_the_live_path() {
-        use super::{JournalCommand, is_live_audio_mix_change};
+    fn live_audio_change_names_which_half_of_the_engine_a_command_retargets() {
+        use kinewright_core::LiveAudioChange;
+
+        use super::{JournalCommand, live_audio_change};
 
         let plain = super::Document::default();
-        let live =
-            |command: Option<&JournalCommand>| is_live_audio_mix_change(command, &plain, &plain);
+        let live = |command: Option<&JournalCommand>| live_audio_change(command, &plain, &plain);
 
-        assert!(live(Some(&JournalCommand::Do(set_track_mix(1)))));
-        assert!(live(Some(&JournalCommand::DoBatch(vec![
+        // Every mix operation, alone and batched, is `Mix`. AU4 adds
+        // `SetTrackAutomation` to the set.
+        let mix_operations = [
             set_track_mix(1),
-            set_track_mix(2)
-        ]))));
-        assert!(live(Some(&JournalCommand::DoBatchCoalesced {
-            operations: vec![set_track_mix(1)],
-            coalesce_key: "track_mix:1#3".to_owned(),
-        })));
-        for operation in [
+            set_track_automation(1),
             super::Operation::UpsertAudioBus {
                 bus: kinewright_core::AudioBus {
                     id: kinewright_core::AudioBusId(1),
@@ -2090,6 +2265,7 @@ mod tests {
                     gain_tenth_db: -30,
                     effects: Vec::new(),
                     ducking_sidechain_tracks: Vec::new(),
+                    gain_curve: None,
                 },
             },
             super::Operation::RemoveAudioBus {
@@ -2099,52 +2275,134 @@ mod tests {
                 master: kinewright_core::AudioMaster {
                     gain_tenth_db: -20,
                     effects: Vec::new(),
+                    gain_curve: None,
                 },
             },
             super::Operation::SetPanLaw {
                 law: kinewright_core::PanLaw::ConstantPower,
             },
-        ] {
-            assert!(
+        ];
+        for operation in &mix_operations {
+            assert_eq!(
                 live(Some(&JournalCommand::Do(operation.clone()))),
-                "AU2 widens the live path to every mix operation; {operation:?} was refused"
+                LiveAudioChange::Mix,
+                "{operation:?} is a mix operation"
             );
-            assert!(live(Some(&JournalCommand::DoBatch(vec![
-                set_track_mix(1),
-                operation
-            ]))));
+            assert_eq!(
+                live(Some(&JournalCommand::DoBatch(vec![
+                    set_track_mix(1),
+                    operation.clone()
+                ]))),
+                LiveAudioChange::Mix
+            );
+            assert_eq!(
+                live(Some(&JournalCommand::DoBatchCoalesced {
+                    operations: vec![operation.clone()],
+                    coalesce_key: "track_mix:1#3".to_owned(),
+                })),
+                LiveAudioChange::Mix
+            );
         }
 
+        // The two clip-audio operations are `ClipShaping`, alone and together.
+        let clip_operations = [set_clip_audio(1), set_clip_gain_envelope(1)];
+        for operation in &clip_operations {
+            assert_eq!(
+                live(Some(&JournalCommand::Do(operation.clone()))),
+                LiveAudioChange::ClipShaping,
+                "{operation:?} shapes one clip's audio"
+            );
+            assert_eq!(
+                live(Some(&JournalCommand::DoBatchCoalesced {
+                    operations: vec![operation.clone()],
+                    coalesce_key: "envelope:1#3".to_owned(),
+                })),
+                LiveAudioChange::ClipShaping,
+                "AU4 §3.8 rule 77: a coalesced envelope drag retargets, it does not re-cue"
+            );
+        }
+        assert_eq!(
+            live(Some(&JournalCommand::DoBatch(vec![
+                set_clip_audio(1),
+                set_clip_gain_envelope(1)
+            ]))),
+            LiveAudioChange::ClipShaping
+        );
+
+        // Every mix of the two sets is `Both` — the case a widened bool would
+        // have served half of (AU4 §4.4 rule 89).
+        for mix in &mix_operations {
+            for clip in &clip_operations {
+                assert_eq!(
+                    live(Some(&JournalCommand::DoBatch(vec![
+                        mix.clone(),
+                        clip.clone()
+                    ]))),
+                    LiveAudioChange::Both,
+                    "{mix:?} beside {clip:?} touches both halves"
+                );
+                assert_eq!(
+                    live(Some(&JournalCommand::DoBatchCoalesced {
+                        operations: vec![clip.clone(), mix.clone()],
+                        coalesce_key: "envelope:1#3".to_owned(),
+                    })),
+                    LiveAudioChange::Both,
+                    "order inside the batch does not change which halves were touched"
+                );
+            }
+        }
+
+        // Everything else re-cues.
         let other = super::Operation::RemoveTrack {
             track: super::TrackId(2),
         };
-        assert!(
-            !live(Some(&JournalCommand::Do(other.clone()))),
+        assert_eq!(
+            live(Some(&JournalCommand::Do(other.clone()))),
+            LiveAudioChange::None,
             "an ordinary edit still stops and re-cues"
         );
-        assert!(
-            !live(Some(&JournalCommand::DoBatch(vec![
-                set_track_mix(1),
-                other.clone()
-            ]))),
-            "a mixed batch may change anything, so it takes the ordinary path"
-        );
-        assert!(
-            !live(Some(&JournalCommand::DoBatchCoalesced {
-                operations: vec![set_track_mix(1), other],
-                coalesce_key: "track_mix:1#3".to_owned(),
-            })),
-            "a mixed coalesced batch is no different"
-        );
-        assert!(
-            !live(Some(&JournalCommand::Undo)),
+        for batch in [
+            vec![set_track_mix(1), other.clone()],
+            vec![set_clip_gain_envelope(1), other.clone()],
+            vec![set_track_mix(1), set_clip_audio(1), other.clone()],
+        ] {
+            assert_eq!(
+                live(Some(&JournalCommand::DoBatch(batch.clone()))),
+                LiveAudioChange::None,
+                "a mixed batch may change anything, so it takes the ordinary path"
+            );
+            assert_eq!(
+                live(Some(&JournalCommand::DoBatchCoalesced {
+                    operations: batch,
+                    coalesce_key: "track_mix:1#3".to_owned(),
+                })),
+                LiveAudioChange::None,
+                "a mixed coalesced batch is no different"
+            );
+        }
+        assert_eq!(
+            live(Some(&JournalCommand::Undo)),
+            LiveAudioChange::None,
             "AU1 §5.4: undo during playback stops and re-cues"
         );
-        assert!(!live(Some(&JournalCommand::Redo)));
-        assert!(!live(None), "the initial snapshot is not a live edit");
-        assert!(
-            !live(Some(&JournalCommand::DoBatch(Vec::new()))),
+        assert_eq!(live(Some(&JournalCommand::Redo)), LiveAudioChange::None);
+        assert_eq!(
+            live(None),
+            LiveAudioChange::None,
+            "the initial snapshot is not a live edit"
+        );
+        assert_eq!(
+            live(Some(&JournalCommand::DoBatch(Vec::new()))),
+            LiveAudioChange::None,
             "an empty batch claims nothing about the mix"
+        );
+        assert_eq!(
+            live(Some(&JournalCommand::DoBatchCoalesced {
+                operations: Vec::new(),
+                coalesce_key: "track_mix:1#3".to_owned(),
+            })),
+            LiveAudioChange::None,
+            "and neither does an empty coalesced batch"
         );
 
         // Every operation is eligible and the documents still differ in the
@@ -2162,29 +2420,258 @@ mod tests {
                 )]),
                 keyframes: std::collections::BTreeMap::new(),
             }],
+            gain_curve: None,
         };
         assert_ne!(
             plain.audio_mix.lookahead_milliseconds(),
             with_lookahead.audio_mix.lookahead_milliseconds(),
             "the fixture must actually change the declared latency"
         );
-        assert!(
-            !is_live_audio_mix_change(
-                Some(&JournalCommand::Do(super::Operation::SetAudioMaster {
-                    master: with_lookahead.audio_mix.master.clone(),
-                })),
-                &plain,
+        for eligible in [
+            super::Operation::SetAudioMaster {
+                master: with_lookahead.audio_mix.master.clone(),
+            },
+            set_clip_gain_envelope(1),
+        ] {
+            assert_eq!(
+                live_audio_change(
+                    Some(&JournalCommand::Do(eligible.clone())),
+                    &plain,
+                    &with_lookahead,
+                ),
+                LiveAudioChange::None,
+                "a change to the declared latency re-cues however eligible {eligible:?} is"
+            );
+        }
+        assert_eq!(
+            live_audio_change(
+                Some(&JournalCommand::DoBatch(vec![
+                    set_track_mix(1),
+                    set_clip_gain_envelope(1)
+                ])),
+                &with_lookahead,
                 &with_lookahead,
             ),
-            "an eligible operation that changes the declared latency still re-cues"
+            LiveAudioChange::Both,
+            "the same latency on both sides is the live case, whatever the figure"
+        );
+    }
+
+    /// A `Playback` that counts what the live path asked of it (AU4 §7 A15).
+    ///
+    /// Only the calls the live path can make are counted; everything else is
+    /// the inert stub `KinewrightApp` would otherwise need a GPU for.
+    #[derive(Default)]
+    struct CountingPlayback {
+        set_documents: std::sync::atomic::AtomicUsize,
+        seeks: std::sync::atomic::AtomicUsize,
+        requested_frames: std::sync::atomic::AtomicUsize,
+        mixes: std::sync::atomic::AtomicUsize,
+        shapings: std::sync::atomic::AtomicUsize,
+        /// Every kind handed to `update_audio`, so "one control per change"
+        /// (AU4 §3.8 rule 75) is a count, not a guess.
+        audio_changes: std::sync::Mutex<Vec<super::LiveAudioChange>>,
+        /// The order the counted calls arrived in, so the re-cue path can be
+        /// asserted to be document, seek, frame.
+        order: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    impl CountingPlayback {
+        fn count(counter: &std::sync::atomic::AtomicUsize) -> usize {
+            counter.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn bump(&self, counter: &std::sync::atomic::AtomicUsize, name: &'static str) {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.order.lock().expect("no test panics here").push(name);
+        }
+    }
+
+    impl super::Playback for CountingPlayback {
+        fn set_document(&self, _document: std::sync::Arc<super::Document>) {
+            self.bump(&self.set_documents, "set_document");
+        }
+        fn request_frame(&self, _at: super::TimeCode) {
+            self.bump(&self.requested_frames, "request_frame");
+        }
+        fn frames(
+            &self,
+        ) -> crossbeam_channel::Receiver<(super::TimeCode, kinewright_core::FrameTexture)> {
+            crossbeam_channel::bounded(0).1
+        }
+        fn events(&self) -> crossbeam_channel::Receiver<super::MediaEvent> {
+            crossbeam_channel::bounded(0).1
+        }
+        fn play(&self, _from: super::TimeCode) {}
+        fn pause(&self) {}
+        fn seek(&self, _to: super::TimeCode) {
+            self.bump(&self.seeks, "seek");
+        }
+        fn position(&self) -> super::TimeCode {
+            super::TimeCode::ZERO
+        }
+        fn output_peaks(&self) -> [f32; 2] {
+            [0.0, 0.0]
+        }
+        fn update_audio_mix(&self, _doc: std::sync::Arc<super::Document>) {
+            self.bump(&self.mixes, "update_audio_mix");
+        }
+        fn update_clip_shaping(&self, _doc: std::sync::Arc<super::Document>) {
+            self.bump(&self.shapings, "update_clip_shaping");
+        }
+        fn update_audio(
+            &self,
+            change: super::LiveAudioChange,
+            _doc: std::sync::Arc<super::Document>,
+        ) {
+            self.audio_changes
+                .lock()
+                .expect("no test panics here")
+                .push(change);
+            self.order
+                .lock()
+                .expect("no test panics here")
+                .push("update_audio");
+        }
+    }
+
+    /// AU4 §7 A15 and §3.8 rule 77: an envelope edit retargets the running
+    /// engine instead of stopping it, and every live kind — `Both` included —
+    /// crosses the seam as exactly one `update_audio` call carrying one
+    /// document, which is what stops the two halves interleaving with each
+    /// other or with a re-cue (§4.4 rule 89).
+    ///
+    /// That one call is where the app's job ends: dispatching `Both` to the
+    /// two halves in order is the trait default's job, and
+    /// `the_default_update_audio_dispatches_every_live_audio_change`
+    /// (`kinewright-media/src/engine.rs`) is what tests it, including on a
+    /// double that overrides neither half.
+    #[test]
+    fn a_clip_shaping_change_retargets_the_engine_instead_of_re_cueing() {
+        use kinewright_core::LiveAudioChange;
+
+        use super::apply_live_audio_change;
+
+        /// Neither half is ever called directly: the app hands the kind to
+        /// `update_audio` and lets the implementation split it.
+        fn assert_no_half_called(playback: &CountingPlayback) {
+            assert_eq!(CountingPlayback::count(&playback.mixes), 0);
+            assert_eq!(CountingPlayback::count(&playback.shapings), 0);
+            assert_eq!(
+                CountingPlayback::count(&playback.set_documents),
+                0,
+                "a retarget never re-cues"
+            );
+        }
+
+        let doc = std::sync::Arc::new(super::Document::default());
+        let at = super::TimeCode(12);
+        let changes = |playback: &CountingPlayback| {
+            playback
+                .audio_changes
+                .lock()
+                .expect("no test panics here")
+                .clone()
+        };
+
+        let shaping = CountingPlayback::default();
+        assert!(
+            apply_live_audio_change(&shaping, LiveAudioChange::ClipShaping, &doc, at),
+            "a clip shaping change keeps the transport running"
+        );
+        assert_eq!(changes(&shaping), [LiveAudioChange::ClipShaping]);
+        assert_no_half_called(&shaping);
+        assert_eq!(CountingPlayback::count(&shaping.seeks), 0);
+        assert_eq!(CountingPlayback::count(&shaping.requested_frames), 0);
+
+        let mix = CountingPlayback::default();
+        assert!(apply_live_audio_change(
+            &mix,
+            LiveAudioChange::Mix,
+            &doc,
+            at
+        ));
+        assert_eq!(changes(&mix), [LiveAudioChange::Mix]);
+        assert_no_half_called(&mix);
+
+        let both = CountingPlayback::default();
+        assert!(apply_live_audio_change(
+            &both,
+            LiveAudioChange::Both,
+            &doc,
+            at
+        ));
+        assert_eq!(
+            changes(&both),
+            [LiveAudioChange::Both],
+            "AU4 §4.4 rule 89: one document, one control, no re-cue between"
+        );
+        assert_eq!(
+            *both.order.lock().expect("no test panics here"),
+            ["update_audio"],
+            "and nothing else is asked of the engine"
+        );
+        assert_no_half_called(&both);
+
+        let recue = CountingPlayback::default();
+        assert!(
+            !apply_live_audio_change(&recue, LiveAudioChange::None, &doc, at),
+            "the ordinary path stops the transport"
+        );
+        assert_eq!(
+            *recue.order.lock().expect("no test panics here"),
+            ["set_document", "seek", "request_frame"],
+            "and re-cues at the stored position"
         );
         assert!(
-            is_live_audio_mix_change(
-                Some(&JournalCommand::Do(set_track_mix(1))),
-                &with_lookahead,
-                &with_lookahead,
-            ),
-            "the same latency on both sides is the live case, whatever the figure"
+            changes(&recue).is_empty(),
+            "a re-cue is not a live audio change"
+        );
+        assert_eq!(CountingPlayback::count(&recue.mixes), 0);
+        assert_eq!(CountingPlayback::count(&recue.shapings), 0);
+    }
+
+    /// AU4 §3.8 rule 75: `Playback::update_clip_shaping` is defaulted, so a
+    /// double that never heard of AU4 still applies the document.
+    #[test]
+    fn update_clip_shaping_defaults_to_set_document_on_an_older_double() {
+        struct OlderDouble(std::sync::atomic::AtomicUsize);
+
+        impl super::Playback for OlderDouble {
+            fn set_document(&self, _document: std::sync::Arc<super::Document>) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            fn request_frame(&self, _at: super::TimeCode) {}
+            fn frames(
+                &self,
+            ) -> crossbeam_channel::Receiver<(super::TimeCode, kinewright_core::FrameTexture)>
+            {
+                crossbeam_channel::bounded(0).1
+            }
+            fn events(&self) -> crossbeam_channel::Receiver<super::MediaEvent> {
+                crossbeam_channel::bounded(0).1
+            }
+            fn play(&self, _from: super::TimeCode) {}
+            fn pause(&self) {}
+            fn seek(&self, _to: super::TimeCode) {}
+            fn position(&self) -> super::TimeCode {
+                super::TimeCode::ZERO
+            }
+            fn output_peaks(&self) -> [f32; 2] {
+                [0.0, 0.0]
+            }
+        }
+
+        let double = OlderDouble(std::sync::atomic::AtomicUsize::new(0));
+        super::Playback::update_clip_shaping(
+            &double,
+            std::sync::Arc::new(super::Document::default()),
+        );
+        super::Playback::update_audio_mix(&double, std::sync::Arc::new(super::Document::default()));
+        assert_eq!(
+            double.0.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "both live methods default to `set_document`"
         );
     }
 
@@ -2246,6 +2733,7 @@ mod tests {
             gain_tenth_db: 0,
             effects: Vec::new(),
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         });
         assert_eq!(
             screenshot_mixer_selection(Some("mixer-chain"), &document),
@@ -2268,6 +2756,7 @@ mod tests {
                         parameters: std::collections::BTreeMap::new(),
                         keyframes: std::collections::BTreeMap::new(),
                     }],
+                    gain_curve: None,
                 }
             }),
             "Set master mix (gain -3.5 dB, 1 effects)"
@@ -2289,6 +2778,63 @@ mod tests {
                 law: kinewright_core::PanLaw::ConstantPower
             }),
             "Set pan law to constant power"
+        );
+    }
+
+    /// AU4 §2.5 and E12: the two automation edits read back in the same voice,
+    /// with the label E12 chose rather than the wire spelling.
+    ///
+    /// Set and cleared for each of the two variants, both counts of the
+    /// singular/plural pair, and one parameter core has not validated —
+    /// `chat_ui` previews an agent's *proposed* operations, so an unknown key
+    /// has to fall through to itself rather than be asserted away.
+    #[test]
+    fn the_two_automation_edits_report_what_they_set() {
+        assert_eq!(
+            super::operation_status(&set_track_automation(4)),
+            "Set 1 gain automation keyframe on track 4"
+        );
+        assert_eq!(
+            super::operation_status(&super::Operation::SetTrackAutomation {
+                track: super::TrackId(4),
+                parameter: "pan_percent".to_owned(),
+                curve: Some(two_key_curve()),
+            }),
+            "Set 2 pan automation keyframes on track 4"
+        );
+        assert_eq!(
+            super::operation_status(&super::Operation::SetTrackAutomation {
+                track: super::TrackId(4),
+                parameter: "gain_tenth_db".to_owned(),
+                curve: None,
+            }),
+            "Cleared gain automation on track 4"
+        );
+        assert_eq!(
+            super::operation_status(&super::Operation::SetTrackAutomation {
+                track: super::TrackId(4),
+                parameter: "tilt_percent".to_owned(),
+                curve: Some(curve()),
+            }),
+            "Set 1 tilt_percent automation keyframe on track 4"
+        );
+        assert_eq!(
+            super::operation_status(&set_clip_gain_envelope(7)),
+            "Set 1 gain envelope keyframe on clip 7"
+        );
+        assert_eq!(
+            super::operation_status(&super::Operation::SetClipGainEnvelope {
+                clip: kinewright_core::ClipId(7),
+                curve: Some(two_key_curve()),
+            }),
+            "Set 2 gain envelope keyframes on clip 7"
+        );
+        assert_eq!(
+            super::operation_status(&super::Operation::SetClipGainEnvelope {
+                clip: kinewright_core::ClipId(7),
+                curve: None,
+            }),
+            "Cleared the gain envelope on clip 7"
         );
     }
 

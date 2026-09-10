@@ -141,7 +141,7 @@ impl MixToggle {
         }
     }
 
-    pub(crate) const fn is_on(self, mix: TrackMix) -> bool {
+    pub(crate) const fn is_on(self, mix: &TrackMix) -> bool {
         match self {
             Self::Mute => mix.mute,
             Self::Solo => mix.solo,
@@ -613,31 +613,29 @@ fn track_strip(
             TRACK_MIX_GAIN_MIN..=TRACK_MIX_GAIN_MAX,
         );
         record_strip_rect("fader", fader.rect);
-        if silenced_by_another_solo(document, mix) && carries_audio {
+        if silenced_by_another_solo(document, &mix) && carries_audio {
             // Directly under the meters, which are the left edge of the row
             // above: this is the reading the label explains. A track with no
             // audio-bearing clip has already said `NO AUDIO`, which is the
             // more specific reason for the same silence.
             ui.label(theme::caps_label(SOLO_MUTED_LABEL, color::TEXT_MUTED));
         }
-        record_mix_edit(
-            edits,
-            &fader,
-            mix,
-            TrackMix {
-                gain_tenth_db,
-                ..mix
-            },
-        );
+        record_mix_edit(edits, &fader, &mix, || TrackMix {
+            gain_tenth_db,
+            ..mix.clone()
+        });
 
-        let (pan, pan_percent) = pan_control(ui, mix);
+        let (pan, pan_percent) = pan_control(ui, &mix);
         record_strip_rect("pan", pan.rect);
-        record_mix_edit(edits, &pan, mix, TrackMix { pan_percent, ..mix });
+        record_mix_edit(edits, &pan, &mix, || TrackMix {
+            pan_percent,
+            ..mix.clone()
+        });
 
         ui.horizontal(|ui| {
             for toggle in [MixToggle::Mute, MixToggle::Solo] {
-                if mix_toggle_button(ui, toggle, mix) {
-                    edits.push(track_mix_toggle_operation(mix, toggle));
+                if mix_toggle_button(ui, toggle, &mix) {
+                    edits.push(track_mix_toggle_operation(&mix, toggle));
                 }
             }
         });
@@ -657,7 +655,7 @@ fn track_strip(
             ui.spacing_mut().item_spacing.x = space::HALF;
             ui.style_mut().override_font_id = Some(theme::medium(type_size::MICRO));
             ui.horizontal(|ui| {
-                reset_row(ui, mix, edits);
+                reset_row(ui, &mix, edits);
                 add_bus_button(ui, document, track, index, carries_audio, chain);
             });
         });
@@ -689,6 +687,7 @@ fn add_bus_button(
             gain_tenth_db: 0,
             effects: Vec::new(),
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         });
     }
 }
@@ -858,6 +857,11 @@ pub(crate) fn chain_tooltip(effects: &[kinewright_core::Effect]) -> String {
 /// ~97 px) and `SOLO MUTED` (~77 px) both wrapped.
 const SOLO_MUTED_LABEL: &str = "SILENCED";
 
+/// AU4 §2.5 rule 33: `Reset` is "return to unity", not "delete my ride", so
+/// the tooltip says which of the two it is.
+const RESET_TOOLTIP: &str =
+    "Return this track to unity gain, centre pan, unmuted and unsoloed. Automation is kept.";
+
 /// The strip's `Reset` button, shown only when there is something to reset.
 ///
 /// The rails are drag-sensing widgets: egui never reports a click, let alone a
@@ -866,16 +870,19 @@ const SOLO_MUTED_LABEL: &str = "SILENCED";
 /// landed on instead. The strip therefore states the gesture the way the
 /// inspector's audio section does — a small `Reset` button that appears once
 /// the values are off neutral and pushes one discrete operation.
-fn reset_row(ui: &mut egui::Ui, mix: TrackMix, edits: &mut InspectorEdits) {
-    if mix.is_neutral() {
+fn reset_row(ui: &mut egui::Ui, mix: &TrackMix, edits: &mut InspectorEdits) {
+    // AU4 §2.5 rule 33: the scalar test, not the widened `is_neutral`. The
+    // button asks "is there a scalar to return to unity?", and a track whose
+    // scalars are already neutral has nothing to reset even when it carries a
+    // curve — `is_neutral` is about elision on the wire, and under rule 11 it
+    // implies this test, so keeping it beside this branch would be dead code.
+    if mix.gain_tenth_db == 0 && mix.pan_percent == 0 && !mix.mute && !mix.solo {
         return;
     }
-    let response = ui
-        .small_button("Reset")
-        .on_hover_text("Return this track to unity gain, centre pan, unmuted and unsoloed.");
+    let response = ui.small_button("Reset").on_hover_text(RESET_TOOLTIP);
     record_strip_rect("reset", response.rect);
     if response.clicked() {
-        edits.push(track_mix_operation(TrackMix::neutral(mix.track)));
+        edits.push(track_mix_operation(&TrackMix::neutral(mix.track)));
     }
 }
 
@@ -963,7 +970,7 @@ fn meters_and_fader(
 }
 
 /// The pan rail and its `L50` / `C` / `R50` readout.
-fn pan_control(ui: &mut egui::Ui, mix: TrackMix) -> (egui::Response, i32) {
+fn pan_control(ui: &mut egui::Ui, mix: &TrackMix) -> (egui::Response, i32) {
     let mut pan_percent = mix.pan_percent;
     let response = ui
         .scope(|ui| {
@@ -993,19 +1000,27 @@ fn pan_control(ui: &mut egui::Ui, mix: TrackMix) -> (egui::Response, i32) {
 /// fader and the pan share the key because one strip runs one gesture at a
 /// time. Returning to neutral is [`reset_row`]'s job, not a gesture on the
 /// rail: the rail senses drags only.
+///
+/// The edited mix arrives as a closure so the caller's `..mix.clone()` — which
+/// copies both automation curves — runs on the frames a control actually
+/// changed, not on every frame of every automated track.
 fn record_mix_edit(
     edits: &mut InspectorEdits,
     response: &egui::Response,
-    mix: TrackMix,
-    edited: TrackMix,
+    mix: &TrackMix,
+    edited: impl FnOnce() -> TrackMix,
 ) {
     if response.drag_started() {
         edits.begin_gesture();
     }
+    if !response.changed() {
+        return;
+    }
     // A readout that commits on Enter or blur reports one `changed()` frame
     // with the unchanged value; a write that changes nothing is not an edit.
-    if response.changed() && edited != mix {
-        let operation = track_mix_operation(edited);
+    let edited = edited();
+    if edited != *mix {
+        let operation = track_mix_operation(&edited);
         if is_live_drag(response) {
             edits.push_live(operation, track_mix_coalesce_key(mix.track));
         } else {
@@ -1081,7 +1096,7 @@ fn draw_meter_segment(ui: &egui::Ui, rect: egui::Rect, start: f32, end: f32, fil
 }
 
 /// One `M` or `S` square in the mixer strip. Returns whether it was clicked.
-fn mix_toggle_button(ui: &mut egui::Ui, toggle: MixToggle, mix: TrackMix) -> bool {
+fn mix_toggle_button(ui: &mut egui::Ui, toggle: MixToggle, mix: &TrackMix) -> bool {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(size::ICON_BUTTON, size::ICON_BUTTON),
         egui::Sense::click(),
@@ -1122,7 +1137,9 @@ pub(crate) fn paint_mix_toggle(
 ///
 /// `SetTrackMix` is an idempotent full set, so every control in the strip
 /// sends all four values and changes exactly the one it owns.
-pub(crate) const fn track_mix_operation(mix: TrackMix) -> Operation {
+/// AU4 §2.1 rule 6: no longer `const` — once `TrackMix` owns a `Vec` the
+/// by-value parameter is dropped at the end of the body.
+pub(crate) fn track_mix_operation(mix: &TrackMix) -> Operation {
     Operation::SetTrackMix {
         track: mix.track,
         gain_tenth_db: mix.gain_tenth_db,
@@ -1133,18 +1150,19 @@ pub(crate) const fn track_mix_operation(mix: TrackMix) -> Operation {
 }
 
 /// Flip one toggle and carry the other three values unchanged (AU1 §5.2).
-pub(crate) const fn track_mix_toggle_operation(mix: TrackMix, toggle: MixToggle) -> Operation {
+/// AU4 §2.1 rule 6: no longer `const`, for the same reason.
+pub(crate) fn track_mix_toggle_operation(mix: &TrackMix, toggle: MixToggle) -> Operation {
     let flipped = match toggle {
         MixToggle::Mute => TrackMix {
             mute: !mix.mute,
-            ..mix
+            ..mix.clone()
         },
         MixToggle::Solo => TrackMix {
             solo: !mix.solo,
-            ..mix
+            ..mix.clone()
         },
     };
-    track_mix_operation(flipped)
+    track_mix_operation(&flipped)
 }
 
 /// Stable coalesce key for one live track-mix gesture (AU1 §5.1).
@@ -1195,7 +1213,7 @@ pub(crate) fn track_carries_audio(document: &Document, track: &Track) -> bool {
 ///
 /// A track muted by its own switch says so with its own lit `M`; this label is
 /// for the track that did nothing and went quiet anyway (AU1 §5.1).
-fn silenced_by_another_solo(document: &Document, mix: TrackMix) -> bool {
+fn silenced_by_another_solo(document: &Document, mix: &TrackMix) -> bool {
     !mix.mute && !mix.solo && document.audio_mix.any_solo()
 }
 
@@ -1304,6 +1322,7 @@ mod tests {
                         audio_fade_in_frames: TimeCode::ZERO,
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
+                        audio_gain_curve: None,
                     }],
                 },
                 Track {
@@ -1326,6 +1345,7 @@ mod tests {
                         keyframes: std::collections::BTreeMap::new(),
                     }],
                     ducking_sidechain_tracks: vec![TrackId(1)],
+                    gain_curve: None,
                 }],
                 tracks: Vec::new(),
                 ..AudioMix::default()
@@ -1344,6 +1364,8 @@ mod tests {
             pan_percent: 25,
             mute: false,
             solo: true,
+            gain_curve: None,
+            pan_curve: None,
         }
     }
 
@@ -1352,7 +1374,7 @@ mod tests {
     #[test]
     fn track_mix_operation_carries_the_whole_mix_state() {
         assert_eq!(
-            track_mix_operation(mix(4)),
+            track_mix_operation(&mix(4)),
             Operation::SetTrackMix {
                 track: TrackId(4),
                 gain_tenth_db: -60,
@@ -1362,7 +1384,7 @@ mod tests {
             }
         );
         assert_eq!(
-            track_mix_operation(TrackMix {
+            track_mix_operation(&TrackMix {
                 gain_tenth_db: 0,
                 ..mix(4)
             }),
@@ -1376,7 +1398,7 @@ mod tests {
             "a fader change keeps pan, mute, and solo"
         );
         assert_eq!(
-            track_mix_operation(TrackMix::neutral(TrackId(4))),
+            track_mix_operation(&TrackMix::neutral(TrackId(4))),
             Operation::SetTrackMix {
                 track: TrackId(4),
                 gain_tenth_db: 0,
@@ -1393,7 +1415,7 @@ mod tests {
     #[test]
     fn a_toggle_flips_only_its_own_flag() {
         assert_eq!(
-            track_mix_toggle_operation(mix(4), MixToggle::Mute),
+            track_mix_toggle_operation(&mix(4), MixToggle::Mute),
             Operation::SetTrackMix {
                 track: TrackId(4),
                 gain_tenth_db: -60,
@@ -1403,7 +1425,7 @@ mod tests {
             }
         );
         assert_eq!(
-            track_mix_toggle_operation(mix(4), MixToggle::Solo),
+            track_mix_toggle_operation(&mix(4), MixToggle::Solo),
             Operation::SetTrackMix {
                 track: TrackId(4),
                 gain_tenth_db: -60,
@@ -1413,7 +1435,7 @@ mod tests {
             }
         );
         // Flipping twice is the identity: no toggle can drift another value.
-        let once = track_mix_toggle_operation(mix(4), MixToggle::Mute);
+        let once = track_mix_toggle_operation(&mix(4), MixToggle::Mute);
         let Operation::SetTrackMix {
             track,
             gain_tenth_db,
@@ -1426,16 +1448,18 @@ mod tests {
         };
         assert_eq!(
             track_mix_toggle_operation(
-                TrackMix {
+                &TrackMix {
                     track,
                     gain_tenth_db,
                     pan_percent,
                     mute,
-                    solo
+                    solo,
+                    gain_curve: None,
+                    pan_curve: None,
                 },
                 MixToggle::Mute
             ),
-            track_mix_operation(mix(4))
+            track_mix_operation(&mix(4))
         );
     }
 
@@ -1516,18 +1540,18 @@ mod tests {
         let mut document = mixer_document();
         assert!(!silenced_by_another_solo(
             &document,
-            document.track_mix(TrackId(1))
+            &document.track_mix(TrackId(1))
         ));
         document.audio_mix.tracks = vec![TrackMix {
             solo: true,
             ..TrackMix::neutral(TrackId(2))
         }];
         assert!(
-            silenced_by_another_solo(&document, document.track_mix(TrackId(1))),
+            silenced_by_another_solo(&document, &document.track_mix(TrackId(1))),
             "a track nobody touched went quiet and must say so"
         );
         assert!(
-            !silenced_by_another_solo(&document, document.track_mix(TrackId(2))),
+            !silenced_by_another_solo(&document, &document.track_mix(TrackId(2))),
             "the soloed track is the one being heard"
         );
         document.audio_mix.tracks.push(TrackMix {
@@ -1537,7 +1561,7 @@ mod tests {
         assert!(
             !silenced_by_another_solo(
                 &document,
-                TrackMix {
+                &TrackMix {
                     mute: true,
                     ..TrackMix::neutral(TrackId(3))
                 }
@@ -2018,6 +2042,60 @@ mod tests {
         document
     }
 
+    /// A two-key ride over the fixture's 30 project frames (AU4 §2.5).
+    fn gain_ride() -> kinewright_core::AutomationCurve {
+        kinewright_core::AutomationCurve {
+            keyframes: vec![
+                kinewright_core::Keyframe {
+                    at: TimeCode::ZERO,
+                    value: -120,
+                    interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                },
+                kinewright_core::Keyframe {
+                    at: TimeCode(29),
+                    value: 0,
+                    interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                },
+            ],
+        }
+    }
+
+    fn pan_ride() -> kinewright_core::AutomationCurve {
+        kinewright_core::AutomationCurve {
+            keyframes: vec![kinewright_core::Keyframe {
+                at: TimeCode::ZERO,
+                value: -40,
+                interpolation: kinewright_core::KeyframeInterpolation::Hold,
+            }],
+        }
+    }
+
+    /// Track 1 rides both parameters but its five scalars are neutral
+    /// (AU4 §2.5 rule 33).
+    fn curve_only_document() -> Document {
+        let mut document = mixer_document();
+        document.audio_mix.tracks = vec![TrackMix {
+            gain_curve: Some(gain_ride()),
+            pan_curve: Some(pan_ride()),
+            ..TrackMix::neutral(TrackId(1))
+        }];
+        document
+    }
+
+    /// Track 1 rides both parameters *and* is off neutral, so it draws the
+    /// `Reset` a curve-only track does not.
+    fn automated_and_non_neutral_document() -> Document {
+        let mut document = mixer_document();
+        document.audio_mix.tracks = vec![TrackMix {
+            gain_tenth_db: -60,
+            pan_percent: 25,
+            gain_curve: Some(gain_ride()),
+            pan_curve: Some(pan_ride()),
+            ..TrackMix::neutral(TrackId(1))
+        }];
+        document
+    }
+
     /// AU1 §5.1 and §7 item 22: a press, a move, and a release on the fader
     /// rail write one `SetTrackMix` per frame under the track's coalesce key,
     /// and open a gesture on the press frame.
@@ -2108,7 +2186,7 @@ mod tests {
             "a press on the rail moves the fader, which is all a rail can do"
         );
         assert!(
-            !written.contains(&track_mix_operation(TrackMix::neutral(TrackId(1)))),
+            !written.contains(&track_mix_operation(&TrackMix::neutral(TrackId(1)))),
             "clicking the rail must not write a neutral mix: {written:?}"
         );
         for operation in &written {
@@ -2179,7 +2257,7 @@ mod tests {
         let clicked = harness.frame(vec![pointer(reset.center(), false)]);
         assert_eq!(
             clicked.operations(),
-            [track_mix_operation(TrackMix::neutral(TrackId(1)))],
+            [track_mix_operation(&TrackMix::neutral(TrackId(1)))],
             "Reset clears all four values in one operation"
         );
         assert_eq!(
@@ -2190,6 +2268,73 @@ mod tests {
         assert!(
             !clicked.gesture_started(),
             "a button press opens no drag gesture"
+        );
+    }
+
+    /// AU4 §2.5 rule 33 and §7 B7: `Reset` asks the scalar question, not the
+    /// widened `is_neutral` one, and the operation it writes keeps the ride.
+    ///
+    /// A track whose five scalars are already neutral has nothing to return to
+    /// unity, so it draws no button at all rather than one whose click the
+    /// app's no-op filter would swallow. A track that is off neutral draws one,
+    /// and clicking it leaves both curves byte-identical — the merge in
+    /// `set_track_mix` is what preserves them, so the strip needs no new
+    /// operation.
+    #[test]
+    fn reset_row_keeps_automation() {
+        assert_eq!(
+            RESET_TOOLTIP,
+            "Return this track to unity gain, centre pan, unmuted and unsoloed. Automation is kept.",
+            "the tooltip says which of the two `Reset` is"
+        );
+
+        let mut harness = MixerHarness::new(curve_only_document());
+        let _ = harness.frame(Vec::new());
+        assert!(
+            !harness.has("reset"),
+            "a curve-bearing track whose scalars are neutral has nothing to reset: {:?}",
+            harness.rects
+        );
+
+        let mut harness = MixerHarness::new(automated_and_non_neutral_document());
+        let _ = harness.frame(Vec::new());
+        let reset = harness.rect("reset");
+        let _ = harness.frame(vec![moved(reset.center()), pointer(reset.center(), true)]);
+        let clicked = harness.frame(vec![pointer(reset.center(), false)]);
+        assert_eq!(
+            clicked.operations(),
+            [track_mix_operation(&TrackMix::neutral(TrackId(1)))],
+            "Reset still writes one neutral `SetTrackMix`"
+        );
+
+        let after = harness
+            .document
+            .audio_mix
+            .tracks
+            .iter()
+            .find(|entry| entry.track == TrackId(1))
+            .expect("a curve-bearing entry is not retained away by a neutral set");
+        assert_eq!(after.gain_tenth_db, 0, "the scalars returned to unity");
+        assert_eq!(after.pan_percent, 0);
+        assert!(!after.mute);
+        assert!(!after.solo);
+        assert_eq!(
+            after.gain_curve.as_ref(),
+            Some(&gain_ride()),
+            "the gain ride survives the reset"
+        );
+        assert_eq!(
+            after.pan_curve.as_ref(),
+            Some(&pan_ride()),
+            "and so does the pan ride"
+        );
+
+        // The button is gone now: the scalars are neutral and only the ride
+        // is left.
+        let _ = harness.frame(Vec::new());
+        assert!(
+            !harness.has("reset"),
+            "one click is enough; the second would have nothing to do"
         );
     }
 
@@ -2274,6 +2419,7 @@ mod tests {
         document.audio_mix.master = AudioMaster {
             gain_tenth_db: -20,
             effects: chain_effects(&["audio_gain"]),
+            gain_curve: None,
         };
         document
     }
@@ -2442,6 +2588,7 @@ mod tests {
         worst_case.audio_mix.master = AudioMaster {
             gain_tenth_db: -30,
             effects: chain_effects(&["audio_gain", "audio_true_peak_limiter"]),
+            gain_curve: None,
         };
         for (label, measured, expected) in [
             (
@@ -2975,6 +3122,7 @@ mod tests {
                     gain_tenth_db: 0,
                     effects: Vec::new(),
                     ducking_sidechain_tracks: Vec::new(),
+                    gain_curve: None,
                 }
             }],
             "the bus is created around the strip you are pointing at"
@@ -3139,6 +3287,7 @@ mod tests {
             gain_tenth_db: 0,
             effects: Vec::new(),
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         });
         assert_eq!(
             mixer_pane_ui::routing_block(&two_buses, &two_buses.audio_mix.buses[0], TrackId(1))
@@ -3884,6 +4033,65 @@ mod tests {
         assert!(
             M36.contains("| 130 |"),
             "M36's internal registry row still counts 130 capabilities"
+        );
+    }
+
+    /// AU4 §7 A21: the docs that describe the Part A automation model say so.
+    ///
+    /// Pinned as hard-wrapped phrases, as the AU3 test above and the DESIGN.md
+    /// test do. The two pointer sentences are the load-bearing half: AU1's
+    /// ramp and AU2's two predicates both keep their AU4 meaning only because
+    /// their own contracts now say what AU4 does to them.
+    #[test]
+    fn the_au4_part_a_docs_describe_the_automation_model() {
+        const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
+        const MEDIA_POLICY: &str = include_str!("../../../docs/MEDIA-POLICY.md");
+        const AU1: &str = include_str!("../../../docs/AU1-MANUAL-MIX.md");
+        const AU2: &str = include_str!("../../../docs/AU2-EQ-AND-DYNAMICS.md");
+        const M36: &str = include_str!("../../../docs/M36-AGENT-RUNTIME-EFFICIENCY.md");
+        assert!(
+            CHANGELOG.contains("AU4 Part A, automation model"),
+            "CHANGELOG.md carries the Part A `Added` line"
+        );
+        assert!(
+            CHANGELOG.contains("A split no longer slides the right half's"),
+            "CHANGELOG.md carries the split/right-half `Fixed` line"
+        );
+        assert!(
+            CHANGELOG.contains("curve is clamped to the new last frame"),
+            "CHANGELOG.md carries the project-shorten clamp `Fixed` line"
+        );
+        assert!(
+            CHANGELOG.contains("instead of failing with `EffectKeyframeOutsideClip`"),
+            "CHANGELOG.md carries the keyframe-clamp `Changed` line"
+        );
+        assert!(
+            CHANGELOG.contains("instead of failing with `AudioFadesTooLong`"),
+            "CHANGELOG.md carries the audio-fade-clamp `Changed` line"
+        );
+        assert!(
+            CHANGELOG.contains("only undo restores them"),
+            "CHANGELOG.md carries the destructive-speed-increase `Changed` line"
+        );
+        assert!(
+            MEDIA_POLICY.contains("Automation is evaluated once."),
+            "MEDIA-POLICY.md carries the `automation_step` paragraph"
+        );
+        assert!(
+            AU1.contains("AU4 §3.3 layers automation under this ramp"),
+            "AU1's ramp section points at where AU4 layers automation under it"
+        );
+        assert!(
+            AU2.contains("AU4 adds no entry to either predicate"),
+            "AU2's parameter predicates say AU4 leaves them alone"
+        );
+        assert!(
+            M36.contains("(2026-09-09, after AU4 Part A)"),
+            "M36 carries the Part A capability-budget rows"
+        );
+        assert!(
+            M36.contains("| 132 |"),
+            "M36's internal registry row counts the two capabilities Part A adds"
         );
     }
 

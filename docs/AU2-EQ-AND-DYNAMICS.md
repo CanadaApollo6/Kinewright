@@ -610,6 +610,11 @@ impl Effect {
 (audio.rs:403-416) reads the value once with `Effect::static_integer_parameter`;
 `process_frame` never reads it.
 
+(AU4 adds no entry to either predicate: its five automation owners — clip gain, track gain
+and pan, bus and master fader — are rides, not switches, and take every interpolation;
+`is_hold_only_parameter` becomes `pub` so the Mixer's automation combo can read it. See
+`docs/AU4-CLIP-ENVELOPES-AND-AUTOMATION.md` §2.6.)
+
 ### 2.3 Validation and the per-chain budget
 
 ```rust

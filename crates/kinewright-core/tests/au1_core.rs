@@ -173,6 +173,8 @@ fn neutral_track_mix_removes_the_entry_and_serializes_byte_identically() {
             pan_percent: 25,
             mute: false,
             solo: true,
+            gain_curve: None,
+            pan_curve: None,
         }]
     );
     assert!(serde_json::to_string(&doc).unwrap().contains("audio_mix"));
@@ -299,6 +301,8 @@ fn remove_track_drops_the_track_mix_entry() {
             pan_percent: 0,
             mute: false,
             solo: false,
+            gain_curve: None,
+            pan_curve: None,
         }]
     );
     assert!(!doc.audio_mix.any_solo());

@@ -193,6 +193,7 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             gain_tenth_db: -25,
             effects: Vec::new(),
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         },
     }
     .apply(&mut part_b)
@@ -209,6 +210,7 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                 )]),
                 keyframes: BTreeMap::new(),
             }],
+            gain_curve: None,
         },
     }
     .apply(&mut part_b)
@@ -343,6 +345,7 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                     },
                 ],
                 ducking_sidechain_tracks: Vec::new(),
+                gain_curve: None,
             },
         },
         Operation::RemoveAudioBus { bus: AudioBusId(1) },
@@ -359,6 +362,7 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                     ]),
                     keyframes: BTreeMap::new(),
                 }],
+                gain_curve: None,
             },
         },
         Operation::SetPanLaw {
@@ -383,6 +387,30 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             pan_percent: 25,
             mute: false,
             solo: true,
+        },
+        // AU4 §2.5: `null` clears, and a curve round trips.
+        Operation::SetTrackAutomation {
+            track: TrackId(1),
+            parameter: "gain_tenth_db".to_owned(),
+            curve: None,
+        },
+        Operation::SetTrackAutomation {
+            track: TrackId(1),
+            parameter: "pan_percent".to_owned(),
+            curve: Some(AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode::ZERO,
+                        value: -40,
+                        interpolation: KeyframeInterpolation::EaseInOut,
+                    },
+                    Keyframe {
+                        at: TimeCode(30),
+                        value: 40,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                ],
+            }),
         },
         Operation::AddClip {
             track: TrackId(1),
@@ -525,6 +553,28 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             gain_tenth_db: -60,
             fade_in_frames: TimeCode(6),
             fade_out_frames: TimeCode(9),
+        },
+        // AU4 §2.5: `null` clears, and a curve round trips.
+        Operation::SetClipGainEnvelope {
+            clip: ClipId(1),
+            curve: None,
+        },
+        Operation::SetClipGainEnvelope {
+            clip: ClipId(1),
+            curve: Some(AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode::ZERO,
+                        value: 0,
+                        interpolation: KeyframeInterpolation::Hold,
+                    },
+                    Keyframe {
+                        at: TimeCode(15),
+                        value: -240,
+                        interpolation: KeyframeInterpolation::Linear,
+                    },
+                ],
+            }),
         },
         Operation::AddTransition {
             clip: ClipId(1),
@@ -3140,6 +3190,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             gain_tenth_db: 0,
             effects: vec![gain],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         },
     }
     .apply(&mut doc)
@@ -3155,6 +3206,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             gain_tenth_db: 0,
             effects: Vec::new(),
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         },
         AudioBus {
             id: AudioBusId(1),
@@ -3168,6 +3220,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
                 keyframes: BTreeMap::new(),
             }],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         },
         AudioBus {
             id: AudioBusId(1),
@@ -3190,6 +3243,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
                 )]),
             }],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         },
         // AU2 §5.4: the bus fader shares the `audio_gain` domain.
         AudioBus {
@@ -3199,6 +3253,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             gain_tenth_db: 121,
             effects: Vec::new(),
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         },
         // AU2 §2.3: 10 + 10 + 1 ms is one millisecond past the chain budget.
         AudioBus {
@@ -3212,6 +3267,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
                 lookahead_effect(3, "audio_true_peak_limiter", 1),
             ],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         },
         // AU2 §2.2 rule 1: `bypass` is a switch, so only `Hold` is legal.
         AudioBus {
@@ -3235,6 +3291,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
                 )]),
             }],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         },
         // AU2 §0 E16: the RMS detector window is sized once when the chain is
         // built, so a curve on it would be silently ignored.
@@ -3259,6 +3316,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
                 )]),
             }],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         },
         // AU2 §2.2 rule 2: a latency-bearing parameter takes no curve at all,
         // not even a `Hold` one.
@@ -3283,6 +3341,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
                 )]),
             }],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         },
     ];
     for bus in invalid_buses {
@@ -3313,6 +3372,7 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
                 )]),
                 keyframes: BTreeMap::new(),
             }],
+            gain_curve: None,
         },
     }
     .apply(&mut doc)
@@ -3325,6 +3385,7 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
             AudioMaster {
                 gain_tenth_db: -601,
                 effects: Vec::new(),
+                gain_curve: None,
             },
             OpError::AudioMasterGainOutOfRange {
                 gain_tenth_db: -601,
@@ -3338,6 +3399,7 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
                     lookahead_effect(2, "audio_compressor", 10),
                     lookahead_effect(3, "audio_true_peak_limiter", 1),
                 ],
+                gain_curve: None,
             },
             OpError::AudioMasterLookaheadExceeded { milliseconds: 21 },
         ),
@@ -3348,6 +3410,7 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
                     lookahead_effect(7, "audio_compressor", 5),
                     lookahead_effect(7, "audio_true_peak_limiter", 5),
                 ],
+                gain_curve: None,
             },
             OpError::DuplicateAudioMasterEffect {
                 effect: EffectId(7),
@@ -3362,6 +3425,7 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
                     parameters: BTreeMap::new(),
                     keyframes: BTreeMap::new(),
                 }],
+                gain_curve: None,
             },
             OpError::AudioMasterDuckingUnsupported,
         ),
@@ -3374,6 +3438,7 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
                     parameters: BTreeMap::new(),
                     keyframes: BTreeMap::new(),
                 }],
+                gain_curve: None,
             },
             OpError::VisualEffectOnAudioMaster {
                 effect: "brightness".to_owned(),
@@ -3418,6 +3483,7 @@ fn a_pre_au2_document_survives_a_load_and_save_byte_identically() {
                 keyframes: BTreeMap::new(),
             }],
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         },
     }
     .apply(&mut doc)
@@ -3554,6 +3620,385 @@ fn transition_descriptors_validate_all_registered_names_and_document_loads() {
             name
         );
     }
+}
+
+/// AU4 §7 item A1: the two variants' wire shape.
+#[test]
+fn the_two_automation_operations_require_their_curve_field_on_the_wire() {
+    // serde's derive does NOT reject an omitted bare `Option<T>` (it reads
+    // `missing_field` as `None`), so `deserialize_required_curve` (AU4 §0 E1)
+    // is what makes an omission an error and never a silent clear.
+    let omitted = serde_json::json!({ "SetClipGainEnvelope": { "clip": 1 } });
+    let error = serde_json::from_value::<Operation>(omitted).unwrap_err();
+    assert!(
+        error.to_string().contains("missing field `curve`"),
+        "an omitted curve must be an error, got {error}"
+    );
+    let omitted = serde_json::json!({
+        "SetTrackAutomation": { "track": 1, "parameter": "gain_tenth_db" }
+    });
+    let error = serde_json::from_value::<Operation>(omitted).unwrap_err();
+    assert!(error.to_string().contains("missing field `curve`"));
+
+    // `"curve": null` clears.
+    assert_eq!(
+        serde_json::from_value::<Operation>(serde_json::json!({
+            "SetClipGainEnvelope": { "clip": 1, "curve": null }
+        }))
+        .unwrap(),
+        Operation::SetClipGainEnvelope {
+            clip: ClipId(1),
+            curve: None,
+        }
+    );
+    assert_eq!(
+        serde_json::from_value::<Operation>(serde_json::json!({
+            "SetTrackAutomation": { "track": 1, "parameter": "pan_percent", "curve": null }
+        }))
+        .unwrap(),
+        Operation::SetTrackAutomation {
+            track: TrackId(1),
+            parameter: "pan_percent".to_owned(),
+            curve: None,
+        }
+    );
+
+    // `#[schemars(required, with = "RequiredNullableCurve")]` publishes `curve`
+    // as required AND nullable (AU4 §0 E21; a bare `required` strips the null
+    // branch) — the workspace's first use of the attribute — and `parameter`
+    // carries the closed vocabulary inline, with no `$defs` entry at all.
+    let schema = serde_json::to_value(schemars::schema_for!(Operation)).unwrap();
+    let variants = schema["oneOf"].as_array().expect("a oneOf of variants");
+    let variant = |name: &str| -> &serde_json::Value {
+        variants
+            .iter()
+            .find(|variant| variant["properties"].get(name).is_some())
+            .unwrap_or_else(|| panic!("{name} is a variant"))
+            .get("properties")
+            .and_then(|properties| properties.get(name))
+            .expect("the variant's payload")
+    };
+    for name in ["SetClipGainEnvelope", "SetTrackAutomation"] {
+        let required = variant(name)["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name} publishes a required list"));
+        assert!(
+            required.iter().any(|entry| entry == "curve"),
+            "{name} must publish curve as required, got {required:?}"
+        );
+    }
+    assert_eq!(
+        variant("SetTrackAutomation")["properties"]["parameter"]["enum"],
+        serde_json::json!(["gain_tenth_db", "pan_percent"])
+    );
+    assert_eq!(
+        kinewright_core::TRACK_AUTOMATION_PARAMETERS.to_vec(),
+        variant("SetTrackAutomation")["properties"]["parameter"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        "the constant and the published enum cannot drift"
+    );
+}
+
+/// AU4 §7 item A4.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn clip_gain_envelope_validates_bounds_titles_and_freezes_atomically() {
+    let curve = |points: &[(i64, i64)]| AutomationCurve {
+        keyframes: points
+            .iter()
+            .map(|(at, value)| Keyframe {
+                at: TimeCode(*at),
+                value: *value,
+                interpolation: KeyframeInterpolation::Linear,
+            })
+            .collect(),
+    };
+    let mut document = document_with_one_clip();
+    let clip_duration = document
+        .clip_duration(document.clip(ClipId(1)).unwrap())
+        .unwrap();
+
+    // Accepted at both ends of the inclusive range.
+    let accepted = curve(&[(0, -600), (10, 120)]);
+    Operation::SetClipGainEnvelope {
+        clip: ClipId(1),
+        curve: Some(accepted.clone()),
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(
+        document.clip(ClipId(1)).unwrap().audio_gain_curve.as_ref(),
+        Some(&accepted)
+    );
+
+    // Rule 27: setting a curve equal to the stored one is accepted and
+    // produces a byte-identical document.
+    let before = document.clone();
+    Operation::SetClipGainEnvelope {
+        clip: ClipId(1),
+        curve: Some(accepted.clone()),
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert_eq!(document, before);
+    assert_eq!(
+        serde_json::to_string(&document).unwrap(),
+        serde_json::to_string(&before).unwrap()
+    );
+
+    // Every rejection leaves the document equal to `before`.
+    let rejections: Vec<(AutomationCurve, OpError)> = vec![
+        (
+            AutomationCurve {
+                keyframes: Vec::new(),
+            },
+            OpError::InvalidClipGainEnvelope {
+                clip: ClipId(1),
+                reason: "automation curve must contain at least one keyframe".to_owned(),
+            },
+        ),
+        (
+            curve(&[(-1, 0)]),
+            OpError::InvalidClipGainEnvelope {
+                clip: ClipId(1),
+                reason: "automation keyframe positions must be non-negative".to_owned(),
+            },
+        ),
+        (
+            curve(&[(10, 0), (5, 0)]),
+            OpError::InvalidClipGainEnvelope {
+                clip: ClipId(1),
+                reason: "automation keyframes must be strictly ordered by frame".to_owned(),
+            },
+        ),
+        (
+            curve(&[(0, -601)]),
+            OpError::ClipGainEnvelopeOutOfRange {
+                clip: ClipId(1),
+                value: -601,
+            },
+        ),
+        (
+            curve(&[(0, 121)]),
+            OpError::ClipGainEnvelopeOutOfRange {
+                clip: ClipId(1),
+                value: 121,
+            },
+        ),
+        (
+            curve(&[(0, 0), (clip_duration.0, 0)]),
+            OpError::ClipGainEnvelopeKeyframeOutsideClip {
+                clip: ClipId(1),
+                at: clip_duration,
+                duration: clip_duration,
+            },
+        ),
+    ];
+    for (rejected, expected) in rejections {
+        let before = document.clone();
+        assert_eq!(
+            Operation::SetClipGainEnvelope {
+                clip: ClipId(1),
+                curve: Some(rejected),
+            }
+            .apply(&mut document),
+            Err(expected)
+        );
+        assert_eq!(document, before, "a rejection must not mutate");
+    }
+
+    // `None` clears.
+    Operation::SetClipGainEnvelope {
+        clip: ClipId(1),
+        curve: None,
+    }
+    .apply(&mut document)
+    .unwrap();
+    assert!(document.clip(ClipId(1)).unwrap().audio_gain_curve.is_none());
+
+    // Rule 31: a title and a freeze are rejected with the existing two errors,
+    // matching `SetClipAudio` arm for arm — including through the document
+    // invariant a hand edit reaches.
+    let mut titled = document_with_one_clip();
+    Operation::AddTitle {
+        track: TrackId(1),
+        at: TimeCode(200),
+        duration: TimeCode(30),
+        title: Title::default(),
+    }
+    .apply(&mut titled)
+    .unwrap();
+    let title_clip = titled
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .find(|clip| matches!(clip.content, ClipContent::Title(_)))
+        .unwrap()
+        .id;
+    assert_eq!(
+        Operation::SetClipGainEnvelope {
+            clip: title_clip,
+            curve: Some(curve(&[(0, -100)])),
+        }
+        .apply(&mut titled),
+        Err(OpError::TitleClipHasNoAudio(title_clip))
+    );
+    let mut hand_edited = titled.clone();
+    for clip in hand_edited
+        .tracks
+        .iter_mut()
+        .flat_map(|track| &mut track.clips)
+        .filter(|clip| clip.id == title_clip)
+    {
+        clip.audio_gain_curve = Some(curve(&[(0, -100)]));
+    }
+    assert_eq!(
+        hand_edited.validate(),
+        Err(OpError::TitleClipHasNoAudio(title_clip))
+    );
+
+    let mut frozen = document_with_one_clip();
+    Operation::AddFreezeFrame {
+        track: TrackId(1),
+        at: TimeCode(200),
+        duration: TimeCode(30),
+        asset: AssetId(1),
+        source_frame: TimeCode(5),
+    }
+    .apply(&mut frozen)
+    .unwrap();
+    let freeze_clip = frozen
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .find(|clip| matches!(clip.content, ClipContent::Freeze(_)))
+        .unwrap()
+        .id;
+    assert_eq!(
+        Operation::SetClipGainEnvelope {
+            clip: freeze_clip,
+            curve: Some(curve(&[(0, -100)])),
+        }
+        .apply(&mut frozen),
+        Err(OpError::FreezeClipHasNoAudio(freeze_clip))
+    );
+}
+
+/// AU4 §7 item A5.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn track_automation_validates_its_vocabulary_ranges_and_project_bound_atomically() {
+    let curve = |points: &[(i64, i64)]| AutomationCurve {
+        keyframes: points
+            .iter()
+            .map(|(at, value)| Keyframe {
+                at: TimeCode(*at),
+                value: *value,
+                interpolation: KeyframeInterpolation::Linear,
+            })
+            .collect(),
+    };
+    let mut document = document_with_one_clip();
+    let duration = document.duration;
+
+    Operation::SetTrackAutomation {
+        track: TrackId(1),
+        parameter: "gain_tenth_db".to_owned(),
+        curve: Some(curve(&[(0, -600), (10, 120)])),
+    }
+    .apply(&mut document)
+    .unwrap();
+    Operation::SetTrackAutomation {
+        track: TrackId(1),
+        parameter: "pan_percent".to_owned(),
+        curve: Some(curve(&[(0, -100), (10, 100)])),
+    }
+    .apply(&mut document)
+    .unwrap();
+
+    let rejections: Vec<(&str, AutomationCurve, OpError)> = vec![
+        (
+            "gain_tenth_db",
+            AutomationCurve {
+                keyframes: Vec::new(),
+            },
+            OpError::InvalidTrackAutomation {
+                track: TrackId(1),
+                parameter: "gain_tenth_db".to_owned(),
+                reason: "automation curve must contain at least one keyframe".to_owned(),
+            },
+        ),
+        (
+            "gain_tenth_db",
+            curve(&[(0, -601)]),
+            OpError::TrackAutomationOutOfRange {
+                track: TrackId(1),
+                parameter: "gain_tenth_db".to_owned(),
+                value: -601,
+            },
+        ),
+        (
+            "pan_percent",
+            curve(&[(0, 101)]),
+            OpError::TrackAutomationOutOfRange {
+                track: TrackId(1),
+                parameter: "pan_percent".to_owned(),
+                value: 101,
+            },
+        ),
+        (
+            "gain_tenth_db",
+            curve(&[(0, 0), (duration.0, 0)]),
+            OpError::TrackAutomationKeyframeOutsideProject {
+                track: TrackId(1),
+                parameter: "gain_tenth_db".to_owned(),
+                at: duration,
+                duration,
+            },
+        ),
+    ];
+    for (parameter, rejected, expected) in rejections {
+        let before = document.clone();
+        assert_eq!(
+            Operation::SetTrackAutomation {
+                track: TrackId(1),
+                parameter: parameter.to_owned(),
+                curve: Some(rejected),
+            }
+            .apply(&mut document),
+            Err(expected)
+        );
+        assert_eq!(document, before, "a rejection must not mutate");
+    }
+
+    // Rule 39: the vocabulary check runs *before* the curve is validated, so
+    // an empty curve under a misspelled parameter still reports the spelling.
+    assert_eq!(
+        Operation::SetTrackAutomation {
+            track: TrackId(1),
+            parameter: "pan".to_owned(),
+            curve: Some(AutomationCurve {
+                keyframes: Vec::new(),
+            }),
+        }
+        .apply(&mut document),
+        Err(OpError::UnknownTrackAutomationParameter {
+            parameter: "pan".to_owned(),
+        })
+    );
+    assert_eq!(
+        Operation::SetTrackAutomation {
+            track: TrackId(9),
+            parameter: "gain_tenth_db".to_owned(),
+            curve: None,
+        }
+        .apply(&mut document),
+        Err(OpError::MissingTrack(TrackId(9)))
+    );
 }
 
 #[test]
@@ -3770,6 +4215,7 @@ fn add_and_remove_track_are_validated_and_atomic() {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         }],
     };
     assert_eq!(
@@ -4040,6 +4486,7 @@ fn unsorted_input_document_is_rejected() {
         audio_fade_in_frames: TimeCode::ZERO,
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
+        audio_gain_curve: None,
     };
     let earlier = Clip {
         id: ClipId(2),

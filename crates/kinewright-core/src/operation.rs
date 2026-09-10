@@ -8,13 +8,14 @@ use crate::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AssetId,
     AudioBus, AudioBusId, AudioChain, AudioMaster, AutomationCurve, BinId,
     COLOR_CONFIDENCE_MAX_BASIS_POINTS, CaptionPreset, Clip, ClipContent, ClipId, ColorContext,
-    ColorDescription, ColorProvenance, Document, Effect, EffectId, FreezeFrame,
+    ColorDescription, ColorProvenance, Document, Effect, EffectId, FreezeFrame, Keyframe,
     KeyframeInterpolation, LinkId, LutAsset, LutAssetId, MARKER_COLOR_TOKEN_COUNT, Marker,
     MarkerId, MediaAsset, MediaBin, MediaSourceFingerprint, PanLaw, ParamValue, RelinkCandidate,
-    StringOut, StringOutId, SyncGroup, SyncGroupId, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
-    TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, ThreePointMode, TimeCode, TimeMappingError, Title,
-    TitleParameterKind, TitlePosition, Track, TrackId, TrackKind, TrackMix, Transition,
-    is_audio_effect, map_source_range_to_project, title_parameter_descriptor,
+    StringOut, StringOutId, SyncGroup, SyncGroupId, TRACK_AUTOMATION_PARAMETERS,
+    TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, ThreePointMode,
+    TimeCode, TimeMappingError, Title, TitleParameterKind, TitlePosition, Track, TrackId,
+    TrackKind, TrackMix, Transition, is_audio_effect, map_source_range_to_project,
+    title_parameter_descriptor,
 };
 
 // The project colour context is intentionally kept inline in the operation so
@@ -112,6 +113,21 @@ pub enum Operation {
         pan_percent: i32,
         mute: bool,
         solo: bool,
+    },
+    /// AU4 §2.5: replace or clear one track's gain or pan automation, in
+    /// project frames. `null` clears it; the field is required, so an omitted
+    /// `curve` is an error and never a silent clear.
+    SetTrackAutomation {
+        track: TrackId,
+        /// `gain_tenth_db` or `pan_percent`, spelled exactly as the `TrackMix`
+        /// field the curve parks on.
+        #[schemars(extend("enum" = ["gain_tenth_db", "pan_percent"]))]
+        parameter: String,
+        /// The whole curve for this owner. `null` clears it. The field is
+        /// required: an omitted `curve` is an error, never a silent clear.
+        #[serde(deserialize_with = "deserialize_required_curve")]
+        #[schemars(required, with = "RequiredNullableCurve")]
+        curve: Option<AutomationCurve>,
     },
     AddClip {
         track: TrackId,
@@ -333,6 +349,17 @@ pub enum Operation {
         /// Fade-out length in project frames, anchored to the clip end.
         fade_out_frames: TimeCode,
     },
+    /// AU4 §2.5: replace or clear one clip's gain envelope, in clip-local
+    /// frames. `null` clears it; the field is required, so an omitted `curve`
+    /// is an error and never a silent clear.
+    SetClipGainEnvelope {
+        clip: ClipId,
+        /// The whole curve for this owner. `null` clears it. The field is
+        /// required: an omitted `curve` is an error, never a silent clear.
+        #[serde(deserialize_with = "deserialize_required_curve")]
+        #[schemars(required, with = "RequiredNullableCurve")]
+        curve: Option<AutomationCurve>,
+    },
     AddTransition {
         clip: ClipId,
         transition: Transition,
@@ -361,6 +388,44 @@ pub enum Operation {
         /// other than 100.
         speed_percent: u32,
     },
+}
+
+/// AU4 §2.5 rule 28: `curve` is required on the wire *and* nullable.
+///
+/// Bare `#[schemars(required)]` does not merely add the field to the
+/// `required` list: it switches generation to
+/// `_schemars_private_non_optional_json_schema`, which **strips the null
+/// branch**, so the published schema would forbid the one documented clear.
+/// The field schema is therefore supplied explicitly, and `required` is kept
+/// only for its effect on the `required` list.
+pub(crate) struct RequiredNullableCurve;
+
+impl schemars::JsonSchema for RequiredNullableCurve {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "NullableAutomationCurve".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "anyOf": [generator.subschema_for::<AutomationCurve>(), {"type": "null"}]
+        })
+    }
+}
+
+/// AU4 §2.5 rule 28: make `curve` **required on the wire** while keeping
+/// `null` as the clear.
+///
+/// The rule's premise — that serde's derive already rejects an omitted
+/// attribute-free `Option<T>` — is not true: serde's `missing_field` succeeds
+/// for `Option` through `deserialize_option`, so an omitted `curve` would
+/// silently clear (AU4 §0 E1). A `deserialize_with` with no `default` is what
+/// actually makes the omission an error, and it agrees with the
+/// `#[schemars(required)]` the schema publishes beside it.
+fn deserialize_required_curve<'de, D>(deserializer: D) -> Result<Option<AutomationCurve>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<AutomationCurve>::deserialize(deserializer)
 }
 
 pub trait ApplyOp {
@@ -911,6 +976,69 @@ pub enum OpError {
     TitleClipHasNoAudio(ClipId),
     #[error("freeze clip {0} has no audio contribution; SetClipAudio accepts media clips only")]
     FreezeClipHasNoAudio(ClipId),
+    /// AU4 §2.6: a clip gain envelope violates [`AutomationCurve::validate`].
+    #[error("clip {clip} gain envelope is invalid: {reason}")]
+    InvalidClipGainEnvelope { clip: ClipId, reason: String },
+    /// AU4 §2.6: a track automation curve violates [`AutomationCurve::validate`].
+    #[error("track {track} automation for {parameter:?} is invalid: {reason}")]
+    InvalidTrackAutomation {
+        track: TrackId,
+        parameter: String,
+        reason: String,
+    },
+    /// AU4 §2.6: a clip gain envelope value is outside the shared audio gain
+    /// domain.
+    #[error("clip {clip} gain envelope value {value} is outside the inclusive range -600..=120")]
+    ClipGainEnvelopeOutOfRange { clip: ClipId, value: i64 },
+    /// AU4 §2.6: a clip gain envelope key sits at or past the clip's duration.
+    #[error(
+        "automation keyframe {at} for clip {clip}'s gain envelope is outside its local range 0..{duration}"
+    )]
+    ClipGainEnvelopeKeyframeOutsideClip {
+        clip: ClipId,
+        at: TimeCode,
+        duration: TimeCode,
+    },
+    /// AU4 §2.6: a track automation value is outside its parameter's range.
+    #[error(
+        "track {track} automation value {value} for {parameter:?} is outside its inclusive range"
+    )]
+    TrackAutomationOutOfRange {
+        track: TrackId,
+        parameter: String,
+        value: i64,
+    },
+    /// AU4 §2.6: a track automation key sits at or past the project duration.
+    #[error(
+        "automation keyframe {at} for track {track} parameter {parameter:?} is outside project range 0..{duration}"
+    )]
+    TrackAutomationKeyframeOutsideProject {
+        track: TrackId,
+        parameter: String,
+        at: TimeCode,
+        duration: TimeCode,
+    },
+    /// AU4 §2.6: kept for hand-edited documents and for an agent that ignores
+    /// the schema's inlined enum.
+    #[error(
+        "unknown track automation parameter {parameter:?}; expected gain_tenth_db or pan_percent"
+    )]
+    UnknownTrackAutomationParameter { parameter: String },
+    /// AU4 §2.6: a bus fader automation key sits at or past the project duration.
+    #[error(
+        "automation keyframe {at} for audio bus {bus}'s fader is outside project range 0..{duration}"
+    )]
+    AudioBusGainKeyframeOutsideProject {
+        bus: AudioBusId,
+        at: TimeCode,
+        duration: TimeCode,
+    },
+    /// AU4 §2.6: a master fader automation key sits at or past the project
+    /// duration.
+    #[error(
+        "automation keyframe {at} for the audio master's fader is outside project range 0..{duration}"
+    )]
+    AudioMasterGainKeyframeOutsideProject { at: TimeCode, duration: TimeCode },
     #[error(
         "track mix gain on track {track} is {gain_tenth_db} tenth-dB, outside the inclusive range -600..=120"
     )]
@@ -995,6 +1123,11 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
             mute,
             solo,
         } => set_track_mix(doc, *track, *gain_tenth_db, *pan_percent, *mute, *solo),
+        Operation::SetTrackAutomation {
+            track,
+            parameter,
+            curve,
+        } => set_track_automation(doc, *track, parameter, curve.as_ref()),
         Operation::AddClip {
             track,
             asset,
@@ -1136,6 +1269,9 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
             *fade_in_frames,
             *fade_out_frames,
         ),
+        Operation::SetClipGainEnvelope { clip, curve } => {
+            set_clip_gain_envelope(doc, *clip, curve.as_ref())
+        }
         Operation::AddTransition { clip, transition } => {
             add_transition(doc, *clip, transition.clone())
         }
@@ -1191,6 +1327,13 @@ fn set_track_sync_lock(doc: &mut Document, track_id: TrackId, locked: bool) -> R
 }
 
 /// Replace one track's mix state (AU1 §2.3). A neutral result removes the entry.
+///
+/// AU4 §2.5 rule 32: the operation carries five scalars and no curve, so the
+/// stored entry's `gain_curve` and `pan_curve` are **merged** into the fresh
+/// entry *before* validation and *before* `is_neutral`. Without the merge one
+/// nudge of a fader on an automated track silently drops both rides, and the
+/// `retain` arm additionally deletes the entry whenever the five scalars are
+/// neutral.
 fn set_track_mix(
     doc: &mut Document,
     track_id: TrackId,
@@ -1202,14 +1345,57 @@ fn set_track_mix(
     if !doc.tracks.iter().any(|track| track.id == track_id) {
         return Err(OpError::MissingTrack(track_id));
     }
+    let stored = doc.audio_mix.track(track_id);
     let entry = TrackMix {
         track: track_id,
         gain_tenth_db,
         pan_percent,
+        gain_curve: stored.gain_curve,
+        pan_curve: stored.pan_curve,
         mute,
         solo,
     };
+    store_track_mix(doc, entry)
+}
+
+/// AU4 §2.5: replace or clear one track's gain or pan automation.
+///
+/// Rule 32a: shares [`set_track_mix`]'s entry lifecycle, so clearing the last
+/// curve on an otherwise neutral track leaves the document byte-identical to
+/// one that never carried it.
+fn set_track_automation(
+    doc: &mut Document,
+    track_id: TrackId,
+    parameter: &str,
+    curve: Option<&AutomationCurve>,
+) -> Result<(), OpError> {
+    if !doc.tracks.iter().any(|track| track.id == track_id) {
+        return Err(OpError::MissingTrack(track_id));
+    }
+    // Rule 39: an unknown spelling is rejected *before* the curve is
+    // validated, so an agent typo gets the vocabulary back rather than a
+    // structural complaint.
+    if !TRACK_AUTOMATION_PARAMETERS.contains(&parameter) {
+        return Err(OpError::UnknownTrackAutomationParameter {
+            parameter: parameter.to_owned(),
+        });
+    }
+    let mut entry = doc.audio_mix.track(track_id);
+    if parameter == TRACK_AUTOMATION_PARAMETERS[0] {
+        entry.gain_curve = curve.cloned();
+    } else {
+        entry.pan_curve = curve.cloned();
+    }
+    store_track_mix(doc, entry)
+}
+
+/// Validate one whole `TrackMix` entry and apply the AU1 §2.3 / AU4 §2.5
+/// rule 32a lifecycle: remove when neutral, otherwise insert or replace and
+/// re-sort by track.
+fn store_track_mix(doc: &mut Document, entry: TrackMix) -> Result<(), OpError> {
+    let track_id = entry.track;
     validate_track_mix_values(&entry)?;
+    validate_track_mix_automation(&entry, doc.duration)?;
     if entry.is_neutral() {
         doc.audio_mix
             .tracks
@@ -1226,6 +1412,114 @@ fn set_track_mix(
         None => doc.audio_mix.tracks.push(entry),
     }
     doc.audio_mix.tracks.sort_by_key(|stored| stored.track);
+    Ok(())
+}
+
+/// AU4 §2.6 rule 37: validate one track entry's two curves, in order —
+/// structure, then value range, then the project bound.
+fn validate_track_mix_automation(entry: &TrackMix, duration: TimeCode) -> Result<(), OpError> {
+    for (parameter, curve, min, max) in [
+        (
+            TRACK_AUTOMATION_PARAMETERS[0],
+            entry.gain_curve.as_ref(),
+            i64::from(TRACK_MIX_GAIN_MIN),
+            i64::from(TRACK_MIX_GAIN_MAX),
+        ),
+        (
+            TRACK_AUTOMATION_PARAMETERS[1],
+            entry.pan_curve.as_ref(),
+            i64::from(TRACK_MIX_PAN_MIN),
+            i64::from(TRACK_MIX_PAN_MAX),
+        ),
+    ] {
+        let Some(curve) = curve else { continue };
+        curve
+            .validate()
+            .map_err(|error| OpError::InvalidTrackAutomation {
+                track: entry.track,
+                parameter: parameter.to_owned(),
+                reason: error.to_string(),
+            })?;
+        for keyframe in &curve.keyframes {
+            if !(min..=max).contains(&keyframe.value) {
+                return Err(OpError::TrackAutomationOutOfRange {
+                    track: entry.track,
+                    parameter: parameter.to_owned(),
+                    value: keyframe.value,
+                });
+            }
+            if !project_frame_in_range(keyframe.at, duration) {
+                return Err(OpError::TrackAutomationKeyframeOutsideProject {
+                    track: entry.track,
+                    parameter: parameter.to_owned(),
+                    at: keyframe.at,
+                    duration,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// AU4 §2.3 rule 17 / §2.6 rule 37.3: the relaxed project-frame bound.
+///
+/// A one-key constant curve on an empty timeline is a legal document, so
+/// deleting the only clip of an automated project succeeds instead of being
+/// rejected.
+fn project_frame_in_range(at: TimeCode, duration: TimeCode) -> bool {
+    at < duration || (duration <= TimeCode::ZERO && at == TimeCode::ZERO)
+}
+
+/// AU4 §2.6 rule 37: validate one clip gain envelope, in order — structure,
+/// then value range, then the clip-local bound.
+fn validate_clip_gain_curve(
+    clip: ClipId,
+    curve: &AutomationCurve,
+    clip_duration: TimeCode,
+) -> Result<(), OpError> {
+    curve
+        .validate()
+        .map_err(|error| OpError::InvalidClipGainEnvelope {
+            clip,
+            reason: error.to_string(),
+        })?;
+    for keyframe in &curve.keyframes {
+        if !(-600..=120).contains(&keyframe.value) {
+            return Err(OpError::ClipGainEnvelopeOutOfRange {
+                clip,
+                value: keyframe.value,
+            });
+        }
+        if keyframe.at >= clip_duration {
+            return Err(OpError::ClipGainEnvelopeKeyframeOutsideClip {
+                clip,
+                at: keyframe.at,
+                duration: clip_duration,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// AU4 §2.5: replace or clear one clip's gain envelope.
+fn set_clip_gain_envelope(
+    doc: &mut Document,
+    clip_id: ClipId,
+    curve: Option<&AutomationCurve>,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let clip = &doc.tracks[track_index].clips[clip_index];
+    // Rule 31: matched arm for arm against `set_clip_audio`.
+    match clip.content {
+        ClipContent::Title(_) => return Err(OpError::TitleClipHasNoAudio(clip_id)),
+        ClipContent::Freeze(_) => return Err(OpError::FreezeClipHasNoAudio(clip_id)),
+        ClipContent::Media => {}
+    }
+    let clip_duration = doc.clip_duration(clip)?;
+    if let Some(curve) = curve {
+        validate_clip_gain_curve(clip_id, curve, clip_duration)?;
+    }
+    doc.tracks[track_index].clips[clip_index].audio_gain_curve = curve.cloned();
     Ok(())
 }
 
@@ -1319,11 +1613,42 @@ fn relink_asset(
         return Err(OpError::RelinkRequiresExplicitUnverifiedSource { asset: asset_id });
     }
 
+    // AU4 §2.4: a candidate re-derives `clip_duration` through
+    // `clip_effective_fps` and `map_source_range_to_project`, so every clip
+    // bound to the relinked asset whose project duration changed gets
+    // `E(0, new_duration)` plus rule 26.1's fade clamp. The metadata guards
+    // above make that unreachable today (AU4 §0 E4), and the pass is written
+    // anyway so a future relaxation cannot silently drop a ride.
+    let before = clip_durations_for_asset(doc, asset_id)?;
     doc.media_pool[index].path.clone_from(&candidate.path);
     doc.media_pool[index]
         .source_fingerprint
         .clone_from(&candidate.fingerprint);
+    for (track_index, clip_index, previous) in before {
+        let clip = doc.tracks[track_index].clips[clip_index].clone();
+        if doc.clip_duration(&clip)? == previous {
+            continue;
+        }
+        survive_clip_edit(doc, track_index, clip_index, TimeCode::ZERO)?;
+    }
     Ok(())
+}
+
+/// Every media clip bound to `asset`, with its project duration before a
+/// relink rewrites the asset record.
+fn clip_durations_for_asset(
+    doc: &Document,
+    asset: AssetId,
+) -> Result<Vec<(usize, usize, TimeCode)>, OpError> {
+    let mut durations = Vec::new();
+    for (track_index, track) in doc.tracks.iter().enumerate() {
+        for (clip_index, clip) in track.clips.iter().enumerate() {
+            if clip.asset == asset && clip.content.is_media() {
+                durations.push((track_index, clip_index, doc.clip_duration(clip)?));
+            }
+        }
+    }
+    Ok(durations)
 }
 
 fn set_asset_color_description(
@@ -1537,6 +1862,7 @@ fn add_clip(
         audio_fade_in_frames: TimeCode::ZERO,
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
+        audio_gain_curve: None,
     };
     doc.tracks[track_index].clips.push(clip);
     doc.tracks[track_index]
@@ -1581,6 +1907,7 @@ fn add_title(
         audio_fade_in_frames: TimeCode::ZERO,
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
+        audio_gain_curve: None,
     });
     doc.tracks[track_index]
         .clips
@@ -1627,6 +1954,7 @@ fn add_freeze_frame(
         audio_fade_in_frames: TimeCode::ZERO,
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
+        audio_gain_curve: None,
     });
     doc.tracks[track_index]
         .clips
@@ -1678,10 +2006,32 @@ fn split_clip(doc: &mut Document, clip_id: ClipId, at: TimeCode) -> Result<(), O
         let right_duration = end.checked_sub(at).ok_or(OpError::TimeOverflow)?;
         title.fade_out_frames = title.fade_out_frames.min(right_duration);
     }
+    // AU4 §2.4: the left half keeps the audio fade-in and the right half the
+    // fade-out, each zeroed on the cut side, mirroring what the title arms
+    // above already do. Today both halves keep both fades verbatim, so a split
+    // of a fully-faded clip fails with `AudioFadesTooLong`.
+    doc.tracks[track_index].clips[clip_index].audio_fade_out_frames = TimeCode::ZERO;
+    right.audio_fade_in_frames = TimeCode::ZERO;
+    // AU4 §2.4: the left half is `E(0, offset)` and the right half
+    // `E(offset, end - at)` — the right half's clip-local frame 0 moves to
+    // `at`, which is the slide this fixes.
+    // The right half's own post-rewrite project duration, read back through
+    // `clip_duration` rather than assumed to be `end - at`, because §2.4's
+    // preamble makes `doc.clip_duration(clip)?` the definition of
+    // `new_duration` on every row.
+    let right_duration = doc.clip_duration(&right)?;
+    rebase_clip_automation(&mut right, offset, right_duration);
+    clamp_clip_audio_fades(&mut right, right_duration);
     doc.tracks[track_index].clips.push(right);
     doc.tracks[track_index]
         .clips
         .sort_by_key(|clip| (clip.timeline_start, clip.id));
+    let left_index = doc.tracks[track_index]
+        .clips
+        .iter()
+        .position(|clip| clip.id == clip_id)
+        .ok_or(OpError::MissingClip(clip_id))?;
+    survive_clip_edit(doc, track_index, left_index, TimeCode::ZERO)?;
     Ok(())
 }
 
@@ -1743,6 +2093,15 @@ fn trim_clip(
         title.fade_in_frames = title.fade_in_frames.min(duration);
         title.fade_out_frames = title.fade_out_frames.min(duration);
     }
+    // AU4 §2.4: `E(delta_local, new_duration)` with a **signed** delta — a
+    // left trim that pulls the head out makes it negative — plus rule 26.1's
+    // fade clamp against the new *project* duration, which is deliberately not
+    // the `duration` used by the title clamp above (that one is in source
+    // frames).
+    // Plain subtraction: both operands are validated non-negative frames
+    // bounded by `document.duration`, so this cannot overflow (AU4 §2.4).
+    let delta_local = TimeCode(shifted_start.0 - original.timeline_start.0);
+    survive_clip_edit(doc, track_index, clip_index, delta_local)?;
     Ok(())
 }
 
@@ -2195,6 +2554,13 @@ fn roll_edit(
         .source_range
         .start = right_source_in;
     doc.tracks[track_index].clips[right_index].timeline_start = to;
+    // AU4 §2.4: only the right clip's `timeline_start` moves, so only it has a
+    // non-zero — and **signed**, negative on a left roll — `delta_local`.
+    survive_clip_edit(doc, track_index, left_index, TimeCode::ZERO)?;
+    // Signed on purpose (AU4 §2.4, F5/F10): negative on a left roll. Both
+    // operands are bounded frames, so the subtraction cannot overflow.
+    let right_delta = TimeCode(to.0 - right.timeline_start.0);
+    survive_clip_edit(doc, track_index, right_index, right_delta)?;
     Ok(())
 }
 
@@ -2271,6 +2637,15 @@ fn slide_clip(doc: &mut Document, clip_id: ClipId, to: TimeCode) -> Result<(), O
         .source_range
         .start = right_source_in;
     doc.tracks[track_index].clips[clip_index + 1].timeline_start = new_end;
+    // AU4 §2.4: the middle is untouched — slot and duration both move by the
+    // same amount — the left neighbour is `E(0, d_left)`, and the right
+    // neighbour's delta is `to - middle.timeline_start`, **signed** and
+    // negative on a left slide.
+    survive_clip_edit(doc, track_index, clip_index - 1, TimeCode::ZERO)?;
+    // Signed on purpose (AU4 §2.4, F5/F10): negative on a left slide. Both
+    // operands are bounded frames, so the subtraction cannot overflow.
+    let right_delta = TimeCode(to.0 - middle.timeline_start.0);
+    survive_clip_edit(doc, track_index, clip_index + 1, right_delta)?;
     Ok(())
 }
 
@@ -2324,6 +2699,182 @@ fn replace_clip(
     clip.content = ClipContent::Media;
     clip.speed_percent = speed_percent;
     Ok(())
+}
+
+/// AU4 §2.4: `E(delta_local, new_duration)` — rule 13 applied to **both** the
+/// clip envelope and every clip-effect curve in `clip.effects`, one policy for
+/// one time base.
+///
+/// `delta_local` is `new_timeline_start - old_timeline_start` in project
+/// frames and is **signed**; `new_duration` is `doc.clip_duration(clip)` after
+/// the operation's own rewrite, never the source-range span.
+fn rebase_clip_automation(clip: &mut Clip, delta_local: TimeCode, new_duration: TimeCode) {
+    if let Some(curve) = &clip.audio_gain_curve {
+        clip.audio_gain_curve = Some(crate::rebase_clip_curve(curve, delta_local, new_duration));
+    }
+    for effect in &mut clip.effects {
+        for curve in effect.keyframes.values_mut() {
+            *curve = crate::rebase_clip_curve(curve, delta_local, new_duration);
+        }
+    }
+}
+
+/// AU4 §2.4 rule 26.1: clamp a clip's audio fades against its new **project**
+/// duration, reducing the fade-out first and then the fade-in if the sum still
+/// exceeds it.
+///
+/// Deliberately not the title clamp beside it (`trim_clip`): the title clamp's
+/// local `duration` is in **source** frames, which the §2.4 preamble says is
+/// not `new_duration`. The two coincide for Title and Freeze clips and diverge
+/// for a Media clip.
+fn clamp_clip_audio_fades(clip: &mut Clip, new_duration: TimeCode) {
+    let duration = new_duration.0.max(0);
+    let mut fade_in = clip.audio_fade_in_frames.0.clamp(0, duration);
+    let mut fade_out = clip.audio_fade_out_frames.0.clamp(0, duration);
+    if fade_in.saturating_add(fade_out) > duration {
+        // Rule 26.1: reduce the fade-out first. After this line the sum is
+        // exactly `duration` (and `fade_in <= duration` from the clamp
+        // above), so the inner branch is defensive and cannot fire.
+        fade_out = duration - fade_in;
+        if fade_in.saturating_add(fade_out) > duration {
+            fade_in = duration - fade_out;
+        }
+    }
+    clip.audio_fade_in_frames = TimeCode(fade_in);
+    clip.audio_fade_out_frames = TimeCode(fade_out);
+}
+
+/// AU4 §2.4: rebase one clip in place and clamp its fades, reading the clip's
+/// post-rewrite project duration back out of the document.
+fn survive_clip_edit(
+    doc: &mut Document,
+    track_index: usize,
+    clip_index: usize,
+    delta_local: TimeCode,
+) -> Result<(), OpError> {
+    let clip = doc.tracks[track_index].clips[clip_index].clone();
+    let new_duration = doc.clip_duration(&clip)?;
+    let clip = &mut doc.tracks[track_index].clips[clip_index];
+    rebase_clip_automation(clip, delta_local, new_duration);
+    clamp_clip_audio_fades(clip, new_duration);
+    Ok(())
+}
+
+/// AU4 §2.4 rule 22: ripple delete, three ordered steps on one project-frame
+/// curve.
+fn ripple_delete_curve(
+    curve: &AutomationCurve,
+    start: TimeCode,
+    ripple_point: TimeCode,
+    duration: TimeCode,
+) -> AutomationCurve {
+    let removed = |at: TimeCode| at >= start && at < ripple_point;
+    let mut keys: BTreeMap<i64, Keyframe> = BTreeMap::new();
+    // Step 1. Without the boundary key the segment from the last pre-cut key
+    // spans the join and re-shapes the pre-cut interior, changing the audio
+    // *before* the cut.
+    if start > TimeCode::ZERO && curve.keyframes.iter().any(|key| removed(key.at)) {
+        let at = TimeCode(start.0 - 1);
+        if let Some(value) = curve.value_at(at) {
+            keys.insert(
+                at.0,
+                Keyframe {
+                    at,
+                    value,
+                    interpolation: curve.segment_interpolation_at(at),
+                },
+            );
+        }
+    }
+    // Steps 2 and 3. No key is inserted at `start`: a key at exactly
+    // `ripple_point` shifts to exactly `start`, and it is that key that
+    // defines the post-cut side.
+    for key in &curve.keyframes {
+        if removed(key.at) {
+            continue;
+        }
+        let at = if key.at >= ripple_point {
+            TimeCode(key.at.0 - duration.0)
+        } else {
+            key.at
+        };
+        keys.insert(at.0, Keyframe { at, ..*key });
+    }
+    // Rule 20: no ripple may fail because of automation, and an empty curve
+    // fails `AutomationCurve::validate`. Every key can only be dropped when
+    // `start == 0` — otherwise step 1 has already inserted the boundary key —
+    // so the survivor is the one constant the cut leaves audible at frame 0,
+    // which is what the material now at `ripple_point` was carrying
+    // (AU4 §0 E3).
+    if keys.is_empty()
+        && let Some(value) = curve.value_at(ripple_point)
+    {
+        keys.insert(
+            start.0,
+            Keyframe {
+                at: start,
+                value,
+                interpolation: curve.segment_interpolation_at(ripple_point),
+            },
+        );
+    }
+    AutomationCurve {
+        keyframes: keys.into_values().collect(),
+    }
+}
+
+/// AU4 §2.4 rule 23: ripple insert, one step — shift keys at `>= at` right and
+/// insert nothing, because the gap is empty on every shifted track by
+/// construction.
+///
+/// The shifted curve is then clamped into `project_duration`. A ripple grows
+/// the project by `duration` only when the rippled tracks carry its last clip;
+/// when they do not, a key past the old end would shift past the *unchanged*
+/// end and rule 20 — no ripple may fail because of automation — would break
+/// (AU4 §0 E2). `clamp_project_curve` returns its input unchanged whenever
+/// nothing over-runs, which is the ordinary case.
+fn ripple_insert_curve(
+    curve: &AutomationCurve,
+    at: TimeCode,
+    duration: TimeCode,
+    project_duration: TimeCode,
+) -> AutomationCurve {
+    let shifted = AutomationCurve {
+        keyframes: curve
+            .keyframes
+            .iter()
+            .map(|key| {
+                if key.at >= at {
+                    Keyframe {
+                        at: TimeCode(key.at.0 + duration.0),
+                        ..*key
+                    }
+                } else {
+                    *key
+                }
+            })
+            .collect(),
+    };
+    crate::clamp_project_curve(&shifted, project_duration)
+}
+
+/// Apply `rewrite` to both track automation curves on every track in
+/// `track_ids`. No bus or master curve ripples (AU4 §2.4 rule 24).
+fn ripple_track_automation(
+    doc: &mut Document,
+    track_ids: &HashSet<TrackId>,
+    rewrite: impl Fn(&AutomationCurve) -> AutomationCurve,
+) {
+    for entry in &mut doc.audio_mix.tracks {
+        if !track_ids.contains(&entry.track) {
+            continue;
+        }
+        for slot in [&mut entry.gain_curve, &mut entry.pan_curve] {
+            if let Some(curve) = slot {
+                *slot = Some(rewrite(curve));
+            }
+        }
+    }
 }
 
 fn require_media(clip: &Clip) -> Result<(), OpError> {
@@ -2396,10 +2947,12 @@ fn ripple_delete_clip(doc: &mut Document, clip_id: ClipId) -> Result<(), OpError
         .ok_or(OpError::TimeOverflow)?;
     let source_track = doc.tracks[track_index].id;
     doc.tracks[track_index].clips.remove(clip_index);
+    let mut rippled = HashSet::new();
     for track in &mut doc.tracks {
         if track.id != source_track && !track.sync_lock {
             continue;
         }
+        rippled.insert(track.id);
         for clip in track
             .clips
             .iter_mut()
@@ -2411,6 +2964,12 @@ fn ripple_delete_clip(doc: &mut Document, clip_id: ClipId) -> Result<(), OpError
                 .ok_or(OpError::TimeOverflow)?;
         }
     }
+    // AU4 §2.4 rule 22: the same track set the clips rippled over, and only
+    // `TrackMix`'s two curves — no bus or master curve ripples (rule 24).
+    let start = removed.timeline_start;
+    ripple_track_automation(doc, &rippled, |curve| {
+        ripple_delete_curve(curve, start, ripple_point, duration)
+    });
     shift_markers_left(&mut doc.markers, ripple_point, duration)?;
     Ok(())
 }
@@ -2442,10 +3001,12 @@ fn ripple_insert_gap_for_tracks(
             return Err(OpError::MissingTrack(*track_id));
         }
     }
+    let mut rippled = HashSet::new();
     for track in &mut doc.tracks {
         if !target_tracks.contains(&track.id) && !track.sync_lock {
             continue;
         }
+        rippled.insert(track.id);
         for clip in track
             .clips
             .iter_mut()
@@ -2457,6 +3018,20 @@ fn ripple_insert_gap_for_tracks(
                 .ok_or(OpError::TimeOverflow)?;
         }
     }
+    // AU4 §2.4 rule 23: the operation's own track set — its targets plus every
+    // `sync_lock` track, which is not ripple delete's source-track set — and
+    // the clip predicate exactly, so a key at `at` shifts. The clips have
+    // already moved, so re-deriving the duration here gives the shift the
+    // bound it is clamped into. Precondition: since AU4 R2 this call can
+    // CLAMP project curves when the duration shrinks; it is safe here only
+    // because a ripple insert never shortens the timeline (and the Insert
+    // three-point path runs only `split_clip` before it). A future caller
+    // that ripples after removing clips must not call it mid-operation.
+    doc.recompute_duration()?;
+    let project_duration = doc.duration;
+    ripple_track_automation(doc, &rippled, |curve| {
+        ripple_insert_curve(curve, at, duration, project_duration)
+    });
     shift_markers_right(&mut doc.markers, at, duration)?;
     Ok(())
 }
@@ -3161,6 +3736,13 @@ fn set_clip_speed(doc: &mut Document, clip_id: ClipId, speed_percent: u32) -> Re
         return Err(OpError::SpeedOnNonMediaClip(clip_id));
     }
     doc.tracks[track_index].clips[clip_index].speed_percent = speed_percent;
+    // AU4 §2.4 rule 25: keyframe frames are **not** scaled by `100/speed` —
+    // integer division makes the round trip lossy and can collapse two keys
+    // onto one frame. `E(0, new_duration)` clamps instead, which makes a speed
+    // *increase* destructive: the keys past the new, shorter duration are
+    // dropped and only undo restores them. Nothing is audible at the time only
+    // because retimed clips contribute no audio at all.
+    survive_clip_edit(doc, track_index, clip_index, TimeCode::ZERO)?;
     Ok(())
 }
 
@@ -3443,7 +4025,11 @@ fn validate_curve(
 /// AU2 §2.2 adds an audio branch: on any [`is_audio_effect`] name, `bypass`,
 /// `detector`, and `true_peak` are hold-only and nothing else is — a frequency,
 /// a gain, a Q, and a time constant all keep every interpolation.
-fn is_hold_only_parameter(effect_name: &str, name: &str) -> bool {
+/// AU4 §2.6 rule 38: `pub` and re-exported from `lib.rs` so the mixer chain
+/// pane's parameter combo can filter with it — its first reader outside core.
+/// AU4 adds no new entry to it: none of the five curve owners is a switch.
+#[must_use]
+pub fn is_hold_only_parameter(effect_name: &str, name: &str) -> bool {
     // AU2 §2.2 rule 1: an audio node's `bypass`, detector mode, and true-peak
     // flag are switches, not scalars — interpolating between two of their
     // settings would resolve states no author ever authored.
@@ -3594,7 +4180,8 @@ fn validate_clip_audio(doc: &Document, clip: &Clip) -> Result<(), OpError> {
     if !clip.content.is_media()
         && (clip.audio_gain_tenth_db != 0
             || clip.audio_fade_in_frames != TimeCode::ZERO
-            || clip.audio_fade_out_frames != TimeCode::ZERO)
+            || clip.audio_fade_out_frames != TimeCode::ZERO
+            || clip.audio_gain_curve.is_some())
     {
         return match clip.content {
             ClipContent::Title(_) => Err(OpError::TitleClipHasNoAudio(clip.id)),
@@ -3602,12 +4189,19 @@ fn validate_clip_audio(doc: &Document, clip: &Clip) -> Result<(), OpError> {
             ClipContent::Media => Ok(()),
         };
     }
+    let clip_duration = doc.clip_duration(clip)?;
+    // AU4 §2.6 rule 37: the envelope is checked as a document invariant as
+    // well as in the operation, so a hand-edited project cannot load with a
+    // curve `SetClipGainEnvelope` would have rejected.
+    if let Some(curve) = &clip.audio_gain_curve {
+        validate_clip_gain_curve(clip.id, curve, clip_duration)?;
+    }
     validate_clip_audio_values(
         clip.id,
         clip.audio_gain_tenth_db,
         clip.audio_fade_in_frames,
         clip.audio_fade_out_frames,
-        doc.clip_duration(clip)?,
+        clip_duration,
     )
 }
 
@@ -4001,6 +4595,7 @@ fn validate_track_mix(doc: &Document) -> Result<(), OpError> {
             return Err(OpError::MissingTrack(entry.track));
         }
         validate_track_mix_values(entry)?;
+        validate_track_mix_automation(entry, doc.duration)?;
     }
     Ok(())
 }
@@ -4038,6 +4633,27 @@ fn validate_audio_master(doc: &Document, master: &AudioMaster) -> Result<(), OpE
             gain_tenth_db: master.gain_tenth_db,
         });
     }
+    // AU4 §2.6 rule 37: the fader's own curve, in the same order as every
+    // other owner — structure, value range, then the relaxed project bound.
+    if let Some(curve) = &master.gain_curve {
+        validate_audio_fader_curve(
+            curve,
+            doc.duration,
+            AUDIO_MASTER_GAIN_MIN..=AUDIO_MASTER_GAIN_MAX,
+            &mut |at, duration| OpError::AudioMasterGainKeyframeOutsideProject { at, duration },
+        )
+        .map_err(|error| match error {
+            FaderCurveError::Structure(reason) => OpError::InvalidEffectAutomation {
+                effect: "audio_master".to_owned(),
+                name: "gain_tenth_db".to_owned(),
+                reason,
+            },
+            FaderCurveError::Range(value) => OpError::AudioMasterGainOutOfRange {
+                gain_tenth_db: i32::try_from(value).unwrap_or(i32::MAX),
+            },
+            FaderCurveError::Outside(error) => error,
+        })?;
+    }
     let mut effect_ids = HashSet::new();
     for effect in &master.effects {
         // AU2 §5.4 (N1): uniqueness is scoped to this chain, so a bus may
@@ -4074,6 +4690,31 @@ fn validate_audio_bus(doc: &Document, bus: &AudioBus) -> Result<(), OpError> {
             bus: bus.id,
             gain_tenth_db: bus.gain_tenth_db,
         });
+    }
+    // AU4 §2.6 rule 37, as for the master fader above.
+    if let Some(curve) = &bus.gain_curve {
+        validate_audio_fader_curve(
+            curve,
+            doc.duration,
+            AUDIO_BUS_GAIN_MIN..=AUDIO_BUS_GAIN_MAX,
+            &mut |at, duration| OpError::AudioBusGainKeyframeOutsideProject {
+                bus: bus.id,
+                at,
+                duration,
+            },
+        )
+        .map_err(|error| match error {
+            FaderCurveError::Structure(reason) => OpError::InvalidEffectAutomation {
+                effect: "audio_bus".to_owned(),
+                name: "gain_tenth_db".to_owned(),
+                reason,
+            },
+            FaderCurveError::Range(value) => OpError::AudioBusGainOutOfRange {
+                bus: bus.id,
+                gain_tenth_db: i32::try_from(value).unwrap_or(i32::MAX),
+            },
+            FaderCurveError::Outside(error) => error,
+        })?;
     }
     let mut tracks = HashSet::new();
     for track in &bus.tracks {
@@ -4134,6 +4775,38 @@ fn validate_audio_bus(doc: &Document, bus: &AudioBus) -> Result<(), OpError> {
     Ok(())
 }
 
+/// The three ways a bus or master fader curve can be rejected, in AU4 §2.6
+/// rule 37's order. Each chain flavours them with its own `OpError`.
+enum FaderCurveError {
+    Structure(String),
+    Range(i64),
+    Outside(OpError),
+}
+
+/// AU4 §2.6 rule 37: the shared bus/master fader-curve check — structure,
+/// value range, then the relaxed project bound. Only the rejections are
+/// chain-flavoured, exactly as [`validate_audio_chain_automation`] is.
+fn validate_audio_fader_curve(
+    curve: &AutomationCurve,
+    duration: TimeCode,
+    range: std::ops::RangeInclusive<i32>,
+    outside: &mut dyn FnMut(TimeCode, TimeCode) -> OpError,
+) -> Result<(), FaderCurveError> {
+    curve
+        .validate()
+        .map_err(|error| FaderCurveError::Structure(error.to_string()))?;
+    let range = i64::from(*range.start())..=i64::from(*range.end());
+    for keyframe in &curve.keyframes {
+        if !range.contains(&keyframe.value) {
+            return Err(FaderCurveError::Range(keyframe.value));
+        }
+        if !project_frame_in_range(keyframe.at, duration) {
+            return Err(FaderCurveError::Outside(outside(keyframe.at, duration)));
+        }
+    }
+    Ok(())
+}
+
 /// Validate one chain effect's automation against the AU2 §2.2 keyframe rules,
 /// the project range, and the parameter's descriptor domain.
 ///
@@ -4187,7 +4860,12 @@ fn validate_audio_chain_automation(
             });
         }
         for keyframe in &curve.keyframes {
-            if keyframe.at >= duration {
+            // AU4 §2.3 rule 17: the relaxed bound applies **equally** here.
+            // The pre-AU4 form had no `duration == 0` guard, so at
+            // `duration == 0` every key — including one at frame 0 — was
+            // outside, and deleting the only clip of a project carrying a
+            // master fader ride was rejected.
+            if !project_frame_in_range(keyframe.at, duration) {
                 return Err(match chain {
                     AudioChain::Bus(bus) => OpError::AudioBusKeyframeOutsideProject {
                         bus,

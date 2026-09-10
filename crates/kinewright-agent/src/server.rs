@@ -5651,6 +5651,7 @@ impl KinewrightMcp {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             }],
             media_pool: vec![asset.clone()],
@@ -6247,6 +6248,7 @@ impl KinewrightMcp {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             }],
             media_pool: vec![asset.clone()],
@@ -8636,6 +8638,7 @@ fn normalization_bus(
         gain_tenth_db: 0,
         effects,
         ducking_sidechain_tracks: Vec::new(),
+        gain_curve: None,
     })
 }
 
@@ -14270,6 +14273,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             }],
             media_pool: vec![asset],
@@ -14328,6 +14332,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 },
                 Clip {
                     id: ClipId(98),
@@ -14342,6 +14347,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 },
             ],
         });
@@ -14517,6 +14523,7 @@ mod tests {
                         audio_fade_in_frames: TimeCode::ZERO,
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
+                        audio_gain_curve: None,
                     }],
                 },
             ],
@@ -14570,6 +14577,7 @@ mod tests {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         };
         let document = Document {
             tracks: vec![
@@ -18849,6 +18857,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             }],
             media_pool: vec![asset],
@@ -20350,6 +20359,7 @@ mod tests {
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         });
         document.validate().unwrap();
@@ -21843,24 +21853,79 @@ mod tests {
         // a second sentence would have cost 120 B and reached no agent. Served
         // is byte-identical again: `queue_export` is not served, and the seven
         // served tools embed no export argument schema at all.
+        //
+        // AU4 §4.3 Part A adds two generated mutators, `set_clip_gain_envelope`
+        // and `set_track_automation`, so 54 generated operations + 78
+        // inspectors = 132 and the registry grows by 93,394 B to 1,519,052 B =
+        // 1,386,288 B of input schemas + 111,103 B of descriptions.
+        //
+        // The +90,829 B of input schemas splits three ways and sums exactly:
+        //
+        //   45,878 B  the two new mutators' own schemas (22,842 + 23,036),
+        //             each carrying its own copy of the shared curve `$defs`;
+        //   42,640 B  820 B of shared `$defs` growth on each of the 52
+        //             pre-existing generated tools;
+        //    2,311 B  on `apply_edit_plan` — the same 820 B of `$defs` growth
+        //             plus 1,491 B for the two new `oneOf` variants its
+        //             inlined `Operation` definition gains (844 + 645 + the
+        //             two separating commas).
+        //
+        // So 45,878 + 52 x 820 + 2,311 = 90,829. The 820 B is *field* growth
+        // on the three `Operation`-reachable types that gained a curve and
+        // not a new `$defs` type (§4.3 rule 85): `AutomationCurve`, `Keyframe`
+        // and `KeyframeInterpolation` are already reachable through
+        // `SetEffectKeyframes`, so reusing them costs a fifth of AU2 Part B's
+        // 1,195 B per-tool bill for two genuinely new definitions. Measured
+        // per tool: `$defs/Clip/properties/audio_gain_curve` 347 B,
+        // `$defs/AudioBus/properties/gain_curve` 234 B,
+        // `$defs/AudioMaster/properties/gain_curve` 236 B, plus three
+        // separating commas = 820 B. `TrackMix` is NOT `Operation`-reachable
+        // (`$defs/Track` carries no `mix`), so `TrackMix.gain_curve` and
+        // `TrackMix.pan_curve` cost the registry nothing; they reach the wire
+        // only through the document.
+        //
+        // Each of the four `curve` occurrences — one per new tool's own
+        // variant schema, one per `apply_edit_plan` `oneOf` variant — is a
+        // `$ref`/`null` `anyOf` rather than an inlined `AutomationCurve`
+        // object, because F1's `required` attribute alone would strip the null
+        // branch and make E1's one documented clear schema-invalid. That is
+        // 96 B cheaper per occurrence, i.e. 384 B of the 91,213 B the
+        // null-stripping first draft billed.
+        //
+        // The +2,228 B of descriptions is the two new tools' prose entire
+        // (1,003 + 1,225): no existing description was touched, and the check
+        // that the sum is exact is what proves it.
+        //
+        // Serialized: 24,015 + 24,429 = 48,444 B of the two new tools whole,
+        // plus the same 44,951 B of schema growth on the 53 pre-existing
+        // `Operation`-embedding tools (52 x 820 + 2,311), minus **1 B**. The
+        // missing byte is rule 84's annotation flip: `set_effect_keyframes`
+        // joins the `.idempotent(...)` list, and `"idempotentHint":true` is
+        // one byte shorter than the `"idempotentHint":false` it replaces. So
+        // 48,444 + 44,951 - 1 = 93,394.
+        //
+        // Served is byte-identical for the ninth consecutive measurement:
+        // neither new tool is served, and the seven served tools embed no
+        // `Operation` schema at all, so even a model change cannot reach them.
         assert_eq!(
             (
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_425_658, 5_660),
+            (1_519_052, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_295_459,
+            registry_metrics.input_schema_bytes, 1_386_288,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 108_875,
+            registry_metrics.description_bytes, 111_103,
             "registry={registry_metrics:?}"
         );
-        // AU2 §6.4/B15, AU3 §4.2/A16 and AU3 §6.4/B13: the served quad,
-        // byte-identical to CC6's through every part of both programmes.
+        // AU2 §6.4/B15, AU3 §4.2/A16, AU3 §6.4/B13 and AU4 §4.3/A19: the
+        // served quad, byte-identical to CC6's through every part of both
+        // programmes.
         assert_eq!(
             (
                 served_metrics.tool_count,
@@ -24730,6 +24795,7 @@ mod tests {
                     audio_fade_in_frames: TimeCode::ZERO,
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
+                    audio_gain_curve: None,
                 }],
             });
         }
@@ -24815,6 +24881,7 @@ mod tests {
             gain_tenth_db: 0,
             effects: Vec::new(),
             ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
         });
         assert_eq!(
             normalization_context(&document, &au3_plan_args(vec![TrackId(3)])).unwrap_err(),

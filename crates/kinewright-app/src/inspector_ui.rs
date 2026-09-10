@@ -4281,6 +4281,7 @@ mod tests {
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         });
         assert_eq!(
@@ -4329,6 +4330,7 @@ mod tests {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         };
         assert_eq!(
             add_effect_operation(&clip, &descriptor),
@@ -4363,6 +4365,7 @@ mod tests {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         };
 
         // A managed colour node is inserted at its stage's first legal index,
@@ -4683,6 +4686,7 @@ mod tests {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         };
         let Operation::AddEffect { effect, .. } = add_effect_operation(&clip, descriptor) else {
             panic!("expected add effect operation");
@@ -4710,6 +4714,7 @@ mod tests {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         };
         let mut freeze = media.clone();
         freeze.content = ClipContent::Freeze(kinewright_core::FreezeFrame {
@@ -5665,6 +5670,7 @@ mod tests {
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
+            audio_gain_curve: None,
         }
     }
 
@@ -7834,6 +7840,7 @@ mod tests {
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             });
         }
         Document {

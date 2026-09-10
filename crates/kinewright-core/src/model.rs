@@ -332,6 +332,13 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "time_code_is_zero")]
     #[schemars(default)]
     pub audio_fade_out_frames: TimeCode,
+    /// AU4 §2.1: this clip's gain envelope, keyed in **clip-local** frames
+    /// (`local = project_frame - timeline_start`) in tenth-dB over the
+    /// inclusive range -600..=120. A curve *replaces* `audio_gain_tenth_db`,
+    /// which becomes the parked value (AU4 §2.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub audio_gain_curve: Option<crate::AutomationCurve>,
     /// Constant playback speed for a media clip as an integer percentage.
     /// The validated range is 10..=1000; 100 is real time. Speed scales the
     /// clip's effective source frame rate, so 50 doubles the project duration
@@ -496,6 +503,11 @@ pub struct AudioBus {
     #[serde(default, skip_serializing_if = "i32_is_zero")]
     #[schemars(default)]
     pub gain_tenth_db: i32,
+    /// AU4 §2.1: this bus's fader automation in **project** frames, tenth-dB
+    /// over the inclusive range -600..=120. A curve replaces `gain_tenth_db`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub gain_curve: Option<crate::AutomationCurve>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub effects: Vec<Effect>,
@@ -505,7 +517,11 @@ pub struct AudioBus {
 }
 
 /// Per-track mix state (AU1 §2.1). An absent entry is neutral.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// AU4 §2.1 rule 5: **not `Copy`** — the two automation curves own a `Vec`.
+/// `neutral` and `is_neutral` stay `const` (`Option::is_none` is `const`), so
+/// [`AudioMix::is_empty`]'s stated reason survives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TrackMix {
     pub track: TrackId,
     /// Integer tenths of a decibel, inclusive range `TRACK_MIX_GAIN_MIN..=TRACK_MIX_GAIN_MAX`.
@@ -516,6 +532,17 @@ pub struct TrackMix {
     #[serde(default, skip_serializing_if = "i32_is_zero")]
     #[schemars(default)]
     pub pan_percent: i32,
+    /// AU4 §2.1: this track's gain automation in **project** frames, tenth-dB
+    /// over the inclusive range -600..=120. A curve replaces `gain_tenth_db`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub gain_curve: Option<crate::AutomationCurve>,
+    /// AU4 §2.1: this track's pan automation in **project** frames, integer
+    /// percent over the inclusive range -100..=100. A curve replaces
+    /// `pan_percent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub pan_curve: Option<crate::AutomationCurve>,
     #[serde(default, skip_serializing_if = "bool_is_false")]
     #[schemars(default)]
     pub mute: bool,
@@ -532,6 +559,25 @@ pub const TRACK_MIX_GAIN_MAX: i32 = 120;
 pub const TRACK_MIX_PAN_MIN: i32 = -100;
 /// Hard-right track mix pan position in percent (AU1 §2.1).
 pub const TRACK_MIX_PAN_MAX: i32 = 100;
+/// AU4 §2.5: the closed vocabulary of `SetTrackAutomation.parameter`, spelled
+/// exactly as the [`TrackMix`] fields the curves park on.
+pub const TRACK_AUTOMATION_PARAMETERS: [&str; 2] = ["gain_tenth_db", "pan_percent"];
+/// AU4 §5.1: the bottom of the timeline rubber band's display axis, in
+/// tenth-dB. A display bound only — no validator reads it, and a key below it
+/// is legal and paints against the band's edge.
+pub const ENVELOPE_DISPLAY_MIN_TENTH_DB: i32 = -400;
+
+/// AU4 §2.5 rule 35: the undo coalesce key for one clip's gain envelope.
+#[must_use]
+pub fn envelope_coalesce_key(clip: ClipId) -> String {
+    format!("envelope:{clip}")
+}
+
+/// AU4 §2.5 rule 35: the undo coalesce key for one track automation lane.
+#[must_use]
+pub fn track_automation_coalesce_key(track: TrackId, parameter: &str) -> String {
+    format!("track_automation:{track}:{parameter}")
+}
 
 impl TrackMix {
     /// The neutral mix state for a track: unity gain, centred, unmuted, unsoloed.
@@ -541,15 +587,27 @@ impl TrackMix {
             track,
             gain_tenth_db: 0,
             pan_percent: 0,
+            gain_curve: None,
+            pan_curve: None,
             mute: false,
             solo: false,
         }
     }
 
     /// Whether this entry leaves the track's signal untouched (AU1 §2.1).
+    ///
+    /// AU4 §2.2 rule 11 widens it with both curves, so a neutral-scalar entry
+    /// carrying a ride is never elided off the wire and never removed by
+    /// `set_track_mix`'s `retain` arm. This is about **elision**, not about
+    /// what the mixer strip's `Reset` button asks (AU4 §2.5 rule 33).
     #[must_use]
     pub const fn is_neutral(&self) -> bool {
-        self.gain_tenth_db == 0 && self.pan_percent == 0 && !self.mute && !self.solo
+        self.gain_tenth_db == 0
+            && self.pan_percent == 0
+            && self.gain_curve.is_none()
+            && self.pan_curve.is_none()
+            && !self.mute
+            && !self.solo
     }
 }
 
@@ -574,6 +632,11 @@ pub struct AudioMaster {
     #[serde(default, skip_serializing_if = "i32_is_zero")]
     #[schemars(default)]
     pub gain_tenth_db: i32,
+    /// AU4 §2.1: the master fader's automation in **project** frames, tenth-dB
+    /// over the inclusive range -600..=120. A curve replaces `gain_tenth_db`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub gain_curve: Option<crate::AutomationCurve>,
     /// The master chain's audio effects, in order. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
@@ -586,7 +649,7 @@ impl AudioMaster {
     /// `const` so [`AudioMix::is_empty`] stays `const`.
     #[must_use]
     pub const fn is_neutral(&self) -> bool {
-        self.gain_tenth_db == 0 && self.effects.is_empty()
+        self.gain_tenth_db == 0 && self.gain_curve.is_none() && self.effects.is_empty()
     }
 }
 
@@ -758,8 +821,8 @@ impl AudioMix {
     pub fn track(&self, track: TrackId) -> TrackMix {
         self.tracks
             .iter()
-            .copied()
             .find(|entry| entry.track == track)
+            .cloned()
             .unwrap_or_else(|| TrackMix::neutral(track))
     }
 
@@ -768,6 +831,35 @@ impl AudioMix {
     pub fn any_solo(&self) -> bool {
         self.tracks.iter().any(|entry| entry.solo)
     }
+}
+
+/// AU4 §2.3 rule 18: clamp every project-frame curve in the mix into a
+/// shortened project — the four new owners **and** the existing bus and master
+/// `Effect.keyframes`, the last of which fixes AU2's latent trap in the same
+/// line.
+fn clamp_audio_mix_curves(mix: &mut AudioMix, duration: TimeCode) {
+    fn clamp(slot: &mut Option<crate::AutomationCurve>, duration: TimeCode) {
+        if let Some(curve) = slot {
+            *slot = Some(crate::clamp_project_curve(curve, duration));
+        }
+    }
+    fn clamp_effects(effects: &mut [Effect], duration: TimeCode) {
+        for effect in effects {
+            for curve in effect.keyframes.values_mut() {
+                *curve = crate::clamp_project_curve(curve, duration);
+            }
+        }
+    }
+    for entry in &mut mix.tracks {
+        clamp(&mut entry.gain_curve, duration);
+        clamp(&mut entry.pan_curve, duration);
+    }
+    for bus in &mut mix.buses {
+        clamp(&mut bus.gain_curve, duration);
+        clamp_effects(&mut bus.effects, duration);
+    }
+    clamp(&mut mix.master.gain_curve, duration);
+    clamp_effects(&mut mix.master.effects, duration);
 }
 
 impl MediaCatalog {
@@ -1166,12 +1258,25 @@ impl Document {
             .ok_or(OpError::TimeOverflow)
     }
 
+    /// Re-derive `duration` from the timeline and, **only when the project
+    /// shortened**, clamp every project-frame automation curve into it
+    /// (AU4 §2.3 rule 18).
+    ///
+    /// The `duration < previous` guard is load-bearing, not an optimisation:
+    /// `recompute_duration` runs on every operation and *before*
+    /// `validate_document`, so an unguarded clamp would silently repair an
+    /// agent-authored write that keys past the end and make the
+    /// `Audio{Bus,Master}KeyframeOutsideProject` raises unreachable.
     pub(crate) fn recompute_duration(&mut self) -> Result<(), OpError> {
+        let previous = self.duration;
         let mut duration = TimeCode::ZERO;
         for clip in self.tracks.iter().flat_map(|track| &track.clips) {
             duration = duration.max(self.clip_end(clip)?);
         }
         self.duration = duration;
+        if duration < previous {
+            clamp_audio_mix_curves(&mut self.audio_mix, duration);
+        }
         Ok(())
     }
 }
@@ -1229,6 +1334,7 @@ mod tests {
                 audio_fade_in_frames: TimeCode::ZERO,
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
+                audio_gain_curve: None,
             }],
         });
         document
