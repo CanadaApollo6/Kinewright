@@ -2,18 +2,19 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use eframe::egui;
 use kinewright_core::{
-    COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN, COLOR_CURVE_MAX_POINTS,
-    COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS, COLOR_NODE_BYPASS_PARAMETER, Clip,
-    ClipContent, ClipId, ColorCurveChannel, ColorNodeKind, ColorStage, ColorWheelChannel,
-    ColorWheelControl, ColorWheelControlSet, ColorWheelsParams, Document, EFFECT_DESCRIPTORS,
-    Effect, EffectId, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER,
-    LUT_MIX_BASIS_POINTS_MAX, LUT_MIX_PARAMETER, LutAsset, LutAssetId, LutAssetSource,
-    LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams, MARKER_COLOR_TOKEN_COUNT,
-    MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, Marker, MarkerId, MatteParams,
-    MatteQualifierParams, MatteWindowParams, MediaKind, Operation, ParamValue, ResolvedCurves,
-    TITLE_COLORS, TITLE_FONT_SIZES, TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition,
-    Transition, color_node_inactive_reason, effect_compatibility_stage, is_audio_effect,
-    is_legacy_display_effect, is_lut_color_node, is_matte_capable_color_node, is_matte_parameter,
+    AutomationCurve, COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN,
+    COLOR_CURVE_MAX_POINTS, COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS,
+    COLOR_NODE_BYPASS_PARAMETER, Clip, ClipContent, ClipId, ColorCurveChannel, ColorNodeKind,
+    ColorStage, ColorWheelChannel, ColorWheelControl, ColorWheelControlSet, ColorWheelsParams,
+    Document, EFFECT_DESCRIPTORS, Effect, EffectId, Keyframe, KeyframeInterpolation,
+    LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER, LUT_MIX_BASIS_POINTS_MAX,
+    LUT_MIX_PARAMETER, LutAsset, LutAssetId, LutAssetSource, LutAvailabilityKind,
+    LutAvailabilityStatus, LutNodeParams, MARKER_COLOR_TOKEN_COUNT, MATTE_MIX_BASIS_POINTS_MAX,
+    MATTE_WINDOW_LIMIT, Marker, MarkerId, MatteParams, MatteQualifierParams, MatteWindowParams,
+    MediaKind, Operation, ParamValue, ResolvedCurves, TITLE_COLORS, TITLE_FONT_SIZES,
+    TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Transition, color_node_inactive_reason,
+    effect_compatibility_stage, envelope_coalesce_key, is_audio_effect, is_legacy_display_effect,
+    is_lut_color_node, is_matte_capable_color_node, is_matte_parameter,
 };
 use kinewright_media::BuiltinLook;
 
@@ -23,7 +24,7 @@ use crate::{
     curve_editor_widget::{self, curve_editor},
     matte_overlay_ui::{MatteHit, MatteTarget},
     media_workflow::{paint_source_status, source_display_state},
-    theme::{self, color, space, type_size},
+    theme::{self, color, size, space, type_size},
     timeline_ui::{is_internal_marker, linked_members, linked_transition_operations},
 };
 
@@ -1031,6 +1032,17 @@ impl KinewrightApp {
             if gain.drag_started() {
                 pending.begin_gesture();
             }
+            if audio_clip.audio_gain_curve.is_some() {
+                // AU4 §5.5 rule 119: the slider follows the existing
+                // `KEYFRAMED` rule and is **not** disabled. Rule 110's
+                // affordance rule is about controls whose position claims to
+                // be what you hear; this slider sits directly above the list
+                // that owns the ride, unlike the mixer rail of rule 109.
+                ui.horizontal(|ui| {
+                    ui.colored_label(color::STATUS_WARNING, "KEYFRAMED");
+                    ui.colored_label(color::TEXT_MUTED, ENVELOPE_KEYFRAMED_NOTE);
+                });
+            }
             let mut changed = gain.changed();
             ui.horizontal(|ui| {
                 ui.label("Fade in");
@@ -1093,6 +1105,15 @@ impl KinewrightApp {
                     pending.push(operation);
                 }
             }
+            envelope_block(
+                ui,
+                audio_clip.id,
+                audio_clip.audio_gain_curve.as_ref(),
+                duration,
+                self.focused().position.0 - audio_clip.timeline_start.0,
+                audio_clip.audio_gain_tenth_db,
+                &mut pending,
+            );
         }
 
         let document = Arc::clone(&self.focused().document);
@@ -3388,7 +3409,7 @@ fn color_curve_keyframe_rows(
     for (label, names) in groups {
         ui.label(egui::RichText::new(label).size(type_size::CAPTION).strong());
         for name in names {
-            keyframe_row(ui, clip, effect, name, pending);
+            keyframed_parameter_row(ui, clip, effect, name, pending);
         }
     }
 }
@@ -3853,15 +3874,340 @@ fn color_node_keyframe_rows(
     }
     ui.colored_label(color::STATUS_WARNING, KEYFRAME_ROWS_NOTE);
     for name in keyframed {
-        keyframe_row(ui, clip, effect, name, pending);
+        keyframed_parameter_row(ui, clip, effect, name, pending);
     }
 }
 
 const KEYFRAME_ROWS_NOTE: &str =
     "Automation drives these controls. Editing here writes the static value, not a keyframe.";
 
+/// AU4 §5.5 rule 118: the `ENVELOPE` block's caps label.
+pub(crate) const ENVELOPE_SECTION_LABEL: &str = "ENVELOPE";
+/// AU4 §5.5 rule 119: the `KEYFRAMED`-style note beside the clip-gain slider.
+pub(crate) const ENVELOPE_KEYFRAMED_NOTE: &str =
+    "the slider shows the parked value; the list below owns the ride";
+/// AU4 §5.5 rule 118: what the block says with no curve on the clip.
+pub(crate) const ENVELOPE_EMPTY_NOTE: &str = "No gain envelope on this clip yet.";
+/// AU4 §5.5 rule 118: the button that seeds or extends the envelope.
+pub(crate) const ENVELOPE_ADD_KEY: &str = "+ Key at playhead";
+/// AU4 §5.5 rule 118: the button that sends `SetClipGainEnvelope`'s `None`.
+pub(crate) const ENVELOPE_CLEAR: &str = "Clear";
+/// The clip gain range every envelope key is clamped to before it is written.
+const ENVELOPE_VALUE_MIN: i64 = -600;
+/// The clip gain range every envelope key is clamped to before it is written.
+const ENVELOPE_VALUE_MAX: i64 = 120;
+
+/// AU4 §5.5 rules 118-120: the clip envelope's keyframe list.
+///
+/// The precise, typeable surface DESIGN.md points the timeline's rubber band
+/// at: the same [`keyframe_row`] the mixer chain pane's `AUTOMATION` section
+/// uses, in tenth-dB, with `+ Key at playhead` and a `Clear` that sends
+/// `SetClipGainEnvelope { curve: None }`.
+///
+/// `playhead_local` is the playhead in **clip-local** frames, which is the
+/// frame a clip envelope key is stored at.
+#[allow(clippy::too_many_arguments)]
+fn envelope_block(
+    ui: &mut egui::Ui,
+    clip: ClipId,
+    curve: Option<&AutomationCurve>,
+    duration: i64,
+    playhead_local: i64,
+    parked_gain_tenth_db: i32,
+    pending: &mut InspectorEdits,
+) {
+    let last = duration.saturating_sub(1).max(0);
+    let range = ENVELOPE_VALUE_MIN..=ENVELOPE_VALUE_MAX;
+    let mut next: Option<CurveWrite> = None;
+    let mut live = false;
+    ui.add_space(space::ONE);
+    ui.label(theme::caps_label(ENVELOPE_SECTION_LABEL, color::TEXT_MUTED));
+    match curve {
+        None => {
+            ui.colored_label(color::TEXT_MUTED, ENVELOPE_EMPTY_NOTE);
+        }
+        Some(curve) => {
+            for index in 0..curve.keyframes.len() {
+                let mut action = keyframe_row(ui, "envelope", curve, index);
+                if action.gesture_started {
+                    pending.begin_gesture();
+                }
+                // The row is pure and domain-free, so the clip's own bound is
+                // applied here rather than inside it: a key past the clip end
+                // is what `SetClipGainEnvelope` rejects.
+                if let Some(edited) = action.edited.as_mut() {
+                    edited.at = TimeCode(edited.at.0.clamp(0, last));
+                }
+                if let Some(applied) =
+                    apply_keyframe_row_action(curve, index, &action, range.clone())
+                {
+                    live = action.live && !action.removed;
+                    next = Some(applied);
+                }
+            }
+        }
+    }
+    ui.horizontal(|ui| {
+        let at = TimeCode(playhead_local.clamp(0, last));
+        let add = ui
+            .small_button(ENVELOPE_ADD_KEY)
+            .on_hover_text("Add a key at the playhead, holding the gain it has there.");
+        crate::mixer_ui::record_strip_rect("envelope_add_key", add.rect);
+        if add.clicked() {
+            let value = curve
+                .and_then(|curve| curve.value_at(at))
+                .unwrap_or_else(|| i64::from(parked_gain_tenth_db));
+            next = Some(CurveWrite::Set(upsert_keyframe(
+                curve,
+                at,
+                value.clamp(*range.start(), *range.end()),
+            )));
+            live = false;
+        }
+        let clear = ui
+            .add_enabled(curve.is_some(), egui::Button::new(ENVELOPE_CLEAR).small())
+            .on_hover_text("Remove this clip's gain envelope.");
+        crate::mixer_ui::record_strip_rect("envelope_clear", clear.rect);
+        if clear.clicked() {
+            next = Some(CurveWrite::Clear);
+            live = false;
+        }
+    });
+    if let Some(applied) = next {
+        let operation = Operation::SetClipGainEnvelope {
+            clip,
+            curve: applied.into_curve(),
+        };
+        // Rule 120: every edit here is discrete except a drag on an existing
+        // key's value, which shares the rubber band's undo entry.
+        if live {
+            pending.push_live(operation, envelope_coalesce_key(clip));
+        } else {
+            pending.push(operation);
+        }
+    }
+}
+
+/// AU4 §5.4 rule 114: what one keyframe row asks its caller to do.
+///
+/// A pure action, not an operation: this row is shared by the inspector's
+/// clip `ENVELOPE` block, which writes `SetClipGainEnvelope`, and the mixer
+/// chain pane's `AUTOMATION` section, which folds an `AudioBus`/`AudioMaster`
+/// fader through `MixerChainEdits` and has no `ClipId` to name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct KeyframeRowAction {
+    /// The key this row now asks for, when the row changed it.
+    pub(crate) edited: Option<Keyframe>,
+    /// The row's remove button was pressed.
+    pub(crate) removed: bool,
+    /// The edit is a live drag frame, so the caller coalesces it (rule 120).
+    pub(crate) live: bool,
+    /// A drag began on this row this frame.
+    pub(crate) gesture_started: bool,
+}
+
+/// Every interpolation a keyframe row offers, in the order it offers them.
+pub(crate) const KEYFRAME_INTERPOLATIONS: [KeyframeInterpolation; 5] = [
+    KeyframeInterpolation::Hold,
+    KeyframeInterpolation::Linear,
+    KeyframeInterpolation::EaseIn,
+    KeyframeInterpolation::EaseOut,
+    KeyframeInterpolation::EaseInOut,
+];
+
+/// The label one interpolation wears in a keyframe row.
+pub(crate) const fn interpolation_label(interpolation: KeyframeInterpolation) -> &'static str {
+    match interpolation {
+        KeyframeInterpolation::Hold => "Hold",
+        KeyframeInterpolation::Linear => "Linear",
+        KeyframeInterpolation::EaseIn => "Ease in",
+        KeyframeInterpolation::EaseOut => "Ease out",
+        KeyframeInterpolation::EaseInOut => "Ease in-out",
+    }
+}
+
+/// AU4 §5.4 rule 114: one editable keyframe — `{frame} {value}
+/// {interpolation}` and a remove button.
+///
+/// `key` is the owner's own name, used for the row's widget ids so two lists
+/// on one frame cannot collide. Nothing here pushes an operation: the caller
+/// turns the returned action into its own.
+pub(crate) fn keyframe_row(
+    ui: &mut egui::Ui,
+    key: &str,
+    curve: &AutomationCurve,
+    index: usize,
+) -> KeyframeRowAction {
+    let mut action = KeyframeRowAction::default();
+    let Some(stored) = curve.keyframes.get(index) else {
+        return action;
+    };
+    let mut at = stored.at.0;
+    let mut value = stored.value;
+    let mut interpolation = stored.interpolation;
+    let mut changed = false;
+    ui.push_id((key, index), |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().interact_size.y = size::ICON_SM;
+            ui.spacing_mut().item_spacing.x = space::HALF;
+            ui.spacing_mut().button_padding = egui::vec2(space::HALF, 0.0);
+            let frame = ui.add(
+                egui::DragValue::new(&mut at)
+                    .range(0..=i64::from(u32::MAX))
+                    .suffix(" f")
+                    .update_while_editing(false),
+            );
+            let level = ui.add(
+                egui::DragValue::new(&mut value)
+                    .range(i64::from(i32::MIN)..=i64::from(i32::MAX))
+                    .update_while_editing(false),
+            );
+            egui::ComboBox::from_id_salt("interpolation")
+                .selected_text(interpolation_label(interpolation))
+                .width(76.0)
+                .show_ui(ui, |ui| {
+                    for option in KEYFRAME_INTERPOLATIONS {
+                        if ui
+                            .selectable_value(
+                                &mut interpolation,
+                                option,
+                                interpolation_label(option),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+            action.removed = ui
+                .small_button("×")
+                .on_hover_text("Remove this key.")
+                .clicked();
+            if frame.drag_started() || level.drag_started() {
+                action.gesture_started = true;
+            }
+            // Rule 120: every edit here is discrete except a drag on an
+            // existing key's value, which shares the rubber band's key.
+            action.live = is_live_drag(&level);
+            changed |= frame.changed() || level.changed();
+        });
+    });
+    if changed {
+        let edited = Keyframe {
+            at: TimeCode(at.max(0)),
+            value,
+            interpolation,
+        };
+        // A readout that commits on Enter or blur reports one `changed()`
+        // frame with the unchanged value; a write that changes nothing is not
+        // an edit.
+        if edited != *stored {
+            action.edited = Some(edited);
+        }
+    }
+    action
+}
+
+/// AU4 §5.4 rule 114: what a folded [`KeyframeRowAction`] asks its owner to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CurveWrite {
+    /// Replace the owner's curve with this one.
+    Set(AutomationCurve),
+    /// Clear it. An empty `AutomationCurve` fails `validate`, so removing the
+    /// last key is a clear and not an empty list.
+    Clear,
+}
+
+impl CurveWrite {
+    /// The `Option<AutomationCurve>` the owning operation carries.
+    #[must_use]
+    pub(crate) fn into_curve(self) -> Option<AutomationCurve> {
+        match self {
+            Self::Set(curve) => Some(curve),
+            Self::Clear => None,
+        }
+    }
+}
+
+/// AU4 §5.4 rule 114 and §5.5: fold one [`KeyframeRowAction`] into the whole
+/// curve its row belongs to. Pure; provable without a window.
+///
+/// `None` when the row asks for nothing at all.
+pub(crate) fn apply_keyframe_row_action(
+    curve: &AutomationCurve,
+    index: usize,
+    action: &KeyframeRowAction,
+    range: std::ops::RangeInclusive<i64>,
+) -> Option<CurveWrite> {
+    if action.removed {
+        if curve.keyframes.len() <= 1 {
+            return Some(CurveWrite::Clear);
+        }
+        if index >= curve.keyframes.len() {
+            return None;
+        }
+        let mut keyframes = curve.keyframes.clone();
+        keyframes.remove(index);
+        return Some(CurveWrite::Set(AutomationCurve { keyframes }));
+    }
+    let edited = action.edited?;
+    if index >= curve.keyframes.len() {
+        return None;
+    }
+    // Keys stay strictly increasing, so a frame dragged past a neighbour stops
+    // one frame short of it rather than producing a curve `validate` rejects.
+    let low = index
+        .checked_sub(1)
+        .and_then(|previous| curve.keyframes.get(previous))
+        .map_or(0, |key| key.at.0.saturating_add(1));
+    let high = curve
+        .keyframes
+        .get(index + 1)
+        .map_or(i64::MAX, |key| key.at.0.saturating_sub(1));
+    let at = if low > high {
+        low
+    } else {
+        edited.at.0.clamp(low, high)
+    };
+    let mut keyframes = curve.keyframes.clone();
+    keyframes[index] = Keyframe {
+        at: TimeCode(at.max(0)),
+        value: edited.value.clamp(*range.start(), *range.end()),
+        interpolation: edited.interpolation,
+    };
+    if keyframes[index] == curve.keyframes[index] {
+        return None;
+    }
+    Some(CurveWrite::Set(AutomationCurve { keyframes }))
+}
+
+/// AU4 §5.4 rule 114 and §5.5: add or replace the key at one frame, keeping
+/// the list sorted. Pure; this is what `+ Key at playhead` writes.
+pub(crate) fn upsert_keyframe(
+    curve: Option<&AutomationCurve>,
+    at: TimeCode,
+    value: i64,
+) -> AutomationCurve {
+    let mut keyframes = curve
+        .map(|curve| curve.keyframes.clone())
+        .unwrap_or_default();
+    let index = keyframes.partition_point(|key| key.at.0 < at.0);
+    match keyframes.get_mut(index) {
+        Some(existing) if existing.at == at => existing.value = value,
+        _ => keyframes.insert(
+            index,
+            Keyframe {
+                at,
+                value,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ),
+    }
+    AutomationCurve { keyframes }
+}
+
 /// One keyframed control's badge and its one-click clear.
-fn keyframe_row(
+fn keyframed_parameter_row(
     ui: &mut egui::Ui,
     clip: ClipId,
     effect: &Effect,
@@ -8739,5 +9085,311 @@ mod tests {
             &[MATTE_TRACK_BUTTON_LABEL],
             "the matte section of a tracked node",
         );
+    }
+
+    // ---- AU4 Part B §5.5: the inspector `ENVELOPE` block ----
+
+    fn envelope_fixture() -> AutomationCurve {
+        AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode::ZERO,
+                    value: -120,
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+                Keyframe {
+                    at: TimeCode(15),
+                    value: -60,
+                    interpolation: KeyframeInterpolation::Hold,
+                },
+                Keyframe {
+                    at: TimeCode(29),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Linear,
+                },
+            ],
+        }
+    }
+
+    /// Run one frame of the `ENVELOPE` block and return what it painted, what
+    /// it wrote, and where it laid its two buttons out.
+    fn envelope_frame(
+        ctx: &egui::Context,
+        curve: Option<&AutomationCurve>,
+        events: Vec<egui::Event>,
+        rects: &mut Vec<(String, egui::Rect)>,
+        time: f64,
+    ) -> (Vec<String>, InspectorEdits) {
+        let mut pending = InspectorEdits::default();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 600.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let _ = crate::mixer_ui::take_strip_rects();
+                envelope_block(ui, ClipId(2), curve, 30, 15, -30, &mut pending);
+            },
+        );
+        *rects = crate::mixer_ui::take_strip_rects();
+        (crate::theme::painted_text(&output), pending)
+    }
+
+    /// AU4 §7 B10: the block paints the key list in tenth-dB and a frame of
+    /// painting writes nothing.
+    #[test]
+    fn the_envelope_block_paints_its_keys_in_tenth_db_and_writes_nothing() {
+        let curve = envelope_fixture();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut rects = Vec::new();
+        let (painted, pending) = envelope_frame(&ctx, Some(&curve), Vec::new(), &mut rects, 0.02);
+        assert!(
+            pending.operations().is_empty(),
+            "painting the ENVELOPE block writes no operation: {:?}",
+            pending.operations()
+        );
+        for expected in [
+            ENVELOPE_SECTION_LABEL,
+            ENVELOPE_ADD_KEY,
+            ENVELOPE_CLEAR,
+            // The rows are `{frame} {value} {interpolation}`, in tenth-dB.
+            // A `DragValue`'s suffix is its own text shape.
+            "15",
+            "29",
+            " f",
+            "-120",
+            "-60",
+            "Hold",
+            "Linear",
+        ] {
+            assert!(
+                painted.iter().any(|text| text == expected),
+                "the ENVELOPE block paints {expected:?}; it painted {painted:?}"
+            );
+        }
+
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let (empty, pending) = envelope_frame(&ctx, None, Vec::new(), &mut rects, 0.02);
+        assert!(pending.operations().is_empty());
+        assert!(
+            empty.iter().any(|text| text == ENVELOPE_EMPTY_NOTE),
+            "a clip with no curve says so: {empty:?}"
+        );
+    }
+
+    /// AU4 §7 B10: `Clear` sends `SetClipGainEnvelope { curve: None }`, and
+    /// `+ Key at playhead` seeds the curve from the parked gain.
+    #[test]
+    fn the_envelope_block_clears_with_a_null_curve_and_seeds_at_the_playhead() {
+        fn press(curve: Option<&AutomationCurve>, button: &str) -> Vec<Operation> {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let mut rects = Vec::new();
+            let _ = envelope_frame(&ctx, curve, Vec::new(), &mut rects, 0.02);
+            let point = rects
+                .iter()
+                .find(|(name, _)| name == button)
+                .unwrap_or_else(|| panic!("the block lays out `{button}`: {rects:?}"))
+                .1
+                .center();
+            let _ = envelope_frame(
+                &ctx,
+                curve,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                &mut rects,
+                0.04,
+            );
+            let (_, pending) = envelope_frame(
+                &ctx,
+                curve,
+                vec![egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                &mut rects,
+                0.06,
+            );
+            pending.operations().to_vec()
+        }
+
+        let curve = envelope_fixture();
+        assert_eq!(
+            press(Some(&curve), "envelope_clear"),
+            [Operation::SetClipGainEnvelope {
+                clip: ClipId(2),
+                curve: None,
+            }],
+            "`Clear` sends the null curve, which is what clears the owner"
+        );
+        let seeded = press(None, "envelope_add_key");
+        assert_eq!(
+            seeded,
+            [Operation::SetClipGainEnvelope {
+                clip: ClipId(2),
+                curve: Some(AutomationCurve {
+                    keyframes: vec![Keyframe {
+                        at: TimeCode(15),
+                        value: -30,
+                        interpolation: KeyframeInterpolation::Linear,
+                    }],
+                }),
+            }],
+            "`+ Key at playhead` seeds one key at the playhead, holding the parked gain"
+        );
+    }
+
+    /// AU4 §7 B10 and rule 120: a value drag on an existing key coalesces
+    /// under `envelope:{clip}`, and every other edit here is discrete.
+    #[test]
+    fn an_envelope_value_drag_coalesces_under_the_rubber_bands_key() {
+        assert_eq!(envelope_coalesce_key(ClipId(2)), "envelope:2");
+        let curve = envelope_fixture();
+
+        // The pure fold the row and the band share.
+        let dragged = KeyframeRowAction {
+            edited: Some(Keyframe {
+                at: TimeCode(15),
+                value: -90,
+                interpolation: KeyframeInterpolation::Hold,
+            }),
+            removed: false,
+            live: true,
+            gesture_started: false,
+        };
+        let CurveWrite::Set(next) = apply_keyframe_row_action(&curve, 1, &dragged, -600..=120)
+            .expect("the row asked for a change")
+        else {
+            panic!("a value drag is not a clear");
+        };
+        assert_eq!(next.keyframes[1].value, -90);
+        let mut pending = InspectorEdits::default();
+        pending.push_live(
+            Operation::SetClipGainEnvelope {
+                clip: ClipId(2),
+                curve: Some(next),
+            },
+            envelope_coalesce_key(ClipId(2)),
+        );
+        assert_eq!(
+            pending.coalesce_key(),
+            Some("envelope:2"),
+            "so the list's drag shares one undo entry with the band's"
+        );
+    }
+
+    /// AU4 §7 B10 and rule 119: the clip-gain slider is **not** disabled while
+    /// a curve exists — it carries the `KEYFRAMED` badge and writes the parked
+    /// scalar, unlike the mixer rail of rule 109.
+    #[test]
+    fn the_clip_gain_slider_stays_editable_while_the_envelope_rides() {
+        const SOURCE: &str = include_str!("inspector_ui.rs");
+        let audio = SOURCE
+            .split_once("if let Some(audio_clip) = audio_target_clip")
+            .expect("the Audio section")
+            .1
+            .split_once("envelope_block(")
+            .expect("which ends at the ENVELOPE block")
+            .0;
+        assert!(
+            !audio.contains("add_enabled"),
+            "no control in the Audio section is disabled by an envelope"
+        );
+        assert!(
+            audio.contains("KEYFRAMED"),
+            "the slider wears the badge instead"
+        );
+        assert!(
+            SOURCE.contains(ENVELOPE_KEYFRAMED_NOTE),
+            "and says which value it is showing"
+        );
+    }
+
+    /// AU4 §5.4 rule 114 and §5.5: the shared pure fold, provable with no
+    /// window.
+    #[test]
+    fn the_keyframe_row_fold_keeps_the_curve_ordered_and_clears_on_the_last_key() {
+        let curve = envelope_fixture();
+        // A frame dragged past its neighbour stops one frame short of it.
+        let past = KeyframeRowAction {
+            edited: Some(Keyframe {
+                at: TimeCode(99),
+                value: -60,
+                interpolation: KeyframeInterpolation::Hold,
+            }),
+            ..KeyframeRowAction::default()
+        };
+        let CurveWrite::Set(next) =
+            apply_keyframe_row_action(&curve, 1, &past, -600..=120).unwrap()
+        else {
+            panic!("this row asks for a value, not a clear");
+        };
+        assert_eq!(next.keyframes[1].at, TimeCode(28));
+        // And a value past the owner's range clamps to it.
+        let loud = KeyframeRowAction {
+            edited: Some(Keyframe {
+                at: TimeCode(15),
+                value: 9_999,
+                interpolation: KeyframeInterpolation::Hold,
+            }),
+            ..KeyframeRowAction::default()
+        };
+        let CurveWrite::Set(next) =
+            apply_keyframe_row_action(&curve, 1, &loud, -600..=120).unwrap()
+        else {
+            panic!("this row asks for a value, not a clear");
+        };
+        assert_eq!(next.keyframes[1].value, 120);
+        // A row that asks for what the curve already holds writes nothing.
+        let same = KeyframeRowAction {
+            edited: Some(curve.keyframes[1]),
+            ..KeyframeRowAction::default()
+        };
+        assert!(apply_keyframe_row_action(&curve, 1, &same, -600..=120).is_none());
+        // Removing one of three drops one key.
+        let remove = KeyframeRowAction {
+            removed: true,
+            ..KeyframeRowAction::default()
+        };
+        let CurveWrite::Set(next) =
+            apply_keyframe_row_action(&curve, 1, &remove, -600..=120).unwrap()
+        else {
+            panic!("this row asks for a value, not a clear");
+        };
+        assert_eq!(next.keyframes.len(), 2);
+        // Removing the last one clears the owner: an empty curve is invalid.
+        let single = AutomationCurve {
+            keyframes: vec![curve.keyframes[0]],
+        };
+        assert_eq!(
+            apply_keyframe_row_action(&single, 0, &remove, -600..=120),
+            Some(CurveWrite::Clear)
+        );
+
+        // `upsert_keyframe` adds or replaces, keeping the list sorted.
+        let seeded = upsert_keyframe(None, TimeCode(9), -40);
+        assert_eq!(seeded.keyframes.len(), 1);
+        let inserted = upsert_keyframe(Some(&curve), TimeCode(9), -40);
+        assert_eq!(inserted.keyframes.len(), 4);
+        assert_eq!(inserted.keyframes[1].at, TimeCode(9));
+        let replaced = upsert_keyframe(Some(&curve), TimeCode(15), 55);
+        assert_eq!(replaced.keyframes.len(), 3);
+        assert_eq!(replaced.keyframes[1].value, 55);
     }
 }

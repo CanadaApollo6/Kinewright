@@ -38,8 +38,14 @@ pub(crate) const MINIMUM_X_SEPARATION: i32 = 1;
 const EDITOR_MIN_SIDE: f32 = 160.0;
 const EDITOR_MAX_SIDE: f32 = 240.0;
 /// How near the pointer must be, in points, to grab or delete a control point.
-const HIT_RADIUS: f32 = 9.0;
-const POINT_RADIUS: f32 = 3.5;
+pub(crate) const HIT_RADIUS: f32 = 9.0;
+pub(crate) const POINT_RADIUS: f32 = 3.5;
+/// How wide the drawn curve is, in points.
+///
+/// Named rather than left a literal so AU4's timeline rubber band can pin its
+/// own stroke against it (AU4 §5.1 rule 102: the three literals are this
+/// widget's own, reused rather than re-invented).
+pub(crate) const CURVE_STROKE: f32 = 1.6;
 /// How long a rejected edit stays on screen, in seconds.
 const REJECTION_SECONDS: f64 = 3.0;
 /// Samples used to draw the curve. Display only; it never feeds a render.
@@ -470,7 +476,7 @@ fn paint(
         egui::Stroke::new(1.0, color::BORDER_STRONG),
     );
 
-    let stroke = egui::Stroke::new(1.6, curve_color(curve));
+    let stroke = egui::Stroke::new(CURVE_STROKE, curve_color(curve));
     let samples: Vec<egui::Pos2> = sample_curve(points, CURVE_SAMPLES)
         .into_iter()
         .map(|(x, y)| basis_to_pixel_f64(rect, x, y))

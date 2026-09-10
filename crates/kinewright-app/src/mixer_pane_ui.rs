@@ -13,13 +13,18 @@ use std::collections::BTreeMap;
 
 use eframe::egui;
 use kinewright_core::{
-    AudioBus, AudioChain, AudioMaster, CHAIN_LOOKAHEAD_MILLISECONDS, Document, Effect, EffectId,
-    LoudnessSnapshot, LoudnessTarget, PanLaw, ParamValue, TimeCode, TrackId,
-    chain_lookahead_milliseconds, effect_descriptor,
+    AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AudioBus,
+    AudioChain, AudioMaster, AutomationCurve, CHAIN_LOOKAHEAD_MILLISECONDS, Document, Effect,
+    EffectId, LoudnessSnapshot, LoudnessTarget, PanLaw, ParamValue, TimeCode, TrackId,
+    chain_lookahead_milliseconds, effect_descriptor, is_hold_only_parameter,
+    is_static_audio_parameter,
 };
 
 use crate::{
-    inspector_ui::{effect_display_name, is_live_drag},
+    inspector_ui::{
+        CurveWrite, apply_keyframe_row_action, effect_display_name, is_live_drag, keyframe_row,
+        upsert_keyframe,
+    },
     mixer_ui::{
         MIXER_REDUCTION_METER_RANGE_DB, MixerChainEdits, MixerMeterLevels, MixerSelection,
         record_keyed_rect, record_param_rect, record_strip_rect, track_caption,
@@ -60,6 +65,39 @@ impl<'a> MixerChain<'a> {
         }
     }
 
+    /// AU4 §5.4 rule 114: this chain's fader curve, if it carries one.
+    const fn gain_curve(self) -> Option<&'a AutomationCurve> {
+        match self {
+            Self::Bus(bus) => bus.gain_curve.as_ref(),
+            Self::Master(master) => master.gain_curve.as_ref(),
+        }
+    }
+
+    /// The chain fader's parked value.
+    const fn gain_tenth_db(self) -> i32 {
+        match self {
+            Self::Bus(bus) => bus.gain_tenth_db,
+            Self::Master(master) => master.gain_tenth_db,
+        }
+    }
+
+    /// The chain fader's legal range, which is what an automation key is
+    /// clamped to before it is written.
+    const fn gain_range(self) -> std::ops::RangeInclusive<i64> {
+        match self {
+            Self::Bus(_) => AUDIO_BUS_GAIN_MIN as i64..=AUDIO_BUS_GAIN_MAX as i64,
+            Self::Master(_) => AUDIO_MASTER_GAIN_MIN as i64..=AUDIO_MASTER_GAIN_MAX as i64,
+        }
+    }
+
+    /// Write this chain's fader curve into the edited copy. `None` clears it.
+    fn set_gain_curve(self, edits: &mut MixerChainEdits, curve: Option<AutomationCurve>) {
+        match self {
+            Self::Bus(bus) => edits.bus(bus).gain_curve = curve,
+            Self::Master(master) => edits.master(master).gain_curve = curve,
+        }
+    }
+
     /// The edited copy of this chain's effect list.
     fn effects_mut(self, edits: &mut MixerChainEdits) -> &mut Vec<Effect> {
         match self {
@@ -83,12 +121,14 @@ impl<'a> MixerChain<'a> {
 /// §4.4); a bus pane ignores them. Returns `true` when that section's `Reset`
 /// was clicked, which the caller answers with `Playback::reset_loudness` —
 /// telemetry, not an operation, so it does not travel through `edits`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn chain_pane(
     ui: &mut egui::Ui,
     document: &Document,
     selection: MixerSelection,
     levels: &MixerMeterLevels,
     snapshot: LoudnessSnapshot,
+    position: TimeCode,
     target: LoudnessTarget,
     edits: &mut MixerChainEdits,
 ) -> bool {
@@ -101,7 +141,7 @@ pub(crate) fn chain_pane(
     ui.allocate_ui_with_layout(column, egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.set_min_width(size::MIXER_CHAIN_PANE_WIDTH);
         ui.set_max_width(size::MIXER_CHAIN_PANE_WIDTH);
-        egui::ScrollArea::vertical()
+        let scrolled = egui::ScrollArea::vertical()
             .id_salt("mixer-chain-pane")
             .max_width(size::MIXER_CHAIN_PANE_WIDTH)
             .show(ui, |ui| {
@@ -109,16 +149,24 @@ pub(crate) fn chain_pane(
                 match selection {
                     MixerSelection::Bus(id) => {
                         if let Some(bus) = document.audio_mix.bus(id) {
-                            bus_pane(ui, document, bus, levels, edits);
+                            bus_pane(ui, document, bus, levels, position, edits);
                         }
                         false
                     }
                     MixerSelection::Master => {
-                        master_pane(ui, document, levels, snapshot, target, edits)
+                        master_pane(ui, document, levels, snapshot, position, target, edits)
                     }
                 }
-            })
-            .inner
+            });
+        // The scroll is the pane's whole answer to a short dock, so its two
+        // measurements are recorded for the test that proves the content
+        // really does overflow a 260 px viewport instead of stretching it.
+        record_strip_rect("chain_pane_viewport", scrolled.inner_rect);
+        record_strip_rect(
+            "chain_pane_content",
+            egui::Rect::from_min_size(scrolled.inner_rect.min, scrolled.content_size),
+        );
+        scrolled.inner
     })
     .inner
 }
@@ -128,24 +176,30 @@ fn bus_pane(
     document: &Document,
     bus: &AudioBus,
     levels: &MixerMeterLevels,
+    position: TimeCode,
     edits: &mut MixerChainEdits,
 ) {
     let chain = MixerChain::Bus(bus);
     pane_title(ui, &format!("Bus: {}", bus.name));
+    // AU4 §5.4 rule 112: at the top of a bus pane, below `LOUDNESS` on the
+    // master pane.
+    automation_section(ui, chain, position, document.duration, edits);
     routing_rows(ui, document, bus, edits);
     sidechain_rows(ui, document, bus, edits);
     ui.separator();
-    chain_cards(ui, chain, levels, edits);
+    chain_cards(ui, chain, levels, position, edits);
     add_effect_menu(ui, chain, edits);
 }
 
 /// The master pane: the `LOUDNESS` section first, then the pan law and the
 /// chain (AU3 §4.4). Returns whether `Reset` was clicked.
+#[allow(clippy::too_many_arguments)]
 fn master_pane(
     ui: &mut egui::Ui,
     document: &Document,
     levels: &MixerMeterLevels,
     snapshot: LoudnessSnapshot,
+    position: TimeCode,
     target: LoudnessTarget,
     edits: &mut MixerChainEdits,
 ) -> bool {
@@ -153,9 +207,10 @@ fn master_pane(
     let chain = MixerChain::Master(master);
     pane_title(ui, "Master");
     let reset_loudness = loudness_section(ui, snapshot, target);
+    automation_section(ui, chain, position, document.duration, edits);
     pan_law_rows(ui, document.audio_mix.pan_law, edits);
     ui.separator();
-    chain_cards(ui, chain, levels, edits);
+    chain_cards(ui, chain, levels, position, edits);
     add_effect_menu(ui, chain, edits);
     reset_loudness
 }
@@ -590,6 +645,7 @@ fn chain_cards(
     ui: &mut egui::Ui,
     chain: MixerChain,
     levels: &MixerMeterLevels,
+    position: TimeCode,
     edits: &mut MixerChainEdits,
 ) {
     let effects = chain.effects();
@@ -599,7 +655,15 @@ fn chain_cards(
     }
     let expanded = expanded_card(ui, chain.selection(), effects);
     for (index, effect) in effects.iter().enumerate() {
-        chain_card(ui, chain, index, expanded == Some(effect.id), levels, edits);
+        chain_card(
+            ui,
+            chain,
+            index,
+            expanded == Some(effect.id),
+            levels,
+            position,
+            edits,
+        );
     }
 }
 
@@ -634,18 +698,20 @@ fn expand_card(ui: &egui::Ui, selection: MixerSelection, effect: EffectId) {
 /// stroke alone are 8 px and the collapsed row's whole budget is `ICON_BUTTON`
 /// (AU2 §6.7). The expanded card takes the frame, where the grouping is what
 /// tells a wrapped row of controls from the row below it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn chain_card(
     ui: &mut egui::Ui,
     chain: MixerChain,
     index: usize,
     expanded: bool,
     levels: &MixerMeterLevels,
+    position: TimeCode,
     edits: &mut MixerChainEdits,
 ) {
     if expanded {
         ui.group(|ui| {
             card_header(ui, chain, index, expanded, levels, edits);
-            card_body(ui, chain, index, levels, edits);
+            card_body(ui, chain, index, levels, position, edits);
         });
     } else {
         card_header(ui, chain, index, expanded, levels, edits);
@@ -680,7 +746,9 @@ fn card_header(
                 expand_card(ui, chain.selection(), effect.id);
             }
 
-            let mut bypassed = parameter_value(effect, "bypass") == 1;
+            // `bypass` is hold-only, so the static read and the resolved
+            // read are the same value; the static one says so.
+            let mut bypassed = parameter_value(effect, "bypass", TimeCode::ZERO) == 1;
             let bypass = ui.checkbox(&mut bypassed, "Bypass");
             record_keyed_rect("bypass", effect.id.0, bypass.rect);
             if bypass.changed()
@@ -731,6 +799,7 @@ fn card_body(
     chain: MixerChain,
     index: usize,
     levels: &MixerMeterLevels,
+    position: TimeCode,
     edits: &mut MixerChainEdits,
 ) {
     let effect = &chain.effects()[index];
@@ -749,22 +818,320 @@ fn card_body(
                 parameter.name,
                 &parameter_label(parameter.name),
                 mixer_unit(parameter.name),
-                parameter_value(effect, parameter.name),
+                parameter_value(effect, parameter.name, position),
                 edits,
             );
         }
     });
     if effect.name == "audio_parametric_eq" {
-        eq_well(ui, effect);
+        eq_well(ui, effect, position);
     }
     if has_gain_computer(&effect.name) {
         reduction_bar(ui, chain.selection().chain(), effect.id, levels);
     }
 }
 
-/// The stored value of one parameter, or its descriptor neutral.
-pub(crate) fn parameter_value(effect: &Effect, name: &str) -> i64 {
-    effect.static_integer_parameter(name).unwrap_or_else(|| {
+/// AU4 §5.4 rule 113: what the `AUTOMATION` section is editing.
+///
+/// One parameter at a time. `Fader` is the chain's own gain; a node target
+/// names the node by id, so a reorder earlier in the same frame cannot
+/// retarget it, exactly as `MixerChain::effect_mut` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AutomationTarget {
+    Fader,
+    Node(EffectId, &'static str),
+}
+
+/// AU4 §5.4 rule 112: the section's caps label.
+pub(crate) const AUTOMATION_LABEL: &str = "AUTOMATION";
+/// AU4 §5.4 rule 114: what the section says when the chosen parameter has no
+/// curve yet.
+pub(crate) const AUTOMATION_EMPTY_NOTE: &str = "No automation on this parameter yet.";
+/// AU4 §5.4 rule 114: the button that seeds or extends a curve.
+pub(crate) const AUTOMATION_ADD_KEY: &str = "+ Key at playhead";
+/// AU4 §5.4 rule 114: the button that removes the whole curve.
+pub(crate) const AUTOMATION_CLEAR: &str = "Clear";
+
+/// How many keyframe rows the section shows before the list scrolls.
+///
+/// Four: the section has a 120 px budget (rule 116) and every row is one
+/// `ICON_SM` control row plus the strip's own spacing.
+pub(crate) const AUTOMATION_VISIBLE_ROWS: u8 = 4;
+
+/// AU4 §5.4 rule 113: every parameter of this chain that may carry a curve.
+///
+/// `Fader` first, then each node's parameters in descriptor order, skipping
+/// the hold-only ones (`bypass`, `detector`, `true_peak`) and the static ones
+/// (both `lookahead_milliseconds` and `rms_window_milliseconds`). These are
+/// `is_hold_only_parameter` and `is_static_audio_parameter`'s first app
+/// readers: until now the app guessed automatability from `mixer_unit()`'s
+/// name match, which does not know about either rule.
+pub(crate) fn automation_targets(chain: MixerChain) -> Vec<AutomationTarget> {
+    let mut targets = vec![AutomationTarget::Fader];
+    for effect in chain.effects() {
+        let Some(descriptor) = effect_descriptor(&effect.name) else {
+            continue;
+        };
+        for parameter in descriptor.parameters {
+            if is_hold_only_parameter(&effect.name, parameter.name)
+                || is_static_audio_parameter(&effect.name, parameter.name)
+            {
+                continue;
+            }
+            targets.push(AutomationTarget::Node(effect.id, parameter.name));
+        }
+    }
+    targets
+}
+
+/// The label one target wears in the section's combo.
+pub(crate) fn automation_target_label(chain: MixerChain, target: AutomationTarget) -> String {
+    match target {
+        AutomationTarget::Fader => "Fader".to_owned(),
+        AutomationTarget::Node(effect, name) => {
+            let node = chain
+                .effects()
+                .iter()
+                .find(|candidate| candidate.id == effect)
+                .map_or_else(
+                    || format!("node {}", effect.0),
+                    |effect| effect_display_name(&effect.name).to_owned(),
+                );
+            format!("{node} · {}", parameter_label(name))
+        }
+    }
+}
+
+/// AU4 §5.4 rule 114: the id key one target's keyframe rows push.
+///
+/// Per target, not the constant `AUTOMATION_LABEL`: `keyframe_row` derives its
+/// `DragValue` and `ComboBox` ids from `(key, index)`, so a single key for
+/// every parameter lets an in-flight text edit or drag state carry across a
+/// change of the target combo — row 0 of the fader and row 0 of a node's
+/// threshold would be the same widget. Built from the node's id and the
+/// parameter's name, both of which survive a reorder.
+fn automation_row_key(target: AutomationTarget) -> String {
+    match target {
+        AutomationTarget::Fader => "automation:fader".to_owned(),
+        AutomationTarget::Node(effect, parameter) => format!("automation:{}:{parameter}", effect.0),
+    }
+}
+
+/// The curve one target carries today, if any.
+fn automation_curve(chain: MixerChain<'_>, target: AutomationTarget) -> Option<&AutomationCurve> {
+    match target {
+        AutomationTarget::Fader => chain.gain_curve(),
+        AutomationTarget::Node(effect, name) => chain
+            .effects()
+            .iter()
+            .find(|candidate| candidate.id == effect)
+            .and_then(|effect| effect.keyframes.get(name)),
+    }
+}
+
+/// The value one target reads at the audible frame, which is what
+/// `+ Key at playhead` writes.
+fn automation_current_value(
+    chain: MixerChain,
+    target: AutomationTarget,
+    position: TimeCode,
+) -> i64 {
+    match target {
+        AutomationTarget::Fader => chain
+            .gain_curve()
+            .and_then(|curve| curve.value_at(position))
+            .unwrap_or_else(|| i64::from(chain.gain_tenth_db())),
+        AutomationTarget::Node(effect, name) => chain
+            .effects()
+            .iter()
+            .find(|candidate| candidate.id == effect)
+            .map_or(0, |effect| parameter_value(effect, name, position)),
+    }
+}
+
+/// The range a key of one target is clamped to before it is written.
+fn automation_range(chain: MixerChain, target: AutomationTarget) -> std::ops::RangeInclusive<i64> {
+    match target {
+        AutomationTarget::Fader => chain.gain_range(),
+        AutomationTarget::Node(effect, name) => chain
+            .effects()
+            .iter()
+            .find(|candidate| candidate.id == effect)
+            .map_or(i64::MIN..=i64::MAX, |effect| {
+                mixer_parameter_range(effect, name, parameter_value(effect, name, TimeCode::ZERO))
+            }),
+    }
+}
+
+/// Write one target's curve into the edited chain copy. `None` clears it.
+fn set_automation_curve(
+    chain: MixerChain,
+    target: AutomationTarget,
+    curve: Option<AutomationCurve>,
+    edits: &mut MixerChainEdits,
+) {
+    match target {
+        AutomationTarget::Fader => chain.set_gain_curve(edits, curve),
+        AutomationTarget::Node(effect, name) => {
+            if let Some(node) = chain.effect_mut(edits, effect) {
+                match curve {
+                    Some(curve) => {
+                        node.keyframes.insert(name.to_owned(), curve);
+                    }
+                    None => {
+                        node.keyframes.remove(name);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The id of the chosen-parameter memory slot for one chain.
+fn automation_memory_id(selection: MixerSelection) -> egui::Id {
+    match selection {
+        MixerSelection::Bus(bus) => egui::Id::new(("mixer-automation-target", "bus", bus.0)),
+        MixerSelection::Master => egui::Id::new(("mixer-automation-target", "master", 0_u64)),
+    }
+}
+
+/// AU4 §5.4 rules 112-116: the chain pane's `AUTOMATION` section.
+///
+/// Below `LOUDNESS` on the master pane, at the top of a bus pane, editing one
+/// parameter at a time. This discharges AU2's deferral *"Automation editing UI
+/// for bus and master parameters"* by surface. Full automation lanes on the
+/// timeline are rejected here and deferred (§1.3): the row asks for editing
+/// "in the mixer" and this is the smallest surface that is it.
+///
+/// Nothing here pushes an operation: `Fader` writes `AudioBus.gain_curve` /
+/// `AudioMaster.gain_curve` and a node parameter writes `Effect.keyframes`,
+/// both through `MixerChainEdits`' existing fold, so one frame is still one
+/// `UpsertAudioBus`/`SetAudioMaster` per chain.
+pub(crate) fn automation_section(
+    ui: &mut egui::Ui,
+    chain: MixerChain,
+    position: TimeCode,
+    duration: TimeCode,
+    edits: &mut MixerChainEdits,
+) {
+    // Bus and master curves are keyed in PROJECT frames, so `duration` is the
+    // bound `validate_document` checks them against.
+    let last = duration.0.saturating_sub(1).max(0);
+    let targets = automation_targets(chain);
+    let stored: Option<AutomationTarget> =
+        ui.data(|data| data.get_temp(automation_memory_id(chain.selection())));
+    let mut target = stored
+        .filter(|target| targets.contains(target))
+        .unwrap_or(AutomationTarget::Fader);
+    ui.scope(|ui| {
+        // The section is a list, not a stack of sections: its rows sit as
+        // close as a strip's do and are one `ICON_SM` control tall. This is
+        // what keeps it inside its 120 px budget (rule 116).
+        ui.spacing_mut().item_spacing.y = space::HALF;
+        ui.spacing_mut().interact_size.y = size::ICON_SM;
+        ui.spacing_mut().button_padding = egui::vec2(space::HALF, 0.0);
+        ui.label(theme::caps_label(AUTOMATION_LABEL, color::TEXT_MUTED));
+        let combo = egui::ComboBox::from_id_salt("mixer-automation-target")
+            .selected_text(automation_target_label(chain, target))
+            .width(size::MIXER_CHAIN_PANE_WIDTH - space::EIGHT)
+            .show_ui(ui, |ui| {
+                for candidate in &targets {
+                    ui.selectable_value(
+                        &mut target,
+                        *candidate,
+                        automation_target_label(chain, *candidate),
+                    );
+                }
+            });
+        if combo.response.changed() || stored != Some(target) {
+            ui.data_mut(|data| data.insert_temp(automation_memory_id(chain.selection()), target));
+        }
+
+        let curve = automation_curve(chain, target).cloned();
+        let range = automation_range(chain, target);
+        // A fixed-height list so the section measures the same with an empty
+        // curve and with a scrolled ten-key one (rule 116).
+        let list_size = egui::vec2(
+            ui.available_width(),
+            f32::from(AUTOMATION_VISIBLE_ROWS) * (size::ICON_SM + space::HALF),
+        );
+        let mut pending: Option<CurveWrite> = None;
+        let mut live = false;
+        let mut gesture_started = false;
+        ui.allocate_ui(list_size, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("mixer-automation-keys")
+                .auto_shrink([false, false])
+                .show(ui, |ui| match &curve {
+                    None => {
+                        ui.label(
+                            egui::RichText::new(AUTOMATION_EMPTY_NOTE)
+                                .font(theme::medium(type_size::MICRO))
+                                .color(color::TEXT_MUTED),
+                        );
+                    }
+                    Some(curve) => {
+                        let row_key = automation_row_key(target);
+                        for index in 0..curve.keyframes.len() {
+                            let mut action = keyframe_row(ui, &row_key, curve, index);
+                            gesture_started |= action.gesture_started;
+                            // The row is pure and domain-free, so the
+                            // project's own bound is applied here.
+                            if let Some(edited) = action.edited.as_mut() {
+                                edited.at = TimeCode(edited.at.0.clamp(0, last));
+                            }
+                            if let Some(next) =
+                                apply_keyframe_row_action(curve, index, &action, range.clone())
+                            {
+                                live = action.live && !action.removed;
+                                pending = Some(next);
+                            }
+                        }
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            let add = ui
+                .small_button(AUTOMATION_ADD_KEY)
+                .on_hover_text("Add a key at the audible frame, holding the value it has there.");
+            record_strip_rect("automation_add_key", add.rect);
+            if add.clicked() {
+                let at = TimeCode(position.0.clamp(0, last));
+                let value = automation_current_value(chain, target, at);
+                pending = Some(CurveWrite::Set(upsert_keyframe(
+                    curve.as_ref(),
+                    at,
+                    value.clamp(*range.start(), *range.end()),
+                )));
+                live = false;
+            }
+            let clear = ui
+                .add_enabled(curve.is_some(), egui::Button::new(AUTOMATION_CLEAR).small())
+                .on_hover_text("Remove this parameter's automation.");
+            record_strip_rect("automation_clear", clear.rect);
+            if clear.clicked() {
+                pending = Some(CurveWrite::Clear);
+                live = false;
+            }
+        });
+        if gesture_started {
+            edits.begin_gesture();
+        }
+        if let Some(next) = pending {
+            set_automation_curve(chain, target, next.into_curve(), edits);
+            edits.mark_live(live);
+        }
+    });
+}
+
+/// The value of one parameter at the audible frame, or its descriptor neutral.
+///
+/// AU4 §5.4 rule 115: resolved through `Effect::integer_parameter_at` rather
+/// than `static_integer_parameter`, so a keyframed card stops displaying its
+/// neutral while automation drives it. `integer_parameter_at` falls back to
+/// the static value, so an un-keyframed parameter reads exactly as it did.
+pub(crate) fn parameter_value(effect: &Effect, name: &str, at: TimeCode) -> i64 {
+    effect.integer_parameter_at(name, at).unwrap_or_else(|| {
         effect_descriptor(&effect.name)
             .and_then(|descriptor| descriptor.parameter(name))
             .map_or(0, |parameter| parameter.neutral)
@@ -1114,12 +1481,12 @@ pub(crate) fn eq_well_hertz(index: usize) -> f64 {
 }
 
 /// The node's own magnitude at each sampled frequency, in decibels.
-pub(crate) fn eq_well_magnitudes(effect: &Effect) -> Vec<f64> {
+pub(crate) fn eq_well_magnitudes(effect: &Effect, at: TimeCode) -> Vec<f64> {
     (0..EQ_WELL_SAMPLES)
         .map(|index| {
             kinewright_media::parametric_eq_magnitude_db(
                 effect,
-                TimeCode::ZERO,
+                at,
                 eq_well_hertz(index),
                 EQ_WELL_SAMPLE_RATE,
             )
@@ -1144,8 +1511,8 @@ pub(crate) fn eq_well_y(rect: egui::Rect, decibels: f64) -> f32 {
 }
 
 /// The polyline the well paints for one node.
-pub(crate) fn eq_well_points(effect: &Effect, rect: egui::Rect) -> Vec<egui::Pos2> {
-    eq_well_magnitudes(effect)
+pub(crate) fn eq_well_points(effect: &Effect, rect: egui::Rect, at: TimeCode) -> Vec<egui::Pos2> {
+    eq_well_magnitudes(effect, at)
         .into_iter()
         .enumerate()
         .map(|(index, decibels)| {
@@ -1158,7 +1525,7 @@ pub(crate) fn eq_well_points(effect: &Effect, rect: egui::Rect) -> Vec<egui::Pos
 }
 
 /// The read-only magnitude well of an expanded parametric EQ (AU2 §6.7).
-fn eq_well(ui: &mut egui::Ui, effect: &Effect) {
+fn eq_well(ui: &mut egui::Ui, effect: &Effect, at: TimeCode) {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), size::MIXER_EQ_CURVE_HEIGHT),
         egui::Sense::hover(),
@@ -1188,7 +1555,7 @@ fn eq_well(ui: &mut egui::Ui, effect: &Effect) {
         );
     }
     painter.add(egui::Shape::line(
-        eq_well_points(effect, rect),
+        eq_well_points(effect, rect, at),
         egui::Stroke::new(1.6, color::TEXT_PRIMARY),
     ));
     response.on_hover_text(EQ_WELL_TOOLTIP);
@@ -1579,5 +1946,335 @@ mod tests {
                 "the readout line is drawn whole as {line:?}; it painted {painted:?}"
             );
         }
+    }
+
+    // ---- AU4 Part B §5.4: the chain pane's `AUTOMATION` section ----
+
+    fn automation_effects(names: &[&str]) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for name in names {
+            insert_audio_effect(&mut effects, name);
+        }
+        effects
+    }
+
+    fn automation_bus(effects: Vec<Effect>, curve: Option<AutomationCurve>) -> AudioBus {
+        AudioBus {
+            id: kinewright_core::AudioBusId(1),
+            name: "Dialogue".to_owned(),
+            tracks: vec![TrackId(1)],
+            gain_tenth_db: -30,
+            effects,
+            ducking_sidechain_tracks: Vec::new(),
+            gain_curve: curve,
+        }
+    }
+
+    /// Ten keys, so the list has to scroll inside its four visible rows.
+    fn ten_key_curve() -> AutomationCurve {
+        AutomationCurve {
+            keyframes: (0..10)
+                .map(|index| kinewright_core::Keyframe {
+                    at: TimeCode(index * 10),
+                    value: -index * 10,
+                    interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                })
+                .collect(),
+        }
+    }
+
+    /// Lay the section out at the pane's width and report its height.
+    fn measure_automation_section(bus: &AudioBus) -> f32 {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut edits = MixerChainEdits::default();
+        let mut measured = egui::Vec2::ZERO;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.vertical(|ui| {
+                ui.set_max_width(size::MIXER_CHAIN_PANE_WIDTH);
+                automation_section(
+                    ui,
+                    MixerChain::Bus(bus),
+                    TimeCode::ZERO,
+                    TimeCode(300),
+                    &mut edits,
+                );
+                measured = ui.min_rect().size();
+            });
+        });
+        measured.y
+    }
+
+    /// AU4 §7 B9 (rule 116): the section spends at most 120 px of the 400 px
+    /// pane, measured with an empty curve and with a scrolled ten-key one.
+    ///
+    /// The list is allocated at a fixed four rows so both cases measure the
+    /// same, exactly as `the_loudness_section_fits_its_height_budget` pins its
+    /// own two.
+    #[test]
+    fn the_automation_section_fits_its_height_budget() {
+        const BUDGET: f32 = 120.0;
+        const MEASURED: f32 = 116.0;
+        for (label, curve) in [("empty", None), ("scrolled ten-key", Some(ten_key_curve()))] {
+            let bus = automation_bus(automation_effects(&["audio_compressor"]), curve);
+            let height = measure_automation_section(&bus);
+            println!("AU4_AUTOMATION_SECTION case=\"{label}\" px={height}");
+            assert!(
+                height <= BUDGET,
+                "the {label} AUTOMATION section is {height} px tall, over the {BUDGET} px budget"
+            );
+            assert!(
+                (height - MEASURED).abs() <= 1.0,
+                "the doc comment says the {label} section measures {MEASURED} px; \
+                 it measured {height}"
+            );
+        }
+    }
+
+    /// AU4 §7 B9 (rule 113): the combo lists `Fader` plus exactly the
+    /// non-hold-only, non-static parameters of the selected chain.
+    ///
+    /// `is_hold_only_parameter` and `is_static_audio_parameter` gain their
+    /// first app readers here: the app stops guessing automatability from
+    /// `mixer_unit()`'s name match.
+    #[test]
+    fn the_automation_combo_lists_only_the_automatable_parameters() {
+        let bus = automation_bus(
+            automation_effects(&[
+                "audio_compressor",
+                "audio_true_peak_limiter",
+                "audio_ducking",
+            ]),
+            None,
+        );
+        let chain = MixerChain::Bus(&bus);
+        let targets = automation_targets(chain);
+        assert_eq!(
+            targets.first(),
+            Some(&AutomationTarget::Fader),
+            "`Fader` is always the first choice"
+        );
+        let named = targets
+            .iter()
+            .filter_map(|target| match target {
+                AutomationTarget::Fader => None,
+                AutomationTarget::Node(_, name) => Some(*name),
+            })
+            .collect::<Vec<_>>();
+        for excluded in [
+            "bypass",
+            "detector",
+            "true_peak",
+            "lookahead_milliseconds",
+            "rms_window_milliseconds",
+        ] {
+            assert!(
+                !named.contains(&excluded),
+                "`{excluded}` is hold-only or static and takes no curve: {named:?}"
+            );
+        }
+        assert!(
+            named.contains(&"threshold_tenth_db") && named.contains(&"ratio_hundredths"),
+            "the compressor's automatable parameters are offered: {named:?}"
+        );
+        // Every offered parameter is one core would accept a curve on.
+        for effect in &bus.effects {
+            for parameter in effect_descriptor(&effect.name)
+                .expect("a registered node")
+                .parameters
+            {
+                let offered = targets.contains(&AutomationTarget::Node(effect.id, parameter.name));
+                let automatable = !is_hold_only_parameter(&effect.name, parameter.name)
+                    && !is_static_audio_parameter(&effect.name, parameter.name);
+                assert_eq!(
+                    offered, automatable,
+                    "`{}`.`{}` offered={offered} automatable={automatable}",
+                    effect.name, parameter.name
+                );
+            }
+        }
+        assert_eq!(
+            automation_target_label(chain, AutomationTarget::Fader),
+            "Fader"
+        );
+    }
+
+    /// AU4 §7 B9 (rule 115): a keyframed card reads the audible frame instead
+    /// of its neutral, and the EQ well samples the same frame.
+    #[test]
+    fn a_keyframed_card_reads_the_audible_frame_instead_of_its_neutral() {
+        let mut effects = automation_effects(&["audio_gain"]);
+        effects[0].keyframes.insert(
+            "gain_tenth_db".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    kinewright_core::Keyframe {
+                        at: TimeCode::ZERO,
+                        value: -120,
+                        interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    },
+                    kinewright_core::Keyframe {
+                        at: TimeCode(30),
+                        value: 0,
+                        interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    },
+                ],
+            },
+        );
+        assert_eq!(
+            parameter_value(&effects[0], "gain_tenth_db", TimeCode::ZERO),
+            -120,
+            "the card shows the ride, not the stored neutral"
+        );
+        assert_eq!(
+            parameter_value(&effects[0], "gain_tenth_db", TimeCode(30)),
+            0
+        );
+        assert_eq!(
+            parameter_value(&effects[0], "gain_tenth_db", TimeCode(15)),
+            -60,
+            "and every frame between them"
+        );
+        // An un-keyframed parameter still reads exactly as it did.
+        let plain = automation_effects(&["audio_gain"]);
+        assert_eq!(
+            parameter_value(&plain[0], "gain_tenth_db", TimeCode(15)),
+            parameter_value(&plain[0], "gain_tenth_db", TimeCode::ZERO)
+        );
+
+        let mut eq = automation_effects(&["audio_parametric_eq"]);
+        eq[0].keyframes.insert(
+            "band1_gain_tenth_db".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    kinewright_core::Keyframe {
+                        at: TimeCode::ZERO,
+                        value: 0,
+                        interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    },
+                    kinewright_core::Keyframe {
+                        at: TimeCode(30),
+                        value: 120,
+                        interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    },
+                ],
+            },
+        );
+        let flat = eq_well_magnitudes(&eq[0], TimeCode::ZERO);
+        let boosted = eq_well_magnitudes(&eq[0], TimeCode(30));
+        assert!(
+            boosted.iter().zip(&flat).any(|(late, early)| late > early),
+            "the well samples the audible frame, not `TimeCode::ZERO`"
+        );
+    }
+
+    /// A master chain carrying one node, so the master pane has cards as well
+    /// as its two sections.
+    fn automation_master_document(curve: Option<AutomationCurve>) -> Document {
+        let mut document = Document {
+            duration: TimeCode(300),
+            ..Document::default()
+        };
+        document.audio_mix.master = AudioMaster {
+            gain_tenth_db: -20,
+            effects: automation_effects(&["audio_gain"]),
+            gain_curve: curve,
+        };
+        document
+    }
+
+    /// Lay the whole master pane out at the pane's width and report its
+    /// content height — what the 400 px column has to scroll.
+    fn measure_master_pane(document: &Document) -> f32 {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let levels = MixerMeterLevels::default();
+        let mut edits = MixerChainEdits::default();
+        let mut measured = egui::Vec2::ZERO;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.vertical(|ui| {
+                ui.set_max_width(size::MIXER_CHAIN_PANE_WIDTH);
+                let reset = master_pane(
+                    ui,
+                    document,
+                    &levels,
+                    snapshot(),
+                    TimeCode::ZERO,
+                    STREAMING_PLATFORM_TARGET,
+                    &mut edits,
+                );
+                assert!(!reset, "nothing was clicked");
+                measured = ui.min_rect().size();
+            });
+        });
+        measured.y
+    }
+
+    /// AU4 §7 B9 (rule 116): the pane itself is asserted, not only the
+    /// section.
+    ///
+    /// On the master pane a 120 px-budget `AUTOMATION` section sits below a
+    /// 90 px-budget `LOUDNESS` section, so the two together are a pane-level
+    /// claim. The pane is a scroll area in a dock whose minimum is 260 px, so
+    /// the budget is what the column has to be able to show, and the content
+    /// above it is what proves the scroll is doing work.
+    #[test]
+    fn the_master_pane_carrying_both_sections_fits_its_budget() {
+        const BUDGET: f32 = 420.0;
+        const MEASURED: f32 = 398.0;
+        for (label, curve) in [("empty", None), ("scrolled ten-key", Some(ten_key_curve()))] {
+            let document = automation_master_document(curve);
+            let height = measure_master_pane(&document);
+            println!("AU4_MASTER_PANE case=\"{label}\" px={height}");
+            assert!(
+                height <= BUDGET,
+                "the {label} master pane is {height} px tall, over the {BUDGET} px budget"
+            );
+            assert!(
+                (height - MEASURED).abs() <= 1.0,
+                "the doc comment says the {label} master pane measures {MEASURED} px; \
+                 it measured {height}"
+            );
+            assert!(
+                height > 260.0,
+                "and it is taller than the 260 px dock minimum, so the pane's scroll area \
+                 is load-bearing rather than decorative"
+            );
+        }
+    }
+
+    /// AU4 §5.4 rule 114: every automation target gets its own row id key.
+    ///
+    /// `keyframe_row` derives its `DragValue` and `ComboBox` ids from
+    /// `(key, index)`, so one shared key would let an in-flight text edit or
+    /// drag survive a change of the target combo and land on a different
+    /// parameter's row.
+    #[test]
+    fn each_automation_target_pushes_its_own_keyframe_row_id() {
+        let targets = [
+            AutomationTarget::Fader,
+            AutomationTarget::Node(EffectId(3), "threshold_tenth_db"),
+            AutomationTarget::Node(EffectId(3), "ratio_tenth"),
+            AutomationTarget::Node(EffectId(4), "threshold_tenth_db"),
+        ];
+        let keys: Vec<String> = targets
+            .iter()
+            .map(|target| automation_row_key(*target))
+            .collect();
+        let unique: std::collections::BTreeSet<&String> = keys.iter().collect();
+        assert_eq!(
+            unique.len(),
+            keys.len(),
+            "no two targets share a row id key: {keys:?}"
+        );
+        assert_ne!(
+            keys[0], AUTOMATION_LABEL,
+            "and the key is not the section's constant caps label"
+        );
+        assert_eq!(
+            automation_row_key(AutomationTarget::Node(EffectId(3), "ratio_tenth")),
+            keys[2],
+            "the key is stable for one target across frames"
+        );
     }
 }

@@ -25,7 +25,7 @@ use kinewright_core::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AudioBus,
     AudioBusId, AudioChain, AudioMaster, Document, EffectId, LoudnessSnapshot, LoudnessTarget,
     MixPeaks, Operation, PanLaw, Playback, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
-    TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix,
+    TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, TimeCode, Track, TrackId, TrackKind, TrackMix,
 };
 
 use crate::{
@@ -64,6 +64,17 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn record_strip_rect(name: &'static str, rect: egui::Rect) {
     STRIP_RECTS.with(|rects| rects.borrow_mut().push((name.to_owned(), rect)));
+}
+
+/// Take the frame's recorded rectangles and clear the record.
+///
+/// Shared so a surface outside this module — AU4's inspector `ENVELOPE` block,
+/// which is a free function with no `MixerHarness` around it — can press its
+/// own controls at the coordinates they were laid out at rather than at
+/// guessed ones.
+#[cfg(test)]
+pub(crate) fn take_strip_rects() -> Vec<(String, egui::Rect)> {
+    STRIP_RECTS.with(|rects| std::mem::take(&mut *rects.borrow_mut()))
 }
 
 #[cfg(not(test))]
@@ -422,6 +433,16 @@ pub(crate) struct MixerTelemetry {
     pub(crate) peaks: MixPeaks,
     /// The live loudness meter (AU3 §3.9), read playing or paused.
     pub(crate) loudness: LoudnessSnapshot,
+    /// AU4 §4.5 rule 91: the audible master position, which is where every
+    /// automated control reads its curve.
+    ///
+    /// Derived, never published: `Playback::position()` is the atomically
+    /// published audible position the app already reads every frame, so an
+    /// automated fader shows exactly the integer the DSP used at that frame.
+    /// A `LiveLoudness`-style published value is rejected — loudness is
+    /// *measured*, an automation value is *derived*, and publishing it would
+    /// duplicate document state in the engine.
+    pub(crate) position: TimeCode,
 }
 
 /// Read the Mixer's telemetry for one frame (AU1 §5.1, AU3 §4.4).
@@ -440,6 +461,9 @@ pub(crate) fn mixer_telemetry(playback: &dyn Playback, playing: bool) -> MixerTe
             MixPeaks::default()
         },
         loudness: playback.loudness(),
+        // Read playing or paused: `seek` sets the clock's fallback frame, so
+        // the position follows a scrub as well as a transport (AU4 §4.5).
+        position: playback.position(),
     }
 }
 
@@ -527,6 +551,7 @@ pub(crate) fn mixer_body(
                 selection,
                 levels,
                 telemetry.loudness,
+                telemetry.position,
                 &mut requested,
                 &mut chain,
                 edits,
@@ -540,6 +565,7 @@ pub(crate) fn mixer_body(
                 current,
                 levels,
                 telemetry.loudness,
+                telemetry.position,
                 target,
                 &mut chain,
             );
@@ -560,6 +586,7 @@ pub(crate) fn mixer_strips(
     selection: Option<MixerSelection>,
     levels: &MixerMeterLevels,
     loudness: LoudnessSnapshot,
+    position: TimeCode,
     requested: &mut Option<MixerSelection>,
     chain: &mut MixerChainEdits,
     edits: &mut InspectorEdits,
@@ -571,18 +598,22 @@ pub(crate) fn mixer_strips(
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 for (index, track) in document.tracks.iter().enumerate() {
-                    track_strip(ui, document, track, index, levels, chain, edits);
+                    track_strip(ui, document, track, index, levels, position, chain, edits);
                 }
                 if !document.audio_mix.buses.is_empty() {
                     // One rule per boundary: with no buses the tracks and the
                     // master meet at a single separator, not two 12 px apart.
                     ui.separator();
                     for bus in &document.audio_mix.buses {
-                        bus_strip(ui, document, bus, selection, levels, requested, chain);
+                        bus_strip(
+                            ui, document, bus, selection, levels, position, requested, chain,
+                        );
                     }
                 }
                 ui.separator();
-                master_strip(ui, document, selection, levels, loudness, requested, chain);
+                master_strip(
+                    ui, document, selection, levels, loudness, position, requested, chain,
+                );
             });
         });
 }
@@ -592,25 +623,39 @@ pub(crate) fn mixer_strips(
 /// The rows are compact on purpose (AU1 §5.1 as amended): stacking the meters
 /// above the fader made a 374 px strip, and the material strip cannot show one
 /// that tall without scrolling past the controls that matter.
+#[allow(clippy::too_many_arguments)]
 fn track_strip(
     ui: &mut egui::Ui,
     document: &Document,
     track: &Track,
     index: usize,
     levels: &MixerMeterLevels,
+    position: TimeCode,
     chain: &mut MixerChainEdits,
     edits: &mut InspectorEdits,
 ) {
     let mix = document.track_mix(track.id);
     let carries_audio = track_carries_audio(document, track);
+    // AU4 §4.5 rule 91: `value_at` at the audible position, derived on the
+    // spot. One O(n) scan per displayed control per frame, and no engine
+    // state.
+    let automated_gain = automation_value_at(mix.gain_curve.as_ref(), position);
+    let automated_pan = automation_value_at(mix.pan_curve.as_ref(), position);
     strip(ui, |ui| {
-        caption_row(ui, track.kind, index, carries_audio);
+        caption_row(
+            ui,
+            track.kind,
+            index,
+            carries_audio,
+            automated_gain.is_some() || automated_pan.is_some(),
+        );
 
         let (fader, gain_tenth_db) = meters_and_fader(
             ui,
             levels.track(track.id),
             mix.gain_tenth_db,
             TRACK_MIX_GAIN_MIN..=TRACK_MIX_GAIN_MAX,
+            automated_gain,
         );
         record_strip_rect("fader", fader.rect);
         if silenced_by_another_solo(document, &mix) && carries_audio {
@@ -625,7 +670,7 @@ fn track_strip(
             ..mix.clone()
         });
 
-        let (pan, pan_percent) = pan_control(ui, &mix);
+        let (pan, pan_percent) = pan_control(ui, &mix, automated_pan);
         record_strip_rect("pan", pan.rect);
         record_mix_edit(edits, &pan, &mix, || TrackMix {
             pan_percent,
@@ -716,12 +761,14 @@ pub(crate) const NO_AUDIO_REASON: &str = "no audio";
 pub(crate) const ALREADY_ROUTED_REASON: &str = "already routed";
 
 /// One bus strip: name, members, node count, meter-and-fader row, `Edit`.
+#[allow(clippy::too_many_arguments)]
 fn bus_strip(
     ui: &mut egui::Ui,
     document: &Document,
     bus: &AudioBus,
     selection: Option<MixerSelection>,
     levels: &MixerMeterLevels,
+    position: TimeCode,
     requested: &mut Option<MixerSelection>,
     chain: &mut MixerChainEdits,
 ) {
@@ -749,6 +796,7 @@ fn bus_strip(
             levels.bus(bus.id),
             bus.gain_tenth_db,
             AUDIO_BUS_GAIN_MIN..=AUDIO_BUS_GAIN_MAX,
+            automation_value_at(bus.gain_curve.as_ref(), position),
         );
         record_keyed_rect("bus_fader", bus.id.0, fader.rect);
         if fader.drag_started() {
@@ -767,12 +815,14 @@ fn bus_strip(
 
 /// The master strip: the post-limiter meter, the master fader, the integrated
 /// loudness line (AU3 §4.5), and `Edit`.
+#[allow(clippy::too_many_arguments)]
 fn master_strip(
     ui: &mut egui::Ui,
     document: &Document,
     selection: Option<MixerSelection>,
     levels: &MixerMeterLevels,
     loudness: LoudnessSnapshot,
+    position: TimeCode,
     requested: &mut Option<MixerSelection>,
     chain: &mut MixerChainEdits,
 ) {
@@ -787,6 +837,7 @@ fn master_strip(
             levels.master(),
             master.gain_tenth_db,
             AUDIO_MASTER_GAIN_MIN..=AUDIO_MASTER_GAIN_MAX,
+            automation_value_at(master.gain_curve.as_ref(), position),
         );
         record_strip_rect("master_fader", fader.rect);
         if fader.drag_started() {
@@ -886,8 +937,42 @@ fn reset_row(ui: &mut egui::Ui, mix: &TrackMix, edits: &mut InspectorEdits) {
     }
 }
 
-/// The strip's first row: caption, kind icon, and the `NO AUDIO` state.
-fn caption_row(ui: &mut egui::Ui, kind: TrackKind, index: usize, carries_audio: bool) {
+/// AU4 §5.3 rule 107: what the inline `A` chip says.
+pub(crate) const AUTOMATION_CHIP: &str = "A";
+/// AU4 §5.3 rule 107: why the chip is there.
+pub(crate) const AUTOMATION_CHIP_TOOLTIP: &str = "Automation drives this track's gain or pan.";
+
+/// AU4 §5.3 rule 109: what a disabled automated rail says.
+///
+/// A const so the sentence is assertable: `on_disabled_hover_text` leaves no
+/// rect to probe.
+pub(crate) const AUTOMATED_FADER_TOOLTIP: &str = "Automation drives this fader. The number is the \
+     parked value and typing sets it; clear the automation in the chain pane to ride the fader \
+     directly.";
+
+/// AU4 §4.5 rule 91: one automated owner's value at the audible frame.
+///
+/// `None` when the owner carries no curve, which is what every caller uses to
+/// choose between the ordinary control and the automated one.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn automation_value_at(
+    curve: Option<&kinewright_core::AutomationCurve>,
+    position: TimeCode,
+) -> Option<i32> {
+    curve
+        .and_then(|curve| curve.value_at(position))
+        .map(|value| value as i32)
+}
+
+/// The strip's first row: caption, kind icon, the `A` chip, and the
+/// `NO AUDIO` state.
+fn caption_row(
+    ui: &mut egui::Ui,
+    kind: TrackKind,
+    index: usize,
+    carries_audio: bool,
+    automated: bool,
+) {
     let (caption, icon) = track_caption_and_icon(kind, index);
     ui.scope(|ui| {
         // A row's height is fixed when it is created, from the parent's
@@ -905,6 +990,15 @@ fn caption_row(ui: &mut egui::Ui, kind: TrackKind, index: usize, carries_audio: 
                     .color(color::TEXT_PRIMARY),
             );
             ui.add(icon.image(size::ICON_SM).tint(color::TEXT_MUTED));
+            if automated {
+                // AU4 §5.3 rule 107: inline after the kind icon, not on a row
+                // of its own. `NO AUDIO` sits below because the caption, the
+                // kind icon and a tracked eight-character caps label are 90 px
+                // of content in a 72 px strip; a one-glyph label is not that
+                // label, and it costs the strip width and not height.
+                ui.label(theme::caps_label(AUTOMATION_CHIP, color::TEXT_MUTED))
+                    .on_hover_text(AUTOMATION_CHIP_TOOLTIP);
+            }
         });
         if !carries_audio {
             // The controls stay enabled: a mix can be set before the media
@@ -933,6 +1027,7 @@ fn meters_and_fader(
     meters: [f32; 2],
     value: i32,
     range: std::ops::RangeInclusive<i32>,
+    automated: Option<i32>,
 ) -> (egui::Response, i32) {
     let mut gain_tenth_db = value;
     let response = ui
@@ -952,14 +1047,17 @@ fn meters_and_fader(
                     // column past the meters beside it.
                     ui.style_mut().override_font_id = Some(theme::medium(type_size::MICRO));
                     ui.spacing_mut().button_padding.y = 0.0;
-                    ui.add(
-                        egui::Slider::new(&mut gain_tenth_db, range)
-                            .vertical()
-                            .integer()
-                            .custom_formatter(|value, _| format_gain_db(value))
-                            .custom_parser(parse_gain_db)
-                            .update_while_editing(false),
-                    )
+                    match automated {
+                        None => ui.add(
+                            egui::Slider::new(&mut gain_tenth_db, range)
+                                .vertical()
+                                .integer()
+                                .custom_formatter(|value, _| format_gain_db(value))
+                                .custom_parser(parse_gain_db)
+                                .update_while_editing(false),
+                        ),
+                        Some(driven) => automated_fader(ui, &mut gain_tenth_db, driven, range),
+                    }
                 })
                 .inner
             })
@@ -969,8 +1067,54 @@ fn meters_and_fader(
     (response, gain_tenth_db)
 }
 
+/// AU4 §5.3 rule 109: an automated gain rail, disabled and showing the
+/// automated value, over an editable readout showing the parked scalar.
+///
+/// The split is what rule 110 earns its two DESIGN.md sentences for. CC5's
+/// rule — *editing a keyframed control writes its static value* — is invisible
+/// on a rail: the editor believes they are riding what they hear. So the rail,
+/// which is the thing you can **drag**, never lies about what you hear, and
+/// the number, which cannot be mistaken for a ride, stays editable.
+///
+/// egui's `Slider` is one widget whose rail and value box share a response, so
+/// the two halves are built here rather than by disabling half a `Slider`.
+/// The returned response is their union, so the strip's recorded `fader` rect
+/// still covers both and `record_mix_edit` still sees the readout's
+/// `changed()` and `drag_started()` — the disabled rail contributes neither.
+fn automated_fader(
+    ui: &mut egui::Ui,
+    parked: &mut i32,
+    driven: i32,
+    range: std::ops::RangeInclusive<i32>,
+) -> egui::Response {
+    let mut shown = driven.clamp(*range.start(), *range.end());
+    ui.vertical(|ui| {
+        let rail = ui
+            .add_enabled(
+                false,
+                egui::Slider::new(&mut shown, range.clone())
+                    .vertical()
+                    .integer()
+                    .show_value(false),
+            )
+            .on_disabled_hover_text(AUTOMATED_FADER_TOOLTIP);
+        let readout = ui
+            .add(
+                egui::DragValue::new(parked)
+                    .range(range)
+                    .custom_formatter(|value, _| format_gain_db(value))
+                    .custom_parser(parse_gain_db)
+                    .update_while_editing(false),
+            )
+            .on_hover_text(AUTOMATED_FADER_TOOLTIP);
+        record_strip_rect("fader_readout", readout.rect);
+        rail.union(readout)
+    })
+    .inner
+}
+
 /// The pan rail and its `L50` / `C` / `R50` readout.
-fn pan_control(ui: &mut egui::Ui, mix: &TrackMix) -> (egui::Response, i32) {
+fn pan_control(ui: &mut egui::Ui, mix: &TrackMix, automated: Option<i32>) -> (egui::Response, i32) {
     let mut pan_percent = mix.pan_percent;
     let response = ui
         .scope(|ui| {
@@ -980,13 +1124,45 @@ fn pan_control(ui: &mut egui::Ui, mix: &TrackMix) -> (egui::Response, i32) {
             ui.spacing_mut().slider_width = size::MIXER_STRIP_WIDTH / 2.0 - space::TWO;
             ui.spacing_mut().item_spacing.x = space::HALF;
             ui.style_mut().override_font_id = Some(theme::medium(type_size::MICRO));
-            ui.add(
-                egui::Slider::new(&mut pan_percent, TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX)
-                    .integer()
-                    .custom_formatter(|value, _| format_pan_value(value))
-                    .custom_parser(parse_pan)
-                    .update_while_editing(false),
-            )
+            match automated {
+                None => ui.add(
+                    egui::Slider::new(&mut pan_percent, TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX)
+                        .integer()
+                        .custom_formatter(|value, _| format_pan_value(value))
+                        .custom_parser(parse_pan)
+                        .update_while_editing(false),
+                ),
+                // AU4 §5.3 rule 109: same treatment as the fader, on one row
+                // because the pan rail is horizontal.
+                Some(driven) => {
+                    let mut shown = driven.clamp(TRACK_MIX_PAN_MIN, TRACK_MIX_PAN_MAX);
+                    ui.horizontal(|ui| {
+                        let rail = ui
+                            .add_enabled(
+                                false,
+                                egui::Slider::new(
+                                    &mut shown,
+                                    TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX,
+                                )
+                                .integer()
+                                .show_value(false),
+                            )
+                            .on_disabled_hover_text(AUTOMATED_FADER_TOOLTIP);
+                        let readout = ui
+                            .add(
+                                egui::DragValue::new(&mut pan_percent)
+                                    .range(TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX)
+                                    .custom_formatter(|value, _| format_pan_value(value))
+                                    .custom_parser(parse_pan)
+                                    .update_while_editing(false),
+                            )
+                            .on_hover_text(AUTOMATED_FADER_TOOLTIP);
+                        record_strip_rect("pan_readout", readout.rect);
+                        rail.union(readout)
+                    })
+                    .inner
+                }
+            }
         })
         .inner;
     (response, pan_percent)
@@ -1578,7 +1754,7 @@ mod tests {
     }
 
     /// Lay one track strip out on its own and report the space it takes.
-    fn measure_track_strip(document: &Document, index: usize) -> egui::Vec2 {
+    fn measure_track_strip(document: &Document, index: usize, position: TimeCode) -> egui::Vec2 {
         let ctx = egui::Context::default();
         theme::install(&ctx);
         let levels = MixerMeterLevels::default();
@@ -1593,6 +1769,7 @@ mod tests {
                     &document.tracks[index],
                     index,
                     &levels,
+                    position,
                     &mut chain,
                     &mut edits,
                 );
@@ -1602,13 +1779,22 @@ mod tests {
         size
     }
 
-    /// AU1 §5.1 as amended: the strip has a height budget, because the Mixer
-    /// dock opens at 300 px and a strip that overran it hid the fader and the
-    /// M/S toggles below the fold.
+    /// AU1 §5.1 as amended, and AU4 §7 B8 (rules 107 and 108): the strip has a
+    /// height budget, because the Mixer dock opens at 300 px and a strip that
+    /// overran it hid the fader and the M/S toggles below the fold.
     ///
     /// The worst case is the one to measure: a track that carries audio, has
     /// been moved off neutral, and has been silenced by another track's solo
     /// wears both the `SILENCED` line and the `Reset` row.
+    ///
+    /// AU4 adds the `A` chip, so the last two cases carry it as well. The
+    /// worst case R37 names — `NO AUDIO` **and** `SILENCED` **and** off-neutral
+    /// **and** automated — is unreachable by construction: the strip states one
+    /// cause and `SILENCED` is suppressed on a track that already says
+    /// `NO AUDIO` (AU4 §0 E50). Both reachable worst cases are measured
+    /// instead, each carrying two extra rows and the chip, and their heights
+    /// are printed for §0. That the chip itself fits one 72 px line is
+    /// `the_automation_chip_paints_inline_and_the_worst_case_strip_fits_the_dock`.
     #[test]
     fn a_track_strip_fits_the_mixer_dock() {
         // The `mixer-dock` default of 320 px leaves about 262 px for strips
@@ -1628,12 +1814,32 @@ mod tests {
                 ..TrackMix::neutral(TrackId(2))
             },
         ];
-        for (label, document, index) in [
-            ("plain", mixer_document(), 0),
-            ("no audio", mixer_document(), 1),
-            ("solo muted and non-neutral", worst_case, 0),
+        let mut no_audio = automated_and_non_neutral_document();
+        no_audio.audio_mix.tracks[0].track = TrackId(2);
+        let mut silenced = automated_and_non_neutral_document();
+        silenced.audio_mix.tracks.push(TrackMix {
+            solo: true,
+            ..TrackMix::neutral(TrackId(2))
+        });
+        for (label, document, index, position) in [
+            ("plain", mixer_document(), 0, TimeCode::ZERO),
+            ("no audio", mixer_document(), 1, TimeCode::ZERO),
+            ("solo muted and non-neutral", worst_case, 0, TimeCode::ZERO),
+            (
+                "no audio, off neutral and automated",
+                no_audio,
+                1,
+                TimeCode(29),
+            ),
+            (
+                "solo muted, off neutral and automated",
+                silenced,
+                0,
+                TimeCode(29),
+            ),
         ] {
-            let size = measure_track_strip(&document, index);
+            let size = measure_track_strip(&document, index, position);
+            println!("AU4_STRIP_HEIGHT case=\"{label}\" px={}", size.y);
             assert!(
                 size.y <= BUDGET,
                 "a {label} track strip is {} px tall, over the {BUDGET} px budget",
@@ -1667,6 +1873,7 @@ mod tests {
         let telemetry = MixerTelemetry {
             peaks: MixPeaks::default(),
             loudness,
+            position: TimeCode::ZERO,
         };
         let mut levels = MixerMeterLevels::default();
         let mut edits = InspectorEdits::default();
@@ -1863,6 +2070,8 @@ mod tests {
         peaks: MixPeaks,
         /// AU3 §4.4: the snapshot the pane's `LOUDNESS` section reads.
         loudness: LoudnessSnapshot,
+        /// AU4 §4.5: the audible frame every automated control reads at.
+        position: TimeCode,
         playing: bool,
         levels: MixerMeterLevels,
         time: f64,
@@ -1886,6 +2095,7 @@ mod tests {
                 selection: None,
                 peaks: MixPeaks::default(),
                 loudness: LoudnessSnapshot::default(),
+                position: TimeCode::ZERO,
                 playing: false,
                 levels: MixerMeterLevels::default(),
                 time: 0.0,
@@ -1924,6 +2134,7 @@ mod tests {
             let telemetry = MixerTelemetry {
                 peaks: self.peaks.clone(),
                 loudness: self.loudness,
+                position: self.position,
             };
             let playing = self.playing;
             let selection = self.selection;
@@ -2510,6 +2721,7 @@ mod tests {
                     &document.audio_mix.buses[index],
                     None,
                     &levels,
+                    TimeCode::ZERO,
                     &mut requested,
                     &mut chain,
                 );
@@ -2534,6 +2746,7 @@ mod tests {
                     None,
                     &levels,
                     loudness,
+                    TimeCode::ZERO,
                     &mut requested,
                     &mut chain,
                 );
@@ -2559,6 +2772,7 @@ mod tests {
                     index,
                     false,
                     &levels,
+                    TimeCode::ZERO,
                     &mut edits,
                 );
                 measured = ui.min_rect().size();
@@ -2651,6 +2865,7 @@ mod tests {
                         selection,
                         &levels,
                         measured_loudness(),
+                        TimeCode::ZERO,
                         STREAMING_PLATFORM_TARGET,
                         &mut edits,
                     );
@@ -2659,6 +2874,48 @@ mod tests {
             },
         );
         measured
+    }
+
+    /// Lay `chain_pane` out inside a viewport of a given height and hand back
+    /// the column it took plus the rects it recorded.
+    fn measure_chain_pane_in(
+        document: &Document,
+        selection: MixerSelection,
+        viewport_height: f32,
+    ) -> (egui::Vec2, Vec<(String, egui::Rect)>) {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let levels = MixerMeterLevels::default();
+        let mut edits = MixerChainEdits::default();
+        let mut measured = egui::Vec2::ZERO;
+        // Anything a previous frame recorded is not this measurement's.
+        let _ = take_strip_rects();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, viewport_height),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui.set_max_height(viewport_height);
+                ui.horizontal_top(|ui| {
+                    mixer_pane_ui::chain_pane(
+                        ui,
+                        document,
+                        selection,
+                        &levels,
+                        measured_loudness(),
+                        TimeCode::ZERO,
+                        STREAMING_PLATFORM_TARGET,
+                        &mut edits,
+                    );
+                    measured = ui.min_rect().size();
+                });
+            },
+        );
+        (measured, take_strip_rects())
     }
 
     /// AU2 §6.6: the pane is one `MIXER_CHAIN_PANE_WIDTH` column however much
@@ -2870,7 +3127,7 @@ mod tests {
             "the strip fader's own change is in the folded bus"
         );
         assert_eq!(
-            mixer_pane_ui::parameter_value(&bus.effects[0], "gain_tenth_db"),
+            mixer_pane_ui::parameter_value(&bus.effects[0], "gain_tenth_db", TimeCode::ZERO),
             -40,
             "the pane control's change is in the same folded bus: {bus:?}"
         );
@@ -2925,7 +3182,7 @@ mod tests {
             "the master fader was not touched"
         );
         assert_eq!(
-            mixer_pane_ui::parameter_value(&master.effects[0], "gain_tenth_db"),
+            mixer_pane_ui::parameter_value(&master.effects[0], "gain_tenth_db", TimeCode::ZERO),
             -25,
             "the master pane's control is in the master's own operation"
         );
@@ -2974,7 +3231,7 @@ mod tests {
         );
         let bus = upserted_bus(&dragged.operations()[0]);
         assert!(
-            mixer_pane_ui::parameter_value(&bus.effects[0], "gain_tenth_db") > 0,
+            mixer_pane_ui::parameter_value(&bus.effects[0], "gain_tenth_db", TimeCode::ZERO) > 0,
             "dragging right raises the value: {bus:?}"
         );
         assert_eq!(bus.gain_tenth_db, -30, "the bus fader was not touched");
@@ -3237,7 +3494,7 @@ mod tests {
         }
         // The two the contract calls out as audible on insertion.
         assert_eq!(
-            mixer_pane_ui::parameter_value(&effects[0], "ceiling_tenth_db"),
+            mixer_pane_ui::parameter_value(&effects[0], "ceiling_tenth_db", TimeCode::ZERO),
             0
         );
         assert_eq!(
@@ -3332,7 +3589,10 @@ mod tests {
         let _ = harness.frame(vec![moved(bypass.center()), pointer(bypass.center(), true)]);
         let clicked = harness.frame(vec![pointer(bypass.center(), false)]);
         let bus = upserted_bus(&clicked.operations()[0]);
-        assert_eq!(mixer_pane_ui::parameter_value(&bus.effects[0], "bypass"), 1);
+        assert_eq!(
+            mixer_pane_ui::parameter_value(&bus.effects[0], "bypass", TimeCode::ZERO),
+            1
+        );
         assert_eq!(bus.effects.len(), 6, "a bypass moves nothing else");
 
         let _ = harness.frame(Vec::new());
@@ -3440,7 +3700,7 @@ mod tests {
             .parameters
             .insert("band1_hertz".to_owned(), ParamValue::Integer(1_000));
 
-        let sampled = mixer_pane_ui::eq_well_magnitudes(&boosted);
+        let sampled = mixer_pane_ui::eq_well_magnitudes(&boosted, TimeCode::ZERO);
         assert_eq!(sampled.len(), mixer_pane_ui::EQ_WELL_SAMPLES);
         for (index, measured) in sampled.iter().enumerate() {
             let expected = kinewright_media::parametric_eq_magnitude_db(
@@ -3473,13 +3733,13 @@ mod tests {
         assert!(mixer_pane_ui::eq_well_y(rect, 24.0) <= rect.top() + 1e-3);
         assert!(mixer_pane_ui::eq_well_y(rect, -24.0) >= rect.bottom() - 1e-3);
 
-        let points = mixer_pane_ui::eq_well_points(&boosted, rect);
+        let points = mixer_pane_ui::eq_well_points(&boosted, rect, TimeCode::ZERO);
         assert_eq!(points.len(), mixer_pane_ui::EQ_WELL_SAMPLES);
         assert!(
             points.iter().any(|point| point.y < zero - 1.0),
             "a +6 dB band paints above the 0 dB line"
         );
-        let flat = mixer_pane_ui::eq_well_points(&effects[0], rect);
+        let flat = mixer_pane_ui::eq_well_points(&effects[0], rect, TimeCode::ZERO);
         assert!(
             flat.iter().all(|point| (point.y - zero).abs() < 0.5),
             "an all-neutral parametric EQ is a flat line on the 0 dB grid"
@@ -3546,7 +3806,8 @@ mod tests {
             assert_eq!(
                 mixer_pane_ui::parameter_value(
                     &harness.document.audio_mix.buses[0].effects[0],
-                    parameter
+                    parameter,
+                    TimeCode::ZERO
                 ),
                 stored,
                 "`{parameter}` still holds the value it was showing"
@@ -3571,7 +3832,7 @@ mod tests {
             );
             let bus = upserted_bus(&committed.operations()[0]);
             assert_eq!(
-                mixer_pane_ui::parameter_value(&bus.effects[0], parameter),
+                mixer_pane_ui::parameter_value(&bus.effects[0], parameter, TimeCode::ZERO),
                 expected,
                 "typing `{typed}` writes {expected}"
             );
@@ -3957,6 +4218,18 @@ mod tests {
             "and 210 for the master",
             // AU3 §6.8: Part B's half of the F21 sentence.
             "the export step normalises the file",
+            // AU4 §5.6 rule 122: the `A` chip, the re-measured strip height,
+            // the `AUTOMATION` section and its re-measured height, and rule
+            // 110's two sentences.
+            "an `A` chip inline after the kind icon",
+            "232 for a track strip",
+            "carries gain or pan automation",
+            "that rail is disabled and shows the",
+            "automated value at the audible position",
+            "editing a keyframed control writes its static value",
+            "a control you can drag never lies about what you hear",
+            "sits an `AUTOMATION` section",
+            "116 points of the pane against a 120 point budget",
         ] {
             assert!(
                 mixer.contains(expected),
@@ -4306,6 +4579,260 @@ mod tests {
         assert!(
             !harness.reset_loudness,
             "the flag is one frame's answer, not a latch"
+        );
+    }
+
+    // ---- AU4 Part B §5.3: the `A` chip and the automated fader ----
+
+    /// AU4 §7 B7 (rule 109): the rail is disabled and reads the automated
+    /// value at the audible position; the readout stays editable and writes
+    /// the parked scalar.
+    #[test]
+    fn an_automated_rail_is_disabled_while_its_readout_writes_the_parked_scalar() {
+        assert_eq!(
+            AUTOMATED_FADER_TOOLTIP,
+            "Automation drives this fader. The number is the parked value and typing sets it; \
+             clear the automation in the chain pane to ride the fader directly.",
+            "the hover text says which half of the control is which"
+        );
+
+        let mut harness = MixerHarness::new(automated_and_non_neutral_document());
+        // The audible frame is 29, where the gain ride reads 0 and the parked
+        // scalar is still -60.
+        harness.position = TimeCode(29);
+        let laid_out = harness.frame(Vec::new());
+        assert!(
+            laid_out.operations().is_empty(),
+            "laying out writes nothing"
+        );
+        assert!(
+            harness.has("fader_readout") && harness.has("pan_readout"),
+            "an automated strip lays out both editable readouts: {:?}",
+            harness.rects
+        );
+
+        // The rail refuses the drag it would otherwise take.
+        let fader = harness.rect("fader");
+        let press = rail_point(fader, 0.9);
+        let _ = harness.frame(vec![moved(press), pointer(press, true)]);
+        let dragged = harness.frame(vec![moved(rail_point(fader, 0.4))]);
+        assert!(
+            dragged.operations().is_empty(),
+            "a disabled rail writes nothing: {:?}",
+            dragged.operations()
+        );
+        let _ = harness.frame(vec![pointer(rail_point(fader, 0.4), false)]);
+
+        // The readout under it does not.
+        let readout = harness.rect("fader_readout").center();
+        let _ = harness.frame(vec![moved(readout), pointer(readout, true)]);
+        let typed = harness.frame(vec![moved(readout + egui::vec2(24.0, 0.0))]);
+        let written = typed.operations().iter().map(gain_of).collect::<Vec<_>>();
+        assert_eq!(written.len(), 1, "one write: {:?}", typed.operations());
+        assert_ne!(written[0], -60, "the readout moved the parked scalar");
+        let _ = harness.frame(vec![pointer(readout, false)]);
+        let after = harness
+            .document
+            .audio_mix
+            .tracks
+            .iter()
+            .find(|entry| entry.track == TrackId(1))
+            .expect("the entry survives");
+        assert_eq!(
+            after.gain_curve.as_ref(),
+            Some(&gain_ride()),
+            "typing the parked value keeps the ride: `track_mix_operation`'s merge (rule 32)"
+        );
+        assert_eq!(after.pan_curve.as_ref(), Some(&pan_ride()));
+    }
+
+    /// AU4 §4.5 rule 91: the automated value is `value_at` at the audible
+    /// position, derived on the spot from `Playback::position()`.
+    #[test]
+    fn the_automated_value_is_read_at_the_audible_position() {
+        assert_eq!(automation_value_at(None, TimeCode::ZERO), None);
+        assert_eq!(
+            automation_value_at(Some(&gain_ride()), TimeCode::ZERO),
+            Some(-120),
+            "the ride starts at -12.0 dB"
+        );
+        assert_eq!(
+            automation_value_at(Some(&gain_ride()), TimeCode(29)),
+            Some(0),
+            "and ends at unity"
+        );
+        assert_eq!(
+            automation_value_at(Some(&pan_ride()), TimeCode(29)),
+            Some(-40),
+            "a one-key curve is a constant everywhere"
+        );
+    }
+
+    /// AU4 §7 B8 (rule 107): the `A` chip paints inline after the kind icon,
+    /// only on an automated track, and fits the 72 px strip beside the caption
+    /// and the kind icon.
+    ///
+    /// B8's other half — the worst-case strip against the 240 px dock budget,
+    /// which is the only binding assert and whose measured height is printed
+    /// for §0 — is in `a_track_strip_fits_the_mixer_dock`, the test rule 108
+    /// names.
+    #[test]
+    fn the_automation_chip_paints_inline_and_the_worst_case_strip_fits_the_dock() {
+        let painted = painted_mixer(&automated_and_non_neutral_document());
+        assert!(
+            painted.iter().any(|text| text == AUTOMATION_CHIP),
+            "an automated track wears the `A` chip: {painted:?}"
+        );
+        assert!(
+            !painted_mixer(&mixer_document())
+                .iter()
+                .any(|text| text == AUTOMATION_CHIP),
+            "and a track with no curve does not"
+        );
+
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.label("");
+        });
+        let chip = caps_label_width(&ctx, AUTOMATION_CHIP);
+        let caption = ctx.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(
+                    "A2".to_owned(),
+                    egui::FontId::new(type_size::CAPTION, egui::FontFamily::Proportional),
+                    color::TEXT_PRIMARY,
+                )
+                .size()
+                .x
+        });
+        assert!(
+            caption + size::ICON_SM + chip + 2.0 * space::HALF <= size::MIXER_STRIP_WIDTH,
+            "the caption, the kind icon and the `A` chip fit one 72 px line: \
+             {caption} + {} + {chip}",
+            size::ICON_SM
+        );
+
+        // The two automated worst cases live in the test B8 names,
+        // `a_track_strip_fits_the_mixer_dock`, beside AU1's three; the chip
+        // fitting the 72 px line is this test's own subject.
+    }
+
+    /// AU4 §7 B9 (rule 114): `+ Key at playhead` and `Clear` are pressed for
+    /// real in the chain pane and fold into exactly one `UpsertAudioBus` per
+    /// chain per frame, through `MixerChainEdits`' existing fold.
+    #[test]
+    fn the_automation_section_buttons_fold_into_one_upsert_per_chain() {
+        let mut harness =
+            MixerHarness::new(chain_document()).editing(MixerSelection::Bus(AudioBusId(1)));
+        harness.position = TimeCode(12);
+        let laid_out = harness.frame(Vec::new());
+        assert!(
+            laid_out.operations().is_empty(),
+            "painting the AUTOMATION section writes no operation: {:?}",
+            laid_out.operations()
+        );
+        assert!(
+            harness.has("automation_add_key") && harness.has("automation_clear"),
+            "the section lays out both buttons: {:?}",
+            harness.rects
+        );
+
+        let add = harness.rect("automation_add_key").center();
+        let _ = harness.frame(vec![moved(add), pointer(add, true)]);
+        let clicked = harness.frame(vec![pointer(add, false)]);
+        assert_eq!(
+            clicked.operations().len(),
+            1,
+            "one whole-chain set, not one per control: {:?}",
+            clicked.operations()
+        );
+        let bus = upserted_bus(&clicked.operations()[0]);
+        let curve = bus
+            .gain_curve
+            .as_ref()
+            .expect("`Fader` writes `AudioBus.gain_curve`");
+        assert_eq!(curve.keyframes.len(), 1);
+        assert_eq!(
+            curve.keyframes[0].at,
+            TimeCode(12),
+            "the key lands on the audible frame"
+        );
+        assert_eq!(
+            curve.keyframes[0].value, -30,
+            "holding the value the fader parks at"
+        );
+        assert_eq!(
+            clicked.coalesce_key(),
+            None,
+            "`+ Key at playhead` is a discrete edit"
+        );
+
+        // The harness applied that operation, so the strip now wears the chip
+        // and `Clear` is enabled.
+        let _ = harness.frame(Vec::new());
+        let clear = harness.rect("automation_clear").center();
+        let _ = harness.frame(vec![moved(clear), pointer(clear, true)]);
+        let cleared = harness.frame(vec![pointer(clear, false)]);
+        assert_eq!(cleared.operations().len(), 1);
+        assert!(
+            upserted_bus(&cleared.operations()[0]).gain_curve.is_none(),
+            "`Clear` removes the whole curve"
+        );
+    }
+
+    /// AU4 §7 B9 (rule 116): the pane still fits the dock it opens in.
+    #[test]
+    fn the_chain_pane_with_an_automation_section_still_fits_the_dock() {
+        const DOCK: f32 = 260.0;
+        let mut document = chain_document_with_master();
+        document.audio_mix.master.gain_curve = Some(gain_ride());
+        let column = measure_chain_pane(&document, MixerSelection::Master);
+        assert!(
+            (column.x - size::MIXER_CHAIN_PANE_WIDTH).abs() <= 1.0,
+            "the pane is still one 400 px column: {} px",
+            column.x
+        );
+
+        // The pane is taller than a short dock, and the `ScrollArea` at
+        // `chain_pane`'s head is what makes that survivable. Measured, not
+        // assumed: lay the pane out in a real 260 px viewport and check the
+        // scroll area's content genuinely overflows it rather than the pane
+        // stretching the dock open.
+        let (short, rects) = measure_chain_pane_in(&document, MixerSelection::Master, DOCK);
+        let named = |name: &str| {
+            rects
+                .iter()
+                .find(|(recorded, _)| recorded == name)
+                .map_or_else(
+                    || panic!("`chain_pane` records {name}: {rects:?}"),
+                    |(_, rect)| *rect,
+                )
+        };
+        let viewport = named("chain_pane_viewport");
+        let content = named("chain_pane_content");
+        println!(
+            "AU4_CHAIN_PANE dock={DOCK} column={} viewport={} content={}",
+            short.y,
+            viewport.height(),
+            content.height()
+        );
+        assert!(
+            short.y <= DOCK,
+            "the pane takes no more than the {DOCK} px dock offers it: {} px",
+            short.y
+        );
+        assert!(
+            viewport.height() <= DOCK,
+            "its scroll viewport is inside the dock: {} px",
+            viewport.height()
+        );
+        assert!(
+            content.height() > viewport.height(),
+            "and the content really does overflow it — the scroll is load-bearing, \
+             not decorative: {} px of content in a {} px viewport",
+            content.height(),
+            viewport.height()
         );
     }
 }

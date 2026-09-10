@@ -68,6 +68,19 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- AU4 Part B, automation editing: a rubber band on every audio clip in the
+  timeline (the same band the waveform paints in; click to add a key, drag to
+  move it, right-click or Delete to remove; snaps to project frames, Alt
+  bypasses; −40 … +12 dB; the inspector's `ENVELOPE` list is the exact
+  surface), an `Envelopes` toolbar toggle, an `AUTOMATION` section in the
+  Mixer's chain pane editing one bus or master parameter at a time (the fader
+  or any automatable node parameter), an `A` chip on automated track strips
+  whose fader and pan rails follow the curve while playing while their readouts
+  still set the parked value, and two planners: `plan_audio_ducking` (ducks a
+  music track under dialogue using transcript words and silence spans, keyed
+  relative to the track's parked gain, measured before and after) and
+  `plan_clip_fades` (proposes short fades where a cut lands on signal). See
+  docs/AU4-CLIP-ENVELOPES-AND-AUTOMATION.md.
 - AU4 Part A, automation model: five automation curve owners — a clip's gain
   envelope (`Clip.audio_gain_curve`, clip-local frames), a track's gain and pan
   (`TrackMix.gain_curve` / `pan_curve`), and the bus and master faders

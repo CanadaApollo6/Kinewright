@@ -29,8 +29,9 @@ use kinewright_core::{
     MixLevelRequest, MixSpectrumPoint, MixSpectrumRequest, Operation, ParamValue, Playback, Query,
     QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus, SilenceStatus,
     SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
-    SubjectFocusBasisPointConstraint, SubjectReframeSettings, SyncGroupId, ThreePointMode,
-    TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
+    SubjectFocusBasisPointConstraint, SubjectReframeSettings, SyncGroupId,
+    TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, ThreePointMode, TimeCode,
+    TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
     TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track, TrackId, TrackKind,
     TranscriptStatus, animated_caption_operations_at, apply_batch, authored_caption_cues,
     beat_montage_plan, beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors,
@@ -1021,10 +1022,18 @@ impl KinewrightMcp {
                     decode_args("plan_speaker_multicam", arguments)?;
                 self.plan_speaker_multicam(args)
             }
+            "plan_audio_ducking" => {
+                let args: AudioDuckingPlanArgs = decode_args("plan_audio_ducking", arguments)?;
+                self.plan_audio_ducking(&args)
+            }
             "plan_audio_normalization" => {
                 let args: AudioNormalizationPlanArgs =
                     decode_args("plan_audio_normalization", arguments)?;
                 self.plan_audio_normalization(&args)
+            }
+            "plan_clip_fades" => {
+                let args: ClipFadesPlanArgs = decode_args("plan_clip_fades", arguments)?;
+                self.plan_clip_fades(&args)
             }
             "get_analysis_status" => {
                 let args: AnalysisStatusArgs = decode_args("get_analysis_status", arguments)?;
@@ -8335,6 +8344,1089 @@ impl KinewrightMcp {
             }),
         ))
     }
+
+    /// AU4 §6.1: build one music-under-dialogue gain ride on the music track,
+    /// keyed relative to that track's parked fader.
+    ///
+    /// Rule 124: `u = mix.gain_tenth_db` is the un-ducked value and
+    /// `d = clamp(u + depth, -600, 120)` the ducked one, because a curve
+    /// *replaces* its scalar — keying around `0 / depth` on a music track the
+    /// editor had already pulled down would raise the un-ducked music instead
+    /// of lowering the ducked music.
+    #[allow(clippy::too_many_lines)]
+    fn plan_audio_ducking(&self, args: &AudioDuckingPlanArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        // Rule 125's refusal is raised before any evidence is read, so an
+        // editor's existing ride is never even measured against.
+        let settings = match ducking_settings(&document, args) {
+            Ok(settings) => settings,
+            Err(error) => return Ok(error_text(error)),
+        };
+        let dialogue = settings
+            .dialogue_tracks
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let (spoken, skipped) = match self.ducking_dialogue_spans(&document, &dialogue) {
+            Ok(spans) => spans,
+            Err(result) => return Ok(result),
+        };
+        let spoken = match &settings.range {
+            // Rule 126: `range` restricts which dialogue spans are considered
+            // — a span is kept when it intersects the window — and then clamps
+            // the emitted curve. It never restricts the measurement.
+            Some(range) => spoken
+                .into_iter()
+                .filter(|span| span.start < range.end && span.end > range.start)
+                .collect::<Vec<_>>(),
+            None => spoken,
+        };
+        if spoken.is_empty() {
+            return Ok(error_text(format!(
+                "no dialogue span was found on tracks {}; nothing to duck",
+                render_track_list(&settings.dialogue_tracks)
+            )));
+        }
+        let spans = ducking_windows(
+            &spoken,
+            settings.hold_frames,
+            settings.attack_frames,
+            settings.release_frames,
+            document.duration,
+        );
+        let bounds = ducking_key_bounds(&document, settings.range.as_ref());
+        let curve = match ducking_curve(
+            &spans,
+            settings.parked_gain_tenth_db,
+            settings.ducked_gain_tenth_db,
+            settings.attack_frames,
+            settings.release_frames,
+            bounds,
+        ) {
+            Ok(curve) => curve,
+            Err(error) => return Ok(error_text(error)),
+        };
+        let keyframe_count = curve.keyframes.len();
+        // Rule 128.2 is read off the curve that was actually emitted, not off
+        // the merged spans it was built from: a key clamped into `bounds` can
+        // reshape a window, and both the reported `windows` and the two
+        // measurement windows would then describe a curve this plan does not
+        // commit.
+        let (ducked_windows, unducked_windows) = ducking_flat_spans(
+            &curve,
+            settings.parked_gain_tenth_db,
+            settings.ducked_gain_tenth_db,
+            document.duration,
+        );
+        let operation = Operation::SetTrackAutomation {
+            track: settings.music_track,
+            parameter: TRACK_AUTOMATION_PARAMETERS[0].to_owned(),
+            curve: Some(curve),
+        };
+        let mut candidate = (*document).clone();
+        if let Err(error) = apply_batch(&mut candidate, std::slice::from_ref(&operation)) {
+            return Ok(error_text(format!(
+                "ducking curve does not fit the current timeline: {error}"
+            )));
+        }
+        // Rule 128: the measurement is best-effort. When no flat window
+        // reaches one gating block the planner reports why and still commits
+        // the curve — the ride is correct whether or not it can be measured.
+        let measured = self.measure_ducking(
+            &candidate,
+            &settings,
+            &ducked_windows,
+            &unducked_windows,
+            &document,
+        );
+        let prepared = match self.prepare_operations(revision, &document, vec![operation]) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "ducking plan does not fit the current timeline: {error}"
+                )));
+            }
+        };
+        let mut text = format!(
+            "prepared music ducking on track {} across {} dialogue window(s) as edit plan {}; the parked fader is {} tenth dB and the ducked floor is {} tenth dB over {keyframe_count} linear keys",
+            settings.music_track,
+            ducked_windows.len(),
+            prepared.id,
+            settings.parked_gain_tenth_db,
+            settings.ducked_gain_tenth_db,
+        );
+        match &measured {
+            Ok(measurement) => {
+                let _ = write!(
+                    text,
+                    "; measured un-ducked {} against ducked {} LUFS hundredths, a delta of {}",
+                    measurement.unducked_lufs_hundredths,
+                    measurement.ducked_lufs_hundredths,
+                    measurement.delta_hundredths,
+                );
+            }
+            Err(reason) => {
+                let _ = write!(text, "; measurement unavailable: {reason}");
+            }
+        }
+        let _ = write!(
+            text,
+            "; inspect the preview, then commit it at timeline revision {revision}"
+        );
+        Ok(success_structured(
+            text,
+            serde_json::json!({
+                "timeline_revision": revision.0,
+                "music_track": settings.music_track,
+                "dialogue_tracks": settings.dialogue_tracks,
+                "depth_tenth_db": settings.depth_tenth_db,
+                "attack_milliseconds": settings.attack_milliseconds,
+                "release_milliseconds": settings.release_milliseconds,
+                "hold_milliseconds": settings.hold_milliseconds,
+                "range": settings.range.as_ref().map(|range| serde_json::json!({
+                    "start_frame": range.start.0,
+                    "end_frame": range.end.0,
+                })),
+                "parked_gain_tenth_db": settings.parked_gain_tenth_db,
+                "ducked_gain_tenth_db": settings.ducked_gain_tenth_db,
+                "windows": ducked_windows
+                    .iter()
+                    .map(|window| serde_json::json!({
+                        "start_frame": window.start.0,
+                        "end_frame": window.end.0,
+                    }))
+                    .collect::<Vec<_>>(),
+                "skipped": skipped
+                    .iter()
+                    .map(|(clip, track, reason)| serde_json::json!({
+                        "clip": clip,
+                        "track": track,
+                        "reason": reason,
+                    }))
+                    .collect::<Vec<_>>(),
+                "keyframe_count": keyframe_count,
+                "measured": measured.as_ref().ok().map(|measurement| serde_json::json!({
+                    "unducked_lufs_hundredths": measurement.unducked_lufs_hundredths,
+                    "ducked_lufs_hundredths": measurement.ducked_lufs_hundredths,
+                    "delta_hundredths": measurement.delta_hundredths,
+                })),
+                "measurement_unavailable_reason": measured.as_ref().err(),
+                "prepared_edit_plan": {
+                    "plan_id": prepared.id,
+                    "expected_revision": revision,
+                    "preview": prepared.preview,
+                },
+            }),
+        ))
+    }
+
+    /// AU4 §6.1 rule 126: the spoken spans of the dialogue tracks, in project
+    /// frames, merged across tracks.
+    ///
+    /// Silence analysis is the primary evidence — a clip's spoken spans are
+    /// the complement of its silent spans inside its own project extent — and
+    /// any ready diarized transcript is unioned on top of it.
+    ///
+    /// A clip whose asset carries no audio stream at all is skipped with a
+    /// reason rather than read as speech: `request_silences` answers
+    /// `NoAudio` for it, `timeline_silences` returns nothing for it, and the
+    /// silence-first complement would otherwise turn "no audio" into "all
+    /// speech" over the clip's whole extent.
+    fn ducking_dialogue_spans(
+        &self,
+        document: &Document,
+        dialogue: &BTreeSet<TrackId>,
+    ) -> Result<DuckingDialogueEvidence, CallToolResult> {
+        let referenced = document
+            .tracks
+            .iter()
+            .filter(|track| dialogue.contains(&track.id))
+            .flat_map(|track| &track.clips)
+            .filter(|clip| clip.content.is_media())
+            .map(|clip| clip.asset)
+            .collect::<BTreeSet<_>>();
+        if referenced.is_empty() {
+            return Err(error_text(
+                "the dialogue tracks carry no media clip to read speech from",
+            ));
+        }
+        let mut no_audio = BTreeSet::new();
+        for asset in document
+            .media_pool
+            .iter()
+            .filter(|asset| referenced.contains(&asset.id))
+        {
+            match self.analysis.silence_status(asset) {
+                SilenceStatus::Ready(_) => {}
+                SilenceStatus::NoAudio => {
+                    no_audio.insert(asset.id);
+                }
+                status => {
+                    if status == SilenceStatus::NotRequested {
+                        self.analysis.request_silence_detection(asset.clone());
+                    }
+                    return Err(error_text(format!(
+                        "asset {} silence analysis is not ready: {}",
+                        asset.id,
+                        render_asset_silences(
+                            asset.id,
+                            &status,
+                            DUCKING_MINIMUM_SILENCE_FRAMES,
+                            None
+                        )
+                    )));
+                }
+            }
+        }
+        let silences =
+            match self
+                .analysis
+                .timeline_silences(document, None, DUCKING_MINIMUM_SILENCE_FRAMES)
+            {
+                Ok(silences) => silences,
+                Err(error) => return Err(error_text(error.to_string())),
+            };
+        let words = self
+            .analysis
+            .timeline_transcript(document, None)
+            .unwrap_or_default();
+        let skipped = document
+            .tracks
+            .iter()
+            .filter(|track| dialogue.contains(&track.id))
+            .flat_map(|track| track.clips.iter().map(move |clip| (track.id, clip)))
+            .filter(|(_, clip)| clip.content.is_media() && no_audio.contains(&clip.asset))
+            .map(|(track, clip)| {
+                (
+                    clip.id,
+                    track,
+                    format!(
+                        "asset {} carries no audio stream, so this clip cannot contain dialogue",
+                        clip.asset
+                    ),
+                )
+            })
+            .collect();
+        Ok((
+            dialogue_spoken_spans(document, dialogue, &silences, &words, &no_audio),
+            skipped,
+        ))
+    }
+
+    /// AU4 §6.1 rule 128: the un-ducked and ducked integrated loudness of the
+    /// music stem, measured on the candidate document over the longest flat
+    /// window of each kind.
+    fn measure_ducking(
+        &self,
+        candidate: &Document,
+        settings: &DuckingSettings,
+        ducked_windows: &[std::ops::Range<TimeCode>],
+        unducked_windows: &[std::ops::Range<TimeCode>],
+        document: &Document,
+    ) -> Result<DuckingMeasurement, String> {
+        let gating = gating_block_project_frames(document.fps);
+        let (ducked_window, unducked_window) =
+            ducking_measurement_windows(ducked_windows, unducked_windows, gating);
+        let ducked_window = ducked_window.ok_or_else(|| {
+            format!(
+                "no ducked window is {gating} project frames long, the one 400 ms loudness gating block the mix measurement needs"
+            )
+        })?;
+        let unducked_window = unducked_window.ok_or_else(|| {
+            format!(
+                "no un-ducked window is {gating} project frames long, the one 400 ms loudness gating block the mix measurement needs"
+            )
+        })?;
+        let ducked = self
+            .measure_track_loudness(candidate, settings.music_track, &ducked_window)
+            .ok_or_else(|| {
+                format!(
+                    "the music stem could not be measured over ducked frames {}..{}",
+                    ducked_window.start.0, ducked_window.end.0
+                )
+            })?;
+        let unducked = self
+            .measure_track_loudness(candidate, settings.music_track, &unducked_window)
+            .ok_or_else(|| {
+                format!(
+                    "the music stem could not be measured over un-ducked frames {}..{}",
+                    unducked_window.start.0, unducked_window.end.0
+                )
+            })?;
+        Ok(DuckingMeasurement {
+            unducked_lufs_hundredths: unducked,
+            ducked_lufs_hundredths: ducked,
+            delta_hundredths: i64::from(ducked) - i64::from(unducked),
+        })
+    }
+
+    /// One track stem's integrated loudness over one project window, through
+    /// the same real mix path `get_audio_levels` uses.
+    fn measure_track_loudness(
+        &self,
+        document: &Document,
+        track: TrackId,
+        window: &std::ops::Range<TimeCode>,
+    ) -> Option<i32> {
+        let report = self
+            .analysis
+            .mix_levels(
+                document,
+                &MixLevelRequest {
+                    range: Some(window.clone()),
+                },
+            )
+            .ok()?;
+        report
+            .tracks
+            .iter()
+            .find(|levels| levels.track == track)?
+            .levels
+            .integrated_lufs_hundredths
+    }
+
+    /// AU4 §6.2: propose head and tail audio fades on clips whose first or
+    /// last gating block peaks above the threshold.
+    ///
+    /// It emits `SetClipAudio` only — no curve, the existing gain and the
+    /// untouched fade carried through — and skips a clip shorter than the
+    /// measurement window with a per-clip reason rather than failing the plan
+    /// (rule 131).
+    #[allow(clippy::too_many_lines)]
+    fn plan_clip_fades(&self, args: &ClipFadesPlanArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let tracks = match clip_fade_tracks(&document, args.tracks.as_deref()) {
+            Ok(tracks) => tracks,
+            Err(error) => return Ok(error_text(error)),
+        };
+        let threshold = args
+            .threshold_dbfs_hundredths
+            .unwrap_or(DEFAULT_CLIP_FADE_THRESHOLD_DBFS_HUNDREDTHS);
+        let fade_milliseconds = args
+            .fade_milliseconds
+            .unwrap_or(DEFAULT_CLIP_FADE_MILLISECONDS);
+        // Rule 132's fade length is `ceil(fade_ms x fps / 1000)` and nothing
+        // else: `fade_milliseconds: 0` really does round to a 0-frame fade,
+        // and a 0-frame fade proposes nothing rather than being floored up
+        // into a 1-frame edit the caller did not ask for.
+        let fade_frames = milliseconds_to_project_frames(fade_milliseconds, document.fps);
+        let window_frames = gating_block_project_frames(document.fps);
+        let mut operations = Vec::new();
+        let mut planned = Vec::new();
+        let mut skipped = Vec::new();
+        // Rule 132's empty-plan reason has to be true. A clip counts here only
+        // when it was actually measured and the THRESHOLD is what refused it;
+        // a clip skipped short, silent, or over a fade the editor already set
+        // never reached the threshold at all, and saying nothing peaked above
+        // it would be a lie the structured content contradicts.
+        let mut rejected_on_threshold = 0usize;
+        for track in document
+            .tracks
+            .iter()
+            .filter(|track| tracks.contains(&track.id))
+        {
+            for clip in &track.clips {
+                if !clip.content.is_media() {
+                    continue;
+                }
+                if fade_frames == 0 {
+                    skipped.push((
+                        clip.id,
+                        track.id,
+                        "fade_milliseconds rounds to 0 frames at this fps".to_owned(),
+                    ));
+                    continue;
+                }
+                let duration = match document.clip_duration(clip) {
+                    Ok(duration) => duration,
+                    Err(error) => {
+                        skipped.push((clip.id, track.id, error.to_string()));
+                        continue;
+                    }
+                };
+                if duration.0 < window_frames {
+                    skipped.push((
+                        clip.id,
+                        track.id,
+                        format!(
+                            "clip is {} project frames, shorter than the {window_frames}-frame loudness gating block the mix measurement refuses to go under",
+                            duration.0
+                        ),
+                    ));
+                    continue;
+                }
+                let Some(end) = clip.timeline_start.checked_add(duration) else {
+                    skipped.push((
+                        clip.id,
+                        track.id,
+                        "clip end overflows the timeline".to_owned(),
+                    ));
+                    continue;
+                };
+                let head = clip.timeline_start..TimeCode(clip.timeline_start.0 + window_frames);
+                let tail = TimeCode(end.0 - window_frames)..end;
+                // Two full `mix_levels` renders per candidate clip, each one
+                // decode of a 400 ms range: a hundred-clip timeline costs 200
+                // passes. Rule 131 accepts that because the gating block is
+                // the shortest range the mix measurement will answer at all;
+                // rule 131's short-window RMS accessor, deferred to AU5 where
+                // repair work needs one anyway, is the way out and this loop
+                // is the caller waiting for it.
+                let (Some(head_peak), Some(tail_peak)) = (
+                    self.measure_track_true_peak(&document, track.id, &head),
+                    self.measure_track_true_peak(&document, track.id, &tail),
+                ) else {
+                    skipped.push((
+                        clip.id,
+                        track.id,
+                        "the track stem is silent over this clip's head or tail window".to_owned(),
+                    ));
+                    continue;
+                };
+                let mut fade_in = clip.audio_fade_in_frames;
+                let mut fade_out = clip.audio_fade_out_frames;
+                // Rule 132: never overwrite a fade the editor already set.
+                if head_peak > threshold && fade_in == TimeCode::ZERO {
+                    fade_in = TimeCode(fade_frames);
+                }
+                if tail_peak > threshold && fade_out == TimeCode::ZERO {
+                    fade_out = TimeCode(fade_frames);
+                }
+                let (fade_in, fade_out) = clamp_fade_pair(fade_in, fade_out, duration);
+                if fade_in == clip.audio_fade_in_frames && fade_out == clip.audio_fade_out_frames {
+                    if head_peak <= threshold || tail_peak <= threshold {
+                        rejected_on_threshold += 1;
+                    }
+                    continue;
+                }
+                operations.push(Operation::SetClipAudio {
+                    clip: clip.id,
+                    gain_tenth_db: clip.audio_gain_tenth_db,
+                    fade_in_frames: fade_in,
+                    fade_out_frames: fade_out,
+                });
+                planned.push(serde_json::json!({
+                    "clip": clip.id,
+                    "track": track.id,
+                    "head_true_peak_dbtp_hundredths": head_peak,
+                    "tail_true_peak_dbtp_hundredths": tail_peak,
+                    "fade_in_frames": fade_in.0,
+                    "fade_out_frames": fade_out.0,
+                }));
+            }
+        }
+        let skipped_value = skipped
+            .iter()
+            .map(|(clip, track, reason)| {
+                serde_json::json!({"clip": clip, "track": track, "reason": reason})
+            })
+            .collect::<Vec<_>>();
+        let mut body = serde_json::json!({
+            "timeline_revision": revision.0,
+            "tracks": tracks.iter().copied().collect::<Vec<_>>(),
+            "threshold_dbfs_hundredths": threshold,
+            "fade_milliseconds": fade_milliseconds,
+            "fade_frames": fade_frames,
+            "window_project_frames": window_frames,
+            "window_sample_frames": kinewright_media::LOUDNESS_GATING_BLOCK_FRAMES,
+            "clips": planned,
+            "skipped": skipped_value,
+            "prepared_edit_plan": serde_json::Value::Null,
+        });
+        if operations.is_empty() {
+            let threshold_clause = if rejected_on_threshold == 0 {
+                String::new()
+            } else {
+                format!(
+                    ": no clip head or tail peaks above {threshold} hundredths dBFS with a fade still at zero"
+                )
+            };
+            return Ok(success_structured(
+                format!(
+                    "nothing to propose{threshold_clause}; {} clip(s) were skipped and nothing was prepared",
+                    skipped.len()
+                ),
+                body,
+            ));
+        }
+        let operation_count = operations.len();
+        let prepared = match self.prepare_operations(revision, &document, operations) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "clip fade plan does not fit the current timeline: {error}"
+                )));
+            }
+        };
+        body["prepared_edit_plan"] = serde_json::json!({
+            "plan_id": prepared.id,
+            "expected_revision": revision,
+            "preview": prepared.preview,
+        });
+        Ok(success_structured(
+            format!(
+                "prepared {operation_count} clip audio fade change(s) of {fade_frames} project frame(s) as edit plan {}; {} clip(s) were skipped; commit it at timeline revision {revision}",
+                prepared.id,
+                skipped.len()
+            ),
+            body,
+        ))
+    }
+
+    /// One track stem's true peak over one project window, through the same
+    /// real mix path `get_audio_levels` uses.
+    fn measure_track_true_peak(
+        &self,
+        document: &Document,
+        track: TrackId,
+        window: &std::ops::Range<TimeCode>,
+    ) -> Option<i32> {
+        let report = self
+            .analysis
+            .mix_levels(
+                document,
+                &MixLevelRequest {
+                    range: Some(window.clone()),
+                },
+            )
+            .ok()?;
+        report
+            .tracks
+            .iter()
+            .find(|levels| levels.track == track)?
+            .levels
+            .true_peak_dbtp_hundredths
+    }
+}
+
+/// AU4 §6.1: the finest silence resolution the ducking planner reads, so a
+/// short breath inside a sentence still splits the spoken span before the
+/// hold extension merges it back (`get_dialogue_pacing` uses the same value).
+const DUCKING_MINIMUM_SILENCE_FRAMES: TimeCode = TimeCode(1);
+/// AU4 §6.1: the default duck depth under the parked fader, in tenth dB.
+const DEFAULT_DUCKING_DEPTH_TENTH_DB: i32 = -120;
+/// AU4 §6.1 rule 126: the default ramp down into a window, in milliseconds
+/// (5 project frames at 30 fps).
+const DEFAULT_DUCKING_ATTACK_MILLISECONDS: u32 = 150;
+/// AU4 §6.1 rule 126: the default ramp back out of a window, in milliseconds
+/// (12 project frames at 30 fps).
+const DEFAULT_DUCKING_RELEASE_MILLISECONDS: u32 = 400;
+/// AU4 §6.1 rule 126: the default floor extension past the last spoken frame,
+/// in milliseconds (6 project frames at 30 fps).
+const DEFAULT_DUCKING_HOLD_MILLISECONDS: u32 = 200;
+/// AU4 §6.2 rule 132: the default head/tail true peak above which a fade is
+/// proposed, in hundredths of dBFS.
+const DEFAULT_CLIP_FADE_THRESHOLD_DBFS_HUNDREDTHS: i32 = -4_000;
+/// AU4 §6.2 rule 132: the default proposed fade length in milliseconds
+/// (1 project frame at 30 fps).
+const DEFAULT_CLIP_FADE_MILLISECONDS: u32 = 20;
+/// AU4 §6.1 rule 128.1 / §6.2 rule 131: the rate `measure_mix_levels` works
+/// at, so [`kinewright_media::LOUDNESS_GATING_BLOCK_FRAMES`] (19,200 sample
+/// frames) is 400 ms. Media keeps its `AUDIO_RATE` private, so the agent
+/// restates it here, pins the pair in `au4_the_gating_block_is_400_ms`, and
+/// exports it so a real-engine test can pin it against the rate a decoded
+/// `AudioLoudness` actually reports.
+pub const MIX_MEASUREMENT_SAMPLE_RATE: u64 = 48_000;
+
+/// AU4 §6.1 rule 126: the dialogue tracks' spoken spans, plus the per-clip
+/// reason for every dialogue clip that contributed none of them.
+type DuckingDialogueEvidence = (
+    Vec<std::ops::Range<TimeCode>>,
+    Vec<(ClipId, TrackId, String)>,
+);
+
+/// AU4 §6.1: the validated, defaulted `plan_audio_ducking` request.
+#[derive(Debug)]
+struct DuckingSettings {
+    music_track: TrackId,
+    dialogue_tracks: Vec<TrackId>,
+    depth_tenth_db: i32,
+    attack_milliseconds: u32,
+    release_milliseconds: u32,
+    hold_milliseconds: u32,
+    attack_frames: i64,
+    release_frames: i64,
+    hold_frames: i64,
+    /// Rule 124: the stored scalar the curve is keyed relative to.
+    parked_gain_tenth_db: i32,
+    ducked_gain_tenth_db: i32,
+    range: Option<std::ops::Range<TimeCode>>,
+}
+
+/// AU4 §6.1 rule 129's `measured` triple.
+///
+/// Every field is a hundredth, which is the point: rule 129's structured
+/// content is integers only.
+#[derive(Debug)]
+#[allow(clippy::struct_field_names)]
+struct DuckingMeasurement {
+    unducked_lufs_hundredths: i32,
+    ducked_lufs_hundredths: i32,
+    delta_hundredths: i64,
+}
+
+/// AU4 §6.1: `ceil(milliseconds x fps / 1000)` in project frames.
+///
+/// At 30 fps the rule 126 defaults are 5 (150 ms), 12 (400 ms) and 6 (200 ms).
+fn milliseconds_to_project_frames(milliseconds: u32, fps: kinewright_core::Rational) -> i64 {
+    let numerator = u128::from(milliseconds).saturating_mul(u128::from(fps.numerator()));
+    let denominator = 1_000_u128.saturating_mul(u128::from(fps.denominator()));
+    i64::try_from(numerator.div_ceil(denominator)).unwrap_or(i64::MAX)
+}
+
+/// AU4 §6.1 rule 128.1 / §6.2 rule 131: one loudness gating block in project
+/// frames — 19,200 sample frames at 48 kHz, 400 ms, **12 project frames at
+/// 30 fps**.
+fn gating_block_project_frames(fps: kinewright_core::Rational) -> i64 {
+    let numerator = u128::from(kinewright_media::LOUDNESS_GATING_BLOCK_FRAMES)
+        .saturating_mul(u128::from(fps.numerator()));
+    let denominator =
+        u128::from(MIX_MEASUREMENT_SAMPLE_RATE).saturating_mul(u128::from(fps.denominator()));
+    i64::try_from(numerator.div_ceil(denominator)).unwrap_or(i64::MAX)
+}
+
+fn render_track_list(tracks: &[TrackId]) -> String {
+    tracks
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// AU4 §6.1 rules 124-126: validate and default one ducking request.
+fn ducking_settings(
+    document: &Document,
+    args: &AudioDuckingPlanArgs,
+) -> Result<DuckingSettings, String> {
+    if !document
+        .tracks
+        .iter()
+        .any(|track| track.id == args.music_track)
+    {
+        return Err(format!("track {} does not exist", args.music_track));
+    }
+    if args.dialogue_tracks.is_empty() {
+        return Err("dialogue_tracks must contain at least one track".to_owned());
+    }
+    let unique = args
+        .dialogue_tracks
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if unique.len() != args.dialogue_tracks.len() {
+        return Err("dialogue_tracks must not contain duplicates".to_owned());
+    }
+    for track in &unique {
+        if !document
+            .tracks
+            .iter()
+            .any(|candidate| candidate.id == *track)
+        {
+            return Err(format!("track {track} does not exist"));
+        }
+        if *track == args.music_track {
+            return Err(format!(
+                "track {track} is both the music track and a dialogue track"
+            ));
+        }
+    }
+    let range = match &args.range {
+        Some(range) => {
+            if range.start < TimeCode::ZERO
+                || range.end <= range.start
+                || range.end > document.duration
+            {
+                return Err(format!(
+                    "ducking range {}..{} is outside project range 0..{}",
+                    range.start.0, range.end.0, document.duration.0
+                ));
+            }
+            Some(range.start..range.end)
+        }
+        None => None,
+    };
+    let mix = document.track_mix(args.music_track);
+    // Rule 125: a silent whole-curve replace of an editor's ride is not
+    // recoverable from structured content, so it is refused by name.
+    if mix.gain_curve.is_some() && !args.replace {
+        return Err(format!(
+            "track {} already carries a gain curve; clear it or pass replace: true",
+            args.music_track
+        ));
+    }
+    let depth_tenth_db = args
+        .depth_tenth_db
+        .unwrap_or(DEFAULT_DUCKING_DEPTH_TENTH_DB);
+    // Rule 124: a duck ducks. A non-negative depth would key the music LOUDER
+    // under dialogue and still report it as a "ducked window" with a positive
+    // delta, so the sign is refused rather than reinterpreted.
+    if depth_tenth_db >= 0 {
+        return Err(format!(
+            "depth_tenth_db must be negative; got {depth_tenth_db}"
+        ));
+    }
+    let parked_gain_tenth_db = mix.gain_tenth_db;
+    // Rule 124: the ducked value is keyed RELATIVE to the parked scalar,
+    // because a curve replaces that scalar outright.
+    let ducked_gain_tenth_db = parked_gain_tenth_db
+        .saturating_add(depth_tenth_db)
+        .clamp(TRACK_MIX_GAIN_MIN, TRACK_MIX_GAIN_MAX);
+    // A track already parked on the floor clamps the ducked value back onto
+    // the parked one. The plan would then commit a no-op curve that still
+    // replaces the scalar (and trips rule 125 on the next call), coalesce the
+    // whole project into one fabricated "dialogue window", and report
+    // `measured: null` blaming the window length. Refuse instead.
+    if ducked_gain_tenth_db == parked_gain_tenth_db {
+        return Err(format!(
+            "depth_tenth_db {depth_tenth_db} leaves the music at its parked {parked_gain_tenth_db} tenth dB; nothing to duck"
+        ));
+    }
+    let attack_milliseconds = args
+        .attack_milliseconds
+        .unwrap_or(DEFAULT_DUCKING_ATTACK_MILLISECONDS);
+    let release_milliseconds = args
+        .release_milliseconds
+        .unwrap_or(DEFAULT_DUCKING_RELEASE_MILLISECONDS);
+    let hold_milliseconds = args
+        .hold_milliseconds
+        .unwrap_or(DEFAULT_DUCKING_HOLD_MILLISECONDS);
+    Ok(DuckingSettings {
+        music_track: args.music_track,
+        dialogue_tracks: unique.into_iter().collect(),
+        depth_tenth_db,
+        attack_milliseconds,
+        release_milliseconds,
+        hold_milliseconds,
+        attack_frames: milliseconds_to_project_frames(attack_milliseconds, document.fps),
+        release_frames: milliseconds_to_project_frames(release_milliseconds, document.fps),
+        hold_frames: milliseconds_to_project_frames(hold_milliseconds, document.fps),
+        parked_gain_tenth_db,
+        ducked_gain_tenth_db,
+        range,
+    })
+}
+
+/// Sort and merge half-open project spans, joining touching neighbours.
+fn merge_project_spans(
+    mut spans: Vec<std::ops::Range<TimeCode>>,
+) -> Vec<std::ops::Range<TimeCode>> {
+    spans.retain(|span| span.start < span.end);
+    spans.sort_by_key(|span| (span.start, span.end));
+    let mut merged: Vec<std::ops::Range<TimeCode>> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match merged.last_mut() {
+            Some(last) if span.start <= last.end => {
+                if span.end > last.end {
+                    last.end = span.end;
+                }
+            }
+            _ => merged.push(span),
+        }
+    }
+    merged
+}
+
+/// AU4 §6.1 rule 126: every dialogue track's spoken spans, in project frames.
+///
+/// A clip's spoken spans are the complement of its silent spans inside its own
+/// project extent; ready diarized transcript words are unioned on top, so a
+/// project that has a transcript but no usable silence analysis still ducks.
+fn dialogue_spoken_spans(
+    document: &Document,
+    dialogue: &BTreeSet<TrackId>,
+    silences: &[TimelineSilenceSpan],
+    words: &[TimelineTranscriptWord],
+    no_audio: &BTreeSet<AssetId>,
+) -> Vec<std::ops::Range<TimeCode>> {
+    let mut spoken = Vec::new();
+    for track in document
+        .tracks
+        .iter()
+        .filter(|track| dialogue.contains(&track.id))
+    {
+        for clip in &track.clips {
+            // `map_timeline_silences` skips a retimed clip, so its silent
+            // spans are unknown and its spoken spans cannot be derived. A
+            // clip whose asset has no audio stream is skipped for the
+            // opposite reason: its silences are not unknown, they are the
+            // whole clip, and no complement of them is speech.
+            if !clip.content.is_media()
+                || clip.speed_percent != 100
+                || no_audio.contains(&clip.asset)
+            {
+                continue;
+            }
+            let Ok(duration) = document.clip_duration(clip) else {
+                continue;
+            };
+            let Some(end) = clip.timeline_start.checked_add(duration) else {
+                continue;
+            };
+            let silent = merge_project_spans(
+                silences
+                    .iter()
+                    .filter(|span| span.track == track.id && span.clip == clip.id)
+                    .map(|span| {
+                        span.project_start.max(clip.timeline_start)..span.project_end.min(end)
+                    })
+                    .collect(),
+            );
+            let mut cursor = clip.timeline_start;
+            for span in silent {
+                if span.start > cursor {
+                    spoken.push(cursor..span.start);
+                }
+                cursor = cursor.max(span.end);
+            }
+            if cursor < end {
+                spoken.push(cursor..end);
+            }
+        }
+    }
+    for word in words.iter().filter(|word| dialogue.contains(&word.track)) {
+        spoken.push(word.project_start..word.project_end);
+    }
+    merge_project_spans(spoken)
+}
+
+/// AU4 §6.1 rule 126: extend each spoken span's end by the hold and merge the
+/// overlaps, giving the flat ducked floors `[a, b)`.
+///
+/// Two held spans merge when they touch *or* when the gap between them is
+/// shorter than `attack + release`: the release ramp out of the first window
+/// and the attack ramp into the second would otherwise cross inside that gap,
+/// putting two un-ducked keys around the second window's start and un-ducking
+/// the music in the middle of the next line of dialogue. At the 150/400/200 ms
+/// defaults that is every speech gap under 766 ms — the common case in real
+/// dialogue — so the merge is the difference between a ride and a stutter.
+fn ducking_windows(
+    spoken: &[std::ops::Range<TimeCode>],
+    hold_frames: i64,
+    attack_frames: i64,
+    release_frames: i64,
+    duration: TimeCode,
+) -> Vec<std::ops::Range<TimeCode>> {
+    let held = merge_project_spans(
+        spoken
+            .iter()
+            .map(|span| {
+                span.start..TimeCode(span.end.0.saturating_add(hold_frames).min(duration.0))
+            })
+            .collect(),
+    );
+    let ramps = attack_frames.saturating_add(release_frames);
+    let mut merged: Vec<std::ops::Range<TimeCode>> = Vec::with_capacity(held.len());
+    for span in held {
+        match merged.last_mut() {
+            Some(last) if span.start.0.saturating_sub(last.end.0) < ramps => {
+                if span.end > last.end {
+                    last.end = span.end;
+                }
+            }
+            _ => merged.push(span),
+        }
+    }
+    merged
+}
+
+/// AU4 §6.1 rule 126: the inclusive frame bounds every emitted key clamps
+/// into — `0..=duration - 1`, narrowed to `range` when one was given.
+fn ducking_key_bounds(
+    document: &Document,
+    range: Option<&std::ops::Range<TimeCode>>,
+) -> std::ops::RangeInclusive<i64> {
+    let high = document.duration.0.saturating_sub(1).max(0);
+    match range {
+        Some(range) => {
+            let low = range.start.0.clamp(0, high);
+            low..=range.end.0.saturating_sub(1).clamp(low, high)
+        }
+        None => 0..=high,
+    }
+}
+
+/// AU4 §6.1 rule 126: four `Linear` keys per merged span at
+/// `(a - attack, u) (a, d) (b, d) (b + release, u)`, clamped into `bounds`,
+/// deduped last-wins, and validated.
+///
+/// The one exception to last-wins is the upper bound. A window that reaches
+/// the end of the project — or straddles `range.end` — clamps both `(b, d)`
+/// and `(b + release, u)` onto `high`, and letting the release key win there
+/// would leave the whole final window ramping back *up* to `u` instead of
+/// sitting on the floor. The ducked value wins that collision, so the release
+/// key is simply not emitted when `b >= high`.
+fn ducking_curve(
+    windows: &[std::ops::Range<TimeCode>],
+    parked_gain_tenth_db: i32,
+    ducked_gain_tenth_db: i32,
+    attack_frames: i64,
+    release_frames: i64,
+    bounds: std::ops::RangeInclusive<i64>,
+) -> Result<AutomationCurve, String> {
+    let (low, high) = (*bounds.start(), *bounds.end());
+    let mut keyframes = Vec::with_capacity(windows.len().saturating_mul(4));
+    for window in windows {
+        let release_key = (window.end.0 < high).then(|| {
+            (
+                window.end.0.saturating_add(release_frames),
+                parked_gain_tenth_db,
+            )
+        });
+        for (at, value) in [
+            (
+                window.start.0.saturating_sub(attack_frames),
+                parked_gain_tenth_db,
+            ),
+            (window.start.0, ducked_gain_tenth_db),
+            (window.end.0, ducked_gain_tenth_db),
+        ]
+        .into_iter()
+        .chain(release_key)
+        {
+            keyframes.push(Keyframe {
+                at: TimeCode(at.clamp(low, high)),
+                value: i64::from(value),
+                interpolation: KeyframeInterpolation::Linear,
+            });
+        }
+    }
+    keyframes.sort_by_key(|keyframe| keyframe.at);
+    let mut deduped: Vec<Keyframe> = Vec::with_capacity(keyframes.len());
+    for keyframe in keyframes {
+        match deduped.last_mut() {
+            // Rule 126's dedupe is last-wins: a clamped key overwrites the one
+            // already sitting on that frame.
+            Some(last) if last.at == keyframe.at => *last = keyframe,
+            _ => deduped.push(keyframe),
+        }
+    }
+    let curve = AutomationCurve { keyframes: deduped };
+    curve
+        .validate()
+        .map_err(|error| format!("the ducking curve is not valid: {error}"))?;
+    Ok(curve)
+}
+
+/// AU4 §6.1 rule 128.2: the flat ducked and flat un-ducked spans of the curve
+/// that was actually emitted, in project frames.
+///
+/// A flat span is a consecutive pair of keyframes carrying the same value,
+/// plus the head before the first key and the tail after the last one, where
+/// an `AutomationCurve` holds its end values. Reading them off the curve —
+/// rather than off the merged spans the curve was built from — is what makes
+/// rule 128.2's "longest flat ducked/un-ducked window" literal: a key clamped
+/// into `bounds` at either end reshapes the curve, and a `windows` array or a
+/// measurement taken from the spans would describe a ride that was never
+/// committed.
+fn ducking_flat_spans(
+    curve: &AutomationCurve,
+    parked_gain_tenth_db: i32,
+    ducked_gain_tenth_db: i32,
+    duration: TimeCode,
+) -> (
+    Vec<std::ops::Range<TimeCode>>,
+    Vec<std::ops::Range<TimeCode>>,
+) {
+    fn record(
+        flats: &mut Vec<(std::ops::Range<TimeCode>, i64)>,
+        span: std::ops::Range<TimeCode>,
+        value: i64,
+    ) {
+        if span.end <= span.start {
+            return;
+        }
+        match flats.last_mut() {
+            Some((last, last_value)) if *last_value == value && last.end >= span.start => {
+                if span.end > last.end {
+                    last.end = span.end;
+                }
+            }
+            _ => flats.push((span, value)),
+        }
+    }
+
+    let mut flats: Vec<(std::ops::Range<TimeCode>, i64)> = Vec::new();
+    if let Some(first) = curve.keyframes.first() {
+        record(&mut flats, TimeCode::ZERO..first.at, first.value);
+    }
+    for pair in curve.keyframes.windows(2) {
+        if pair[0].value == pair[1].value {
+            record(&mut flats, pair[0].at..pair[1].at, pair[0].value);
+        }
+    }
+    if let Some(last) = curve.keyframes.last() {
+        record(&mut flats, last.at..duration, last.value);
+    }
+    let mut ducked = Vec::new();
+    let mut unducked = Vec::new();
+    for (span, value) in flats {
+        if value == i64::from(ducked_gain_tenth_db) {
+            ducked.push(span);
+        } else if value == i64::from(parked_gain_tenth_db) {
+            unducked.push(span);
+        }
+    }
+    (ducked, unducked)
+}
+
+/// AU4 §6.1 rule 128.2: the longest flat ducked window and the longest flat
+/// un-ducked window, each at least one gating block long.
+fn ducking_measurement_windows(
+    ducked: &[std::ops::Range<TimeCode>],
+    unducked: &[std::ops::Range<TimeCode>],
+    gating_frames: i64,
+) -> (
+    Option<std::ops::Range<TimeCode>>,
+    Option<std::ops::Range<TimeCode>>,
+) {
+    let longest = |candidates: &[std::ops::Range<TimeCode>]| {
+        candidates
+            .iter()
+            .filter(|window| window.end.0.saturating_sub(window.start.0) >= gating_frames)
+            .max_by_key(|window| window.end.0.saturating_sub(window.start.0))
+            .cloned()
+    };
+    (longest(ducked), longest(unducked))
+}
+
+/// AU4 §6.2: the tracks `plan_clip_fades` walks — the requested ones, or every
+/// track in the document.
+fn clip_fade_tracks(
+    document: &Document,
+    requested: Option<&[TrackId]>,
+) -> Result<BTreeSet<TrackId>, String> {
+    let Some(requested) = requested else {
+        return Ok(document.tracks.iter().map(|track| track.id).collect());
+    };
+    if requested.is_empty() {
+        return Err("tracks must contain at least one track when it is given".to_owned());
+    }
+    let unique = requested.iter().copied().collect::<BTreeSet<_>>();
+    if unique.len() != requested.len() {
+        return Err("tracks must not contain duplicates".to_owned());
+    }
+    for track in &unique {
+        if !document
+            .tracks
+            .iter()
+            .any(|candidate| candidate.id == *track)
+        {
+            return Err(format!("track {track} does not exist"));
+        }
+    }
+    Ok(unique)
+}
+
+/// AU4 §6.2 rule 132: clamp the proposed pair so the two fades never overlap
+/// or overrun the clip.
+fn clamp_fade_pair(
+    fade_in: TimeCode,
+    fade_out: TimeCode,
+    duration: TimeCode,
+) -> (TimeCode, TimeCode) {
+    let fade_in = TimeCode(fade_in.0.clamp(0, duration.0));
+    let fade_out = TimeCode(fade_out.0.clamp(0, duration.0 - fade_in.0));
+    (fade_in, fade_out)
 }
 
 fn beat_montage_analysis_state(
@@ -9059,6 +10151,58 @@ struct AudioNormalizationPlanArgs {
     /// Accepted measured loudness error in hundredths of LU. Defaults to 100.
     #[serde(default = "default_loudness_tolerance_hundredths")]
     tolerance_hundredths: u16,
+}
+
+/// AU4 §6.1: arguments for `plan_audio_ducking`.
+///
+/// `deny_unknown_fields` closes the schema: a misspelled `depth_tenth_db` must
+/// refuse rather than silently duck by the default 12 dB.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AudioDuckingPlanArgs {
+    /// The music track whose gain automation this plan replaces.
+    music_track: TrackId,
+    /// The dialogue tracks whose spoken spans define the duck windows.
+    dialogue_tracks: Vec<TrackId>,
+    /// How far under the parked fader the music sits while dialogue plays, in
+    /// tenths of a decibel; negative. Defaults to -120.
+    #[serde(default)]
+    depth_tenth_db: Option<i32>,
+    /// Ramp down into each window, in milliseconds. Defaults to 150.
+    #[serde(default)]
+    attack_milliseconds: Option<u32>,
+    /// Ramp back up out of each window, in milliseconds. Defaults to 400.
+    #[serde(default)]
+    release_milliseconds: Option<u32>,
+    /// How long the floor is held past the last spoken frame, in
+    /// milliseconds. Defaults to 200.
+    #[serde(default)]
+    hold_milliseconds: Option<u32>,
+    /// Optional half-open project-frame window. It restricts which dialogue
+    /// spans are considered and clamps the emitted curve; it never restricts
+    /// the measurement, and a window straddling its end keeps the music on the
+    /// floor to the end of the project, because a curve holds its last value.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+    /// Replace an existing gain curve on the music track instead of refusing.
+    #[serde(default)]
+    replace: bool,
+}
+
+/// AU4 §6.2: arguments for `plan_clip_fades`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ClipFadesPlanArgs {
+    /// Tracks to consider. Omit for every track in the document.
+    #[serde(default)]
+    tracks: Option<Vec<TrackId>>,
+    /// Head/tail true-peak level above which a fade is proposed, in
+    /// hundredths of dBFS. Defaults to -4000.
+    #[serde(default)]
+    threshold_dbfs_hundredths: Option<i32>,
+    /// Proposed fade length in milliseconds. Defaults to 20.
+    #[serde(default)]
+    fade_milliseconds: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -10144,10 +11288,29 @@ fn inspector_tools() -> Vec<Tool> {
             schema_object::<SpeakerMulticamPlanArgs>(),
         )
         .with_annotations(read_only()),
+        // AU4 §6.1: the ducking planner's first sentence carries the two facts
+        // an agent must know before it commits — that the plan REPLACES the
+        // music track's gain automation, and that the measurement can come
+        // back null — because `get_capability` and `search_capabilities`
+        // publish only `first_sentence(description)` (runtime.rs:184-190).
+        Tool::new(
+            "plan_audio_ducking",
+            "Build one revision-gated music-under-dialogue gain ride that REPLACES the music track's whole gain automation, keyed relative to that track's parked fader so an already-trimmed music level survives, refused by name when a gain curve already exists unless replace is true, and reporting measured as null with a stated reason - while still committing the curve - when no flat window reaches the 400 ms loudness gating block. Dialogue windows come from the selected dialogue tracks' silence analysis and any ready diarized transcript, merged in project frames and extended by hold_milliseconds; each merged window gets four linear keys, at attack before its start, at its start, at its end, and at release after its end. An optional range restricts which dialogue spans are considered and clamps the emitted curve; it never restricts the measurement. It emits exactly one SetTrackAutomation on gain_tenth_db, raises no confirmation because it removes nothing, and mutates nothing until commit_edit_plan.",
+            schema_object::<AudioDuckingPlanArgs>(),
+        )
+        .with_annotations(read_only()),
         Tool::new(
             "plan_audio_normalization",
             "Measure the rendered timeline mix, build compressor/gain/true-peak-limiter processing with lossy-codec peak headroom for selected source tracks, render and remeasure the candidate in memory, and return a revision-gated plan only when it meets the requested LUFS target and sample-peak ceiling, on a bus that declares 5 ms of lookahead so a running playback stops and re-cues once when the plan is committed.",
             schema_object::<AudioNormalizationPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        // AU4 §6.2: the fade planner's first sentence carries the skip rule and
+        // the never-overwrite rule, for the same reason.
+        Tool::new(
+            "plan_clip_fades",
+            "Propose short audio fade-in and fade-out frame counts on media clips whose head or tail window peaks above threshold_dbfs_hundredths, emitting set_clip_audio only - never adding a curve, never overwriting a fade that is already non-zero - and skipping any clip shorter than that window with a per-clip reason in structured content instead of failing the whole plan. The window is exactly one loudness gating block - 19,200 sample frames at 48 kHz, 12 project frames at 30 fps - because the mix measurement refuses any shorter range, and the decision reads the track stem's true peak over it. Each proposal carries that clip's existing gain and its untouched fade through, and clamps the pair so fade_in plus fade_out never exceeds the clip duration. Returns an opaque prepared_edit_plan preview; the timeline is unchanged until commit_edit_plan.",
+            schema_object::<ClipFadesPlanArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -13860,10 +15023,11 @@ mod tests {
         ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, FrameTexture, Marker,
         MarkerId, MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus,
         MediaCacheClearResult, MediaCacheFamily, MediaCacheInventory, MediaError, MediaEvent,
-        MediaKind, MediaSourceFingerprint, MonitorProof, MonitorProofMetadata, ParamValue,
-        Rational, RgbaImage, STREAMING_PLATFORM_TARGET, SceneChange, SceneStatus, SilenceSpan,
-        SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Title, Track, TrackId, TrackKind,
-        TranscriptWord, VisualAssetResult, audio_qc_exceptions, audio_qc_technical_pass,
+        MediaKind, MediaSourceFingerprint, MixLevelReport, MonitorProof, MonitorProofMetadata,
+        ParamValue, Rational, RgbaImage, STREAMING_PLATFORM_TARGET, SceneChange, SceneStatus,
+        SilenceSpan, SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Title, Track,
+        TrackId, TrackKind, TrackLevels, TrackMix, TranscriptWord, VisualAssetResult,
+        audio_qc_exceptions, audio_qc_technical_pass,
     };
     use serde_json::json;
     use std::{
@@ -13908,12 +15072,26 @@ mod tests {
         /// AU3 §4.1: what this double answers `audio_qc` with. `None` keeps
         /// the trait's `NotImplemented` default.
         audio_qc: Option<AudioQcDouble>,
+        /// AU4 §6.1: which assets this double reports as silence-Ready, so the
+        /// ducking planner's readiness refusal has both branches.
+        silence_ready: BTreeSet<AssetId>,
+        /// AU4 §6.1: the project-frame silence spans the planner complements
+        /// into spoken spans.
+        timeline_silences: Vec<TimelineSilenceSpan>,
+        /// AU4 §6.1 / §6.2: a scripted `Analysis::mix_levels`, so the two
+        /// planners' measurement arms are pinned without a decoder.
+        mix_levels: Option<MixLevelsDouble>,
     }
 
     /// AU3 §4.1: a scripted `Analysis::audio_qc`, so the agent's refusal
     /// texts and its envelope are pinned without a decoder.
     type AudioQcDouble =
         Box<dyn Fn(&AudioQcRequest) -> Result<AudioQcReport, MediaError> + Send + Sync>;
+
+    /// AU4 §6.1 / §6.2: a scripted `Analysis::mix_levels`.
+    type MixLevelsDouble = Box<
+        dyn Fn(&Document, &MixLevelRequest) -> Result<MixLevelReport, MediaError> + Send + Sync,
+    >;
 
     impl Playback for NoopMedia {
         fn set_document(&self, _doc: Arc<Document>) {}
@@ -14014,7 +15192,25 @@ mod tests {
 
         fn request_silence_detection(&self, _asset: MediaAsset) {}
 
-        fn silence_status(&self, _asset: &MediaAsset) -> SilenceStatus {
+        fn silence_status(&self, asset: &MediaAsset) -> SilenceStatus {
+            // `request_silences` answers `NoAudio` for any asset that is not
+            // `Audio` or `AudioVideo` (kinewright-media `derived.rs`), and
+            // never `Ready`; the double mirrors that, so the ducking
+            // planner's video-only branch is reachable here.
+            if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
+                return SilenceStatus::NoAudio;
+            }
+            if self.silence_ready.contains(&asset.id) {
+                return SilenceStatus::Ready(Arc::new(AssetSilences {
+                    asset: asset.id,
+                    content_sha256: String::new(),
+                    source_fps: asset.fps,
+                    source_frames: asset.duration,
+                    threshold_dbfs_hundredths: -3_500,
+                    window_milliseconds: 10,
+                    spans: Vec::new(),
+                }));
+            }
             SilenceStatus::NotRequested
         }
 
@@ -14024,7 +15220,19 @@ mod tests {
             _range: Option<std::ops::Range<TimeCode>>,
             _minimum_source_frames: TimeCode,
         ) -> Result<Vec<TimelineSilenceSpan>, MediaError> {
-            Ok(Vec::new())
+            Ok(self.timeline_silences.clone())
+        }
+
+        fn mix_levels(
+            &self,
+            document: &Document,
+            request: &MixLevelRequest,
+        ) -> Result<MixLevelReport, MediaError> {
+            self.mix_levels
+                .as_ref()
+                .map_or(Err(MediaError::NotImplemented), |double| {
+                    double(document, request)
+                })
         }
 
         fn audio_qc(
@@ -19484,7 +20692,7 @@ mod tests {
                 "{name} must be read-only"
             );
         }
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 78);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 80);
 
         // M36: every colour planner and every CC5 tool stays inside the
         // kilobyte description budget, measured on the *registered* descriptor
@@ -19506,6 +20714,9 @@ mod tests {
             "track_reframe_subject",
             "get_color_qc",
             "get_audio_qc",
+            // AU4 §6.3 rule 135: both Part B planners join the same budget.
+            "plan_audio_ducking",
+            "plan_clip_fades",
         ] {
             let tool = tools.iter().find(|tool| tool.name == name).unwrap();
             let description = tool.description.as_deref().unwrap_or_default();
@@ -21907,25 +23118,68 @@ mod tests {
         // Served is byte-identical for the ninth consecutive measurement:
         // neither new tool is served, and the seven served tools embed no
         // `Operation` schema at all, so even a model change cannot reach them.
+        //
+        // AU4 §6.3 Part B adds two planners, `plan_audio_ducking` and
+        // `plan_clip_fades`, so 54 generated operations + 80 inspectors = 134
+        // and the registry grows by 5,318 B to 1,524,370 B = 1,389,434 B of
+        // input schemas + 112,948 B of descriptions.
+        //
+        // Unlike Part A this costs nothing outside the two new rows. Neither
+        // planner touches the `Operation` model, and a planner's arguments
+        // embed no `Operation` at all, so no pre-existing tool moves a byte
+        // and the split is simply the two tools whole:
+        //
+        //   +3,146 B  input schemas: `AudioDuckingPlanArgs` 2,391 B and
+        //             `ClipFadesPlanArgs` 755 B, both `deny_unknown_fields`
+        //             and both embedding only `TrackId`, `TimeCode` and the
+        //             shared `TranscriptRangeArgs` shape;
+        //   +1,845 B  descriptions: 1,000 B of `plan_audio_ducking`'s prose
+        //             and 845 B of `plan_clip_fades`', each under rule 135's
+        //             1,024 B budget and each carrying its load-bearing
+        //             clause in the FIRST sentence, because `get_capability`
+        //             and `search_capabilities` publish only
+        //             `first_sentence(description)`. The fade row is 14 B
+        //             heavier than the first measurement: "emitting
+        //             set_clip_audio only" moved out of the third sentence,
+        //             which no compact surface publishes, into the first.
+        //
+        // The ducking row is 137 B heavier than the first measurement, and
+        // every byte is a FIELD doc comment rather than prose: +10 B on
+        // `depth_tenth_db` for the sign it now refuses, and +127 B on `range`
+        // for the straddling window that holds the floor to the end of the
+        // project (126 B of text plus one escaped newline, because schemars
+        // joins a doc comment's lines). A field doc is billed to the input
+        // schema column, not the description column, which is why the
+        // description total does not move: the two descriptions are byte for
+        // byte what they were, and rule 135's 24 B of remaining budget was
+        // never spent.
+        //
+        // So 3,146 + 1,845 = 4,991 B of schema-plus-description against
+        // 5,318 B serialized; the remaining 327 B are the two rows' names,
+        // annotations and JSON envelopes (3,556 + 1,762 = 5,318 B measured
+        // whole), unchanged by either move because a row's envelope does not
+        // grow with its payload. Served is byte-identical for the tenth
+        // consecutive measurement: a planner is registry-only, reached
+        // through `invoke_capability`, whose argument schema is generic.
         assert_eq!(
             (
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_519_052, 5_660),
+            (1_524_370, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_386_288,
+            registry_metrics.input_schema_bytes, 1_389_434,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 111_103,
+            registry_metrics.description_bytes, 112_948,
             "registry={registry_metrics:?}"
         );
-        // AU2 §6.4/B15, AU3 §4.2/A16, AU3 §6.4/B13 and AU4 §4.3/A19: the
-        // served quad, byte-identical to CC6's through every part of both
-        // programmes.
+        // AU2 §6.4/B15, AU3 §4.2/A16, AU3 §6.4/B13, AU4 §4.3/A19 and
+        // AU4 §6.3/B13: the served quad, byte-identical to CC6's through
+        // every part of both programmes.
         assert_eq!(
             (
                 served_metrics.tool_count,
@@ -25216,5 +26470,1163 @@ mod tests {
             audio_verification: None,
             audio_verification_unavailable_reason: None,
         }
+    }
+
+    // -----------------------------------------------------------------
+    // AU4 §6.1 / §6.2 Part B: the two envelope planners.
+    // -----------------------------------------------------------------
+
+    /// AU4 §6.1 rule 130's shape without a decoder: a 360-frame (12 s at
+    /// 30 fps) document with a music track 1 and a dialogue track 2.
+    fn au4_ducking_document() -> Document {
+        let asset = MediaAsset {
+            id: AssetId(1),
+            path: PathBuf::from("duck.mp4"),
+            name: "duck".to_owned(),
+            duration: TimeCode(360),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::AudioVideo,
+            resolution: Some((320, 180)),
+            source_fingerprint: MediaSourceFingerprint::default(),
+            color_description: ColorDescription::default(),
+        };
+        let clip = |id: u64| Clip {
+            id: ClipId(id),
+            asset: AssetId(1),
+            source_range: TimeCode::ZERO..TimeCode(360),
+            content: kinewright_core::ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+            audio_gain_curve: None,
+        };
+        Document {
+            catalog: kinewright_core::MediaCatalog::default(),
+            audio_mix: kinewright_core::AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
+            lut_assets: Vec::new(),
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Audio,
+                    sync_lock: false,
+                    clips: vec![clip(1)],
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: false,
+                    clips: vec![clip(2)],
+                },
+            ],
+            media_pool: vec![asset],
+            markers: Vec::new(),
+            fps: Rational::new(30, 1).unwrap(),
+            resolution: (320, 180),
+            duration: TimeCode(360),
+        }
+    }
+
+    /// Silence evidence on the dialogue clip, in project frames.
+    fn au4_silence_spans(spans: &[(i64, i64)]) -> Vec<TimelineSilenceSpan> {
+        spans
+            .iter()
+            .map(|(start, end)| TimelineSilenceSpan {
+                asset: AssetId(1),
+                track: TrackId(2),
+                clip: ClipId(2),
+                source_start: TimeCode(*start),
+                source_end: TimeCode(*end),
+                project_start: TimeCode(*start),
+                project_end: TimeCode(*end),
+            })
+            .collect()
+    }
+
+    fn au4_ducking_args(replace: bool) -> AudioDuckingPlanArgs {
+        AudioDuckingPlanArgs {
+            music_track: TrackId(1),
+            dialogue_tracks: vec![TrackId(2)],
+            depth_tenth_db: None,
+            attack_milliseconds: None,
+            release_milliseconds: None,
+            hold_milliseconds: None,
+            range: None,
+            replace,
+        }
+    }
+
+    /// A scripted `mix_levels` that answers every track with one loudness and
+    /// records the ranges it was asked for.
+    fn au4_mix_levels_double(
+        calls: Arc<Mutex<Vec<std::ops::Range<TimeCode>>>>,
+        loudness: i32,
+        true_peak: i32,
+    ) -> MixLevelsDouble {
+        Box::new(move |document: &Document, request: &MixLevelRequest| {
+            let range = request
+                .range
+                .clone()
+                .unwrap_or(TimeCode::ZERO..document.duration);
+            calls.lock().unwrap().push(range.clone());
+            Ok(MixLevelReport {
+                range,
+                any_solo: false,
+                tracks: document
+                    .tracks
+                    .iter()
+                    .map(|track| TrackLevels {
+                        track: track.id,
+                        kind: track.kind,
+                        mix: document.track_mix(track.id),
+                        audible: true,
+                        bus: None,
+                        levels: AudioLoudness {
+                            integrated_lufs_hundredths: Some(loudness),
+                            sample_peak_dbfs_hundredths: Some(true_peak),
+                            sample_rate: 48_000,
+                            channels: 2,
+                            sample_frames: 19_200,
+                            momentary_max_lufs_hundredths: None,
+                            short_term_max_lufs_hundredths: None,
+                            loudness_range_lu_hundredths: None,
+                            true_peak_dbtp_hundredths: Some(true_peak),
+                        },
+                    })
+                    .collect(),
+                buses: Vec::new(),
+                master: AudioLoudness {
+                    integrated_lufs_hundredths: Some(loudness),
+                    sample_peak_dbfs_hundredths: Some(true_peak),
+                    sample_rate: 48_000,
+                    channels: 2,
+                    sample_frames: 19_200,
+                    momentary_max_lufs_hundredths: None,
+                    short_term_max_lufs_hundredths: None,
+                    loudness_range_lu_hundredths: None,
+                    true_peak_dbtp_hundredths: Some(true_peak),
+                },
+            })
+        })
+    }
+
+    fn au4_service(document: Document, analysis: NoopMedia) -> KinewrightMcp {
+        let core = Core::spawn(document).unwrap();
+        let playback: Arc<dyn Playback> = Arc::new(NoopMedia::default());
+        KinewrightMcp::configured(
+            core,
+            playback,
+            Arc::new(analysis),
+            None,
+            ConfirmationBroker::default(),
+            false,
+            Arc::new(RwLock::new(None)),
+        )
+    }
+
+    /// AU4 §7 B11, rule 126: the merged windows and the four `Linear` keys per
+    /// window, at the 5 / 12 / 6 frames the 150 / 400 / 200 ms defaults give at
+    /// 30 fps.
+    #[test]
+    fn au4_ducking_windows_carry_four_linear_keys_per_merged_span() {
+        let fps = Rational::new(30, 1).unwrap();
+        assert_eq!(milliseconds_to_project_frames(150, fps), 5, "attack");
+        assert_eq!(milliseconds_to_project_frames(400, fps), 12, "release");
+        assert_eq!(milliseconds_to_project_frames(200, fps), 6, "hold");
+
+        let document = au4_ducking_document();
+        let dialogue = BTreeSet::from([TrackId(2)]);
+        // Speech from 2.0 s to 4.0 s is the complement of the two silent
+        // spans around it.
+        let spoken = dialogue_spoken_spans(
+            &document,
+            &dialogue,
+            &au4_silence_spans(&[(0, 60), (120, 360)]),
+            &[],
+            &BTreeSet::new(),
+        );
+        assert_eq!(spoken, vec![TimeCode(60)..TimeCode(120)]);
+
+        let windows = ducking_windows(&spoken, 6, 5, 12, document.duration);
+        assert_eq!(
+            windows,
+            vec![TimeCode(60)..TimeCode(126)],
+            "the hold extends the floor 6 frames past the last spoken frame"
+        );
+        let curve = ducking_curve(
+            &windows,
+            0,
+            -120,
+            5,
+            12,
+            ducking_key_bounds(&document, None),
+        )
+        .unwrap();
+        assert_eq!(
+            curve
+                .keyframes
+                .iter()
+                .map(|key| (key.at.0, key.value, key.interpolation))
+                .collect::<Vec<_>>(),
+            vec![
+                (55, 0, KeyframeInterpolation::Linear),
+                (60, -120, KeyframeInterpolation::Linear),
+                (126, -120, KeyframeInterpolation::Linear),
+                (138, 0, KeyframeInterpolation::Linear),
+            ],
+            "(a - attack, u) (a, d) (b, d) (b + release, u)"
+        );
+        // The floor really is flat over `[a, b)`: rule 128.2's premise.
+        assert_eq!(curve.value_at(TimeCode(60)), Some(-120));
+        assert_eq!(curve.value_at(TimeCode(125)), Some(-120));
+
+        // Two spans whose held floors touch merge into one window.
+        assert_eq!(
+            ducking_windows(
+                &[TimeCode(60)..TimeCode(120), TimeCode(124)..TimeCode(180),],
+                6,
+                5,
+                12,
+                document.duration,
+            ),
+            vec![TimeCode(60)..TimeCode(186)]
+        );
+        // Every key clamps into `0..=duration - 1`, so a span at the head of
+        // the project cannot key a negative frame.
+        let clamped = ducking_curve(
+            &[TimeCode(0)..TimeCode(20)],
+            0,
+            -120,
+            5,
+            12,
+            ducking_key_bounds(&document, None),
+        )
+        .unwrap();
+        assert_eq!(clamped.keyframes[0].at, TimeCode(0));
+        assert_eq!(
+            clamped.keyframes[0].value, -120,
+            "dedupe is last-wins, so the clamped floor key wins the frame"
+        );
+        assert_eq!(clamped.keyframes.len(), 3);
+    }
+
+    /// AU4 §7 B11, rule 124: the curve is keyed RELATIVE to the stored scalar.
+    ///
+    /// A planner that keyed around `0 / depth` on a track the editor had
+    /// already pulled to -60 dB would raise the un-ducked music by 60 dB.
+    #[test]
+    fn au4_ducking_keys_relative_to_the_parked_scalar() {
+        for (parked, depth, expected) in [
+            (0, -120, -120),
+            (-350, -120, -470),
+            // Parked at the ceiling: the duck is still 12 dB down from it.
+            (120, -120, 0),
+            // Clamped at the floor, but still 4.5 dB under the parked level.
+            (-555, -120, -600),
+        ] {
+            let mut document = au4_ducking_document();
+            document.audio_mix.tracks.push(TrackMix {
+                gain_tenth_db: parked,
+                ..TrackMix::neutral(TrackId(1))
+            });
+            let settings = ducking_settings(
+                &document,
+                &AudioDuckingPlanArgs {
+                    depth_tenth_db: Some(depth),
+                    ..au4_ducking_args(false)
+                },
+            )
+            .unwrap();
+            assert_eq!(settings.parked_gain_tenth_db, parked);
+            assert_eq!(
+                settings.ducked_gain_tenth_db, expected,
+                "parked {parked} + depth {depth}"
+            );
+        }
+        // A non-negative "depth" would key the music LOUDER under dialogue and
+        // report it as a ducked window, so it is refused by name.
+        let mut document = au4_ducking_document();
+        document.audio_mix.tracks.push(TrackMix {
+            gain_tenth_db: 120,
+            ..TrackMix::neutral(TrackId(1))
+        });
+        for depth in [200, 0] {
+            assert_eq!(
+                ducking_settings(
+                    &document,
+                    &AudioDuckingPlanArgs {
+                        depth_tenth_db: Some(depth),
+                        ..au4_ducking_args(false)
+                    },
+                )
+                .unwrap_err(),
+                format!("depth_tenth_db must be negative; got {depth}"),
+            );
+        }
+    }
+
+    /// AU4 §7 B11, rule 124: a duck that leaves the music where it was parked
+    /// is refused rather than committed as a no-op curve.
+    ///
+    /// A track already parked on the -60 dB floor clamps `parked + depth` back
+    /// onto `parked`. `ducking_flat_spans` then tests `value == ducked` first,
+    /// so every flat span lands in `ducked`, `unducked` comes back empty, and
+    /// the plan commits a scalar-replacing no-op, fabricates one "dialogue
+    /// window" over the whole project, and blames the null measurement on the
+    /// window length.
+    #[test]
+    fn au4_ducking_refuses_a_depth_that_leaves_the_music_at_its_parked_level() {
+        let mut document = au4_ducking_document();
+        document.audio_mix.tracks.push(TrackMix {
+            gain_tenth_db: -600,
+            ..TrackMix::neutral(TrackId(1))
+        });
+        assert_eq!(
+            ducking_settings(
+                &document,
+                &AudioDuckingPlanArgs {
+                    depth_tenth_db: Some(-120),
+                    ..au4_ducking_args(false)
+                },
+            )
+            .unwrap_err(),
+            "depth_tenth_db -120 leaves the music at its parked -600 tenth dB; nothing to duck",
+        );
+    }
+
+    /// AU4 §7 B11, rules 125 and 127: an existing gain curve is refused by
+    /// name unless `replace: true`, and an envelope-only plan raises no
+    /// confirmation.
+    #[test]
+    fn au4_plan_audio_ducking_refuses_an_existing_gain_curve_unless_replace() {
+        let mut document = au4_ducking_document();
+        document.audio_mix.tracks.push(TrackMix {
+            gain_curve: Some(AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode::ZERO,
+                    value: -50,
+                    interpolation: KeyframeInterpolation::Linear,
+                }],
+            }),
+            ..TrackMix::neutral(TrackId(1))
+        });
+        let analysis = NoopMedia {
+            silence_ready: BTreeSet::from([AssetId(1)]),
+            timeline_silences: au4_silence_spans(&[(0, 60), (120, 360)]),
+            mix_levels: Some(au4_mix_levels_double(
+                Arc::new(Mutex::new(Vec::new())),
+                -1_600,
+                -300,
+            )),
+            ..NoopMedia::default()
+        };
+        let service = au4_service(document.clone(), analysis);
+
+        let refused = service
+            .plan_audio_ducking(&au4_ducking_args(false))
+            .unwrap();
+        assert_eq!(refused.is_error, Some(true), "{refused:?}");
+        assert_eq!(
+            refused.content[0].as_text().unwrap().text,
+            "track 1 already carries a gain curve; clear it or pass replace: true"
+        );
+
+        let replaced = service.plan_audio_ducking(&au4_ducking_args(true)).unwrap();
+        assert_eq!(replaced.is_error, Some(false), "{replaced:?}");
+        let body = replaced.structured_content.as_ref().unwrap();
+        assert_eq!(body["keyframe_count"], 4);
+        assert!(!body["prepared_edit_plan"]["plan_id"].is_null(), "{body}");
+
+        // Rule 127: `plan_confirmation_description` fires only on clip or
+        // track removal, so an envelope-only plan raises none.
+        assert_eq!(
+            plan_confirmation_description(
+                &document,
+                &[Operation::SetTrackAutomation {
+                    track: TrackId(1),
+                    parameter: TRACK_AUTOMATION_PARAMETERS[0].to_owned(),
+                    curve: Some(AutomationCurve {
+                        keyframes: vec![Keyframe {
+                            at: TimeCode::ZERO,
+                            value: 0,
+                            interpolation: KeyframeInterpolation::Linear,
+                        }],
+                    }),
+                }],
+            ),
+            None
+        );
+    }
+
+    /// AU4 §7 B11, rule 128.2: a 100 ms speech span gives a 300 ms floor, one
+    /// gating block short, so `measured` is null with a reason — and the plan
+    /// still commits.
+    #[test]
+    fn au4_plan_audio_ducking_reports_measured_null_on_a_short_window() {
+        let document = au4_ducking_document();
+        let analysis = NoopMedia {
+            silence_ready: BTreeSet::from([AssetId(1)]),
+            // 100 ms of speech at 30 fps is 3 frames; 3 + 6 hold = 9 < 12.
+            timeline_silences: au4_silence_spans(&[(0, 60), (63, 360)]),
+            mix_levels: Some(au4_mix_levels_double(
+                Arc::new(Mutex::new(Vec::new())),
+                -1_600,
+                -300,
+            )),
+            ..NoopMedia::default()
+        };
+        let service = au4_service(document, analysis);
+        let planned = service
+            .plan_audio_ducking(&au4_ducking_args(false))
+            .unwrap();
+        assert_eq!(planned.is_error, Some(false), "{planned:?}");
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(
+            body["windows"],
+            json!([{"start_frame": 60, "end_frame": 69}])
+        );
+        assert_eq!(body["measured"], serde_json::Value::Null);
+        let reason = body["measurement_unavailable_reason"].as_str().unwrap();
+        assert!(
+            reason.contains("no ducked window is 12 project frames long"),
+            "{reason}"
+        );
+        assert!(
+            !body["prepared_edit_plan"]["plan_id"].is_null(),
+            "the curve is still correct and still worth committing: {body}"
+        );
+        assert!(
+            planned.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("measurement unavailable"),
+            "{planned:?}"
+        );
+
+        // Rule 128.2's stated floor: 200 ms of speech at the 200 ms hold is
+        // exactly one gating block, and it does measure — read, like the
+        // planner reads it, off the emitted curve rather than off the span.
+        let curve = ducking_curve(
+            &[TimeCode(60)..TimeCode(72)],
+            0,
+            -120,
+            5,
+            12,
+            ducking_key_bounds(&au4_ducking_document(), None),
+        )
+        .unwrap();
+        let (ducked_windows, unducked_windows) = ducking_flat_spans(&curve, 0, -120, TimeCode(360));
+        assert_eq!(ducked_windows, vec![TimeCode(60)..TimeCode(72)]);
+        assert_eq!(
+            unducked_windows,
+            vec![TimeCode::ZERO..TimeCode(55), TimeCode(84)..TimeCode(360)]
+        );
+        let (ducked, unducked) =
+            ducking_measurement_windows(&ducked_windows, &unducked_windows, 12);
+        assert_eq!(ducked, Some(TimeCode(60)..TimeCode(72)));
+        assert_eq!(unducked, Some(TimeCode(84)..TimeCode(360)));
+    }
+
+    /// AU4 §7 B11, rules 126 and 129: `range` restricts which dialogue spans
+    /// are considered and clamps the emitted curve, never the measurement, and
+    /// is echoed in structured content.
+    #[test]
+    fn au4_plan_audio_ducking_range_restricts_spans_and_clamps_the_curve() {
+        let document = au4_ducking_document();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let analysis = NoopMedia {
+            silence_ready: BTreeSet::from([AssetId(1)]),
+            // Speech at 60..120 and again at 240..300.
+            timeline_silences: au4_silence_spans(&[(0, 60), (120, 240), (300, 360)]),
+            mix_levels: Some(au4_mix_levels_double(Arc::clone(&calls), -1_600, -300)),
+            ..NoopMedia::default()
+        };
+        let service = au4_service(document, analysis);
+        let planned = service
+            .plan_audio_ducking(&AudioDuckingPlanArgs {
+                range: Some(TranscriptRangeArgs {
+                    start: TimeCode::ZERO,
+                    end: TimeCode(130),
+                }),
+                ..au4_ducking_args(false)
+            })
+            .unwrap();
+        assert_eq!(planned.is_error, Some(false), "{planned:?}");
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(
+            body["range"],
+            json!({"start_frame": 0, "end_frame": 130}),
+            "rule 129 echoes the window back"
+        );
+        assert_eq!(
+            body["windows"],
+            json!([{"start_frame": 60, "end_frame": 126}]),
+            "the 240..300 span is outside the range and is not considered"
+        );
+        // The release key at 138 clamps to the range's last frame, 129.
+        assert_eq!(body["keyframe_count"], 4);
+        assert_eq!(
+            ducking_curve(
+                &[TimeCode(60)..TimeCode(126)],
+                0,
+                -120,
+                5,
+                12,
+                ducking_key_bounds(
+                    &au4_ducking_document(),
+                    Some(&(TimeCode::ZERO..TimeCode(130)))
+                ),
+            )
+            .unwrap()
+            .keyframes
+            .iter()
+            .map(|key| (key.at.0, key.value))
+            .collect::<Vec<_>>(),
+            vec![(55, 0), (60, -120), (126, -120), (129, 0)]
+        );
+
+        // The measurement is NOT restricted by `range`: the longest un-ducked
+        // window runs from the release key to the end of the project.
+        let measured = calls.lock().unwrap().clone();
+        assert!(
+            measured.iter().any(|range| range.end > TimeCode(130)),
+            "{measured:?}"
+        );
+        assert!(body["measured"]["delta_hundredths"].is_i64(), "{body}");
+
+        // The clamp on the *served* path, not just in `ducking_curve`: commit
+        // the plan and read the key back off the committed `TrackMix`.
+        let plan_id = body["prepared_edit_plan"]["plan_id"].clone();
+        let committed = service
+            .call_blocking(
+                CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                    json!({"plan_id": plan_id, "expected_revision": 0})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(committed.is_error, Some(false), "{committed:?}");
+        let curve = service
+            .snapshot()
+            .unwrap()
+            .1
+            .track_mix(TrackId(1))
+            .gain_curve
+            .expect("the plan commits a gain curve on the music track");
+        assert_eq!(
+            curve.keyframes.last().unwrap().at,
+            TimeCode(129),
+            "the release key at 138 is clamped to the range's last frame: {curve:?}"
+        );
+    }
+
+    /// AU4 §7 B11, rule 126: two windows whose ramps would cross merge into
+    /// one flat floor.
+    ///
+    /// At the 150 / 400 / 200 ms defaults a 0.5 s pause between two spoken
+    /// spans leaves a 9-frame gap between the held floors and 17 frames of
+    /// ramp to fit into it. Emitting both ramps would put two un-ducked keys
+    /// around the second window's start and un-duck the music *inside* the
+    /// next line of dialogue, so the two windows merge instead.
+    #[test]
+    fn au4_ducking_merges_windows_whose_ramps_would_overlap() {
+        let document = au4_ducking_document();
+        // 30 fps: frames 90..105 are exactly the 0.5 s pause.
+        let windows = ducking_windows(
+            &[TimeCode(60)..TimeCode(90), TimeCode(105)..TimeCode(135)],
+            6,
+            5,
+            12,
+            document.duration,
+        );
+        assert_eq!(
+            windows,
+            vec![TimeCode(60)..TimeCode(141)],
+            "the held floors are 9 frames apart, shorter than attack + release = 17"
+        );
+        let curve = ducking_curve(
+            &windows,
+            0,
+            -120,
+            5,
+            12,
+            ducking_key_bounds(&document, None),
+        )
+        .unwrap();
+        assert_eq!(
+            curve
+                .keyframes
+                .iter()
+                .map(|key| (key.at.0, key.value))
+                .collect::<Vec<_>>(),
+            vec![(55, 0), (60, -120), (141, -120), (153, 0)]
+        );
+        // Both spoken spans sit on the floor at every frame — the property
+        // the un-merged emission broke, where `value_at(110)` came back
+        // essentially un-ducked.
+        for frame in (60..90).chain(105..135) {
+            assert_eq!(curve.value_at(TimeCode(frame)), Some(-120), "frame {frame}");
+        }
+        // No un-ducked key lands between the two windows.
+        assert!(
+            !curve
+                .keyframes
+                .iter()
+                .any(|key| key.value == 0 && (60..=141).contains(&key.at.0)),
+            "{curve:?}"
+        );
+        // The only two ramps are outside the merged window, and each is
+        // monotone across its whole length.
+        for frame in 55..60 {
+            assert!(
+                curve.value_at(TimeCode(frame)) > curve.value_at(TimeCode(frame + 1)),
+                "the attack ramp falls at frame {frame}"
+            );
+        }
+        for frame in 141..153 {
+            assert!(
+                curve.value_at(TimeCode(frame)) < curve.value_at(TimeCode(frame + 1)),
+                "the release ramp rises at frame {frame}"
+            );
+        }
+        // The boundary: a gap of exactly attack + release does NOT merge, and
+        // degenerates continuously into an instantaneous touch at `u` — the
+        // release key at 96 + 12 and the attack key at 113 - 5 are the same
+        // frame carrying the same value, so the dedupe is a no-op and there is
+        // no flat un-ducked span for the measurement to select.
+        let boundary = ducking_windows(
+            &[TimeCode(60)..TimeCode(90), TimeCode(113)..TimeCode(143)],
+            6,
+            5,
+            12,
+            document.duration,
+        );
+        assert_eq!(
+            boundary,
+            vec![TimeCode(60)..TimeCode(96), TimeCode(113)..TimeCode(149)],
+            "a gap of exactly attack + release = 17 keeps the two windows apart"
+        );
+        assert_eq!(
+            ducking_curve(
+                &boundary,
+                0,
+                -120,
+                5,
+                12,
+                ducking_key_bounds(&document, None),
+            )
+            .unwrap()
+            .keyframes
+            .iter()
+            .map(|key| (key.at.0, key.value))
+            .collect::<Vec<_>>(),
+            vec![
+                (55, 0),
+                (60, -120),
+                (96, -120),
+                (108, 0),
+                (113, -120),
+                (149, -120),
+                (161, 0)
+            ],
+            "one un-ducked key at 108, not two: the touch has no width"
+        );
+    }
+
+    /// AU4 §7 B11, rule 126: at the upper bound the ducked value wins the
+    /// collision, so the last window keeps its floor.
+    ///
+    /// `b` and `b + release` clamp onto the same frame both when the dialogue
+    /// reaches the end of the project and when the window straddles
+    /// `range.end`. Last-wins would keep the un-ducked key there and ramp the
+    /// music back *up* across the whole final window.
+    #[test]
+    fn au4_ducking_prefers_the_ducked_floor_at_the_upper_bound() {
+        let document = au4_ducking_document();
+        let keys = |curve: &AutomationCurve| {
+            curve
+                .keyframes
+                .iter()
+                .map(|key| (key.at.0, key.value))
+                .collect::<Vec<_>>()
+        };
+        // Dialogue that runs to the end of the project.
+        let to_the_end = ducking_curve(
+            &[TimeCode(300)..TimeCode(360)],
+            0,
+            -120,
+            5,
+            12,
+            ducking_key_bounds(&document, None),
+        )
+        .unwrap();
+        assert_eq!(
+            keys(&to_the_end),
+            vec![(295, 0), (300, -120), (359, -120)],
+            "the release key is not emitted when b reaches the upper bound"
+        );
+        assert_eq!(to_the_end.value_at(TimeCode(359)), Some(-120));
+        // A window straddling `range.end` clamps exactly the same way.
+        let straddle = ducking_curve(
+            &[TimeCode(150)..TimeCode(250)],
+            0,
+            -120,
+            5,
+            12,
+            ducking_key_bounds(&document, Some(&(TimeCode(100)..TimeCode(200)))),
+        )
+        .unwrap();
+        assert_eq!(keys(&straddle), vec![(145, 0), (150, -120), (199, -120)]);
+        assert_eq!(
+            straddle.value_at(TimeCode(199)),
+            Some(-120),
+            "the in-range part of the window stays on the floor"
+        );
+    }
+
+    /// AU4 §7 B11, rule 128.2: `windows` and `measured` describe the curve
+    /// that is committed, not the merged spans it was built from.
+    ///
+    /// The straddle case is the sharpest: the merged span is `[150, 250)`,
+    /// but the curve that lands is ducked from 150 to the end of the project,
+    /// because the release key would have clamped onto the floor key.
+    #[test]
+    fn au4_plan_audio_ducking_reports_the_windows_of_the_committed_curve() {
+        let document = au4_ducking_document();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let analysis = NoopMedia {
+            silence_ready: BTreeSet::from([AssetId(1)]),
+            // Speech from 150 to 244; the 200 ms hold makes the floor
+            // [150, 250), which straddles the range's end at 200.
+            timeline_silences: au4_silence_spans(&[(0, 150), (244, 360)]),
+            mix_levels: Some(au4_mix_levels_double(Arc::clone(&calls), -1_600, -300)),
+            ..NoopMedia::default()
+        };
+        let service = au4_service(document, analysis);
+        let planned = service
+            .plan_audio_ducking(&AudioDuckingPlanArgs {
+                range: Some(TranscriptRangeArgs {
+                    start: TimeCode(100),
+                    end: TimeCode(200),
+                }),
+                ..au4_ducking_args(false)
+            })
+            .unwrap();
+        assert_eq!(planned.is_error, Some(false), "{planned:?}");
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(body["keyframe_count"], 3);
+        assert_eq!(
+            body["windows"],
+            json!([{"start_frame": 150, "end_frame": 360}]),
+            "the reported window is the curve's flat floor, not the merged span: {body}"
+        );
+        assert!(body["measured"]["delta_hundredths"].is_i64(), "{body}");
+        assert_eq!(
+            body["measurement_unavailable_reason"],
+            serde_json::Value::Null
+        );
+
+        let plan_id = body["prepared_edit_plan"]["plan_id"].clone();
+        let committed = service
+            .call_blocking(
+                CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                    json!({"plan_id": plan_id, "expected_revision": 0})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(committed.is_error, Some(false), "{committed:?}");
+        let curve = service
+            .snapshot()
+            .unwrap()
+            .1
+            .track_mix(TrackId(1))
+            .gain_curve
+            .expect("the plan commits a gain curve on the music track");
+        assert_eq!(
+            curve
+                .keyframes
+                .iter()
+                .map(|key| (key.at.0, key.value))
+                .collect::<Vec<_>>(),
+            vec![(145, 0), (150, -120), (199, -120)]
+        );
+        for frame in [150, 199, 250, 359] {
+            assert_eq!(
+                curve.value_at(TimeCode(frame)),
+                Some(-120),
+                "the committed curve is ducked at frame {frame}"
+            );
+        }
+        // Both measurement windows were taken from that curve.
+        let measured = calls.lock().unwrap().clone();
+        assert!(
+            measured.contains(&(TimeCode(150)..TimeCode(360))),
+            "the ducked window: {measured:?}"
+        );
+        assert!(
+            measured.contains(&(TimeCode::ZERO..TimeCode(145))),
+            "the un-ducked window: {measured:?}"
+        );
+    }
+
+    /// AU4 §7 B11, rule 126: a video-only clip on a dialogue track is skipped
+    /// by name, not read as one long spoken span.
+    ///
+    /// `request_silences` answers `NoAudio` for an asset with no audio
+    /// stream, so `timeline_silences` returns nothing for the clip and the
+    /// silence-first complement would otherwise make its whole extent speech
+    /// — ducking the music under B-roll with no warning.
+    #[test]
+    fn au4_plan_audio_ducking_skips_a_video_only_dialogue_clip() {
+        let mut document = au4_ducking_document();
+        document.media_pool.push(MediaAsset {
+            id: AssetId(2),
+            path: PathBuf::from("broll.mp4"),
+            name: "broll".to_owned(),
+            duration: TimeCode(360),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((320, 180)),
+            source_fingerprint: MediaSourceFingerprint::default(),
+            color_description: ColorDescription::default(),
+        });
+        // Nothing validates `TrackKind` on `dialogue_tracks`, so a video
+        // track of B-roll can be named beside the real dialogue track.
+        document.tracks.push(Track {
+            id: TrackId(3),
+            kind: TrackKind::Video,
+            sync_lock: false,
+            clips: vec![Clip {
+                id: ClipId(3),
+                asset: AssetId(2),
+                source_range: TimeCode::ZERO..TimeCode(360),
+                content: kinewright_core::ClipContent::Media,
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+                audio_gain_curve: None,
+            }],
+        });
+        let analysis = NoopMedia {
+            silence_ready: BTreeSet::from([AssetId(1)]),
+            timeline_silences: au4_silence_spans(&[(0, 60), (120, 360)]),
+            mix_levels: Some(au4_mix_levels_double(
+                Arc::new(Mutex::new(Vec::new())),
+                -1_600,
+                -300,
+            )),
+            ..NoopMedia::default()
+        };
+        let service = au4_service(document, analysis);
+        let planned = service
+            .plan_audio_ducking(&AudioDuckingPlanArgs {
+                dialogue_tracks: vec![TrackId(2), TrackId(3)],
+                ..au4_ducking_args(false)
+            })
+            .unwrap();
+        assert_eq!(planned.is_error, Some(false), "{planned:?}");
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(
+            body["windows"],
+            json!([{"start_frame": 60, "end_frame": 126}]),
+            "only the audio clip's speech ducks: {body}"
+        );
+        let skipped = body["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{body}");
+        assert_eq!(skipped[0]["clip"], 3);
+        assert_eq!(skipped[0]["track"], 3);
+        assert_eq!(
+            skipped[0]["reason"],
+            "asset 2 carries no audio stream, so this clip cannot contain dialogue"
+        );
+    }
+
+    /// AU4 §7 B12, rule 131: the fade window is one loudness gating block —
+    /// 19,200 sample frames at 48 kHz, 400 ms, 12 project frames at 30 fps.
+    #[test]
+    fn au4_the_gating_block_is_400_ms() {
+        assert_eq!(kinewright_media::LOUDNESS_GATING_BLOCK_FRAMES, 19_200);
+        assert_eq!(
+            kinewright_media::LOUDNESS_GATING_BLOCK_FRAMES * 1_000 / MIX_MEASUREMENT_SAMPLE_RATE,
+            400,
+            "19,200 sample frames at 48 kHz is 400 ms"
+        );
+        assert_eq!(
+            gating_block_project_frames(Rational::new(30, 1).unwrap()),
+            12
+        );
+        assert_eq!(
+            gating_block_project_frames(Rational::new(60, 1).unwrap()),
+            24
+        );
+        assert_eq!(
+            gating_block_project_frames(Rational::new(24_000, 1_001).unwrap()),
+            10,
+            "23.976 fps rounds up, because a short range is refused outright"
+        );
+        // Rule 132's default fade is one frame at 30 fps.
+        assert_eq!(
+            milliseconds_to_project_frames(20, Rational::new(30, 1).unwrap()),
+            1
+        );
+        // Rule 132's clamp: the pair never overruns the clip.
+        assert_eq!(
+            clamp_fade_pair(TimeCode(10), TimeCode(10), TimeCode(12)),
+            (TimeCode(10), TimeCode(2))
+        );
+        assert_eq!(
+            clamp_fade_pair(TimeCode(30), TimeCode(4), TimeCode(12)),
+            (TimeCode(12), TimeCode(0))
+        );
+    }
+
+    /// AU4 §7 B12: `plan_clip_fades` proposes `SetClipAudio` fade frames only,
+    /// never overwrites a non-zero fade, and skips a clip shorter than the
+    /// measurement window with a per-clip reason while the rest commits.
+    #[test]
+    fn au4_plan_clip_fades_proposes_fades_and_skips_short_clips() {
+        let mut document = au4_ducking_document();
+        // Track 2 carries a hot 60-frame clip whose fade-in the editor has
+        // already set, plus a 6-frame clip the measurement cannot reach.
+        document.tracks[1].clips[0].source_range = TimeCode::ZERO..TimeCode(60);
+        document.tracks[1].clips[0].audio_fade_in_frames = TimeCode(4);
+        document.tracks[1].clips.push(Clip {
+            id: ClipId(3),
+            asset: AssetId(1),
+            source_range: TimeCode::ZERO..TimeCode(6),
+            content: kinewright_core::ClipContent::Media,
+            timeline_start: TimeCode(60),
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: -35,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+            audio_gain_curve: None,
+        });
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let analysis = NoopMedia {
+            mix_levels: Some(au4_mix_levels_double(Arc::clone(&calls), -1_600, -1_000)),
+            ..NoopMedia::default()
+        };
+        let service = au4_service(document, analysis);
+        let planned = service
+            .plan_clip_fades(&ClipFadesPlanArgs {
+                tracks: Some(vec![TrackId(2)]),
+                threshold_dbfs_hundredths: None,
+                fade_milliseconds: None,
+            })
+            .unwrap();
+        assert_eq!(planned.is_error, Some(false), "{planned:?}");
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(body["window_sample_frames"], 19_200);
+        assert_eq!(body["window_project_frames"], 12);
+        assert_eq!(body["fade_frames"], 1);
+        assert_eq!(body["threshold_dbfs_hundredths"], -4_000);
+        // The 6-frame clip is skipped, by name, and the plan still commits.
+        let skipped = body["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{body}");
+        assert_eq!(skipped[0]["clip"], 3);
+        assert!(
+            skipped[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("shorter than the 12-frame loudness gating block"),
+            "{body}"
+        );
+        // The 60-frame clip keeps its editor-set fade-in and gains a fade-out.
+        let clips = body["clips"].as_array().unwrap();
+        assert_eq!(clips.len(), 1, "{body}");
+        assert_eq!(clips[0]["clip"], 2);
+        assert_eq!(clips[0]["fade_in_frames"], 4, "a non-zero fade is kept");
+        assert_eq!(clips[0]["fade_out_frames"], 1);
+        assert!(!body["prepared_edit_plan"]["plan_id"].is_null(), "{body}");
+        // Two windows per clip, both exactly one gating block long.
+        let measured = calls.lock().unwrap().clone();
+        assert_eq!(measured.len(), 2, "{measured:?}");
+        for range in &measured {
+            assert_eq!(range.end.0 - range.start.0, 12, "{measured:?}");
+        }
+        assert_eq!(measured[0], TimeCode::ZERO..TimeCode(12));
+        assert_eq!(measured[1], TimeCode(48)..TimeCode(60));
+    }
+
+    /// AU4 §7 B12: below the threshold nothing is proposed, the planner says
+    /// so rather than preparing an empty plan, and the per-clip evidence for
+    /// the clips it could not measure survives that branch.
+    #[test]
+    fn au4_plan_clip_fades_proposes_nothing_under_the_threshold() {
+        let mut document = au4_ducking_document();
+        // A clip the measurement cannot reach, so the empty-plan branch still
+        // has a `skipped` reason to carry.
+        document.tracks[1].clips[0].source_range = TimeCode::ZERO..TimeCode(60);
+        document.tracks[1].clips.push(Clip {
+            id: ClipId(3),
+            asset: AssetId(1),
+            source_range: TimeCode::ZERO..TimeCode(6),
+            content: kinewright_core::ClipContent::Media,
+            timeline_start: TimeCode(60),
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+            audio_gain_curve: None,
+        });
+        let analysis = NoopMedia {
+            mix_levels: Some(au4_mix_levels_double(
+                Arc::new(Mutex::new(Vec::new())),
+                -1_600,
+                -5_000,
+            )),
+            ..NoopMedia::default()
+        };
+        let service = au4_service(document, analysis);
+        let planned = service
+            .plan_clip_fades(&ClipFadesPlanArgs {
+                tracks: None,
+                threshold_dbfs_hundredths: None,
+                fade_milliseconds: None,
+            })
+            .unwrap();
+        assert_eq!(planned.is_error, Some(false), "{planned:?}");
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(body["clips"], json!([]));
+        assert_eq!(body["prepared_edit_plan"], serde_json::Value::Null);
+        let skipped = body["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{body}");
+        assert_eq!(skipped[0]["clip"], 3);
+        assert_eq!(skipped[0]["track"], 2);
+        assert!(
+            skipped[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("shorter than the 12-frame loudness gating block"),
+            "the empty-plan branch still carries the per-clip evidence: {body}"
+        );
+        // The other branch of the empty-plan text: here clips really were
+        // measured and refused by the threshold, so the clause is true.
+        assert_eq!(
+            planned.content[0].as_text().unwrap().text,
+            "nothing to propose: no clip head or tail peaks above -4000 hundredths dBFS with a fade still at zero; 1 clip(s) were skipped and nothing was prepared",
+            "{planned:?}"
+        );
+    }
+
+    /// AU4 §7 B12, rule 132: `fade_frames` is `ceil(fade_ms x fps / 1000)`
+    /// with no floor under it, so a fade that rounds to zero frames proposes
+    /// nothing and says why per clip.
+    #[test]
+    fn au4_plan_clip_fades_skips_a_fade_that_rounds_to_zero_frames() {
+        let document = au4_ducking_document();
+        let analysis = NoopMedia {
+            // Hot enough that a floored 1-frame fade would have been proposed.
+            mix_levels: Some(au4_mix_levels_double(
+                Arc::new(Mutex::new(Vec::new())),
+                -1_600,
+                -300,
+            )),
+            ..NoopMedia::default()
+        };
+        let service = au4_service(document, analysis);
+        let planned = service
+            .plan_clip_fades(&ClipFadesPlanArgs {
+                tracks: Some(vec![TrackId(1)]),
+                threshold_dbfs_hundredths: None,
+                fade_milliseconds: Some(0),
+            })
+            .unwrap();
+        assert_eq!(planned.is_error, Some(false), "{planned:?}");
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(body["fade_frames"], 0);
+        assert_eq!(body["clips"], json!([]));
+        assert_eq!(body["prepared_edit_plan"], serde_json::Value::Null);
+        let skipped = body["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{body}");
+        assert_eq!(skipped[0]["clip"], 1);
+        assert_eq!(
+            skipped[0]["reason"],
+            "fade_milliseconds rounds to 0 frames at this fps"
+        );
+        // The clip's true peak is -300 hundredths, ten times over the -4,000
+        // default: the empty-plan text must NOT claim nothing peaked above the
+        // threshold, because no clip was ever measured against it.
+        assert_eq!(
+            planned.content[0].as_text().unwrap().text,
+            "nothing to propose; 1 clip(s) were skipped and nothing was prepared",
+            "{planned:?}"
+        );
+    }
+
+    /// AU4 §7 B13, rule 135: both Part B planner descriptions stay under the
+    /// 1 KB budget and carry their load-bearing clause in the FIRST sentence.
+    ///
+    /// `get_capability` and `search_capabilities` publish only
+    /// `first_sentence(description)`, so a clause in a second sentence reaches
+    /// no agent on either compact surface. For ducking the two facts are that
+    /// the plan REPLACES the music track's gain automation and that the
+    /// measurement can come back null; for fades, that a non-zero fade is
+    /// never overwritten and a short clip is skipped rather than failing the
+    /// plan. The test pins the published summary, not the raw description.
+    #[test]
+    fn au4_part_b_planner_summaries_carry_the_load_bearing_clauses() {
+        let tools = KinewrightMcp::tools().unwrap();
+        let summary = |name: &str| {
+            crate::runtime::capabilities(&tools)
+                .into_iter()
+                .find(|capability| capability.name == name)
+                .unwrap_or_else(|| panic!("{name} is a capability"))
+                .summary
+        };
+        for name in ["plan_audio_ducking", "plan_clip_fades"] {
+            let description = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap()
+                .description
+                .clone()
+                .unwrap()
+                .to_string();
+            assert!(
+                description.len() < 1_024,
+                "{name} description is {} bytes",
+                description.len()
+            );
+            assert!(
+                summary(name).len() < description.len(),
+                "{name} must carry more than its first sentence"
+            );
+        }
+
+        let ducking = summary("plan_audio_ducking");
+        assert!(ducking.contains("REPLACES"), "{ducking}");
+        assert!(ducking.contains("parked fader"), "{ducking}");
+        assert!(ducking.contains("replace is true"), "{ducking}");
+        assert!(ducking.contains("measured as null"), "{ducking}");
+
+        let fades = summary("plan_clip_fades");
+        assert!(fades.contains("set_clip_audio only"), "{fades}");
+        assert!(fades.contains("never overwriting a fade"), "{fades}");
+        assert!(fades.contains("skipping any clip shorter"), "{fades}");
+        assert!(fades.contains("per-clip reason"), "{fades}");
     }
 }

@@ -360,6 +360,130 @@ No OPEN note remains.
   `git diff --stat -- crates/kinewright-app` lists at commit time; the counts in §8 are grep bounds
   (rule 4), not edit sites.
 
+**Implementation errata (Part B agent, 2026-09-09):**
+
+- **E35. Argument struct names follow the repo convention**: `AudioDuckingPlanArgs` /
+  `ClipFadesPlanArgs`, matching the other thirteen `…PlanArgs`, not §6.1's `PlanAudioDuckingArgs`.
+- **E36. The agent restates the mix measurement rate**: media keeps `AUDIO_RATE` private, so
+  `MIX_MEASUREMENT_SAMPLE_RATE = 48_000` is a named agent constant, pinned against
+  `kinewright_media::LOUDNESS_GATING_BLOCK_FRAMES` (19 200 samples = 400 ms = 12 project frames at
+  30 fps, 24 at 60, 10 at 23.976) and, on the live endpoint, against the decoded report's
+  `master.sample_rate` in the real-engine ducking test. The constant is `pub` so that integration
+  test can name it; the upstream cleanup is for media to export its `AUDIO_RATE` (AU5 note).
+- **E37. Dialogue spans are silence-first.** A clip's spoken spans are the complement of its
+  `TimelineSilenceSpan`s inside its own project extent, unioned with any ready diarized
+  `TranscriptWord`s; silence analysis is required (refused by name with detection requested),
+  transcripts are opportunistic. Rule 126 named both sources without an order or a readiness rule;
+  this is what makes rule 130's real-engine test runnable offline. A retimed dialogue clip
+  contributes no span (its silences are unknown) rather than ducking under the whole clip.
+- **E38. Rule 128.2's un-ducked criterion is implemented on the actual flat interval**
+  `[b + release, a_next − attack)` (head `[0, a₀ − attack)` and tail `[b_last + release, duration)`
+  count too), which must reach one gating block — strictly stricter than "a gap of at least
+  `release + 400 ms`" because it also accounts for the next window's attack. Ducked windows are
+  judged half-open: `[a, b)` qualifies at `b − a >= gating_frames`.
+- **E39. `plan_clip_fades` with nothing to propose returns success** with `prepared_edit_plan: null`,
+  `clips: []` and the per-clip `skipped` reasons; an error would discard the evidence B12 asks for.
+  A clip whose head or tail window measures digital silence (`true_peak_dbtp_hundredths == None`)
+  is skipped with a per-clip reason beside rule 131's short-clip skip.
+- **E40. `plan_audio_ducking` refuses when no dialogue span is found** ("no dialogue span was found
+  on tracks {…}; nothing to duck"): `AutomationCurve::validate` rejects an empty curve, so a refusal
+  is the only reachable outcome.
+- **E41. Test scaffolding**: `DuckingMeasurement` carries `#[allow(clippy::struct_field_names)]`
+  (rule 129's triple is hundredths-only by design); `NoopMedia` gains `silence_ready`,
+  `timeline_silences` and `mix_levels` doubles; the `range` clamp is asserted through the pure
+  `ducking_curve` helper because `prepare_operations`' preview carries no operation payload;
+  `deny_unknown_fields` surfaces as a protocol-level `McpError`, so B12 asserts on `expect_err`.
+- **E42. Measured Part B registry**: 54 generated / 80 inspectors / 134; serialized 1,524,370 B
+  (+5,318 = 3,556 + 1,762); input 1,389,434 B (+3,146 = 2,391 + 755, of which 137 B are the
+  `depth_tenth_db` and `range` field docs added by the pass-2 fixes); descriptions 112,948 B
+  (+1,845 = 1,000 + 845, after F8 moved "set_clip_audio only" into the fades description's first
+  sentence; the ducking description is 24 B under the 1,024 B budget with four load-bearing
+  clauses in its first sentence); served quad unchanged; nothing pre-existing moved a
+  byte. `AU4_DUCK depth=-120 unducked=-2177 ducked=-3377 delta=-1200 budget=50`.
+- **E43. Windows merge when their ramps would overlap.** `ducking_windows` merges two spans when
+  `next.start − prev.end < attack + release` (not only when they touch on the hold), so no `u`
+  key can land between two windows whose release and attack ramps cross; at the defaults that is
+  any speech gap between 200 ms and 766 ms, the common case in real dialogue. Without it the curve
+  reversed direction twice and un-ducked inside the second window (review-agent-b F1).
+- **E44. A collision at the upper bound prefers the ducked value.** When `b + release` clamps onto
+  `(b, d)` — dialogue reaching the project end, or a window straddling `range.end` — the `(…, u)`
+  key is skipped rather than winning last, so the final window stays at the floor; rule 126's
+  "deduped last-wins" is right only at the lower bound. A window straddling `range.end` therefore
+  keeps the floor to the end of the project (an `AutomationCurve` holds its last value); the
+  reported `windows` say so, and the `range` field doc states it. A zero-effect duck
+  (`ducked == parked`) and a non-negative `depth_tenth_db` are refused.
+- **E45. The reported `windows` and the two measurement windows are derived from the emitted
+  curve's keyframes** (consecutive equal-valued pairs at `d` and at `u`, plus the flat head and
+  tail), not from the merged spans, so the report cannot describe a floor the committed curve
+  does not have.
+- **E46. A dialogue clip whose asset reports `NoAudio` is skipped** with a visible per-clip reason
+  (a video-only clip cannot contain dialogue); previously the silence-first complement made its
+  whole extent one spoken span.
+- **E47. `plan_clip_fades` keeps rule 132's `ceil` without a floor of one frame**: a
+  `fade_milliseconds` that rounds to 0 frames at the project fps proposes nothing for that clip,
+  with a per-clip reason.
+
+**Implementation errata (Part B app, 2026-09-09):**
+
+- **E48. Rule 99's one predicate is two.** `envelope_hit(points, rect, pointer) -> Option<usize>`
+  names the nearest key within 9 px; `envelope_near_curve(polyline, rect, pointer) -> bool` is the
+  allocation predicate ("near the line"). One function cannot both name a key index and answer
+  "on the polyline". A drag that grabs no key does nothing (the curve editor's precedent).
+- **E49. Delete/Backspace on a hovered envelope key removes the key, arbitrated by a one-shot
+  report.** `keyboard_shortcuts` runs before `timeline()` in the same frame, so the timeline writes
+  `EnvelopeHover { clip, index }` into the session at the end of each frame and `keyboard_shortcuts`
+  `take()`s it (one frame, so a stale hover from another tab cannot swallow a Delete): with a key
+  hovered, bare Delete/Backspace send `SetClipGainEnvelope` with `envelope_remove_key` applied and
+  leave the clip alone; the last key refuses and records `ENVELOPE_LAST_KEY_NOTE`; with nothing
+  hovered (or a stale report) the clip delete runs exactly as before; `Shift+Del` still
+  ripple-deletes. The secondary click and the inspector's per-row `×` remain.
+- **E50. R37's worst case is unreachable**: `SILENCED` is suppressed on a `NO AUDIO` strip by
+  design, so the two cannot co-occur. Both reachable worst cases (`NO AUDIO` + off-neutral +
+  automated; `SILENCED` + off-neutral + automated) measure **232 px**: the chip and the automated
+  layouts cost zero height and neither rule-108 fallback was needed.
+- **E51. The colour inspector's old `keyframe_row` is renamed `keyframed_parameter_row`**, not
+  rewritten onto the new one: it is a per-parameter `KEYFRAMED` + `Clear keyframes` badge row,
+  while rule 114's generalisation is a per-keyframe editable row. The new `keyframe_row` has two
+  callers (inspector `ENVELOPE`, Mixer `AUTOMATION`); `apply_keyframe_row_action` returns
+  `Option<CurveWrite { Set, Clear }>` (clippy denies `Option<Option<_>>`); bounds are applied by
+  the caller (`automation_section` takes `duration`), keeping the row pure and domain-free.
+- **E52. Rule 91's plumbing is `MixerTelemetry.position`**, read from `Playback::position()` in
+  `mixer_telemetry` (the AU3 precedent) and passed down `mixer_strips` / `chain_pane`; no new
+  `Playback` method, no atomic.
+- **E53. A curve-free audio or A/V clip paints a flat `TEXT_MUTED` line at its parked
+  `audio_gain_tenth_db`**, and a click on it inserts the first key at the snapped frame holding
+  that value, under the same 9 px / 24 px rules as a real curve. The cost is named: the band wins
+  the last-registered tie against `body`, so a click within 9 px of the parked line (23.1 % down
+  the band at unity) inserts a key instead of selecting the clip; the `Envelopes` toggle disables
+  it wholesale. The curve-free band is **click-only** (`Sense::click`), so a clip drag that starts
+  on the parked line still drags the clip — egui hit-tests click and drag separately. A one-key
+  curve draws flat across the band because `value_at` clamps outside the keyed interval.
+- **E54. Rule 109's split is two widgets**: egui's `Slider` shares one response between rail and
+  value box, so an automated fader is a disabled `Slider(show_value(false))` over an editable
+  `DragValue`, their responses unioned; the disabled rail contributes no `changed()` /
+  `drag_started()`, so `record_mix_edit` is unchanged. Recorded rects `fader_readout` /
+  `pan_readout`.
+- **E55. B5 is discharged on `paint_clip_envelope`**, not on a painted `timeline()` frame
+  (`KinewrightApp::new` needs a live GPU engine, E11); B4's rule-105 regression guard is a
+  source-level `include_str!` pin (exactly one `InspectorEdits`, one `submit_inspector_edits`,
+  every `extend_live` / `push_live` within reach of `envelope_coalesce_key`, ≥ 5 surviving
+  `pending_operations =` sites) because the timeline has no pointer harness.
+- **E56. Measured figures**: `AUTOMATION` section **116 px** against `BUDGET 120`; a master pane
+  carrying `LOUDNESS` + `AUTOMATION` **398 px** against a newly named `BUDGET 420` (rule 116 left
+  the pane budget unnamed; the 260 px dock scrolls); band resolutions 13.684 / 27.542 / 52.0
+  tenth-dB per px at 38.00 / 18.88 / 10.00 px.
+- **E58. A band grab clamps to −600 … +120 without raising a parked key below the −400 display
+  floor**: `envelope_grab_value(band, pointer_y, stored)` keeps the stored value while the pointer
+  stays on the floor, so a purely horizontal drag does not silently lift a −500 key to −400; the
+  first frame the pointer leaves the floor, the drag writes what it points at. The chain pane's
+  automation rows carry per-target ids (`automation:fader` / `automation:{effect}:{parameter}`),
+  and `chain_pane` records its viewport and content rects so the 260 px-dock scroll is asserted
+  (`content 398.19 > viewport 260`).
+- **E57. `curve_editor_widget::HIT_RADIUS`, `POINT_RADIUS` and `CURVE_STROKE` are `pub(crate)`** so rule 102's
+  "reused, not re-invented" is assertable; `mixer_ui::take_strip_rects` (test-only) lets the
+  inspector's `ENVELOPE` block be pressed at recorded coordinates. The `Envelopes` toggle is
+  `session.show_envelopes` (project.rs), defaulting on.
+
 ## 1. Scope
 
 ### 1.1 The editor job

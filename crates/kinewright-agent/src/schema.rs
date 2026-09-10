@@ -13,7 +13,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 78] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 80] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -88,7 +88,13 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 78] = [
     "plan_beat_pacing",
     "plan_beat_montage",
     "plan_music_fit",
+    // AU4 §6.3 rule 134: the two Part B planners sit in the audio family's
+    // alphabetical position beside `plan_audio_normalization`. `plan_` infers
+    // `CapabilityKind::Planner` at runtime.rs:175-177, so neither needs a
+    // `CAPABILITY_KIND_OVERRIDES` entry.
+    "plan_audio_ducking",
     "plan_audio_normalization",
+    "plan_clip_fades",
     "get_analysis_status",
     "get_caption_presets",
     "get_captions",

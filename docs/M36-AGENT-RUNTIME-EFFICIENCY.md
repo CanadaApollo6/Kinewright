@@ -116,6 +116,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-09, after AU3 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-09, after AU4 Part A) | 132 | 1,519,052 B | 1,386,288 B | 111,103 B |
 | Served MCP runtime (2026-09-09, after AU4 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-09, after AU4 Part B) | 134 | 1,524,370 B | 1,389,434 B | 112,948 B |
+| Served MCP runtime (2026-09-09, after AU4 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
 
 That is a 99.1% reduction in initially advertised serialized tool metadata at
 the M36 baseline, 99.4% at the 2026-08-24 measurement, 99.56% after CC6
@@ -241,6 +243,43 @@ ninth consecutive measurement at 7 / 5,660 B / 3,510 B / 998 B — neither new
 tool is served, and the seven served tools embed no `Operation` schema, so a
 model change cannot reach them at all — so the reduction holds at 99.63%,
 5,660 B served against a 1,519,052 B registry.
+
+AU4 Part B adds two planners and no operation at all: `plan_audio_ducking` and
+`plan_clip_fades` join `INSPECTOR_TOOL_NAMES` beside `plan_audio_normalization`,
+so the counts go to 54 generated operations + 80 inspectors = 134 and the
+registry grows by 5,318 B to 1,524,370 B. Unlike Part A, this costs nothing
+outside the two new rows: neither planner touches the `Operation` model, and a
+planner's arguments embed no `Operation` at all, so no pre-existing tool moves
+a byte and the split is simply the two tools whole:
+
+- **3,146 B** of input schema, `AudioDuckingPlanArgs` (2,391 B) and
+  `ClipFadesPlanArgs` (755 B), both `deny_unknown_fields` and both embedding
+  only `TrackId`, `TimeCode` and the shared half-open project range;
+- **1,845 B** of description, 1,000 B for `plan_audio_ducking` and 845 B for
+  `plan_clip_fades`, each under the 1,024 B budget.
+
+That is 3,146 + 1,845 = 4,991 B against 5,318 B serialized; the remaining 327 B
+are the two rows' names, annotations and JSON envelopes (3,556 B + 1,762 B
+measured whole). Both descriptions spend most of their budget on their *first*
+sentence, and that is the point: `get_capability` and `search_capabilities`
+publish `first_sentence(description)` and drop the rest, so the two facts an
+agent needs before committing a duck — that the plan replaces the music track's
+whole gain automation, and that the loudness measurement can come back null on
+a short window while the curve commits anyway — have to live in it. The fade
+planner's row is 14 B heavier than its first measurement for exactly that
+reason: "emitting set_clip_audio only" was moved out of a third sentence no
+compact surface publishes and into the first, which is 14 B of prose bought to
+make one clause reachable. The ducking row carries 137 B a review round bought
+in *field* doc comments rather than prose — 10 B on `depth_tenth_db` for the
+sign it now refuses and 127 B on `range` for the straddling window that holds
+the floor to the end of the project — and that is why the description column
+does not move at all while the input-schema column does: a field doc is billed
+to the schema its type generates, so the 24 B left in `plan_audio_ducking`'s
+1,024 B description budget stayed unspent. The served quad is byte-identical
+for the tenth consecutive measurement at 7 / 5,660 B / 3,510 B / 998 B: a
+planner is registry-only, reached through `invoke_capability`, whose argument
+schema is generic and embeds no planner argument type. The reduction holds at
+99.63%, 5,660 B served against a 1,524,370 B registry.
 
 The registry grew with the colour tools; the served surface stays at seven
 tools. The `color_curves` descriptor (133

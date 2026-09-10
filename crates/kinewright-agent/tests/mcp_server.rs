@@ -2486,6 +2486,12 @@ async fn cc7_prepare_commit_and_compare(
 /// not move in Part A, and neither does the served quad: the two new tools are
 /// registry-only and the seven served tools embed no `Operation` schema, so
 /// this is the ninth consecutive byte-identical measurement.
+///
+/// AU4 §6.3 Part B (B13) adds the two planners `plan_audio_ducking` and
+/// `plan_clip_fades` to `INSPECTOR_TOOL_NAMES`, so 54 + 80 = 134 with the
+/// generated count unchanged. The served quad does not move for the tenth
+/// consecutive measurement: a planner is registry-only, reached through
+/// `invoke_capability`, whose argument schema is generic.
 #[tokio::test(flavor = "multi_thread")]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let core = Core::spawn(Document::default()).unwrap();
@@ -2511,22 +2517,23 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 132 tools, of which `INSPECTOR_TOOL_NAMES` is 78.
+    // The internal registry: 134 tools, of which `INSPECTOR_TOOL_NAMES` is 80.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        132,
+        134,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
-         AU4 Part A adds set_clip_gain_envelope and set_track_automation"
+         AU4 Part A adds set_clip_gain_envelope and set_track_automation; \
+         AU4 Part B adds plan_audio_ducking and plan_clip_fades"
     );
     assert_eq!(
         operations.len(),
         54,
         "AU2 Part B generates two more mutators; neither part of AU3 generates one; \
-         AU4 Part A generates two more"
+         AU4 Part A generates two more; AU4 Part B generates none"
     );
     for name in [
         "set_track_mix",
@@ -2537,15 +2544,17 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         "get_audio_qc",
         "set_clip_gain_envelope",
         "set_track_automation",
+        "plan_audio_ducking",
+        "plan_clip_fades",
     ] {
         assert!(registry.iter().any(|entry| entry == name), "missing {name}");
     }
     assert_eq!(
         registry.len() - operations.len(),
-        78,
+        80,
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector; \
-         AU4 Part A adds no inspector"
+         AU4 Part A adds no inspector; AU4 Part B adds the two planners"
     );
     let spectrum = registry
         .iter()
@@ -2570,6 +2579,23 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
             "AU4 §4.3: {curve} is registered directly after {scalar}"
         );
     }
+    // AU4 §6.3 rule 134: the two Part B planners keep the audio family's
+    // alphabetical order around `plan_audio_normalization` — the ordering
+    // assert is extended, never relaxed.
+    let normalization = registry
+        .iter()
+        .position(|entry| entry == "plan_audio_normalization")
+        .unwrap();
+    assert_eq!(
+        registry.get(normalization - 1).map(String::as_str),
+        Some("plan_audio_ducking"),
+        "AU4 §6.3: plan_audio_ducking is registered directly before plan_audio_normalization"
+    );
+    assert_eq!(
+        registry.get(normalization + 1).map(String::as_str),
+        Some("plan_clip_fades"),
+        "AU4 §6.3: plan_clip_fades is registered directly after plan_audio_normalization"
+    );
 
     // The served byte counts CC6 recorded, asserted byte-identically: no AU1,
     // AU2, AU3, or AU4 tool is served, and the seven served tools do not embed
@@ -7290,6 +7316,354 @@ async fn cc7_f2_the_default_floor_does_not_refuse() {
 
     // Neither call moved the timeline: both are evidence-only.
     assert_eq!(cc7_revision(&client).await, tracked_revision);
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU4 §6.1 rule 130: 12 s of steady 440 Hz music at 30 fps, the bed the duck
+/// rides on.
+///
+/// A steady tone is deliberate: the ducked and the un-ducked measurement
+/// windows sit at different *times*, so anything but constant material would
+/// fold a content difference into the delta rule 130 attributes to the duck.
+fn au4_music_media() -> GeneratedMedia {
+    let mut arguments = vec![
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=30",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=48000",
+        "-frames:v",
+        "360",
+        "-t",
+        "12.0",
+    ];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    arguments.extend(["-c:a", "aac", "-shortest"]);
+    GeneratedMedia::ffmpeg("au4-duck-music", &arguments, "mp4")
+}
+
+/// AU4 §6.1 rule 130: 12 s of digital silence carrying one gated burst from
+/// 2.0 s to 4.0 s, so the merged dialogue span is `[60, 120)` in project
+/// frames and the held floor `[60, 126)`.
+///
+/// The 6.0 s to 8.0 s stretch is silent, which is what gives the un-ducked
+/// measurement window rule 128.2 needs — the gap from the release key at 138
+/// to the end of the project is 222 frames, far past `release + 400 ms`.
+fn au4_dialogue_media() -> GeneratedMedia {
+    let mut arguments = vec![
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=30",
+        "-f",
+        "lavfi",
+        "-i",
+        "aevalsrc=0.30*sin(2*PI*300*t)*between(t\\,2\\,3.999):s=48000",
+        "-frames:v",
+        "360",
+        "-t",
+        "12.0",
+    ];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    arguments.extend(["-c:a", "aac", "-shortest"]);
+    GeneratedMedia::ffmpeg("au4-duck-dialogue", &arguments, "mp4")
+}
+
+/// AU4 §6.1 rule 130: the accepted error between the requested depth and the
+/// measured un-ducked/ducked delta, in hundredths of LU.
+const PLAN_DUCKING_DEPTH_BUDGET_HUNDREDTHS: i64 = 50;
+
+/// AU4 §7 B11, rule 130: `plan_audio_ducking` converges through the real
+/// engine.
+///
+/// On AU3's planner template: invoke, assert the structured windows and the
+/// relative keying, commit, assert the committed `TrackMix.gain_curve`, then
+/// re-measure the music stem with `get_audio_levels` over a ducked window and
+/// an un-ducked window and assert the two differ by the requested depth.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
+    let music_media = au4_music_media();
+    let dialogue_media = au4_dialogue_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let music = media.probe(music_media.path()).unwrap();
+    let dialogue = media.probe(dialogue_media.path()).unwrap();
+    assert_eq!(music.duration, TimeCode(360), "12 s at 30 fps");
+    assert_eq!(dialogue.duration, TimeCode(360));
+
+    let mut document = single_clip_document(music.clone());
+    document.media_pool.push(dialogue.clone());
+    document.tracks.push(Track {
+        id: TrackId(2),
+        kind: TrackKind::Audio,
+        sync_lock: false,
+        clips: vec![Clip {
+            id: ClipId(2),
+            asset: dialogue.id,
+            source_range: TimeCode::ZERO..dialogue.duration,
+            content: kinewright_core::ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+            audio_gain_curve: None,
+        }],
+    });
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    // Silence analysis is asynchronous. The first call requests it and is
+    // refused by name; the loop is the readiness refusal's other branch.
+    let depth = -120_i64;
+    let arguments = json!({
+        "music_track": 1,
+        "dialogue_tracks": [2],
+        "depth_tenth_db": depth,
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let planned = loop {
+        let result = invoke_capability(&client, "plan_audio_ducking", arguments.clone()).await;
+        if result.is_error == Some(false) {
+            break result;
+        }
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(
+            text.contains("silence analysis is not ready"),
+            "the only expected refusal here is a pending analysis: {text}"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "silence analysis did not finish: {text}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    let body = planned.structured_content.as_ref().unwrap();
+    let revision = body["timeline_revision"].as_u64().unwrap();
+    assert_eq!(
+        body["windows"],
+        json!([{"start_frame": 60, "end_frame": 126}]),
+        "the 2.0-4.0 s burst plus the 200 ms hold is a 66-frame floor: {body}"
+    );
+    // Rule 124: the parked fader is unity here, so the floor is the depth
+    // itself — and it is the *sum*, not the depth, that is committed.
+    assert_eq!(body["parked_gain_tenth_db"], 0);
+    assert_eq!(
+        body["ducked_gain_tenth_db"].as_i64().unwrap(),
+        body["parked_gain_tenth_db"].as_i64().unwrap() + depth
+    );
+    assert_eq!(body["keyframe_count"], 4);
+    let plan_measured = body["measured"].clone();
+    assert!(
+        plan_measured["delta_hundredths"].is_i64(),
+        "both flat windows clear the gating block by a wide margin: {body}"
+    );
+    assert_eq!(
+        body["measurement_unavailable_reason"],
+        serde_json::Value::Null
+    );
+
+    let plan_id = body["prepared_edit_plan"]["plan_id"].clone();
+    let committed = client
+        .call_tool(
+            CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                json!({"plan_id": plan_id, "expected_revision": revision})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        committed.is_error,
+        Some(false),
+        "{:?}",
+        committed.structured_content
+    );
+
+    // What landed: one gain curve on the music track, four keys, the attack
+    // key 5 frames before the first spoken frame and the release key 12 after
+    // the held floor ends.
+    let document = query_document(&core);
+    let curve = document
+        .track_mix(TrackId(1))
+        .gain_curve
+        .expect("the plan commits a gain curve on the music track");
+    assert_eq!(curve.keyframes.len(), 4, "{curve:?}");
+    assert_eq!(curve.keyframes.first().unwrap().at, TimeCode(55));
+    assert_eq!(curve.keyframes.last().unwrap().at, TimeCode(138));
+    assert_eq!(curve.value_at(TimeCode(60)), Some(depth));
+    assert_eq!(curve.value_at(TimeCode(125)), Some(depth));
+    assert_eq!(curve.value_at(TimeCode(200)), Some(0));
+
+    // The engine's own answer: the music stem measured inside the ducked
+    // floor and inside the un-ducked stretch.
+    let ducked = au4_music_track_loudness(&client, 66, 120).await;
+    let unducked = au4_music_track_loudness(&client, 180, 240).await;
+    let delta = ducked - unducked;
+    println!(
+        "AU4_DUCK depth={depth} unducked={unducked} ducked={ducked} delta={delta} budget={PLAN_DUCKING_DEPTH_BUDGET_HUNDREDTHS}"
+    );
+    assert!(
+        (delta - depth * 10).abs() <= PLAN_DUCKING_DEPTH_BUDGET_HUNDREDTHS,
+        "the committed ride must really move the music stem by {depth} tenth dB: \
+         unducked={unducked} ducked={ducked} delta={delta}"
+    );
+    // The planner's own measurement agrees with the re-measurement, which is
+    // what makes rule 129's `measured` worth publishing.
+    assert!(
+        (plan_measured["delta_hundredths"].as_i64().unwrap() - delta).abs()
+            <= PLAN_DUCKING_DEPTH_BUDGET_HUNDREDTHS,
+        "plan {plan_measured} against re-measured {delta}"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// The music track's integrated loudness over one project window.
+async fn au4_music_track_loudness(
+    client: &RunningService<RoleClient, ()>,
+    start_frame: i64,
+    end_frame: i64,
+) -> i64 {
+    let levels = invoke_capability(
+        client,
+        "get_audio_levels",
+        json!({"start_frame": start_frame, "end_frame": end_frame}),
+    )
+    .await;
+    assert_eq!(levels.is_error, Some(false), "{levels:?}");
+    let report = &levels.structured_content.as_ref().unwrap()["report"];
+    // AU4 §6.1 rule 128.1: the agent restates media's private audio rate as
+    // `MIX_MEASUREMENT_SAMPLE_RATE`, and this is where that restatement meets
+    // the real decoder — `LOUDNESS_GATING_BLOCK_FRAMES / rate == 400 ms` is
+    // only a fact about the gating block if the mix really runs at 48 kHz.
+    assert_eq!(
+        report["master"]["sample_rate"].as_u64(),
+        Some(kinewright_agent::MIX_MEASUREMENT_SAMPLE_RATE),
+        "the real mix path measures at the rate the agent's constant claims: {report}"
+    );
+    report["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["track"] == 1)
+        .expect("the music track is reported")["levels"]["integrated_lufs_hundredths"]
+        .as_i64()
+        .expect("the music stem is not silent")
+}
+
+/// AU4 §7 B12: `plan_clip_fades` through the real engine and the live
+/// endpoint.
+///
+/// The measurement is the real mix path, so the 400 ms head and tail windows
+/// are decoded, not scripted; the clip is a full-scale-ish steady tone, so
+/// both windows peak well above the -4000 hundredth default. The plan emits
+/// `SetClipAudio` only, and the committed document carries the fades and
+/// nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn au4_plan_clip_fades_measures_the_real_mix_and_commits_set_clip_audio() {
+    let generated = au4_music_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let mut document = single_clip_document(asset);
+    // An editor-set fade-in the planner must not overwrite.
+    document.tracks[0].clips[0].audio_fade_in_frames = TimeCode(7);
+    document.tracks[0].clips[0].audio_gain_tenth_db = -35;
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    // `deny_unknown_fields` closes the schema: a misspelled threshold is a
+    // protocol-level refusal that names the three accepted fields, not a
+    // silent fall back to the default.
+    let misspelled = client
+        .call_tool(
+            CallToolRequestParams::new("invoke_capability").with_arguments(
+                json!({
+                    "name": "plan_clip_fades",
+                    "arguments": {"threshold_dbfs_hundreths": -4_000}
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect_err("an unknown field is refused");
+    assert!(
+        misspelled
+            .to_string()
+            .contains("unknown field `threshold_dbfs_hundreths`"),
+        "{misspelled}"
+    );
+
+    let planned = invoke_capability(&client, "plan_clip_fades", json!({"tracks": [1]})).await;
+    assert_eq!(planned.is_error, Some(false), "{planned:?}");
+    let body = planned.structured_content.as_ref().unwrap();
+    let revision = body["timeline_revision"].as_u64().unwrap();
+    // Rule 131 in the terms B12 asks for.
+    assert_eq!(body["window_sample_frames"], 19_200);
+    assert_eq!(body["window_project_frames"], 12);
+    assert_eq!(body["fade_frames"], 1, "20 ms is 1 project frame at 30 fps");
+    assert_eq!(body["skipped"], json!([]));
+    let clips = body["clips"].as_array().unwrap();
+    assert_eq!(clips.len(), 1, "{body}");
+    assert_eq!(clips[0]["fade_in_frames"], 7, "a non-zero fade is kept");
+    assert_eq!(clips[0]["fade_out_frames"], 1);
+    assert!(
+        clips[0]["tail_true_peak_dbtp_hundredths"].as_i64().unwrap() > -4_000,
+        "the sine's tail window is hot: {body}"
+    );
+
+    let plan_id = body["prepared_edit_plan"]["plan_id"].clone();
+    let committed = client
+        .call_tool(
+            CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                json!({"plan_id": plan_id, "expected_revision": revision})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        committed.is_error,
+        Some(false),
+        "{:?}",
+        committed.structured_content
+    );
+
+    let clip = query_document(&core).tracks[0].clips[0].clone();
+    assert_eq!(clip.audio_fade_in_frames, TimeCode(7));
+    assert_eq!(clip.audio_fade_out_frames, TimeCode(1));
+    assert_eq!(
+        clip.audio_gain_tenth_db, -35,
+        "SetClipAudio carries the existing gain through"
+    );
+    assert!(
+        clip.audio_gain_curve.is_none(),
+        "rule 133: the fade planner adds no curve"
+    );
+
     client.cancel().await.unwrap();
     server.shutdown();
 }

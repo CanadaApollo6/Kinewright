@@ -264,6 +264,22 @@ pub(crate) struct ProjectSession {
     pub(crate) pixels_per_frame: f32,
     pub(crate) timeline_zoom_target: f32,
     pub(crate) timeline_scroll_target: f32,
+    /// AU4 §5.1 rule 100: whether the timeline paints clip gain envelopes.
+    ///
+    /// Session state beside `pixels_per_frame`, never document state, and on
+    /// by default: the overlay is a view of the document, so hiding it must
+    /// not be something undo can restore. Off hides the band and with it all
+    /// envelope hit-testing. A modifier key was rejected — Alt is already the
+    /// snap bypass — and so was a mode toggle that disables clip drags.
+    pub(crate) show_envelopes: bool,
+    /// AU4 §5.1 rule 101 (AU4 §0 E49): the envelope key the timeline saw under
+    /// the pointer at the end of the last frame.
+    ///
+    /// Session state, rewritten every frame the timeline draws.
+    /// `keyboard_shortcuts` runs before the timeline paints, so this report is
+    /// how Delete/Backspace tells "remove this key" from "delete this clip" —
+    /// the matte overlay's `report_expanded` pattern, one frame old.
+    pub(crate) envelope_hover: Option<crate::timeline_ui::EnvelopeHover>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +381,8 @@ impl ProjectSession {
             pixels_per_frame: 6.0,
             timeline_zoom_target: 6.0,
             timeline_scroll_target: 0.0,
+            show_envelopes: true,
+            envelope_hover: None,
         };
         session.publish_project_path_to_agents();
         Ok(session)

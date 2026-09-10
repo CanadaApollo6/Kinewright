@@ -290,6 +290,32 @@ The playhead is a 2 px `accent` line with a 10 by 8 downward handle in the ruler
 The ruler and handle use immediate pointer tracking. Zoom and horizontal scroll
 settle over `motion-navigation` without decoding or file access.
 
+An audio or audio+video clip carrying a gain envelope draws it as a rubber band
+inside the waveform band. The band is
+`band.shrink2(vec2(2, 4))`, the same rect the waveform uses, so the ride and the
+waveform agree pixel for pixel.
+Keys are 3.5 point handles on a 1.6 point line, in `text-primary` at 64% and in
+`accent` while the clip is selected. The value axis is linear over
+−40 to +12 dB, with unity 23.1% down the band; a key outside that range clamps
+to the edge and marks it. The pointer takes the band only within a
+9 point hit radius of the line or a key, so clip drags and the 6 point trim
+handles are untouched everywhere else, and no band is drawn or hit-tested under
+24 points of clip width. Clicking the line adds a key, dragging one moves it
+between its neighbours, right-clicking removes it, and the last key stays:
+clearing the envelope belongs to the inspector.
+Delete or Backspace over a key removes the key, not the clip.
+A clip with no envelope yet still shows a band: one flat, muted line at its
+parked clip gain, and
+a click on that line lands the first key there, holding that gain.
+Keys snap to the same guides
+every other timeline drag uses, and
+Alt bypasses snapping on envelope keys as it does everywhere. An
+`Envelopes` toolbar toggle hides the overlay and its hit-testing; it is view
+state, not something undo restores. One ride is one undo entry. The band is
+deliberately coarse — 1.4 dB per point on a 72 point track, 5.2 dB on the 44
+point minimum — so
+the band is the coarse gesture and the inspector's keyframe list is the exact one.
+
 ### Media bin
 
 Assets appear as full-width 16:9 cards. A cached thumbnail fills the image area;
@@ -335,21 +361,35 @@ its own. Strips run left to right in a scroll area: one per track in document
 order, a `border-subtle` rule, one per bus (with a second rule only when buses
 exist), then the master strip. Each strip is `size-mixer-strip-width` wide and
 fits in 240 points of height in its tallest state: 232 for a track strip
-carrying both its `SILENCED` line and its button row, 215 for a bus strip
+carrying its `SILENCED` or `NO AUDIO` line, its button row and its automation
+chip, 215 for a bus strip
 whether it holds one node or six, and 210 for the master.
 
 A track strip reads top to bottom: the caption and kind icon at the track
-header's type size (plus `NO AUDIO` on the next line, in `text-muted`, for a
-track with no audio-bearing clip); one `size-mixer-fader-height`-tall group with
-a pair of vertical L/R meter bars on the left, each `size-mixer-meter-width`
+header's type size, with an `A` chip inline after the kind icon while the track
+carries gain or pan automation (plus `NO AUDIO` on the next line, in
+`text-muted`, for a track with no audio-bearing clip); one
+`size-mixer-fader-height`-tall group with a pair of vertical L/R meter bars on
+the left, each `size-mixer-meter-width`
 wide and using the transport meter's thresholds, colours, and 0.9 per second
 decay, and the vertical gain fader labelled in dB on the right (`SILENCED` in
 `text-muted` sits under the meters when another track's solo silences this one
 and the strip does not already say `NO AUDIO`); a horizontal pan control
 labelled `L`/`C`/`R`; the `M`/`S` toggles side by side, which use the same states
 as the timeline track header; and a bottom row holding a `Reset` small button
-that appears only while the track's mix is not neutral. Sliders have no
+that appears only while the track's mix is not neutral — it returns the five
+scalars to unity and keeps the automation. Sliders have no
 double-click reset. Neither micro label disables the strip's controls.
+
+While a curve drives a track's gain or pan, that rail is disabled and shows the
+automated value at the audible position, and the numeric readout beside it stays
+editable and writes the parked value. The split follows two rules. The first is
+the product's existing one:
+editing a keyframed control writes its static value.
+The second is an affordance rule:
+a control you can drag never lies about what you hear.
+On a fader the editor believes they are riding what they hear, and the first rule
+is invisible there; in a numeric field it is not.
 
 A bus strip reads: name, member tracks, a node count with the full chain as its
 tooltip, one row carrying the meter pair and the vertical gain fader with its dB
@@ -381,6 +421,14 @@ target's tolerance, warning above it — and are `text-secondary` below it; quie
 is never a failure. The master strip carries the integrated figure as one micro
 line under the fader. Monitoring is not delivery: playback is never normalised;
 the export step normalises the file.
+
+Below it, and at the top of a bus pane, sits an `AUTOMATION` section: a combo
+choosing one parameter at a time — the chain's `Fader` plus every node parameter
+that may carry a curve — over a scrolled list of `{frame} {value}
+{interpolation}` rows, with `+ Key at playhead` and `Clear`. It spends
+116 points of the pane against a 120 point budget, empty or scrolled, because
+the list is allocated at a fixed four rows. Timeline automation lanes are not
+part of this surface; the mixer is where a bus or master ride is edited.
 
 ### Transcript and utility panels
 

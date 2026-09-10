@@ -248,7 +248,33 @@ pub(crate) const KEYMAP: [KeyBinding; 21] = [
 
 impl KinewrightApp {
     pub(crate) fn keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        // AU4 §5.1 rule 101 (AU4 §0 E49): the timeline's envelope hover report
+        // is good for exactly one frame, so it is taken here whatever happens
+        // next. The timeline rewrites it at the end of every frame it draws;
+        // taking it means a frame in which it does *not* draw — the Mixer or
+        // Transcript tab is up, or the material strip is hidden — leaves
+        // nothing behind to swallow a later Delete.
+        let envelope_hover = self.focused_mut().envelope_hover.take();
         if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        // Delete or Backspace over an envelope key removes the key, not the
+        // clip. This function runs before `panel_layout` draws the timeline,
+        // so the report it arbitrates on is one frame old — the matte
+        // overlay's `report_expanded` pattern. It comes first because a
+        // pointer parked on the band is the most specific thing on screen; a
+        // report that no longer names a curve answers `Clip` and falls
+        // straight through to the ordinary paths below.
+        if envelope_hover.is_some()
+            && ctx.input(|input| {
+                !input.modifiers.ctrl
+                    && !input.modifiers.shift
+                    && !input.modifiers.alt
+                    && (input.key_pressed(egui::Key::Delete)
+                        || input.key_pressed(egui::Key::Backspace))
+            })
+            && self.remove_hovered_envelope_key(envelope_hover)
+        {
             return;
         }
         if self.focused().transcript_selection.is_some()

@@ -2,16 +2,18 @@ use std::sync::Arc;
 
 use eframe::egui;
 use kinewright_core::{
-    Analysis, Clip, ClipContent, ClipId, Document, FrameRounding, MARKER_COLOR_TOKEN_COUNT, Marker,
-    MarkerId, MediaAsset, MediaKind, Operation, Rational, SceneStatus, SilenceStatus, TimeCode,
-    Title, TrackId, TrackKind, Transition, WaveformData, map_frames_with_rounding,
-    map_source_range_to_project,
+    Analysis, AutomationCurve, Clip, ClipContent, ClipId, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB,
+    FrameRounding, Keyframe, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaKind,
+    Operation, Rational, SceneStatus, SilenceStatus, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
+    TimeCode, Title, TrackId, TrackKind, Transition, WaveformData, envelope_coalesce_key,
+    map_frames_with_rounding, map_source_range_to_project,
 };
 use kinewright_media::timeline_source_at;
 
 use crate::{
     app::KinewrightApp,
     icons::{self, Icon},
+    inspector_ui::{InspectorEdits, is_live_drag},
     mixer_ui::{MixToggle, paint_mix_toggle, track_caption_and_icon, track_mix_toggle_operation},
     theme::{self, color, radius, size, space, type_size},
     visual_cache::VisualCache,
@@ -27,6 +29,28 @@ const SNAP_TOLERANCE: f32 = 8.0;
 const FILMSTRIP_TILE_WIDTH: f32 = 96.0;
 const THUMBNAIL_WIDTH: u32 = 128;
 const INTERNAL_MARKER_LABEL_PREFIX: &str = "__kinewright_reframe_subject_v1:";
+
+/// AU4 §5.1 rule 97: the clip width under which no envelope band is painted
+/// and no envelope hit-testing runs. The same 24 the clip-width floor uses
+/// (`clip_width = (duration * pixels_per_frame).max(24.0)`), so the coarse
+/// gesture is never offered where it cannot land.
+const ENVELOPE_MINIMUM_CLIP_WIDTH: f32 = 24.0;
+/// AU4 §5.1 rule 99: how near the polyline or a key the pointer has to be
+/// before the band takes an interact. `curve_editor_widget::HIT_RADIUS`
+/// reused, not re-invented.
+const ENVELOPE_HIT_RADIUS: f32 = 9.0;
+/// AU4 §5.1 rule 102: `curve_editor_widget::POINT_RADIUS`, reused.
+const ENVELOPE_POINT_RADIUS: f32 = 3.5;
+/// AU4 §5.1 rule 102: `curve_editor_widget::CURVE_STROKE`, reused.
+const ENVELOPE_STROKE: f32 = 1.6;
+/// AU4 §5.1 rule 95: the top of the band's value axis, in tenth-dB.
+///
+/// The bottom is [`ENVELOPE_DISPLAY_MIN_TENTH_DB`] (−40 dB); together they are
+/// a 520 tenth-dB span with unity at `(120 − 0) / 520` = 23.1 % from the top.
+const ENVELOPE_DISPLAY_MAX_TENTH_DB: i32 = TRACK_MIX_GAIN_MAX;
+/// AU4 §5.1 rule 95: the span of the band's value axis, in tenth-dB.
+const ENVELOPE_DISPLAY_SPAN_TENTH_DB: i32 =
+    ENVELOPE_DISPLAY_MAX_TENTH_DB - ENVELOPE_DISPLAY_MIN_TENTH_DB;
 
 /// Tracker provenance markers are document sidecars, not editorial markers.
 /// Keep them out of the timeline's visible, selectable, and snapping surfaces.
@@ -47,7 +71,525 @@ enum TrimEdge {
     Right,
 }
 
+/// The envelope key one pointer is dragging, remembered across frames.
+///
+/// Frame-local like `CurveEditorMemory`: it lives in `ui.data` temp storage
+/// and is never serialised, because it is a pointer state and not a document
+/// or session fact.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct EnvelopeDrag {
+    clip: ClipId,
+    index: usize,
+}
+
+/// AU4 §5.1 rule 95a: the envelope's paint, hit and interact rect.
+///
+/// Pure; no `Ui`, no session state. `band` is built exactly as the waveform's
+/// is — `rect.top() + 18.0` for a pure-audio asset, `rect.bottom() −
+/// rect.height() * 0.42` otherwise — and the return is
+/// `band.shrink2(vec2(space::HALF, space::ONE))`, the same rect
+/// `paint_waveform` draws into, so the ride and the waveform agree pixel for
+/// pixel.
+///
+/// One helper because the interact is allocated some 750 lines before the
+/// painting path builds its own `band`: without it the two sites would
+/// disagree by `space::HALF = 2` px in x and `space::ONE = 4` px in y and the
+/// drawn key would not be the grabbed key. A `MediaKind::Video` asset — and
+/// every Title and Freeze clip, which reach this with no asset at all — has no
+/// band, no paint and no interact.
+fn envelope_band_rect(clip_rect: egui::Rect, kind: MediaKind) -> Option<egui::Rect> {
+    envelope_band_unshrunk(clip_rect, kind)
+        .map(|band| band.shrink2(egui::vec2(space::HALF, space::ONE)))
+}
+
+/// The same band before the shrink — what `paint_clip`'s waveform scrim fills.
+///
+/// The single expression [`envelope_band_rect`] is derived from, so the scrim,
+/// the waveform and the ride cannot drift apart when the `18.0` or the `0.42`
+/// changes.
+fn envelope_band_unshrunk(clip_rect: egui::Rect, kind: MediaKind) -> Option<egui::Rect> {
+    if !matches!(kind, MediaKind::Audio | MediaKind::AudioVideo) {
+        return None;
+    }
+    let band_top = if matches!(kind, MediaKind::Audio) {
+        clip_rect.top() + 18.0
+    } else {
+        clip_rect.bottom() - clip_rect.height() * 0.42
+    };
+    Some(egui::Rect::from_min_max(
+        egui::pos2(clip_rect.left(), band_top),
+        clip_rect.max,
+    ))
+}
+
+/// AU4 §5.1 rule 98: the rect the envelope's `ui.interact` takes.
+///
+/// Rule 95a's band, intersected with `body_rect` horizontally. egui 0.35.0
+/// resolves overlapping interactive rects by *last registered wins*
+/// (`hit_test.rs:429-433`, the cargo-registry copy Cargo.lock:1116-1118 pins:
+/// the comment sits at :429 and the code at :430, "In case of a tie, take the
+/// last one = the one on top"), so this interact has to be allocated **after**
+/// `body`, `left` and `right` or it loses every tie — and without the x
+/// restriction it would steal both `EDGE_HANDLE_WIDTH` trim handles, which
+/// live outside `body_rect`. Do not "fix" the order.
+fn envelope_interact_rect(band: egui::Rect, body_rect: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(band.left().max(body_rect.left()), band.top()),
+        egui::pos2(band.right().min(body_rect.right()), band.bottom()),
+    )
+}
+
+/// Half away from zero, the house rounding for a pointer coordinate.
+fn envelope_round_half_away_from_zero(value: f64) -> f64 {
+    if value < 0.0 {
+        -(-value + 0.5).floor()
+    } else {
+        (value + 0.5).floor()
+    }
+}
+
+/// AU4 §5.1 rule 96: pointer x to a clip-local frame, through the same rect
+/// ratio the waveform uses. Pure; no window, no session state.
+///
+/// Not through `pixels_per_frame`: `clip_width` has a 24 px floor, so at any
+/// zoom where `duration × pixels_per_frame < 24` the painted rect is wider
+/// than the clip's true span and adjacent clips overlap in x. `paint_waveform`
+/// survives that by mapping columns through a clip-local ratio of
+/// `rect.width()`; the envelope does the same.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn envelope_x_to_local_frame(rect: egui::Rect, duration: TimeCode, x: f32) -> TimeCode {
+    let ratio = f64::from(x - rect.left()) / f64::from(rect.width().max(1.0));
+    let frame = envelope_round_half_away_from_zero(ratio * duration.0 as f64) as i64;
+    TimeCode(frame.clamp(0, duration.0.saturating_sub(1).max(0)))
+}
+
+/// AU4 §5.1 rule 96: a clip-local frame back to x, through the same ratio.
+#[allow(clippy::cast_precision_loss)]
+fn envelope_local_frame_to_x(rect: egui::Rect, duration: TimeCode, at: TimeCode) -> f32 {
+    let span = duration.0.max(1) as f32;
+    rect.left() + rect.width() * (at.0 as f32 / span)
+}
+
+/// AU4 §5.1 rule 95: a tenth-dB value to y, linear over −400 … +120.
+///
+/// A value outside the range clamps to the edge rather than being hidden.
+#[allow(clippy::cast_precision_loss)]
+fn envelope_value_to_y(rect: egui::Rect, value: i32) -> f32 {
+    let clamped = value.clamp(ENVELOPE_DISPLAY_MIN_TENTH_DB, ENVELOPE_DISPLAY_MAX_TENTH_DB);
+    let fraction =
+        (ENVELOPE_DISPLAY_MAX_TENTH_DB - clamped) as f32 / ENVELOPE_DISPLAY_SPAN_TENTH_DB as f32;
+    rect.top() + rect.height() * fraction
+}
+
+/// AU4 §5.1 rule 95: y back to a tenth-dB value, linear over −400 … +120.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn envelope_y_to_value(rect: egui::Rect, y: f32) -> i32 {
+    let fraction = (f64::from(y - rect.top()) / f64::from(rect.height().max(1.0))).clamp(0.0, 1.0);
+    let value = f64::from(ENVELOPE_DISPLAY_MAX_TENTH_DB)
+        - fraction * f64::from(ENVELOPE_DISPLAY_SPAN_TENTH_DB);
+    (envelope_round_half_away_from_zero(value) as i32)
+        .clamp(ENVELOPE_DISPLAY_MIN_TENTH_DB, ENVELOPE_DISPLAY_MAX_TENTH_DB)
+}
+
+/// AU4 §5.1 rules 95 and 101: the value one band grab writes.
+///
+/// Rule 95 fixes the *display* axis at −400 … +120 while rule 101 clamps a
+/// dragged key to −600 … +120, so a key the inspector parked at −500 paints on
+/// the band's floor and [`envelope_y_to_value`] would read −400 back out of
+/// it — a purely horizontal drag would silently raise the key by 10 dB. A key
+/// already below the display floor therefore keeps its stored value for as
+/// long as the pointer stays on the floor; the first frame the pointer leaves
+/// the floor, the drag means it.
+fn envelope_grab_value(band: egui::Rect, pointer_y: f32, stored: i64) -> i32 {
+    let pointed = envelope_y_to_value(band, pointer_y);
+    if stored < i64::from(ENVELOPE_DISPLAY_MIN_TENTH_DB) && pointed == ENVELOPE_DISPLAY_MIN_TENTH_DB
+    {
+        let held = stored.clamp(i64::from(TRACK_MIX_GAIN_MIN), i64::from(TRACK_MIX_GAIN_MAX));
+        return i32::try_from(held).unwrap_or(ENVELOPE_DISPLAY_MIN_TENTH_DB);
+    }
+    pointed
+}
+
+/// Every key of one clip envelope as a pixel position inside the band.
+///
+/// Index `i` is keyframe `i`, which is what makes [`envelope_hit`]'s return
+/// addressable by the gesture rules.
+#[allow(clippy::cast_possible_truncation)]
+fn envelope_points(rect: egui::Rect, duration: TimeCode, keys: &[Keyframe]) -> Vec<egui::Pos2> {
+    keys.iter()
+        .map(|key| {
+            egui::pos2(
+                envelope_local_frame_to_x(rect, duration, key.at),
+                envelope_value_to_y(rect, key.value as i32),
+            )
+        })
+        .collect()
+}
+
+/// The drawn line through those keys, with a `Hold` segment drawn as a step.
+///
+/// A `Hold` segment is flat until the next key's first sample (AU4 §3.1 rule
+/// 3), so drawing it as a ramp would make the band lie about what is heard.
+/// The line runs the whole width of the band because `value_at` clamps outside
+/// the keyed interval: a one-key curve really is a constant over the clip, and
+/// drawing it as a single dot would hide the thing there is to grab.
+fn envelope_polyline(
+    rect: egui::Rect,
+    points: &[egui::Pos2],
+    keys: &[Keyframe],
+) -> Vec<egui::Pos2> {
+    let Some(first) = points.first() else {
+        return Vec::new();
+    };
+    let mut line = Vec::with_capacity(points.len() * 2 + 2);
+    line.push(egui::pos2(rect.left(), first.y));
+    for (index, point) in points.iter().enumerate() {
+        if index > 0
+            && keys.get(index - 1).is_some_and(|key| {
+                key.interpolation == kinewright_core::KeyframeInterpolation::Hold
+            })
+        {
+            line.push(egui::pos2(point.x, points[index - 1].y));
+        }
+        line.push(*point);
+    }
+    if let Some(last) = points.last() {
+        line.push(egui::pos2(rect.right(), last.y));
+    }
+    line
+}
+
+/// AU4 §0 E53: the line a clip with no curve shows — flat, at the clip's
+/// parked `audio_gain_tenth_db`.
+///
+/// Without it rule 101's "a click on the line inserts a key" is unreachable
+/// for the *first* key and nothing on an untouched audio clip says it has a
+/// band at all. Two points, so [`envelope_near_curve`]'s segment probe answers
+/// it exactly as it answers a real curve.
+fn envelope_parked_polyline(band: egui::Rect, parked: i32) -> Vec<egui::Pos2> {
+    let y = envelope_value_to_y(band, parked);
+    vec![egui::pos2(band.left(), y), egui::pos2(band.right(), y)]
+}
+
+/// AU4 §5.1 rule 102: the rubber band over one clip's gain envelope.
+///
+/// Points at [`ENVELOPE_POINT_RADIUS`], the line at [`ENVELOPE_STROKE`], in
+/// `ACCENT` when the clip is selected and `TEXT_PRIMARY_64` otherwise — accent
+/// stays reserved for selection and direct manipulation (DESIGN.md).
+///
+/// AU4 §0 E53: a clip with no curve paints one flat line at `parked`, its
+/// `audio_gain_tenth_db`, in `TEXT_MUTED` and with no key dots — the band is
+/// an offer, not an envelope, until the first click lands a key on it.
+#[allow(clippy::cast_possible_truncation)]
+fn paint_clip_envelope(
+    painter: &egui::Painter,
+    band: egui::Rect,
+    duration: TimeCode,
+    keys: &[Keyframe],
+    parked: i32,
+    selected: bool,
+) {
+    if keys.is_empty() {
+        painter.add(egui::Shape::line(
+            envelope_parked_polyline(band, parked),
+            egui::Stroke::new(ENVELOPE_STROKE, color::TEXT_MUTED),
+        ));
+        return;
+    }
+    let tint = if selected {
+        color::ACCENT
+    } else {
+        color::TEXT_PRIMARY_64
+    };
+    let points = envelope_points(band, duration, keys);
+    let line = envelope_polyline(band, &points, keys);
+    if line.len() >= 2 {
+        painter.add(egui::Shape::line(
+            line,
+            egui::Stroke::new(ENVELOPE_STROKE, tint),
+        ));
+    }
+    for (point, key) in points.iter().zip(keys) {
+        painter.circle_filled(*point, ENVELOPE_POINT_RADIUS, tint);
+        let value = key.value as i32;
+        if !(ENVELOPE_DISPLAY_MIN_TENTH_DB..=ENVELOPE_DISPLAY_MAX_TENTH_DB).contains(&value) {
+            // Rule 95: a value outside the display range clamps to the edge
+            // and paints a 2 px marker there rather than being hidden.
+            painter.line_segment(
+                [
+                    egui::pos2(point.x - ENVELOPE_POINT_RADIUS, point.y),
+                    egui::pos2(point.x + ENVELOPE_POINT_RADIUS, point.y),
+                ],
+                egui::Stroke::new(2.0, tint),
+            );
+        }
+    }
+}
+
+/// AU4 §5.1 rule 99: the key under the pointer, if one is within
+/// [`ENVELOPE_HIT_RADIUS`].
+///
+/// Mirrors `curve_editor_widget::nearest_point` and the matte overlay's
+/// `matte_hit_test`: O(n) over the key list, nearest wins, no spatial index.
+/// A pointer further than the radius outside the band cannot hit anything, so
+/// the rect is the first rejection.
+fn envelope_hit(points: &[egui::Pos2], rect: egui::Rect, pointer: egui::Pos2) -> Option<usize> {
+    if !rect.expand(ENVELOPE_HIT_RADIUS).contains(pointer) {
+        return None;
+    }
+    points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| (index, point.distance(pointer)))
+        .filter(|(_, distance)| *distance <= ENVELOPE_HIT_RADIUS)
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(index, _)| index)
+}
+
+/// The distance from `pointer` to the segment `start..end`.
+fn distance_to_segment(start: egui::Pos2, end: egui::Pos2, pointer: egui::Pos2) -> f32 {
+    let span = end - start;
+    let length_squared = span.length_sq();
+    if length_squared <= f32::EPSILON {
+        return start.distance(pointer);
+    }
+    let t = ((pointer - start).dot(span) / length_squared).clamp(0.0, 1.0);
+    (start + span * t).distance(pointer)
+}
+
+/// AU4 §5.1 rule 99: whether the pointer is within [`ENVELOPE_HIT_RADIUS`] of
+/// the drawn line or one of its keys.
+///
+/// This is the allocation predicate: body drags and the two 6 px trim handles
+/// are untouched everywhere except within 9 px of the line.
+fn envelope_near_curve(polyline: &[egui::Pos2], rect: egui::Rect, pointer: egui::Pos2) -> bool {
+    if !rect.expand(ENVELOPE_HIT_RADIUS).contains(pointer) {
+        return false;
+    }
+    match polyline {
+        [] => false,
+        [only] => only.distance(pointer) <= ENVELOPE_HIT_RADIUS,
+        _ => polyline
+            .windows(2)
+            .any(|pair| distance_to_segment(pair[0], pair[1], pointer) <= ENVELOPE_HIT_RADIUS),
+    }
+}
+
+/// AU4 §5.1 rule 101: insert one key at a snapped clip-local frame, taking the
+/// curve's current value there. Pure; returns the whole key list.
+///
+/// A frame that already carries a key is left alone — the pointer would have
+/// grabbed that key rather than the line.
+fn envelope_insert_key(curve: &AutomationCurve, at: TimeCode) -> Vec<Keyframe> {
+    let mut keys = curve.keyframes.clone();
+    let index = keys.partition_point(|key| key.at.0 < at.0);
+    if keys.get(index).is_some_and(|key| key.at == at) {
+        return keys;
+    }
+    let value = curve.value_at(at).unwrap_or(0);
+    // The segment the click landed on decides the new key's shape, so
+    // inserting on a `Hold` run does not silently turn it into a ramp.
+    let interpolation = index
+        .checked_sub(1)
+        .and_then(|previous| keys.get(previous))
+        .map_or(kinewright_core::KeyframeInterpolation::Linear, |key| {
+            key.interpolation
+        });
+    keys.insert(
+        index,
+        Keyframe {
+            at,
+            value,
+            interpolation,
+        },
+    );
+    keys
+}
+
+/// AU4 §5.1 rule 101: move one key, x kept strictly between its neighbours and
+/// inside `0..=duration − 1`, y clamped to `-600..=120`. Pure; returns the
+/// whole key list.
+fn envelope_move_key(
+    keys: &[Keyframe],
+    index: usize,
+    at: TimeCode,
+    value: i32,
+    duration: TimeCode,
+) -> Vec<Keyframe> {
+    let last = duration.0.saturating_sub(1).max(0);
+    let low = index
+        .checked_sub(1)
+        .and_then(|previous| keys.get(previous))
+        .map_or(0, |key| key.at.0.saturating_add(1));
+    let high = keys
+        .get(index + 1)
+        .map_or(last, |key| key.at.0.saturating_sub(1));
+    let mut moved = keys.to_vec();
+    let Some(key) = moved.get_mut(index) else {
+        return moved;
+    };
+    let low = low.clamp(0, last);
+    let high = high.clamp(0, last);
+    // Unreachable on a valid curve: two neighbours of a key are always at
+    // least two frames apart.
+    key.at = TimeCode(if low > high {
+        low
+    } else {
+        at.0.clamp(low, high)
+    });
+    key.value = i64::from(value.clamp(TRACK_MIX_GAIN_MIN, TRACK_MIX_GAIN_MAX));
+    moved
+}
+
+/// AU4 §5.1 rule 101: remove one key. `None` when there is nothing to remove —
+/// **the last key cannot be removed**, because clearing the envelope is the
+/// inspector's `Clear`, which sends `curve: None`.
+fn envelope_remove_key(keys: &[Keyframe], index: usize) -> Option<Vec<Keyframe>> {
+    if keys.len() <= 1 || index >= keys.len() {
+        return None;
+    }
+    let mut remaining = keys.to_vec();
+    remaining.remove(index);
+    Some(remaining)
+}
+
+/// The operation one envelope gesture writes.
+fn envelope_operation(clip: ClipId, keys: Vec<Keyframe>) -> Operation {
+    Operation::SetClipGainEnvelope {
+        clip,
+        curve: Some(AutomationCurve { keyframes: keys }),
+    }
+}
+
+/// AU4 §5.1 rules 97 and 100: whether this clip is offered a rubber band at
+/// all. Pure; no window.
+///
+/// The toggle first, because it hides the overlay and with it all
+/// hit-testing; then the 24 px floor, so the coarse gesture is never offered
+/// where it cannot land.
+fn envelope_is_offered(duration: TimeCode, pixels_per_frame: f32, show_envelopes: bool) -> bool {
+    #[allow(clippy::cast_precision_loss)]
+    let width = duration.0 as f32 * pixels_per_frame;
+    show_envelopes && width >= ENVELOPE_MINIMUM_CLIP_WIDTH
+}
+
+/// Where the in-flight envelope drag is remembered between frames.
+const ENVELOPE_DRAG_MEMORY_ID: &str = "timeline-envelope-drag";
+
+/// AU4 §5.1 rules 96 and 103: pointer x to a snapped clip-local frame.
+///
+/// The snapped **project** frame comes from the existing `nearest_snap` path,
+/// so envelope keys snap to the same guides everything else does and Alt
+/// bypasses them through the same frame-level flag; it is then converted to a
+/// clip-local frame by subtracting `timeline_start`, never by re-deriving x
+/// from `pixels_per_frame`.
+#[allow(clippy::too_many_arguments)]
+fn envelope_snapped_local_frame(
+    band: egui::Rect,
+    clip_start: TimeCode,
+    duration: TimeCode,
+    pointer_x: f32,
+    candidates: &[i64],
+    ruler_interval: i64,
+    pixels_per_frame: f32,
+    snapping_disabled: bool,
+) -> (TimeCode, Option<i64>) {
+    let local = envelope_x_to_local_frame(band, duration, pointer_x);
+    let raw = clip_start.0.saturating_add(local.0);
+    let (snapped, guide) = if snapping_disabled {
+        (raw, None)
+    } else {
+        nearest_snap(raw, candidates, ruler_interval, pixels_per_frame)
+    };
+    let at = snapped
+        .saturating_sub(clip_start.0)
+        .clamp(0, duration.0.saturating_sub(1).max(0));
+    (TimeCode(at), guide)
+}
+
+/// AU4 §5.1 rule 101 (AU4 §0 E49): the timeline's report that the pointer was
+/// over one envelope key, read one frame later.
+///
+/// `keyboard_shortcuts` runs at the top of the frame, before `panel_layout`
+/// draws the timeline, so a Delete can only be arbitrated against what the
+/// *previous* frame saw. This is the matte overlay's
+/// `InspectorEdits::matte_expanded` → `MatteOverlayState::report_expanded`
+/// pattern (inspector_ui.rs:759-761): the input policy is the last frame's
+/// report, and it costs no deferral because the pointer has not moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EnvelopeHover {
+    pub(crate) clip: ClipId,
+    pub(crate) index: usize,
+}
+
+/// AU4 §5.1 rule 101 (AU4 §0 E49): what Delete/Backspace does this frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EnvelopeDelete {
+    /// No envelope key was hovered: Delete deletes the selected clip, exactly
+    /// as it did before. Also the answer to a stale report, whose clip or
+    /// curve has since gone.
+    Clip,
+    /// The hovered key goes and the clip is left alone.
+    ///
+    /// The remaining key list rather than the built `Operation`, which is
+    /// 552 bytes and would make every `Clip` answer carry them.
+    RemoveKey { clip: ClipId, keys: Vec<Keyframe> },
+    /// The hovered key is the envelope's last one, which rule 101 refuses to
+    /// remove: clearing an envelope is the inspector's `Clear`.
+    RefuseLastKey,
+}
+
+/// AU4 §5.1 rule 101 (AU4 §0 E49): arbitrate one Delete/Backspace between the
+/// hovered envelope key and the selected clip. Pure; no window, no session.
+pub(crate) fn envelope_delete_action(
+    document: &Document,
+    hover: Option<EnvelopeHover>,
+) -> EnvelopeDelete {
+    let Some(hover) = hover else {
+        return EnvelopeDelete::Clip;
+    };
+    let Some(curve) = document
+        .clip(hover.clip)
+        .and_then(|clip| clip.audio_gain_curve.as_ref())
+    else {
+        return EnvelopeDelete::Clip;
+    };
+    envelope_remove_key(&curve.keyframes, hover.index).map_or(
+        EnvelopeDelete::RefuseLastKey,
+        |keys| EnvelopeDelete::RemoveKey {
+            clip: hover.clip,
+            keys,
+        },
+    )
+}
+
+/// AU4 §5.1 rule 101: what the app says when Delete lands on an envelope's
+/// last key.
+pub(crate) const ENVELOPE_LAST_KEY_NOTE: &str =
+    "An envelope's last key stays: use Clear in the Inspector to remove the envelope.";
+
 impl KinewrightApp {
+    /// AU4 §5.1 rule 101 (AU4 §0 E49): Delete/Backspace over an envelope key.
+    ///
+    /// Returns `false` when nothing was hovered, which is the caller's cue to
+    /// fall through to `delete_selected`. The report is passed in rather than
+    /// read from the session because the caller takes it: it is good for one
+    /// frame only.
+    pub(crate) fn remove_hovered_envelope_key(&mut self, hover: Option<EnvelopeHover>) -> bool {
+        let document = Arc::clone(&self.focused().document);
+        match envelope_delete_action(&document, hover) {
+            EnvelopeDelete::Clip => false,
+            EnvelopeDelete::RemoveKey { clip, keys } => {
+                self.send_operation(envelope_operation(clip, keys));
+                true
+            }
+            EnvelopeDelete::RefuseLastKey => {
+                self.record_error("Operations", ENVELOPE_LAST_KEY_NOTE);
+                true
+            }
+        }
+    }
+
     pub(crate) fn add_title_at_playhead(&mut self) {
         let document = Arc::clone(&self.focused().document);
         let at = self.focused().position;
@@ -221,6 +763,7 @@ impl KinewrightApp {
         let mut zoom_target = old_zoom_target;
         let mut scroll_target = self.focused().timeline_scroll_target;
         let project_duration = self.focused().document.duration;
+        let mut show_envelopes = self.focused().show_envelopes;
         ui.allocate_ui_with_layout(
             egui::vec2(ui.available_width(), size::TIMELINE_TOOLBAR_HEIGHT),
             egui::Layout::left_to_right(egui::Align::Center),
@@ -259,6 +802,21 @@ impl KinewrightApp {
                 }
                 if self.ripple_mode {
                     ui.label(theme::caps_label("RIPPLE", color::ACCENT));
+                }
+                // AU4 §5.1 rule 100: session state, not document state. Off
+                // hides the overlay and with it all envelope hit-testing.
+                let envelopes = ui
+                    .add(
+                        egui::Button::new("Envelopes")
+                            .selected(show_envelopes)
+                            .min_size(egui::vec2(72.0, 22.0)),
+                    )
+                    .on_hover_text(
+                        "Show the gain envelope on audio clips. The band is the coarse gesture; \
+                         the inspector's keyframe list is the exact one.",
+                    );
+                if envelopes.clicked() {
+                    show_envelopes = !show_envelopes;
                 }
                 ui.separator();
                 if icons::button(ui, Icon::Undo, "Undo (Ctrl+Z)").clicked() {
@@ -320,6 +878,7 @@ impl KinewrightApp {
         self.projects[project_index].timeline_zoom_target = zoom_target;
         self.projects[project_index].timeline_scroll_target = scroll_target;
         self.projects[project_index].pixels_per_frame = pixels_per_frame;
+        self.projects[project_index].show_envelopes = show_envelopes;
 
         let document = Arc::clone(&self.focused().document);
         let mut selected_clip = self.focused().selected_clip;
@@ -360,11 +919,27 @@ impl KinewrightApp {
         let (major_tick, minor_tick) = tick_density(pixels_per_frame, document.fps);
         let clip_bounds = collect_clip_bounds(&document);
         let mut pending_operations = None;
+        // AU4 §5.2 rule 104: the timeline's first coalescing path, used by the
+        // envelope and nothing else. Clip move, trim, marker and playhead
+        // drags keep their `drag_stopped`-only `pending_operations` batch
+        // (rule 105); the two paths coexist.
+        let mut envelope_edits = InspectorEdits::default();
+        let mut envelope_drag = ui
+            .data_mut(|data| data.get_temp::<EnvelopeDrag>(egui::Id::new(ENVELOPE_DRAG_MEMORY_ID)));
+        // AU4 §5.1 rule 101 (AU4 §0 E49): the key the pointer is over this
+        // frame, reported to the session so the *next* frame's
+        // `keyboard_shortcuts` can answer Delete with it.
+        let mut envelope_hover: Option<EnvelopeHover> = None;
         let mut seek = None;
         let mut scrub_started = false;
         let mut scrub_stopped = false;
         let mut snap_guide = None;
         let snapping_disabled = ui.input(|input| input.modifiers.alt);
+        // Read once for the whole frame rather than once per audio clip: the
+        // envelope's allocation predicate (rule 99) asks for it on every clip
+        // that carries a curve, and the answer is the same screen position for
+        // all of them.
+        let envelope_pointer = ui.input(|input| input.pointer.hover_pos());
 
         ui.horizontal_top(|ui| {
             if let Some(operation) = paint_track_labels(ui, &document, total_height, track_height) {
@@ -484,6 +1059,215 @@ impl KinewrightApp {
                                     egui::Sense::drag(),
                                 )
                                 .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+
+                            // AU4 §5.1 rule 98: the envelope's interact is
+                            // allocated AFTER `body`, `left` and `right`,
+                            // because egui 0.35.0 resolves overlapping
+                            // interactive rects by last-registered-wins
+                            // (`hit_test.rs:429-433`) — an interact allocated
+                            // before the body would lose every tie. Rule 99:
+                            // and only when a drag is in flight or the pointer
+                            // is within 9 px of the line, so body drags and
+                            // the two 6 px trim handles are untouched
+                            // everywhere else.
+                            let envelope_kind = match &clip.content {
+                                ClipContent::Media => asset.map(|asset| asset.kind),
+                                ClipContent::Title(_) | ClipContent::Freeze(_) => None,
+                            };
+                            // Rule 97: no band and no hit-testing under 24 px
+                            // of clip width, so the coarse gesture is never
+                            // offered where it cannot land.
+                            let envelope_shown =
+                                envelope_is_offered(duration, pixels_per_frame, show_envelopes);
+                            let envelope_curve =
+                                clip.audio_gain_curve.as_ref().filter(|_| envelope_shown);
+                            if let Some(band) = envelope_kind
+                                .filter(|_| envelope_shown)
+                                .and_then(|kind| envelope_band_rect(clip_rect, kind))
+                            {
+                                let keys: &[Keyframe] =
+                                    envelope_curve.map_or(&[], |curve| &curve.keyframes);
+                                let points = envelope_points(band, duration, keys);
+                                // AU4 §0 E53: a clip with no curve still shows
+                                // a flat line at its parked
+                                // `audio_gain_tenth_db`, so rule 101's "a
+                                // click on the line inserts a key" reaches the
+                                // *first* key too and the band is
+                                // discoverable on an untouched audio clip.
+                                let drawn = if keys.is_empty() {
+                                    envelope_parked_polyline(band, clip.audio_gain_tenth_db)
+                                } else {
+                                    envelope_polyline(band, &points, keys)
+                                };
+                                let interact_rect = envelope_interact_rect(band, body_rect);
+                                let dragging =
+                                    envelope_drag.is_some_and(|drag| drag.clip == clip.id);
+                                // The allocation predicate tests the rect the
+                                // interact actually takes, not the whole band:
+                                // a pointer over a 6 px trim handle within
+                                // 9 px of the line would otherwise allocate an
+                                // interact whose rect cannot contain it.
+                                let near = envelope_pointer.is_some_and(|pointer| {
+                                    envelope_near_curve(&drawn, interact_rect, pointer)
+                                });
+                                if dragging || near {
+                                    // AU4 §0 E53: the parked line's offer is
+                                    // click-only, so a clip drag that starts
+                                    // on it still drags the clip — egui
+                                    // hit-tests click and drag separately, and
+                                    // a click-only widget over `body` yields
+                                    // click: envelope, drag: body.
+                                    let sense = if keys.is_empty() {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::click_and_drag()
+                                    };
+                                    let envelope = ui.interact(
+                                        interact_rect,
+                                        ui.make_persistent_id(("clip-envelope", clip.id.0)),
+                                        sense,
+                                    );
+                                    clip_pointer_interaction |=
+                                        envelope.hovered() || envelope.dragged();
+                                    // AU4 §5.1 rule 101 (AU4 §0 E49): the
+                                    // pointer's key is reported to the session
+                                    // at the end of the frame, because
+                                    // `keyboard_shortcuts` runs before the
+                                    // timeline paints and has to answer Delete
+                                    // from the report, one frame old — the
+                                    // matte overlay's `matte_expanded` →
+                                    // `report_expanded` pattern.
+                                    if envelope.hovered()
+                                        && let Some(pointer) = envelope_pointer
+                                        && let Some(index) = envelope_hit(&points, band, pointer)
+                                    {
+                                        envelope_hover = Some(EnvelopeHover {
+                                            clip: clip.id,
+                                            index,
+                                        });
+                                    }
+                                    // The snap table is O(clips + markers) and
+                                    // allocates, so it is built only on the
+                                    // frames a gesture actually consumes it —
+                                    // the same shape the clip body's own
+                                    // `interacting` guard uses below.
+                                    let interacting = envelope.drag_started()
+                                        || is_live_drag(&envelope)
+                                        || envelope.clicked();
+                                    let candidates = if interacting {
+                                        snap_candidates(
+                                            &clip_bounds,
+                                            &document.markers,
+                                            clip.id,
+                                            playhead_position.0,
+                                        )
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    if envelope.drag_started()
+                                        && let Some(pointer) = envelope.interact_pointer_pos()
+                                    {
+                                        envelope_drag =
+                                            envelope_hit(&points, band, pointer).map(|index| {
+                                                EnvelopeDrag {
+                                                    clip: clip.id,
+                                                    index,
+                                                }
+                                            });
+                                        if envelope_drag.is_some() {
+                                            envelope_edits.begin_gesture();
+                                        }
+                                    }
+                                    if let Some(drag) =
+                                        envelope_drag.filter(|drag| drag.clip == clip.id)
+                                        && let Some(stored) = keys.get(drag.index)
+                                        && is_live_drag(&envelope)
+                                        && let Some(pointer) = envelope.interact_pointer_pos()
+                                    {
+                                        let (at, guide) = envelope_snapped_local_frame(
+                                            band,
+                                            clip.timeline_start,
+                                            duration,
+                                            pointer.x,
+                                            &candidates,
+                                            minor_tick,
+                                            pixels_per_frame,
+                                            snapping_disabled,
+                                        );
+                                        if envelope.dragged() {
+                                            snap_guide = guide.or(snap_guide);
+                                        }
+                                        let moved = envelope_move_key(
+                                            keys,
+                                            drag.index,
+                                            at,
+                                            envelope_grab_value(band, pointer.y, stored.value),
+                                            duration,
+                                        );
+                                        // A frame that asks for the values the
+                                        // document already holds is not an
+                                        // edit (AU4 §5.2 rule 104).
+                                        if moved != keys {
+                                            envelope_edits.extend_live(
+                                                vec![envelope_operation(clip.id, moved)],
+                                                envelope_coalesce_key(clip.id),
+                                            );
+                                        }
+                                    }
+                                    if envelope.drag_stopped() {
+                                        envelope_drag = None;
+                                    }
+                                    if envelope.clicked()
+                                        && let Some(pointer) = envelope.interact_pointer_pos()
+                                        && envelope_hit(&points, band, pointer).is_none()
+                                    {
+                                        let (at, _) = envelope_snapped_local_frame(
+                                            band,
+                                            clip.timeline_start,
+                                            duration,
+                                            pointer.x,
+                                            &candidates,
+                                            minor_tick,
+                                            pixels_per_frame,
+                                            snapping_disabled,
+                                        );
+                                        let inserted = match envelope_curve {
+                                            Some(curve) => envelope_insert_key(curve, at),
+                                            // AU4 §0 E53: the first key lands
+                                            // at the value the flat line was
+                                            // drawn at, through the same
+                                            // `upsert_keyframe` the
+                                            // inspector's `+ Key at playhead`
+                                            // writes.
+                                            None => {
+                                                crate::inspector_ui::upsert_keyframe(
+                                                    None,
+                                                    at,
+                                                    i64::from(clip.audio_gain_tenth_db),
+                                                )
+                                                .keyframes
+                                            }
+                                        };
+                                        if inserted != keys {
+                                            envelope_edits
+                                                .push(envelope_operation(clip.id, inserted));
+                                        }
+                                    }
+                                    // Removal is the secondary click or the
+                                    // Delete/Backspace the session report
+                                    // above arms: `KeyAction::Delete` runs
+                                    // before the timeline paints, so the
+                                    // keyboard half is answered in `keys.rs`
+                                    // from that report (AU4 §0 E49).
+                                    if envelope.secondary_clicked()
+                                        && let Some(pointer) = envelope.interact_pointer_pos()
+                                        && let Some(index) = envelope_hit(&points, band, pointer)
+                                        && let Some(remaining) = envelope_remove_key(keys, index)
+                                    {
+                                        envelope_edits.push(envelope_operation(clip.id, remaining));
+                                    }
+                                }
+                            }
 
                             clip_pointer_interaction |= body.hovered()
                                 || body.dragged()
@@ -690,6 +1474,21 @@ impl KinewrightApp {
                             if clip.content.is_media() && clip.speed_percent != 100 {
                                 paint_speed_badge(&painter, draw_rect, clip.speed_percent);
                             }
+                            // AU4 §5.1 rule 102: the rubber band paints last,
+                            // over the waveform it shares a rect with.
+                            if let Some(band) = envelope_kind
+                                .filter(|_| envelope_shown)
+                                .and_then(|kind| envelope_band_rect(draw_rect, kind))
+                            {
+                                paint_clip_envelope(
+                                    &painter,
+                                    band,
+                                    duration,
+                                    envelope_curve.map_or(&[], |curve| &curve.keyframes),
+                                    clip.audio_gain_tenth_db,
+                                    selected,
+                                );
+                            }
                         }
                     }
 
@@ -856,9 +1655,21 @@ impl KinewrightApp {
             }
         });
 
+        ui.data_mut(|data| {
+            let id = egui::Id::new(ENVELOPE_DRAG_MEMORY_ID);
+            match envelope_drag {
+                Some(drag) => {
+                    data.insert_temp(id, drag);
+                }
+                None => data.remove::<EnvelopeDrag>(id),
+            }
+        });
         if let Some(operations) = pending_operations {
             self.send_operations(operations);
         }
+        // AU4 §5.2 rule 104: one `submit_inspector_edits` at the end of the
+        // function, exactly as the CC5 matte overlay does it.
+        self.submit_inspector_edits(envelope_edits);
         if scrub_started {
             self.resume_after_scrub = self.playing;
             // CC6 §8.2: the drag pauses the transport, so `playing` stops
@@ -903,6 +1714,7 @@ impl KinewrightApp {
         }
         session.title_text_focus = title_text_focus;
         session.timeline_scroll_target = scroll_target;
+        session.envelope_hover = envelope_hover;
     }
 }
 
@@ -1224,15 +2036,15 @@ fn paint_clip(
             rect,
         );
     }
+    // AU4 §5.1 rule 95a: the band comes from `envelope_band_rect`, the one
+    // pure helper the envelope's paint, hit and interact all take, so the ride
+    // and the waveform cannot drift apart by the 2 px in x and 4 px in y the
+    // shrink costs. The scrim fills the same band before that shrink, taken
+    // from the same expression rather than rebuilt here.
     if rect.intersects(clip_bounds)
-        && matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo)
+        && let Some(band) = envelope_band_unshrunk(rect, asset.kind)
+        && let Some(waveform_rect) = envelope_band_rect(rect, asset.kind)
     {
-        let band_top = if matches!(asset.kind, MediaKind::Audio) {
-            rect.top() + 18.0
-        } else {
-            rect.bottom() - rect.height() * 0.42
-        };
-        let band = egui::Rect::from_min_max(egui::pos2(rect.left(), band_top), rect.max);
         // A strong scrim keeps waveforms legible over saturated footage.
         painter.rect_filled(band, radius::XS, color::MEDIA_SCRIM_78);
         if let Some(waveform) = visual_cache.waveform(media, asset) {
@@ -1242,7 +2054,7 @@ fn paint_clip(
                 waveform.as_ref(),
                 asset,
                 source_range.clone(),
-                band.shrink2(egui::vec2(space::HALF, space::ONE)),
+                waveform_rect,
                 selected,
             );
         }
@@ -2614,6 +3426,810 @@ mod tests {
                 clip: ClipId(2),
                 speed_percent: 50,
             }]
+        );
+    }
+
+    // ---- AU4 Part B §5.1-§5.2: the timeline rubber band ----
+
+    /// A band of the exact geometry §5.1's cases produce, at a clip width that
+    /// makes the mapping rect 240 px wide.
+    fn envelope_test_band(track_height: f32, kind: MediaKind) -> egui::Rect {
+        let lane = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, track_height));
+        let clip_rect = egui::Rect::from_min_size(
+            egui::pos2(lane.left(), lane.top() + space::ONE),
+            // `space::HALF` a side comes off in the shrink, so 244 px of clip
+            // is 240 px of band.
+            egui::vec2(244.0, lane.height() - space::TWO),
+        );
+        envelope_band_rect(clip_rect, kind).expect("an audio clip has a band")
+    }
+
+    fn envelope_curve(keys: &[(i64, i64)]) -> AutomationCurve {
+        AutomationCurve {
+            keyframes: keys
+                .iter()
+                .map(|(at, value)| Keyframe {
+                    at: TimeCode(*at),
+                    value: *value,
+                    interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                })
+                .collect(),
+        }
+    }
+
+    /// Every circle and every stroked path one paint pass emitted.
+    ///
+    /// Shared by the envelope's paint tests: `Shape::Vec` nests, so the walk is
+    /// recursive and worth writing once.
+    fn collect_envelope_shapes(
+        shape: &egui::epaint::Shape,
+        circles: &mut Vec<(f32, egui::Color32)>,
+        lines: &mut Vec<(Vec<egui::Pos2>, f32, egui::Color32)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Circle(circle) => circles.push((circle.radius, circle.fill)),
+            egui::epaint::Shape::Path(path) => {
+                if let egui::epaint::ColorMode::Solid(color) = path.stroke.color {
+                    lines.push((path.points.clone(), path.stroke.width, color));
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_envelope_shapes(shape, circles, lines);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// AU4 §7 B1: the four pure mappings, with no window.
+    ///
+    /// The three band heights are exactly 38.00, 18.88 and 10.00 px, so
+    /// 520 / 18.88 = 27.54 and an equality assert on 27.5 would fail; the
+    /// resolutions are asserted within ±0.1 and printed.
+    #[test]
+    fn envelope_mappings_round_trip_and_place_unity_at_23_percent() {
+        let band = envelope_test_band(size::TRACK_HEIGHT, MediaKind::Audio);
+        assert!(
+            (band.width() - 240.0).abs() < f32::EPSILON,
+            "the mapping rect is 240 px wide; it is {}",
+            band.width()
+        );
+        let duration = TimeCode(300);
+        for frame in 0..duration.0 {
+            let at = TimeCode(frame);
+            let x = envelope_local_frame_to_x(band, duration, at);
+            assert_eq!(
+                envelope_x_to_local_frame(band, duration, x),
+                at,
+                "frame {frame} of a 300-frame clip round-trips through a 240 px rect"
+            );
+        }
+
+        let unity = envelope_value_to_y(band, 0);
+        let fraction = (unity - band.top()) / band.height();
+        assert!(
+            (fraction - 0.231).abs() <= 0.001,
+            "unity sits at (120 - 0) / 520 = 23.1 % from the top; it sits at {fraction}"
+        );
+        assert_eq!(
+            envelope_y_to_value(band, unity),
+            0,
+            "and maps back to unity"
+        );
+        assert!(
+            (envelope_value_to_y(band, ENVELOPE_DISPLAY_MIN_TENTH_DB - 1) - band.bottom()).abs()
+                < f32::EPSILON,
+            "-401 clamps to the bottom edge"
+        );
+        assert!(
+            (envelope_value_to_y(band, ENVELOPE_DISPLAY_MAX_TENTH_DB + 1) - band.top()).abs()
+                < f32::EPSILON,
+            "121 clamps to the top edge"
+        );
+
+        for (label, height, expected) in [
+            ("a pure-audio clip on a 72 px track", 38.00_f32, 13.7_f32),
+            ("an audio+video clip on a 72 px track", 18.88, 27.5),
+            ("a pure-audio clip on the 44 px minimum track", 10.00, 52.0),
+        ] {
+            let case = match (height, label.contains("audio+video")) {
+                (_, true) => envelope_test_band(size::TRACK_HEIGHT, MediaKind::AudioVideo),
+                (h, false) if (h - 38.00).abs() < 0.01 => {
+                    envelope_test_band(size::TRACK_HEIGHT, MediaKind::Audio)
+                }
+                _ => envelope_test_band(44.0, MediaKind::Audio),
+            };
+            assert!(
+                (case.height() - height).abs() <= 0.01,
+                "{label} gives a {height} px band; it gave {}",
+                case.height()
+            );
+            #[allow(clippy::cast_precision_loss)]
+            let resolution = ENVELOPE_DISPLAY_SPAN_TENTH_DB as f32 / case.height();
+            println!(
+                "AU4_ENVELOPE_RESOLUTION case={label} band_px={} tenth_db_per_px={resolution}",
+                case.height()
+            );
+            assert!(
+                (resolution - expected).abs() <= 0.1,
+                "{label} resolves at {expected} tenth-dB per logical pixel; it resolved at {resolution}"
+            );
+        }
+
+        assert!(
+            envelope_band_rect(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(240.0, 64.0)),
+                MediaKind::Video
+            )
+            .is_none(),
+            "a Video asset has no band, and a Title or Freeze clip reaches this with no kind at all"
+        );
+    }
+
+    /// AU4 §7 B2: the hit radius, the allocation floor, and the trim handles.
+    #[test]
+    fn envelope_hit_stays_inside_nine_pixels_and_off_both_trim_handles() {
+        let band = envelope_test_band(size::TRACK_HEIGHT, MediaKind::Audio);
+        let key = band.center();
+        assert_eq!(
+            envelope_hit(&[key], band, key + egui::vec2(9.0, 0.0)),
+            Some(0),
+            "a key is found within 9.0"
+        );
+        assert_eq!(
+            envelope_hit(&[key], band, key + egui::vec2(9.1, 0.0)),
+            None,
+            "and not at 9.1"
+        );
+        assert!(envelope_near_curve(
+            &[key, key + egui::vec2(80.0, 0.0)],
+            band,
+            key + egui::vec2(40.0, 8.0)
+        ));
+        assert!(!envelope_near_curve(
+            &[key, key + egui::vec2(80.0, 0.0)],
+            band,
+            key + egui::vec2(40.0, 10.0)
+        ));
+
+        // Rule 97: no hit-testing at all under 24 px of clip width.
+        assert!(
+            envelope_is_offered(TimeCode(30), 0.8, true),
+            "24 px of clip is offered"
+        );
+        assert!(
+            !envelope_is_offered(TimeCode(30), 0.79, true),
+            "23.7 px of clip is not"
+        );
+
+        let clip_rect = egui::Rect::from_min_size(egui::pos2(100.0, 20.0), egui::vec2(244.0, 64.0));
+        let body_rect = egui::Rect::from_min_max(
+            egui::pos2(clip_rect.left() + EDGE_HANDLE_WIDTH, clip_rect.top()),
+            egui::pos2(clip_rect.right() - EDGE_HANDLE_WIDTH, clip_rect.bottom()),
+        );
+        let band = envelope_band_rect(clip_rect, MediaKind::Audio).unwrap();
+        let interact = envelope_interact_rect(band, body_rect);
+        assert!(
+            interact.left() >= body_rect.left() && interact.right() <= body_rect.right(),
+            "the envelope interact never overlaps either 6 px trim handle in x: {interact:?}"
+        );
+        // A pointer 3 px from the line, inside the left handle's x band,
+        // still reaches the handle.
+        let probe = egui::pos2(clip_rect.left() + 2.0, band.center().y + 3.0);
+        let left_handle = egui::Rect::from_min_max(
+            clip_rect.min,
+            egui::pos2(clip_rect.left() + EDGE_HANDLE_WIDTH, clip_rect.bottom()),
+        );
+        assert!(
+            left_handle.contains(probe),
+            "the probe is on the left handle"
+        );
+        assert!(
+            !interact.contains(probe),
+            "and the envelope interact does not cover it"
+        );
+    }
+
+    /// AU4 §7 B3: the three gesture rules, pure, over the whole key list.
+    #[test]
+    fn envelope_gesture_rules_are_pure_over_the_key_list() {
+        let curve = envelope_curve(&[(0, 0), (60, -200), (120, 0)]);
+        let duration = TimeCode(180);
+
+        // Insert takes the curve's current value at the snapped frame.
+        let inserted = envelope_insert_key(&curve, TimeCode(30));
+        assert_eq!(inserted.len(), 4);
+        assert_eq!(inserted[1].at, TimeCode(30));
+        assert_eq!(inserted[1].value, curve.value_at(TimeCode(30)).unwrap());
+        assert_eq!(
+            envelope_insert_key(&curve, TimeCode(60)),
+            curve.keyframes,
+            "a frame that already carries a key is left alone"
+        );
+
+        // A dragged key is constrained between its neighbours ± 1 frame and
+        // clamped in both axes.
+        let far = envelope_move_key(&curve.keyframes, 1, TimeCode(500), 999, duration);
+        assert_eq!(
+            far[1].at,
+            TimeCode(119),
+            "x stops one frame short of its neighbour"
+        );
+        assert_eq!(
+            far[1].value,
+            i64::from(TRACK_MIX_GAIN_MAX),
+            "y clamps to +120"
+        );
+        let low = envelope_move_key(&curve.keyframes, 1, TimeCode(-9), -9_999, duration);
+        assert_eq!(
+            low[1].at,
+            TimeCode(1),
+            "and one frame past the one before it"
+        );
+        assert_eq!(
+            low[1].value,
+            i64::from(TRACK_MIX_GAIN_MIN),
+            "y clamps to -600"
+        );
+        let last = envelope_move_key(&curve.keyframes, 2, TimeCode(9_999), 0, duration);
+        assert_eq!(
+            last[2].at,
+            TimeCode(179),
+            "the last key stops at duration - 1"
+        );
+
+        // Remove drops one key; the last one cannot be removed.
+        let removed = envelope_remove_key(&curve.keyframes, 1).expect("three keys leave two");
+        assert_eq!(removed.len(), 2);
+        assert_eq!(removed[1].at, TimeCode(120));
+        let only = envelope_curve(&[(0, 0)]);
+        assert!(
+            envelope_remove_key(&only.keyframes, 0).is_none(),
+            "the last key cannot be removed: clearing is the inspector's `Clear`"
+        );
+    }
+
+    /// AU4 §7 B3 and rules 96/103: a snapped insert lands on a project frame
+    /// converted by subtracting `timeline_start`, and Alt bypasses snapping
+    /// through the existing frame-level flag.
+    #[test]
+    fn envelope_snapping_runs_on_project_frames_and_alt_bypasses_it() {
+        let band = envelope_test_band(size::TRACK_HEIGHT, MediaKind::Audio);
+        let duration = TimeCode(300);
+        let clip_start = TimeCode(40);
+        // A guide at project frame 100 is clip-local frame 60.
+        let candidates = [100_i64];
+        let x = envelope_local_frame_to_x(band, duration, TimeCode(58));
+        let (snapped, guide) = envelope_snapped_local_frame(
+            band,
+            clip_start,
+            duration,
+            x,
+            &candidates,
+            30,
+            1.0,
+            false,
+        );
+        assert_eq!(snapped, TimeCode(60), "the guide at project frame 100 wins");
+        assert_eq!(
+            guide,
+            Some(100),
+            "and paints through the existing snap path"
+        );
+        let (raw, guide) =
+            envelope_snapped_local_frame(band, clip_start, duration, x, &candidates, 30, 1.0, true);
+        assert_eq!(raw, TimeCode(58), "Alt bypasses snapping on envelope keys");
+        assert_eq!(guide, None, "and paints no guide");
+    }
+
+    /// AU4 §7 B4: one rubber-band drag is one undo entry, on the
+    /// `a_coalesced_bus_fader_drag_is_one_undo_entry` template
+    /// (`au2_core.rs:1387`).
+    #[test]
+    fn a_coalesced_envelope_drag_is_one_undo_entry() {
+        use kinewright_core::{Command, Core, Event};
+
+        let mut document = linked_fixture();
+        document.tracks[1].clips[0].audio_gain_curve = Some(envelope_curve(&[(0, 0), (20, 0)]));
+        let clip = document.tracks[1].clips[0].id;
+        let key = kinewright_core::envelope_coalesce_key(clip);
+        assert_eq!(key, format!("envelope:{clip}"));
+        let core = Core::spawn(document.clone()).unwrap();
+
+        let duration = TimeCode(30);
+        let stored = document.tracks[1].clips[0]
+            .audio_gain_curve
+            .clone()
+            .unwrap();
+        let mut last = None;
+        for step in 1..=10_i64 {
+            let moved = envelope_move_key(
+                &stored.keyframes,
+                1,
+                TimeCode(20),
+                i32::try_from(-step * 10).unwrap(),
+                duration,
+            );
+            let Event::DocumentChanged { doc, .. } = core
+                .request(Command::DoBatchCoalesced {
+                    operations: vec![envelope_operation(clip, moved)],
+                    coalesce_key: format!("{key}#1"),
+                })
+                .unwrap()
+            else {
+                panic!("a coalesced envelope batch should be accepted");
+            };
+            last = Some(doc);
+        }
+        let last = last.unwrap();
+        assert_eq!(
+            last.tracks[1].clips[0]
+                .audio_gain_curve
+                .as_ref()
+                .unwrap()
+                .keyframes[1]
+                .value,
+            -100
+        );
+        let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+            panic!("the gesture should be undoable");
+        };
+        assert_eq!(
+            doc.as_ref(),
+            &document,
+            "one undo restores the pre-gesture document: ten drag frames are one entry"
+        );
+
+        // A frame whose recomputed curve equals the document writes nothing.
+        let settled = envelope_move_key(&stored.keyframes, 1, TimeCode(20), 0, duration);
+        assert_eq!(
+            settled, stored.keyframes,
+            "a frame that asks for the values the document already holds is not an edit"
+        );
+
+        // And a discrete edit in the same frame drops the key.
+        let mut edits = crate::inspector_ui::InspectorEdits::default();
+        edits.extend_live(
+            vec![envelope_operation(clip, stored.keyframes.clone())],
+            key.clone(),
+        );
+        assert_eq!(edits.coalesce_key(), Some(key.as_str()));
+        edits.push(envelope_operation(clip, stored.keyframes.clone()));
+        assert_eq!(
+            edits.coalesce_key(),
+            None,
+            "a frame that also carries a discrete edit drops the key"
+        );
+    }
+
+    /// AU4 §7 B4 (rule 105): the regression risk of grafting `InspectorEdits`
+    /// into `timeline()` is that a clip move, a trim, a marker drag or a
+    /// playhead drag starts filing per-frame batches. `timeline()` therefore
+    /// owns exactly one `InspectorEdits`, submits it once, and never reaches
+    /// the live path under any key but the envelope's.
+    #[test]
+    fn the_timeline_has_exactly_one_coalescing_path_and_the_envelope_owns_it() {
+        const FILE: &str = include_str!("timeline_ui.rs");
+        // The test module quotes every one of these names, so the pin reads
+        // the production half of the file only.
+        let source = FILE
+            .split_once("\n#[cfg(test)]")
+            .expect("timeline_ui.rs has a test module")
+            .0;
+        assert_eq!(
+            source.matches("InspectorEdits::default()").count(),
+            1,
+            "the timeline gains ONE `InspectorEdits`, used by the envelope only"
+        );
+        assert_eq!(
+            source.matches("submit_inspector_edits(").count(),
+            1,
+            "and submits it exactly once, at the end of the function"
+        );
+        for live in ["extend_live(", "push_live("] {
+            for (index, _) in source.match_indices(live) {
+                let window = &source[index..(index + 240).min(source.len())];
+                assert!(
+                    window.contains("envelope_coalesce_key"),
+                    "every live write in the timeline is the envelope's: {live}"
+                );
+            }
+        }
+        assert!(
+            source.matches("pending_operations = ").count() >= 5,
+            "clip move, both trims, the marker drag and the ripple path keep their \
+             `drag_stopped`-only batch"
+        );
+    }
+
+    /// AU4 §7 B5: a painted frame of the band writes no operation and paints
+    /// the polyline and its points at the contract's radii, in `ACCENT` when
+    /// the clip is selected and `TEXT_PRIMARY_64` otherwise.
+    #[test]
+    fn a_painted_envelope_writes_nothing_and_draws_its_points_and_line() {
+        let curve = envelope_curve(&[(0, 0), (15, -200), (29, 0)]);
+        for (selected, expected) in [(false, color::TEXT_PRIMARY_64), (true, color::ACCENT)] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let band = envelope_test_band(size::TRACK_HEIGHT, MediaKind::Audio);
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                paint_clip_envelope(
+                    ui.painter(),
+                    band,
+                    TimeCode(30),
+                    &curve.keyframes,
+                    0,
+                    selected,
+                );
+            });
+            let mut circles = Vec::new();
+            let mut lines = Vec::new();
+            for clipped in &output.shapes {
+                collect_envelope_shapes(&clipped.shape, &mut circles, &mut lines);
+            }
+            assert_eq!(circles.len(), 3, "one point per key");
+            for (radius, fill) in &circles {
+                assert!((radius - ENVELOPE_POINT_RADIUS).abs() < f32::EPSILON);
+                assert_eq!(*fill, expected);
+            }
+            assert!(
+                lines.iter().any(
+                    |(_, width, tint)| (width - ENVELOPE_STROKE).abs() < f32::EPSILON
+                        && *tint == expected
+                ),
+                "the polyline is 1.6 px in {expected:?}; it painted {lines:?}"
+            );
+        }
+        assert!(
+            (ENVELOPE_HIT_RADIUS - crate::curve_editor_widget::HIT_RADIUS).abs() < f32::EPSILON
+                && (ENVELOPE_POINT_RADIUS - crate::curve_editor_widget::POINT_RADIUS).abs()
+                    < f32::EPSILON
+                && (ENVELOPE_STROKE - crate::curve_editor_widget::CURVE_STROKE).abs()
+                    < f32::EPSILON,
+            "the three literals are the curve editor's own, reused rather than re-invented"
+        );
+    }
+
+    /// AU4 §7 B6: the `Envelopes` toggle is session state, defaults on, and
+    /// when off nothing paints and no interact is allocated.
+    #[test]
+    fn the_envelopes_toggle_is_session_state_that_defaults_on() {
+        assert!(
+            envelope_is_offered(TimeCode(30), 6.0, true),
+            "the overlay is offered on an ordinary clip"
+        );
+        assert!(
+            !envelope_is_offered(TimeCode(30), 6.0, false),
+            "and hidden, with all its hit-testing, when the toggle is off"
+        );
+        let session = include_str!("project.rs");
+        assert!(
+            session.contains("show_envelopes: bool"),
+            "the toggle lives beside `pixels_per_frame` on the session, not on the document"
+        );
+        assert!(session.contains("show_envelopes: true"), "and defaults on");
+    }
+
+    /// AU4 §7 B14: the timeline's first `include_str!` docs pin.
+    #[test]
+    fn the_design_note_states_the_timeline_envelope_rules() {
+        const DESIGN: &str = include_str!("../../../docs/DESIGN.md");
+        let timeline = DESIGN
+            .split_once("### Timeline")
+            .expect("DESIGN.md has a Timeline section")
+            .1
+            .split_once("\n### ")
+            .expect("the Timeline section ends at the next heading")
+            .0;
+        // The file is hard-wrapped, so each phrase is one that fits a line.
+        for expected in [
+            "gain envelope",
+            "`band.shrink2(vec2(2, 4))`, the same rect the waveform uses",
+            "9 point hit radius",
+            "3.5 point handles on a 1.6 point line",
+            "`Envelopes` toolbar toggle",
+            "Alt bypasses snapping on envelope keys as it does everywhere",
+            "−40 to +12 dB",
+            "Delete or Backspace over a key removes the key, not the clip",
+            "a click on that line lands the first key there, holding that gain",
+            "the band is the coarse gesture and the inspector's keyframe list is the exact one",
+        ] {
+            assert!(
+                timeline.contains(expected),
+                "DESIGN.md's Timeline section must state: {expected}"
+            );
+        }
+    }
+
+    /// AU4 §5.1 rule 101 (AU4 §0 E49): Delete arbitrates between the hovered
+    /// envelope key and the selected clip.
+    ///
+    /// `keyboard_shortcuts` runs before the timeline paints, so the whole
+    /// question is decided by [`envelope_delete_action`] against the report the
+    /// timeline left last frame. Both directions are proven here: a hovered key
+    /// yields a `SetClipGainEnvelope` that keeps the clip, and no hover yields
+    /// `Clip`, which is the old `delete_selected` path untouched.
+    #[test]
+    fn delete_over_a_hovered_envelope_key_removes_the_key_and_not_the_clip() {
+        let mut document = linked_fixture();
+        document.tracks[1].clips[0].audio_gain_curve =
+            Some(envelope_curve(&[(0, 0), (15, -200), (29, 0)]));
+        let clip = document.tracks[1].clips[0].id;
+
+        // No band hovered: Delete still deletes the selected clip.
+        assert_eq!(
+            envelope_delete_action(&document, None),
+            EnvelopeDelete::Clip,
+            "with nothing hovered Delete is the clip delete it has always been"
+        );
+
+        let hovered = envelope_delete_action(&document, Some(EnvelopeHover { clip, index: 1 }));
+        let EnvelopeDelete::RemoveKey { clip: target, keys } = hovered else {
+            panic!("a hovered key is removed, not the clip: {hovered:?}");
+        };
+        assert_eq!(target, clip, "the removal names the hovered clip");
+        // The one operation `remove_hovered_envelope_key` sends for it.
+        let operation = envelope_operation(target, keys);
+        assert!(
+            matches!(
+                &operation,
+                Operation::SetClipGainEnvelope { clip: target, curve: Some(_) } if *target == clip
+            ),
+            "the removal is one `SetClipGainEnvelope` on the hovered clip: {operation:?}"
+        );
+        let clips_before = document
+            .tracks
+            .iter()
+            .map(|track| track.clips.len())
+            .sum::<usize>();
+        let mut applied = document.clone();
+        kinewright_core::apply_batch(&mut applied, std::slice::from_ref(&operation))
+            .expect("removing one key is a valid operation");
+        assert_eq!(
+            applied
+                .tracks
+                .iter()
+                .map(|track| track.clips.len())
+                .sum::<usize>(),
+            clips_before,
+            "no clip is deleted"
+        );
+        let remaining = applied
+            .clip(clip)
+            .and_then(|clip| clip.audio_gain_curve.as_ref())
+            .expect("the envelope survives");
+        assert_eq!(
+            remaining
+                .keyframes
+                .iter()
+                .map(|key| key.at.0)
+                .collect::<Vec<_>>(),
+            vec![0, 29],
+            "and exactly the hovered key is gone"
+        );
+
+        // Rule 101's last-key refusal: clearing an envelope is the inspector's
+        // `Clear`, so Delete on the only key deletes neither key nor clip.
+        let mut single = document.clone();
+        single.tracks[1].clips[0].audio_gain_curve = Some(envelope_curve(&[(0, 0)]));
+        assert_eq!(
+            envelope_delete_action(&single, Some(EnvelopeHover { clip, index: 0 })),
+            EnvelopeDelete::RefuseLastKey,
+            "the last key stays"
+        );
+
+        // A stale report — the curve has since been cleared — falls back to the
+        // clip delete rather than doing nothing.
+        let mut cleared = document.clone();
+        cleared.tracks[1].clips[0].audio_gain_curve = None;
+        assert_eq!(
+            envelope_delete_action(&cleared, Some(EnvelopeHover { clip, index: 1 })),
+            EnvelopeDelete::Clip,
+            "a report whose curve is gone is not a veto"
+        );
+
+        // The arbitration has to happen before any `delete_selected` call, and
+        // `keyboard_shortcuts` is the only place it can: it runs before the
+        // timeline paints, so this is the pin that the branch stays first.
+        let keys = include_str!("keys.rs");
+        let envelope = keys
+            .find("remove_hovered_envelope_key")
+            .expect("`keyboard_shortcuts` consults the envelope report");
+        let delete = keys
+            .find("self.delete_selected()")
+            .expect("`keyboard_shortcuts` still has its clip-delete path");
+        assert!(
+            envelope < delete,
+            "the hovered-key branch is arbitrated before any `delete_selected`"
+        );
+        assert!(
+            keys.contains("egui::Key::Backspace") && keys.contains("egui::Key::Delete"),
+            "both keys reach it"
+        );
+        assert!(
+            keys.contains("envelope_hover.take()"),
+            "and the report is taken, so a frame in which the timeline does not draw \
+             cannot leave a stale hover behind to swallow a later Delete"
+        );
+        assert!(
+            keys.find("egui_wants_keyboard_input") < keys.find("remove_hovered_envelope_key"),
+            "a Delete typed into a text field is still swallowed by the guard"
+        );
+        // AU4 §0 E53: the parked (curve-free) band is click-only, so a clip
+        // drag that starts on it falls through to `body`.
+        let timeline = include_str!("timeline_ui.rs");
+        let sense = timeline
+            .find("let sense = if keys.is_empty() {")
+            .expect("the envelope interact picks its sense from the key list");
+        assert!(
+            timeline[sense..sense + 200].contains("egui::Sense::click()"),
+            "the curve-free band senses clicks only"
+        );
+    }
+
+    /// AU4 §0 E53: a clip with no curve still shows a band — one flat, muted
+    /// line at its parked `audio_gain_tenth_db` — and a click on it lands the
+    /// first key there.
+    #[test]
+    fn a_curve_free_clip_shows_a_flat_parked_line_that_a_click_seeds() {
+        const PARKED: i32 = -60;
+        let band = envelope_test_band(size::TRACK_HEIGHT, MediaKind::Audio);
+        let parked_y = envelope_value_to_y(band, PARKED);
+
+        // It paints: one line, no key dots, at the parked value, in the muted
+        // tint that says "not an envelope yet".
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_clip_envelope(ui.painter(), band, TimeCode(30), &[], PARKED, false);
+        });
+        let mut circles = Vec::new();
+        let mut lines = Vec::new();
+        for clipped in &output.shapes {
+            collect_envelope_shapes(&clipped.shape, &mut circles, &mut lines);
+        }
+        assert!(circles.is_empty(), "a curve-free clip draws no key dots");
+        assert_eq!(lines.len(), 1, "and exactly one line: {lines:?}");
+        let (points, width, tint) = &lines[0];
+        assert!(
+            (width - ENVELOPE_STROKE).abs() < f32::EPSILON && *tint == color::TEXT_MUTED,
+            "the parked line is {ENVELOPE_STROKE} px of TEXT_MUTED: {width} {tint:?}"
+        );
+        assert_eq!(points.len(), 2, "it is flat: {points:?}");
+        assert!(
+            (points[0].x - band.left()).abs() < f32::EPSILON
+                && (points[1].x - band.right()).abs() < f32::EPSILON
+                && (points[0].y - parked_y).abs() < f32::EPSILON
+                && (points[1].y - parked_y).abs() < f32::EPSILON,
+            "it spans the band at the parked value: {points:?} against {parked_y}"
+        );
+
+        // It hit-tests on the same 9 px rule the real curve does.
+        let drawn = envelope_parked_polyline(band, PARKED);
+        let on_line = egui::pos2(band.center().x, parked_y + 8.0);
+        let off_line = egui::pos2(band.center().x, parked_y - 10.0);
+        assert!(
+            envelope_near_curve(&drawn, band, on_line),
+            "8 px from the parked line is on it"
+        );
+        assert!(
+            !envelope_near_curve(&drawn, band, off_line),
+            "10 px from it is not"
+        );
+        assert!(
+            envelope_hit(&[], band, on_line).is_none(),
+            "there is no key to grab, so the click is an insertion"
+        );
+
+        // And the click inserts the first key at the snapped frame, carrying
+        // the parked value, through the inspector's own `upsert_keyframe`.
+        let at = envelope_x_to_local_frame(band, TimeCode(30), on_line.x);
+        let seeded = crate::inspector_ui::upsert_keyframe(None, at, i64::from(PARKED)).keyframes;
+        assert_eq!(seeded.len(), 1, "one key: {seeded:?}");
+        assert_eq!(
+            (seeded[0].at, seeded[0].value),
+            (at, i64::from(PARKED)),
+            "at the snapped frame, holding the parked gain"
+        );
+
+        // The 24 px floor still gates the whole offer, curve or no curve.
+        assert!(
+            !envelope_is_offered(TimeCode(30), 0.5, true),
+            "a 15 px clip is offered no band to click"
+        );
+    }
+
+    /// AU4 §5.1 rules 95 and 101: a band grab clamps to −600 … +120 but does
+    /// not raise a key parked below the −400 display floor unless the pointer
+    /// actually leaves the floor.
+    #[test]
+    fn a_band_grab_clamps_to_the_gain_range_without_raising_a_parked_key() {
+        let band = envelope_test_band(size::TRACK_HEIGHT, MediaKind::Audio);
+
+        // The floor of the band reads back as the display floor …
+        assert_eq!(
+            envelope_y_to_value(band, band.bottom()),
+            ENVELOPE_DISPLAY_MIN_TENTH_DB
+        );
+        // … so a key stored at −500 would be raised to −400 by a purely
+        // horizontal grab. It is not.
+        assert_eq!(
+            envelope_grab_value(band, band.bottom(), -500),
+            -500,
+            "a key below the display floor keeps its value while the pointer stays on the floor"
+        );
+        // The moment the pointer leaves the floor, the drag means it.
+        let lifted = envelope_grab_value(band, band.center().y, -500);
+        assert_eq!(
+            lifted,
+            envelope_y_to_value(band, band.center().y),
+            "a pointer off the floor writes what it points at"
+        );
+        assert!(lifted > ENVELOPE_DISPLAY_MIN_TENTH_DB);
+        // An ordinary key is unaffected: the floor is still the floor.
+        assert_eq!(
+            envelope_grab_value(band, band.bottom(), 0),
+            ENVELOPE_DISPLAY_MIN_TENTH_DB,
+            "a key inside the display range is clamped to the floor as before"
+        );
+        // And rule 101's own −600 … +120 clamp is untouched.
+        let keys = envelope_curve(&[(0, 0), (29, 0)]).keyframes;
+        let moved = envelope_move_key(&keys, 0, TimeCode(0), -900, TimeCode(30));
+        assert_eq!(
+            moved[0].value,
+            i64::from(TRACK_MIX_GAIN_MIN),
+            "the grab is still clamped to −600"
+        );
+    }
+
+    /// AU4 §5.1 rules 98 and 99: the allocation predicate tests the rect the
+    /// interact actually takes, not the whole band.
+    ///
+    /// The band reaches `space::HALF` into the clip's edge while the interact
+    /// stops at `EDGE_HANDLE_WIDTH`, so a pointer sitting *outside* the clip,
+    /// at the height of the line's left end, used to be within 9 px of the
+    /// polyline and allocate an interact whose rect could never contain it.
+    #[test]
+    fn the_allocation_predicate_uses_the_interact_rect_not_the_band() {
+        let lane =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, size::TRACK_HEIGHT));
+        let clip_rect = egui::Rect::from_min_size(
+            egui::pos2(lane.left() + 40.0, lane.top() + space::ONE),
+            egui::vec2(244.0, lane.height() - space::TWO),
+        );
+        let band =
+            envelope_band_rect(clip_rect, MediaKind::Audio).expect("an audio clip has a band");
+        let body_rect = egui::Rect::from_min_max(
+            egui::pos2(clip_rect.left() + EDGE_HANDLE_WIDTH, clip_rect.top()),
+            egui::pos2(clip_rect.right() - EDGE_HANDLE_WIDTH, clip_rect.bottom()),
+        );
+        let interact = envelope_interact_rect(band, body_rect);
+        assert!(
+            interact.left() > band.left() && interact.right() < band.right(),
+            "the interact is inside the band by the two trim handles"
+        );
+
+        let curve = envelope_curve(&[(0, 0), (29, 0)]);
+        let points = envelope_points(band, TimeCode(30), &curve.keyframes);
+        let drawn = envelope_polyline(band, &points, &curve.keyframes);
+        let outside = egui::pos2(clip_rect.left() - 5.0, points[0].y);
+        assert!(
+            envelope_near_curve(&drawn, band, outside),
+            "against the band, a pointer 5 px outside the clip is `near` the line"
+        );
+        assert!(
+            !interact.contains(outside),
+            "but the interact's rect does not contain it"
+        );
+        assert!(
+            !envelope_near_curve(&drawn, interact, outside),
+            "so tested against the interact rect it allocates nothing"
+        );
+        // And a pointer genuinely on the line still allocates.
+        assert!(
+            envelope_near_curve(&drawn, interact, egui::pos2(band.center().x, points[0].y)),
+            "the ordinary hover is untouched"
         );
     }
 }
