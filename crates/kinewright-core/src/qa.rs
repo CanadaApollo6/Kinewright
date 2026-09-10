@@ -133,7 +133,21 @@ pub fn qa_document(document: &Document) -> QaReport {
     let mut has_audio_bearing_clip = false;
     for track in &document.tracks {
         let track_audible = document.track_audible(track.id);
-        let mut previous_end = TimeCode::ZERO;
+        // AU5 §5.2: "what is a gap" has one definition, and it lives on
+        // `Document`. `track_gaps` walks these same clips in this same order,
+        // so its gaps arrive in clip order and each one ends at the
+        // `timeline_start` of the clip that opens it.
+        //
+        // Deliberate cost (AU5 §0 R94): this walks the track's clips a second
+        // time and derives `clip_duration` twice per clip, plus one `Vec` and
+        // one linear `tracks` scan per track. QA is not on a hot path, and
+        // threading the durations back out of the accessor to save it would
+        // trade the single definition for a wider signature.
+        let mut gaps = document
+            .track_gaps(track.id)
+            .unwrap_or_default()
+            .into_iter()
+            .peekable();
         let mut previous_was_media = false;
         for clip in &track.clips {
             for effect in &clip.effects {
@@ -222,17 +236,17 @@ pub fn qa_document(document: &Document) -> QaReport {
             has_audible_media |= audio_bearing && track_audible;
             let duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
             let end = TimeCode(clip.timeline_start.0.saturating_add(duration.0));
-            if clip.timeline_start > previous_end {
+            if let Some(gap) = gaps.next_if(|gap| gap.end == clip.timeline_start) {
                 issues.push(issue(
                     QaSeverity::Warning,
                     "track_gap",
                     format!(
                         "Track {} has a gap from frame {} to {}.",
-                        track.id, previous_end.0, clip.timeline_start.0
+                        track.id, gap.start.0, gap.end.0
                     ),
                     Some(track.id),
                     Some(clip.id),
-                    Some(previous_end..clip.timeline_start),
+                    Some(gap),
                 ));
             } else if previous_was_media
                 && matches!(clip.content, ClipContent::Media)
@@ -276,7 +290,6 @@ pub fn qa_document(document: &Document) -> QaReport {
                     ));
                 }
                 let Some(preset) = title.caption_preset else {
-                    previous_end = end.max(previous_end);
                     previous_was_media = false;
                     continue;
                 };
@@ -339,7 +352,6 @@ pub fn qa_document(document: &Document) -> QaReport {
                     ));
                 }
             }
-            previous_end = end.max(previous_end);
             previous_was_media = matches!(clip.content, ClipContent::Media);
         }
     }

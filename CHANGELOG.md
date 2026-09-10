@@ -45,6 +45,16 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   whatever is there.
 
 ### Changed
+- `plan_audio_normalization` now extends a bus that carries only AU5 repair
+  nodes instead of refusing it. Before AU5 the planner refused outright as soon
+  as the requested tracks intersected any existing bus, so a repaired dialogue
+  track could never be normalized at all. It now appends the compressor, gain
+  and 5 ms true-peak limiter after the repair prefix — carrying the bus's name,
+  fader, fader automation and sidechain across — when every effect on the
+  intersecting bus is one of AU5's three repair nodes and the bus's tracks
+  equal the requested set exactly. Any other intersection still refuses with
+  the message it always did, and the repaired chain declares 15 + 5 = 20 ms,
+  exactly the chain lookahead budget, whichever planner runs first.
 - A trim, split, roll, slide or speed change that shortens a clip past a
   keyframe now clamps the curve (preserving the value audible at the new edge)
   instead of failing with `EffectKeyframeOutsideClip`; a written curve that
@@ -71,6 +81,44 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- AU5 Part B, the repair surfaces: the Mixer's `+ Effect` menu offers the three
+  repair nodes, each with its own card — denoise over a 31-bar learned-floor
+  well on a −120…0 dB scale that says `No profile learned.` until it is taught,
+  hum removal over the same read-only magnitude well the parametric EQ uses,
+  drawn from the notch cascade, and de-click on one row of controls — with the
+  31 profile bands read from the well rather than dragged. A `Learn profile`
+  button on the denoise card measures the longest silence on the tracks feeding
+  that chain through the real mix path, off the UI thread, and writes all
+  thirty-one bands as one undo entry; it says so distinctly when the silence
+  analysis has not finished and when no span reaches 469 ms. A `Room tone`
+  button on the timeline toolbar fills the gap nearest the playhead on the
+  selected clip's track, capturing from that track's longest silence the first
+  time it is pressed, as one batch and one undo entry. See
+  docs/AU5-REPAIR-AND-ROOM-TONE.md.
+- AU5 Part B, room tone: `capture_room_tone` decodes a chosen source range of
+  any pooled asset at 48 kHz stereo, writes it into the project's own
+  content-addressed room-tone store beside the LUT store
+  (`<stem>.kinewright-assets/room-tone/<sha256>.wav`, 500 ms to 60 s, truncated
+  down to a whole 30 fps asset frame) and registers it as one ordinary asset
+  named after the source it came from; it asks before it writes a byte, and a
+  second identical capture returns the same asset id and changes nothing.
+  `plan_room_tone_fill` then fills one audio track's leading and interior gaps
+  — never the trailing one — with butt-joined, fade-free tiles of that asset on
+  the same track, choosing each tile's source range so the fill's project
+  length equals the gap exactly, skipping a gap it cannot fill exactly, one
+  under `minimum_gap_frames`, or one needing more than 64 tiles with a per-gap
+  reason rather than failing the whole plan. See
+  docs/AU5-REPAIR-AND-ROOM-TONE.md.
+- AU5 Part B, the two repair planners: `plan_dialogue_repair` measures the
+  dialogue before the repair, learns a noise profile over the longest silence
+  span on the selected tracks, builds denoise → hum removal → de-click at the
+  head of those tracks' bus (reusing an existing bus with its own effects, name
+  and fader preserved), measures again, and **refuses as tool text — naming
+  both numbers and which way the percentile floor biases them — when it cannot
+  prove the signal-to-noise ratio improved**; and `plan_audio_normalization`
+  gains the `normalization_context` amendment that lets it extend such a bus.
+  An unfinished silence analysis and a project with no long enough silence are
+  two distinct refusals, so an agent knows which one is worth retrying.
 - AU5 Part A, repair nodes and measurement: three audio chain nodes —
   `audio_denoise` (an STFT broadband gate driven by a 31-band learned noise
   profile, 12 ms declared latency), `audio_hum_removal` (a fixed 50/60 Hz

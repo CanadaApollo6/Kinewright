@@ -61,7 +61,21 @@ const LIVE_FILL_MILLISECONDS: usize = 1_000;
 /// AU1 §3.4: the per-channel ramp a live track-mix change is smoothed over.
 const TRACK_MIX_RAMP_MILLISECONDS: u32 = 5;
 
-pub(crate) fn decode_audio_range(
+/// Decode one source range of one media file to interleaved `f32` at an
+/// explicit rate and channel count.
+///
+/// **`pub`, not `pub(crate)` (AU5 §0 R111).** AU5 §5.8 rule 115 spells
+/// `capture_room_tone`'s decode as exactly this call, and the agent — which
+/// owns that capability — is outside this crate. Widening the existing
+/// function is the only spelling that keeps the capture reading the same
+/// samples the mix path reads; a second decoder in the agent would be a second
+/// answer to "what is in this range".
+///
+/// # Errors
+///
+/// Returns `MediaError::Cancelled` when `cancellation` fires, and the
+/// decoder's own failure when the file cannot be opened, seeked or decoded.
+pub fn decode_audio_range(
     path: &Path,
     source_fps: Rational,
     source_from: TimeCode,

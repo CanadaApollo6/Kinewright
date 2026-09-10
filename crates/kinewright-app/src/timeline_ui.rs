@@ -8,7 +8,7 @@ use kinewright_core::{
     TimeCode, Title, TrackId, TrackKind, Transition, WaveformData, envelope_coalesce_key,
     map_frames_with_rounding, map_source_range_to_project,
 };
-use kinewright_media::timeline_source_at;
+use kinewright_media::{RoomToneStore, timeline_source_at};
 
 use crate::{
     app::KinewrightApp,
@@ -817,6 +817,26 @@ impl KinewrightApp {
                     );
                 if envelopes.clicked() {
                     show_envelopes = !show_envelopes;
+                }
+                // AU5 §6.4 rule 129: beside `Envelopes`, and grey until there
+                // is both a selected clip and a gap on its track to fill.
+                let room_tone_block = self.room_tone_block();
+                let room_tone = ui
+                    .add_enabled(
+                        room_tone_block.is_none(),
+                        egui::Button::new(ROOM_TONE_BUTTON).min_size(egui::vec2(72.0, 22.0)),
+                    )
+                    .on_disabled_hover_text(room_tone_block.unwrap_or_default());
+                let room_tone = if room_tone_block.is_none() {
+                    room_tone.on_hover_text(
+                        "Fill the gap nearest the playhead on the selected clip's track with \
+                         room tone, captured from that track's longest silence.",
+                    )
+                } else {
+                    room_tone
+                };
+                if room_tone.clicked() {
+                    self.fill_room_tone_at_selection();
                 }
                 ui.separator();
                 if icons::button(ui, Icon::Undo, "Undo (Ctrl+Z)").clicked() {
@@ -2985,11 +3005,514 @@ fn project_delta_to_source(project_delta: i64, project_fps: Rational, source_fps
         .map_or(0, |frames| frames.0.saturating_mul(sign))
 }
 
+// ---------------------------------------------------------------------------
+// AU5 §6.4: the `Room tone` button
+// ---------------------------------------------------------------------------
+
+/// AU5 §6.4 rule 129: the toolbar button that fills a gap with room tone.
+pub(crate) const ROOM_TONE_BUTTON: &str = "Room tone";
+/// Where a refused fill lands in the error log (AU5 §0 R134).
+///
+/// Not `LOOK_ERROR_CATEGORY`: the button is a timeline gesture, and a
+/// `Room tone` refusal filed under "Look" tells the editor to go and look at
+/// a surface that had nothing to do with it.
+pub(crate) const ROOM_TONE_ERROR_CATEGORY: &str = "Timeline";
+/// AU5 §6.4 rule 129: why the button is grey with nothing selected.
+pub(crate) const ROOM_TONE_NEEDS_CLIP: &str = "Select a clip on the track whose gap to fill";
+/// AU5 §6.4 rule 129: why the button is grey on a track with no hole in it.
+pub(crate) const ROOM_TONE_NEEDS_GAP: &str = "That track has no gap to fill";
+/// AU5 §5.3 rule 95: the most clips one fill may lay.
+///
+/// The agent's `plan_room_tone_fill` holds the same ceiling; a gap that needs
+/// more than 64 tiles of one capture is a hole, not a seam.
+pub(crate) const ROOM_TONE_MAX_TILES: usize = 64;
+/// What the button says while its first capture is decoding.
+pub(crate) const ROOM_TONE_CAPTURING: &str = "Capturing room tone\u{2026}";
+
+/// AU5 §6.4 rule 129: the gap this click fills.
+///
+/// The nearest gap on the selected clip's own track, measured from the
+/// playhead: distance zero while the playhead is inside a gap, and the
+/// distance to the nearer edge otherwise. Leading and interior gaps only,
+/// which is what [`Document::track_gaps`] answers; a track that ends before
+/// the project does has no hole in it.
+pub(crate) fn room_tone_target(
+    document: &Document,
+    clip: ClipId,
+    playhead: TimeCode,
+) -> Option<(TrackId, std::ops::Range<TimeCode>)> {
+    let track = document
+        .tracks
+        .iter()
+        .find(|track| track.clips.iter().any(|candidate| candidate.id == clip))?;
+    let gaps = document.track_gaps(track.id)?;
+    let nearest = gaps.into_iter().min_by_key(|gap| {
+        if playhead < gap.start {
+            gap.start.0.saturating_sub(playhead.0)
+        } else if playhead >= gap.end {
+            playhead.0.saturating_sub(gap.end.0)
+        } else {
+            0
+        }
+    })?;
+    Some((track.id, nearest))
+}
+
+/// The room-tone asset already in this project's pool, if there is one.
+///
+/// The store is content-addressed under `<stem>.kinewright-assets/room-tone`,
+/// so "is this room tone?" is a question about where the file lives rather
+/// than about a document flag: AU5 §5.1 rule 89 keeps room tone an **ordinary**
+/// `MediaAsset` and adds no new document type to ask.
+pub(crate) fn existing_room_tone_asset<'a>(
+    document: &'a Document,
+    room_tone_dir: &std::path::Path,
+) -> Option<&'a MediaAsset> {
+    document
+        .media_pool
+        .iter()
+        .find(|asset| asset.path.parent() == Some(room_tone_dir))
+}
+
+/// Why one gap is refused, in the words `plan_room_tone_fill` uses (AU5 §0
+/// R137).
+///
+/// All three of core's mapping refusals are matched **by name**, in the
+/// agent's own words, so the button and `plan_room_tone_fill` answer one
+/// sentence each. They are three different failures and the editor is told
+/// which: an exact-in-frames range usually *does* exist at 30 → 25, so
+/// "no exact source range" over a coverage failure would have them conclude
+/// the rate pair is unusable, and `SourceTooShortToCover` is the one whose
+/// answer really is *record more room tone*. A `_ =>` wildcard over the three
+/// would put the first sentence on all of them, which is the misdirection
+/// AU5 §0 R137 exists to end.
+fn room_tone_skip_reason(
+    length: TimeCode,
+    source_fps: Rational,
+    project_fps: Rational,
+    error: &kinewright_core::TimeMappingError,
+) -> String {
+    let rates = format!("{} / {}", rate_text(source_fps), rate_text(project_fps));
+    match error {
+        kinewright_core::TimeMappingError::InexactDuration { .. } => format!(
+            "gap of {} project frames has no exact source range at {rates}",
+            length.0
+        ),
+        kinewright_core::TimeMappingError::NoCoveringSourceRange {
+            source_duration, ..
+        } => format!(
+            "gap of {} project frames has no exact source range at {rates} that also carries its \
+             sample frames within the {source_duration}-source-frame room-tone asset",
+            length.0
+        ),
+        kinewright_core::TimeMappingError::SourceTooShortToCover {
+            minimum_source_frames,
+            source_duration,
+            ..
+        } => format!(
+            "gap of {} project frames needs at least {minimum_source_frames} source frames of room \
+             tone at {rates}, and this asset carries only {source_duration}",
+            length.0
+        ),
+        other => format!(
+            "gap of {} project frames has no usable source range at {rates}: {other}",
+            length.0
+        ),
+    }
+}
+
+/// AU5 §5.3: the `AddClip`s that fill one gap from one room-tone asset.
+///
+/// Butt-joined, no fade, tiling forward from `gap.start`, capped at
+/// [`ROOM_TONE_MAX_TILES`]. Every tile is written at the default
+/// `speed_percent` — `AddClip` carries no speed field — which is what makes
+/// each tile's mapped project span exactly the span it was asked for
+/// (AU5 §0 R44).
+///
+/// **Each tile's source range comes from
+/// core's `covering_source_range_for_project_duration`, not from
+/// `map_project_duration_to_source(TimeCode::ZERO, …)`** (AU5 §0 R135). The
+/// latter answers a range that is exact in project *frames*, which is not the
+/// same as one that carries enough *samples*: the mixer maps source samples to
+/// project samples one for one, so at 30 → 25 a phase-0 seven-frame fill
+/// (`0..8`) is 640 sample frames short and the join dips to silence. The core
+/// helper sweeps the source phase and returns the first range that both maps
+/// exactly and supplies the gap's sample frames, which at 25 fps is `1..10`
+/// rather than `0..8`. Tiles may therefore start at a **non-zero** source
+/// frame and differ from one another by a frame in length; what is fixed is
+/// the project span each maps to.
+///
+/// **Core is asked once per pass, with what is left of the gap** (AU5 §0
+/// R141). Its answer is the largest coverable span **at most** that long, so a
+/// remainder it cannot cover is simply split again rather than refusing the
+/// whole gap: coverability is not monotone in `want`, and "the remainder is
+/// uncoverable while `remainder − 1` and `1` both are" is common rather than
+/// exotic. Wherever a single hoisted tile would have worked, this emits the
+/// identical tiles — with `remaining ≥ whole` core returns the same `whole`
+/// every pass — so R137's "chosen once, not per tile" survives in effect while
+/// the pathological remainders stop being fatal. It is also exactly
+/// `plan_room_tone_fill`'s loop, which is what makes R140's "one rule" true.
+///
+/// # Errors
+///
+/// Returns the gap's own reason when no source range covers it at these two
+/// rates, or when the gap needs more than the tile ceiling.
+pub(crate) fn room_tone_fill_operations(
+    document: &Document,
+    track: TrackId,
+    gap: &std::ops::Range<TimeCode>,
+    asset: &MediaAsset,
+) -> Result<Vec<Operation>, String> {
+    let project_fps = document.fps;
+    let length = TimeCode(gap.end.0.saturating_sub(gap.start.0));
+    let mut operations = Vec::new();
+    let mut cursor = gap.start;
+    while cursor < gap.end {
+        if operations.len() >= ROOM_TONE_MAX_TILES {
+            return Err(format!(
+                "gap of {} project frames needs more than {ROOM_TONE_MAX_TILES} tiles of this \
+                 room tone",
+                length.0
+            ));
+        }
+        let remaining = TimeCode(gap.end.0 - cursor.0);
+        let placed_so_far = operations.len();
+        let (want, source) = kinewright_core::longest_coverable_project_tile(
+            asset.duration,
+            asset.fps,
+            project_fps,
+            kinewright_media::ROOM_TONE_SAMPLE_RATE,
+            remaining,
+        )
+        .map_err(|error| {
+            // The headline names the GAP, which is what an editor can see,
+            // while core's refusal is about whatever is left of it. When those
+            // differ — the tiler covered part of the gap and then ran out of
+            // representable spans — the residue is named too, so a reader is
+            // not told "gap of 1 project frames" about a seven-frame hole.
+            // Word for word `plan_room_tone_fill`'s annotation.
+            let reason = room_tone_skip_reason(length, asset.fps, project_fps, &error);
+            if remaining == length {
+                reason
+            } else {
+                format!(
+                    "{reason}; {placed_so_far} tile(s) covered all but its last {} project \
+                     frame(s)",
+                    remaining.0
+                )
+            }
+        })?;
+        operations.push(Operation::AddClip {
+            track,
+            asset: asset.id,
+            at: cursor,
+            source,
+        });
+        cursor = TimeCode(cursor.0 + want.0);
+    }
+    if cursor != gap.end {
+        return Err(format!(
+            "the fill would end at {} rather than at the gap's own {}",
+            cursor.0, gap.end.0
+        ));
+    }
+    Ok(operations)
+}
+
+/// One frame rate as `30/1`, for a per-gap refusal an editor can act on.
+fn rate_text(fps: kinewright_core::Rational) -> String {
+    format!("{}/{}", fps.numerator(), fps.denominator())
+}
+
+impl KinewrightApp {
+    /// AU5 §6.4 rule 129: why the `Room tone` button is grey, if it is.
+    pub(crate) fn room_tone_block(&self) -> Option<&'static str> {
+        let session = self.focused();
+        let Some(clip) = session.selected_clip else {
+            return Some(ROOM_TONE_NEEDS_CLIP);
+        };
+        if room_tone_target(&session.document, clip, session.position).is_none() {
+            return Some(ROOM_TONE_NEEDS_GAP);
+        }
+        None
+    }
+
+    /// AU5 §6.4 rule 129: fill the gap nearest the playhead on the selected
+    /// clip's track.
+    ///
+    /// One `DoBatch` and therefore one undo entry, either way: with a
+    /// room-tone asset already in the pool the batch is the `AddClip`s alone
+    /// and goes out on this frame; without one, the capture runs on a worker
+    /// — DESIGN.md's performance contract keeps decode off the UI thread —
+    /// and the same single batch, `AddAsset` first, goes out when it lands.
+    pub(crate) fn fill_room_tone_at_selection(&mut self) {
+        let mut edits = InspectorEdits::default();
+        // A refused fill is a timeline refusal, not a look one (AU5 §0 R134).
+        edits.set_error_category(ROOM_TONE_ERROR_CATEGORY);
+        let capture = self.plan_room_tone_fill(&mut edits);
+        // One submit, at the end, exactly as `timeline()`'s own is: every
+        // refusal above reached `edits.errors` rather than the log directly.
+        self.submit_inspector_edits(edits);
+        if let Some(job) = capture {
+            self.spawn_room_tone_capture(job);
+        }
+    }
+
+    /// Fill now if the pool already holds room tone; otherwise name the
+    /// capture that has to run first.
+    ///
+    /// Every refusal is an `InspectorEdits` error and never a live write:
+    /// a fill is a discrete action, so the timeline's one coalescing path
+    /// stays the envelope's (AU4 §5.1 rule 105).
+    fn plan_room_tone_fill(&self, edits: &mut InspectorEdits) -> Option<RoomToneCaptureJob> {
+        let session = self.focused();
+        let Some(clip) = session.selected_clip else {
+            edits.push_error(ROOM_TONE_NEEDS_CLIP);
+            return None;
+        };
+        let Some((track, gap)) = room_tone_target(&session.document, clip, session.position) else {
+            edits.push_error(ROOM_TONE_NEEDS_GAP);
+            return None;
+        };
+        let store = match self.room_tone_store() {
+            Ok(store) => store,
+            Err(message) => {
+                edits.push_error(message);
+                return None;
+            }
+        };
+        let directory = store.room_tone_dir();
+        if let Some(asset) = existing_room_tone_asset(&session.document, &directory) {
+            match room_tone_fill_operations(&session.document, track, &gap, asset) {
+                Ok(operations) => edits.extend_operations(operations),
+                Err(reason) => edits.push_error(reason),
+            }
+            return None;
+        }
+        // Nothing captured yet: take the track's own longest silence, which
+        // is the only range in the project known to be room tone rather than
+        // material.
+        let Some((asset, source)) = self.longest_silence_on_track(track) else {
+            edits.push_error(ROOM_TONE_CAPTURE_NEEDS_SILENCE);
+            return None;
+        };
+        Some(RoomToneCaptureJob {
+            track,
+            gap,
+            asset,
+            source,
+            store,
+        })
+    }
+
+    /// The store this project's room tone lives in.
+    fn room_tone_store(&self) -> Result<RoomToneStore, String> {
+        let session = self.focused();
+        let Some(path) = session.project_path.as_ref() else {
+            return Err(ROOM_TONE_NEEDS_SAVED_PROJECT.to_owned());
+        };
+        RoomToneStore::for_project(path)
+            .map_err(|error| format!("Could not open the room-tone store: {error}"))
+    }
+
+    /// The longest silence on one track, in its own asset's source frames.
+    ///
+    /// Filtered by the caller on `TimelineSilenceSpan.track`, exactly as the
+    /// `Learn` gesture filters it (AU5 §0 R46): the routine has no track
+    /// argument.
+    fn longest_silence_on_track(
+        &self,
+        track: TrackId,
+    ) -> Option<(MediaAsset, std::ops::Range<TimeCode>)> {
+        let document = &self.focused().document;
+        let spans = self
+            .analysis
+            .timeline_silences(document, None, TimeCode(1))
+            .ok()?;
+        let span = spans
+            .into_iter()
+            .filter(|span| span.track == track)
+            .max_by_key(|span| span.source_end.0 - span.source_start.0)?;
+        let asset = document
+            .media_pool
+            .iter()
+            .find(|asset| asset.id == span.asset)?
+            .clone();
+        Some((asset, span.source_start..span.source_end))
+    }
+
+    /// Capture on a worker, then land one batch (AU5 §6.4 rule 129).
+    fn spawn_room_tone_capture(&mut self, job: RoomToneCaptureJob) {
+        let RoomToneCaptureJob {
+            track,
+            gap,
+            asset,
+            source,
+            store,
+        } = job;
+        let session = self.focused();
+        let (session_id, revision) = (session.id, session.revision);
+        let analysis = Arc::clone(&self.analysis);
+        let result_tx = self.room_tone_tx.clone();
+        // The capture is capped at the store's own writer cap rather than at
+        // the whole silence: 60 s of room tone tiles any gap the ceiling
+        // allows, and a longer decode buys nothing.
+        let capped = capped_capture_range(&source, asset.fps);
+        let spawned = std::thread::Builder::new()
+            .name("kinewright-room-tone".to_owned())
+            .spawn(move || {
+                let cancellation = kinewright_core::ExportCancellation::default();
+                let result = store
+                    .capture_room_tone(&asset, capped, &cancellation)
+                    .map_err(|error| format!("Could not capture room tone: {error}"))
+                    .and_then(|capture| {
+                        analysis
+                            .probe(&capture.path)
+                            .map_err(|error| {
+                                format!("Could not probe the captured room tone: {error}")
+                            })
+                            .map(|probed| MediaAsset {
+                                // `probe_path` names a store file by its own
+                                // digest; the capture names it after what it
+                                // was taken from (AU5 §5.8 rule 115, R46).
+                                name: format!("Room tone \u{2014} {}", asset.name),
+                                ..probed
+                            })
+                    });
+                let _ = result_tx.send(RoomToneCaptureResponse {
+                    session_id,
+                    revision,
+                    track,
+                    gap,
+                    result,
+                });
+            })
+            .is_ok();
+        if spawned {
+            self.room_tone_pending = self.room_tone_pending.saturating_add(1);
+            ROOM_TONE_CAPTURING.clone_into(&mut self.status);
+        } else {
+            self.record_error("Media", "Could not start the room-tone capture worker");
+        }
+    }
+
+    /// Drain the capture worker; called from `poll_background`.
+    pub(crate) fn poll_room_tone(&mut self, ctx: &egui::Context) {
+        while let Ok(response) = self.room_tone_rx.try_recv() {
+            self.room_tone_pending = self.room_tone_pending.saturating_sub(1);
+            let mut edits = InspectorEdits::default();
+            edits.set_error_category(ROOM_TONE_ERROR_CATEGORY);
+            match self.room_tone_batch(&response) {
+                Ok(operations) => edits.extend_operations(operations),
+                Err(message) => edits.push_error(message),
+            }
+            self.submit_inspector_edits(edits);
+        }
+        if self.room_tone_pending > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The one batch a completed capture lands: `[AddAsset, AddClip…]`.
+    fn room_tone_batch(
+        &self,
+        response: &RoomToneCaptureResponse,
+    ) -> Result<Vec<Operation>, String> {
+        let asset = response.result.as_ref().map_err(Clone::clone)?;
+        let session = self.focused();
+        if session.id != response.session_id || session.revision != response.revision {
+            // Landing it against a document that has moved would fill a gap
+            // that is no longer there. The retry is not free: this refusal
+            // lands no `AddAsset`, so `existing_room_tone_asset` still finds
+            // nothing and the next press decodes again — the store's content
+            // addressing de-duplicates the *write*, never the decode
+            // (AU5 §0 R129).
+            return Err(ROOM_TONE_DOCUMENT_MOVED.to_owned());
+        }
+        let mut operations = vec![Operation::AddAsset {
+            asset: asset.clone(),
+        }];
+        operations.extend(room_tone_fill_operations(
+            &session.document,
+            response.track,
+            &response.gap,
+            asset,
+        )?);
+        Ok(operations)
+    }
+}
+
+/// AU5 §6.4: one capture the button decided has to run before it can fill.
+///
+/// A named struct rather than a five-tuple, so the fill's decision and the
+/// worker that carries it out cannot drift on argument order.
+pub(crate) struct RoomToneCaptureJob {
+    track: TrackId,
+    gap: std::ops::Range<TimeCode>,
+    /// The asset the room tone is taken **from**, raw and pre-chain (AU5
+    /// §5.1 rule 91).
+    asset: MediaAsset,
+    /// The silence to capture, in that asset's own source frames.
+    source: std::ops::Range<TimeCode>,
+    store: RoomToneStore,
+}
+
+/// AU5 §6.4: what one finished capture hands back to the app.
+pub(crate) struct RoomToneCaptureResponse {
+    pub(crate) session_id: u64,
+    /// The revision the fill was derived against; a moved document is refused
+    /// rather than filled at the wrong frames.
+    pub(crate) revision: kinewright_core::TimelineRevision,
+    pub(crate) track: TrackId,
+    pub(crate) gap: std::ops::Range<TimeCode>,
+    pub(crate) result: Result<MediaAsset, String>,
+}
+
+/// AU5 §6.4: why a capture cannot start.
+pub(crate) const ROOM_TONE_CAPTURE_NEEDS_SILENCE: &str =
+    "No silence on that track to capture room tone from yet";
+/// AU5 §5.1: the store is rooted at the project file, so there has to be one.
+pub(crate) const ROOM_TONE_NEEDS_SAVED_PROJECT: &str =
+    "Save the project before capturing room tone";
+/// AU5 §6.4: a capture that finished against a document that has since moved.
+pub(crate) const ROOM_TONE_DOCUMENT_MOVED: &str =
+    "The timeline changed while the room tone was capturing; press Room tone again";
+
+/// Trim one silence to the store's writer cap (AU5 §5.1 rule 90).
+///
+/// The cap guards the **writer**: `write_capture` refuses a buffer over
+/// `ROOM_TONE_MAX_CAPTURE_MILLISECONDS`, so a two-minute silence is trimmed
+/// here rather than decoded and then refused.
+pub(crate) fn capped_capture_range(
+    source: &std::ops::Range<TimeCode>,
+    fps: Rational,
+) -> std::ops::Range<TimeCode> {
+    let end = source
+        .end
+        .0
+        .min(source.start.0.saturating_add(longest_capture_frames(fps)));
+    source.start..TimeCode(end)
+}
+
+/// The longest capture the store will write, in this asset's source frames.
+pub(crate) fn longest_capture_frames(fps: Rational) -> i64 {
+    i64::try_from(
+        kinewright_media::ROOM_TONE_MAX_CAPTURE_MILLISECONDS
+            .saturating_mul(u64::from(fps.numerator()))
+            / (1_000 * u64::from(fps.denominator()).max(1)),
+    )
+    .unwrap_or(i64::MAX)
+    .max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use kinewright_core::{AssetId, LinkId, MediaAsset, Track};
+    use kinewright_core::{
+        AssetId, LinkId, MediaAsset, Track, covering_source_range_for_project_duration,
+        map_project_duration_to_source,
+    };
 
     use super::*;
 
@@ -3817,15 +4340,22 @@ mod tests {
             .split_once("\n#[cfg(test)]")
             .expect("timeline_ui.rs has a test module")
             .0;
+        // AU5 §6.4 rule 129 adds two more, both **discrete**: the `Room
+        // tone` button's own, submitted once at the end of
+        // `fill_room_tone_at_selection`, and the one `poll_room_tone` lands a
+        // finished capture through. The claim the pin defends is unchanged
+        // and is the `extend_live` / `push_live` scan below: no path in this
+        // file may file a per-frame coalesced batch but the envelope's.
         assert_eq!(
             source.matches("InspectorEdits::default()").count(),
-            1,
-            "the timeline gains ONE `InspectorEdits`, used by the envelope only"
+            3,
+            "the timeline gains ONE `InspectorEdits` for the envelope and AU5's two \
+             discrete room-tone paths, and nothing else"
         );
         assert_eq!(
             source.matches("submit_inspector_edits(").count(),
-            1,
-            "and submits it exactly once, at the end of the function"
+            3,
+            "and each submits exactly once"
         );
         for live in ["extend_live(", "push_live("] {
             for (index, _) in source.match_indices(live) {
@@ -3934,6 +4464,19 @@ mod tests {
             "Delete or Backspace over a key removes the key, not the clip",
             "a click on that line lands the first key there, holding that gain",
             "the band is the coarse gesture and the inspector's keyframe list is the exact one",
+            // AU5 §6.5 rule 133: the `Room tone` button.
+            "A `Room tone` toolbar button sits beside `Envelopes`",
+            "grey until a clip is",
+            "selected and that clip's track has a gap in it",
+            "fills the gap nearest the",
+            "playhead on that track",
+            "butt joins and",
+            "captures from that track's longest silence the first time it is",
+            "Leading and interior gaps only",
+            "The result is an ordinary clip",
+            "trims, splits and",
+            "deletes like any other, and deleting it brings the gap warning back",
+            "one undo entry",
         ] {
             assert!(
                 timeline.contains(expected),
@@ -4230,6 +4773,848 @@ mod tests {
         assert!(
             envelope_near_curve(&drawn, interact, egui::pos2(band.center().x, points[0].y)),
             "the ordinary hover is untouched"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AU5 §6.4: the `Room tone` button
+    // -----------------------------------------------------------------------
+
+    /// One audio track with a leading gap and an interior gap, plus a
+    /// room-tone asset in the pool.
+    ///
+    /// Clips at 40..70 and 100..130 on a 30 fps project, so the gaps are
+    /// `0..40` and `70..100` and the tail after 130 is **not** a gap.
+    fn gapped_fixture(project_fps: Rational) -> Document {
+        let asset_fps = Rational::new(30, 1).unwrap();
+        let source = MediaAsset {
+            id: AssetId(1),
+            path: PathBuf::from("interview.wav"),
+            name: "interview.wav".to_owned(),
+            duration: TimeCode(600),
+            fps: asset_fps,
+            kind: MediaKind::Audio,
+            resolution: None,
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+            color_description: kinewright_core::ColorDescription::default(),
+        };
+        let tone = MediaAsset {
+            id: AssetId(2),
+            path: PathBuf::from("/p/show.kinewright-assets/room-tone/abc.wav"),
+            name: "Room tone \u{2014} interview.wav".to_owned(),
+            duration: TimeCode(60),
+            fps: asset_fps,
+            kind: MediaKind::Audio,
+            resolution: None,
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+            color_description: kinewright_core::ColorDescription::default(),
+        };
+        let clip = |id: u64, at: i64, source_start: i64, source_end: i64| Clip {
+            id: ClipId(id),
+            asset: AssetId(1),
+            source_range: TimeCode(source_start)..TimeCode(source_end),
+            content: kinewright_core::ClipContent::Media,
+            timeline_start: TimeCode(at),
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+            audio_gain_curve: None,
+        };
+        // The clips are written in the source domain so their project
+        // durations are 30 frames at 30 fps and scale with the project rate.
+        let second =
+            map_project_duration_to_source(TimeCode::ZERO, TimeCode(30), asset_fps, project_fps)
+                .unwrap_or(TimeCode(30));
+        let span = map_source_range_to_project(TimeCode::ZERO..second, asset_fps, project_fps)
+            .unwrap_or(TimeCode(30));
+        Document {
+            catalog: kinewright_core::MediaCatalog::default(),
+            audio_mix: kinewright_core::AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![
+                        clip(1, 40, 0, second.0),
+                        clip(2, 70 + span.0, second.0, second.0 * 2),
+                    ],
+                },
+            ],
+            media_pool: vec![source, tone],
+            markers: Vec::new(),
+            fps: project_fps,
+            resolution: (1_920, 1_080),
+            lut_assets: Vec::new(),
+            duration: TimeCode(400),
+        }
+    }
+
+    /// AU5 §7 B15 (§6.4 rule 129): the button fills the gap **nearest the
+    /// playhead on the selected clip's track**, and is disabled otherwise.
+    #[test]
+    fn au5_the_room_tone_button_targets_the_gap_nearest_the_playhead() {
+        let fps = Rational::new(30, 1).unwrap();
+        let document = gapped_fixture(fps);
+        // Leading gap `0..40`, interior gap `70..100`; the tail after 130 is
+        // not a gap and never appears.
+        assert_eq!(
+            document.track_gaps(TrackId(2)),
+            Some(vec![TimeCode(0)..TimeCode(40), TimeCode(70)..TimeCode(100),])
+        );
+        for (playhead, expected) in [
+            (TimeCode(0), TimeCode(0)..TimeCode(40)),
+            (TimeCode(45), TimeCode(0)..TimeCode(40)),
+            (TimeCode(80), TimeCode(70)..TimeCode(100)),
+            (TimeCode(300), TimeCode(70)..TimeCode(100)),
+        ] {
+            let (track, gap) = room_tone_target(&document, ClipId(1), playhead)
+                .expect("the clip's track has gaps");
+            assert_eq!(track, TrackId(2));
+            assert_eq!(gap, expected, "with the playhead at {}", playhead.0);
+        }
+
+        // A clip on a track with no gap, and a clip that is not in the
+        // document at all, both disable the button.
+        assert!(room_tone_target(&document, ClipId(99), TimeCode::ZERO).is_none());
+        let mut gapless = document.clone();
+        gapless.tracks[1].clips[0].timeline_start = TimeCode::ZERO;
+        gapless.tracks[1].clips[1].timeline_start = TimeCode(30);
+        assert_eq!(
+            gapless.track_gaps(TrackId(2)),
+            Some(Vec::new()),
+            "butt-joined clips leave no gap"
+        );
+        assert!(room_tone_target(&gapless, ClipId(1), TimeCode::ZERO).is_none());
+    }
+
+    /// AU5 §7 B15 and §5.3: the fill is butt-joined, exact, and capped.
+    #[test]
+    fn au5_the_room_tone_fill_tiles_the_gap_exactly() {
+        let fps = Rational::new(30, 1).unwrap();
+        let document = gapped_fixture(fps);
+        let tone = document
+            .asset(AssetId(2))
+            .expect("the pool holds room tone");
+        let gap = TimeCode(0)..TimeCode(40);
+        let operations = room_tone_fill_operations(&document, TrackId(2), &gap, tone)
+            .expect("a 40-frame gap tiles from a 60-frame capture");
+        assert_eq!(operations.len(), 1, "one tile covers it: {operations:?}");
+        let Operation::AddClip {
+            track,
+            asset,
+            at,
+            source,
+        } = &operations[0]
+        else {
+            panic!("a fill is `AddClip`s and nothing else: {operations:?}");
+        };
+        assert_eq!(*track, TrackId(2));
+        assert_eq!(*asset, AssetId(2));
+        assert_eq!(*at, TimeCode::ZERO);
+        assert_eq!(*source, TimeCode::ZERO..TimeCode(40));
+
+        // A gap longer than the capture tiles forward, butt-joined, with the
+        // last tile short — and the tiles cover the gap exactly.
+        let long = TimeCode(0)..TimeCode(150);
+        let operations = room_tone_fill_operations(&document, TrackId(2), &long, tone)
+            .expect("a 150-frame gap tiles from a 60-frame capture");
+        assert_eq!(operations.len(), 3);
+        let mut cursor = long.start;
+        for operation in &operations {
+            let Operation::AddClip { at, source, .. } = operation else {
+                panic!("a fill is `AddClip`s: {operation:?}");
+            };
+            assert_eq!(*at, cursor, "butt-joined, never overlapping");
+            let span = map_source_range_to_project(source.clone(), tone.fps, document.fps)
+                .expect("the tile maps");
+            cursor = TimeCode(cursor.0 + span.0);
+        }
+        assert_eq!(cursor, long.end, "the tiles cover the gap exactly");
+        assert_eq!(
+            operations.last().map(|operation| match operation {
+                Operation::AddClip { source, .. } => source.end,
+                _ => TimeCode::ZERO,
+            }),
+            Some(TimeCode(30)),
+            "the last tile is the short one"
+        );
+
+        // The ceiling is a refusal with a reason, never a partial fill.
+        let huge =
+            TimeCode(0)..TimeCode(60 * i64::try_from(ROOM_TONE_MAX_TILES).unwrap_or(i64::MAX) + 60);
+        let refusal = room_tone_fill_operations(&document, TrackId(2), &huge, tone)
+            .expect_err("a gap past the tile ceiling is refused");
+        assert!(
+            refusal.contains(&ROOM_TONE_MAX_TILES.to_string()),
+            "the refusal names the ceiling: {refusal}"
+        );
+    }
+
+    /// AU5 §0 R12 and §5.3 rule 98: a gap with no exact source range is
+    /// refused **by name** rather than filled one frame short.
+    #[test]
+    fn au5_a_gap_with_no_exact_source_range_is_refused_with_its_reason() {
+        // A 60 fps project reading a 30 fps room-tone asset can only express
+        // even-frame spans, so an odd gap has no exact source range at all.
+        let document = gapped_fixture(Rational::new(60, 1).unwrap());
+        let tone = document
+            .asset(AssetId(2))
+            .expect("the pool holds room tone");
+        let odd = TimeCode(0)..TimeCode(7);
+        let refusal = room_tone_fill_operations(&document, TrackId(2), &odd, tone)
+            .expect_err("7 project frames is not representable at 30/60");
+        assert!(
+            refusal.contains("has no exact source range at 30/1 / 60/1"),
+            "the refusal names both rates: {refusal}"
+        );
+        // An even gap at the same two rates fills exactly.
+        let even = TimeCode(0)..TimeCode(8);
+        let operations = room_tone_fill_operations(&document, TrackId(2), &even, tone)
+            .expect("8 project frames is four source frames");
+        assert_eq!(operations.len(), 1);
+        let Operation::AddClip { source, .. } = &operations[0] else {
+            panic!("a fill is `AddClip`s");
+        };
+        assert_eq!(*source, TimeCode::ZERO..TimeCode(4));
+    }
+
+    /// AU5 §5.1 rule 90: a silence longer than the writer cap is trimmed
+    /// before it is decoded, not decoded and then refused.
+    #[test]
+    fn au5_a_capture_is_capped_before_it_is_decoded() {
+        let fps = Rational::new(30, 1).unwrap();
+        // 60 s at 30 fps is 1 800 asset frames.
+        let long = TimeCode(100)..TimeCode(9_000);
+        assert_eq!(
+            capped_capture_range(&long, fps),
+            TimeCode(100)..TimeCode(1_900)
+        );
+        let short = TimeCode(10)..TimeCode(40);
+        assert_eq!(capped_capture_range(&short, fps), short);
+    }
+
+    /// AU5 §5.1 rule 89: "is this room tone?" is a question about the store,
+    /// not about a document flag.
+    #[test]
+    fn au5_the_room_tone_asset_is_recognised_by_its_store_directory() {
+        let document = gapped_fixture(Rational::new(30, 1).unwrap());
+        let directory = PathBuf::from("/p/show.kinewright-assets/room-tone");
+        assert_eq!(
+            existing_room_tone_asset(&document, &directory).map(|asset| asset.id),
+            Some(AssetId(2))
+        );
+        let elsewhere = PathBuf::from("/other/show.kinewright-assets/room-tone");
+        assert!(
+            existing_room_tone_asset(&document, &elsewhere).is_none(),
+            "a capture from a different project's store is not this project's room tone"
+        );
+    }
+
+    /// AU5 §0 R135 (media R101 reversed): a 25 fps fill takes the **covering**
+    /// source range, not the phase-0 exact one.
+    ///
+    /// `map_project_duration_to_source(TimeCode::ZERO, 7, 30, 25)` answers
+    /// `0..8`, which maps to exactly seven project frames and is still 640
+    /// sample frames short of what the mixer will ask the decoder for, so the
+    /// join dips to silence. `covering_source_range_for_project_duration`
+    /// sweeps the phase and answers `1..10`.
+    #[test]
+    fn au5_a_twenty_five_fps_fill_covers_the_gap_in_samples_not_only_in_frames() {
+        let project_fps = Rational::new(25, 1).unwrap();
+        let asset_fps = Rational::new(30, 1).unwrap();
+        let document = seven_frame_gap_fixture(project_fps, asset_fps);
+        let tone = document
+            .asset(AssetId(2))
+            .expect("the pool holds room tone");
+        let gap = TimeCode(0)..TimeCode(7);
+        assert_eq!(
+            document.track_gaps(TrackId(2)),
+            Some(vec![gap.clone()]),
+            "the fixture's only gap is the leading seven frames"
+        );
+
+        // The exact-in-frames answer, which is what R135 reverses.
+        assert_eq!(
+            map_project_duration_to_source(TimeCode::ZERO, TimeCode(7), asset_fps, project_fps),
+            Ok(TimeCode(8)),
+            "phase 0 is exact in frames — and short in samples"
+        );
+        let covering = covering_source_range_for_project_duration(
+            TimeCode(7),
+            asset_fps,
+            project_fps,
+            tone.duration,
+            kinewright_media::ROOM_TONE_SAMPLE_RATE,
+        )
+        .expect("a 60-frame capture covers seven project frames at 25 fps");
+        assert_eq!(
+            covering,
+            TimeCode(1)..TimeCode(10),
+            "the covering range is the phase-1 one"
+        );
+
+        let operations = room_tone_fill_operations(&document, TrackId(2), &gap, tone)
+            .expect("the seven-frame gap fills");
+        assert_eq!(operations.len(), 1);
+        let Operation::AddClip { at, source, .. } = &operations[0] else {
+            panic!("a fill is `AddClip`s: {operations:?}");
+        };
+        assert_eq!(*at, TimeCode::ZERO);
+        assert_eq!(
+            *source, covering,
+            "the button lays exactly the range the core helper answers"
+        );
+
+        // And the fill really closes the gap: applied, the track has none left.
+        let mut filled = document.clone();
+        for operation in &operations {
+            operation
+                .apply(&mut filled)
+                .expect("the fill is a document the core accepts");
+        }
+        assert_eq!(
+            filled.track_gaps(TrackId(2)),
+            Some(Vec::new()),
+            "no residual `track_gap` remains after the fill"
+        );
+    }
+
+    /// One 25 fps audio track whose only gap is the leading seven frames.
+    ///
+    /// The dialogue clip starts at project frame 7 and runs 12 source frames
+    /// of a 30 fps asset, which is ten project frames at 25.
+    fn seven_frame_gap_fixture(project_fps: Rational, asset_fps: Rational) -> Document {
+        let source = MediaAsset {
+            id: AssetId(1),
+            path: PathBuf::from("interview.wav"),
+            name: "interview.wav".to_owned(),
+            duration: TimeCode(600),
+            fps: asset_fps,
+            kind: MediaKind::Audio,
+            resolution: None,
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+            color_description: kinewright_core::ColorDescription::default(),
+        };
+        let tone = MediaAsset {
+            id: AssetId(2),
+            path: PathBuf::from("/p/show.kinewright-assets/room-tone/abc.wav"),
+            name: "Room tone \u{2014} interview.wav".to_owned(),
+            duration: TimeCode(60),
+            fps: asset_fps,
+            ..source.clone()
+        };
+        Document {
+            catalog: kinewright_core::MediaCatalog::default(),
+            audio_mix: kinewright_core::AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![Clip {
+                        id: ClipId(1),
+                        asset: AssetId(1),
+                        source_range: TimeCode(0)..TimeCode(12),
+                        content: kinewright_core::ClipContent::Media,
+                        timeline_start: TimeCode(7),
+                        effects: Vec::new(),
+                        transition_in: None,
+                        link: None,
+                        audio_gain_tenth_db: 0,
+                        audio_fade_in_frames: TimeCode::ZERO,
+                        audio_fade_out_frames: TimeCode::ZERO,
+                        speed_percent: 100,
+                        audio_gain_curve: None,
+                    }],
+                },
+            ],
+            media_pool: vec![source, tone],
+            markers: Vec::new(),
+            fps: project_fps,
+            resolution: (1_920, 1_080),
+            lut_assets: Vec::new(),
+            // The project is exactly its content: 7 frames of gap plus the
+            // dialogue clip's ten, so `apply` accepts the fill.
+            duration: TimeCode(17),
+        }
+    }
+
+    /// AU5 §0 R137: the repeating tile is the longest one the asset can
+    /// **cover**, not its whole mapped length.
+    ///
+    /// A 61-frame capture maps to 51 project frames at 25 fps, and a 51-frame
+    /// tile is impossible: the demand is `⌈51 × 48 000 / 25⌉ = 97 920` sample
+    /// frames and the whole asset supplies `⌊61 × 48 000 / 30⌋ = 97 600`. That
+    /// is not a rare shape — every capture length with `D mod 6 ∈ {1, 2, 3}`
+    /// has it, about half of them — and asking for it refused the **whole**
+    /// fill of any gap at least as long as the tone. One project frame shorter
+    /// tiles the same gap exactly.
+    #[test]
+    fn au5_a_full_tile_that_cannot_cover_steps_down_instead_of_refusing_the_fill() {
+        let project_fps = Rational::new(25, 1).unwrap();
+        let asset_fps = Rational::new(30, 1).unwrap();
+        let mut document = seven_frame_gap_fixture(project_fps, asset_fps);
+        // A capture in the failing residue class, and a gap twice its length.
+        document
+            .media_pool
+            .iter_mut()
+            .find(|asset| asset.id == AssetId(2))
+            .expect("the pool holds room tone")
+            .duration = TimeCode(61);
+        let tone = document
+            .asset(AssetId(2))
+            .expect("the pool holds room tone");
+
+        // The premise: the whole asset's own mapped length has no covering
+        // range, so a tiler that asks for it refuses everything.
+        let whole =
+            map_source_range_to_project(TimeCode::ZERO..tone.duration, asset_fps, project_fps)
+                .expect("the asset maps");
+        assert_eq!(whole, TimeCode(51));
+        assert!(
+            covering_source_range_for_project_duration(
+                whole,
+                asset_fps,
+                project_fps,
+                tone.duration,
+                kinewright_media::ROOM_TONE_SAMPLE_RATE,
+            )
+            .is_err(),
+            "the premise: a 51-frame tile cannot be covered by a 61-frame asset at 30 → 25"
+        );
+        let tile = tile_for(&document, tone, TimeCode(100))
+            .expect("one frame shorter is coverable, and core's search finds it");
+        assert_eq!(tile, TimeCode(50), "the search lands on the frame below");
+
+        let gap = TimeCode(0)..TimeCode(100);
+        let operations = room_tone_fill_operations(&document, TrackId(2), &gap, tone)
+            .expect("a 100-frame gap tiles from a 61-frame capture rather than refusing");
+        assert_eq!(operations.len(), 2, "50 + 50: {operations:?}");
+        let mut cursor = gap.start;
+        for operation in &operations {
+            let Operation::AddClip { at, source, .. } = operation else {
+                panic!("a fill is `AddClip`s: {operation:?}");
+            };
+            assert_eq!(*at, cursor, "butt-joined, never overlapping");
+            let span = map_source_range_to_project(source.clone(), tone.fps, project_fps)
+                .expect("the tile maps");
+            cursor = TimeCode(cursor.0 + span.0);
+        }
+        assert_eq!(cursor, gap.end, "the tiles cover the gap exactly");
+
+        // And it is a real fill: laid into the document, the gap is gone.
+        let mut filled = document.clone();
+        filled.tracks[1].clips[0].timeline_start = TimeCode(100);
+        filled.duration = TimeCode(110);
+        assert_eq!(
+            filled.track_gaps(TrackId(2)),
+            Some(vec![gap.clone()]),
+            "the fixture's only gap is the leading hundred frames"
+        );
+        for operation in
+            &room_tone_fill_operations(&filled, TrackId(2), &gap, tone).expect("the fill holds")
+        {
+            operation
+                .apply(&mut filled)
+                .expect("the fill is a document the core accepts");
+        }
+        assert_eq!(
+            filled.track_gaps(TrackId(2)),
+            Some(Vec::new()),
+            "no residual `track_gap` remains after a multi-tile fill"
+        );
+    }
+
+    /// Core's tile search at the app's own sample rate, for a whole gap.
+    fn tile_for(
+        document: &Document,
+        asset: &MediaAsset,
+        gap: TimeCode,
+    ) -> Result<TimeCode, String> {
+        kinewright_core::longest_coverable_project_tile(
+            asset.duration,
+            asset.fps,
+            document.fps,
+            kinewright_media::ROOM_TONE_SAMPLE_RATE,
+            gap,
+        )
+        .map(|(tile, _)| tile)
+        .map_err(|error| error.to_string())
+    }
+
+    /// AU5 §0 R139: each of core's three mapping refusals gets its own
+    /// sentence, and none of them gets another's.
+    ///
+    /// `SourceTooShortToCover` is the one whose answer really is *record more
+    /// room tone*; under a `_ =>` wildcard it printed
+    /// `InexactDuration`'s "no exact source range", which sends an editor to
+    /// look at the rate pair instead of at the microphone — the exact
+    /// misdirection R137 exists to end.
+    #[test]
+    fn au5_each_mapping_refusal_gets_its_own_sentence() {
+        use kinewright_core::TimeMappingError;
+        let source_fps = Rational::new(30, 1).unwrap();
+        let project_fps = Rational::new(25, 1).unwrap();
+        let reason = |error: &TimeMappingError| {
+            room_tone_skip_reason(TimeCode(7), source_fps, project_fps, error)
+        };
+
+        let inexact = reason(&TimeMappingError::InexactDuration {
+            source_start: 0,
+            project_duration: 7,
+        });
+        let no_covering = reason(&TimeMappingError::NoCoveringSourceRange {
+            project_duration: 7,
+            source_duration: 61,
+        });
+        let too_short = reason(&TimeMappingError::SourceTooShortToCover {
+            project_duration: 7,
+            minimum_source_frames: 62,
+            source_duration: 61,
+        });
+        for sentence in [&inexact, &no_covering, &too_short] {
+            assert!(
+                sentence.contains("gap of 7 project frames"),
+                "every refusal names the span that was asked for: {sentence}"
+            );
+            assert!(
+                sentence.contains("30/1 / 25/1"),
+                "and both rates: {sentence}"
+            );
+        }
+        assert_ne!(inexact, no_covering);
+        assert_ne!(no_covering, too_short);
+        assert_ne!(inexact, too_short);
+
+        assert!(inexact.ends_with("no exact source range at 30/1 / 25/1"));
+        assert!(
+            no_covering.contains("also carries its sample frames within the 61-source-frame"),
+            "{no_covering}"
+        );
+        assert!(
+            too_short.contains("needs at least 62 source frames of room tone")
+                && too_short.contains("carries only 61"),
+            "the one refusal whose answer is `record more room tone` says so: {too_short}"
+        );
+        assert!(
+            !too_short.contains("no exact source range"),
+            "and never wears `InexactDuration`'s sentence: {too_short}"
+        );
+
+        // No `_ =>` over the three named variants: the wildcard exists, but it
+        // catches only what core adds later, and it says so rather than
+        // borrowing one of these sentences.
+        let other = reason(&TimeMappingError::NegativeFrames(TimeCode(-1)));
+        assert!(
+            other.contains("has no usable source range at 30/1 / 25/1"),
+            "{other}"
+        );
+        for sentence in [&inexact, &no_covering, &too_short] {
+            assert_ne!(*sentence, other);
+        }
+    }
+
+    /// AU5 §0 R141: an uncoverable remainder is **split again**, not refused.
+    ///
+    /// Coverability is not monotone in `want`, so a remainder core cannot
+    /// cover says nothing about `remainder − 1` or about 1. Asking core once
+    /// for the whole gap and then insisting the leftover be coverable at
+    /// exactly its own length refused gaps `plan_room_tone_fill` fills: 300
+    /// combinations at 30 → 59.94, 226 at 30 → 50, 240 at 30 → 48, all with a
+    /// store-produced 30 fps tone, because `RoomToneStore::asset_fps()` is
+    /// `Rational::default()` and those three are workspace project rates.
+    ///
+    /// This is the reviewer's worked case: a twenty-second tone and a
+    /// 1 001-frame gap at 30 → 59.94. Asking for the residue of 2 refuses;
+    /// asking core for "the largest span at most 2" answers 1, twice.
+    #[test]
+    fn au5_an_uncoverable_remainder_is_split_again_rather_than_refusing_the_gap() {
+        let project_fps = Rational::new(60_000, 1_001).unwrap();
+        let asset_fps = Rational::new(30, 1).unwrap();
+        let mut document = seven_frame_gap_fixture(project_fps, asset_fps);
+        document.tracks[1].clips[0].timeline_start = TimeCode(1_001);
+        // Twelve 30 fps source frames are twenty-four project frames at 59.94.
+        document.duration = TimeCode(1_025);
+        document
+            .media_pool
+            .iter_mut()
+            .find(|asset| asset.id == AssetId(2))
+            .expect("the pool holds room tone")
+            .duration = TimeCode(600);
+        let tone = document
+            .asset(AssetId(2))
+            .expect("the pool holds room tone");
+        let gap = TimeCode(0)..TimeCode(1_001);
+        assert_eq!(document.track_gaps(TrackId(2)), Some(vec![gap.clone()]));
+
+        // The premise: the whole gap's tile leaves a residue of 2, and 2 is
+        // not coverable at this rate pair while 1 is.
+        assert_eq!(tile_for(&document, tone, gap.end), Ok(TimeCode(999)));
+        assert!(
+            covering_source_range_for_project_duration(
+                TimeCode(2),
+                asset_fps,
+                project_fps,
+                tone.duration,
+                kinewright_media::ROOM_TONE_SAMPLE_RATE,
+            )
+            .is_err(),
+            "the residue of 2 has no covering range"
+        );
+        assert_eq!(tile_for(&document, tone, TimeCode(2)), Ok(TimeCode(1)));
+
+        let operations = room_tone_fill_operations(&document, TrackId(2), &gap, tone)
+            .expect("the residue is split again rather than refusing the gap");
+        assert_eq!(operations.len(), 3, "999 + 1 + 1: {operations:?}");
+        let mut cursor = gap.start;
+        for operation in &operations {
+            let Operation::AddClip { at, source, .. } = operation else {
+                panic!("a fill is `AddClip`s: {operation:?}");
+            };
+            assert_eq!(*at, cursor, "butt-joined, never overlapping");
+            let span = map_source_range_to_project(source.clone(), tone.fps, project_fps)
+                .expect("the tile maps");
+            cursor = TimeCode(cursor.0 + span.0);
+        }
+        assert_eq!(cursor, gap.end, "the three tiles sum to the gap exactly");
+
+        let mut filled = document.clone();
+        for operation in &operations {
+            operation
+                .apply(&mut filled)
+                .expect("the fill is a document the core accepts");
+        }
+        assert_eq!(
+            filled.track_gaps(TrackId(2)),
+            Some(Vec::new()),
+            "no residual `track_gap` remains at 30 \u{2192} 59.94"
+        );
+    }
+
+    /// AU5 §0 R141: a partly-tiled gap names **both** the gap and the residue.
+    ///
+    /// The headline names the gap, which is the span an editor can see and
+    /// asked about; core's refusal is about whatever is left of it. Printing
+    /// only the residue said "gap of 1 project frames" about a 241-frame hole,
+    /// and printing only the gap hid which span actually had no range. The
+    /// annotation is `plan_room_tone_fill`'s, word for word.
+    #[test]
+    fn au5_a_refused_tile_names_both_the_gap_and_the_residue() {
+        // 30 → 60 can only express even spans. A two-second tone tiles 120
+        // project frames at a time, so a 241-frame gap lays two full tiles and
+        // then has a **one**-frame residue that no source range can express.
+        let project_fps = Rational::new(60, 1).unwrap();
+        let asset_fps = Rational::new(30, 1).unwrap();
+        let mut document = seven_frame_gap_fixture(project_fps, asset_fps);
+        document.tracks[1].clips[0].timeline_start = TimeCode(241);
+        document.duration = TimeCode(265);
+        let tone = document
+            .asset(AssetId(2))
+            .expect("the pool holds room tone");
+        let gap = TimeCode(0)..TimeCode(241);
+        assert_eq!(document.track_gaps(TrackId(2)), Some(vec![gap.clone()]));
+        assert_eq!(
+            tile_for(&document, tone, gap.end),
+            Ok(TimeCode(120)),
+            "the repeating tile is the whole two-second capture"
+        );
+        let refusal = room_tone_fill_operations(&document, TrackId(2), &gap, tone)
+            .expect_err("an odd residue is not representable at 30 \u{2192} 60");
+        assert!(
+            refusal.contains("gap of 241 project frames"),
+            "the headline names the hole the editor can see: {refusal}"
+        );
+        assert!(
+            refusal.contains("2 tile(s) covered all but its last 1 project frame(s)"),
+            "and the annotation names how far it got and what is left: {refusal}"
+        );
+
+        // A gap that fails on its very first pass carries no annotation: there
+        // is no residue distinct from the gap to name.
+        let mut odd = document.clone();
+        odd.tracks[1].clips[0].timeline_start = TimeCode(1);
+        odd.duration = TimeCode(25);
+        let tone = odd.asset(AssetId(2)).expect("the pool holds room tone");
+        let first = TimeCode(0)..TimeCode(1);
+        let refusal = room_tone_fill_operations(&odd, TrackId(2), &first, tone)
+            .expect_err("one project frame is not representable at 30 \u{2192} 60");
+        assert!(refusal.contains("gap of 1 project frames"), "{refusal}");
+        assert!(
+            !refusal.contains("tile(s) covered"),
+            "nothing was covered, so nothing claims to have been: {refusal}"
+        );
+    }
+
+    /// AU5 §0 R140: an NTSC capture under the floor is refused as a
+    /// **coverage** failure naming the asset's own length, not as a rate one.
+    ///
+    /// The refusal has to send the editor to the microphone, not to the frame
+    /// rate. Which sentence it is is core's call, not the app's: below the
+    /// ~501-source-frame floor at 30 → 29.97 the search's last refusal is
+    /// `NoCoveringSourceRange`, whose sentence ends by naming the
+    /// **60-source-frame room-tone asset** as the thing the samples had to fit
+    /// inside. The app no longer computes a floor of its own to append (R138's
+    /// first text did, and it was a figure the app remembered rather than one
+    /// the search produced).
+    #[test]
+    fn au5_a_short_ntsc_capture_is_refused_with_the_length_it_needs() {
+        let project_fps = Rational::new(30_000, 1_001).unwrap();
+        let asset_fps = Rational::new(30, 1).unwrap();
+        let document = seven_frame_gap_fixture(project_fps, asset_fps);
+        let tone = document
+            .asset(AssetId(2))
+            .expect("the pool holds room tone");
+        assert_eq!(tone.duration, TimeCode(60), "two seconds of room tone");
+        let gap = TimeCode(0)..TimeCode(7);
+        let refusal = room_tone_fill_operations(&document, TrackId(2), &gap, tone)
+            .expect_err("a two-second capture covers nothing at 29.97");
+        assert!(
+            refusal.contains("within the 60-source-frame room-tone asset"),
+            "the refusal names the asset's own length as the binding limit: {refusal}"
+        );
+        assert!(
+            refusal.contains("also carries its sample frames"),
+            "and says coverage, not representability, is what failed: {refusal}"
+        );
+        // One frame over the floor and the same gap fills, which is what makes
+        // the sentence above actionable rather than fatalistic.
+        let mut longer = document.clone();
+        longer
+            .media_pool
+            .iter_mut()
+            .find(|asset| asset.id == AssetId(2))
+            .expect("the pool holds room tone")
+            .duration = TimeCode(501);
+        let tone = longer.asset(AssetId(2)).expect("the pool holds room tone");
+        assert!(
+            room_tone_fill_operations(&longer, TrackId(2), &gap, tone).is_ok(),
+            "501 source frames is where covering first becomes possible at this rate pair"
+        );
+    }
+
+    /// AU5 §0 R138 / R140: an NTSC project fills, and the tile starts deep in
+    /// the capture.
+    ///
+    /// 30000/1001 against a 30/1 capture is the rate pair every North American
+    /// project is in, and it needs both of core's AU5 searches. A 29.97
+    /// project frame demands 1 601.6 sample frames and a 30 fps source frame
+    /// supplies 1 600, so **no phase-0 range can ever cover**: the covering
+    /// range for a 40-frame gap is `460..501`, forty-one source frames from
+    /// the middle of the capture, which only a phase sweep as deep as the
+    /// ratio's period can find.
+    ///
+    /// Two capture lengths, and the second is the point of R140. Twenty
+    /// seconds is comfortably over the ~501-source-frame floor below which
+    /// nothing at this rate pair covers anything. **Forty seconds is the
+    /// length the app's own four-frame step-down used to refuse** — its
+    /// coverable tile is 1 000 project frames — the span of the 1 001-frame
+    /// map period — 199 frames
+    /// below what 1 200 source frames map to — and it is an entirely ordinary
+    /// capture, so that bound skipped every gap on the track for a large part
+    /// of all NTSC recordings.
+    #[test]
+    fn au5_a_drop_frame_project_still_proposes_a_fill() {
+        let project_fps = Rational::new(30_000, 1_001).unwrap();
+        let asset_fps = Rational::new(30, 1).unwrap();
+        for (label, capture) in [("twenty seconds", 600_i64), ("forty seconds", 1_200)] {
+            let mut document = seven_frame_gap_fixture(project_fps, asset_fps);
+            document.tracks[1].clips[0].timeline_start = TimeCode(40);
+            document.duration = TimeCode(52);
+            document
+                .media_pool
+                .iter_mut()
+                .find(|asset| asset.id == AssetId(2))
+                .expect("the pool holds room tone")
+                .duration = TimeCode(capture);
+            let tone = document
+                .asset(AssetId(2))
+                .expect("the pool holds room tone");
+            let gap = TimeCode(0)..TimeCode(40);
+            assert_eq!(document.track_gaps(TrackId(2)), Some(vec![gap.clone()]));
+            let operations = room_tone_fill_operations(&document, TrackId(2), &gap, tone)
+                .unwrap_or_else(|error| {
+                    panic!("a {label} 30 fps capture fills an NTSC gap: {error}")
+                });
+            assert_eq!(operations.len(), 1, "{label}: {operations:?}");
+            let Operation::AddClip { at, source, .. } = &operations[0] else {
+                panic!("a fill is `AddClip`s: {operations:?}");
+            };
+            assert_eq!(*at, TimeCode::ZERO);
+            assert_eq!(
+                *source,
+                TimeCode(460)..TimeCode(501),
+                "{label}: forty-one source frames from the middle of the capture, which only \
+                 a phase sweep deeper than three can find"
+            );
+            let mut filled = document.clone();
+            for operation in &operations {
+                operation
+                    .apply(&mut filled)
+                    .expect("the fill is a document the core accepts");
+            }
+            assert_eq!(
+                filled.track_gaps(TrackId(2)),
+                Some(Vec::new()),
+                "{label}: no residual `track_gap` remains at 30000/1001"
+            );
+        }
+    }
+
+    /// AU5 §0 R134: a room-tone refusal is filed under `Timeline`, and the
+    /// inspector's own default is still `Look`.
+    #[test]
+    fn au5_a_room_tone_refusal_is_not_filed_under_look() {
+        assert_eq!(
+            InspectorEdits::default().error_category(),
+            crate::inspector_ui::LOOK_ERROR_CATEGORY,
+            "every CC4-CC6 look card keeps the category it has always had"
+        );
+        let mut edits = InspectorEdits::default();
+        edits.set_error_category(ROOM_TONE_ERROR_CATEGORY);
+        assert_eq!(edits.error_category(), "Timeline");
+        assert_ne!(
+            ROOM_TONE_ERROR_CATEGORY,
+            crate::inspector_ui::LOOK_ERROR_CATEGORY,
+            "the button is a timeline gesture; a `Room tone` refusal under `Look` \
+             sends the editor to a surface that had nothing to do with it"
+        );
+        // Both submitting paths set it: the production sources are read here
+        // because neither path can be driven without a `KinewrightApp`.
+        let source = include_str!("timeline_ui.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("timeline_ui.rs has a test module")
+            .0;
+        assert_eq!(
+            source
+                .matches("set_error_category(ROOM_TONE_ERROR_CATEGORY)")
+                .count(),
+            2,
+            "`fill_room_tone_at_selection` and `poll_room_tone` both set it"
+        );
+        assert_eq!(
+            source.matches("InspectorEdits::default()").count(),
+            3,
+            "and those are two of the file's three `InspectorEdits`; the third is \
+             the envelope's, which keeps the `Look` default"
         );
     }
 }

@@ -30,6 +30,12 @@ use crate::{
 
 const INSPECTOR_MAX_HEIGHT: f32 = 360.0;
 
+/// Where a refused inspector action lands in the error log.
+///
+/// The default, and the only category before AU5: every caller of
+/// [`InspectorEdits::push_error`] was a look card.
+pub(crate) const LOOK_ERROR_CATEGORY: &str = "Look";
+
 /// Edits gathered from one inspector frame.
 ///
 /// A dragged slider emits one operation per frame so the preview stays live.
@@ -68,6 +74,13 @@ pub(crate) struct InspectorEdits {
     /// The window a card asked the overlay to select, with the window count
     /// the card could see, so the overlay can clamp the request (CC5 §6).
     matte_selected_window: Option<(usize, usize)>,
+    /// Which error-log category this frame's refusals belong to.
+    ///
+    /// `None` is the inspector's own "Look", which every CC4–CC6 caller
+    /// wants. AU5 §6.4 rule 129 gave `push_error` its first caller outside the
+    /// look cards, and a room-tone refusal filed under "Look" is a message
+    /// landing under a lie.
+    error_category: Option<&'static str>,
     /// Refusals a card produced while building a batch, for the app's error
     /// log.
     ///
@@ -203,8 +216,35 @@ impl InspectorEdits {
     }
 
     /// Record a refusal the app should surface through the error log.
-    fn push_error(&mut self, message: impl Into<String>) {
+    /// AU5 §6.4 rule 129 gave this its first caller outside the inspector:
+    /// the timeline's `Room tone` button reports a refused fill exactly where
+    /// a refused look action already reports.
+    pub(crate) fn push_error(&mut self, message: impl Into<String>) {
         self.errors.push(message.into());
+    }
+
+    /// File this frame's refusals under a category other than "Look".
+    ///
+    /// One category per frame, because `submit_inspector_edits` drains the
+    /// errors once: a surface that produces refusals of two kinds in one frame
+    /// does not exist, and inventing a per-message category for one that might
+    /// would be state nothing reads.
+    pub(crate) const fn set_error_category(&mut self, category: &'static str) {
+        self.error_category = Some(category);
+    }
+
+    /// The category this frame's refusals are filed under.
+    #[must_use]
+    pub(crate) const fn error_category(&self) -> &'static str {
+        match self.error_category {
+            Some(category) => category,
+            None => LOOK_ERROR_CATEGORY,
+        }
+    }
+
+    /// Record one batch that is a single action rather than a live gesture.
+    pub(crate) fn extend_operations(&mut self, operations: impl IntoIterator<Item = Operation>) {
+        self.extend(operations);
     }
 
     #[cfg(test)]
@@ -764,8 +804,9 @@ impl KinewrightApp {
         }
         // Refusals go out before the operations so a card that both refused
         // one action and produced another still reports the refusal.
+        let category = edits.error_category();
         for message in edits.errors {
-            self.record_error("Look", message);
+            self.record_error(category, message);
         }
         if edits.gesture_started {
             // Open the new gesture even when this frame produced no operation:
@@ -4291,6 +4332,10 @@ pub(crate) fn effect_display_name(name: &str) -> &str {
         "audio_parametric_eq" => "Parametric EQ",
         "audio_gate" => "Gate",
         "audio_true_peak_limiter" => "True-peak limiter",
+        // AU5 §6.1 rule 120: the three repair nodes.
+        "audio_denoise" => "Denoise",
+        "audio_hum_removal" => "Hum removal",
+        "audio_declick" => "De-click",
         _ => name,
     }
 }

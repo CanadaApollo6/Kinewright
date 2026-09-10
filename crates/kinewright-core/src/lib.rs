@@ -210,8 +210,10 @@ pub use scopes::{
     matte_scoped_frame, measure_scope, measure_scopes,
 };
 pub use time::{
-    FrameRounding, Rational, TimeCode, TimeMappingError, map_frames, map_frames_with_rounding,
-    map_source_range_to_project, speed_scaled_fps,
+    FrameRounding, Rational, TimeCode, TimeMappingError,
+    covering_source_range_for_project_duration, longest_coverable_project_tile, map_frames,
+    map_frames_with_rounding, map_project_duration_to_source, map_source_range_to_project,
+    speed_scaled_fps,
 };
 pub use title::{
     CaptionPreset, TITLE_COLORS, TITLE_FONT_SIZES, TITLE_PARAMETER_DESCRIPTORS, Title,

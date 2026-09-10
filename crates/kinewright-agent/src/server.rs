@@ -1043,6 +1043,18 @@ impl KinewrightMcp {
                 let args: ClipFadesPlanArgs = decode_args("plan_clip_fades", arguments)?;
                 self.plan_clip_fades(&args)
             }
+            "plan_room_tone_fill" => {
+                let args: RoomToneFillPlanArgs = decode_args("plan_room_tone_fill", arguments)?;
+                self.plan_room_tone_fill(&args)
+            }
+            "plan_dialogue_repair" => {
+                let args: DialogueRepairPlanArgs = decode_args("plan_dialogue_repair", arguments)?;
+                self.plan_dialogue_repair(&args)
+            }
+            "capture_room_tone" => {
+                let args: CaptureRoomToneArgs = decode_args("capture_room_tone", arguments)?;
+                self.capture_room_tone(&args)
+            }
             "get_analysis_status" => {
                 let args: AnalysisStatusArgs = decode_args("get_analysis_status", arguments)?;
                 self.analysis_status(args.asset_id)
@@ -1362,8 +1374,30 @@ impl KinewrightMcp {
         expected_revision: TimelineRevision,
         operation: Operation,
     ) -> CallToolResult {
+        self.apply_operation_analyzing(tool_name, expected_revision, operation, true)
+    }
+
+    /// [`Self::apply_operation`], with the background analysis a newly pooled
+    /// asset normally earns made optional.
+    ///
+    /// `analyze` is `false` for exactly one caller, `capture_room_tone`
+    /// (AU5 §0 R112): a captured room tone is a second of noise the project
+    /// wrote itself, and `request_asset_analysis` would queue a transcription
+    /// on it — which, on a machine that has never transcribed anything, means
+    /// downloading the Whisper model to read a file with no speech in it — plus
+    /// a scene detection on an asset with no video and a beat detection on
+    /// material chosen for having no events. The one analysis a room tone could
+    /// use is a waveform, which is requested on demand by the surface that
+    /// draws it, not here.
+    fn apply_operation_analyzing(
+        &self,
+        tool_name: &str,
+        expected_revision: TimelineRevision,
+        operation: Operation,
+        analyze: bool,
+    ) -> CallToolResult {
         let imported_asset = match &operation {
-            Operation::AddAsset { asset } => Some(asset.clone()),
+            Operation::AddAsset { asset } if analyze => Some(asset.clone()),
             _ => None,
         };
         let before = self.snapshot().ok();
@@ -2043,6 +2077,262 @@ impl KinewrightMcp {
                 "reused_existing_asset": false,
                 "applied": true,
                 "next": "Bind the asset with plan_technical_lut or plan_creative_look, then submit the returned operations through prepare_edit_plan.",
+            }),
+        ))
+    }
+
+    /// Derive the AU5 room-tone store from the published project path.
+    ///
+    /// Exactly [`Self::lut_store`]'s shape and for the same reason: `None`
+    /// means the project has never been saved, which is a distinct state from
+    /// a store root that exists but cannot be used.
+    fn room_tone_store(
+        &self,
+    ) -> Option<Result<kinewright_media::RoomToneStore, kinewright_core::MediaError>> {
+        self.project_path()
+            .map(|path| kinewright_media::RoomToneStore::for_project(&path))
+    }
+
+    /// AU5 §5.8 `capture_room_tone`: decode one source range, write it into the
+    /// project's room-tone store, and register it as one ordinary `AddAsset`.
+    ///
+    /// Rule 114: a hand-written capability on `import_lut_asset`'s exact shape,
+    /// inferred as `CapabilityKind::Action` because it carries neither a `get_`
+    /// nor a `plan_` prefix and needs no `CAPABILITY_KIND_OVERRIDES` entry.
+    ///
+    /// Rule 115: it decodes the chosen **source** range — the raw clip source,
+    /// never the mix path, because capturing post-chain would apply the
+    /// denoiser, the compressor and the limiter twice (rule 91) — writes
+    /// `wav_f32` bytes under their own sha256, probes the written file like any
+    /// import, and submits **one** `Operation::AddAsset`. It sits behind the
+    /// same confirmation path as `import_lut_asset`, because it is the only
+    /// AU5 tool that writes bytes into the project directory.
+    ///
+    /// Rule 116: when the store already holds that digest and `media_pool`
+    /// already carries an asset at that path, it returns the existing
+    /// `asset_id` and emits **no** operation, so a re-run is a no-op rather
+    /// than a `DuplicateAsset` failure.
+    #[allow(clippy::too_many_lines)]
+    fn capture_room_tone(&self, args: &CaptureRoomToneArgs) -> Result<CallToolResult, McpError> {
+        let (actual_revision, document) = self.snapshot()?;
+        if args.expected_revision != actual_revision {
+            return Ok(lut_revision_conflict(
+                "capture_room_tone",
+                args.expected_revision,
+                actual_revision,
+            ));
+        }
+        let Some(store) = self.room_tone_store() else {
+            return Ok(room_tone_capture_error(
+                "project_not_saved",
+                "the project has never been saved, so it has no room-tone store root",
+                &serde_json::json!({
+                    "field": "project_path",
+                    "observed": serde_json::Value::Null,
+                    "allowed": "a saved project file path such as <dir>/<stem>.kinewright",
+                    "recovery_action": "Save the project first; the store root is <dir>/<stem>.kinewright-assets and is derived from the project path at runtime.",
+                }),
+            ));
+        };
+        let store = match store {
+            Ok(store) => store,
+            Err(error) => return Ok(room_tone_store_error_result(&error)),
+        };
+        let Some(source) = document.asset(args.asset_id) else {
+            return Ok(room_tone_capture_error(
+                "unknown_asset",
+                &format!("asset {} is not in the media pool", args.asset_id),
+                &serde_json::json!({
+                    "field": "asset_id",
+                    "observed": args.asset_id.0,
+                    "allowed": "an asset id returned by get_timeline_state",
+                    "recovery_action": "Import the source first, then capture a range of it.",
+                }),
+            ));
+        };
+        let from = args.source_start_frame;
+        let to = args.source_end_frame;
+        if from < TimeCode::ZERO || to <= from || to > source.duration {
+            return Ok(room_tone_capture_error(
+                "invalid_source_range",
+                &format!(
+                    "capture_room_tone needs 0 <= source_start_frame < source_end_frame <= {}; got {from}..{to}",
+                    source.duration
+                ),
+                &serde_json::json!({
+                    "field": "source_end_frame",
+                    "observed": format!("{from}..{to}"),
+                    "allowed": format!("0..{}", source.duration.0),
+                    "recovery_action": "Read the asset's duration from get_source_info and pick a range inside it.",
+                }),
+            ));
+        }
+        // F10: the store's 60 s cap is enforced by `write_capture`, which runs
+        // AFTER the decode — so a ten-minute request used to buy a
+        // confirmation and a ten-minute synchronous decode on the handler
+        // thread before being told no, and R111's `ExportCancellation::default`
+        // is what makes that wait uninterruptible. The same cap is therefore
+        // checked here, in the units the caller asked in, before a byte is
+        // read. The store stays authoritative: this bound is computed from
+        // frames and rounds down, so a range this arm lets through can still be
+        // refused there on its exact sample count.
+        let requested_milliseconds = capture_range_milliseconds(from, to, source.fps);
+        if requested_milliseconds > kinewright_media::ROOM_TONE_MAX_CAPTURE_MILLISECONDS {
+            return Ok(room_tone_capture_error(
+                "room_tone_capture_too_long",
+                &format!(
+                    "source frames {from}..{to} are {requested_milliseconds} ms of room tone, over the {} ms cap",
+                    kinewright_media::ROOM_TONE_MAX_CAPTURE_MILLISECONDS
+                ),
+                &serde_json::json!({
+                    "field": "source_end_frame",
+                    "observed": format!("{requested_milliseconds} ms"),
+                    "allowed": format!("{} ms or fewer", kinewright_media::ROOM_TONE_MAX_CAPTURE_MILLISECONDS),
+                    "recovery_action": "Capture a shorter range; a few seconds of steady tone is enough to tile a gap.",
+                }),
+            ));
+        }
+        if source.kind == MediaKind::Video {
+            return Ok(room_tone_capture_error(
+                "no_audio_stream",
+                &format!("asset {} carries no audio stream to capture", source.id),
+                &serde_json::json!({
+                    "field": "asset_id",
+                    "observed": source.id.0,
+                    "allowed": "an asset whose kind is audio or audio_video",
+                    "recovery_action": "Pick the production sound asset rather than a picture-only one.",
+                }),
+            ));
+        }
+        // Ask before touching the filesystem, exactly as `import_lut_asset`
+        // does, and quote the honest length: the store truncates the capture
+        // down to a whole 30 fps asset frame, so the figure a caller approves
+        // is the requested range, in the units it asked in.
+        let description = format!(
+            "The agent wants to capture room tone from source frames {from}..{to} of \"{}\" into this project's room-tone store at {}. The decoded 48 kHz stereo samples are written under the project directory and registered as an undoable AddAsset operation.",
+            source.name,
+            store.room_tone_dir().display(),
+        );
+        if let Err(reason) = self.confirmations.confirm("capture_room_tone", description) {
+            return Ok(room_tone_capture_error(
+                "capture_refused",
+                &format!("refused destructive tool capture_room_tone: {reason}"),
+                &serde_json::json!({
+                    "field": "confirmation",
+                    "observed": reason,
+                    "allowed": "an approved confirmation",
+                    "recovery_action": "Ask the operator to approve the capture, then resend at the current timeline_revision.",
+                    "reason": reason,
+                    "store_file_written": false,
+                    "document_changed": false,
+                }),
+            ));
+        }
+        let samples = match kinewright_media::decode_audio_range(
+            &source.path,
+            source.fps,
+            from,
+            to,
+            ROOM_TONE_CAPTURE_SAMPLE_RATE,
+            ROOM_TONE_CAPTURE_CHANNELS,
+            &ExportCancellation::default(),
+        ) {
+            Ok(samples) => samples,
+            Err(error) => {
+                return Ok(room_tone_capture_error(
+                    "capture_decode_failed",
+                    &format!("could not decode source frames {from}..{to}: {error}"),
+                    &serde_json::json!({
+                        "field": "asset_id",
+                        "observed": source.path.display().to_string(),
+                        "allowed": "a readable source with a decodable audio stream",
+                        "recovery_action": "Relink the source, then capture again.",
+                    }),
+                ));
+            }
+        };
+        let capture = match store.write_capture(&samples) {
+            Ok(capture) => capture,
+            Err(error) => return Ok(room_tone_store_error_result(&error)),
+        };
+        // Rule 116: the store write is idempotent by digest, and so is this.
+        // A second identical call finds the pooled asset at the same store
+        // path and returns its id, emitting no operation at all.
+        if let Some(existing) = document
+            .media_pool
+            .iter()
+            .find(|asset| asset.path == capture.path)
+        {
+            return Ok(success_structured(
+                format!(
+                    "room tone asset {} \"{}\" already records sha256={}; reused the existing record instead of registering a second one",
+                    existing.id, existing.name, capture.sha256
+                ),
+                serde_json::json!({
+                    "timeline_revision": actual_revision.0,
+                    // Rule 114's "`import_lut_asset`'s exact shape" includes its
+                    // payload shape: that tool publishes `lut_asset` in BOTH the
+                    // reused and the applied branch, so a caller reads one key
+                    // either way. Spilling these fields flat here would make the
+                    // shape depend on `reused_existing_asset`, which is the one
+                    // thing rule 114 promises it does not (F2).
+                    "room_tone_asset": room_tone_asset_summary(existing, &capture, store.root()),
+                    "reused_existing_asset": true,
+                    "applied": false,
+                    "next": "Fill this track's gaps with plan_room_tone_fill.",
+                }),
+            ));
+        }
+        let mut asset = match self.analysis.probe(&capture.path) {
+            Ok(asset) => asset,
+            Err(error) => {
+                return Ok(room_tone_capture_error(
+                    "capture_probe_failed",
+                    &format!("could not probe the written room tone file: {error}"),
+                    &serde_json::json!({
+                        "field": "store_path",
+                        "observed": capture.path.display().to_string(),
+                        "allowed": "a probeable 48 kHz stereo WAV",
+                        "recovery_action": "Check that the project directory is writable and try again.",
+                    }),
+                ));
+            }
+        };
+        // R46 / rule 115: `probe_path` writes a `name` from the file name,
+        // which for a content-addressed store file is `<sha256>.wav`. The
+        // capture therefore OVERRIDES probe's answer rather than carrying it.
+        asset.name = args
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map_or_else(|| format!("Room tone — {}", source.name), str::to_owned);
+        let summary = room_tone_asset_summary(&asset, &capture, store.root());
+        let text = format!(
+            "captured {} ms of room tone as asset {} \"{}\" sha256={} into {}",
+            capture.milliseconds,
+            asset.id,
+            asset.name,
+            capture.sha256,
+            store.room_tone_dir().display(),
+        );
+        let result = self.apply_operation_analyzing(
+            "capture_room_tone",
+            args.expected_revision,
+            Operation::AddAsset { asset },
+            false,
+        );
+        if result.is_error == Some(true) {
+            return Ok(result);
+        }
+        Ok(success_structured(
+            text,
+            serde_json::json!({
+                "timeline_revision": args.expected_revision.0,
+                "room_tone_asset": summary,
+                "reused_existing_asset": false,
+                "applied": true,
+                "next": "Fill this track's gaps with plan_room_tone_fill.",
             }),
         ))
     }
@@ -8941,6 +9231,572 @@ impl KinewrightMcp {
             body,
         ))
     }
+
+    /// AU5 §5.5: propose butt-joined room-tone fills for one audio track's
+    /// leading and interior gaps.
+    ///
+    /// Rule 103: it enumerates [`Document::track_gaps`], filters to the
+    /// requested `range` and to gaps at or above `minimum_gap_frames`, applies
+    /// rule 97's exact-length arithmetic per gap, and reports every gap it saw
+    /// with a `skipped_reason` when it proposed nothing for it. **It never
+    /// fails a whole plan for one gap** — `plan_clip_fades`' idiom — and it
+    /// raises no confirmation, because a fill removes nothing.
+    ///
+    /// Rule 104: it is idempotent by construction. A filled gap is not a gap,
+    /// so a second run over the committed document proposes nothing, and the
+    /// fill clip carries no marking of any kind: it is an ordinary media clip
+    /// of a room-tone asset, so every AU4 survival rule already applies to it.
+    #[allow(clippy::too_many_lines)]
+    fn plan_room_tone_fill(&self, args: &RoomToneFillPlanArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let settings = match room_tone_fill_settings(&document, args) {
+            Ok(settings) => settings,
+            Err(error) => return Ok(error_text(error)),
+        };
+        // `None` is an unknown track, which `room_tone_fill_settings` already
+        // refused by name; an existing track with no gaps answers an empty
+        // list, which is the idempotent re-run.
+        let gaps = document.track_gaps(settings.track).unwrap_or_default();
+        let mut operations = Vec::new();
+        let mut reported = Vec::new();
+        let mut filled = 0usize;
+        let mut tile_total = 0usize;
+        for gap in gaps {
+            // Rule 103's `range` is `plan_audio_ducking`'s: it restricts which
+            // gaps are considered and clamps what is proposed inside them, so
+            // a caller can repair one act without touching the reel.
+            let clamped = match &settings.range {
+                Some(range) => {
+                    let start = gap.start.max(range.start);
+                    let end = gap.end.min(range.end);
+                    if start >= end {
+                        continue;
+                    }
+                    start..end
+                }
+                None => gap.clone(),
+            };
+            let length = TimeCode(clamped.end.0.saturating_sub(clamped.start.0));
+            if length < settings.minimum_gap_frames {
+                reported.push(room_tone_gap_value(
+                    &clamped,
+                    0,
+                    Some(&format!(
+                        "gap of {} project frames is under minimum_gap_frames {}",
+                        length.0, settings.minimum_gap_frames.0
+                    )),
+                ));
+                continue;
+            }
+            match room_tone_fill_tiles(&document, &settings.asset, &clamped, settings.maximum_tiles)
+            {
+                Ok(tiles) => {
+                    reported.push(room_tone_gap_value(&clamped, tiles.len(), None));
+                    let mut at = clamped.start;
+                    for (tile, duration) in &tiles {
+                        // Rule 95: same track, butt-joined, no fade. Rule 44:
+                        // `AddClip` writes `speed_percent = 100`, which is what
+                        // makes rule 97's helper a true inverse of
+                        // `clip_duration`. F7: the advance is the length
+                        // `room_tone_fill_tiles` already measured, not a second
+                        // derivation of it.
+                        operations.push(Operation::AddClip {
+                            track: settings.track,
+                            asset: settings.asset.id,
+                            at,
+                            source: tile.clone(),
+                        });
+                        at = TimeCode(at.0.saturating_add(duration.0));
+                    }
+                    filled += 1;
+                    tile_total += tiles.len();
+                }
+                Err(reason) => reported.push(room_tone_gap_value(&clamped, 0, Some(&reason))),
+            }
+        }
+        let mut body = serde_json::json!({
+            "timeline_revision": revision.0,
+            "track": settings.track,
+            "asset_id": settings.asset.id,
+            "asset_name": settings.asset.name,
+            "minimum_gap_frames": settings.minimum_gap_frames.0,
+            "maximum_tiles": settings.maximum_tiles,
+            "range": settings.range.as_ref().map(|range| serde_json::json!({
+                "start_frame": range.start.0,
+                "end_frame": range.end.0,
+            })),
+            "gaps": reported,
+            "tiles": tile_total,
+            "prepared_edit_plan": serde_json::Value::Null,
+        });
+        if operations.is_empty() {
+            // Rule 103: an empty plan states the reason that applied, and the
+            // per-gap list beside it is what makes that statement checkable.
+            let reason = if reported.is_empty() {
+                format!(
+                    "track {} has no leading or interior gap to fill",
+                    settings.track
+                )
+            } else {
+                format!(
+                    "every one of the {} gap(s) on track {} was skipped with a reason",
+                    reported.len(),
+                    settings.track
+                )
+            };
+            return Ok(success_structured(
+                format!("nothing to propose: {reason}; nothing was prepared"),
+                body,
+            ));
+        }
+        let prepared = match self.prepare_operations(revision, &document, operations) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "room tone fill plan does not fit the current timeline: {error}"
+                )));
+            }
+        };
+        body["prepared_edit_plan"] = serde_json::json!({
+            "plan_id": prepared.id,
+            "expected_revision": revision,
+            "preview": prepared.preview,
+        });
+        Ok(success_structured(
+            format!(
+                "prepared {tile_total} room tone clip(s) filling {filled} gap(s) on track {} as edit plan {}; inspect the preview, then commit it at timeline revision {revision}",
+                settings.track, prepared.id
+            ),
+            body,
+        ))
+    }
+
+    /// AU5 §5.6: build one measured dialogue repair chain at the head of the
+    /// tracks' bus, and **refuse** when it cannot prove it helped.
+    ///
+    /// Rule 106's loop is the deliverable: measure `Analysis::audio_repair` on
+    /// the candidate point **before**, learn the noise profile over the longest
+    /// silence span, build the chain, apply it to a candidate document, measure
+    /// **after**, and refuse — as tool text, never a protocol error — when the
+    /// SNR gain is under `minimum_snr_gain_db_hundredths`, naming both numbers
+    /// and the direction of the percentile bias. Unlike AU4's `measured: null`
+    /// idiom, an unmeasurable improvement refuses, because refusing is the
+    /// deliverable.
+    #[allow(clippy::too_many_lines)]
+    fn plan_dialogue_repair(
+        &self,
+        args: &DialogueRepairPlanArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let settings = match dialogue_repair_settings(&document, args) {
+            Ok(settings) => settings,
+            Err(error) => return Ok(error_text(error)),
+        };
+        // Rule 109: a track routes to at most one bus, so reusing the tracks'
+        // bus is not a choice between candidates — it is the only bus there
+        // can be. Its existing effects are preserved and the repair prefix is
+        // inserted at the head.
+        let existing = document.audio_mix.buses.iter().find(|bus| {
+            bus.tracks
+                .iter()
+                .any(|track| settings.tracks.contains(track))
+        });
+        for bus in &document.audio_mix.buses {
+            if bus
+                .tracks
+                .iter()
+                .any(|track| settings.tracks.contains(track))
+                && !settings
+                    .tracks
+                    .iter()
+                    .all(|track| bus.tracks.contains(track))
+            {
+                return Ok(error_text(format!(
+                    "audio bus {} ({}) already carries some but not all of tracks {}; repair one \
+                     bus at a time",
+                    bus.id,
+                    bus.name,
+                    render_track_list(&settings.tracks)
+                )));
+            }
+        }
+        let carried = existing.map_or_else(Vec::new, |bus| {
+            bus.effects
+                .iter()
+                .filter(|effect| !is_au5_repair_node(&effect.name))
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        if let Some(bus) = existing {
+            let present = bus
+                .effects
+                .iter()
+                .filter(|effect| is_au5_repair_node(&effect.name))
+                .map(|effect| effect.name.clone())
+                .collect::<Vec<_>>();
+            if !present.is_empty() && !args.replace {
+                return Ok(error_text(format!(
+                    "audio bus {} ({}) already carries an AU5 repair prefix ({}); pass replace \
+                     true to rebuild it",
+                    bus.id,
+                    bus.name,
+                    present.join(", ")
+                )));
+            }
+        }
+        let bus_id = existing.map_or_else(|| document.audio_mix.next_bus_id(), |bus| bus.id);
+        let bus_name =
+            existing.map_or_else(|| "Dialogue repair".to_owned(), |bus| bus.name.clone());
+        let gain_tenth_db = existing.map_or(0, |bus| bus.gain_tenth_db);
+        let gain_curve = existing.and_then(|bus| bus.gain_curve.clone());
+        let sidechain = existing.map_or_else(Vec::new, |bus| bus.ducking_sidechain_tracks.clone());
+        // Rule 107: the readiness gate is checked FIRST, because it is free
+        // and the measurement below is a render. An agent waiting on an async
+        // silence analysis should not pay for two mixes to be told to wait.
+        let learn_span = if settings.denoise {
+            match self.dialogue_repair_learn_span(&document, &settings) {
+                Ok(span) => Some(span),
+                Err(result) => return Ok(result),
+            }
+        } else {
+            None
+        };
+        // Rule 109: reusing a bus preserves **its** routing as well as its
+        // effects. A bus carrying more tracks than were asked for is repaired
+        // whole — a chain is per bus, so there is no other thing it could
+        // mean — and rewriting `tracks` to the requested subset here would
+        // silently un-route the tracks the caller did not name.
+        let routed = existing.map_or_else(|| settings.tracks.clone(), |bus| bus.tracks.clone());
+        let bus_of = |effects: Vec<Effect>| AudioBus {
+            id: bus_id,
+            name: bus_name.clone(),
+            tracks: routed.clone(),
+            gain_tenth_db,
+            gain_curve: gain_curve.clone(),
+            effects,
+            ducking_sidechain_tracks: sidechain.clone(),
+        };
+        // Rule 106's "before" and "after" are measured at the SAME point, on
+        // two documents that differ only by the repair prefix: the baseline
+        // carries the bus without it. Measuring the track stem before and the
+        // bus stem after would fold a routing change into the number the
+        // refusal is built on.
+        let baseline = match candidate_document(&document, bus_of(carried.clone())) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "the repair bus does not fit the current timeline: {error}"
+                )));
+            }
+        };
+        let point = MixSpectrumPoint::Bus(bus_id);
+        let before = match self.analysis.audio_repair(
+            &baseline,
+            &kinewright_core::AudioRepairRequest {
+                range: settings.range.clone(),
+                point,
+            },
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "could not measure the dialogue before repair: {error}"
+                )));
+            }
+        };
+        // Rule 105: the hum default is whichever of the two measured excesses
+        // is larger, so an unarmed caller notches the mains frequency the
+        // material actually carries rather than the one the descriptor
+        // happens to neutral at.
+        let fundamental = settings.hum_fundamental_hertz.unwrap_or(
+            match (
+                before.hum_50_excess_db_hundredths,
+                before.hum_60_excess_db_hundredths,
+            ) {
+                (Some(fifty), Some(sixty)) if sixty > fifty => {
+                    REPAIR_ALTERNATE_HUM_FUNDAMENTAL_HERTZ
+                }
+                (None, Some(_)) => REPAIR_ALTERNATE_HUM_FUNDAMENTAL_HERTZ,
+                _ => REPAIR_DEFAULT_HUM_FUNDAMENTAL_HERTZ,
+            },
+        );
+        let mut effects = Vec::new();
+        let mut next_effect_id = next_audio_effect_id(&document);
+        let mut learned = None;
+        if let Some(span) = learn_span {
+            let profile = match self.analysis.mix_noise_profile(
+                &document,
+                &kinewright_core::MixNoiseProfileRequest {
+                    range: Some(span.project_start..span.project_end),
+                    point: MixSpectrumPoint::Track(span.track),
+                },
+            ) {
+                Ok(profile) => profile,
+                Err(error) => {
+                    return Ok(error_text(format!(
+                        "could not learn a noise profile over project frames {}..{} on track {}: {error}",
+                        span.project_start, span.project_end, span.track
+                    )));
+                }
+            };
+            let mut parameters = vec![
+                ("reduction_tenth_db", i64::from(settings.reduction_tenth_db)),
+                (
+                    "lookahead_milliseconds",
+                    REPAIR_DENOISE_LOOKAHEAD_MILLISECONDS,
+                ),
+            ];
+            for (name, band) in kinewright_core::NOISE_PROFILE_PARAMETER_NAMES
+                .iter()
+                .zip(profile.bands.iter())
+            {
+                parameters.push((name, i64::from(*band)));
+            }
+            effects.push(static_audio_effect(
+                EffectId(next_effect_id),
+                "audio_denoise",
+                &parameters,
+            ));
+            next_effect_id = next_effect_id.saturating_add(1);
+            learned = Some((span, profile));
+        }
+        if settings.hum {
+            effects.push(static_audio_effect(
+                EffectId(next_effect_id),
+                "audio_hum_removal",
+                &[
+                    ("fundamental_hertz", fundamental),
+                    ("harmonic_count", REPAIR_HUM_HARMONIC_COUNT),
+                    ("depth_tenth_db", REPAIR_HUM_DEPTH_TENTH_DB),
+                    ("notch_q_hundredths", REPAIR_HUM_NOTCH_Q_HUNDREDTHS),
+                ],
+            ));
+            next_effect_id = next_effect_id.saturating_add(1);
+        }
+        if settings.declick {
+            effects.push(static_audio_effect(
+                EffectId(next_effect_id),
+                "audio_declick",
+                &[
+                    (
+                        "max_click_milliseconds",
+                        REPAIR_DECLICK_MAX_CLICK_MILLISECONDS,
+                    ),
+                    (
+                        "detector_threshold_tenth_db",
+                        REPAIR_DECLICK_DETECTOR_THRESHOLD_TENTH_DB,
+                    ),
+                    (
+                        "lookahead_milliseconds",
+                        REPAIR_DECLICK_LOOKAHEAD_MILLISECONDS,
+                    ),
+                ],
+            ));
+        }
+        let prefix_names = effects
+            .iter()
+            .map(|effect| effect.name.clone())
+            .collect::<Vec<_>>();
+        let prefix_declared = kinewright_core::chain_lookahead_milliseconds(&effects);
+        // Rule 108: the whole prefix declares 15 ms — 12 of denoise plus 3 of
+        // de-click, hum declaring none — and a caller that disables a node
+        // pays less, never more. The budget below is therefore checked against
+        // what this call really built.
+        debug_assert!(
+            prefix_declared <= REPAIR_CHAIN_DECLARED_MILLISECONDS,
+            "the repair prefix declared {prefix_declared} ms, over rule 108's {REPAIR_CHAIN_DECLARED_MILLISECONDS}"
+        );
+        effects.extend(carried.iter().cloned());
+        // Rule 109: refuse by name rather than letting `UpsertAudioBus` fail
+        // inside a prepared plan, quoting the existing chain's declared
+        // milliseconds and the prefix's own.
+        let declared = kinewright_core::chain_lookahead_milliseconds(&effects);
+        if declared > kinewright_core::CHAIN_LOOKAHEAD_MILLISECONDS {
+            let carried_declared = kinewright_core::chain_lookahead_milliseconds(&carried);
+            return Ok(error_text(format!(
+                "audio bus {bus_id} already declares {carried_declared} ms of lookahead and this \
+                 repair prefix declares {prefix_declared} more, which is over the {} ms chain \
+                 budget",
+                kinewright_core::CHAIN_LOOKAHEAD_MILLISECONDS
+            )));
+        }
+        let bus = bus_of(effects);
+        let candidate = match candidate_document(&document, bus.clone()) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "the repair chain is not applicable: {error}"
+                )));
+            }
+        };
+        let after = match self.analysis.audio_repair(
+            &candidate,
+            &kinewright_core::AudioRepairRequest {
+                range: settings.range.clone(),
+                point,
+            },
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "could not measure the dialogue after repair: {error}"
+                )));
+            }
+        };
+        let (Some(before_snr), Some(after_snr)) =
+            (before.snr_db_hundredths, after.snr_db_hundredths)
+        else {
+            return Ok(error_text(format!(
+                "the repair cannot be measured: the signal-to-noise ratio reads none {}, so there \
+                 is no gain to hold against minimum_snr_gain_db_hundredths {}. {REPAIR_PERCENTILE_BIAS_SENTENCE}",
+                if before.snr_db_hundredths.is_none() {
+                    "before the repair"
+                } else {
+                    "after the repair"
+                },
+                settings.minimum_snr_gain_db_hundredths
+            )));
+        };
+        let gain = i64::from(after_snr) - i64::from(before_snr);
+        if gain < i64::from(settings.minimum_snr_gain_db_hundredths) {
+            return Ok(error_text(format!(
+                "the repair chain measures a signal-to-noise gain of {gain} hundredths of a dB \
+                 against the required minimum_snr_gain_db_hundredths {}, so nothing was prepared. \
+                 {REPAIR_PERCENTILE_BIAS_SENTENCE}",
+                settings.minimum_snr_gain_db_hundredths
+            )));
+        }
+        let prepared = match self.prepare_operations(
+            revision,
+            &document,
+            vec![Operation::UpsertAudioBus { bus }],
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Ok(error_text(format!(
+                    "dialogue repair plan does not fit the current timeline: {error}"
+                )));
+            }
+        };
+        Ok(success_structured(
+            format!(
+                "prepared a measured dialogue repair on audio bus {bus_id} as edit plan {}; the \
+                 signal-to-noise ratio moves from {before_snr} to {after_snr} hundredths of a dB, \
+                 a gain of {gain} against the required {}; inspect the preview, then commit it at \
+                 timeline revision {revision}",
+                prepared.id, settings.minimum_snr_gain_db_hundredths
+            ),
+            serde_json::json!({
+                "timeline_revision": revision.0,
+                "tracks": settings.tracks,
+                "audio_bus": bus_id,
+                "audio_bus_tracks": routed,
+                "reused_existing_bus": existing.is_some(),
+                "repair_prefix": prefix_names,
+                "carried_effects": carried.iter().map(|effect| effect.name.clone()).collect::<Vec<_>>(),
+                "reduction_tenth_db": settings.reduction_tenth_db,
+                "hum_fundamental_hertz": fundamental,
+                "chain_lookahead_milliseconds": declared,
+                "repair_prefix_lookahead_milliseconds": prefix_declared,
+                "learn_range": learned.as_ref().map(|(span, _)| serde_json::json!({
+                    "track": span.track,
+                    "start_frame": span.project_start.0,
+                    "end_frame": span.project_end.0,
+                })),
+                "profile_bands_tenth_db": learned
+                    .as_ref()
+                    .map(|(_, profile)| profile.bands.to_vec()),
+                "minimum_snr_gain_db_hundredths": settings.minimum_snr_gain_db_hundredths,
+                "measured": {
+                    "before_snr_db_hundredths": before_snr,
+                    "after_snr_db_hundredths": after_snr,
+                    "snr_gain_db_hundredths": gain,
+                    "before_noise_floor_dbfs_hundredths": before.noise_floor_dbfs_hundredths,
+                    "after_noise_floor_dbfs_hundredths": after.noise_floor_dbfs_hundredths,
+                },
+                "prepared_edit_plan": {
+                    "plan_id": prepared.id,
+                    "expected_revision": revision,
+                    "preview": prepared.preview,
+                },
+            }),
+        ))
+    }
+
+    /// AU5 §5.6 rule 107: the longest silence span on the requested tracks,
+    /// gated on readiness exactly as `plan_audio_ducking` gates.
+    ///
+    /// The two refusals are deliberately **distinct** strings: "not analysed
+    /// yet" is a wait, and "no span is long enough" is a different material
+    /// problem, and an agent that cannot tell them apart retries the one it
+    /// should give up on (R10, B9).
+    fn dialogue_repair_learn_span(
+        &self,
+        document: &Document,
+        settings: &DialogueRepairSettings,
+    ) -> Result<TimelineSilenceSpan, CallToolResult> {
+        let referenced = document
+            .tracks
+            .iter()
+            .filter(|track| settings.tracks.contains(&track.id))
+            .flat_map(|track| &track.clips)
+            .filter(|clip| clip.content.is_media())
+            .map(|clip| clip.asset)
+            .collect::<BTreeSet<_>>();
+        if referenced.is_empty() {
+            return Err(error_text(format!(
+                "tracks {} carry no media clip to learn a noise profile from",
+                render_track_list(&settings.tracks)
+            )));
+        }
+        for asset in document
+            .media_pool
+            .iter()
+            .filter(|asset| referenced.contains(&asset.id))
+        {
+            match self.analysis.silence_status(asset) {
+                SilenceStatus::Ready(_) | SilenceStatus::NoAudio => {}
+                status => {
+                    if status == SilenceStatus::NotRequested {
+                        self.analysis.request_silence_detection(asset.clone());
+                    }
+                    return Err(error_text(format!(
+                        "asset {} silence analysis is not ready: {}",
+                        asset.id,
+                        render_asset_silences(
+                            asset.id,
+                            &status,
+                            DUCKING_MINIMUM_SILENCE_FRAMES,
+                            None
+                        )
+                    )));
+                }
+            }
+        }
+        let minimum = repair_minimum_learn_project_frames(document.fps);
+        let silences =
+            match self
+                .analysis
+                .timeline_silences(document, None, DUCKING_MINIMUM_SILENCE_FRAMES)
+            {
+                Ok(silences) => silences,
+                Err(error) => return Err(error_text(error.to_string())),
+            };
+        // R46: the CALLER filters `timeline_silences` on the span's own track.
+        silences
+            .into_iter()
+            .filter(|span| settings.tracks.contains(&span.track))
+            .filter(|span| span.project_end.0.saturating_sub(span.project_start.0) >= minimum)
+            .max_by_key(|span| span.project_end.0.saturating_sub(span.project_start.0))
+            .ok_or_else(|| {
+                error_text(format!(
+                    "no silence span reaches {PLAN_REPAIR_MINIMUM_LEARN_MILLISECONDS} ms on \
+                     tracks {}, which is {minimum} project frames here; a noise profile is learned \
+                     over the longest silence and cannot be learned over less",
+                    render_track_list(&settings.tracks)
+                ))
+            })
+    }
 }
 
 /// AU5 §3.8 rule 67: the first and last whole RMS window inside one clip.
@@ -9017,6 +9873,561 @@ const DEFAULT_CLIP_FADE_MILLISECONDS: u32 = 20;
 /// exports it so a real-engine test can pin it against the rate a decoded
 /// `AudioLoudness` actually reports.
 pub const MIX_MEASUREMENT_SAMPLE_RATE: u64 = 48_000;
+
+/// AU5 §5.5 rule 102: the shortest gap `plan_room_tone_fill` proposes a fill
+/// for, in project frames, as a named const rather than a serde default.
+const ROOM_TONE_MINIMUM_GAP_FRAMES: TimeCode = TimeCode(1);
+/// AU5 §5.3 rule 95: the most butt-joined tiles one gap may be filled with.
+///
+/// A gap needing more is skipped with a reason rather than tiled without
+/// bound: 64 tiles of the shortest legal capture is over half a minute of room
+/// tone, and a hole that long is an edit decision, not a repair.
+const ROOM_TONE_MAX_TILES: u32 = 64;
+
+/// AU5 §5.5: the validated, defaulted `plan_room_tone_fill` request.
+#[derive(Debug)]
+struct RoomToneFillSettings {
+    track: TrackId,
+    asset: MediaAsset,
+    range: Option<std::ops::Range<TimeCode>>,
+    minimum_gap_frames: TimeCode,
+    maximum_tiles: u32,
+}
+
+/// AU5 §5.1: whether one pooled asset lives in this project's room-tone store.
+///
+/// The store is content-addressed under
+/// `<stem>.kinewright-assets/room-tone/<sha256>.wav`, so the parent directory
+/// name is the identity — and it is the only one available here, because a
+/// captured room-tone asset is an **ordinary** `MediaAsset` (rule 89) with no
+/// flag of its own to read.
+fn is_room_tone_asset(asset: &MediaAsset) -> bool {
+    asset.path.parent().and_then(std::path::Path::file_name)
+        == Some(std::ffi::OsStr::new(
+            kinewright_media::ROOM_TONE_STORE_DIRECTORY,
+        ))
+}
+
+/// AU5 §5.5 rule 102: validate and default one `plan_room_tone_fill` request.
+fn room_tone_fill_settings(
+    document: &Document,
+    args: &RoomToneFillPlanArgs,
+) -> Result<RoomToneFillSettings, String> {
+    let track = document
+        .tracks
+        .iter()
+        .find(|track| track.id == args.track)
+        .ok_or_else(|| format!("track {} does not exist", args.track))?;
+    if track.kind != TrackKind::Audio {
+        return Err(format!(
+            "track {} is a {} track; room tone fills only an audio track",
+            args.track,
+            track_kind_name(track.kind)
+        ));
+    }
+    // Rule 102: `asset_id` defaults to the sole registered room-tone asset,
+    // and a missing one is **named** rather than assumed (B7).
+    let registered = document
+        .media_pool
+        .iter()
+        .filter(|asset| is_room_tone_asset(asset))
+        .collect::<Vec<_>>();
+    let asset = if let Some(id) = args.asset_id {
+        document
+            .media_pool
+            .iter()
+            .find(|asset| asset.id == id)
+            .ok_or_else(|| format!("asset {id} is not in the media pool"))?
+    } else {
+        match registered.as_slice() {
+            [] => {
+                return Err(
+                    "the project has no registered room-tone asset; capture one with \
+                     capture_room_tone first, or name an existing asset with asset_id"
+                        .to_owned(),
+                );
+            }
+            [only] => only,
+            many => {
+                return Err(format!(
+                    "the project registers {} room-tone assets; name the one to tile with asset_id",
+                    many.len()
+                ));
+            }
+        }
+    };
+    if asset.kind == MediaKind::Video {
+        return Err(format!(
+            "asset {} carries no audio stream, so it cannot fill a gap",
+            asset.id
+        ));
+    }
+    let minimum_gap_frames = args
+        .minimum_gap_frames
+        .map_or(ROOM_TONE_MINIMUM_GAP_FRAMES, TimeCode);
+    if minimum_gap_frames < TimeCode(1) {
+        return Err("minimum_gap_frames must be at least 1".to_owned());
+    }
+    let maximum_tiles = args.maximum_tiles.unwrap_or(ROOM_TONE_MAX_TILES);
+    if maximum_tiles == 0 || maximum_tiles > ROOM_TONE_MAX_TILES {
+        return Err(format!(
+            "maximum_tiles must be in 1..={ROOM_TONE_MAX_TILES}"
+        ));
+    }
+    let range = match &args.range {
+        Some(range) => {
+            if range.start >= range.end {
+                return Err(format!(
+                    "range needs start < end; got {}..{}",
+                    range.start, range.end
+                ));
+            }
+            Some(range.start..range.end)
+        }
+        None => None,
+    };
+    Ok(RoomToneFillSettings {
+        track: args.track,
+        asset: asset.clone(),
+        range,
+        minimum_gap_frames,
+        maximum_tiles,
+    })
+}
+
+/// AU5 §5.3 / §0 R96: the sample rate the covering check is done at.
+///
+/// It is the rate the audio mix path actually runs at, restated as a `u32`
+/// because that is the width core's helper takes; the `const` assertion below
+/// is what stops the two spellings from drifting.
+const ROOM_TONE_FILL_SAMPLE_RATE: u32 = 48_000;
+const _: () = assert!(ROOM_TONE_FILL_SAMPLE_RATE as u64 == MIX_MEASUREMENT_SAMPLE_RATE);
+
+/// AU5 §5.3 rule 97's per-gap reason, built agent-side from the gap length,
+/// the two rates and **which** way core refused (R92, R96, R119).
+///
+/// The three `TimeMappingError` kinds core answers are three different pieces
+/// of advice and are never collapsed into one sentence: a duration that is not
+/// representable at these rates is a rate problem the editor cannot fix by
+/// recording more tone, a range that no phase can cover inside the asset is a
+/// sample-supply problem at these rates, and an asset provably too short to
+/// cover the gap at any phase is the one case whose answer really is "record
+/// more room tone".
+///
+/// All three arms are reachable: `longest_coverable_project_tile` returns
+/// **its own last refusal** rather than inventing one, so whichever kind core
+/// ended on is the kind a caller reads. (Pass-2 finding 2 recorded the arm as
+/// defensive; that was true only of the shortfall loop this function used to sit
+/// behind, which core now owns.)
+/// `au5_room_tone_skip_reason_gives_each_mapping_refusal_its_own_sentence` pins
+/// all three directly, so the wording cannot drift from the app's copy of it.
+fn room_tone_skip_reason(
+    length: TimeCode,
+    source_fps: kinewright_core::Rational,
+    project_fps: kinewright_core::Rational,
+    error: &kinewright_core::TimeMappingError,
+) -> String {
+    let rates = format!(
+        "{}/{} / {}/{}",
+        source_fps.numerator(),
+        source_fps.denominator(),
+        project_fps.numerator(),
+        project_fps.denominator()
+    );
+    match error {
+        kinewright_core::TimeMappingError::InexactDuration { .. } => format!(
+            "gap of {} project frames has no exact source range at {rates}",
+            length.0
+        ),
+        kinewright_core::TimeMappingError::NoCoveringSourceRange {
+            source_duration, ..
+        } => format!(
+            "gap of {} project frames has no exact source range at {rates} that also carries its \
+             sample frames within the {source_duration}-source-frame room-tone asset",
+            length.0
+        ),
+        kinewright_core::TimeMappingError::SourceTooShortToCover {
+            minimum_source_frames,
+            source_duration,
+            ..
+        } => format!(
+            "gap of {} project frames needs at least {minimum_source_frames} source frames of room \
+             tone at {rates}, and this asset carries only {source_duration}",
+            length.0
+        ),
+        other => format!(
+            "gap of {} project frames has no usable source range at {rates}: {other}",
+            length.0
+        ),
+    }
+}
+
+/// AU5 §5.3 rules 95-98: the source ranges one gap is tiled from **with the
+/// project length each was measured at**, or the per-gap reason it is skipped
+/// with.
+///
+/// **The source start is chosen, never assumed, and so is the tile's length.**
+/// Core's `longest_coverable_project_tile` answers the largest project span
+/// this asset can actually *cover* — not merely the largest it maps to —
+/// together with the source range that covers it, capped at what is left of the
+/// gap. Both halves matter and both were got wrong before core owned them:
+///
+/// * Which exact ends exist depends on the **phase** of `source_start`, because
+///   the audio mixer maps source samples to project samples one for one, opens
+///   the decoder over the clip's source range, plays the mapped project span and
+///   stops. At 30 -> 25 a seven-frame gap admits the eight-frame `0..8`, which
+///   supplies 12 800 sample frames against a demand of 13 440 and runs out
+///   early, and the nine-frame `1..10`, `2..11` and `3..12`, which do not — so a
+///   planner hard-coding `source_start = 0` ships the one fill that leaves
+///   silence in the middle of the hole it was asked to close (R96).
+/// * How far below its mapped length a tile has to shrink is **not** a small
+///   literal. At 30 -> 29.97 the covering tile is the map period's `0..1001`, so
+///   an asset of 1 006..=1 500 frames has to step down by 5..=499 to reach it;
+///   against the four-frame allowance this function used to carry, 496 of the
+///   1 300 store-producible asset lengths found no tile at all and therefore
+///   skipped **every** gap on the track (R119, pass-2 finding 1).
+///
+/// The loop asks for the whole remaining gap each time, so a span core can cover
+/// in one tile is one `AddClip` and a longer one is butt-joined tiles that walk
+/// the remainder down. Core's own refusal rides into
+/// [`room_tone_skip_reason`], so the three kinds stay three sentences.
+///
+/// The duration rides back with the range so the emit loop advances by the
+/// length this function already measured through `Document::clip_duration`
+/// rather than re-deriving it through a second accessor (R85's rule, F7): two
+/// spellings of one length would let a disagreement land two `AddClip`s at the
+/// same frame and surface only as a generic `ClipOverlap`.
+fn room_tone_fill_tiles(
+    document: &Document,
+    asset: &MediaAsset,
+    gap: &std::ops::Range<TimeCode>,
+    maximum_tiles: u32,
+) -> Result<Vec<(std::ops::Range<TimeCode>, TimeCode)>, String> {
+    let project_fps = document.fps;
+    let source_fps = asset.fps;
+    let length = TimeCode(gap.end.0.saturating_sub(gap.start.0));
+    let mut tiles: Vec<std::ops::Range<TimeCode>> = Vec::new();
+    let mut remaining = length;
+    while remaining > TimeCode::ZERO {
+        if u32::try_from(tiles.len()).unwrap_or(u32::MAX) >= maximum_tiles {
+            let whole = map_source_range_to_project(
+                TimeCode::ZERO..asset.duration,
+                source_fps,
+                project_fps,
+            )
+            .unwrap_or(asset.duration);
+            return Err(format!(
+                "gap of {} project frames needs more than maximum_tiles {maximum_tiles} tiles of the {} project frame room-tone asset",
+                length.0, whole.0
+            ));
+        }
+        let placed_so_far = tiles.len();
+        let (want, source) = kinewright_core::longest_coverable_project_tile(
+            asset.duration,
+            source_fps,
+            project_fps,
+            ROOM_TONE_FILL_SAMPLE_RATE,
+            remaining,
+        )
+        .map_err(|error| {
+            // The headline names the GAP, which is what a caller can see, while
+            // core's refusal is about whatever is left of it. When those differ
+            // — the tiler covered part of the gap and then ran out of
+            // representable spans — the residue is named too, so a reader is not
+            // told "gap of 1 project frames" about a seven-frame hole.
+            let reason = room_tone_skip_reason(length, source_fps, project_fps, &error);
+            if remaining == length {
+                reason
+            } else {
+                format!(
+                    "{reason}; {placed_so_far} tile(s) covered all but its last {} project frame(s)",
+                    remaining.0
+                )
+            }
+        })?;
+        tiles.push(source);
+        remaining = TimeCode(remaining.0.saturating_sub(want.0));
+    }
+    // Rule 97's assertion, taken through the document's own accessor rather
+    // than through the arithmetic that produced the answer: `clip_duration`
+    // maps through `clip_effective_fps`, so this is also what pins
+    // `speed_percent = 100` (R44). The measured durations are what the caller
+    // then advances by.
+    let mut measured = 0_i64;
+    let mut at = gap.start;
+    let mut placed = Vec::with_capacity(tiles.len());
+    for tile in tiles {
+        let fill = room_tone_fill_clip(asset, at, tile.clone());
+        let duration = document
+            .clip_duration(&fill)
+            .map_err(|error| format!("the proposed fill does not measure: {error}"))?;
+        measured = measured.saturating_add(duration.0);
+        at = TimeCode(at.0.saturating_add(duration.0));
+        placed.push((tile, duration));
+    }
+    if measured != length.0 || at != gap.end {
+        return Err(format!(
+            "the proposed fill measures {measured} project frames against a gap of {}",
+            length.0
+        ));
+    }
+    Ok(placed)
+}
+
+/// AU5 §5.3: the clip `AddClip` will build, for rule 97's `clip_duration`
+/// assertion. `speed_percent` is 100 because `add_clip` writes 100 and the
+/// planner never proposes a retimed fill (R44).
+fn room_tone_fill_clip(
+    asset: &MediaAsset,
+    at: TimeCode,
+    source: std::ops::Range<TimeCode>,
+) -> Clip {
+    Clip {
+        id: ClipId(0),
+        asset: asset.id,
+        source_range: source,
+        content: ClipContent::Media,
+        timeline_start: at,
+        effects: Vec::new(),
+        transition_in: None,
+        link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
+        speed_percent: 100,
+        audio_gain_curve: None,
+    }
+}
+
+/// AU5 §5.5 rule 103's per-gap row: `{start, end, tiles, skipped_reason}`.
+fn room_tone_gap_value(
+    gap: &std::ops::Range<TimeCode>,
+    tiles: usize,
+    skipped_reason: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "start": gap.start.0,
+        "end": gap.end.0,
+        "tiles": tiles,
+        "skipped_reason": skipped_reason,
+    })
+}
+
+/// AU5 §5.6 rule 105: the default maximum attenuation the repair chain asks
+/// `audio_denoise` for, in tenth dB.
+const DEFAULT_REPAIR_REDUCTION_TENTH_DB: i32 = 120;
+/// AU5 §5.6 rule 105: the default gate the measured SNR gain must clear, in
+/// hundredths of a dB. 100 is 1.0 dB — deliberately modest, because the
+/// percentile floor biases the measurement low (rule 21).
+const DEFAULT_REPAIR_MINIMUM_SNR_GAIN_HUNDREDTHS: i32 = 100;
+/// AU5 §5.6 rule 108: the denoiser's declared whole algorithmic delay, in
+/// milliseconds.
+const REPAIR_DENOISE_LOOKAHEAD_MILLISECONDS: i64 = 12;
+/// AU5 §5.6 rule 108: how many harmonics above the mains fundamental the hum
+/// cascade notches.
+const REPAIR_HUM_HARMONIC_COUNT: i64 = 3;
+/// AU5 §5.6 rule 108: the depth of each hum notch, in tenth dB.
+const REPAIR_HUM_DEPTH_TENTH_DB: i64 = -300;
+/// AU5 §5.6 rule 108: each hum notch's Q, in hundredths.
+const REPAIR_HUM_NOTCH_Q_HUNDREDTHS: i64 = 1_200;
+/// AU5 §5.6 rule 108: the longest flagged span the de-clicker repairs, in
+/// milliseconds — the descriptor's own maximum.
+const REPAIR_DECLICK_MAX_CLICK_MILLISECONDS: i64 = 1;
+/// AU5 §5.6 rule 108: the de-click detector's threshold, in tenth dB — the
+/// descriptor's neutral.
+const REPAIR_DECLICK_DETECTOR_THRESHOLD_TENTH_DB: i64 = 240;
+/// AU5 §5.6 rule 108: the de-clicker's declared whole algorithmic delay, in
+/// milliseconds.
+const REPAIR_DECLICK_LOOKAHEAD_MILLISECONDS: i64 = 3;
+/// AU5 §5.6 rule 105: the mains frequency the hum cascade notches when neither
+/// measured excess says otherwise.
+const REPAIR_DEFAULT_HUM_FUNDAMENTAL_HERTZ: i64 = 50;
+/// AU5 §5.6 rule 105: the other mains frequency, chosen when its measured
+/// excess is the larger of the two.
+///
+/// Named for the same reason its twin is (F8): it is as much a default as 50 —
+/// the value an unarmed caller gets on 60 Hz material — and it is also the
+/// other half of `hum_fundamental_hertz`' domain, which
+/// `dialogue_repair_settings` validates against both consts rather than against
+/// two bare literals.
+const REPAIR_ALTERNATE_HUM_FUNDAMENTAL_HERTZ: i64 = 60;
+/// AU5 §5.6 rule 108: what the whole repair prefix declares, in milliseconds —
+/// 12 of denoise plus 3 of de-click, hum declaring none. Rule 112 leaves
+/// exactly 5 for `plan_audio_normalization`'s true-peak limiter, which is what
+/// makes the two planners fit the 20 ms budget in either order.
+const REPAIR_CHAIN_DECLARED_MILLISECONDS: i64 = 15;
+/// AU5 §5.6 rule 107: the shortest silence a noise profile can be learned
+/// over, in milliseconds.
+///
+/// Media keeps `NOISE_PROFILE_MINIMUM_FRAMES` (22,528 sample frames) private,
+/// exactly as it keeps its `AUDIO_RATE` private, so the agent restates the
+/// duration here on [`MIX_MEASUREMENT_SAMPLE_RATE`]'s precedent and derives the
+/// project-frame minimum from the sample-frame count rather than from the
+/// rounded millisecond figure: 22,528 / 48,000 is 469.33 ms, and 469 ms of
+/// audio would be sixteen sample frames short of what the profile refuses on.
+const PLAN_REPAIR_MINIMUM_LEARN_MILLISECONDS: u32 = 469;
+/// AU5 §5.6 rule 107 / §3.7: `NOISE_PROFILE_MINIMUM_FRAMES`, restated.
+const PLAN_REPAIR_MINIMUM_LEARN_SAMPLE_FRAMES: u64 = 22_528;
+
+/// AU5 §2.4 rule 21 / §5.6 rule 106: the direction of the percentile floor's
+/// bias, in one sentence, spelled once and used by every refusal that quotes a
+/// measured SNR.
+///
+/// A planner that refuses without saying which way the measurement leans sends
+/// a caller looking for a repair bug that is really a material property.
+const REPAIR_PERCENTILE_BIAS_SENTENCE: &str = "The floor this is measured against is the \
+10th-percentile 10 ms window and the signal the 90th, not a detected silence, so continuous \
+speech reads a HIGHER floor and therefore a LOWER gain than the same repair would show on \
+material that carries real room tone: measure a range that contains some, or lower \
+minimum_snr_gain_db_hundredths deliberately.";
+
+/// AU5 §5.6: whether one effect name is one of AU5's three repair nodes.
+///
+/// Rule 111 reads it to decide whether `plan_audio_normalization` may extend a
+/// bus rather than refuse it, and rule 109 reads it to find a repair prefix
+/// already on the bus.
+fn is_au5_repair_node(name: &str) -> bool {
+    matches!(
+        name,
+        "audio_denoise" | "audio_hum_removal" | "audio_declick"
+    )
+}
+
+/// AU5 §5.6 rule 107: [`PLAN_REPAIR_MINIMUM_LEARN_SAMPLE_FRAMES`] in project
+/// frames, rounded up so a span that just clears it really does hold a whole
+/// profile window. At 30 fps this is 15 frames, 500 ms.
+fn repair_minimum_learn_project_frames(fps: kinewright_core::Rational) -> i64 {
+    let numerator = u128::from(PLAN_REPAIR_MINIMUM_LEARN_SAMPLE_FRAMES)
+        .saturating_mul(u128::from(fps.numerator()));
+    let denominator =
+        u128::from(MIX_MEASUREMENT_SAMPLE_RATE).saturating_mul(u128::from(fps.denominator()));
+    i64::try_from(numerator.div_ceil(denominator)).unwrap_or(i64::MAX)
+}
+
+/// AU5 §5.6: the validated, defaulted `plan_dialogue_repair` request.
+#[derive(Debug)]
+struct DialogueRepairSettings {
+    tracks: Vec<TrackId>,
+    range: Option<std::ops::Range<TimeCode>>,
+    denoise: bool,
+    hum: bool,
+    declick: bool,
+    reduction_tenth_db: i32,
+    hum_fundamental_hertz: Option<i64>,
+    minimum_snr_gain_db_hundredths: i32,
+}
+
+/// AU5 §5.6 rule 105: validate and default one `plan_dialogue_repair` request.
+fn dialogue_repair_settings(
+    document: &Document,
+    args: &DialogueRepairPlanArgs,
+) -> Result<DialogueRepairSettings, String> {
+    if args.tracks.is_empty() {
+        return Err("tracks must contain at least one audio track".to_owned());
+    }
+    let unique = args.tracks.iter().copied().collect::<BTreeSet<_>>();
+    if unique.len() != args.tracks.len() {
+        return Err("tracks must not contain duplicates".to_owned());
+    }
+    for track in &unique {
+        let candidate = document
+            .tracks
+            .iter()
+            .find(|candidate| candidate.id == *track)
+            .ok_or_else(|| format!("track {track} does not exist"))?;
+        if candidate.kind != TrackKind::Audio {
+            return Err(format!(
+                "track {track} is a {} track; dialogue repair runs on an audio track",
+                track_kind_name(candidate.kind)
+            ));
+        }
+    }
+    let denoise = args.denoise.unwrap_or(true);
+    let hum = args.hum.unwrap_or(true);
+    let declick = args.declick.unwrap_or(true);
+    if !(denoise || hum || declick) {
+        return Err(
+            "denoise, hum and declick are all false, so there is no repair chain to build"
+                .to_owned(),
+        );
+    }
+    let reduction_tenth_db = args
+        .reduction_tenth_db
+        .unwrap_or(DEFAULT_REPAIR_REDUCTION_TENTH_DB);
+    if !(0..=600).contains(&reduction_tenth_db) {
+        return Err("reduction_tenth_db must be in 0..=600".to_owned());
+    }
+    if let Some(hertz) = args.hum_fundamental_hertz
+        && hertz != REPAIR_DEFAULT_HUM_FUNDAMENTAL_HERTZ
+        && hertz != REPAIR_ALTERNATE_HUM_FUNDAMENTAL_HERTZ
+    {
+        return Err(format!(
+            "hum_fundamental_hertz must be {REPAIR_DEFAULT_HUM_FUNDAMENTAL_HERTZ} or {REPAIR_ALTERNATE_HUM_FUNDAMENTAL_HERTZ}"
+        ));
+    }
+    let minimum_snr_gain_db_hundredths = args
+        .minimum_snr_gain_db_hundredths
+        .unwrap_or(DEFAULT_REPAIR_MINIMUM_SNR_GAIN_HUNDREDTHS);
+    if minimum_snr_gain_db_hundredths < 0 {
+        return Err("minimum_snr_gain_db_hundredths must not be negative".to_owned());
+    }
+    let range = match &args.range {
+        Some(range) => {
+            if range.start >= range.end {
+                return Err(format!(
+                    "range needs start < end; got {}..{}",
+                    range.start, range.end
+                ));
+            }
+            Some(range.start..range.end)
+        }
+        None => None,
+    };
+    Ok(DialogueRepairSettings {
+        tracks: unique.into_iter().collect(),
+        range,
+        denoise,
+        hum,
+        declick,
+        reduction_tenth_db,
+        hum_fundamental_hertz: args.hum_fundamental_hertz,
+        minimum_snr_gain_db_hundredths,
+    })
+}
+
+/// AU5 §5.6: one candidate document carrying `bus`, for a measurement taken
+/// before anything is prepared.
+fn candidate_document(document: &Document, bus: AudioBus) -> Result<Document, String> {
+    let mut candidate = document.clone();
+    apply_batch(
+        &mut candidate,
+        std::slice::from_ref(&Operation::UpsertAudioBus { bus }),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(candidate)
+}
+
+/// AU3 §6.3 / AU5 §5.6: the next free audio effect id in one document.
+///
+/// The master chain is scanned too, for symmetry rather than correctness —
+/// effect ids are unique per owner (AU2 N1), so a master effect could never
+/// have collided with a bus effect's id. Scanning it means the one place that
+/// allocates audio effect ids reads every audio effect the document has, and
+/// AU5's repair planner allocating from a second spelling of the same scan is
+/// exactly the drift R85 exists to prevent.
+fn next_audio_effect_id(document: &Document) -> u64 {
+    document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .flat_map(|clip| &clip.effects)
+        .chain(document.audio_mix.buses.iter().flat_map(|bus| &bus.effects))
+        .chain(document.audio_mix.master.effects.iter())
+        .map(|effect| effect.id.0)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
 
 /// AU4 §6.1 rule 126: the dialogue tracks' spoken spans, plus the per-clip
 /// reason for every dialogue clip that contributed none of them.
@@ -9578,6 +10989,33 @@ struct NormalizationContext {
     tracks: Vec<TrackId>,
     bus_id: AudioBusId,
     first_effect_id: u64,
+    /// AU5 §5.7 rule 111: the bus this plan **extends** rather than creates.
+    extends: Option<ExtendedRepairBus>,
+}
+
+/// AU5 §5.7 rule 111: every [`AudioBus`] field except `effects`, carried off
+/// an existing repair bus so `normalization_bus` can rebuild it without
+/// resetting anything.
+///
+/// Enumerating the fields is deliberate (R35): `normalization_bus` builds a
+/// whole fresh `AudioBus` and used to write `gain_tenth_db: 0`, so a field left
+/// off this list is a field silently reset — and because `gain_tenth_db` is
+/// `skip_serializing_if = "i32_is_zero"`, the reset would be invisible in the
+/// golden too.
+#[derive(Debug, Clone)]
+struct ExtendedRepairBus {
+    /// The bus this plan rewrites. Carried rather than re-found (F9): the id is
+    /// already in hand where this struct is built, and re-finding it with a
+    /// loop-invariant predicate made the answer depend on two `find` calls
+    /// agreeing about first-match order.
+    id: AudioBusId,
+    name: String,
+    tracks: Vec<TrackId>,
+    gain_tenth_db: i32,
+    gain_curve: Option<AutomationCurve>,
+    ducking_sidechain_tracks: Vec<TrackId>,
+    /// The repair prefix rule 112 appends the delivery processing after.
+    prefix: Vec<Effect>,
 }
 
 fn normalization_context(
@@ -9601,16 +11039,36 @@ fn normalization_context(
             return Err(format!("track {track} contains no audio source clips"));
         }
     }
+    // AU5 §5.7 rule 111: one relaxation, and only one. A bus that carries a
+    // repair prefix and *nothing else*, whose `tracks` equal the requested set
+    // exactly, is EXTENDED rather than refused — otherwise a repaired dialogue
+    // track could never be normalized and AU6's noisy-location workflow would
+    // have no path. Any other intersection still refuses with the message it
+    // always did. The `tracks`-equality condition is not optional: without it
+    // normalization would silently re-target a different set.
+    let mut extends = None;
     if let Some(bus) = document
         .audio_mix
         .buses
         .iter()
         .find(|bus| bus.tracks.iter().any(|track| tracks.contains(track)))
     {
-        return Err(format!(
-            "track selection already intersects audio bus {} ({}); remove or deliberately revise that mix before normalizing",
-            bus.id, bus.name
-        ));
+        if bus_is_au5_repair_prefix(bus, &tracks) {
+            extends = Some(ExtendedRepairBus {
+                id: bus.id,
+                name: bus.name.clone(),
+                tracks: bus.tracks.clone(),
+                gain_tenth_db: bus.gain_tenth_db,
+                gain_curve: bus.gain_curve.clone(),
+                ducking_sidechain_tracks: bus.ducking_sidechain_tracks.clone(),
+                prefix: bus.effects.clone(),
+            });
+        } else {
+            return Err(format!(
+                "track selection already intersects audio bus {} ({}); remove or deliberately revise that mix before normalizing",
+                bus.id, bus.name
+            ));
+        }
     }
     if !(-2_400..=-900).contains(&args.target_lufs_hundredths) {
         return Err("target_lufs_hundredths must be in -2400..=-900".to_owned());
@@ -9624,28 +11082,40 @@ fn normalization_context(
     // AU2 §5.4/B5: the shared `max + 1` allocator, which core pins against
     // this call site's former inline loop. There is deliberately no matching
     // document-wide effect-id helper (N1), so the scan below stays local.
-    let bus_id = document.audio_mix.next_bus_id();
-    // AU3 §6.3: the master chain is scanned too, for symmetry rather than
-    // correctness — effect ids are unique per owner (AU2 N1), so a master
-    // effect could never have collided with a bus effect's id. Scanning it
-    // means the one place that allocates audio effect ids reads every audio
-    // effect the document has.
-    let first_effect_id = document
-        .tracks
-        .iter()
-        .flat_map(|track| &track.clips)
-        .flat_map(|clip| &clip.effects)
-        .chain(document.audio_mix.buses.iter().flat_map(|bus| &bus.effects))
-        .chain(document.audio_mix.master.effects.iter())
-        .map(|effect| effect.id.0)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
+    // AU5 §5.7 rule 111: an extended bus keeps its own id, so the plan rewrites
+    // the bus the repair already built rather than routing the same tracks a
+    // second time — which `validate_audio_mix` would refuse anyway.
+    let bus_id = extends
+        .as_ref()
+        .map_or_else(|| document.audio_mix.next_bus_id(), |bus| bus.id);
+    // AU3 §6.3: the shared scan, which reads every audio effect the document
+    // has — including an extended bus's repair prefix, so the delivery
+    // processing appended after it can never reuse one of its ids.
+    let first_effect_id = next_audio_effect_id(document);
     Ok(NormalizationContext {
         tracks: tracks.into_iter().collect(),
         bus_id,
         first_effect_id,
+        extends,
     })
+}
+
+/// AU5 §5.7 rule 111: whether one intersecting bus is a repair prefix this
+/// plan may extend.
+///
+/// **Non-empty and every effect a repair node.** A bus with no effects at all
+/// is an editor's routing decision that carries no repair, so it keeps the
+/// refusal it always had; the relaxation exists so a *repaired* dialogue bus
+/// can be normalized, and widening it to a bus that was never repaired would
+/// silently rename and reprocess a submix nobody asked this plan to touch
+/// (AU5 §0 R110).
+fn bus_is_au5_repair_prefix(bus: &AudioBus, requested: &BTreeSet<TrackId>) -> bool {
+    !bus.effects.is_empty()
+        && bus
+            .effects
+            .iter()
+            .all(|effect| is_au5_repair_node(&effect.name))
+        && bus.tracks.iter().copied().collect::<BTreeSet<_>>() == *requested
 }
 
 fn verified_normalization_operation(
@@ -9675,6 +11145,7 @@ fn verified_normalization_operation(
             requested_gain,
             current_peak,
             processing_ceiling,
+            context.extends.as_ref(),
         )?;
         let operation = Operation::UpsertAudioBus { bus };
         let mut candidate = document.clone();
@@ -9732,6 +11203,16 @@ fn static_audio_effect(id: EffectId, name: &str, parameters: &[(&str, i64)]) -> 
     }
 }
 
+/// AU3 §6.3, as amended by AU5 §5.7 rule 112: the delivery bus.
+///
+/// `extends` is the AU5 repair prefix rule 111 found on an existing bus. The
+/// delivery processing is **appended** after it rather than started from an
+/// empty `Vec`, the bus keeps its existing name rather than being renamed to
+/// "Delivery normalization", and every other `AudioBus` field rides across —
+/// so the prefix rides all four convergence iterations of
+/// `verified_normalization_operation` and the loudness converged on is the
+/// **repaired** loudness. The chain still ends in `audio_true_peak_limiter` at
+/// 5 ms, which is what makes 15 + 5 = 20 exactly the budget.
 fn normalization_bus(
     bus_id: AudioBusId,
     first_effect_id: u64,
@@ -9739,13 +11220,14 @@ fn normalization_bus(
     gain_hundredths: i32,
     measured_peak_hundredths: i32,
     ceiling_hundredths: i32,
+    extends: Option<&ExtendedRepairBus>,
 ) -> Result<AudioBus, String> {
     if !(-6_000..=3_600).contains(&gain_hundredths) {
         return Err(format!(
             "required normalization gain {gain_hundredths} hundredths dB exceeds the supported -6000..=3600 range"
         ));
     }
-    let mut effects = Vec::new();
+    let mut effects = extends.map_or_else(Vec::new, |bus| bus.prefix.clone());
     let mut next_effect_id = first_effect_id;
     if gain_hundredths >= 0 {
         let makeup_hundredths = gain_hundredths.min(2_400);
@@ -9818,12 +11300,16 @@ fn normalization_bus(
     ));
     Ok(AudioBus {
         id: bus_id,
-        name: "Delivery normalization".to_owned(),
-        tracks,
-        gain_tenth_db: 0,
+        name: extends.map_or_else(
+            || "Delivery normalization".to_owned(),
+            |bus| bus.name.clone(),
+        ),
+        tracks: extends.map_or(tracks, |bus| bus.tracks.clone()),
+        gain_tenth_db: extends.map_or(0, |bus| bus.gain_tenth_db),
         effects,
-        ducking_sidechain_tracks: Vec::new(),
-        gain_curve: None,
+        ducking_sidechain_tracks: extends
+            .map_or_else(Vec::new, |bus| bus.ducking_sidechain_tracks.clone()),
+        gain_curve: extends.and_then(|bus| bus.gain_curve.clone()),
     })
 }
 
@@ -10296,6 +11782,94 @@ struct ClipFadesPlanArgs {
     /// Proposed fade length in milliseconds. Defaults to 20.
     #[serde(default)]
     fade_milliseconds: Option<u32>,
+}
+
+/// AU5 §5.5 rule 102: arguments for `plan_room_tone_fill`.
+///
+/// `deny_unknown_fields` so a misspelled knob is refused by name rather than
+/// silently defaulted (B7), and every default is a **named const** rather than
+/// a serde default, so the value a caller reads in the description is the
+/// value the planner uses.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RoomToneFillPlanArgs {
+    /// The audio track whose leading and interior gaps are filled.
+    track: TrackId,
+    /// Optional half-open project-frame window. It restricts which gaps are
+    /// considered and clamps what is proposed inside them.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+    /// The room-tone asset to tile. Defaults to the project's sole registered
+    /// room-tone asset; a project with none is refused by name.
+    #[serde(default)]
+    asset_id: Option<AssetId>,
+    /// Skip a gap shorter than this many project frames. Defaults to 1.
+    #[serde(default)]
+    minimum_gap_frames: Option<i64>,
+    /// Skip a gap needing more than this many butt-joined tiles. Defaults to
+    /// 64, which is also the ceiling.
+    #[serde(default)]
+    maximum_tiles: Option<u32>,
+}
+
+/// AU5 §5.6 rule 105: arguments for `plan_dialogue_repair`.
+///
+/// Every default is a **named const**, and every value on the wire is an
+/// integer or a boolean.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DialogueRepairPlanArgs {
+    /// The audio tracks to repair. They must all route to the same bus, or to
+    /// none.
+    tracks: Vec<TrackId>,
+    /// Optional half-open project-frame window the before/after measurement is
+    /// taken over. Omit to measure the whole timeline.
+    #[serde(default)]
+    range: Option<TranscriptRangeArgs>,
+    /// Include the STFT broadband denoiser. Defaults to true.
+    #[serde(default)]
+    denoise: Option<bool>,
+    /// Include the mains hum cascade. Defaults to true.
+    #[serde(default)]
+    hum: Option<bool>,
+    /// Include the de-clicker. Defaults to true.
+    #[serde(default)]
+    declick: Option<bool>,
+    /// The denoiser's maximum attenuation, in tenth dB. Defaults to 120.
+    #[serde(default)]
+    reduction_tenth_db: Option<i32>,
+    /// The mains frequency to notch, 50 or 60. Defaults to whichever of the
+    /// two measured hum excesses is larger.
+    #[serde(default)]
+    hum_fundamental_hertz: Option<i64>,
+    /// The measured signal-to-noise gain the chain must clear, in hundredths
+    /// of a dB. Defaults to 100.
+    #[serde(default)]
+    minimum_snr_gain_db_hundredths: Option<i32>,
+    /// Rebuild a repair prefix that is already on the bus instead of refusing.
+    #[serde(default)]
+    replace: bool,
+}
+
+/// AU5 §5.8 rule 114: arguments for `capture_room_tone`, on
+/// [`ImportLutAssetArgs`]' exact shape.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CaptureRoomToneArgs {
+    /// Revision returned by `get_timeline_state`. This capability applies its
+    /// own operation, so the gate is mandatory.
+    expected_revision: TimelineRevision,
+    /// The pooled asset to capture from. Its raw source is decoded, never the
+    /// mix path.
+    asset_id: AssetId,
+    /// Inclusive first source frame of the captured range.
+    source_start_frame: TimeCode,
+    /// Exclusive last source frame of the captured range.
+    source_end_frame: TimeCode,
+    /// Optional name for the registered asset. Defaults to
+    /// `"Room tone — <source asset name>"`.
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -11412,6 +12986,43 @@ fn inspector_tools() -> Vec<Tool> {
             schema_object::<ClipFadesPlanArgs>(),
         )
         .with_annotations(read_only()),
+        // AU5 §5.6 / §5.9 rule 117: the repair planner's first sentence carries
+        // the two facts an agent must know before it calls — that the planner
+        // REFUSES when it cannot measure an improvement, and which way the
+        // percentile floor biases that measurement — because `get_capability`
+        // and `search_capabilities` publish only `first_sentence(description)`
+        // (runtime.rs:184-190).
+        Tool::new(
+            "plan_dialogue_repair",
+            "Build a measured denoise, hum-removal and de-click chain at the head of the selected audio tracks' bus and REFUSE it, naming both numbers, when the measured signal-to-noise gain falls under minimum_snr_gain_db_hundredths - the floor is a 10th-percentile short window rather than a detected silence, so continuous speech reads a higher floor and a lower gain than material carrying real room tone. The noise profile is learned over the longest silence span on those tracks, so a project whose silence analysis has not finished is refused with a different sentence from one whose longest silence is too short to learn over. An existing bus is reused with its own effects preserved and the repair prefix inserted at the head; a chain that would exceed the 20 ms lookahead budget is refused by name before it can fail inside a plan; replace must be true to rebuild a repair prefix that is already there. Returns an opaque prepared_edit_plan preview; the timeline is unchanged until commit_edit_plan.",
+            schema_object::<DialogueRepairPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        // AU5 §5.8 rule 114: `capture_room_tone` is an Action, not a planner -
+        // it writes bytes under the project directory and applies its own
+        // operation - so it carries the destructive annotations
+        // `import_lut_asset` carries and its first sentence says so.
+        Tool::new(
+            "capture_room_tone",
+            "Decode one source range of an existing asset at 48 kHz stereo, write it into this project's room-tone store as a content-addressed WAV, and register it as one ordinary AddAsset - this WRITES BYTES under the project directory, so it asks for confirmation first and reports a refusal rather than silently skipping. The capture must be at least 500 ms and at most 60 s, and it is truncated down to a whole 30 fps asset frame so plan_room_tone_fill can tile it to an exact gap length. The new asset is named \"Room tone - <source asset name>\" unless name overrides it, because the store file is named after its own digest. Idempotent by content: a second identical capture returns the existing asset_id and emits no operation instead of failing as a duplicate. Frames are exact source integers of the named asset.",
+            schema_object::<CaptureRoomToneArgs>(),
+        )
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(true)
+                .idempotent(true)
+                .open_world(false),
+        ),
+        // AU5 §5.5 rule 103: the fill planner's first sentence carries the gap
+        // definition, the same-track butt join and the never-fail-a-whole-plan
+        // rule, for the same reason.
+        Tool::new(
+            "plan_room_tone_fill",
+            "Propose butt-joined room tone clips that fill one audio track's leading and interior gaps - never the trailing one, which is not a hole - on that same track with no fade, skipping any gap it cannot fill to the exact frame with a per-gap reason instead of failing the whole plan. Each gap is tiled forward from the chosen room-tone asset and capped at maximum_tiles, and every tile's source range is picked so the fill's mapped project length equals the gap exactly, which is why a 60 fps project reading a 30 fps audio-only asset can only fill even-frame gaps and skips the rest. asset_id defaults to the project's sole registered room-tone asset; a project with none is refused by name rather than assumed. It raises no confirmation because a fill removes nothing, and it is idempotent: a filled gap is not a gap, so a second run over the committed timeline proposes nothing. Returns an opaque prepared_edit_plan preview; the timeline is unchanged until commit_edit_plan.",
+            schema_object::<RoomToneFillPlanArgs>(),
+        )
+        .with_annotations(read_only()),
         Tool::new(
             "get_analysis_status",
             "Return the uniform transcript, silence, scene, and beat job lifecycle for one asset without starting work.",
@@ -12246,6 +13857,91 @@ fn lut_tool_error(
 /// [`lut_tool_error`] bound to `import_lut_asset`.
 fn lut_import_error(code: &str, message: &str, details: &serde_json::Value) -> CallToolResult {
     lut_tool_error("import_lut_asset", code, message, details)
+}
+
+/// AU5 §5.8: the sample rate and channel count every room-tone capture is
+/// decoded at, restated from `kinewright_media`'s own store constants so the
+/// agent cannot ask for a rate the store will not accept.
+const ROOM_TONE_CAPTURE_SAMPLE_RATE: u32 = kinewright_media::ROOM_TONE_SAMPLE_RATE;
+/// AU5 §5.8: see [`ROOM_TONE_CAPTURE_SAMPLE_RATE`].
+const ROOM_TONE_CAPTURE_CHANNELS: u16 = kinewright_media::ROOM_TONE_CHANNELS;
+
+/// AU5 §5.8: one captured room tone's published summary, used by **both**
+/// `capture_room_tone` branches so the payload shape does not depend on whether
+/// the capture was applied or reused (F2).
+fn room_tone_asset_summary(
+    asset: &MediaAsset,
+    capture: &kinewright_media::RoomToneCapture,
+    store_root: &Path,
+) -> serde_json::Value {
+    serde_json::json!({
+        "asset_id": asset.id,
+        "name": asset.name,
+        "sha256": capture.sha256,
+        "store_path": capture.path,
+        "store_root": store_root,
+        "byte_len": capture.byte_len,
+        "frames": capture.frames.0,
+        "fps": format!("{}/{}", asset.fps.numerator(), asset.fps.denominator()),
+        "sample_frames": capture.sample_frames,
+        "milliseconds": capture.milliseconds,
+    })
+}
+
+/// AU5 §5.8 / F10: how long one requested source range is, in milliseconds,
+/// rounded **down**.
+///
+/// Rounding down is what keeps this an early bound rather than a second
+/// authority: the store measures the same range in sample frames and stays the
+/// one that refuses, so this arm may only reject ranges the store would reject
+/// too.
+fn capture_range_milliseconds(from: TimeCode, to: TimeCode, fps: kinewright_core::Rational) -> u64 {
+    let frames = u128::try_from(to.0.saturating_sub(from.0)).unwrap_or_default();
+    let numerator = frames
+        .saturating_mul(1_000)
+        .saturating_mul(u128::from(fps.denominator()));
+    u64::try_from(numerator / u128::from(fps.numerator())).unwrap_or(u64::MAX)
+}
+
+/// [`lut_tool_error`] bound to `capture_room_tone`.
+///
+/// AU5 §5.8 rule 114 puts the capture on `import_lut_asset`'s **exact** shape,
+/// which includes its structured-rejection envelope: a caller that already
+/// pattern-matches `code`/`message`/`details`/`applied` on one tool needs to
+/// learn nothing new for the other.
+fn room_tone_capture_error(
+    code: &str,
+    message: &str,
+    details: &serde_json::Value,
+) -> CallToolResult {
+    lut_tool_error("capture_room_tone", code, message, details)
+}
+
+/// One `RoomToneStoreError` rendered into `capture_room_tone`'s envelope.
+///
+/// `RoomToneStoreError` renders `"<code>: <detail>; observed=<v>; allowed=<v>"`,
+/// which is `LutStoreError`'s own spelling, so the two share
+/// [`lut_error_detail`] and [`lut_error_field`] rather than growing a second
+/// parser for one format.
+fn room_tone_store_error_result(error: &kinewright_core::MediaError) -> CallToolResult {
+    let rendered = error.to_string();
+    let payload = rendered
+        .strip_prefix("media backend error: ")
+        .unwrap_or(rendered.as_str());
+    let (code, remainder) = payload
+        .split_once(": ")
+        .unwrap_or(("room_tone_capture_failed", payload));
+    room_tone_capture_error(
+        code,
+        lut_error_detail(remainder),
+        &serde_json::json!({
+            "field": "source_end_frame",
+            "observed": lut_error_field(remainder, "observed"),
+            "allowed": lut_error_field(remainder, "allowed"),
+            "recovery_action": "Capture between 500 ms and 60 s of room tone into a writable project directory, then resend at the current timeline_revision.",
+            "message": rendered,
+        }),
+    )
 }
 
 /// A revision conflict on a CC4 LUT tool, in the same structured shape as
@@ -20864,7 +22560,7 @@ mod tests {
                 "{name} must be read-only"
             );
         }
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 81);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 84);
 
         // M36: every colour planner and every CC5 tool stays inside the
         // kilobyte description budget, measured on the *registered* descriptor
@@ -20892,6 +22588,10 @@ mod tests {
             // AU4 §6.3 rule 135: both Part B planners join the same budget.
             "plan_audio_ducking",
             "plan_clip_fades",
+            // AU5 §5.9 rule 117: all three Part B capabilities join it too.
+            "plan_dialogue_repair",
+            "capture_room_tone",
+            "plan_room_tone_fill",
         ] {
             let tool = tools.iter().find(|tool| tool.name == name).unwrap();
             let description = tool.description.as_deref().unwrap_or_default();
@@ -21188,6 +22888,1313 @@ mod tests {
             evidence_only: true,
             provenance: AudioRepairProvenance::default(),
         }
+    }
+
+    /// AU5 §5.4-style fixture: a 30 fps audio track with clip A at `0..30`, a
+    /// gap at `30..60` and clip B at `60..90`, plus a room-tone asset that
+    /// lives in the project's room-tone store.
+    fn au5b_fill_document() -> Document {
+        let dialogue = MediaAsset {
+            id: AssetId(1),
+            path: PathBuf::from("dialogue.wav"),
+            name: "dialogue".to_owned(),
+            duration: TimeCode(300),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Audio,
+            resolution: None,
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+            color_description: kinewright_core::ColorDescription::default(),
+        };
+        let room_tone = MediaAsset {
+            id: AssetId(2),
+            // AU5 §5.1: the store path is the only identity a captured
+            // room-tone asset has, because rule 89 registers it as an
+            // ORDINARY `MediaAsset` with no flag of its own.
+            path: PathBuf::from("/p/show.kinewright-assets/room-tone/abc.wav"),
+            name: "Room tone — dialogue".to_owned(),
+            duration: TimeCode(60),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Audio,
+            resolution: None,
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+            color_description: kinewright_core::ColorDescription::default(),
+        };
+        let clip = |id: u64, at: i64| Clip {
+            id: ClipId(id),
+            asset: AssetId(1),
+            source_range: TimeCode::ZERO..TimeCode(30),
+            content: ClipContent::Media,
+            timeline_start: TimeCode(at),
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+            audio_gain_curve: None,
+        };
+        Document {
+            catalog: kinewright_core::MediaCatalog::default(),
+            audio_mix: kinewright_core::AudioMix::default(),
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Audio,
+                sync_lock: true,
+                clips: vec![clip(1, 0), clip(2, 60)],
+            }],
+            media_pool: vec![dialogue, room_tone],
+            duration: TimeCode(90),
+            ..Document::default()
+        }
+    }
+
+    fn au5b_service(document: Document, analysis: Arc<dyn Analysis>) -> KinewrightMcp {
+        let core = Core::spawn(document).unwrap();
+        let playback: Arc<dyn Playback> = Arc::new(NoopMedia::default());
+        KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default())
+    }
+
+    /// AU5 §5.5 / B7: `plan_room_tone_fill`'s per-gap contract.
+    ///
+    /// The interior gap is filled from one tile of the 60-frame sample, the
+    /// row carries `{start, end, tiles, skipped_reason}`, a gap under
+    /// `minimum_gap_frames` is skipped with a reason rather than failing the
+    /// plan, the tile cap is a skip and not a panic, and `deny_unknown_fields`
+    /// refuses a misspelled knob.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn au5_plan_room_tone_fill_reports_every_gap_and_never_fails_the_plan() {
+        let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia::default());
+        let service = au5b_service(au5b_fill_document(), analysis);
+        let call = |arguments: serde_json::Value| {
+            service.call_blocking(
+                CallToolRequestParams::new("plan_room_tone_fill")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+        };
+
+        let planned = call(json!({"track": 1})).unwrap();
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(planned.is_error, Some(false), "{body}");
+        assert_eq!(
+            body["gaps"],
+            json!([{"start": 30, "end": 60, "tiles": 1, "skipped_reason": null}]),
+            "the interior gap is one 30-frame tile of the 60-frame sample; the TRAILING gap after \
+             frame 90 is not a gap at all: {body}"
+        );
+        assert_eq!(body["tiles"], 1);
+        // Rule 102: the asset defaults to the project's sole room-tone asset,
+        // found by its store directory and nothing else.
+        assert_eq!(body["asset_id"], 2);
+        assert!(body["prepared_edit_plan"]["plan_id"].is_u64(), "{body}");
+        // Rule 103: no confirmation — a fill removes nothing — and nothing is
+        // mutated, so an identical second call sees the identical gap. (A
+        // `ConfirmationBroker::default()` refuses every request, so a tool that
+        // raised one could not have reached `prepared_edit_plan` at all.)
+        let again = call(json!({"track": 1})).unwrap();
+        let again = again.structured_content.as_ref().unwrap();
+        assert_eq!(again["timeline_revision"], 0, "{again}");
+        assert_eq!(again["gaps"], body["gaps"], "{again}");
+
+        // A gap under `minimum_gap_frames` is REPORTED and skipped, not
+        // silently dropped, and the plan that results is empty rather than
+        // failed.
+        let skipped = call(json!({"track": 1, "minimum_gap_frames": 31})).unwrap();
+        let body = skipped.structured_content.as_ref().unwrap();
+        assert_eq!(skipped.is_error, Some(false), "{body}");
+        assert_eq!(body["gaps"][0]["tiles"], 0);
+        assert_eq!(
+            body["gaps"][0]["skipped_reason"],
+            "gap of 30 project frames is under minimum_gap_frames 31"
+        );
+        assert_eq!(body["prepared_edit_plan"], serde_json::Value::Null);
+        assert!(
+            skipped.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .starts_with("nothing to propose: every one of the 1 gap(s)"),
+            "{skipped:?}"
+        );
+
+        // The tile cap is a per-gap reason too, naming the cap.
+        let capped =
+            call(json!({"track": 1, "maximum_tiles": 1, "range": {"start": 0, "end": 90}}))
+                .unwrap();
+        let body = capped.structured_content.as_ref().unwrap();
+        assert_eq!(body["gaps"][0]["tiles"], 1, "{body}");
+
+        // Rule 103's `range` restricts and clamps, `plan_audio_ducking`'s way.
+        let clamped = call(json!({"track": 1, "range": {"start": 40, "end": 60}})).unwrap();
+        let body = clamped.structured_content.as_ref().unwrap();
+        assert_eq!(body["gaps"][0]["start"], 40, "{body}");
+        assert_eq!(body["gaps"][0]["end"], 60, "{body}");
+
+        // `deny_unknown_fields`, and the two named refusals.
+        assert!(call(json!({"track": 1, "minimum_gap": 2})).is_err());
+        let unknown_track = call(json!({"track": 9})).unwrap();
+        assert_eq!(
+            unknown_track.content[0].as_text().unwrap().text,
+            "track 9 does not exist"
+        );
+    }
+
+    /// AU5 §5.3 rule 95 / B5: a gap longer than the sample **tiles**, and one
+    /// that would need more tiles than `maximum_tiles` is skipped with a reason
+    /// naming the cap rather than tiled without bound.
+    #[test]
+    fn au5_plan_room_tone_fill_tiles_a_long_gap_and_caps_it() {
+        let mut document = au5b_fill_document();
+        // A 90-frame gap from the 60-frame sample: two tiles, 60 then 30.
+        document.tracks[0].clips[1].timeline_start = TimeCode(120);
+        document.duration = TimeCode(150);
+        let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia::default());
+        let service = au5b_service(document, analysis);
+        let call = |arguments: serde_json::Value| {
+            service.call_blocking(
+                CallToolRequestParams::new("plan_room_tone_fill")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+        };
+        let planned = call(json!({"track": 1})).unwrap();
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(planned.is_error, Some(false), "{body}");
+        assert_eq!(
+            body["gaps"],
+            json!([{"start": 30, "end": 120, "tiles": 2, "skipped_reason": null}]),
+            "{body}"
+        );
+        assert_eq!(body["tiles"], 2);
+        // Two butt-joined `AddClip`s of the same asset, the second starting
+        // where the first ends.
+        let plan_id = PreparedPlanId(body["prepared_edit_plan"]["plan_id"].as_u64().unwrap());
+        let plan = service
+            .prepared_plans
+            .lock()
+            .unwrap()
+            .get(plan_id)
+            .expect("the prepared plan is still stored");
+        let starts = plan
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                Operation::AddClip { at, source, .. } => (at.0, source.start.0, source.end.0),
+                other => panic!("a fill is AddClip only, not {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(starts, [(30, 0, 60), (90, 0, 30)], "{starts:?}");
+
+        // The cap is a per-gap reason naming itself, and the plan still ends
+        // cleanly rather than failing.
+        let capped = call(json!({"track": 1, "maximum_tiles": 1})).unwrap();
+        let body = capped.structured_content.as_ref().unwrap();
+        assert_eq!(capped.is_error, Some(false), "{body}");
+        assert_eq!(body["gaps"][0]["tiles"], 0, "{body}");
+        assert_eq!(
+            body["gaps"][0]["skipped_reason"],
+            "gap of 90 project frames needs more than maximum_tiles 1 tiles of the 60 project \
+             frame room-tone asset",
+            "{body}"
+        );
+        assert_eq!(body["prepared_edit_plan"], serde_json::Value::Null);
+    }
+
+    /// AU5 §0 R119 / pass-2 finding 2: each `TimeMappingError` kind gets its
+    /// own sentence, pinned **directly** rather than only through the two the
+    /// planner can reach.
+    ///
+    /// The app carries a byte-identical `room_tone_skip_reason` behind its
+    /// `Room tone` button and pins the same three sentences; two copies of one
+    /// wording is exactly the drift R85 exists to catch, and until the trio
+    /// moves into core beside `covering_source_range_for_project_duration`
+    /// these two tests are what hold them together.
+    #[test]
+    fn au5_room_tone_skip_reason_gives_each_mapping_refusal_its_own_sentence() {
+        let source = Rational::new(30, 1).unwrap();
+        let project = Rational::new(25, 1).unwrap();
+        let inexact = room_tone_skip_reason(
+            TimeCode(7),
+            source,
+            project,
+            &kinewright_core::TimeMappingError::InexactDuration {
+                source_start: 0,
+                project_duration: 7,
+            },
+        );
+        assert_eq!(
+            inexact,
+            "gap of 7 project frames has no exact source range at 30/1 / 25/1"
+        );
+
+        let uncoverable = room_tone_skip_reason(
+            TimeCode(7),
+            source,
+            project,
+            &kinewright_core::TimeMappingError::NoCoveringSourceRange {
+                project_duration: 7,
+                source_duration: 60,
+            },
+        );
+        assert_eq!(
+            uncoverable,
+            "gap of 7 project frames has no exact source range at 30/1 / 25/1 that also carries \
+             its sample frames within the 60-source-frame room-tone asset"
+        );
+
+        // The one refusal whose answer really is "record more room tone".
+        let too_short = room_tone_skip_reason(
+            TimeCode(7),
+            source,
+            project,
+            &kinewright_core::TimeMappingError::SourceTooShortToCover {
+                project_duration: 7,
+                source_duration: 5,
+                minimum_source_frames: 9,
+            },
+        );
+        assert_eq!(
+            too_short,
+            "gap of 7 project frames needs at least 9 source frames of room tone at 30/1 / 25/1, \
+             and this asset carries only 5"
+        );
+
+        // And the wildcard is a real sentence too, not a `Debug` dump.
+        let other = room_tone_skip_reason(
+            TimeCode(7),
+            source,
+            project,
+            &kinewright_core::TimeMappingError::Overflow,
+        );
+        assert_eq!(
+            other,
+            "gap of 7 project frames has no usable source range at 30/1 / 25/1: \
+             frame-rate conversion overflowed"
+        );
+
+        for (left, right) in [
+            (&inexact, &uncoverable),
+            (&inexact, &too_short),
+            (&uncoverable, &too_short),
+            (&inexact, &other),
+        ] {
+            assert_ne!(left, right, "each kind must read differently");
+        }
+    }
+
+    /// AU5 §0 R119: the per-gap reason carries **which** way core refused.
+    ///
+    /// The three `TimeMappingError` kinds are three different pieces of advice,
+    /// and collapsing them into one sentence about exact source ranges is what
+    /// hid an NTSC project getting no fill at all: "these rates cannot express
+    /// this span" is a rate problem, "no phase covers it inside this asset" is
+    /// a supply problem at these rates, and only the third is answered by
+    /// recording more room tone.
+    #[test]
+    fn au5_plan_room_tone_fill_names_which_way_the_source_range_failed() {
+        let reason = |project_fps: Rational, gap_end: i64, asset_frames: i64| {
+            let mut document = au5b_fill_document();
+            document.fps = project_fps;
+            document.media_pool[1].duration = TimeCode(asset_frames);
+            document.tracks[0].clips[0].source_range = TimeCode::ZERO..TimeCode(5);
+            document.tracks[0].clips[1].timeline_start = TimeCode(gap_end);
+            let tail = map_source_range_to_project(
+                TimeCode::ZERO..TimeCode(30),
+                document.media_pool[0].fps,
+                project_fps,
+            )
+            .unwrap();
+            document.duration = TimeCode(gap_end + tail.0);
+            let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia::default());
+            let service = au5b_service(document, analysis);
+            let planned = service
+                .call_blocking(
+                    CallToolRequestParams::new("plan_room_tone_fill")
+                        .with_arguments(json!({"track": 1}).as_object().unwrap().clone()),
+                )
+                .unwrap();
+            planned.structured_content.as_ref().unwrap()["gaps"][0]["skipped_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+
+        // Not representable: a 60 fps project reading a 30 fps asset can only
+        // express even spans, at any phase and any asset length.
+        let unrepresentable = reason(Rational::new(60, 1).unwrap(), 17, 60);
+        // Core's tiler covers the six even frames it can and then has one
+        // unrepresentable frame left, so the gap is still skipped whole — and
+        // the reason names the GAP, the rate pair and the residue, rather than
+        // reporting a "gap of 1 project frames" nobody can see on the timeline.
+        assert_eq!(
+            unrepresentable,
+            "gap of 7 project frames has no exact source range at 30/1 / 60/1; 1 tile(s) covered \
+             all but its last 1 project frame(s)"
+        );
+
+        // Representable, but not coverable inside THIS asset: at 30 -> 29.97
+        // every covering phase sits hundreds of source frames in, so a 60-frame
+        // sample supplies no whole tile at any length core will search. The
+        // reason is core's own `NoCoveringSourceRange` kind, which names the
+        // asset — the rates are fine, the asset is short — and it is a
+        // different sentence from the rate refusal above (R119).
+        let uncoverable = reason(Rational::new(30_000, 1_001).unwrap(), 40, 60);
+        assert_eq!(
+            uncoverable,
+            "gap of 35 project frames has no exact source range at 30/1 / 30000/1001 that also \
+             carries its sample frames within the 60-source-frame room-tone asset"
+        );
+        assert_ne!(
+            unrepresentable, uncoverable,
+            "R119: the two refusals must be distinguishable"
+        );
+    }
+
+    /// AU5 §5.5 / B7: a project with no room-tone asset is refused **by
+    /// name**, never by silently tiling the first audio asset it finds.
+    #[test]
+    fn au5_plan_room_tone_fill_names_a_missing_room_tone_asset() {
+        let mut document = au5b_fill_document();
+        document.media_pool.retain(|asset| asset.id == AssetId(1));
+        let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia::default());
+        let service = au5b_service(document, analysis);
+        let refused = service
+            .call_blocking(
+                CallToolRequestParams::new("plan_room_tone_fill")
+                    .with_arguments(json!({"track": 1}).as_object().unwrap().clone()),
+            )
+            .unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        assert_eq!(
+            refused.content[0].as_text().unwrap().text,
+            "the project has no registered room-tone asset; capture one with capture_room_tone \
+             first, or name an existing asset with asset_id"
+        );
+    }
+
+    /// AU5 §5.3 rule 97 / B6: the 60 fps arm — a gap with no exact source
+    /// range is skipped with rule 97's reason while the rest of the plan
+    /// commits, and it is never written one frame long into a `ClipOverlap`.
+    #[test]
+    fn au5_plan_room_tone_fill_skips_a_gap_with_no_exact_source_range() {
+        let mut document = au5b_fill_document();
+        // A 60 fps project reading the 30 fps audio-only asset: `round(2E)`
+        // has no solution for an odd project duration, so a 7-frame gap has no
+        // exact source range at all.
+        document.fps = Rational::new(60, 1).unwrap();
+        document.tracks[0].clips[0].source_range = TimeCode::ZERO..TimeCode(5);
+        document.tracks[0].clips[1].timeline_start = TimeCode(17);
+        // Clip A is 5 source frames = 10 project frames at 60 fps and clip B is
+        // 30 source frames = 60, so the first gap is `10..17` — seven frames,
+        // odd, and therefore unrepresentable. F4: a THIRD clip opens a second
+        // gap of `77..83`, six frames and even, which is fillable, so this lane
+        // pins rule 103's real claim — one gap is skipped **while the rest of
+        // the plan commits** — rather than the degenerate case where the only
+        // gap is the one that failed.
+        let mut third = document.tracks[0].clips[0].clone();
+        third.id = ClipId(3);
+        third.timeline_start = TimeCode(83);
+        document.tracks[0].clips.push(third);
+        document.duration = TimeCode(93);
+        let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia::default());
+        let service = au5b_service(document, analysis);
+        let planned = service
+            .call_blocking(
+                CallToolRequestParams::new("plan_room_tone_fill")
+                    .with_arguments(json!({"track": 1}).as_object().unwrap().clone()),
+            )
+            .unwrap();
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(planned.is_error, Some(false), "{body}");
+        assert_eq!(
+            body["gaps"],
+            json!([
+                {
+                    "start": 10,
+                    "end": 17,
+                    "tiles": 0,
+                    "skipped_reason":
+                        "gap of 7 project frames has no exact source range at 30/1 / 60/1; \
+                         1 tile(s) covered all but its last 1 project frame(s)"
+                },
+                {"start": 77, "end": 83, "tiles": 1, "skipped_reason": null},
+            ]),
+            "{body}"
+        );
+        assert_eq!(body["tiles"], 1, "{body}");
+        // Rule 103 / `plan_clip_fades`' idiom: one gap's reason never fails the
+        // whole plan, and the other gap really is prepared.
+        assert!(body["prepared_edit_plan"]["plan_id"].is_u64(), "{body}");
+        assert!(
+            planned.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .starts_with("prepared 1 room tone clip(s) filling 1 gap(s)"),
+            "{planned:?}"
+        );
+    }
+
+    /// AU5 §5.3 rule 97 / §0 R96 / B6: the **25 fps** arm — a 7-frame gap
+    /// filled from the 30 fps audio-only asset, whose tile is the *covering*
+    /// source range core chooses rather than one hard-coded at frame 0.
+    ///
+    /// `map_frames(8, 30, 25) = round(40/6) = 7`, so `0..8` is exact in project
+    /// frames — and 640 sample frames short of what the gap demands, because
+    /// the mixer maps source samples to project samples one for one. The
+    /// planner must therefore ship one of the phases that covers, and the
+    /// assertion is against core's shared helper rather than against a literal,
+    /// so the agent's fill and media's seam lane cannot disagree about which
+    /// range that is.
+    #[test]
+    fn au5_plan_room_tone_fill_takes_its_tile_from_the_covering_source_range() {
+        let mut document = au5b_fill_document();
+        document.fps = Rational::new(25, 1).unwrap();
+        // Clip A is 30 source frames = 25 project frames at 25 fps, so the gap
+        // opens at 25; clip B starts at 32, making the gap exactly 7 frames.
+        document.tracks[0].clips[1].timeline_start = TimeCode(32);
+        document.duration = TimeCode(57);
+        let asset = document.media_pool[1].clone();
+        let expected = kinewright_core::covering_source_range_for_project_duration(
+            TimeCode(7),
+            asset.fps,
+            document.fps,
+            asset.duration,
+            ROOM_TONE_FILL_SAMPLE_RATE,
+        )
+        .expect("a 7-frame gap has a covering range at 30 -> 25");
+        assert_ne!(
+            expected.start,
+            TimeCode::ZERO,
+            "the point of R96 is that phase 0 is NOT the answer here"
+        );
+
+        let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia::default());
+        let service = au5b_service(document.clone(), analysis);
+        let planned = service
+            .call_blocking(
+                CallToolRequestParams::new("plan_room_tone_fill")
+                    .with_arguments(json!({"track": 1}).as_object().unwrap().clone()),
+            )
+            .unwrap();
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(planned.is_error, Some(false), "{body}");
+        assert_eq!(
+            body["gaps"],
+            json!([{"start": 25, "end": 32, "tiles": 1, "skipped_reason": null}]),
+            "{body}"
+        );
+        let plan_id = PreparedPlanId(body["prepared_edit_plan"]["plan_id"].as_u64().unwrap());
+        let plan = service
+            .prepared_plans
+            .lock()
+            .unwrap()
+            .get(plan_id)
+            .expect("the prepared plan is still stored");
+        assert_eq!(plan.operations.len(), 1, "{:?}", plan.operations);
+        let Operation::AddClip {
+            track,
+            asset: filled,
+            at,
+            source,
+        } = plan.operations[0].clone()
+        else {
+            panic!("a fill is one AddClip: {:?}", plan.operations);
+        };
+        assert_eq!(track, TrackId(1));
+        assert_eq!(filled, asset.id);
+        assert_eq!(at, TimeCode(25));
+        assert_eq!(
+            source, expected,
+            "the tile must be core's covering range, phase and all"
+        );
+        // Rule 97: and it must still be exactly the gap long.
+        let clip = room_tone_fill_clip(&asset, at, source);
+        assert_eq!(document.clip_duration(&clip).unwrap(), TimeCode(7));
+    }
+
+    /// AU5 §5.6: the fixture the repair planner's in-crate lanes drive — one
+    /// 300-frame audio track with a 30-frame silence span on it.
+    fn au5b_repair_document() -> Document {
+        let mut document = au5b_fill_document();
+        document.media_pool.retain(|asset| asset.id == AssetId(1));
+        document.tracks[0].clips = vec![Clip {
+            id: ClipId(1),
+            asset: AssetId(1),
+            source_range: TimeCode::ZERO..TimeCode(300),
+            content: ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+            audio_gain_curve: None,
+        }];
+        document.duration = TimeCode(300);
+        document
+    }
+
+    /// AU5 §5.6: a scripted analysis that answers a HIGHER SNR once the
+    /// document carries a repair node, so rule 106's measured loop has both
+    /// its outcomes.
+    ///
+    /// `gain` is the hundredths of a dB the repair is scripted to buy.
+    /// AU5 §0 R113 / F1: what each `Analysis::audio_repair` call was asked —
+    /// the mix point, and how many buses the document it was handed already
+    /// carried.
+    type RepairCalls = Arc<Mutex<Vec<(MixSpectrumPoint, usize)>>>;
+
+    fn au5b_repair_analysis(gain: i32, ready: bool) -> Arc<dyn Analysis> {
+        au5b_repair_analysis_recording(gain, ready).0
+    }
+
+    fn au5b_repair_analysis_recording(gain: i32, ready: bool) -> (Arc<dyn Analysis>, RepairCalls) {
+        let calls: RepairCalls = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&calls);
+        let analysis: Arc<dyn Analysis> = au5b_repair_analysis_with(gain, ready, recorder);
+        (analysis, calls)
+    }
+
+    fn au5b_repair_analysis_with(gain: i32, ready: bool, calls: RepairCalls) -> Arc<dyn Analysis> {
+        Arc::new(NoopMedia {
+            silence_ready: if ready {
+                [AssetId(1)].into_iter().collect()
+            } else {
+                BTreeSet::new()
+            },
+            timeline_silences: vec![TimelineSilenceSpan {
+                asset: AssetId(1),
+                track: TrackId(1),
+                clip: ClipId(1),
+                source_start: TimeCode::ZERO,
+                source_end: TimeCode(30),
+                project_start: TimeCode::ZERO,
+                project_end: TimeCode(30),
+            }],
+            mix_noise_profile: Some(Box::new(|_document, request| {
+                Ok(kinewright_core::NoiseProfileReport {
+                    range: request
+                        .range
+                        .clone()
+                        .unwrap_or(TimeCode::ZERO..TimeCode(30)),
+                    point: request.point,
+                    sample_rate: 48_000,
+                    sample_frames: 48_000,
+                    windows: 22,
+                    bands: [-500; kinewright_core::NOISE_PROFILE_BAND_COUNT],
+                })
+            })),
+            audio_repair: Some(Box::new(move |document, request| {
+                // R113 / F1: record WHAT was asked, not only what was answered.
+                // Without this the lanes would pass identically if the baseline
+                // `UpsertAudioBus` were deleted, or if "before" were measured
+                // at `MixSpectrumPoint::Track` and "after" at
+                // `MixSpectrumPoint::Bus` — the exact fold R113 forbids.
+                calls
+                    .lock()
+                    .unwrap()
+                    .push((request.point, document.audio_mix.buses.len()));
+                let repaired = document
+                    .audio_mix
+                    .buses
+                    .iter()
+                    .flat_map(|bus| &bus.effects)
+                    .any(|effect| is_au5_repair_node(&effect.name));
+                let snr = if repaired { 2_000 + gain } else { 2_000 };
+                Ok(AudioRepairReport {
+                    range: request
+                        .range
+                        .clone()
+                        .unwrap_or(TimeCode::ZERO..TimeCode(300)),
+                    point: request.point,
+                    sample_rate: 48_000,
+                    sample_frames: 480_000,
+                    window_milliseconds: kinewright_core::REPAIR_WINDOW_MILLISECONDS,
+                    windows: 1_000,
+                    noise_floor_dbfs_hundredths: Some(-4_800),
+                    signal_dbfs_hundredths: Some(-2_800 + snr - 2_000),
+                    snr_db_hundredths: Some(snr),
+                    hum_50_excess_db_hundredths: Some(300),
+                    hum_60_excess_db_hundredths: Some(900),
+                    hum_50_harmonic_excess_db_hundredths: vec![300, 0, 0, 0],
+                    hum_60_harmonic_excess_db_hundredths: vec![900, 0, 0, 0],
+                    click_count: 0,
+                    click_density_per_minute: 0,
+                    findings: Vec::new(),
+                    evidence_only: true,
+                    provenance: AudioRepairProvenance::default(),
+                })
+            })),
+            ..NoopMedia::default()
+        })
+    }
+
+    /// AU5 §5.6 / B8: the chain `plan_dialogue_repair` builds.
+    ///
+    /// Rule 108's three nodes in signal order at the HEAD of the bus, with
+    /// rule 108's parameters, `chain_lookahead_milliseconds == 15`, the
+    /// learned profile written into all 31 rows, and the mains frequency
+    /// defaulted to whichever measured excess is larger.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn au5_plan_dialogue_repair_builds_the_measured_chain_at_the_head_of_the_bus() {
+        let (analysis, calls) = au5b_repair_analysis_recording(400, true);
+        let service = au5b_service(au5b_repair_document(), analysis);
+        let call = |arguments: serde_json::Value| {
+            service.call_blocking(
+                CallToolRequestParams::new("plan_dialogue_repair")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+        };
+        let planned = call(json!({"tracks": [1]})).unwrap();
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(planned.is_error, Some(false), "{body}");
+        assert_eq!(
+            body["repair_prefix"],
+            json!(["audio_denoise", "audio_hum_removal", "audio_declick"]),
+            "{body}"
+        );
+        assert_eq!(body["chain_lookahead_milliseconds"], 15, "{body}");
+        assert_eq!(
+            body["repair_prefix_lookahead_milliseconds"], 15,
+            "12 of denoise plus 3 of de-click; hum declares none: {body}"
+        );
+        assert_eq!(body["reused_existing_bus"], false);
+        // Rule 105: the default fundamental is the LARGER measured excess.
+        assert_eq!(body["hum_fundamental_hertz"], 60, "{body}");
+        assert_eq!(body["reduction_tenth_db"], 120, "the named-const default");
+        assert_eq!(body["minimum_snr_gain_db_hundredths"], 100);
+        assert_eq!(body["measured"]["before_snr_db_hundredths"], 2_000);
+        assert_eq!(body["measured"]["after_snr_db_hundredths"], 2_400);
+        assert_eq!(body["measured"]["snr_gain_db_hundredths"], 400);
+        assert_eq!(
+            body["learn_range"],
+            json!({"track": 1, "start_frame": 0, "end_frame": 30}),
+            "the profile is learned over the longest silence span: {body}"
+        );
+        assert_eq!(
+            body["profile_bands_tenth_db"].as_array().unwrap().len(),
+            kinewright_core::NOISE_PROFILE_BAND_COUNT
+        );
+
+        // R113 / F1: exactly two measurements, both at the SAME bus point, and
+        // both on a document that already carried the bus — which is what makes
+        // the baseline `UpsertAudioBus` load-bearing rather than decorative. A
+        // "before" taken on a bus-less document, or at the track point, fails
+        // here.
+        let observed = calls.lock().unwrap().clone();
+        assert_eq!(observed.len(), 2, "{observed:?}");
+        let bus_id = kinewright_core::AudioBusId(body["audio_bus"].as_u64().unwrap());
+        assert_eq!(
+            observed,
+            vec![
+                (MixSpectrumPoint::Bus(bus_id), 1),
+                (MixSpectrumPoint::Bus(bus_id), 1)
+            ],
+            "before and after must be one point on two documents that differ only by the prefix"
+        );
+
+        // F6: `deny_unknown_fields`, on the planner with the most optional
+        // knobs and therefore the most room for a silently ignored typo.
+        assert!(call(json!({"tracks": [1], "reduction_tenth_dbs": 200})).is_err());
+        assert!(call(json!({"tracks": [1], "minimum_snr_gain": 100})).is_err());
+
+        // The bus itself, out of the prepared plan's own preview document.
+        let bus = au5b_prepared_bus(&service, body);
+        assert_eq!(
+            bus.effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            ["audio_denoise", "audio_hum_removal", "audio_declick"]
+        );
+        assert_eq!(
+            kinewright_core::chain_lookahead_milliseconds(&bus.effects),
+            15
+        );
+        let denoise = &bus.effects[0];
+        assert_eq!(
+            denoise.static_integer_parameter("reduction_tenth_db"),
+            Some(120)
+        );
+        assert_eq!(
+            denoise.static_integer_parameter("lookahead_milliseconds"),
+            Some(12)
+        );
+        for name in kinewright_core::NOISE_PROFILE_PARAMETER_NAMES {
+            assert_eq!(
+                denoise.static_integer_parameter(name),
+                Some(-500),
+                "{name} must carry the learned band"
+            );
+        }
+        assert!(
+            denoise.keyframes.is_empty(),
+            "static_audio_effect writes no keyframes"
+        );
+        let hum = &bus.effects[1];
+        for (parameter, value) in [
+            ("fundamental_hertz", 60),
+            ("harmonic_count", 3),
+            ("depth_tenth_db", -300),
+            ("notch_q_hundredths", 1_200),
+        ] {
+            assert_eq!(
+                hum.static_integer_parameter(parameter),
+                Some(value),
+                "{parameter}"
+            );
+        }
+        let declick = &bus.effects[2];
+        for (parameter, value) in [
+            ("max_click_milliseconds", 1),
+            ("detector_threshold_tenth_db", 240),
+            ("lookahead_milliseconds", 3),
+        ] {
+            assert_eq!(
+                declick.static_integer_parameter(parameter),
+                Some(value),
+                "{parameter}"
+            );
+        }
+    }
+
+    /// The `UpsertAudioBus` one prepared repair plan carries.
+    fn au5b_prepared_bus(service: &KinewrightMcp, body: &serde_json::Value) -> AudioBus {
+        let plan_id = PreparedPlanId(body["prepared_edit_plan"]["plan_id"].as_u64().unwrap());
+        let plan = service
+            .prepared_plans
+            .lock()
+            .unwrap()
+            .get(plan_id)
+            .expect("the prepared plan is still stored");
+        assert_eq!(plan.operations.len(), 1, "{:?}", plan.operations);
+        match plan.operations.into_iter().next().unwrap() {
+            Operation::UpsertAudioBus { bus } => bus,
+            other => panic!("the repair plan is one UpsertAudioBus, not {other:?}"),
+        }
+    }
+
+    /// AU5 §5.6 / B8: an existing bus is REUSED with its effects preserved,
+    /// the prefix goes at the head, `replace: false` refuses a prefix that is
+    /// already there, and a chain that would exceed the 20 ms budget is
+    /// refused by name before `UpsertAudioBus` can fail inside a plan.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn au5_plan_dialogue_repair_reuses_a_bus_and_refuses_by_name() {
+        let mut document = au5b_repair_document();
+        document.audio_mix.buses.push(AudioBus {
+            id: kinewright_core::AudioBusId(4),
+            name: "Dialogue".to_owned(),
+            tracks: vec![TrackId(1)],
+            gain_tenth_db: -20,
+            effects: vec![static_audio_effect(
+                EffectId(9),
+                "audio_compressor",
+                &[("threshold_tenth_db", -120), ("ratio_hundredths", 300)],
+            )],
+            ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
+        });
+        let service = au5b_service(document.clone(), au5b_repair_analysis(400, true));
+        let call = |arguments: serde_json::Value| {
+            service.call_blocking(
+                CallToolRequestParams::new("plan_dialogue_repair")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+        };
+        let planned = call(json!({"tracks": [1]})).unwrap();
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(planned.is_error, Some(false), "{body}");
+        assert_eq!(body["reused_existing_bus"], true, "{body}");
+        assert_eq!(body["audio_bus"], 4, "{body}");
+        assert_eq!(body["carried_effects"], json!(["audio_compressor"]));
+        let bus = au5b_prepared_bus(&service, body);
+        assert_eq!(
+            bus.effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "audio_denoise",
+                "audio_hum_removal",
+                "audio_declick",
+                "audio_compressor"
+            ],
+            "the prefix goes at the HEAD and the existing chain is preserved"
+        );
+        assert_eq!(bus.name, "Dialogue", "the bus keeps its own name");
+        assert_eq!(bus.gain_tenth_db, -20, "and its own fader");
+        assert_eq!(
+            bus.effects
+                .iter()
+                .map(|effect| effect.id.0)
+                .collect::<Vec<_>>(),
+            [10, 11, 12, 9],
+            "the prefix allocates from one past the document's highest audio effect id, and the \
+             carried node keeps its own"
+        );
+
+        // Rule 109: a bus carrying MORE tracks than were asked for keeps its
+        // own routing. Rewriting `tracks` to the requested subset would
+        // silently un-route track 2 from a bus the caller only meant to add a
+        // repair prefix to.
+        let mut wider = document.clone();
+        wider.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: Vec::new(),
+        });
+        wider.audio_mix.buses[0].tracks = vec![TrackId(1), TrackId(2)];
+        let service = au5b_service(wider, au5b_repair_analysis(400, true));
+        let planned = service
+            .call_blocking(
+                CallToolRequestParams::new("plan_dialogue_repair")
+                    .with_arguments(json!({"tracks": [1]}).as_object().unwrap().clone()),
+            )
+            .unwrap();
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(planned.is_error, Some(false), "{body}");
+        assert_eq!(body["tracks"], json!([1]), "{body}");
+        assert_eq!(body["audio_bus_tracks"], json!([1, 2]), "{body}");
+        assert_eq!(
+            au5b_prepared_bus(&service, body).tracks,
+            vec![TrackId(1), TrackId(2)]
+        );
+
+        // Rule 109: a repair prefix already on the bus refuses unless
+        // `replace` is true.
+        let mut replaced = document.clone();
+        replaced.audio_mix.buses[0].effects.insert(
+            0,
+            static_audio_effect(
+                EffectId(8),
+                "audio_declick",
+                &[("max_click_milliseconds", 1)],
+            ),
+        );
+        let service = au5b_service(replaced.clone(), au5b_repair_analysis(400, true));
+        let refused = service
+            .call_blocking(
+                CallToolRequestParams::new("plan_dialogue_repair")
+                    .with_arguments(json!({"tracks": [1]}).as_object().unwrap().clone()),
+            )
+            .unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        assert_eq!(
+            refused.content[0].as_text().unwrap().text,
+            "audio bus 4 (Dialogue) already carries an AU5 repair prefix (audio_declick); pass \
+             replace true to rebuild it"
+        );
+        let rebuilt = service
+            .call_blocking(
+                CallToolRequestParams::new("plan_dialogue_repair").with_arguments(
+                    json!({"tracks": [1], "replace": true})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        let body = rebuilt.structured_content.as_ref().unwrap();
+        assert_eq!(rebuilt.is_error, Some(false), "{body}");
+        assert_eq!(body["carried_effects"], json!(["audio_compressor"]));
+
+        // Rule 109's budget refusal, quoting both figures rather than letting
+        // `UpsertAudioBus` fail inside a prepared plan.
+        let mut heavy = document;
+        heavy.audio_mix.buses[0].effects = vec![static_audio_effect(
+            EffectId(9),
+            "audio_true_peak_limiter",
+            &[("lookahead_milliseconds", 8)],
+        )];
+        let service = au5b_service(heavy, au5b_repair_analysis(400, true));
+        let refused = service
+            .call_blocking(
+                CallToolRequestParams::new("plan_dialogue_repair")
+                    .with_arguments(json!({"tracks": [1]}).as_object().unwrap().clone()),
+            )
+            .unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        assert_eq!(
+            refused.content[0].as_text().unwrap().text,
+            "audio bus 4 already declares 8 ms of lookahead and this repair prefix declares 15 \
+             more, which is over the 20 ms chain budget"
+        );
+    }
+
+    /// AU5 §5.6 rule 106 / B10: the measured refusal, which is the
+    /// deliverable — as tool text naming BOTH numbers and the direction of
+    /// the percentile bias, never a protocol error, and never a prepared plan.
+    #[test]
+    fn au5_plan_dialogue_repair_refuses_when_it_cannot_measure_an_improvement() {
+        let service = au5b_service(au5b_repair_document(), au5b_repair_analysis(40, true));
+        let refused = service
+            .call_blocking(
+                CallToolRequestParams::new("plan_dialogue_repair")
+                    .with_arguments(json!({"tracks": [1]}).as_object().unwrap().clone()),
+            )
+            .unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        assert!(refused.structured_content.is_none(), "{refused:?}");
+        let text = &refused.content[0].as_text().unwrap().text;
+        assert!(text.contains("gain of 40 hundredths of a dB"), "{text}");
+        assert!(
+            text.contains("minimum_snr_gain_db_hundredths 100"),
+            "both numbers, not one: {text}"
+        );
+        assert!(
+            text.contains("HIGHER floor and therefore a LOWER gain"),
+            "rule 21's bias direction: {text}"
+        );
+        // A deliberately lowered gate accepts the same measurement, which is
+        // what makes the refusal a gate rather than a ceiling.
+        let planned = service
+            .call_blocking(
+                CallToolRequestParams::new("plan_dialogue_repair").with_arguments(
+                    json!({"tracks": [1], "minimum_snr_gain_db_hundredths": 40})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(planned.is_error, Some(false), "{planned:?}");
+    }
+
+    /// AU5 §5.6 rule 107 / B9: the readiness gate's two arms are **different
+    /// strings**.
+    ///
+    /// "not analysed yet" is a wait; "no span is long enough" is a material
+    /// problem, and an agent that cannot tell them apart retries the one it
+    /// should give up on.
+    #[test]
+    fn au5_plan_dialogue_repair_separates_not_ready_from_no_long_enough_span() {
+        let pending = au5b_service(au5b_repair_document(), au5b_repair_analysis(400, false));
+        let refused = pending
+            .call_blocking(
+                CallToolRequestParams::new("plan_dialogue_repair")
+                    .with_arguments(json!({"tracks": [1]}).as_object().unwrap().clone()),
+            )
+            .unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        let not_ready = refused.content[0].as_text().unwrap().text.clone();
+        assert!(
+            not_ready.contains("silence analysis is not ready"),
+            "B9: the assertion is `contains`, because the real message names the asset: {not_ready}"
+        );
+
+        // Silence analysis complete, but the longest span is 14 project
+        // frames — one under the 15 a 22,528 sample-frame profile window needs
+        // at 30 fps.
+        let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia {
+            silence_ready: [AssetId(1)].into_iter().collect(),
+            timeline_silences: vec![TimelineSilenceSpan {
+                asset: AssetId(1),
+                track: TrackId(1),
+                clip: ClipId(1),
+                source_start: TimeCode::ZERO,
+                source_end: TimeCode(14),
+                project_start: TimeCode::ZERO,
+                project_end: TimeCode(14),
+            }],
+            ..NoopMedia::default()
+        });
+        let short = au5b_service(au5b_repair_document(), analysis);
+        let refused = short
+            .call_blocking(
+                CallToolRequestParams::new("plan_dialogue_repair")
+                    .with_arguments(json!({"tracks": [1]}).as_object().unwrap().clone()),
+            )
+            .unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        let too_short = refused.content[0].as_text().unwrap().text.clone();
+        assert!(
+            too_short.contains("no silence span reaches 469 ms"),
+            "{too_short}"
+        );
+        assert_ne!(
+            not_ready, too_short,
+            "the two refusals must be distinguishable"
+        );
+        assert_eq!(
+            repair_minimum_learn_project_frames(Rational::new(30, 1).unwrap()),
+            15
+        );
+    }
+
+    /// AU5 §5.9 rule 117 / B12: the three Part B capabilities are registered
+    /// with the kinds their names infer, and each carries its load-bearing
+    /// clause in the FIRST sentence — the only part `get_capability` and
+    /// `search_capabilities` publish.
+    #[test]
+    fn au5_part_b_capabilities_are_registered_with_their_inferred_kinds() {
+        let tools = KinewrightMcp::tools().unwrap();
+        let capabilities = crate::runtime::capabilities(&tools);
+        let kind = |name: &str| {
+            capabilities
+                .iter()
+                .find(|capability| capability.name == name)
+                .unwrap_or_else(|| panic!("{name} must be a capability"))
+                .kind
+        };
+        assert_eq!(kind("plan_dialogue_repair"), CapabilityKind::Planner);
+        assert_eq!(kind("plan_room_tone_fill"), CapabilityKind::Planner);
+        // Rule 114: no `get_`/`plan_`/`track_` prefix and no
+        // `CAPABILITY_KIND_OVERRIDES` entry, so inference falls through to
+        // `Action` — which is what a tool that writes bytes and applies its
+        // own operation is.
+        assert_eq!(kind("capture_room_tone"), CapabilityKind::Action);
+
+        let description = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} is registered"))
+                .description
+                .clone()
+                .unwrap_or_else(|| panic!("{name} carries a description"))
+                .to_string()
+        };
+        let repair = crate::runtime::first_sentence(&description("plan_dialogue_repair"));
+        assert!(repair.contains("REFUSE"), "{repair}");
+        assert!(
+            repair.contains("minimum_snr_gain_db_hundredths"),
+            "{repair}"
+        );
+        assert!(
+            repair.contains("higher floor and a lower gain"),
+            "rule 21's bias direction is load-bearing: {repair}"
+        );
+        let fill = crate::runtime::first_sentence(&description("plan_room_tone_fill"));
+        assert!(fill.contains("leading and interior gaps"), "{fill}");
+        assert!(fill.contains("never the trailing one"), "{fill}");
+        assert!(fill.contains("instead of failing the whole plan"), "{fill}");
+        let capture = crate::runtime::first_sentence(&description("capture_room_tone"));
+        assert!(capture.contains("WRITES BYTES"), "{capture}");
+        assert!(capture.contains("confirmation"), "{capture}");
+
+        // Rule 114's annotations: the capture is the only one of the three
+        // that is not read-only.
+        let annotations = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap()
+                .annotations
+                .clone()
+                .unwrap()
+        };
+        assert_eq!(annotations("capture_room_tone").read_only_hint, Some(false));
+        assert_eq!(
+            annotations("capture_room_tone").destructive_hint,
+            Some(true)
+        );
+        assert_eq!(
+            annotations("plan_dialogue_repair").read_only_hint,
+            Some(true)
+        );
+        assert_eq!(
+            annotations("plan_room_tone_fill").read_only_hint,
+            Some(true)
+        );
+    }
+
+    /// AU5 §5.8 rule 115 / B2: every `capture_room_tone` refusal that fires
+    /// before a byte is read, in the structured envelope `import_lut_asset`
+    /// uses.
+    ///
+    /// The unsaved-project arm short-circuits ahead of the argument checks, so
+    /// the four that follow it need a service whose project path is set (F5) —
+    /// without one they were unreachable and the doc comment claimed coverage
+    /// the test did not have. None of these arms reaches the confirmation, the
+    /// decoder or the store.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn au5_capture_room_tone_refuses_in_the_import_envelope() {
+        let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia::default());
+        let service = au5b_service(au5b_repair_document(), analysis);
+        let call = |arguments: serde_json::Value| {
+            service
+                .call_blocking(
+                    CallToolRequestParams::new("capture_room_tone")
+                        .with_arguments(arguments.as_object().unwrap().clone()),
+                )
+                .unwrap()
+        };
+        let unsaved = call(json!({
+            "expected_revision": 0,
+            "asset_id": 1,
+            "source_start_frame": 0,
+            "source_end_frame": 30
+        }));
+        assert_eq!(unsaved.is_error, Some(true));
+        let body = unsaved.structured_content.as_ref().unwrap();
+        assert_eq!(body["code"], "project_not_saved", "{body}");
+        assert_eq!(body["applied"], false);
+
+        let stale = call(json!({
+            "expected_revision": 7,
+            "asset_id": 1,
+            "source_start_frame": 0,
+            "source_end_frame": 30
+        }));
+        assert_eq!(
+            stale.structured_content.as_ref().unwrap()["code"],
+            "revision_conflict"
+        );
+
+        // The mandatory revision gate: `expected_revision` has no serde
+        // default, so omitting it is a malformed request rather than a silent
+        // zero.
+        assert!(
+            service
+                .call_blocking(
+                    CallToolRequestParams::new("capture_room_tone").with_arguments(
+                        json!({"asset_id": 1, "source_start_frame": 0, "source_end_frame": 30})
+                            .as_object()
+                            .unwrap()
+                            .clone()
+                    )
+                )
+                .is_err()
+        );
+        // `deny_unknown_fields`: a misspelled optional is refused, not ignored.
+        assert!(
+            service
+                .call_blocking(
+                    CallToolRequestParams::new("capture_room_tone").with_arguments(
+                        json!({
+                            "expected_revision": 0,
+                            "asset_id": 1,
+                            "source_start_frame": 0,
+                            "source_end_frame": 30,
+                            "nmae": "x"
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone()
+                    )
+                )
+                .is_err()
+        );
+
+        // F5: with a project path set, the argument refusals become reachable.
+        // The path need not exist — the store root is derived, and every arm
+        // below returns before anything is written.
+        let mut document = au5b_repair_document();
+        document.media_pool.push(MediaAsset {
+            id: AssetId(10),
+            path: PathBuf::from("long.wav"),
+            name: "two minutes".to_owned(),
+            duration: TimeCode(3_600),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Audio,
+            resolution: None,
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+            color_description: kinewright_core::ColorDescription::default(),
+        });
+        document.media_pool.push(MediaAsset {
+            id: AssetId(9),
+            path: PathBuf::from("silent.mp4"),
+            name: "picture only".to_owned(),
+            duration: TimeCode(300),
+            fps: Rational::new(30, 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((320, 180)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+            color_description: kinewright_core::ColorDescription::default(),
+        });
+        let core = Core::spawn(document).unwrap();
+        let playback: Arc<dyn Playback> = Arc::new(NoopMedia::default());
+        let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia::default());
+        let saved = KinewrightMcp::configured(
+            core,
+            playback,
+            analysis,
+            None,
+            ConfirmationBroker::default(),
+            true,
+            Arc::new(RwLock::new(Some(PathBuf::from(
+                "/tmp/kinewright-au5b/show.kinewright",
+            )))),
+        );
+        let call = |arguments: serde_json::Value| {
+            saved
+                .call_blocking(
+                    CallToolRequestParams::new("capture_room_tone")
+                        .with_arguments(arguments.as_object().unwrap().clone()),
+                )
+                .unwrap()
+        };
+        let refusal_code = |result: &CallToolResult| {
+            result.structured_content.as_ref().unwrap()["code"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let unknown = call(json!({
+            "expected_revision": 0,
+            "asset_id": 77,
+            "source_start_frame": 0,
+            "source_end_frame": 30
+        }));
+        assert_eq!(unknown.is_error, Some(true));
+        assert_eq!(refusal_code(&unknown), "unknown_asset", "{unknown:?}");
+
+        for (label, from, to) in [
+            ("inverted", 30, 10),
+            ("empty", 30, 30),
+            ("past the asset", 0, 301),
+            ("negative", -1, 30),
+        ] {
+            let refused = call(json!({
+                "expected_revision": 0,
+                "asset_id": 1,
+                "source_start_frame": from,
+                "source_end_frame": to
+            }));
+            assert_eq!(refused.is_error, Some(true), "{label}");
+            assert_eq!(refusal_code(&refused), "invalid_source_range", "{label}");
+        }
+
+        // F10: the store's 60 s cap is checked HERE, before the confirmation
+        // and before a ten-minute decode nobody can cancel.
+        // 2,400 frames of a 30 fps asset is 80 s. Reaching the store with it
+        // would have meant an 80-second synchronous decode first — and, in this
+        // test, a confirmation nobody answers.
+        let long = call(json!({
+            "expected_revision": 0,
+            "asset_id": 10,
+            "source_start_frame": 0,
+            "source_end_frame": 2_400
+        }));
+        assert_eq!(long.is_error, Some(true));
+        assert_eq!(
+            refusal_code(&long),
+            "room_tone_capture_too_long",
+            "{long:?}"
+        );
+        assert_eq!(
+            long.structured_content.as_ref().unwrap()["message"],
+            "source frames 0..2400 are 80000 ms of room tone, over the 60000 ms cap",
+            "{long:?}"
+        );
+
+        // A picture-only asset carries nothing to capture, and says so rather
+        // than failing inside the decoder.
+        let silent = call(json!({
+            "expected_revision": 0,
+            "asset_id": 9,
+            "source_start_frame": 0,
+            "source_end_frame": 30
+        }));
+        assert_eq!(silent.is_error, Some(true));
+        assert_eq!(refusal_code(&silent), "no_audio_stream", "{silent:?}");
     }
 
     /// AU5 §4.1 / A15 through a scripted analysis: the stale-revision
@@ -23567,20 +26574,76 @@ mod tests {
         // `COMPACT_TOOL_NAMES`, and the seven served tools embed no
         // `Operation` schema, so neither the new inspector nor the three new
         // descriptors can reach them.
+        //
+        // AU5 §5.9 Part B adds three hand-written capabilities —
+        // `plan_dialogue_repair` and `plan_room_tone_fill` (Planners by the
+        // `plan_` prefix) and `capture_room_tone` (an Action by inference, no
+        // prefix and no `CAPABILITY_KIND_OVERRIDES` entry) — so 54 generated
+        // operations + 84 inspectors = 138 and the registry grows by 9,000 B
+        // to 1,540,264 B = 1,397,156 B of input schemas + 120,458 B of
+        // descriptions.
+        //
+        // Nothing else moves at all, which is what makes the split trivial to
+        // check: Part B adds no `Operation` variant and no effect descriptor,
+        // so no generated tool and no spliced `effect_documentation()` row
+        // changes by a byte, and R84's pattern sentence — which has named
+        // `plan_dialogue_repair` on five tool descriptions since Part A — is
+        // deliberately left exactly as it was.
+        //
+        // The +5,726 B of input schemas is the three new argument schemas,
+        // whole:
+        //
+        //   2,207 B  `DialogueRepairPlanArgs`;
+        //   1,855 B  `RoomToneFillPlanArgs`;
+        //   1,664 B  `CaptureRoomToneArgs`.
+        //
+        // The +2,775 B of descriptions is the three new prose blocks, each
+        // inside rule 135's 1,024 B budget with its load-bearing clause in the
+        // FIRST sentence, because `get_capability` and `search_capabilities`
+        // publish only `first_sentence(description)`:
+        //
+        //     995 B  `plan_dialogue_repair` — that it REFUSES when the
+        //            measured SNR gain misses the minimum, and which way the
+        //            percentile floor biases that measurement (rule 21);
+        //     972 B  `plan_room_tone_fill` — leading and interior gaps only,
+        //            same-track and butt-joined, and a gap it cannot fill
+        //            exactly is skipped rather than failing the plan;
+        //     808 B  `capture_room_tone` — that it WRITES BYTES under the
+        //            project directory and therefore confirms first.
+        //
+        // Serialized, the three rows whole are 3,369 + 2,993 + 2,638 = 9,000,
+        // and the per-row sums close exactly: 2,207 + 995 = 3,202 against
+        // 3,369, 1,855 + 972 = 2,827 against 2,993, and 1,664 + 808 = 2,472
+        // against 2,638. The three remainders are 167, 166 and 166 B of name,
+        // annotations and JSON envelope. A row's envelope is **147 B plus its
+        // name**, which reproduces every earlier measurement — `get_audio_qc`
+        // 147 + 12 = 159, `get_audio_repair` 147 + 16 = 163,
+        // `plan_dialogue_repair` 147 + 20 = 167, `plan_room_tone_fill`
+        // 147 + 19 = 166 — and `capture_room_tone` reads 166 rather than its
+        // 147 + 17 = 164 because its description quotes the default asset name
+        // and `description_bytes` counts the two `"` unescaped while
+        // `serialized_bytes` counts them escaped. The two annotation sets cost
+        // the same: `read_only` true/`destructive` false and `read_only`
+        // false/`destructive` true are `true`+`false` either way.
+        //
+        // Served is byte-identical for the TWELFTH consecutive measurement,
+        // for the same structural reason as the eleventh: all three Part B
+        // capabilities are registry-only, reached through `invoke_capability`,
+        // whose argument schema is generic.
         assert_eq!(
             (
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_531_264, 5_660),
+            (1_540_264, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_391_430,
+            registry_metrics.input_schema_bytes, 1_397_156,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 117_683,
+            registry_metrics.description_bytes, 120_458,
             "registry={registry_metrics:?}"
         );
         // AU2 §6.4/B15, AU3 §4.2/A16, AU3 §6.4/B13, AU4 §4.3/A19,
@@ -26478,6 +29541,7 @@ mod tests {
     /// this string, so the strings are the contract. They were previously
     /// pinned by nothing at all.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn normalization_context_refuses_each_malformed_argument() {
         let mut document = au3_normalization_document();
         for (args, expected) in [
@@ -26548,6 +29612,106 @@ mod tests {
             "track selection already intersects audio bus 7 (Dialogue); remove or deliberately \
              revise that mix before normalizing"
         );
+
+        // AU5 §5.7 rule 111 / B11: the relaxation is narrow, and these are the
+        // arms that say how narrow. A bus carrying one `audio_gain` beside the
+        // repair prefix is NOT a repair prefix and still refuses; a bus whose
+        // `tracks` differ from the requested set still refuses, because
+        // extending it would silently re-target normalization at a different
+        // set; and an empty bus keeps the refusal it always had (R110).
+        let repair_prefix = || {
+            vec![
+                static_audio_effect(
+                    EffectId(11),
+                    "audio_denoise",
+                    &[("reduction_tenth_db", 120)],
+                ),
+                static_audio_effect(
+                    EffectId(12),
+                    "audio_declick",
+                    &[("max_click_milliseconds", 1)],
+                ),
+            ]
+        };
+        let bus = document.audio_mix.buses.last_mut().unwrap();
+        bus.effects = repair_prefix();
+        bus.effects.push(static_audio_effect(
+            EffectId(13),
+            "audio_gain",
+            &[("gain_tenth_db", -20)],
+        ));
+        assert_eq!(
+            normalization_context(&document, &au3_plan_args(vec![TrackId(3)])).unwrap_err(),
+            "track selection already intersects audio bus 7 (Dialogue); remove or deliberately \
+             revise that mix before normalizing",
+            "one non-repair node is enough to keep the refusal"
+        );
+
+        let bus = document.audio_mix.buses.last_mut().unwrap();
+        bus.effects = repair_prefix();
+        bus.tracks = vec![TrackId(2), TrackId(3)];
+        assert_eq!(
+            normalization_context(&document, &au3_plan_args(vec![TrackId(3)])).unwrap_err(),
+            "track selection already intersects audio bus 7 (Dialogue); remove or deliberately \
+             revise that mix before normalizing",
+            "the tracks-equality condition is not optional"
+        );
+
+        // The one accepted shape: a non-empty repair prefix over exactly the
+        // requested tracks. It EXTENDS bus 7 rather than allocating a new one,
+        // and carries every `AudioBus` field except `effects` (R35).
+        let bus = document.audio_mix.buses.last_mut().unwrap();
+        bus.tracks = vec![TrackId(3)];
+        bus.gain_tenth_db = -35;
+        bus.ducking_sidechain_tracks = vec![TrackId(2)];
+        let context = normalization_context(&document, &au3_plan_args(vec![TrackId(3)])).unwrap();
+        assert_eq!(context.bus_id, kinewright_core::AudioBusId(7));
+        let extends = context.extends.as_ref().expect("bus 7 is extended");
+        assert_eq!(extends.name, "Dialogue");
+        assert_eq!(extends.tracks, vec![TrackId(3)]);
+        assert_eq!(extends.gain_tenth_db, -35);
+        assert_eq!(extends.ducking_sidechain_tracks, vec![TrackId(2)]);
+        assert_eq!(
+            extends
+                .prefix
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["audio_denoise", "audio_declick"]
+        );
+        // Rule 112: the delivery processing is APPENDED to that prefix, the
+        // bus keeps its name, and the chain still ends in the 5 ms true-peak
+        // limiter — 15 + 5 = 20, exactly `CHAIN_LOOKAHEAD_MILLISECONDS`.
+        let extended = normalization_bus(
+            context.bus_id,
+            context.first_effect_id,
+            context.tracks.clone(),
+            -900,
+            -150,
+            -300,
+            context.extends.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(
+            extended
+                .effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "audio_denoise",
+                "audio_declick",
+                "audio_gain",
+                "audio_true_peak_limiter"
+            ]
+        );
+        assert_eq!(extended.name, "Dialogue", "the bus keeps its own name");
+        assert_eq!(extended.gain_tenth_db, -35, "the fader is not reset");
+        assert_eq!(extended.ducking_sidechain_tracks, vec![TrackId(2)]);
+        assert_eq!(
+            context.first_effect_id, 13,
+            "the appended ids start one past the prefix's own highest id"
+        );
     }
 
     /// AU3 §6.3/B11: the plan's limiter is the inter-sample-aware one, in every
@@ -26590,6 +29754,7 @@ mod tests {
                 gain,
                 peak,
                 -300,
+                None,
             )
             .unwrap();
             let names = bus

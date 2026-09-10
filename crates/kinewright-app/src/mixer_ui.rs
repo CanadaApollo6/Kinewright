@@ -443,6 +443,13 @@ pub(crate) struct MixerTelemetry {
     /// *measured*, an automation value is *derived*, and publishing it would
     /// duplicate document state in the engine.
     pub(crate) position: TimeCode,
+    /// AU5 §6.3 rule 128: the range a `Learn profile` on the selected chain
+    /// would read, or why there is not one.
+    ///
+    /// Read from `Analysis`, not from `Playback`, so `mixer_telemetry` leaves
+    /// it at its default and `mixer_panel` fills it: the Mixer paints one
+    /// chain at a time, so one answer is all the pane can use.
+    pub(crate) noise_learn: mixer_pane_ui::NoiseLearnRange,
 }
 
 /// Read the Mixer's telemetry for one frame (AU1 §5.1, AU3 §4.4).
@@ -464,6 +471,9 @@ pub(crate) fn mixer_telemetry(playback: &dyn Playback, playing: bool) -> MixerTe
         // Read playing or paused: `seek` sets the clock's fallback frame, so
         // the position follows a scrub as well as a transport (AU4 §4.5).
         position: playback.position(),
+        // AU5 §6.3: the learn range comes from `Analysis`, which this routine
+        // has no handle on. `mixer_panel` fills it for the selected chain.
+        noise_learn: mixer_pane_ui::NoiseLearnRange::default(),
     }
 }
 
@@ -475,13 +485,30 @@ pub(crate) struct MixerFrame {
     /// The `LOUDNESS` section's `Reset` was clicked (AU3 §4.4). Answered with
     /// `Playback::reset_loudness`, never with an operation.
     pub(crate) reset_loudness: bool,
+    /// AU5 §6.3 rule 126: a denoise card's `Learn profile` was clicked, and
+    /// which node on which chain asked.
+    ///
+    /// A **request**, not an edit — document edits leave the Mixer through
+    /// `InspectorEdits` — and a `Copy` pair, so `MixerFrame` stays `Copy`
+    /// (AU5 §0 R43). `AudioChain` is the spelling `MixerSelection::chain()`
+    /// already produces and the reduction map is already keyed by; AU5 adds no
+    /// second name for "which chain".
+    pub(crate) learn_noise_profile: Option<(AudioChain, EffectId)>,
 }
 
 impl KinewrightApp {
     /// The Mixer tab of the material strip (AU1 §5.1, AU2 §6.6, AU3 §4.4).
     pub(crate) fn mixer_panel(&mut self, ui: &mut egui::Ui) {
         let document = Arc::clone(&self.focused().document);
-        let telemetry = mixer_telemetry(self.playback.as_ref(), self.playing);
+        let mut telemetry = mixer_telemetry(self.playback.as_ref(), self.playing);
+        // AU5 §6.3 rule 127: the learn range is read once, for the one chain
+        // the pane is painting, and only when that chain carries a node that
+        // can use it — `timeline_silences` walks every clip in the document.
+        if let Some(selection) = self.mixer_selection
+            && chain_carries_denoise(&document, selection)
+        {
+            telemetry.noise_learn = self.noise_learn_range(selection.chain());
+        }
         // The bars measure against the export dialog's current profile target,
         // whatever the dialog's other settings say (AU3 §4.4, F12/F20).
         let target = export_delivery_profile(self.export_dialog.delivery_aspect).loudness_target();
@@ -500,8 +527,25 @@ impl KinewrightApp {
         if frame.reset_loudness {
             self.playback.reset_loudness();
         }
+        // A request, not an edit: it starts a measurement and writes nothing.
+        if let Some((chain, effect)) = frame.learn_noise_profile {
+            self.request_noise_profile(chain, effect);
+        }
         self.submit_inspector_edits(edits);
     }
+}
+
+/// Whether the selected chain carries a denoise node (AU5 §6.3 rule 127).
+///
+/// The gate on reading `Analysis::timeline_silences` at all: without a node to
+/// teach there is no `Learn profile` button, and the walk costs a pass over
+/// every clip in the project.
+pub(crate) fn chain_carries_denoise(document: &Document, selection: MixerSelection) -> bool {
+    let effects = match selection {
+        MixerSelection::Bus(id) => document.audio_mix.bus(id).map(|bus| &bus.effects),
+        MixerSelection::Master => Some(&document.audio_mix.master.effects),
+    };
+    effects.is_some_and(|effects| effects.iter().any(|effect| effect.name == "audio_denoise"))
 }
 
 /// The whole Mixer tab: the strips and, when one chain is selected, the pane
@@ -533,6 +577,7 @@ pub(crate) fn mixer_body(
     };
     let mut requested = selection;
     let mut reset_loudness = false;
+    let mut learn_noise_profile = None;
     let mut chain = MixerChainEdits::default();
     ui.horizontal_top(|ui| {
         // The pane owns a fixed column on the right; the strips take what is
@@ -559,6 +604,10 @@ pub(crate) fn mixer_body(
         });
         if let Some(current) = selection {
             ui.separator();
+            let mut learn = mixer_pane_ui::NoiseLearn {
+                range: telemetry.noise_learn,
+                requested: &mut learn_noise_profile,
+            };
             reset_loudness = mixer_pane_ui::chain_pane(
                 ui,
                 document,
@@ -568,6 +617,7 @@ pub(crate) fn mixer_body(
                 telemetry.position,
                 target,
                 &mut chain,
+                &mut learn,
             );
         }
     });
@@ -575,6 +625,7 @@ pub(crate) fn mixer_body(
     MixerFrame {
         selection: requested,
         reset_loudness,
+        learn_noise_profile,
     }
 }
 
@@ -1874,6 +1925,7 @@ mod tests {
             peaks: MixPeaks::default(),
             loudness,
             position: TimeCode::ZERO,
+            noise_learn: mixer_pane_ui::NoiseLearnRange::default(),
         };
         let mut levels = MixerMeterLevels::default();
         let mut edits = InspectorEdits::default();
@@ -2078,6 +2130,10 @@ mod tests {
         rects: Vec<(String, egui::Rect)>,
         /// Whether the last frame's `Reset` was clicked (AU3 §4.4).
         reset_loudness: bool,
+        /// AU5 §6.3: what the denoise card is told about the learn range.
+        noise_learn: mixer_pane_ui::NoiseLearnRange,
+        /// AU5 §6.3: the node the last frame's `Learn profile` named.
+        learn_noise_profile: Option<(AudioChain, EffectId)>,
     }
 
     /// 20 ms a frame: long enough that a press and the release after it are
@@ -2101,7 +2157,15 @@ mod tests {
                 time: 0.0,
                 rects: Vec::new(),
                 reset_loudness: false,
+                noise_learn: mixer_pane_ui::NoiseLearnRange::default(),
+                learn_noise_profile: None,
             }
+        }
+
+        /// Tell the denoise card what range a `Learn` would read (AU5 §6.3).
+        fn learning(mut self, range: mixer_pane_ui::NoiseLearnRange) -> Self {
+            self.noise_learn = range;
+            self
         }
 
         /// Open the pane on one chain, as its `Edit` toggle would.
@@ -2135,12 +2199,14 @@ mod tests {
                 peaks: self.peaks.clone(),
                 loudness: self.loudness,
                 position: self.position,
+                noise_learn: self.noise_learn,
             };
             let playing = self.playing;
             let selection = self.selection;
             let mut ended_with = MixerFrame {
                 selection,
                 reset_loudness: false,
+                learn_noise_profile: None,
             };
             let mut edits = InspectorEdits::default();
             let levels = &mut self.levels;
@@ -2162,6 +2228,7 @@ mod tests {
             });
             self.selection = ended_with.selection;
             self.reset_loudness = ended_with.reset_loudness;
+            self.learn_noise_profile = ended_with.learn_noise_profile;
             self.rects = STRIP_RECTS.with(|rects| rects.borrow().clone());
             for operation in edits.operations() {
                 operation
@@ -2766,6 +2833,11 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.vertical(|ui| {
                 ui.set_max_width(size::MIXER_CHAIN_PANE_WIDTH);
+                let mut requested = None;
+                let mut learn = mixer_pane_ui::NoiseLearn {
+                    range: mixer_pane_ui::NoiseLearnRange::default(),
+                    requested: &mut requested,
+                };
                 mixer_pane_ui::chain_card(
                     ui,
                     MixerChain::Bus(bus),
@@ -2774,6 +2846,7 @@ mod tests {
                     &levels,
                     TimeCode::ZERO,
                     &mut edits,
+                    &mut learn,
                 );
                 measured = ui.min_rect().size();
             });
@@ -2859,6 +2932,11 @@ mod tests {
             },
             |ui| {
                 ui.horizontal_top(|ui| {
+                    let mut requested = None;
+                    let mut learn = mixer_pane_ui::NoiseLearn {
+                        range: mixer_pane_ui::NoiseLearnRange::default(),
+                        requested: &mut requested,
+                    };
                     mixer_pane_ui::chain_pane(
                         ui,
                         document,
@@ -2868,6 +2946,7 @@ mod tests {
                         TimeCode::ZERO,
                         STREAMING_PLATFORM_TARGET,
                         &mut edits,
+                        &mut learn,
                     );
                     measured = ui.min_rect().size();
                 });
@@ -2901,6 +2980,11 @@ mod tests {
             |ui| {
                 ui.set_max_height(viewport_height);
                 ui.horizontal_top(|ui| {
+                    let mut requested = None;
+                    let mut learn = mixer_pane_ui::NoiseLearn {
+                        range: mixer_pane_ui::NoiseLearnRange::default(),
+                        requested: &mut requested,
+                    };
                     mixer_pane_ui::chain_pane(
                         ui,
                         document,
@@ -2910,6 +2994,7 @@ mod tests {
                         TimeCode::ZERO,
                         STREAMING_PLATFORM_TARGET,
                         &mut edits,
+                        &mut learn,
                     );
                     measured = ui.min_rect().size();
                 });
@@ -3399,10 +3484,10 @@ mod tests {
         );
     }
 
-    /// AU2 §7 B20: the six offered nodes, their eight display names, and the
-    /// two gates.
+    /// AU2 §7 B20, amended by AU5 §7 B13: the nine offered nodes, their
+    /// display names, and the two gates.
     #[test]
-    fn the_effect_menu_offers_six_nodes_and_gates_the_two_it_must() {
+    fn the_effect_menu_offers_nine_nodes_and_gates_the_two_it_must() {
         assert_eq!(
             mixer_pane_ui::INSERTABLE_AUDIO_EFFECTS,
             [
@@ -3410,13 +3495,16 @@ mod tests {
                 "audio_parametric_eq",
                 "audio_compressor",
                 "audio_gate",
+                "audio_denoise",
+                "audio_hum_removal",
+                "audio_declick",
                 "audio_ducking",
                 "audio_true_peak_limiter",
             ]
         );
         for legacy in ["audio_eq", "audio_limiter"] {
             assert!(
-                !mixer_pane_ui::is_audio_effect_insertable(legacy),
+                !mixer_pane_ui::INSERTABLE_AUDIO_EFFECTS.contains(&legacy),
                 "{legacy} is retained and processed but never offered"
             );
             assert!(
@@ -3425,7 +3513,6 @@ mod tests {
             );
         }
         for name in mixer_pane_ui::INSERTABLE_AUDIO_EFFECTS {
-            assert!(mixer_pane_ui::is_audio_effect_insertable(name));
             assert!(
                 !crate::inspector_ui::is_effect_insertable(name),
                 "the clip inspector still refuses every audio node"
@@ -3440,6 +3527,10 @@ mod tests {
             ("audio_parametric_eq", "Parametric EQ"),
             ("audio_gate", "Gate"),
             ("audio_true_peak_limiter", "True-peak limiter"),
+            // AU5 §6.1 rule 120.
+            ("audio_denoise", "Denoise"),
+            ("audio_hum_removal", "Hum removal"),
+            ("audio_declick", "De-click"),
         ] {
             assert_eq!(effect_display_name(name), display);
         }
@@ -3700,7 +3791,11 @@ mod tests {
             .parameters
             .insert("band1_hertz".to_owned(), ParamValue::Integer(1_000));
 
-        let sampled = mixer_pane_ui::eq_well_magnitudes(&boosted, TimeCode::ZERO);
+        let sampled = mixer_pane_ui::eq_well_magnitudes(
+            &boosted,
+            TimeCode::ZERO,
+            kinewright_media::parametric_eq_magnitude_db,
+        );
         assert_eq!(sampled.len(), mixer_pane_ui::EQ_WELL_SAMPLES);
         for (index, measured) in sampled.iter().enumerate() {
             let expected = kinewright_media::parametric_eq_magnitude_db(
@@ -3733,13 +3828,23 @@ mod tests {
         assert!(mixer_pane_ui::eq_well_y(rect, 24.0) <= rect.top() + 1e-3);
         assert!(mixer_pane_ui::eq_well_y(rect, -24.0) >= rect.bottom() - 1e-3);
 
-        let points = mixer_pane_ui::eq_well_points(&boosted, rect, TimeCode::ZERO);
+        let points = mixer_pane_ui::eq_well_points(
+            &boosted,
+            rect,
+            TimeCode::ZERO,
+            kinewright_media::parametric_eq_magnitude_db,
+        );
         assert_eq!(points.len(), mixer_pane_ui::EQ_WELL_SAMPLES);
         assert!(
             points.iter().any(|point| point.y < zero - 1.0),
             "a +6 dB band paints above the 0 dB line"
         );
-        let flat = mixer_pane_ui::eq_well_points(&effects[0], rect, TimeCode::ZERO);
+        let flat = mixer_pane_ui::eq_well_points(
+            &effects[0],
+            rect,
+            TimeCode::ZERO,
+            kinewright_media::parametric_eq_magnitude_db,
+        );
         assert!(
             flat.iter().all(|point| (point.y - zero).abs() < 0.5),
             "an all-neutral parametric EQ is a flat line on the 0 dB grid"
@@ -4186,12 +4291,35 @@ mod tests {
             "size-mixer-chain-pane-width",
             "size-mixer-eq-curve-height",
             "size-mixer-reduction-meter-height",
+            // AU5 §6.5 rule 133.
+            "size-mixer-noise-well-height",
         ] {
             assert!(
                 DESIGN.contains(token),
                 "DESIGN.md must list the token `{token}`"
             );
         }
+        // AU5 §6.5 rule 133: the three repair cards, the noise well, the
+        // `Learn profile` button and the fifteen-of-twenty sentence.
+        for expected in [
+            "The `+ Effect` menu offers nine nodes",
+            "Denoise, Hum removal and De-click, which belong at the head of a bus",
+            "thirty-one bars over −120…0 dB in",
+            "`No profile learned.` in `text-muted`",
+            "the floor the node was taught, not a meter",
+            "quiet is never a failure",
+            "`Learn profile` button, which measures the longest silence on the tracks",
+            "Silence analysis is still running for these tracks.",
+            "No silence span reaches 469 ms.",
+            "The three repair nodes declare fifteen of the chain's twenty",
+            "repaired bus can still take a delivery limiter and",
+        ] {
+            assert!(
+                mixer.contains(expected),
+                "DESIGN.md's Mixer section must state: {expected}"
+            );
+        }
+
         assert!(
             !mixer.contains("Bus strips are read-only"),
             "AU2 delivers the controls that sentence apologised for"
@@ -4781,13 +4909,51 @@ mod tests {
         );
     }
 
-    /// AU4 §7 B9 (rule 116): the pane still fits the dock it opens in.
+    /// AU4 §7 B9 (rule 116), extended by AU5 §6.5 rule 132: the pane still
+    /// fits the dock it opens in, master chain **and** repair-bearing bus.
     #[test]
     fn the_chain_pane_with_an_automation_section_still_fits_the_dock() {
-        const DOCK: f32 = 260.0;
+        for (label, document, selection) in [
+            ("master", chain_document_with_ride(), MixerSelection::Master),
+            (
+                "repair bus",
+                repair_document_with_ride(),
+                MixerSelection::Bus(AudioBusId(1)),
+            ),
+        ] {
+            the_chain_pane_still_fits_the_dock(label, &document, selection);
+        }
+    }
+
+    /// The master chain of AU4's worst case, with a fader ride on it.
+    fn chain_document_with_ride() -> Document {
         let mut document = chain_document_with_master();
         document.audio_mix.master.gain_curve = Some(gain_ride());
-        let column = measure_chain_pane(&document, MixerSelection::Master);
+        document
+    }
+
+    /// AU5 §6.5 rule 132: the same worst case with the three repair nodes at
+    /// the head of the bus, which is the chain `plan_dialogue_repair` builds.
+    fn repair_document_with_ride() -> Document {
+        let mut document = chain_document_with_ride();
+        let bus = &mut document.audio_mix.buses[0];
+        bus.gain_curve = Some(gain_ride());
+        bus.effects = chain_effects(&[
+            "audio_denoise",
+            "audio_hum_removal",
+            "audio_declick",
+            "audio_true_peak_limiter",
+        ]);
+        document
+    }
+
+    fn the_chain_pane_still_fits_the_dock(
+        label: &str,
+        document: &Document,
+        selection: MixerSelection,
+    ) {
+        const DOCK: f32 = 260.0;
+        let column = measure_chain_pane(document, selection);
         assert!(
             (column.x - size::MIXER_CHAIN_PANE_WIDTH).abs() <= 1.0,
             "the pane is still one 400 px column: {} px",
@@ -4799,7 +4965,7 @@ mod tests {
         // assumed: lay the pane out in a real 260 px viewport and check the
         // scroll area's content genuinely overflows it rather than the pane
         // stretching the dock open.
-        let (short, rects) = measure_chain_pane_in(&document, MixerSelection::Master, DOCK);
+        let (short, rects) = measure_chain_pane_in(document, selection, DOCK);
         let named = |name: &str| {
             rects
                 .iter()
@@ -4812,7 +4978,7 @@ mod tests {
         let viewport = named("chain_pane_viewport");
         let content = named("chain_pane_content");
         println!(
-            "AU4_CHAIN_PANE dock={DOCK} column={} viewport={} content={}",
+            "AU4_CHAIN_PANE case=\"{label}\" dock={DOCK} column={} viewport={} content={}",
             short.y,
             viewport.height(),
             content.height()
@@ -4834,5 +5000,207 @@ mod tests {
             content.height(),
             viewport.height()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // AU5 §6: the repair cards, the `Learn` gesture and the pane's fit
+    // -----------------------------------------------------------------------
+
+    /// A bus whose chain is exactly one repair node, so `expanded_card`'s
+    /// "the first, if nothing is remembered" rule expands the one under test.
+    fn repair_chain_document(name: &str) -> Document {
+        let mut document = mixer_document();
+        let bus = &mut document.audio_mix.buses[0];
+        bus.gain_tenth_db = -30;
+        bus.effects = chain_effects(&[name]);
+        document
+    }
+
+    /// Paint one frame of the mixer with a given learn range, and hand back
+    /// the text it painted, the operations it wrote, and the rects it laid
+    /// out (AU5 §7 B13).
+    fn painted_repair_mixer(
+        document: &Document,
+        noise_learn: mixer_pane_ui::NoiseLearnRange,
+    ) -> (Vec<String>, Vec<Operation>, Vec<(String, egui::Rect)>) {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let telemetry = MixerTelemetry {
+            peaks: MixPeaks::default(),
+            loudness: LoudnessSnapshot::default(),
+            position: TimeCode::ZERO,
+            noise_learn,
+        };
+        let mut levels = MixerMeterLevels::default();
+        let mut edits = InspectorEdits::default();
+        let _ = take_strip_rects();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let frame = mixer_body(
+                    ui,
+                    document,
+                    Some(MixerSelection::Bus(AudioBusId(1))),
+                    &telemetry,
+                    STREAMING_PLATFORM_TARGET,
+                    false,
+                    &mut levels,
+                    &mut edits,
+                );
+                assert!(frame.learn_noise_profile.is_none(), "nothing was clicked");
+            },
+        );
+        (
+            theme::painted_text(&output),
+            edits.operations().to_vec(),
+            take_strip_rects(),
+        )
+    }
+
+    /// AU5 §7 B13: a headless painted frame of each repair card writes **no**
+    /// operation, and only the denoise card carries a reduction bar.
+    #[test]
+    fn au5_a_painted_repair_card_writes_no_operation() {
+        for (name, display) in [
+            ("audio_denoise", "Denoise"),
+            ("audio_hum_removal", "Hum removal"),
+            ("audio_declick", "De-click"),
+        ] {
+            let document = repair_chain_document(name);
+            let effect = document.audio_mix.buses[0].effects[0].id;
+            for range in [
+                mixer_pane_ui::NoiseLearnRange::Analysing,
+                mixer_pane_ui::NoiseLearnRange::NoSilence,
+                mixer_pane_ui::NoiseLearnRange::Span(TimeCode(12), TimeCode(90)),
+            ] {
+                let (painted, operations, rects) = painted_repair_mixer(&document, range);
+                assert!(
+                    operations.is_empty(),
+                    "the {name} card writes no operation; with {range:?} it wrote {operations:?}"
+                );
+                assert!(
+                    painted.iter().any(|text| text == display),
+                    "the {name} card is named {display}; it painted {painted:?}"
+                );
+                let has = |key: &str| rects.iter().any(|(recorded, _)| recorded == key);
+                assert_eq!(
+                    has(&format!("reduction:{}", effect.0)),
+                    name == "audio_denoise",
+                    "only the denoise card has a gain computer to report ({name})"
+                );
+                assert_eq!(
+                    has(&format!("noise_well:{}", effect.0)),
+                    name == "audio_denoise",
+                    "only the denoise card carries the learned-floor well ({name})"
+                );
+                assert_eq!(
+                    has(&format!("eq_well:{}", effect.0)),
+                    name == "audio_hum_removal",
+                    "only the hum card carries the magnitude comb ({name})"
+                );
+                assert_eq!(
+                    has(&format!("learn:{}", effect.0)),
+                    name == "audio_denoise",
+                    "only the denoise card carries a `Learn profile` ({name})"
+                );
+
+                // AU5 §6.1 rule 120: the 31 profile rows are never dragged.
+                assert!(
+                    !rects
+                        .iter()
+                        .any(|(recorded, _)| recorded.contains("profile_band")),
+                    "the profile rows are read from the well, never dragged: {rects:?}"
+                );
+
+                // AU5 §7 B15: the two refusals are distinct and painted.
+                let refusals = [
+                    mixer_pane_ui::LEARN_ANALYSIS_RUNNING,
+                    mixer_pane_ui::LEARN_NO_SILENCE,
+                ];
+                assert_ne!(
+                    refusals[0], refusals[1],
+                    "collapsing the two would tell the editor the recording has no silence \
+                     when the analysis has simply not run"
+                );
+                let expected = match range {
+                    mixer_pane_ui::NoiseLearnRange::Analysing if name == "audio_denoise" => {
+                        Some(mixer_pane_ui::LEARN_ANALYSIS_RUNNING)
+                    }
+                    mixer_pane_ui::NoiseLearnRange::NoSilence if name == "audio_denoise" => {
+                        Some(mixer_pane_ui::LEARN_NO_SILENCE)
+                    }
+                    _ => None,
+                };
+                for refusal in refusals {
+                    assert_eq!(
+                        painted.iter().any(|text| text == refusal),
+                        expected == Some(refusal),
+                        "with {range:?} on {name}, `{refusal}` is painted only when it is true: \
+                         {painted:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// AU5 §7 B15 (§6.3 rule 126): `Learn profile` is a request, not an edit.
+    #[test]
+    fn au5_the_learn_button_asks_and_writes_nothing() {
+        let document = repair_chain_document("audio_denoise");
+        let effect = document.audio_mix.buses[0].effects[0].id;
+        let key = format!("learn:{}", effect.0);
+
+        // Enabled: the click travels out as a request and the frame's edits
+        // stay empty.
+        let mut harness = MixerHarness::new(document.clone())
+            .editing(MixerSelection::Bus(AudioBusId(1)))
+            .learning(mixer_pane_ui::NoiseLearnRange::Span(
+                TimeCode(12),
+                TimeCode(90),
+            ));
+        harness.frame(vec![]);
+        let button = harness.rect(&key).center();
+        harness.frame(vec![moved(button), pointer(button, true)]);
+        let edits = harness.frame(vec![pointer(button, false)]);
+        assert_eq!(
+            harness.learn_noise_profile,
+            Some((AudioChain::Bus(AudioBusId(1)), effect)),
+            "the card names the node and the chain, and nothing else"
+        );
+        assert!(
+            edits.operations().is_empty(),
+            "and it writes no operation: {:?}",
+            edits.operations()
+        );
+        assert_eq!(
+            harness.document, document,
+            "the document is byte-identical after the gesture"
+        );
+
+        // Refused: the button is disabled in both refusal states, so the same
+        // press produces no request at all.
+        for range in [
+            mixer_pane_ui::NoiseLearnRange::Analysing,
+            mixer_pane_ui::NoiseLearnRange::NoSilence,
+        ] {
+            let mut harness = MixerHarness::new(document.clone())
+                .editing(MixerSelection::Bus(AudioBusId(1)))
+                .learning(range);
+            harness.frame(vec![]);
+            let button = harness.rect(&key).center();
+            harness.frame(vec![moved(button), pointer(button, true)]);
+            let edits = harness.frame(vec![pointer(button, false)]);
+            assert_eq!(
+                harness.learn_noise_profile, None,
+                "{range:?} disables the button"
+            );
+            assert!(edits.operations().is_empty());
+        }
     }
 }

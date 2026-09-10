@@ -1,16 +1,23 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
     time::Duration,
 };
 
 use eframe::egui;
 use kinewright_agent::{ClaudeCodeDriver, CodexDriver, CursorAcpDriver};
 use kinewright_core::{
-    AgentDriver, Analysis, Command, Document, Event, Export, HarnessInfo, JournalCommand,
-    LiveAudioChange, MediaAsset, MediaError, MediaEvent, Operation, Playback, PlaybackState,
-    TimeCode, Track, TrackId, TrackKind,
+    AgentDriver, Analysis, AudioChain, Command, Document, Effect, EffectId, Event, Export,
+    HarnessInfo, JournalCommand, LiveAudioChange, MediaAsset, MediaError, MediaEvent,
+    MixNoiseProfileRequest, MixSpectrumPoint, NOISE_PROFILE_BAND_COUNT,
+    NOISE_PROFILE_PARAMETER_NAMES, Operation, ParamValue, Playback, PlaybackState, Rational,
+    SilenceStatus, TimeCode, Track, TrackId, TrackKind,
 };
 use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits};
 
@@ -19,6 +26,7 @@ use crate::{
     export_ui::{ExportDialog, ExportJob},
     icons::Icon,
     media_workflow::media_asset_requires_refresh,
+    mixer_pane_ui::{LEARN_NO_SILENCE, NoiseLearnRange},
     project::{
         ProjectSaveError, ProjectSaveReport, ProjectSession, derive_lut_store,
         focus_publishes_lut_library, index_after_close, project_name, session_index_by_id,
@@ -129,6 +137,15 @@ pub(crate) struct KinewrightApp {
     /// CC6 §8.1 Colour QC: the read-only measurement window and its single
     /// worker. Nothing in it can reach the document.
     pub(crate) color_qc: crate::color_qc_ui::ColorQcState,
+    /// AU5 §6.3 rule 127: the single-flight worker behind `Learn profile`.
+    pub(crate) noise_learn: NoiseLearnState,
+    /// AU5 §6.4 rule 129: finished room-tone captures on their way to one
+    /// `DoBatch`. Decode never runs on the UI thread (DESIGN.md).
+    pub(crate) room_tone_tx: mpsc::Sender<crate::timeline_ui::RoomToneCaptureResponse>,
+    pub(crate) room_tone_rx: mpsc::Receiver<crate::timeline_ui::RoomToneCaptureResponse>,
+    /// How many captures are still decoding, which is what keeps the frame
+    /// clock running while one is.
+    pub(crate) room_tone_pending: usize,
     /// CC6 §8.2 QC clipping mask: the program viewer's whole-picture
     /// replacement view and the working-proof worker behind it.
     pub(crate) qc_mask: crate::preview_ui::QcMaskState,
@@ -215,6 +232,7 @@ impl KinewrightApp {
         let media_events = media.events();
         let visual_cache = crate::visual_cache::VisualCache::new(media.visual_asset_results());
         let (probe_tx, probe_rx) = mpsc::channel();
+        let (room_tone_tx, room_tone_rx) = mpsc::channel();
         let (relink_probe_tx, relink_probe_rx) = mpsc::channel();
         let (lut_import_tx, lut_import_rx) = mpsc::channel();
         let (lut_restore_tx, lut_restore_rx) = mpsc::channel();
@@ -314,6 +332,10 @@ impl KinewrightApp {
             texture: None,
             color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
             color_qc: crate::color_qc_ui::ColorQcState::default(),
+            noise_learn: NoiseLearnState::default(),
+            room_tone_tx,
+            room_tone_rx,
+            room_tone_pending: 0,
             qc_mask: crate::preview_ui::QcMaskState::default(),
             working_proof_cache: std::sync::Arc::default(),
             matte_overlay: crate::matte_overlay_ui::MatteOverlayState::default(),
@@ -1000,6 +1022,8 @@ impl KinewrightApp {
         if self.color_qc.is_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
+        self.poll_noise_learn(ctx);
+        self.poll_room_tone(ctx);
         self.poll_recording(ctx);
         self.poll_media_workflow(ctx);
         self.recover_stranded_ab_hold(ctx);
@@ -2154,6 +2178,512 @@ pub(crate) fn run() -> eframe::Result {
     )
 }
 
+// ---------------------------------------------------------------------------
+// AU5 §6.3: the `Learn profile` worker
+// ---------------------------------------------------------------------------
+
+/// AU5 §3.7 rule 63: the shortest range a noise profile can be learned from,
+/// in **audio sample frames** at the render rate.
+///
+/// `NOISE_PROFILE_SEGMENT_FRAMES + 9 × NOISE_PROFILE_HOP_FRAMES` — ten
+/// windows, the fewest a 20th percentile means anything over. The media crate
+/// keeps its own copy `pub(crate)` and re-checks the rendered count itself, so
+/// this one is the app's *gate*, never the authority: `mix_noise_profile`
+/// refuses a short range by name whatever the app believed.
+pub(crate) const NOISE_PROFILE_MINIMUM_SAMPLE_FRAMES: u64 = 22_528;
+/// The rate `mix_noise_profile` renders at (`export.rs`'s `AUDIO_RATE`).
+pub(crate) const NOISE_PROFILE_SAMPLE_RATE: u64 = 48_000;
+/// What a `Learn` says when the machine could not give it a thread.
+pub(crate) const LEARN_WORKER_UNAVAILABLE: &str = "Could not start the noise profile worker";
+
+/// `ceil(22 528 / 48 000 × fps)`, computed rather than written down (AU5 §3.7
+/// rule 63).
+///
+/// The three frame domains are audio sample, source and project. This turns
+/// the sample-frame minimum into either of the other two, given that domain's
+/// rate: a project minimum at `document.fps`, a source minimum at
+/// `asset.fps` — which for an audio-only asset is `Rational::default()`, 30/1.
+pub(crate) fn noise_profile_minimum_frames(fps: Rational) -> u64 {
+    let numerator = NOISE_PROFILE_MINIMUM_SAMPLE_FRAMES * u64::from(fps.numerator());
+    let denominator = NOISE_PROFILE_SAMPLE_RATE * u64::from(fps.denominator());
+    numerator.div_ceil(denominator.max(1))
+}
+
+/// The tracks whose signal reaches one chain (AU5 §6.3 rule 127).
+///
+/// A bus is fed by exactly the tracks it lists; the master is fed by every
+/// track in the project, because every track reaches it through a bus or
+/// directly. `validate_audio_mix` already forbids a track in two buses, so
+/// the bus answer needs no de-duplication.
+pub(crate) fn tracks_feeding_chain(document: &Document, chain: AudioChain) -> Vec<TrackId> {
+    match chain {
+        AudioChain::Bus(id) => document
+            .audio_mix
+            .bus(id)
+            .map(|bus| bus.tracks.clone())
+            .unwrap_or_default(),
+        AudioChain::Master => document.tracks.iter().map(|track| track.id).collect(),
+    }
+}
+
+/// One learn measurement, as the worker delivers it.
+struct NoiseProfileResponse {
+    generation: u64,
+    session: u64,
+    chain: AudioChain,
+    effect: EffectId,
+    result: Result<[i32; NOISE_PROFILE_BAND_COUNT], String>,
+}
+
+/// A learn the app accepted while a worker was still measuring.
+struct NoiseProfileJob {
+    generation: u64,
+    session: u64,
+    chain: AudioChain,
+    effect: EffectId,
+    analysis: Arc<dyn Analysis>,
+    document: Arc<Document>,
+    request: MixNoiseProfileRequest,
+}
+
+/// The running worker and the flag that retires it.
+struct LearnWorker {
+    cancelled: Arc<AtomicBool>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl LearnWorker {
+    fn retire(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+}
+
+/// AU5 §6.3 rule 127: the single-flight machine behind `Learn profile`.
+///
+/// The colour-QC pattern in miniature, and for the same reason:
+/// `mix_noise_profile` decodes and renders a mix range, which must not happen
+/// on a frame. Latest request wins — a second click parks in `queued` rather
+/// than starting a second render — and a response is accepted only if its
+/// generation is still the live one, so a superseded measurement can never
+/// land in the document.
+pub(crate) struct NoiseLearnState {
+    active: Option<LearnWorker>,
+    queued: Option<NoiseProfileJob>,
+    /// The generation the app is waiting for, if any.
+    pending: Option<u64>,
+    generation: u64,
+    response_tx: mpsc::Sender<NoiseProfileResponse>,
+    response_rx: mpsc::Receiver<NoiseProfileResponse>,
+    #[cfg(test)]
+    spawned_workers: u64,
+    /// Refuse the next thread spawn, so the arm that reports a worker that
+    /// could not start has a test.
+    #[cfg(test)]
+    refuse_next_spawn: bool,
+}
+
+impl std::fmt::Debug for NoiseLearnState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NoiseLearnState")
+            .field("pending", &self.pending)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for NoiseLearnState {
+    fn default() -> Self {
+        // Unbounded, exactly as the colour-QC channel is: a superseded worker
+        // is retired by its flag and filtered by generation, so a full queue
+        // must never be able to drop the response the app is waiting for.
+        let (response_tx, response_rx) = mpsc::channel();
+        Self {
+            active: None,
+            queued: None,
+            pending: None,
+            generation: 0,
+            response_tx,
+            response_rx,
+            #[cfg(test)]
+            spawned_workers: 0,
+            #[cfg(test)]
+            refuse_next_spawn: false,
+        }
+    }
+}
+
+impl NoiseLearnState {
+    #[must_use]
+    pub(crate) const fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Accept one learn request. Latest wins.
+    fn request(&mut self, job: NoiseProfileJob) {
+        self.generation = self.generation.wrapping_add(1);
+        let job = NoiseProfileJob {
+            generation: self.generation,
+            ..job
+        };
+        self.pending = Some(self.generation);
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|worker| !LearnWorker::is_finished(worker))
+        {
+            if let Some(worker) = self.active.as_ref() {
+                worker.retire();
+            }
+            self.queued = Some(job);
+            return;
+        }
+        self.reap_finished_worker();
+        self.spawn(job);
+    }
+
+    fn spawn(&mut self, job: NoiseProfileJob) {
+        let NoiseProfileJob {
+            generation,
+            session,
+            chain,
+            effect,
+            analysis,
+            document,
+            request,
+        } = job;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let response_tx = self.response_tx.clone();
+        let spawn_result = if self.spawn_is_refused() {
+            Err(std::io::Error::other(LEARN_WORKER_UNAVAILABLE))
+        } else {
+            thread::Builder::new()
+                .name("kinewright-noise-profile".to_owned())
+                .spawn(move || {
+                    let result = analysis
+                        .mix_noise_profile(&document, &request)
+                        .map(|report| report.bands)
+                        .map_err(|error| error.to_string());
+                    if worker_cancelled.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let _ = response_tx.send(NoiseProfileResponse {
+                        generation,
+                        session,
+                        chain,
+                        effect,
+                        result,
+                    });
+                })
+        };
+        let Ok(handle) = spawn_result else {
+            // `pending` stays `Some(generation)`: `poll` drops any response
+            // whose generation is not the pending one, so clearing it here
+            // would swallow the very error this arm exists to report and the
+            // click would look like it did nothing.
+            self.active = None;
+            let _ = self.response_tx.send(NoiseProfileResponse {
+                generation,
+                session,
+                chain,
+                effect,
+                result: Err(LEARN_WORKER_UNAVAILABLE.to_owned()),
+            });
+            return;
+        };
+        #[cfg(test)]
+        {
+            self.spawned_workers += 1;
+        }
+        self.active = Some(LearnWorker { cancelled, handle });
+    }
+
+    /// Whether this spawn is refused before it is attempted.
+    ///
+    /// Always `false` outside tests. A refused thread spawn is the one arm of
+    /// the worker no fixture can otherwise reach — the OS has to run out of
+    /// threads — and it is exactly the arm that swallowed its own error until
+    /// the pass-1 review found it, so it gets a seam rather than no cover.
+    #[cfg(test)]
+    fn spawn_is_refused(&mut self) -> bool {
+        std::mem::take(&mut self.refuse_next_spawn)
+    }
+
+    #[cfg(not(test))]
+    #[allow(clippy::unused_self)]
+    const fn spawn_is_refused(&mut self) -> bool {
+        false
+    }
+
+    fn reap_finished_worker(&mut self) {
+        if self.active.as_ref().is_some_and(LearnWorker::is_finished)
+            && let Some(worker) = self.active.take()
+        {
+            let _ = worker.handle.join();
+        }
+    }
+
+    /// Drain worker responses, accepting only the live generation, and start a
+    /// parked request when the running worker is done.
+    fn poll(&mut self) -> Vec<NoiseProfileResponse> {
+        let mut accepted = Vec::new();
+        while let Ok(response) = self.response_rx.try_recv() {
+            if self.pending != Some(response.generation) {
+                continue;
+            }
+            self.pending = None;
+            accepted.push(response);
+        }
+        self.reap_finished_worker();
+        if self.active.is_none()
+            && let Some(job) = self.queued.take()
+        {
+            self.spawn(job);
+        }
+        accepted
+    }
+
+    #[cfg(test)]
+    const fn spawned_workers(&self) -> u64 {
+        self.spawned_workers
+    }
+
+    /// Refuse the next thread spawn, so R136's arm has a test.
+    #[cfg(test)]
+    const fn refusing_next_spawn(mut self) -> Self {
+        self.refuse_next_spawn = true;
+        self
+    }
+}
+
+impl KinewrightApp {
+    /// AU5 §6.3 rule 127: the range a `Learn profile` on the selected chain
+    /// would read, or why there is not one.
+    ///
+    /// The routine takes `(document, range, minimum_source_frames)` and has no
+    /// track argument, so the **caller** filters the answer on
+    /// `TimelineSilenceSpan.track`. The minimum handed down is the smallest
+    /// any relevant asset could need, so nothing long enough is filtered out
+    /// on the way; the project-frame gate below is the one that decides.
+    pub(crate) fn noise_learn_range(&self, chain: AudioChain) -> NoiseLearnRange {
+        let session = self.focused();
+        let document = &session.document;
+        let tracks = tracks_feeding_chain(document, chain);
+        if tracks.is_empty() {
+            return NoiseLearnRange::NoSilence;
+        }
+        let assets = assets_on_tracks(document, &tracks);
+        if assets.is_empty() {
+            return NoiseLearnRange::NoSilence;
+        }
+        let mut minimum_source_frames = u64::MAX;
+        for asset in &assets {
+            let status = self.analysis.silence_status(asset);
+            match status {
+                SilenceStatus::Ready(_) => {}
+                // Nothing to learn from an asset with no audio, and a failed
+                // or cancelled analysis is not "still running" — neither can
+                // ever become a span, so neither holds the card at the first
+                // refusal.
+                SilenceStatus::NoAudio | SilenceStatus::Failed(_) | SilenceStatus::Cancelled => {
+                    continue;
+                }
+                SilenceStatus::NotRequested
+                | SilenceStatus::Queued
+                | SilenceStatus::Hashing
+                | SilenceStatus::Analyzing => {
+                    // Ask for it, then say so. The card is the only surface
+                    // that wants this analysis for a bus.
+                    if matches!(status, SilenceStatus::NotRequested) {
+                        self.analysis.request_silence_detection(asset.clone());
+                    }
+                    return NoiseLearnRange::Analysing;
+                }
+            }
+            minimum_source_frames =
+                minimum_source_frames.min(noise_profile_minimum_frames(asset.fps));
+        }
+        if minimum_source_frames == u64::MAX {
+            return NoiseLearnRange::NoSilence;
+        }
+        let Ok(spans) = self.analysis.timeline_silences(
+            document,
+            None,
+            TimeCode(i64::try_from(minimum_source_frames).unwrap_or(i64::MAX)),
+        ) else {
+            return NoiseLearnRange::NoSilence;
+        };
+        let minimum_project_frames =
+            i64::try_from(noise_profile_minimum_frames(document.fps)).unwrap_or(i64::MAX);
+        spans
+            .into_iter()
+            .filter(|span| tracks.contains(&span.track))
+            .filter(|span| span.project_end.0 - span.project_start.0 >= minimum_project_frames)
+            .max_by_key(|span| span.project_end.0 - span.project_start.0)
+            .map_or(NoiseLearnRange::NoSilence, |span| {
+                NoiseLearnRange::Span(span.project_start, span.project_end)
+            })
+    }
+
+    /// AU5 §6.3: start one learn measurement for the node the card named.
+    pub(crate) fn request_noise_profile(&mut self, chain: AudioChain, effect: EffectId) {
+        let NoiseLearnRange::Span(start, end) = self.noise_learn_range(chain) else {
+            // The button is disabled in both refusal states, so this is a
+            // race — the analysis retired between the paint and the click —
+            // not a path the editor can reach by clicking twice.
+            self.record_error("Mixer", LEARN_NO_SILENCE);
+            return;
+        };
+        let session = self.focused();
+        let job = NoiseProfileJob {
+            generation: 0,
+            session: session.id,
+            chain,
+            effect,
+            analysis: Arc::clone(&self.analysis),
+            document: Arc::clone(&session.document),
+            request: MixNoiseProfileRequest {
+                range: Some(start..end),
+                point: match chain {
+                    AudioChain::Bus(id) => MixSpectrumPoint::Bus(id),
+                    AudioChain::Master => MixSpectrumPoint::Master,
+                },
+            },
+        };
+        self.noise_learn.request(job);
+        "Learning the noise floor\u{2026}".clone_into(&mut self.status);
+    }
+
+    /// AU5 §6.3 rule 127: land one accepted measurement as **one** chain set.
+    fn apply_noise_profile(
+        &mut self,
+        session: u64,
+        chain: AudioChain,
+        effect: EffectId,
+        bands: [i32; NOISE_PROFILE_BAND_COUNT],
+    ) {
+        if self.focused().id != session {
+            // The measurement describes a document that is no longer in front
+            // of the editor. Dropping it is the only honest answer: the
+            // operation would go to whatever project happens to be focused.
+            return;
+        }
+        let document = Arc::clone(&self.focused().document);
+        let Some(operation) = noise_profile_operation(&document, chain, effect, &bands) else {
+            self.record_error(
+                "Mixer",
+                "The denoise node the profile was learned for is no longer on this chain",
+            );
+            return;
+        };
+        // One undo entry: a fresh gesture identity under the chain's own
+        // coalesce key, so a second `Learn` is a second entry rather than a
+        // continuation of the first.
+        let gesture = self.begin_edit_gesture();
+        let key = match chain {
+            AudioChain::Bus(id) => crate::mixer_ui::MixerSelection::Bus(id).coalesce_key(),
+            AudioChain::Master => crate::mixer_ui::MixerSelection::Master.coalesce_key(),
+        };
+        self.send_operations_coalesced(vec![operation], format!("{key}#{gesture}"));
+        "Learned the noise floor".clone_into(&mut self.status);
+    }
+
+    /// Drain the learn worker; called from `poll_background`.
+    fn poll_noise_learn(&mut self, ctx: &egui::Context) {
+        for response in self.noise_learn.poll() {
+            match response.result {
+                Ok(bands) => self.apply_noise_profile(
+                    response.session,
+                    response.chain,
+                    response.effect,
+                    bands,
+                ),
+                Err(error) => {
+                    self.record_error("Mixer", format!("Could not learn a noise profile: {error}"));
+                }
+            }
+        }
+        if self.noise_learn.is_pending() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+    }
+}
+
+/// Every asset a clip on one of these tracks plays.
+fn assets_on_tracks(document: &Document, tracks: &[TrackId]) -> Vec<MediaAsset> {
+    let mut assets: Vec<MediaAsset> = Vec::new();
+    for track in document.tracks.iter().filter(|t| tracks.contains(&t.id)) {
+        for clip in &track.clips {
+            // Titles and freezes carry no source audio to learn from; a title
+            // clip does not even use its `asset` field.
+            if !clip.content.is_media() {
+                continue;
+            }
+            if assets.iter().any(|held| held.id == clip.asset) {
+                continue;
+            }
+            if let Some(found) = document
+                .media_pool
+                .iter()
+                .find(|held| held.id == clip.asset)
+            {
+                assets.push(found.clone());
+            }
+        }
+    }
+    assets
+}
+
+/// The one operation a completed learn writes (AU5 §6.3 rule 127).
+///
+/// Written as a whole-chain set, because `UpsertAudioBus` and `SetAudioMaster`
+/// are the only shapes a chain edit has: there is no per-parameter operation,
+/// which is exactly why one `Learn` is one undo entry.
+fn noise_profile_operation(
+    document: &Document,
+    chain: AudioChain,
+    effect: EffectId,
+    bands: &[i32; NOISE_PROFILE_BAND_COUNT],
+) -> Option<Operation> {
+    match chain {
+        AudioChain::Bus(id) => {
+            let mut bus = document.audio_mix.bus(id)?.clone();
+            write_noise_profile(&mut bus.effects, effect, bands)?;
+            Some(Operation::UpsertAudioBus { bus })
+        }
+        AudioChain::Master => {
+            let mut master = document.audio_mix.master.clone();
+            write_noise_profile(&mut master.effects, effect, bands)?;
+            Some(Operation::SetAudioMaster { master })
+        }
+    }
+}
+
+/// Write all 31 bands into one denoise node, or refuse.
+///
+/// All 31 or none (AU5 §2.1): a partially written profile is not a profile,
+/// and the runtime's "all 31 at the neutral means unity gain" rule reads the
+/// whole block.
+fn write_noise_profile(
+    effects: &mut [Effect],
+    effect: EffectId,
+    bands: &[i32; NOISE_PROFILE_BAND_COUNT],
+) -> Option<()> {
+    let node = effects
+        .iter_mut()
+        .find(|candidate| candidate.id == effect && candidate.name == "audio_denoise")?;
+    for (name, band) in NOISE_PROFILE_PARAMETER_NAMES.iter().zip(bands) {
+        node.parameters
+            .insert((*name).to_owned(), ParamValue::Integer(i64::from(*band)));
+    }
+    Some(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2855,6 +3385,428 @@ mod tests {
                 solo: false,
             }),
             "Set mix on track 1 (gain +0.0 dB, pan 0, mute false, solo false)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AU5 §6.3: the `Learn profile` worker
+    // -----------------------------------------------------------------------
+
+    /// AU5 §3.7 rule 63: the three frame domains, derived and never written
+    /// down.
+    #[test]
+    fn au5_the_learn_minimum_is_derived_per_rate() {
+        use kinewright_core::Rational;
+        let thirty = Rational::new(30, 1).unwrap();
+        // 22 528 / 48 000 s = 469.33 ms; at 30 fps that is 14.08 frames, and
+        // the ceiling is what makes a range long enough rather than nearly so.
+        assert_eq!(super::noise_profile_minimum_frames(thirty), 15);
+        assert_eq!(
+            super::noise_profile_minimum_frames(Rational::new(24, 1).unwrap()),
+            12
+        );
+        assert_eq!(
+            super::noise_profile_minimum_frames(Rational::new(25, 1).unwrap()),
+            12
+        );
+        assert_eq!(
+            super::noise_profile_minimum_frames(Rational::new(60, 1).unwrap()),
+            29
+        );
+        // 48 000 sample frames a second is the render rate, so the sample
+        // domain is the constant itself.
+        assert_eq!(
+            super::noise_profile_minimum_frames(Rational::new(48_000, 1).unwrap()),
+            super::NOISE_PROFILE_MINIMUM_SAMPLE_FRAMES
+        );
+        // A drop-frame rate is exact rather than rounded to its nominal.
+        assert_eq!(
+            super::noise_profile_minimum_frames(Rational::new(30_000, 1_001).unwrap()),
+            15
+        );
+    }
+
+    /// AU5 §6.3 rule 127: the tracks feeding one chain.
+    #[test]
+    fn au5_the_learn_range_reads_the_tracks_feeding_the_chain() {
+        use kinewright_core::{AudioBus, AudioBusId, AudioChain, Document, Track, TrackKind};
+        let mut document = Document {
+            tracks: vec![
+                Track {
+                    id: super::TrackId(1),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                },
+                Track {
+                    id: super::TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                },
+            ],
+            ..Document::default()
+        };
+        document.audio_mix.buses.push(AudioBus {
+            id: AudioBusId(1),
+            name: "Dialogue".to_owned(),
+            tracks: vec![super::TrackId(2)],
+            gain_tenth_db: 0,
+            gain_curve: None,
+            effects: Vec::new(),
+            ducking_sidechain_tracks: Vec::new(),
+        });
+        assert_eq!(
+            super::tracks_feeding_chain(&document, AudioChain::Bus(AudioBusId(1))),
+            vec![super::TrackId(2)],
+            "a bus is fed by exactly the tracks it lists"
+        );
+        assert_eq!(
+            super::tracks_feeding_chain(&document, AudioChain::Master),
+            vec![super::TrackId(1), super::TrackId(2)],
+            "the master is fed by every track"
+        );
+        assert!(
+            super::tracks_feeding_chain(&document, AudioChain::Bus(AudioBusId(9))).is_empty(),
+            "an unknown bus feeds nothing rather than panicking"
+        );
+    }
+
+    /// AU5 §7 B15: one completed `Learn` is **one** operation under the
+    /// chain's own coalesce key, and one `Undo` puts the document back.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn au5_one_learn_completion_is_one_operation_and_one_undo() {
+        use kinewright_core::{
+            AudioBus, AudioBusId, AudioChain, Command, Core, Document, Effect, EffectId, Event,
+            NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, ParamValue,
+        };
+        let mut denoise = Effect {
+            id: EffectId(1),
+            name: "audio_denoise".to_owned(),
+            parameters: std::collections::BTreeMap::new(),
+            keyframes: std::collections::BTreeMap::new(),
+        };
+        for (name, value) in [
+            ("bypass", 0),
+            ("reduction_tenth_db", 0),
+            ("floor_offset_tenth_db", 0),
+            ("smoothing_milliseconds", 50),
+            ("lookahead_milliseconds", 12),
+        ] {
+            denoise
+                .parameters
+                .insert(name.to_owned(), ParamValue::Integer(value));
+        }
+        let mut document = Document {
+            tracks: vec![kinewright_core::Track {
+                id: super::TrackId(1),
+                kind: kinewright_core::TrackKind::Audio,
+                sync_lock: true,
+                clips: Vec::new(),
+            }],
+            ..Document::default()
+        };
+        document.audio_mix.buses.push(AudioBus {
+            id: AudioBusId(3),
+            name: "Dialogue".to_owned(),
+            tracks: vec![super::TrackId(1)],
+            gain_tenth_db: 0,
+            gain_curve: None,
+            effects: vec![denoise],
+            ducking_sidechain_tracks: Vec::new(),
+        });
+        let original = document.clone();
+
+        let mut bands = [-1_200; NOISE_PROFILE_BAND_COUNT];
+        for (index, band) in bands.iter_mut().enumerate() {
+            *band = -900 + i32::try_from(index).unwrap() * 10;
+        }
+        let operation = super::noise_profile_operation(
+            &document,
+            AudioChain::Bus(AudioBusId(3)),
+            EffectId(1),
+            &bands,
+        )
+        .expect("the node is on the chain");
+        let super::Operation::UpsertAudioBus { bus } = &operation else {
+            panic!("a learn writes one whole-chain set; it wrote {operation:?}");
+        };
+        let node = &bus.effects[0];
+        for (index, name) in NOISE_PROFILE_PARAMETER_NAMES.iter().enumerate() {
+            assert_eq!(
+                node.parameters.get(*name),
+                Some(&ParamValue::Integer(i64::from(bands[index]))),
+                "all 31 or none: {name} is missing"
+            );
+        }
+        assert_eq!(
+            node.parameters.len(),
+            5 + NOISE_PROFILE_BAND_COUNT,
+            "the five controls survive the learn untouched"
+        );
+        assert_eq!(
+            node.parameters.get("smoothing_milliseconds"),
+            Some(&ParamValue::Integer(50))
+        );
+
+        // The coalesce key is the chain's own, so a second learn is a second
+        // undo entry rather than a continuation of the first.
+        assert_eq!(
+            crate::mixer_ui::MixerSelection::Bus(AudioBusId(3)).coalesce_key(),
+            "audio_bus:3"
+        );
+        assert_eq!(
+            crate::mixer_ui::MixerSelection::Master.coalesce_key(),
+            "audio_master"
+        );
+
+        let core = Core::spawn(original.clone()).unwrap();
+        assert!(matches!(
+            core.request(Command::DoBatchCoalesced {
+                operations: vec![operation],
+                coalesce_key: "audio_bus:3#7".to_owned(),
+            })
+            .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+            panic!("undo returns the restored document");
+        };
+        assert_eq!(
+            *doc, original,
+            "one `Undo` restores the pre-gesture document"
+        );
+
+        // A node that left the chain between the request and the response is
+        // refused rather than written to whatever node now holds that id.
+        document.audio_mix.buses[0].effects.clear();
+        assert!(
+            super::noise_profile_operation(
+                &document,
+                AudioChain::Bus(AudioBusId(3)),
+                EffectId(1),
+                &bands
+            )
+            .is_none()
+        );
+    }
+
+    /// An `Analysis` whose `mix_noise_profile` blocks until its gate opens.
+    ///
+    /// The only way to have two learn requests in flight at once without a
+    /// real engine, and the only thing the worker tests need from `Analysis`
+    /// at all — every other method is the `NotImplemented` shape the app's own
+    /// stubs use.
+    struct GatedAnalysis {
+        gate: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl std::fmt::Debug for GatedAnalysis {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("GatedAnalysis")
+        }
+    }
+    impl kinewright_core::Analysis for GatedAnalysis {
+        fn probe(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<kinewright_core::MediaAsset, super::MediaError> {
+            Err(super::MediaError::NotImplemented)
+        }
+        fn thumbnail_at(
+            &self,
+            _at: super::TimeCode,
+            _max_width: u32,
+        ) -> Result<kinewright_core::RgbaImage, super::MediaError> {
+            Err(super::MediaError::NotImplemented)
+        }
+        fn timeline_transcript(
+            &self,
+            _document: &kinewright_core::Document,
+            _range: Option<std::ops::Range<super::TimeCode>>,
+        ) -> Result<Vec<kinewright_core::TimelineTranscriptWord>, super::MediaError> {
+            Ok(Vec::new())
+        }
+        fn request_waveform(&self, _asset: kinewright_core::MediaAsset, _generation: u64) -> bool {
+            false
+        }
+        fn request_thumbnail(
+            &self,
+            _asset: kinewright_core::MediaAsset,
+            _source_at: super::TimeCode,
+            _max_width: u32,
+            _generation: u64,
+        ) -> bool {
+            false
+        }
+        fn visual_asset_results(
+            &self,
+        ) -> crossbeam_channel::Receiver<kinewright_core::VisualAssetResult> {
+            crossbeam_channel::bounded(0).1
+        }
+        fn request_transcription(&self, _asset: kinewright_core::MediaAsset) {}
+        fn transcript_status(
+            &self,
+            _asset: &kinewright_core::MediaAsset,
+        ) -> kinewright_core::TranscriptStatus {
+            kinewright_core::TranscriptStatus::NotRequested
+        }
+        fn request_silence_detection(&self, _asset: kinewright_core::MediaAsset) {}
+        fn silence_status(
+            &self,
+            _asset: &kinewright_core::MediaAsset,
+        ) -> kinewright_core::SilenceStatus {
+            kinewright_core::SilenceStatus::NotRequested
+        }
+        fn timeline_silences(
+            &self,
+            _document: &kinewright_core::Document,
+            _range: Option<std::ops::Range<super::TimeCode>>,
+            _minimum_source_frames: super::TimeCode,
+        ) -> Result<Vec<kinewright_core::TimelineSilenceSpan>, super::MediaError> {
+            Ok(Vec::new())
+        }
+        fn request_scene_detection(&self, _asset: kinewright_core::MediaAsset) {}
+        fn scene_status(
+            &self,
+            _asset: &kinewright_core::MediaAsset,
+        ) -> kinewright_core::SceneStatus {
+            kinewright_core::SceneStatus::NotRequested
+        }
+        fn timeline_scene_changes(
+            &self,
+            _document: &kinewright_core::Document,
+            _range: Option<std::ops::Range<super::TimeCode>>,
+            _minimum_confidence_basis_points: u16,
+        ) -> Result<Vec<kinewright_core::TimelineSceneChange>, super::MediaError> {
+            Ok(Vec::new())
+        }
+        fn mix_noise_profile(
+            &self,
+            _document: &kinewright_core::Document,
+            _request: &super::MixNoiseProfileRequest,
+        ) -> Result<kinewright_core::NoiseProfileReport, super::MediaError> {
+            while !self.gate.load(std::sync::atomic::Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            Ok(kinewright_core::NoiseProfileReport {
+                range: super::TimeCode::ZERO..super::TimeCode(30),
+                point: super::MixSpectrumPoint::Master,
+                sample_rate: 48_000,
+                sample_frames: 22_528,
+                windows: 10,
+                bands: [-700; kinewright_core::NOISE_PROFILE_BAND_COUNT],
+            })
+        }
+    }
+
+    /// A gate that is already open, for a test whose worker never runs.
+    fn refusing_analysis() -> std::sync::Arc<dyn kinewright_core::Analysis> {
+        std::sync::Arc::new(GatedAnalysis {
+            gate: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        })
+    }
+
+    /// AU5 §6.3 rule 127: latest request wins, and only the live generation
+    /// lands.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn au5_the_learn_worker_is_single_flight() {
+        use kinewright_core::{AudioBusId, AudioChain, Document, EffectId};
+        use std::sync::Arc;
+
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let analysis: Arc<dyn kinewright_core::Analysis> = Arc::new(GatedAnalysis {
+            gate: Arc::clone(&gate),
+        });
+        let document = Arc::new(Document::default());
+        let mut state = super::NoiseLearnState::default();
+        let job = |chain| super::NoiseProfileJob {
+            generation: 0,
+            session: 1,
+            chain,
+            effect: EffectId(1),
+            analysis: Arc::clone(&analysis),
+            document: Arc::clone(&document),
+            request: super::MixNoiseProfileRequest {
+                range: Some(super::TimeCode::ZERO..super::TimeCode(30)),
+                point: super::MixSpectrumPoint::Master,
+            },
+        };
+        state.request(job(AudioChain::Master));
+        assert!(state.is_pending());
+        // A second click while the first is still measuring parks rather than
+        // starting a second render.
+        state.request(job(AudioChain::Bus(AudioBusId(2))));
+        state.request(job(AudioChain::Bus(AudioBusId(5))));
+        assert_eq!(
+            state.spawned_workers(),
+            1,
+            "three requests, one worker at a time"
+        );
+        gate.store(true, std::sync::atomic::Ordering::Release);
+
+        // The first worker's answer belongs to a retired generation and is
+        // dropped; the parked one runs and is the one that lands.
+        let mut landed = Vec::new();
+        for _ in 0..2_000 {
+            landed.extend(state.poll());
+            if !landed.is_empty() && !state.is_pending() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(landed.len(), 1, "exactly one measurement lands");
+        assert_eq!(landed[0].chain, AudioChain::Bus(AudioBusId(5)));
+        assert_eq!(state.spawned_workers(), 2, "the parked request ran second");
+        assert!(!state.is_pending());
+    }
+
+    /// AU5 §0 R136: a worker that could not start says so.
+    ///
+    /// `spawn` retired the pending generation before it queued its own error
+    /// response, and `poll` drops any response whose generation is not the
+    /// pending one — so the one arm that reports a machine out of threads
+    /// could never reach the error log, and the click looked like it did
+    /// nothing.
+    #[test]
+    fn au5_a_learn_worker_that_cannot_start_reports_itself() {
+        use kinewright_core::{AudioBusId, AudioChain, Document, EffectId};
+        use std::sync::Arc;
+
+        let analysis = refusing_analysis();
+        let document = Arc::new(Document::default());
+        let mut state = super::NoiseLearnState::default().refusing_next_spawn();
+        state.request(super::NoiseProfileJob {
+            generation: 0,
+            session: 1,
+            chain: AudioChain::Bus(AudioBusId(4)),
+            effect: EffectId(2),
+            analysis,
+            document,
+            request: super::MixNoiseProfileRequest {
+                range: Some(super::TimeCode::ZERO..super::TimeCode(30)),
+                point: super::MixSpectrumPoint::Master,
+            },
+        });
+        assert!(
+            state.is_pending(),
+            "the request is still the live one until its answer is read"
+        );
+        assert_eq!(state.spawned_workers(), 0, "no thread ever started");
+
+        let landed = state.poll();
+        assert_eq!(landed.len(), 1, "the failure is delivered, not swallowed");
+        assert_eq!(landed[0].chain, AudioChain::Bus(AudioBusId(4)));
+        assert_eq!(landed[0].effect, EffectId(2));
+        assert_eq!(
+            landed[0].result.as_ref().err().map(String::as_str),
+            Some(super::LEARN_WORKER_UNAVAILABLE),
+            "and it names the failure the editor is shown"
+        );
+        assert!(
+            !state.is_pending(),
+            "and the generation retires once its answer has been read"
         );
     }
 }

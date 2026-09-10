@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ops::Range,
     path::PathBuf,
 };
 
@@ -1225,6 +1226,42 @@ impl Document {
     pub fn track_audible(&self, track: TrackId) -> bool {
         let mix = self.track_mix(track);
         !mix.mute && (!self.audio_mix.any_solo() || mix.solo)
+    }
+
+    /// AU5 §5.2: the leading and interior gaps of one track, in project frames.
+    ///
+    /// Content- and kind-agnostic: a title or a freeze closes a gap exactly as
+    /// a media clip does, because this is the definition `qa_document`'s
+    /// `"track_gap"` warning has always used, and `qa_document` is refactored
+    /// onto this accessor so the two cannot drift apart. **Never the trailing
+    /// gap** — a track that ends before the project does is not a hole, and
+    /// reporting one would invent warnings on every existing document.
+    /// Callers that want only audible gaps filter themselves.
+    ///
+    /// The walk is seeded at [`TimeCode::ZERO`] and advances
+    /// `previous_end = end.max(previous_end)`, so a clip nested inside an
+    /// earlier clip's span opens no gap and clips need not be sorted. A clip
+    /// whose duration cannot be derived — a missing asset, an unrepresentable
+    /// frame-rate mapping — contributes zero frames, which is the reading the
+    /// QA walk has always taken.
+    ///
+    /// `None` when no track carries `track`, which is distinguishable from a
+    /// track with no gaps (AU5 §0 R42). The lookup is a `find`, which is
+    /// unambiguous because `validate_document` rejects a duplicate `TrackId`.
+    #[must_use]
+    pub fn track_gaps(&self, track: TrackId) -> Option<Vec<Range<TimeCode>>> {
+        let track = self.tracks.iter().find(|entry| entry.id == track)?;
+        let mut gaps = Vec::new();
+        let mut previous_end = TimeCode::ZERO;
+        for clip in &track.clips {
+            if clip.timeline_start > previous_end {
+                gaps.push(previous_end..clip.timeline_start);
+            }
+            let duration = self.clip_duration(clip).unwrap_or(TimeCode::ZERO);
+            let end = TimeCode(clip.timeline_start.0.saturating_add(duration.0));
+            previous_end = end.max(previous_end);
+        }
+        Some(gaps)
     }
 
     /// Validate every cross-reference and timeline invariant in the document.

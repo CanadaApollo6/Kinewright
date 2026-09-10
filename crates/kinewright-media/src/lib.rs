@@ -18,6 +18,7 @@ mod loudness;
 mod lut;
 mod lut_store;
 mod render;
+mod room_tone_store;
 mod sha256;
 mod spectrum;
 mod timeline;
@@ -55,6 +56,14 @@ mod cc6_fixtures;
 #[cfg(test)]
 mod cc7_fixtures;
 
+/// AU5 §5.4's seam lanes. They live in `src/` rather than in
+/// `tests/au5_fixtures.rs` for exactly AU5 §0 R62's reason and are recorded as
+/// R100: the seam pin compares `export::mix_audio`'s samples against a
+/// per-piece decode, and `mix_audio` is `pub(crate)` (export.rs:1078), as is
+/// `test_support`, behind the `test-util` feature no default build enables.
+#[cfg(test)]
+mod au5b_fixtures;
+
 #[cfg(test)]
 mod gpu_test_support;
 
@@ -62,7 +71,7 @@ use ffmpeg_next as ffmpeg;
 use kinewright_core::MediaError;
 
 pub use analysis::{MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_FILES, MAX_WAVEFORM_PEAKS};
-pub use audio::{hum_removal_magnitude_db, parametric_eq_magnitude_db};
+pub use audio::{decode_audio_range, hum_removal_magnitude_db, parametric_eq_magnitude_db};
 pub use builtin_looks::{
     BUILTIN_IDENTITY_SIZE, BUILTIN_LOOK_DOMAIN_MAX, BUILTIN_LOOK_DOMAIN_MIN, BUILTIN_LOOK_SHA256,
     BUILTIN_LOOK_SIZE, BuiltinLook,
@@ -97,6 +106,13 @@ pub use lut::{
 pub use lut_store::{
     LUT_MAX_FILE_BYTES, LUT_STORE_LUTS_DIRECTORY, LUT_STORE_SUFFIX, LutAssetImport, LutLibrary,
     LutStore, LutStoreError, LutStoreErrorCode, metadata_mismatch,
+};
+pub use room_tone_store::{
+    ROOM_TONE_ASSET_FRAMES_PER_SECOND, ROOM_TONE_CHANNELS, ROOM_TONE_MAX_CAPTURE_MILLISECONDS,
+    ROOM_TONE_MAX_FILE_BYTES, ROOM_TONE_MINIMUM_CAPTURE_MILLISECONDS,
+    ROOM_TONE_SAMPLE_FRAMES_PER_ASSET_FRAME, ROOM_TONE_SAMPLE_RATE, ROOM_TONE_STORE_DIRECTORY,
+    RoomToneAvailabilityKind, RoomToneAvailabilityStatus, RoomToneCapture, RoomToneStore,
+    RoomToneStoreError, RoomToneStoreErrorCode,
 };
 pub use sha256::{sha256_bytes, sha256_file, source_fingerprint};
 pub use timeline::{

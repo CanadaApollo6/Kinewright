@@ -15,9 +15,10 @@ use eframe::egui;
 use kinewright_core::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AudioBus,
     AudioChain, AudioMaster, AutomationCurve, CHAIN_LOOKAHEAD_MILLISECONDS, Document, Effect,
-    EffectId, LoudnessSnapshot, LoudnessTarget, PanLaw, ParamValue, TimeCode, TrackId,
-    chain_lookahead_milliseconds, effect_descriptor, has_gain_computer, is_hold_only_parameter,
-    is_static_audio_parameter,
+    EffectId, LoudnessSnapshot, LoudnessTarget, NOISE_PROFILE_BAND_COUNT,
+    NOISE_PROFILE_PARAMETER_NAMES, PROFILE_BAND_NEUTRAL_TENTH_DB, PanLaw, ParamValue, TimeCode,
+    TrackId, chain_lookahead_milliseconds, effect_descriptor, has_gain_computer,
+    is_hold_only_parameter, is_noise_profile_parameter, is_static_audio_parameter,
 };
 
 use crate::{
@@ -131,6 +132,7 @@ pub(crate) fn chain_pane(
     position: TimeCode,
     target: LoudnessTarget,
     edits: &mut MixerChainEdits,
+    learn: &mut NoiseLearn<'_>,
 ) -> bool {
     // The pane owns exactly one column. `set_max_width` alone does not hold a
     // `ScrollArea`, which sizes its viewport from the room it is offered, so
@@ -149,13 +151,13 @@ pub(crate) fn chain_pane(
                 match selection {
                     MixerSelection::Bus(id) => {
                         if let Some(bus) = document.audio_mix.bus(id) {
-                            bus_pane(ui, document, bus, levels, position, edits);
+                            bus_pane(ui, document, bus, levels, position, edits, learn);
                         }
                         false
                     }
-                    MixerSelection::Master => {
-                        master_pane(ui, document, levels, snapshot, position, target, edits)
-                    }
+                    MixerSelection::Master => master_pane(
+                        ui, document, levels, snapshot, position, target, edits, learn,
+                    ),
                 }
             });
         // The scroll is the pane's whole answer to a short dock, so its two
@@ -171,6 +173,7 @@ pub(crate) fn chain_pane(
     .inner
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bus_pane(
     ui: &mut egui::Ui,
     document: &Document,
@@ -178,6 +181,7 @@ fn bus_pane(
     levels: &MixerMeterLevels,
     position: TimeCode,
     edits: &mut MixerChainEdits,
+    learn: &mut NoiseLearn<'_>,
 ) {
     let chain = MixerChain::Bus(bus);
     pane_title(ui, &format!("Bus: {}", bus.name));
@@ -187,7 +191,7 @@ fn bus_pane(
     routing_rows(ui, document, bus, edits);
     sidechain_rows(ui, document, bus, edits);
     ui.separator();
-    chain_cards(ui, chain, levels, position, edits);
+    chain_cards(ui, chain, levels, position, edits, learn);
     add_effect_menu(ui, chain, edits);
 }
 
@@ -202,6 +206,7 @@ fn master_pane(
     position: TimeCode,
     target: LoudnessTarget,
     edits: &mut MixerChainEdits,
+    learn: &mut NoiseLearn<'_>,
 ) -> bool {
     let master = &document.audio_mix.master;
     let chain = MixerChain::Master(master);
@@ -210,7 +215,7 @@ fn master_pane(
     automation_section(ui, chain, position, document.duration, edits);
     pan_law_rows(ui, document.audio_mix.pan_law, edits);
     ui.separator();
-    chain_cards(ui, chain, levels, position, edits);
+    chain_cards(ui, chain, levels, position, edits, learn);
     add_effect_menu(ui, chain, edits);
     reset_loudness
 }
@@ -647,6 +652,7 @@ fn chain_cards(
     levels: &MixerMeterLevels,
     position: TimeCode,
     edits: &mut MixerChainEdits,
+    learn: &mut NoiseLearn<'_>,
 ) {
     let effects = chain.effects();
     if effects.is_empty() {
@@ -663,6 +669,7 @@ fn chain_cards(
             levels,
             position,
             edits,
+            learn,
         );
     }
 }
@@ -694,10 +701,13 @@ fn expand_card(ui: &egui::Ui, selection: MixerSelection, effect: EffectId) {
 
 /// One chain card: a header row, and a body when it is the expanded one.
 ///
-/// A collapsed card carries no frame, because a `ui.group`'s margins and
-/// stroke alone are 8 px and the collapsed row's whole budget is `ICON_BUTTON`
-/// (AU2 §6.7). The expanded card takes the frame, where the grouping is what
-/// tells a wrapped row of controls from the row below it.
+/// A collapsed card carries no frame, because the collapsed row's whole budget
+/// is `ICON_BUTTON` and a `ui.group`'s margins and stroke cost 14 px on their
+/// own (AU2 §6.7). Fourteen, not the 8 rule 131's arithmetic assumed: the
+/// group and the header together measure 31.5 px (AU5 §0 R120).
+///
+/// The expanded card takes the frame, where the grouping is what tells a
+/// wrapped row of controls from the row below it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn chain_card(
     ui: &mut egui::Ui,
@@ -707,11 +717,12 @@ pub(crate) fn chain_card(
     levels: &MixerMeterLevels,
     position: TimeCode,
     edits: &mut MixerChainEdits,
+    learn: &mut NoiseLearn<'_>,
 ) {
     if expanded {
         ui.group(|ui| {
             card_header(ui, chain, index, expanded, levels, edits);
-            card_body(ui, chain, index, levels, position, edits);
+            card_body(ui, chain, index, levels, position, edits, learn);
         });
     } else {
         card_header(ui, chain, index, expanded, levels, edits);
@@ -794,6 +805,7 @@ fn card_header(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn card_body(
     ui: &mut egui::Ui,
     chain: MixerChain,
@@ -801,6 +813,7 @@ fn card_body(
     levels: &MixerMeterLevels,
     position: TimeCode,
     edits: &mut MixerChainEdits,
+    learn: &mut NoiseLearn<'_>,
 ) {
     let effect = &chain.effects()[index];
     let Some(descriptor) = effect_descriptor(&effect.name) else {
@@ -808,7 +821,10 @@ fn card_body(
     };
     ui.horizontal_wrapped(|ui| {
         for parameter in descriptor.parameters {
-            if parameter.name == "bypass" {
+            // AU5 §6.1 rule 120: the 31 profile rows are read from the noise
+            // well, never dragged — skipped by the one core predicate,
+            // exactly as `bypass` is skipped by exact name.
+            if parameter.name == "bypass" || is_noise_profile_parameter(parameter.name) {
                 continue;
             }
             mixer_parameter_control(
@@ -823,8 +839,12 @@ fn card_body(
             );
         }
     });
-    if effect.name == "audio_parametric_eq" {
-        eq_well(ui, effect, position);
+    if let Some(magnitude) = well_magnitude_source(&effect.name) {
+        eq_well(ui, effect, position, magnitude);
+    }
+    if effect.name == "audio_denoise" {
+        noise_well(ui, effect);
+        learn_row(ui, chain, effect, learn);
     }
     if has_gain_computer(&effect.name) {
         reduction_bar(ui, chain.selection().chain(), effect.id, levels);
@@ -1279,8 +1299,9 @@ pub(crate) enum MixerUnit {
     Q,
     /// A two-item choice rather than a number.
     Flag,
-    /// A registered name in none of the units above. No audio descriptor has
-    /// one today; the variant keeps an unrecognised control readable instead
+    /// A registered name in none of the units above. `audio_hum_removal`'s
+    /// `harmonic_count` is the first audio parameter to reach it (AU5 §6.1
+    /// rule 121); the variant keeps an unrecognised control readable instead
     /// of labelling it in a unit it is not in.
     Plain,
 }
@@ -1420,7 +1441,7 @@ pub(crate) fn parameter_label(name: &str) -> String {
         "low_gain_tenth_db" => "Low",
         "mid_gain_tenth_db" => "Mid",
         "high_gain_tenth_db" => "High",
-        "threshold_tenth_db" => "Threshold",
+        "threshold_tenth_db" | "detector_threshold_tenth_db" => "Threshold",
         "ratio_hundredths" => "Ratio",
         "attack_milliseconds" => "Attack",
         "release_milliseconds" => "Release",
@@ -1440,6 +1461,16 @@ pub(crate) fn parameter_label(name: &str) -> String {
         "output_gain_tenth_db" => "Output",
         "range_tenth_db" => "Range",
         "hold_milliseconds" => "Hold",
+        // AU5 §6.1 rule 120. `reduction_tenth_db` and `lookahead_milliseconds`
+        // already have their arms above and are shared with AU2's limiter and
+        // compressor.
+        "floor_offset_tenth_db" => "Floor offset",
+        "smoothing_milliseconds" => "Smoothing",
+        "fundamental_hertz" => "Mains",
+        "harmonic_count" => "Harmonics",
+        "depth_tenth_db" => "Depth",
+        "notch_q_hundredths" => "Notch Q",
+        "max_click_milliseconds" => "Max click",
         other => other,
     }
     .to_owned()
@@ -1472,18 +1503,32 @@ pub(crate) fn eq_well_hertz(index: usize) -> f64 {
     EQ_WELL_MIN_HERTZ * (EQ_WELL_MAX_HERTZ / EQ_WELL_MIN_HERTZ).powf(index as f64 / span)
 }
 
+/// AU5 §6.2 rule 124: the one thing the well is parameterised by.
+///
+/// `parametric_eq_magnitude_db` and `hum_removal_magnitude_db` are the two
+/// analytic responses the media crate publishes, and they share this shape
+/// deliberately, so the comb is `eq_well` whole rather than a second chart.
+pub(crate) type MagnitudeSource = fn(&Effect, TimeCode, f64, u32) -> f64;
+
 /// The node's own magnitude at each sampled frequency, in decibels.
-pub(crate) fn eq_well_magnitudes(effect: &Effect, at: TimeCode) -> Vec<f64> {
+pub(crate) fn eq_well_magnitudes(
+    effect: &Effect,
+    at: TimeCode,
+    magnitude: MagnitudeSource,
+) -> Vec<f64> {
     (0..EQ_WELL_SAMPLES)
-        .map(|index| {
-            kinewright_media::parametric_eq_magnitude_db(
-                effect,
-                at,
-                eq_well_hertz(index),
-                EQ_WELL_SAMPLE_RATE,
-            )
-        })
+        .map(|index| magnitude(effect, at, eq_well_hertz(index), EQ_WELL_SAMPLE_RATE))
         .collect()
+}
+
+/// AU5 §6.2 rule 124: the magnitude source one card's well is drawn from, if
+/// the card has a well at all.
+pub(crate) fn well_magnitude_source(name: &str) -> Option<MagnitudeSource> {
+    match name {
+        "audio_parametric_eq" => Some(kinewright_media::parametric_eq_magnitude_db),
+        "audio_hum_removal" => Some(kinewright_media::hum_removal_magnitude_db),
+        _ => None,
+    }
 }
 
 /// Where one frequency lands across the well: log across 20 Hz to 20 kHz.
@@ -1503,8 +1548,13 @@ pub(crate) fn eq_well_y(rect: egui::Rect, decibels: f64) -> f32 {
 }
 
 /// The polyline the well paints for one node.
-pub(crate) fn eq_well_points(effect: &Effect, rect: egui::Rect, at: TimeCode) -> Vec<egui::Pos2> {
-    eq_well_magnitudes(effect, at)
+pub(crate) fn eq_well_points(
+    effect: &Effect,
+    rect: egui::Rect,
+    at: TimeCode,
+    magnitude: MagnitudeSource,
+) -> Vec<egui::Pos2> {
+    eq_well_magnitudes(effect, at, magnitude)
         .into_iter()
         .enumerate()
         .map(|(index, decibels)| {
@@ -1516,8 +1566,14 @@ pub(crate) fn eq_well_points(effect: &Effect, rect: egui::Rect, at: TimeCode) ->
         .collect()
 }
 
-/// The read-only magnitude well of an expanded parametric EQ (AU2 §6.7).
-fn eq_well(ui: &mut egui::Ui, effect: &Effect, at: TimeCode) {
+/// The read-only magnitude well of an expanded parametric EQ (AU2 §6.7), and
+/// of an expanded hum-removal card, whole (AU5 §6.2 rule 124).
+///
+/// The comb parameterises exactly one thing — where the decibels come from.
+/// The x-map, the y-map, the 1.6 px polyline, the `eq_well:{id}` rect and the
+/// "Magnitude at 48 kHz." tooltip are the EQ well's, unchanged, because a
+/// notch cascade and a shelving cascade are the same kind of picture.
+fn eq_well(ui: &mut egui::Ui, effect: &Effect, at: TimeCode, magnitude: MagnitudeSource) {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), size::MIXER_EQ_CURVE_HEIGHT),
         egui::Sense::hover(),
@@ -1547,10 +1603,210 @@ fn eq_well(ui: &mut egui::Ui, effect: &Effect, at: TimeCode) {
         );
     }
     painter.add(egui::Shape::line(
-        eq_well_points(effect, rect, at),
+        eq_well_points(effect, rect, at, magnitude),
         egui::Stroke::new(1.6, color::TEXT_PRIMARY),
     ));
     response.on_hover_text(EQ_WELL_TOOLTIP);
+}
+
+// ---------------------------------------------------------------------------
+// The `Learn` gesture
+// ---------------------------------------------------------------------------
+
+/// The button that teaches a denoise node its floor (AU5 §6.3 rule 126).
+pub(crate) const LEARN_PROFILE_BUTTON: &str = "Learn profile";
+/// AU5 §6.3 rule 128, first refusal: the analysis has not finished.
+///
+/// Distinct from [`LEARN_NO_SILENCE`] on purpose. Collapsing the two would
+/// tell the editor the recording has no silence in it when what is true is
+/// that nothing has been looked at yet.
+pub(crate) const LEARN_ANALYSIS_RUNNING: &str =
+    "Silence analysis is still running for these tracks.";
+/// AU5 §6.3 rule 128, second refusal: the analysis is in and nothing is long
+/// enough.
+///
+/// 469 ms is `NOISE_PROFILE_MINIMUM_FRAMES` (22 528 sample frames at the
+/// 48 kHz render rate) said in the only unit an editor has (AU5 §3.7 rule 63).
+pub(crate) const LEARN_NO_SILENCE: &str = "No silence span reaches 469 ms.";
+
+/// What the denoise card knows about the range a `Learn` would read (AU5 §6.3
+/// rule 128).
+///
+/// Session state read *in*; the click that acts on it travels *out* through
+/// [`NoiseLearn::requested`]. The card itself reaches no document and no
+/// engine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum NoiseLearnRange {
+    /// `silence_status` is not ready for at least one asset on the tracks
+    /// feeding this chain.
+    #[default]
+    Analysing,
+    /// Ready, and no span reaches [`LEARN_NO_SILENCE`]'s 469 ms.
+    NoSilence,
+    /// The longest silence span on those tracks, in **project** frames.
+    Span(TimeCode, TimeCode),
+}
+
+/// The `Learn` channel, in and out, in one argument (AU5 §6.3 rule 126).
+///
+/// `requested` is a request rather than an edit: document edits leave the
+/// Mixer through `InspectorEdits`, so "the card pushes no operation" stays
+/// enforced by the type the card cannot reach rather than by this one.
+#[derive(Debug)]
+pub(crate) struct NoiseLearn<'a> {
+    pub(crate) range: NoiseLearnRange,
+    pub(crate) requested: &'a mut Option<(AudioChain, EffectId)>,
+}
+
+/// The `Learn profile` row of an expanded denoise card (AU5 §6.3).
+fn learn_row(ui: &mut egui::Ui, chain: MixerChain, effect: &Effect, learn: &mut NoiseLearn<'_>) {
+    let span = match learn.range {
+        NoiseLearnRange::Span(start, end) => Some((start, end)),
+        NoiseLearnRange::Analysing | NoiseLearnRange::NoSilence => None,
+    };
+    ui.horizontal(|ui| {
+        let button = ui.add_enabled(span.is_some(), egui::Button::new(LEARN_PROFILE_BUTTON));
+        record_keyed_rect("learn", effect.id.0, button.rect);
+        let button = match span {
+            // Hover names the span that will be used, so the measurement is
+            // never taken from a range the editor cannot see.
+            Some((start, end)) => button.on_hover_text(format!(
+                "Learn the floor from frames {}\u{2013}{} \u{2014} the longest silence on the \
+                 tracks feeding this chain.",
+                start.0, end.0
+            )),
+            None => button,
+        };
+        if button.clicked() {
+            *learn.requested = Some((chain.selection().chain(), effect.id));
+        }
+    });
+    // The refusal takes its own line and **wraps**: it is a sentence, and a
+    // sentence beside the button pushes the 400 px column wider than the
+    // pane's own token, which the dock pin catches.
+    let refusal = match learn.range {
+        NoiseLearnRange::Analysing => Some(LEARN_ANALYSIS_RUNNING),
+        NoiseLearnRange::NoSilence => Some(LEARN_NO_SILENCE),
+        NoiseLearnRange::Span(_, _) => None,
+    };
+    if let Some(refusal) = refusal {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(refusal)
+                    .font(theme::medium(type_size::MICRO))
+                    .color(color::TEXT_MUTED),
+            )
+            .wrap(),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The learned-noise-floor well
+// ---------------------------------------------------------------------------
+
+/// The bottom of the noise well's scale, in decibels (AU5 §6.2 rule 125).
+///
+/// `PROFILE_BAND_NEUTRAL_TENTH_DB` is −1200, so an unlearned band sits exactly
+/// on the floor and paints nothing at all.
+pub(crate) const NOISE_WELL_FLOOR_DB: f64 = -120.0;
+/// What the well says when nothing has been learned yet (AU5 §6.2 rule 125).
+///
+/// Deliberately not a warning: DESIGN.md reserves status colour for outcomes,
+/// and an untaught denoiser is a node at its identity, not a fault.
+pub(crate) const NOISE_WELL_EMPTY_NOTE: &str = "No profile learned.";
+/// What the well is, said once, where the editor can reach it.
+pub(crate) const NOISE_WELL_TOOLTIP: &str =
+    "The noise floor this node was taught, −120…0 dB per third octave.";
+
+/// The 31 learned bands of one denoise node, low to high, in tenth dB.
+///
+/// A missing row reads the neutral, which is what makes AU5 §2.1 rule 6's
+/// write-all-or-none block legible: an inserted node carries none of the 31
+/// and the well shows an untaught floor rather than an empty chart.
+pub(crate) fn noise_well_bands(effect: &Effect) -> [i64; NOISE_PROFILE_BAND_COUNT] {
+    let mut bands = [PROFILE_BAND_NEUTRAL_TENTH_DB; NOISE_PROFILE_BAND_COUNT];
+    for (band, name) in bands.iter_mut().zip(NOISE_PROFILE_PARAMETER_NAMES) {
+        if let Some(ParamValue::Integer(value)) = effect.parameters.get(name) {
+            *band = *value;
+        }
+    }
+    bands
+}
+
+/// Whether every band is still at the neutral, which is the runtime's own
+/// "nothing has been learned" test (AU5 §2.1 rule 5).
+pub(crate) fn noise_well_is_unlearned(bands: &[i64; NOISE_PROFILE_BAND_COUNT]) -> bool {
+    bands
+        .iter()
+        .all(|band| *band <= PROFILE_BAND_NEUTRAL_TENTH_DB)
+}
+
+/// The 31 bars the well paints, low band to high, in the rect it was given.
+///
+/// Pure geometry: a band at the −120 dB floor is a zero-height rect and a band
+/// at 0 dB fills the well. Bars are laid on an exact 31-wide grid with a 1 px
+/// gutter, so the chart reads as a spectrum rather than as 31 meters.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub(crate) fn noise_well_bars(
+    rect: egui::Rect,
+    bands: &[i64; NOISE_PROFILE_BAND_COUNT],
+) -> Vec<egui::Rect> {
+    let step = rect.width() / NOISE_PROFILE_BAND_COUNT as f32;
+    bands
+        .iter()
+        .enumerate()
+        .map(|(index, band)| {
+            let decibels = *band as f64 / 10.0;
+            let fraction =
+                ((decibels - NOISE_WELL_FLOOR_DB) / -NOISE_WELL_FLOOR_DB).clamp(0.0, 1.0) as f32;
+            let left = rect.left() + step * index as f32;
+            egui::Rect::from_min_max(
+                egui::pos2(left, rect.bottom() - rect.height() * fraction),
+                egui::pos2(left + (step - 1.0).max(1.0), rect.bottom()),
+            )
+        })
+        .collect()
+}
+
+/// The read-only learned-floor well of an expanded denoise card (AU5 §6.2
+/// rule 125).
+///
+/// A **new** chart, not the EQ well parameterised again: it shares the well
+/// chrome — the letterbox fill, the inset and the subtle border — and nothing
+/// else. Its scale is −120…0 dB rather than ±24, it has 31 bars rather than a
+/// polyline, and it is drawn in `TEXT_SECONDARY` and never in the accent,
+/// because it reports the floor the node was taught rather than an outcome.
+fn noise_well(ui: &mut egui::Ui, effect: &Effect) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), size::MIXER_NOISE_WELL_HEIGHT),
+        egui::Sense::hover(),
+    );
+    record_keyed_rect("noise_well", effect.id.0, rect);
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, radius::SM, color::LETTERBOX);
+    theme::paint_inset_well(&painter, rect, radius::px(radius::SM));
+    painter.rect_stroke(
+        rect,
+        radius::SM,
+        egui::Stroke::new(1.0, color::BORDER_SUBTLE),
+        egui::StrokeKind::Inside,
+    );
+    let bands = noise_well_bands(effect);
+    if noise_well_is_unlearned(&bands) {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            NOISE_WELL_EMPTY_NOTE,
+            theme::medium(type_size::MICRO),
+            color::TEXT_MUTED,
+        );
+    } else {
+        for bar in noise_well_bars(rect, &bands) {
+            painter.rect_filled(bar, 0.0, color::TEXT_SECONDARY);
+        }
+    }
+    response.on_hover_text(NOISE_WELL_TOOLTIP);
 }
 
 /// The filled part of a gain-reduction bar (AU2 §6.7).
@@ -1591,23 +1847,71 @@ fn reduction_bar(
 // Insertion
 // ---------------------------------------------------------------------------
 
-/// The six nodes the mixer's `+ Effect` menu offers, in menu order (AU2 §6.8).
+/// The nine nodes the mixer's `+ Effect` menu offers, in menu order (AU2 §6.8,
+/// AU5 §6.1 rule 118).
 ///
 /// `audio_eq` and `audio_limiter` are retained, valid, and processed, but a
 /// new chain never grows one: the parametric EQ and the true-peak limiter
 /// replace them.
-pub(crate) const INSERTABLE_AUDIO_EFFECTS: [&str; 6] = [
+///
+/// AU5's three repair nodes are appended after `audio_gate` rather than at the
+/// end, because `audio_ducking` and `audio_true_peak_limiter` are the two the
+/// menu already warns about and a repair node is an ordinary identity insert.
+pub(crate) const INSERTABLE_AUDIO_EFFECTS: [&str; 9] = [
     "audio_gain",
     "audio_parametric_eq",
     "audio_compressor",
     "audio_gate",
+    "audio_denoise",
+    "audio_hum_removal",
+    "audio_declick",
     "audio_ducking",
     "audio_true_peak_limiter",
 ];
 
-/// Whether the mixer's `+ Effect` menu offers one audio effect (AU2 §6.8).
-pub(crate) fn is_audio_effect_insertable(name: &str) -> bool {
-    INSERTABLE_AUDIO_EFFECTS.contains(&name)
+/// The two parameter names the menu's self-check accepts at `MixerUnit::Plain`
+/// (AU5 §6.1 rule 119).
+///
+/// `bypass` is a flag the card header draws as a checkbox and never as a
+/// number, and `harmonic_count` is a count — a pure integer with no unit to
+/// wear. Everything else that reads `Plain` is a parameter whose suffix
+/// `mixer_unit` does not know, which is the drift the check exists to catch.
+const PLAIN_UNIT_ALLOW_LIST: [&str; 2] = ["bypass", "harmonic_count"];
+
+/// Why one `+ Effect` menu entry is malformed, if it is (AU5 §6.1 rule 119).
+///
+/// AU2 asserted that each name of `INSERTABLE_AUDIO_EFFECTS` was a member of
+/// `INSERTABLE_AUDIO_EFFECTS`, which cannot fail. This one can: it asks
+/// whether the name is a registered audio effect, whether the registry has a
+/// descriptor to insert at, and whether every row of that descriptor resolves
+/// to a unit the card can label — the three ways an appended name could
+/// silently paint a broken card.
+fn insertable_menu_defect(name: &str) -> Option<String> {
+    if !kinewright_core::is_audio_effect(name) {
+        return Some(format!(
+            "the `+ Effect` menu offers `{name}`, which is not an audio effect"
+        ));
+    }
+    let Some(descriptor) = effect_descriptor(name) else {
+        return Some(format!(
+            "the `+ Effect` menu offers `{name}`, which has no effect descriptor"
+        ));
+    };
+    descriptor
+        .parameters
+        .iter()
+        .find(|parameter| {
+            mixer_unit(parameter.name) == MixerUnit::Plain
+                && !PLAIN_UNIT_ALLOW_LIST.contains(&parameter.name)
+        })
+        .map(|parameter| {
+            format!(
+                "the `+ Effect` menu offers `{name}`, whose `{}` reads no unit from its \
+                 suffix \u{2014} add the suffix to `mixer_unit` or the name to \
+                 `PLAIN_UNIT_ALLOW_LIST`",
+                parameter.name
+            )
+        })
 }
 
 /// Why `Ducking` is refused on a chain with no sidechain source.
@@ -1673,6 +1977,13 @@ pub(crate) fn insert_audio_effect(effects: &mut Vec<Effect>, name: &str) {
         parameters: descriptor
             .parameters
             .iter()
+            // AU5 §2.1 rule 6: the 31 profile rows are a write-all-or-none
+            // block whose absence *is* the neutral, so an inserted denoise
+            // node carries none of them. Writing 31 `-1200` entries into
+            // every document that inserts the node would also keep §4.2's
+            // compact-render omission arm from ever firing in the app's own
+            // projects.
+            .filter(|parameter| !is_noise_profile_parameter(parameter.name))
             .map(|parameter| {
                 (
                     parameter.name.to_owned(),
@@ -1688,8 +1999,9 @@ fn add_effect_menu(ui: &mut egui::Ui, chain: MixerChain, edits: &mut MixerChainE
     let response = ui.menu_button("+ Effect", |ui| {
         for name in INSERTABLE_AUDIO_EFFECTS {
             debug_assert!(
-                is_audio_effect_insertable(name),
-                "the menu offers only the six nodes of AU2 §6.8"
+                insertable_menu_defect(name).is_none(),
+                "{}",
+                insertable_menu_defect(name).unwrap_or_default()
             );
             let block = insertion_block(chain.effects(), chain.sidechain(), name);
             let entry = ui.add_enabled(
@@ -2152,8 +2464,16 @@ mod tests {
                 ],
             },
         );
-        let flat = eq_well_magnitudes(&eq[0], TimeCode::ZERO);
-        let boosted = eq_well_magnitudes(&eq[0], TimeCode(30));
+        let flat = eq_well_magnitudes(
+            &eq[0],
+            TimeCode::ZERO,
+            kinewright_media::parametric_eq_magnitude_db,
+        );
+        let boosted = eq_well_magnitudes(
+            &eq[0],
+            TimeCode(30),
+            kinewright_media::parametric_eq_magnitude_db,
+        );
         assert!(
             boosted.iter().zip(&flat).any(|(late, early)| late > early),
             "the well samples the audible frame, not `TimeCode::ZERO`"
@@ -2186,6 +2506,11 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.vertical(|ui| {
                 ui.set_max_width(size::MIXER_CHAIN_PANE_WIDTH);
+                let mut requested = None;
+                let mut learn = NoiseLearn {
+                    range: NoiseLearnRange::default(),
+                    requested: &mut requested,
+                };
                 let reset = master_pane(
                     ui,
                     document,
@@ -2194,6 +2519,7 @@ mod tests {
                     TimeCode::ZERO,
                     STREAMING_PLATFORM_TARGET,
                     &mut edits,
+                    &mut learn,
                 );
                 assert!(!reset, "nothing was clicked");
                 measured = ui.min_rect().size();
@@ -2325,5 +2651,423 @@ mod tests {
             has_gain_computer("audio_denoise"),
             "which is the one that knows about the denoiser, so `reduction_bar` gets a bar"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // AU5 §6.1-§6.5: the three repair cards, the two wells and the four pins
+    // -----------------------------------------------------------------------
+
+    /// A bus carrying the three repair nodes, in chain order.
+    fn repair_bus(names: &[&str]) -> AudioBus {
+        automation_bus(automation_effects(names), None)
+    }
+
+    /// Lay one **expanded** card out at the pane's width and report its height.
+    fn measure_card(bus: &AudioBus, index: usize, learn: NoiseLearnRange) -> f32 {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let levels = MixerMeterLevels::default();
+        let mut edits = MixerChainEdits::default();
+        let mut requested = None;
+        let mut measured = egui::Vec2::ZERO;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.vertical(|ui| {
+                ui.set_max_width(size::MIXER_CHAIN_PANE_WIDTH);
+                let mut learn = NoiseLearn {
+                    range: learn,
+                    requested: &mut requested,
+                };
+                chain_card(
+                    ui,
+                    MixerChain::Bus(bus),
+                    index,
+                    true,
+                    &levels,
+                    TimeCode::ZERO,
+                    &mut edits,
+                    &mut learn,
+                );
+                measured = ui.min_rect().size();
+            });
+        });
+        assert!(requested.is_none(), "nothing was clicked");
+        measured.y
+    }
+
+    /// AU5 §7 B13: the menu offers nine nodes and its self-check can fail.
+    ///
+    /// The AU2 assert it replaces re-asserted membership of the array it was
+    /// iterating, which no edit could ever break. This one reads the registry.
+    #[test]
+    fn au5_the_effect_menu_self_check_can_fail() {
+        for name in INSERTABLE_AUDIO_EFFECTS {
+            assert_eq!(
+                insertable_menu_defect(name),
+                None,
+                "every offered node passes its own check"
+            );
+        }
+        assert!(
+            insertable_menu_defect("color_wheels")
+                .is_some_and(|defect| defect.contains("not an audio effect")),
+            "a non-audio name is caught"
+        );
+        assert!(
+            insertable_menu_defect("audio_nonesuch").is_some(),
+            "a name with no descriptor is caught"
+        );
+        // The allow-list is exactly the two rows that are legitimately
+        // unitless, and `harmonic_count` really does reach `Plain`.
+        assert_eq!(mixer_unit("harmonic_count"), MixerUnit::Plain);
+        assert_eq!(mixer_unit("notch_q_hundredths"), MixerUnit::Q);
+        // `bypass` is drawn as the header's checkbox, never as a numbered
+        // control, so it never reaches `mixer_unit`'s flag arm — which is why
+        // it is on the allow-list rather than in the `detector | true_peak`
+        // match.
+        assert_eq!(mixer_unit("bypass"), MixerUnit::Plain);
+        assert_eq!(mixer_unit("detector"), MixerUnit::Flag);
+        assert_eq!(PLAIN_UNIT_ALLOW_LIST, ["bypass", "harmonic_count"]);
+    }
+
+    /// AU5 §2.1 rule 6 and §6.1 rule 120: the 31 profile rows are written by
+    /// neither the insert nor the card.
+    #[test]
+    fn au5_the_profile_rows_are_never_inserted_and_never_dragged() {
+        let effects = automation_effects(&["audio_denoise"]);
+        let denoise = &effects[0];
+        assert_eq!(
+            denoise
+                .parameters
+                .keys()
+                .filter(|name| is_noise_profile_parameter(name))
+                .count(),
+            0,
+            "an inserted denoise node carries none of the 31 bands: {:?}",
+            denoise.parameters.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            denoise.parameters.len(),
+            5,
+            "and it carries all five of the controls: {:?}",
+            denoise.parameters.keys().collect::<Vec<_>>()
+        );
+        // The card draws a control for every row it does not skip, so the
+        // count of drawn controls is the count of non-profile, non-bypass rows.
+        let descriptor = effect_descriptor("audio_denoise").expect("registered");
+        let drawn = descriptor
+            .parameters
+            .iter()
+            .filter(|parameter| {
+                parameter.name != "bypass" && !is_noise_profile_parameter(parameter.name)
+            })
+            .count();
+        assert_eq!(drawn, 4, "denoise draws four controls, not 35");
+    }
+
+    /// AU5 §7 B14 (§6.2 rule 125): the noise well is pure geometry.
+    #[test]
+    fn au5_the_noise_well_is_a_pure_function_of_its_bands() {
+        let effects = automation_effects(&["audio_denoise"]);
+        let bands = noise_well_bands(&effects[0]);
+        assert_eq!(bands.len(), NOISE_PROFILE_BAND_COUNT);
+        assert!(
+            noise_well_is_unlearned(&bands),
+            "an inserted node reads unlearned, because a missing row is the neutral"
+        );
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(310.0, size::MIXER_NOISE_WELL_HEIGHT),
+        );
+        let empty = noise_well_bars(rect, &bands);
+        assert_eq!(empty.len(), NOISE_PROFILE_BAND_COUNT, "31 bars, always");
+        for bar in &empty {
+            assert!(
+                bar.height() <= f32::EPSILON,
+                "a band at the −120 dB floor paints nothing: {bar:?}"
+            );
+        }
+
+        // A learned floor: −120 dB at the bottom band, 0 dB at the top.
+        let mut learned = bands;
+        learned[0] = -1_200;
+        learned[NOISE_PROFILE_BAND_COUNT - 1] = 0;
+        learned[15] = -600;
+        assert!(!noise_well_is_unlearned(&learned));
+        let bars = noise_well_bars(rect, &learned);
+        assert!(bars[0].height() <= f32::EPSILON, "the floor is still empty");
+        assert!(
+            (bars[NOISE_PROFILE_BAND_COUNT - 1].height() - rect.height()).abs() <= 0.01,
+            "0 dB fills the well: {} px of {}",
+            bars[NOISE_PROFILE_BAND_COUNT - 1].height(),
+            rect.height()
+        );
+        assert!(
+            (bars[15].height() - rect.height() / 2.0).abs() <= 0.01,
+            "−60 dB is half the well: {} px",
+            bars[15].height()
+        );
+        // Low band to high, left to right, on an exact 31-wide grid.
+        assert!(bars[0].left() < bars[1].left());
+        assert!(bars[0].right() <= bars[1].left(), "the bars do not overlap");
+        // Out-of-range values clamp rather than escaping the well.
+        let mut wild = bands;
+        wild[3] = 900;
+        wild[4] = -9_000;
+        let clamped = noise_well_bars(rect, &wild);
+        assert!((clamped[3].height() - rect.height()).abs() <= 0.01);
+        assert!(clamped[4].height() <= f32::EPSILON);
+    }
+
+    /// AU5 §7 B14 (§6.2 rule 124): the comb is the EQ well, parameterised.
+    #[test]
+    fn au5_the_hum_comb_is_the_eq_well_drawn_from_the_hum_response() {
+        let mut effects = automation_effects(&["audio_hum_removal"]);
+        // A working notch, so the comb is not a flat line.
+        let node = &mut effects[0];
+        node.parameters
+            .insert("depth_tenth_db".to_owned(), ParamValue::Integer(-400));
+        node.parameters
+            .insert("harmonic_count".to_owned(), ParamValue::Integer(3));
+        let source = well_magnitude_source("audio_hum_removal").expect("the hum card has a well");
+        let magnitudes = eq_well_magnitudes(&effects[0], TimeCode::ZERO, source);
+        assert_eq!(magnitudes.len(), EQ_WELL_SAMPLES);
+        for (index, decibels) in magnitudes.iter().enumerate() {
+            let expected = kinewright_media::hum_removal_magnitude_db(
+                &effects[0],
+                TimeCode::ZERO,
+                eq_well_hertz(index),
+                EQ_WELL_SAMPLE_RATE,
+            );
+            assert!(
+                (decibels - expected).abs() <= 1e-12,
+                "sample {index} is the design's own answer: {decibels} vs {expected}"
+            );
+        }
+        assert!(
+            magnitudes.iter().any(|decibels| *decibels < -1.0),
+            "a 40 dB notch shows in the comb"
+        );
+        let eq = automation_effects(&["audio_parametric_eq"]);
+        let eq_source =
+            well_magnitude_source("audio_parametric_eq").expect("the EQ card has a well");
+        assert_eq!(
+            eq_well_magnitudes(&eq[0], TimeCode::ZERO, eq_source),
+            eq_well_magnitudes(
+                &eq[0],
+                TimeCode::ZERO,
+                kinewright_media::parametric_eq_magnitude_db
+            ),
+            "the EQ card still draws the EQ response"
+        );
+        assert!(
+            well_magnitude_source("audio_denoise").is_none(),
+            "the denoise card has a bar chart, not a magnitude well"
+        );
+    }
+
+    /// AU5 §7 B14 (§6.5 rule 131): the denoise card's height budget.
+    ///
+    /// group frame + header 31.5 + **two** wrapped control rows at 33.5 each,
+    /// 39.5 marginal with their row spacing + noise well 48 + the
+    /// `Learn profile` row 26, which is one bare `egui::Button` + reduction
+    /// bar 6 + `item_spacing.y` 6 between each, and a further 18 px in the two
+    /// refused states, where rule 128's sentence takes its own wrapped line:
+    /// `31.5 + 6 + 73 + 6 + 48 + 6 + 26 + 6 + 6 = 208.5`. Rule 131's own
+    /// arithmetic put a control row at 22 px and the group at 8 and left the
+    /// `Learn` row out altogether; the budget therefore moves 160 → 240 with
+    /// the measurements recorded beside it, as an AU5 §0 erratum (R120).
+    ///
+    /// All three learn states are pinned, and the refused ones are the tall
+    /// ones: the sentence cannot sit beside the button, because a
+    /// 49-character label in a `ui.horizontal` pushes the pane's 400 px
+    /// column wider than its own token (AU5 §0 R132).
+    #[test]
+    fn au5_the_denoise_card_fits_its_height_budget() {
+        const BUDGET: f32 = 240.0;
+        /// The `Span` state: the button alone, no sentence.
+        const MEASURED_LEARNABLE: f32 = 208.5;
+        /// Either refusal: the button plus rule 128's own wrapped line.
+        const MEASURED_REFUSED: f32 = 226.5;
+        let bus = repair_bus(&["audio_denoise"]);
+        for (label, learn, measured) in [
+            ("analysing", NoiseLearnRange::Analysing, MEASURED_REFUSED),
+            ("no silence", NoiseLearnRange::NoSilence, MEASURED_REFUSED),
+            (
+                "learnable",
+                NoiseLearnRange::Span(TimeCode(0), TimeCode(60)),
+                MEASURED_LEARNABLE,
+            ),
+        ] {
+            let height = measure_card(&bus, 0, learn);
+            println!("AU5_DENOISE_CARD case=\"{label}\" px={height}");
+            assert!(
+                height <= BUDGET,
+                "the {label} denoise card is {height} px tall, over the {BUDGET} px budget"
+            );
+            assert!(
+                (height - measured).abs() <= 1.0,
+                "the doc comment says the {label} denoise card measures {measured} px; \
+                 it measured {height}"
+            );
+        }
+    }
+
+    /// AU5 §7 B14 (§6.5 rule 131): the hum card's height budget.
+    ///
+    /// group frame + header 31.5 + two wrapped control rows at 33.5 each +
+    /// comb 96 + `item_spacing.y` 6 between each:
+    /// `31.5 + 6 + 73 + 6 + 96 = 212.5`. Still the tallest **card** of the
+    /// three; the budget moves 190 → 220 for the same reason the denoise
+    /// card's does (AU5 §0 R120).
+    #[test]
+    fn au5_the_hum_card_fits_its_height_budget() {
+        const BUDGET: f32 = 220.0;
+        const MEASURED: f32 = 212.5;
+        let bus = repair_bus(&["audio_hum_removal"]);
+        let height = measure_card(&bus, 0, NoiseLearnRange::default());
+        println!("AU5_HUM_CARD px={height}");
+        assert!(
+            height <= BUDGET,
+            "the hum card is {height} px tall, over the {BUDGET} px budget"
+        );
+        assert!(
+            (height - MEASURED).abs() <= 1.0,
+            "the doc comment says the hum card measures {MEASURED} px; it measured {height}"
+        );
+    }
+
+    /// AU5 §7 B14 (§6.5 rule 131): the de-click card's height budget.
+    ///
+    /// group frame + header 31.5 + `item_spacing.y` 6 + one wrapped control
+    /// row 33.5 = 71.0. This card carries **no** AU5 geometry at all — no
+    /// well, no learn row, no reduction bar — and still overruns rule 131's
+    /// 70, which is what identifies the shortfall as the contract's estimate
+    /// rather than slack in the implementation; the budget moves 70 → 80
+    /// (AU5 §0 R120).
+    #[test]
+    fn au5_the_declick_card_fits_its_height_budget() {
+        const BUDGET: f32 = 80.0;
+        const MEASURED: f32 = 71.0;
+        let bus = repair_bus(&["audio_declick"]);
+        let height = measure_card(&bus, 0, NoiseLearnRange::default());
+        println!("AU5_DECLICK_CARD px={height}");
+        assert!(
+            height <= BUDGET,
+            "the de-click card is {height} px tall, over the {BUDGET} px budget"
+        );
+        assert!(
+            (height - MEASURED).abs() <= 1.0,
+            "the doc comment says the de-click card measures {MEASURED} px; it measured {height}"
+        );
+    }
+
+    /// Lay a whole bus pane out at the pane's width and report its content
+    /// height — what the 400 px column has to scroll (AU5 §0 R47).
+    fn measure_repair_bus_pane(
+        document: &Document,
+        expanded: EffectId,
+        learn: NoiseLearnRange,
+    ) -> f32 {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let levels = MixerMeterLevels::default();
+        let mut edits = MixerChainEdits::default();
+        let mut requested = None;
+        let mut measured = egui::Vec2::ZERO;
+        let bus = &document.audio_mix.buses[0];
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            // Which card is expanded is egui memory, so it is set here rather
+            // than clicked: the pane is being measured, not driven.
+            expand_card(ui, MixerSelection::Bus(bus.id), expanded);
+            ui.vertical(|ui| {
+                ui.set_max_width(size::MIXER_CHAIN_PANE_WIDTH);
+                let mut learn = NoiseLearn {
+                    range: learn,
+                    requested: &mut requested,
+                };
+                bus_pane(
+                    ui,
+                    document,
+                    bus,
+                    &levels,
+                    TimeCode::ZERO,
+                    &mut edits,
+                    &mut learn,
+                );
+                measured = ui.min_rect().size();
+            });
+        });
+        measured.y
+    }
+
+    /// A document whose one bus carries the whole repair prefix.
+    fn repair_bus_document() -> Document {
+        let mut document = Document {
+            duration: TimeCode(300),
+            ..Document::default()
+        };
+        document.audio_mix.buses.push(repair_bus(&[
+            "audio_denoise",
+            "audio_hum_removal",
+            "audio_declick",
+        ]));
+        document
+    }
+
+    /// AU5 §7 B14 (§6.5 rule 131, R47): the bus pane's **content** budget.
+    ///
+    /// Not a fit budget: `chain_pane` opens with a `ScrollArea`, so an overrun
+    /// costs scroll distance and never clipping.
+    ///
+    /// Two arms, because R46 and the product disagree about which case is the
+    /// tallest. R46 fixes the measurement at the **hum** card expanded, the
+    /// tallest of the three cards at 212.5 px, and that arm reads **522.5**.
+    /// But `expanded_card` expands the **first** node when nothing is
+    /// remembered, which on the repair prefix is the **denoise** card, and its
+    /// default learn state is `Analysing` — so the pane an editor meets on
+    /// first paint carries the 226.5 px refused denoise card and reads
+    /// **536.5**. That is the default *and* the worst case, so it is the one
+    /// the budget is set above (AU5 §0 R121).
+    #[test]
+    fn au5_the_repair_bus_pane_fits_its_content_budget() {
+        const BUDGET: f32 = 540.0;
+        /// R46's case: the hum card, the tallest of the three cards.
+        const MEASURED_HUM: f32 = 522.5;
+        /// The product's own default: the first node, in its default state.
+        const MEASURED_DEFAULT: f32 = 536.5;
+        let document = repair_bus_document();
+        let effects = &document.audio_mix.buses[0].effects;
+        assert_eq!(
+            effects[0].name, "audio_denoise",
+            "`expanded_card` expands the first node, which is the denoise card"
+        );
+        assert_eq!(effects[1].name, "audio_hum_removal");
+        for (label, expanded, learn, measured) in [
+            (
+                "denoise expanded, analysing (default)",
+                effects[0].id,
+                NoiseLearnRange::Analysing,
+                MEASURED_DEFAULT,
+            ),
+            (
+                "hum expanded",
+                effects[1].id,
+                NoiseLearnRange::default(),
+                MEASURED_HUM,
+            ),
+        ] {
+            let height = measure_repair_bus_pane(&document, expanded, learn);
+            println!("AU5_REPAIR_BUS_PANE case=\"{label}\" px={height}");
+            assert!(
+                height <= BUDGET,
+                "the repair bus pane ({label}) is {height} px of content, over the \
+                 {BUDGET} px budget"
+            );
+            assert!(
+                (height - measured).abs() <= 1.0,
+                "the doc comment says the repair bus pane ({label}) measures {measured} px; \
+                 it measured {height}"
+            );
+        }
     }
 }

@@ -316,6 +316,15 @@ deliberately coarse — 1.4 dB per point on a 72 point track, 5.2 dB on the 44
 point minimum — so
 the band is the coarse gesture and the inspector's keyframe list is the exact one.
 
+A `Room tone` toolbar button sits beside `Envelopes` and is grey until a clip is
+selected and that clip's track has a gap in it. It fills the gap nearest the
+playhead on that track, tiling one room-tone capture forward with butt joins and
+no fades, and captures from that track's longest silence the first time it is
+pressed. Leading and interior gaps only: a track that ends before the project
+does is not a hole. The result is an ordinary clip — it trims, splits and
+deletes like any other, and deleting it brings the gap warning back — and the
+whole fill, capture included, is one undo entry.
+
 ### Media bin
 
 Assets appear as full-width 16:9 cards. A cached thumbnail fills the image area;
@@ -410,6 +419,23 @@ Hz, ms, ratio, Q), a read-only magnitude well on a parametric EQ, and a
 gain-reduction bar on a dynamics node. The gain-reduction bar is the one meter
 in the product that fills from the right, because it shows how far a signal has
 been pushed down; it uses status-warning and never accent.
+
+The `+ Effect` menu offers nine nodes. Three of them repair rather than shape:
+Denoise, Hum removal and De-click, which belong at the head of a bus chain,
+ahead of the EQ and the dynamics that assume a clean signal. The hum card
+carries the same read-only magnitude well the parametric EQ does, drawn from
+the notch cascade instead of the shelves. The denoise card carries a different
+chart: `size-mixer-noise-well-height` tall, thirty-one bars over −120…0 dB in
+`text-secondary`, reading `No profile learned.` in `text-muted` until it has
+been taught. It is the floor the node was taught, not a meter, so it never
+takes a status colour — quiet is never a failure. Under it sits a
+`Learn profile` button, which measures the longest silence on the tracks
+feeding that chain and writes all thirty-one bands in one edit; it says
+`Silence analysis is still running for these tracks.` while the analysis is
+out, and `No silence span reaches 469 ms.` when the analysis is in and nothing
+is long enough. The three repair nodes declare fifteen of the chain's twenty
+milliseconds, which is why a repaired bus can still take a delivery limiter and
+nothing else.
 
 The master pane opens with a `LOUDNESS` section: momentary and short-term as
 horizontal bars over −40…0 LUFS, each `size-mixer-loudness-bar-height` tall,

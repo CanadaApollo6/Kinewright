@@ -1316,6 +1316,16 @@ with `true_peak_dbtp_hundredths ≤ −100`. **Regression pin:** the g2/g3 windo
 (kinewright-eval.rs:1441-1445, :1573-1577) and the suite self-test (:5255-5272) are unchanged and
 re-run; F17's arithmetic (baselines ≥ 100 from the window edges) is recorded in the test doc.
 
+**Amended by AU5 §5.7 (2026-09-10).** `normalization_context`'s outright refusal on an intersecting
+bus is **relaxed in exactly one shape**: a bus whose every effect is an AU5 repair node — and whose
+`tracks` equal the requested set exactly — returns *extend bus N* rather than *new bus*, carrying
+every `AudioBus` field except `effects`, and `normalization_bus` **appends** the compressor/gain and
+the 5 ms true-peak limiter after that repair prefix instead of starting from an empty `Vec`, keeping
+the existing bus's name. Total declared latency is then 15 + 5 = 20, exactly
+`CHAIN_LOOKAHEAD_MILLISECONDS`. Any other intersection still refuses with the string above, so the
+g2/g3 eval baselines — which carry no repair bus — are untouched; the relaxation only widens
+acceptance. See AU5 §5.7 rules 110-113 and AU5 §0 R110.
+
 ### 6.4 `get_export_jobs` text and the Part B registry effect
 
 `export_jobs` (server.rs:3643-3654) keeps its first line and appends, per job with an

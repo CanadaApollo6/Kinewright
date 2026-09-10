@@ -682,7 +682,7 @@ cannot collide if each owns a range and one anchor line.
   exactly between window 99 and window 100 and that window 116 is excluded for straddling clip 4's
   end. A flat level satisfies any index arithmetic at all, including a wrong one.
 
-**Implementation errata, Part A app (2026-09-10).** R90–R99 is the app's reserved range; it is
+**Implementation errata, Part A app (2026-09-10).** R90–R91 (of a reserved R90–R99, whose tail Part B core took from R92) is the app's reserved range; it is
 appended here, ahead of the closing line below, so three implementers editing §0 at once cannot
 collide; the numbers below R90 belong to the other Part A crates, whose blocks follow the closing
 line. A reviewer reading §0 straight through should read this block last.
@@ -722,6 +722,1067 @@ line. A reviewer reading §0 straight through should read this block last.
   `MixLoudnessRangeTooShort` with its neighbour, is separated **by value** instead: the double
   echoes the request's own fields, and a legal `hop_milliseconds` lies in `1..=window ≤ 1000`
   while every point code is `0` or `≥ 1_000_000`, so the two producers cannot meet.
+
+**Implementation errata, Part B core (2026-09-10).** R92–R99 is the core crate's reserved Part B
+range.
+
+- **R92. "The caller is told" is a new `TimeMappingError` variant.** §5.3 rule 97 fixes
+  `map_project_duration_to_source`'s return type as `Result<TimeCode, TimeMappingError>` and says
+  the caller "is told, never silently given the wrong length", but names no variant, and none of
+  the four existing ones fits the case it is describing: a *well-formed* request — valid rates, a
+  non-negative start, a positive duration — that this rate pair simply cannot express.
+  `InvalidRange` describes a malformed input range, which is why it carries the **degenerate**
+  refusal instead (R95) and not this one. The helper therefore answers a new
+  `TimeMappingError::InexactDuration { source_start: i64, project_duration: i64 }`. This is **not**
+  a §2.3 rule 14/15 violation — those two rules reserve `Operation` and `OpError`, and
+  `TimeMappingError` is neither; `OpError::TimeMapping` wraps it without gaining a variant of its
+  own. `TimeMappingError` derives no `Serialize`, so nothing on the wire moves, and the enum is
+  matched non-exhaustively everywhere outside `time.rs` (the only out-of-crate mentions are two
+  `ok_or(TimeMappingError::Overflow)` constructions in `eval.rs`), so no other crate needed a stub.
+  §5.3's per-gap reason string stays the planner's, built agent-side from the gap length and the two
+  rates; the variant only has to be **distinguishable** from an overflow or a bad rate, which it is.
+- **R93 (rewritten after pass-1 review; the first text's ±1 justification and its minimality claim
+  are both withdrawn). The inverse is defined by the forward function; the window finds *an* exact
+  end and a bisection finds the *smallest*.** Rule 97 says "searched in the two-frame window around
+  the rounded estimate" without saying how a candidate is confirmed or which one wins when several
+  qualify. Implemented in two stages, because those are two different problems.
+
+  **(i) Confirmation.** The estimate is `map_frames(project_duration, project_fps, source_fps)`, the
+  window is `estimate − 1 ..= estimate + 1` offset from `source_start`, and each candidate is
+  confirmed by **running `map_source_range_to_project` on it** rather than by an independent closed
+  form — so the inverse cannot drift from the function it inverts, and rule 97's
+  `clip_duration(fill) == gap` assertion can never disagree with the helper that produced the fill.
+  Candidates at or below `source_start` are skipped, so the answer is always a non-empty range.
+
+  **(ii) Why ±1 finds an exact end whenever one exists.** The first text said "a mapped duration is
+  the difference of two independently round-to-nearest boundaries, so it can miss the exact quotient
+  by at most one frame either way", which the reviewer correctly rejected: each boundary's ±0.5 is
+  half a **project** frame, worth `r = source_fps / project_fps` **source** frames, so at `r = 2.5`
+  the slack is 2.5 source frames, not 1. The real argument runs the other way, over the *set* of
+  answers rather than over the error. With `a = map_frames(source_start)`, the ends that map exactly
+  are the integers in `[r·(a + D − c), r·(a + D + 1 − c))` — a half-open interval of width exactly
+  `r`, which always contains the real point `x = source_start + r·D`. `estimate` is within one frame
+  of `r·D`, so `source_start + estimate` is one of `⌊x⌋`, `⌈x⌉`; `estimate ± 1` covers both. When
+  `r ≥ 1` the interval is at least one wide, so at least one of `⌊x⌋`, `⌈x⌉` lies inside it (if
+  `⌈x⌉ ≥ U` then `⌊x⌋ ≥ U − 1 ≥ L`). When `r < 1` the interval can hold no integer at all, and that
+  is rule 98's refusal, not a miss. **The window therefore does not need to widen to `⌈r⌉`**, and it
+  is not widened. A brute force over 121 rate pairs (ratios from 23/1000 to 1000/23), eight
+  `source_start` values up to 10⁶ and durations 1..=40 — 38 720 cases — found zero false refusals,
+  agreeing with the reviewer's independent ~500 000-case sweep and its 76 032-case pass-2 repeat.
+
+  **`c` is not exactly one half, and it does not matter (pass-2 finding 3).** `FrameRounding::Nearest`
+  is `(numerator + denominator / 2) / denominator` with an **integer** `denominator / 2`
+  (time.rs:198-203), so on an odd `den = source_fps.numerator × project_fps.denominator` — and odd is
+  ordinary, 25 → 24 gives `den = 25` — the threshold is `c = ⌊den/2⌋ / den = 0.5 − 1/(2·den)`, not
+  `0.5`. Written with `0.5` the containment `x ∈ [L, U)` can fail by `1/(2·den)`. Written with `c`, as
+  above, it is an **identity rather than an approximation**: the same `c` is what rounded
+  `source_start` to `a`, so `r·(a − c) ≤ source_start < r·(a + 1 − c)` *is* the definition of `a`, and
+  adding `r·D` to all three carries it. The `estimate ∈ {⌊r·D⌋, ⌈r·D⌉}` step needs only `c ∈ [0, 0.5]`,
+  true for every denominator. The conclusion is therefore unchanged, because the same offset appears
+  on both sides.
+
+  **(iii) Minimality is a separate mechanism.** That interval is `r` wide, so it holds `⌊r⌋` or `⌈r⌉`
+  integers: the exact ends form a multi-member **run** whenever `r > 1` and the interval straddles two
+  integers, and the window can land anywhere in it. **Two thresholds, not one** — pass-2 caught the
+  first rewrite collapsing them. The *run* is multi-member from `r > 1` up; the *window* only starts
+  landing on a non-minimal member around `r ≳ 1.6`. The reviewer's counterexample is of the second
+  kind, at R93's own rate pair: `map_project_duration_to_source(1, 1, 60/1, 24/1)` answered **3** while
+  `1..2` is also exact, because `estimate = round(2.5) = 3` and `3 − 1` frames from `source_start =
+  1` is `end = 4`, not `2`. So the "smallest is returned" claim was false off `source_start = 0`,
+  and the old round-trip lane could not see it — every pair it covered had `r ≤ 1.25`. The smallest
+  is now recovered by **bisecting** `source_start + 1 ..= end` on the forward mapping, which is
+  monotone non-decreasing in `end`: the ends mapping to at least `project_duration` are an
+  upward-closed run, so the first of them is the smallest exact one, and the windowed `end` proves
+  the run non-empty and caps the search. **Bisection rather than the reviewer's linear walk down**:
+  the run is `⌈r⌉` long and nothing in `time.rs` bounds a frame rate — `Rational::new` accepts any
+  non-zero `u32` pair — so a walk is `O(source_fps / project_fps)` and a hand-built document could
+  make it run for hours, while the bisection is `O(log r)` and equally defined by the forward
+  function. So a fill really does consume no more of its asset than it must, and tiling from a short
+  room-tone sample gets the most tiles out of it. Pinned three ways: the round-trip lane gains **two
+  inverted-ratio pairs** (60 → 24 and 59.94 → 23.976, `r = 2.5`) beside §5.3's three, asserting over
+  four `source_start` values that `end` maps back exactly and `end − 1` never does; it also counts
+  the run **upward** and asserts its length is `⌊r⌋` or `⌈r⌉`, so a multi-member run is visible in
+  the suite rather than only in a reviewer's sweep (pass-2 finding 4 — the old lane pinned only the
+  run's lower edge, which is exactly why the AU5-path cases below went unnoticed while it stayed
+  green); and `au5_map_project_duration_to_source_answers_the_smallest_end_of_the_run` pins the
+  counterexample itself, `(source_start 1, duration 1) → Ok(2)`.
+
+  **Where "smallest" argues with R101 — they do meet, on the AU5 path, and smallest is kept anyway
+  (rewritten after pass-2; the "cannot meet" text is withdrawn).** R101 records that the mixer maps
+  source samples to project samples one for one, so a fill whose source range carries fewer sample
+  frames than the gap needs leaves silence at its tail; by that reading the **largest** exact end
+  would be the kinder choice. The withdrawn text claimed the two rules could not disagree on the AU5
+  path because `r ≤ 1.25` forces a single-member run. That is false, and it was generalised from the
+  one example R101 happens to use (`D = 7` at 25 fps, whose run really is `{8}` alone). A run is
+  multi-member from `r > 1` up, given alignment, and rule 98's own rate pairs hit it constantly —
+  measured against the shipped helper at `source_start = 0`, which is what the planner passes:
+
+  | project | multi-member gap lengths | first three runs `(D, smallest, largest)` |
+  |---|---|---|
+  | 30 fps (`r = 1.00`) | none | — |
+  | 25 fps (`r = 1.20`) | `D ≡ 3 (mod 5)` | `(3, 3, 4)`, `(8, 9, 10)`, `(13, 15, 16)` |
+  | 24 fps (`r = 1.25`) | `D ≡ 2 (mod 4)` | `(2, 2, 3)`, `(6, 7, 8)`, `(10, 12, 13)` |
+
+  So a fifth of all 25 fps gap lengths and a **quarter** of all 24 fps ones, not a case "a later
+  part" might reach. On R101's own sample arithmetic — 48 kHz, 1 600 sample frames to a 30 fps asset
+  frame — the cost of choosing the smaller is the whole asset frame:
+
+  | project | gap `D` | gap sample frames | smallest | supplies | shortfall | largest | supplies | shortfall |
+  |---|---|---|---|---|---|---|---|---|
+  | 24 fps | 2 | 4 000 | `0..2` | 3 200 | **800** (16.7 ms) | `0..3` | 4 800 | **0** |
+  | 25 fps | 3 | 5 760 | `0..3` | 4 800 | **960** (20.0 ms) | `0..4` | 6 400 | **0** |
+
+  Both are equally exact in *project* frames — `clip_duration(fill) == D` either way and neither
+  overlaps — so no invariant and no test moves.
+
+  **A third correction, from the media review (F2): the run-length claim above is still too weak.**
+  The table is measured at `source_start = 0` only, and "the run is a single integer at `r ≤ 1.25`"
+  — which the pass-2 rewrite still leaned on for the `D = 7` example — is false at any other phase.
+  At `r = 1.2`, `source_start = 1`, `D = 7` the run is `{9, 10}`: R93's own interval gives
+  `a = map_frames(1) = 1`, so the exact ends are the integers in `[1.2·7.5, 1.2·8.5) = [9.0, 10.2)`,
+  and a half-open interval of width 1.2 holds two integers whenever it straddles one. **The run
+  length is `⌊r⌋` or `⌈r⌉` regardless of whether `r ≤ 1.25`; alignment decides, and alignment is a
+  function of the phase.** The lane asserting that length is what makes the statement falsifiable.
+
+  **`map_project_duration_to_source` keeps "smallest" — and the real answer is neither smallest nor
+  largest, it is R96's phase sweep.** This helper is the *inverse of the forward mapping* and stays
+  that: an unqualified "largest" rule can push the end past `asset.duration`, and a planner's fill
+  ladder has no arm for that when the wanted span is shorter than a whole tile, so it would skip a
+  gap that fills correctly today. What R101's sample arithmetic actually asks for is a **range**,
+  chosen on both its phase and its end, bounded by the asset — and that is a different function.
+  It is **R96**, `covering_source_range_for_project_duration`, which is the one the planner and the
+  timeline button call. Nothing in this entry is withdrawn by that; the two coexist, and R96 is
+  built on top of this one.
+- **R94. The `qa_document` refactor deletes `previous_end` rather than keeping it beside the new
+  accessor.** Rule 94 asks for one definition of "what is a gap". Keeping the QA walk's own
+  `previous_end` and merely cross-checking it against `Document::track_gaps` would have left two.
+  The clip loop now drives a `Peekable` cursor over `track_gaps`' answer and takes a gap when
+  `gap.end == clip.timeline_start`, which is **exactly** the old `clip.timeline_start >
+  previous_end` condition: `track_gaps` walks the same clips in the same order with the same
+  `previous_end = end.max(previous_end)` seeding, so its k-th gap is opened by the k-th clip that
+  triggered one, and gaps are disjoint and increasing, so no earlier clip can consume a later
+  gap's end (a clip whose start equals a later gap's end would itself have closed that gap). The
+  `abrupt_cut` `else` arm, the `previous_was_media` flag and the title branch's early `continue`
+  are otherwise untouched. The byte-identity pin
+  `au5_the_qa_report_is_byte_identical_across_the_track_gaps_refactor` embeds the serialized
+  `QaReport` captured from `qa_document` **before** the refactor landed — the golden was printed by
+  a throwaway lane against the pre-refactor code and pasted in, which is the only way a
+  before/after pin means anything — over §5.2's whole corpus in one document: a leading gap, an
+  adjacent join, an interior gap, a trailing gap the accessor must not report, an empty track, a
+  track whose only clip starts at 0, a title closing the span between two media clips, and a track
+  whose first clip names an **unregistered asset**, so `clip_duration` fails and the clip
+  contributes zero frames while the clip behind it still opens a gap — the accessor's
+  `unwrap_or(TimeCode::ZERO)` reading, which the golden shows the pre-refactor walk shared. The
+  golden was re-captured for that eighth case the same way, by exporting `4f25cba` to a scratch tree
+  and running the corpus against the pre-refactor `qa.rs`. `qa.rs:684`'s existing case is untouched
+  and still green.
+
+  **Two things the equivalence argument leans on, named rather than left to the reader.**
+  `track_gaps` resolves its track with a `find`, so a document carrying two tracks with the same
+  `TrackId` would drive the second track's QA walk from the first track's gap list — mis-attributed
+  or dropped `"track_gap"` warnings, where the per-track `previous_end` was immune. That is
+  unreachable because `validate_document` rejects a duplicate id (`OpError::DuplicateTrack`,
+  operation.rs:4421); the accessor's doc comment says so and the gap test pins the rejection. And
+  the refactor is not free: `track_gaps` walks the track's clips a second time and derives
+  `clip_duration` twice per clip, plus one `Vec` and one linear `tracks` scan per track. QA is not
+  on a hot path and threading the durations back out of the accessor would trade the single
+  definition for a wider signature, so the cost is deliberate and recorded in a comment beside it.
+- **R95. A zero-frame `project_duration` is refused uniformly.** Rule 97 never says what a
+  zero-length request answers, and the first implementation let it through the `< 0` guard and into
+  the search, where it answered **rate-dependently**: `InexactDuration` at 30 → 30, but
+  `Ok(source_start + 1)` at 60 → 24, because a project slower than its source really can map a
+  non-empty source range to zero project frames (`map_source_range_to_project(4..5, 60/1, 24/1)` is
+  `Ok(0)`). No AU5 caller passes zero — `ROOM_TONE_MINIMUM_GAP_FRAMES` is `TimeCode(1)` and a
+  zero-frame gap is not a gap — but an answer that depends on the rate pair is a trap for the next
+  caller. Zero is now refused at every rate pair, through the **existing**
+  `InvalidRange { start: source_start, end: source_start }` — the same empty-range error
+  `map_source_range_to_project` itself answers for `s..s`, and a true statement at every rate,
+  which `InexactDuration`'s message would not have been. Pinned across four rate pairs, beside the
+  `Ok(0)` that shows what the uniformity is hiding.
+- **R96. A fill has a *phase*, and core owns choosing it. Amends rule 97 and rule 101(ii); answers
+  the media review's ruling 1 and F2/F3.** R101 measured a 640 sample-frame hole at the tail of the
+  25 fps fill and concluded that rule 101(ii)'s "the seam holds" was arithmetically impossible
+  without a sub-frame source range or a resampler. The media reviewer refuted that by construction
+  and measured all three joins at exactly 0.0 on a fill of source `2..11`. **R101 tried only
+  `source_start = 0` and generalised from it.** The missing fact is that the mixer plays the
+  **mapped project duration and stops**: `AudioMixer::open` bounds the destination slice by
+  `project_sample_end` and retires the source once the project span is covered, and
+  `validate_source_range` ties the source length to nothing but the asset's own duration — so a
+  source range carrying **more** sample frames than the gap needs is legal, is not a `ClipOverlap`,
+  and is cleanly truncated. Only a range carrying **fewer** leaves silence.
+
+  Which exact ends exist is therefore a question about the **phase** of `source_start`, not about
+  the rate pair. At 30 → 25 with a seven-frame gap (13 440 sample frames at 48 kHz):
+
+  | `source_start` | exact ends | supplied | covers |
+  |---|---|---|---|
+  | 0 | `{8}` | 12 800 | no — R101's hole, 640 frames |
+  | 1 | `{9, 10}` | 12 800 / 14 400 | `1..10` |
+  | 2 | `{11}` | 14 400 | yes |
+  | 3 | `{12}` | 14 400 | yes |
+
+  **Normative.** `time.rs` gains
+  `covering_source_range_for_project_duration(project_duration, source_fps, project_fps,
+  source_duration, sample_rate) -> Result<Range<TimeCode>, TimeMappingError>`, and it — not the bare
+  `map_project_duration_to_source` — is what a planner or a timeline button calls. For each
+  `source_start` in the phase window below it takes that phase's smallest exact end and **walks the
+  exact run upward**, returning the first range that supplies at least the gap's sample frames and
+  ends at or before `source_duration`; candidates are ordered by phase, then by end, so the answer
+  consumes as little of the asset as covering allows. For the case above it answers `1..10` — one
+  phase earlier than the reviewer's `2..11`, and the same seam.
+
+  **The window is one whole *period* of the phase pattern (rewritten twice; both the `⌈r⌉ + 1` rule
+  and the reduced-denominator rule that replaced it are withdrawn).** `⌈r⌉ + 1` bounds one phase's
+  exact-end **run length** — R93 proves that — and the first version of this entry used it as if it
+  also bounded how deep the *phase* has to go. It does not. The second version corrected the shape
+  but not the arithmetic: it took the period to be the reduced **denominator** of `r`, which is a
+  different number whenever `r ≠ 1`, and asserted a second factor "is 1 for every workspace rate at
+  48 kHz" when it is **5** for two of them. The derivation, which this entry should have carried
+  from the start:
+
+  Write `A = project_num · source_den` and `B = source_num · project_den`, so
+  `map_frames(e) = ⌊(e·A + ⌊B/2⌋)/B⌋` and `r = B/A`. Shifting a whole candidate by `P`
+  (`s → s + P`, `e → e + P`) leaves the answer alone only if **both** halves are invariant.
+
+  - The **map** half: `mapped(e+P) − mapped(s+P) = mapped(e) − mapped(s)` for every `e`, `s` exactly
+    when `B | P·A`, so the map repeats every `B / gcd(A, B)` source frames — the reduced
+    **numerator** of `r`. At 30 → 29.97 that is **1 001**, not the 1 000 the second version used;
+    `+ ⌈r⌉` slack hid the difference for `r > 1` by luck rather than by argument.
+  - The **sample** half: supply is `⌊e · rate · source_den / source_num⌋ − ⌊s · …⌋`, invariant under
+    the same shift exactly when `P · rate · source_den / source_num` is an integer, so it repeats
+    every `source_num / gcd(rate · source_den, source_num)` frames. That is **5**, not 1, for a
+    `30000/1001` or `60000/1001` source at 48 kHz.
+
+  **The window is therefore `lcm(map_period, sample_period)`, and `⌈r⌉` is gone.** Sweeping `0..P`
+  is **complete**: a covering range at `s ≥ P` implies one at `s − P` with a smaller `end`, so it is
+  still inside `source_duration` and is preferred by the (phase, end) ordering. And no smaller window
+  is *provably* complete from the rate pair alone: `map_period` and `sample_period` are each the
+  minimal period of their half, so the lcm is the minimal period of the joint pattern, and a shorter
+  sweep can only ever *happen* to suffice for a given gap length and asset. That is exactly what
+  made the two withdrawn rules look right — measured over `D` 1..=200, **68 of the 81** pairs are in
+  fact covered by some window smaller than `P` (30 → 23.976 needs 3 against `P = 1 001`; even
+  30 → 29.97 needs 500 against 1 001), which is why a rule can be wrong for a long time before
+  anything refuses. Short of `P`, the withdrawn rules stood at **66 of the 81** pairs (`⌈r⌉ + 1`)
+  and **23** (reduced denominator + `⌈r⌉`), and on two pairs that was reachable: at **29.97 → 29.97**
+  (`P = lcm(1, 5) = 5`, swept 2) **40 of 200** gap lengths were falsely refused with a covering
+  range sitting at phase 3, and at **29.97 → 59.94** 20 of 200. Those are reachable because
+  `plan_room_tone_fill` takes an explicit `asset_id` for any non-`Video` pool asset, so a 29.97 A/V
+  asset is a documented fill source — the mitigation "not a case the store can produce" was too
+  narrow. The earlier, larger failure stands as recorded: with the `⌈r⌉ + 1` rule a 30 fps room-tone
+  asset filled **no** gap length 1..=200 in a 29.97 or 59.94 project, and since the tilers of the
+  day — `room_tone_tile_source` in the app, its namesake in the agent, both since deleted (R141) —
+  turned a refusal into a skipped gap, an NTSC project received no room-tone fill at all. The trap is subtler than "phase 0 is inexact": at 29.97 phase 0 **is** exact, `0..1`
+  maps to one project frame — it is two sample frames short of the 1 602 that frame demands, as is
+  every phase up to 498.
+
+  **`MAX_PHASE_CANDIDATES` is 4 096**, up from 64, and the loop is exclusive (it was `0..=64`, 65
+  candidates, while the prose said 64). 4 096 admits every workspace pair's whole period with
+  headroom: under the corrected formula the widest is **2 500, at 59.94 → 24** — the second version
+  attributed that number to `24 → 59.94`, its mirror, which is 1 001 — and the deepest phase any gap
+  of 1..=200 frames actually needs across the 9 × 9 matrix is **499**, on the NTSC pulldown pairs,
+  pinned by value. The cap and the run walk's saturating break are what keep both loops bounded at
+  all: the period reaches ~1.8e19 on a hand-built `u32` pair, and a miss must cost a skipped gap
+  rather than a hang. One bisection per phase makes a full sweep microseconds, and only a gap that
+  would otherwise be refused ever pays for the deep phases.
+
+  **Walking the run is not a refinement, it is required.** A sweep that asked each phase only for
+  its *smallest* exact end — the obvious form — covers at 30, 25 and 24 fps but fails outright at
+  **23.976** for every gap length `D ≡ 0 (mod 4)` **up to 92** (from 96 up, phases 2 and 7 do cover;
+  the first text stated the claim without that bound). At `D = 4` the demand is 8 008 sample frames
+  and every phase's smallest exact end supplies 8 000 — short by **8**. The answer is `2..8`: phase
+  2's run is `{7, 8}` and its *second* member is the first thing that covers. Pinned as its own
+  lane.
+
+  **Three refusals, not one, because a planner writes a different sentence for each.**
+  (i) `InexactDuration { source_start: 0, … }` — no phase **in the swept window** expresses the
+  duration; §5.4 arm (iii)'s 60 fps skip, whose reason string rule 97 already spells. The first text
+  said "no phase can express it at all", which was false twice over: phase 0 being inexact does not
+  imply every phase is (526 counterexamples in the matrix, the first at 30 → 50, `D = 1`), and with
+  the old window this variant fired on 161 matrix cases a deeper phase expresses exactly — the
+  smallest being `(4, 25/1 → 59.94)`, exact at phase 4. With the corrected window a re-run of the
+  whole 9 × 9 × `D` 1..=200 matrix finds **zero** such cases, and the sweep lane now asserts that
+  directly by re-scanning 1 200 phases whenever this variant is returned.
+  (ii) `SourceTooShortToCover { project_duration, source_duration, minimum_source_frames }` —
+  **new**, and the only refusal whose answer is "record more room tone". Supply is at most
+  `length × rate × source_den / source_num`, so it is decided **before** the sweep from that bound
+  alone: the number in the message is a proof, not the summary of a failed search.
+  (iii) `NoCoveringSourceRange { project_duration, source_duration }` — exact ranges exist, the
+  asset is long enough, and nothing covers at any phase or any length. At 30 → 59.94 one source
+  frame supplies 1 600 sample frames against a demand of 1 602 while two map to two project frames
+  too many, so **every even** span is uncoverable while every odd one fills — a limit of the
+  one-for-one mapping, not of the recording. The first text folded (ii) and (iii) together and its
+  message read "no source range within 96000 source frames covers 1 project frames" on a 53-minute
+  asset, blaming the recording for the mapping's arithmetic. That is R92's third and fourth new
+  `TimeMappingError` variants in this range; R92's reasoning applies unchanged (no `Operation`, no
+  `OpError`, no `Serialize`, no exhaustive match outside `time.rs`).
+
+  **A withdrawn diagnosis, recorded because it was wrong in an instructive way.** The pass-3 text
+  carried a paragraph headed "the demand bound is conservative", which blamed those 40 refusals at
+  29.97 → 29.97 on the position-independent `⌈D·k⌉` demand bound. Measured, that is not the cause:
+  for `D = 2` the bound is 3 204 and the **worst real need over 2 000 gap positions is also 3 204**,
+  so the bound is exactly attained rather than loose, and phase 3's `3..5` supplies exactly 3 204
+  and therefore covers at *every* position. All 40 were window misses. The lesson is the one this
+  entry keeps having to learn: a measurement explained by the first plausible mechanism, rather than
+  by one that was checked, sends the next reader past the real defect. The demand bound is tight;
+  the window was short.
+
+  **The sample arithmetic is media's, re-spelled, and the demand side rounds up.** Core cannot call
+  `kinewright-media`'s `clock::frame_to_samples` — media depends on core — so
+  `⌊frame × rate × fps.den / fps.num⌋` is written out again in `time.rs` with a comment naming the
+  original, and the lane checks core's answer against a *third* copy spelled from media's source so
+  the re-spelling itself is pinned. Supply uses that floor exactly. Demand uses
+  `⌈D × rate × project_fps.den / project_fps.num⌉`, because the mixer's real demand is
+  `⌊end × k⌋ − ⌊start × k⌋` at the gap's absolute position, which is `⌊D·k⌋` or `⌈D·k⌉` depending
+  where the gap sits; the ceiling is the position-independent bound, and the two agree for every
+  rate the workspace uses at 48 kHz (`k` = 1 600, 1 920, 2 000, 2 002). The bound is not merely
+  safe but **tight**: its value is attained by the real need at some gap position for every rate and
+  duration tested, which is why the withdrawn "conservative" diagnosis above had no measurement
+  behind it.
+
+  **The lane that checks the window shares no *period* arithmetic with it.** `first_covering_range`
+  in `tests/au5_core.rs` scans phases from 0 with a flat constant bound and derives no period at
+  all, so it tests the window *rule* rather than agreeing with it, and every refusal across the
+  9 × 9 matrix is checked against it. It does call the same two mappers and re-walk the run the same
+  way, so it would not catch a wrong smallest-exact-end or a wrong break condition — those are R93's
+  lanes, a different pin. Reverting each withdrawn formula genuinely fails it, inside the lane's own
+  bounds (9 × 9, `D` 1..=60): `⌈r⌉ + 1` on **701** (pair, `D`) cases, the first being
+  **30 → 29.97, `D` = 1**; reduced denominator + `⌈r⌉` on **18**, the first being
+  **29.97 → 29.97, `D` = 2** — not `D` = 1, which phase 1's `1..2` answers with exactly the 1 602
+  sample frames it needs, inside even the withdrawn two-phase window.
+
+  **Left to the other crates:** the agent's `plan_room_tone_fill` and the app's timeline tiler both
+  hard-coded `source_start = TimeCode::ZERO` when this entry was first written (F3), so both shipped
+  the one fill at 30 → 25 that does not cover; both now call this helper. R101 is rewritten by the
+  media implementer per the review's ruling 1; this entry is the core half and does not depend on
+  that rewrite landing first. One consequence, recorded as history: the tilers of the day turned
+  every refusal into `None`, so all three refusals above collapsed into one skipped gap and the
+  editor never learned which of the three it hit. R139's three-way reason closed that.
+- **R97. Choosing the repeating tile is core's job too, for the same reason choosing the phase was.
+  Amends rule 95; answers the agent pass-2 review's finding 1.** A fill repeats **one** tile, so a
+  tiler needs the longest span its asset can actually *cover*, which is not the longest it maps to.
+  Both tilers — the agent's `room_tone_longest_tile` and the app's byte-identical copy — searched
+  for it by stepping `want` down from the asset's own mapped length by at most
+  `ROOM_TONE_MAX_TILE_SHORTFALL_FRAMES = 4`. That literal is derived from the
+  `⌈project_fps / source_fps⌉` lattice, which is the right argument for a project *faster* than the
+  source and says nothing about one slower by a 1001/1000 ratio.
+
+  The measured consequence, verified here against the shipped helper rather than a replica: at
+  30 → 29.97 the covering tile is the map period's `0..1001` — 1 001 source frames worth 1 000
+  project frames — so an asset of 1 006..=1 500 frames must step down by 5..=499 to reach it.
+  **496 of the 1 300 store-producible asset lengths** need a step past four at 30 → 29.97 and
+  **744** at 30 → 59.94, and a tiler that finds no tile skips *every* gap on the track. An editor on
+  a 29.97 timeline who grabs an ordinary 33–50 s room tone therefore filled nothing at all — the
+  same user-visible failure R96's phase window was written to close, relocated from core's window
+  into the agent's constant. That is the argument for moving the search: one answer to "what tile
+  fits", beside the one answer to "what phase fits", rather than a literal per caller.
+
+  **Normative.** `time.rs` gains
+
+  ```rust
+  pub fn longest_coverable_project_tile(
+      source_duration: TimeCode, source_fps: Rational, project_fps: Rational,
+      sample_rate: u32, max_project_frames: TimeCode,
+  ) -> Result<(TimeCode, Range<TimeCode>), TimeMappingError>;
+  ```
+
+  returning the largest `want` **within `MAX_TILE_SEARCH_STEPS` steps** of
+  `min(max_project_frames, whole)` for which `covering_source_range_for_project_duration` answers,
+  together with that range. The step qualifier is load-bearing rather than pedantic: that ceiling
+  passes 2 048 on real input, since a 1 800-frame (60 s, the capture cap) tone at 30 → 59.94 maps to
+  3 596 project frames. Harmless there — coverable wants at that pair are two apart — but a caller
+  reading the bound as an unconditional maximum would be wrong.
+  `max_project_frames` is the gap the caller wants filled, so a tile never overshoots it — asked for
+  7 against a 1 200-frame asset at 29.97 it answers `(7, 493..501)`, not the asset's own length.
+  **The agent and the app delete their copies of the loop and the constant** and call this.
+
+  **The scan is a first-hit downward walk, not a bisection, because coverability is not monotone in
+  `want`.** A failing `want` says nothing about `want − 1`: at 30 → 59.94 every odd span covers and
+  every even one cannot, at any phase or length. The walk is bounded by
+  `MAX_TILE_SEARCH_STEPS = 2 048` instead — **4.09×** the worst step there is at a workspace rate
+  pair, found by sweeping all 81 ordered pairs of the nine rates over `source_duration` 30..=1 800:
+  **501**, at 23.976 → 24 with a 999-frame asset (`whole` = 1 000, first coverable `want` = 499).
+  The 30 → 29.97 / 1 500-frame case this entry cites elsewhere is 499 — memorable, but not the
+  maximum. Cost is that bound times one phase sweep and is paid
+  only while nothing fits; the pathological case is an asset that covers nothing at an NTSC pair,
+  which walks the whole way down before refusing.
+
+  **A refusal is the covering helper's own, propagated.** Whichever of R96's three the last
+  attempted `want` produced is returned unchanged, so a caller's sentence names the real reason
+  instead of inventing one. 60, 300 and 500-frame assets at 29.97 are dead at every step and say so.
+
+  **What the agent's R119 got wrong, corrected here because the numbers are core's.** R119 said "60,
+  300, 500, 1 200 and 1 500-frame assets refuse at every step" and "raising the constant would not
+  rescue those lengths; recording a longer room tone does". Only 60, 300 and 500 are genuinely dead;
+  1 200 fills at step 199 and 1 500 at step 499, so a larger bound is *precisely* what rescues them,
+  and 496 lengths were in that class. "Record a longer room tone" is not sound advice either,
+  because the set is not monotone in length — 1 000 and 1 800 fill while 1 006…1 500 did not. The
+  agent implementer amends R119; the lane pinning all six step-downs lives here.
+
+**Implementation errata, Part B media (2026-09-10).** R100–R109 is the media crate's reserved
+Part B range.
+
+- **R100. The seam lanes live in `src/au5b_fixtures.rs`, and three files §8 does not list are
+  touched.** §8's Part B media list puts the seam lanes in `tests/au5_fixtures.rs`, but the pin
+  compares `export::mix_audio`'s samples against a per-piece decode, and **`mix_audio` is
+  `pub(crate)`** (export.rs:1078) — an integration test links only the crate's public surface.
+  `test_support`, which every fixture needs, is likewise behind the `test-util` feature no default
+  build enables. (`decode_audio_range` is **not** part of this argument: it is `pub` as of this same
+  diff, R106.) This is exactly R62's situation and takes R62's answer: rather than widen the public
+  API for a test, the six lanes live in a new `#[cfg(test)] mod au5b_fixtures`, beside the code they
+  measure, in §5.4's house style with the same fixture bytes and the same promoted helpers.
+  `tests/au5_fixtures.rs` is therefore **untouched** in Part B. Two further files outside §8's Part B
+  media list are edited, both without behaviour change: `lut_store.rs`, whose `sanitize` and
+  `is_canonical_sha256` became `pub(crate)` so `room_tone_store.rs` can call them — two stores under
+  one root must not disagree about what a digest looks like — and `audio.rs`, for R106's doc block
+  alone.
+- **R101. Corrected: a fill is short of its gap when the *phase* of `source_start` makes its exact
+  end fall short — not when the two rates disagree.** *(This entry replaces a wrong one. The first
+  version concluded that §5.4 rule 101(ii)'s "the seam holds" at 25 fps was arithmetically
+  impossible and needed either a sub-frame source range or a resampler. That was a missed
+  construction, caught in pass-1 review and reproduced both ways; the conclusion is withdrawn and
+  the observations that were right are kept below, because they are the reason the phase matters.)*
+  The facts the first version got right: the audio mixer maps **source samples to project samples
+  one for one**, opening the decoder over `[frame_to_samples(source.start),
+  frame_to_samples(source.end))` at the asset's rate and filling the clip's project span from it,
+  with no rate conversion anywhere; `frame_to_samples` floors; and rule 97's exact range is exact in
+  project **frames**, which is not the same as carrying enough sample **frames** to fill the gap.
+  What it missed is that a source range carrying **more** sample frames than the gap is *cleanly
+  truncated*: the destination slice is bounded by `project_sample_end` and the source is `retire()`d
+  once the span is covered (audio.rs:4245-4262), `validate_source_range` (operation.rs:4344-4362)
+  ties nothing to the project span, and `clip_duration` is derived from the *mapped* range, so a
+  longer range is neither a `ClipOverlap` nor a validation failure. And because
+  `map_source_range_to_project` maps **absolute boundaries and subtracts** (time.rs:233-256), which
+  exact ends exist depends on `source_start`. At 30 → 25 with `D = 7`:
+
+  | `source_start` | exact ends (`clip_duration == 7`) | supplies ≥ 13 440 sample frames |
+  |---|---|---|
+  | 0 | {8} | — |
+  | 1 | {9, **10**} | 10 |
+  | 2 | {**11**} | 11 |
+  | 3 | {**12**} | 12 |
+  | 4 | {12} | — |
+
+  So only phase 0 fails, and a caller that hard-codes `source_start = 0` and takes
+  `map_project_duration_to_source`'s **smallest** exact end ships that one fill and no other. Core's
+  `covering_source_range_for_project_duration` (§0 R96) sweeps the phase and returns `1..10` here,
+  which supplies 14 400 against the gap's 13 440. The media lanes were rebuilt on it:
+  `au5_a_twenty_five_fps_fill_is_seamless_across_its_join` asserts `clip_duration == 7`, no overlap,
+  and **all three joins — `clip_a_to_fill`, `fill_to_clip_b`, `whole_gap` — at exactly 0.0 with no
+  silence modelled**, printing `AU5_ROOM_TONE_COVERAGE required=13440 supplied=14400 excess=960`;
+  and `au5_a_zero_phase_fill_at_twenty_five_fps_falls_short_of_its_gap` keeps the `0..8` measurement
+  as the evidence for *why* the covering helper exists, pinning the 640 sample frame / 13.333 ms
+  shortfall against `ROOM_TONE_FILL_RESIDUAL_BUDGET_SAMPLE_FRAMES` at 3.00x and then asserting that
+  the covering range for that very gap exists. §5.4 rule 101(ii) and B6 are met as written, in the
+  document model as it stands, with no sub-frame source range and no resampler. The cross-crate
+  consequence is that **every fill site must use the covering helper**, not
+  `map_project_duration_to_source`, or it ships the phase-0 fill; that is the agent's and app's to
+  make, and this lane pair is the evidence.
+- **R102. The store truncates a capture to a whole asset frame, and compares the caps on sample
+  frames rather than on milliseconds.** §5.3 needs `k` source frames to be exactly `k × 1 600`
+  sample frames of the store file at `speed_percent = 100`; a capture ending mid-frame would make
+  `probe_path`'s `ceil` round the asset duration **up** (decode.rs:600-609) and the last tile of a
+  fill would read past the end of the file into silence — R101's shortfall, but on every fill at
+  every rate rather than only on an uncovered phase. `write_capture` therefore truncates to
+  `ROOM_TONE_SAMPLE_FRAMES_PER_ASSET_FRAME`, at most 1 599 sample frames or 33.3 ms, and reports the
+  written length back. The truncation can never cross the floor, because
+  `ROOM_TONE_MINIMUM_CAPTURE_MILLISECONDS` is itself a whole number of asset frames (24 000 sample
+  frames, exactly 15) — pinned, along with the ceiling's 1 800, by
+  `the_capture_constants_are_their_own_arithmetic`. Separately, the two caps are compared on
+  **sample frames**, not on the derived milliseconds: `2 880 001` sample frames still floors to
+  60 000 ms, so a millisecond comparison would have let a capture past the ceiling through. The
+  boundary lanes assert both sides of both caps one sample frame apart.
+- **R103. `MEDIA-POLICY.md` had no LUT-store sentence to sit beside.** §1.4 Part B asks for "one
+  sentence on the room-tone store beside the LUT store's". `MEDIA-POLICY.md` describes no store at
+  all — the LUT store is documented in `CC4-LOOK-MANAGEMENT.md` — so the room-tone text landed as a
+  new `## Room-tone store` section after `## Playback audio mixdown`, one short paragraph naming the
+  shared `<stem>.kinewright-assets` root, the ordinary-`MediaAsset` registration, the two
+  deliberately different caps and R102's truncation.
+- **R104. The store fixes 48 kHz stereo rather than taking them as arguments, and owns a second copy
+  of the WAV writer.** §5.1 and §5.8 spell one rate and one channel count everywhere
+  (`decode_audio_range(.., 48_000, 2)`), and §5.4 rule 100's exactness is a property of that rate
+  meeting the mix's, so `ROOM_TONE_SAMPLE_RATE` and `ROOM_TONE_CHANNELS` are constants and
+  `write_capture` takes only samples: a caller that could pass 44 100 could silently give the seam a
+  resampler. The WAV encoder itself could not be reused from `test_support::wav_f32`, which is
+  behind the `test-util` feature — `#[cfg(any(test, feature = "test-util"))]`, so a default build
+  genuinely cannot call it — so `room_tone_wav_bytes` is a production copy and
+  `the_store_wav_is_byte_identical_to_the_fixture_writer` pins the two byte for byte — without it,
+  the seam lanes would be measuring a different file from the one the product writes.
+- **R105. `capture_room_tone`'s decode is a media-crate method, because nothing on `Analysis`
+  returns samples.** §5.8 rule 115 has the capability call `decode_audio_range` directly, which is
+  `pub(crate)`, and no `Analysis` method hands a caller raw audio. The media half is therefore
+  `RoomToneStore::capture_room_tone(&self, asset, source, cancellation) -> Result<RoomToneCapture>`:
+  it refuses an asset with no audio, an empty or out-of-bounds range, and a range outside the two
+  capture caps **before a byte is decoded** — the writer's half of rule 90's metadata-first rule,
+  since a one-hour range would otherwise decode into 1.4 GB of `f32` and only then be refused — then
+  decodes the raw source at 48 kHz stereo and writes the store file. The agent half is the rest of
+  rule 115: probe the written file, override `probe_path`'s `<sha256>.wav` name (R46), and submit one
+  `AddAsset`; rule 116's idempotence reads `RoomToneCapture::already_present`, which is `true` when
+  the store already held a correctly hashed file at that digest. `decode_audio_range` was separately
+  widened to `pub` in the same working tree (see R106), which is compatible and not a second answer:
+  a caller that decodes first and calls `RoomToneStore::write_capture` gets the same file and the
+  same digest, because `write_capture` re-applies the span guard on the buffer it is handed. The
+  difference is only **where** an over-long range is refused, and `capture_room_tone` refuses it a
+  decode earlier. That ordering is pinned by
+  `capture_room_tone_refuses_a_bad_or_over_long_range_before_it_decodes_anything`, whose 50-minute
+  case points at a **path that does not exist**. The non-existent path is the discriminator, and it
+  has to be: `decode_audio_range` treats EOF as zero padding (`samples.resize(expected, 0.0)`), so
+  the same case over a real short file would have let a decode-first implementation reach
+  `write_capture` and answer the identical `room_tone_capture_too_long` message — the lane would have
+  passed either way. With nothing at the path, a decode-first order fails with the decoder's own open
+  error instead, so only a guard-first order produces the asserted refusal; moving
+  `check_capture_span` after the decode fails the lane, which is how that was checked. That is why
+  the app's `Room tone` path and any agent path holding the asset should prefer it.
+- **R106. `decode_audio_range` is `pub`, and its `# Errors` section is load-bearing.** §5.8 rule 115
+  spells `capture_room_tone`'s decode as this call and the agent is outside the crate, so the
+  function was widened from `pub(crate)` to `pub` and is re-exported from `lib.rs`; a second decoder
+  in the agent would be a second answer to "what is in this range". The consequence media owns is
+  the doc block: the workspace runs `clippy::pedantic` and the media gate is `-D warnings`, so
+  `missing_errors_doc` fires the moment the function becomes `pub`. The `# Errors` section naming
+  `MediaError::Cancelled` and the decoder's own failures is therefore **required**, not decorative,
+  and `audio.rs` is named in R100 as a file §8's Part B media list does not carry. Recorded in the
+  media range because the media gate is what fails without it.
+- **R107. `already_present` comes back from the write, not from a second pass.** `write_capture`
+  first asked `availability(&sha256)` — a full `fs::read` plus SHA-256 — and then `write_store_file`
+  independently re-read and re-hashed the same file for its dedup compare: two full reads and two
+  digest passes of a file that can be 23 MB. `write_store_file` now answers `bool` — `true` when it
+  kept the existing file — and that is `RoomToneCapture::already_present` directly. The two
+  predicates agreed before (both require a non-symlink regular file; `check_store_entry` refuses a
+  symlink first), so this is cost removed, not a behaviour change, and
+  `a_second_capture_of_the_same_bytes_leaves_the_store_file_untouched` still pins both the flag and
+  the untouched inode.
+- **R108. The constants are tied to `Rational::default()`, and the requested length is reported.**
+  `the_capture_constants_are_their_own_arithmetic` derived 1 600 from
+  `ROOM_TONE_ASSET_FRAMES_PER_SECOND`, and a separate lane asserted
+  `RoomToneStore::asset_fps() == Rational::default()` — a tautology, since `asset_fps()` *returns*
+  it. Nothing connected the constant to the rate `probe_path` actually gives an audio-only asset, so
+  a `Rational::default()` that moved off 30/1 would have made every figure in the file silently
+  wrong with every lane still green; one assertion now ties them. Separately, `RoomToneCapture`
+  gained `requested_sample_frames` beside `sample_frames`, so a surface can say "33 ms were trimmed"
+  by R102's truncation without recomputing from the buffer it passed.
+- **R109. Two small divergences from §5.1, recorded rather than left silent.** (a) §5.1 rule 90 says
+  "the 9 MB between them is the margin" between the 32 MiB reader cap and the 60 s writer cap. The
+  real figure is **10 514 388 B ≈ 10.5 MB** (`33 554 432 − 23 040 044`); the module doc says 10.5 and
+  `the_capture_constants_are_their_own_arithmetic` recomputes both endpoints rather than quoting
+  either, so the code is right and only §5.1's prose is off. Nothing else depends on the number.
+  (b) There is **no `copy_to` counterpart** for Save As. `LutStore::copy_to` relocates
+  `luts/<sha>.cube` into the new project's store; nothing relocates `room-tone/<sha>.wav`, because
+  room tone is an ordinary `MediaAsset` with an absolute path and survives exactly as any external
+  media file does — the new project points back at the old project's asset directory. Neither §5.1,
+  §8 nor B1 asks for more, and rule 89's whole point is that room tone is *ordinary* media; but it
+  is a difference in behaviour between two stores under one root, and the app's Save As surface
+  should confirm it is intended rather than discover it.
+
+**Implementation errata, Part B agent (2026-09-10).** R110–R119 is the agent's reserved range for
+Part B.
+
+- **R110. `normalization_context`'s relaxation is non-vacuous: an *empty* bus still refuses.** Rule
+  111 says the plan extends a bus when "every effect is an AU5 repair node", which a bus with **no**
+  effects satisfies vacuously. It is implemented as *non-empty **and** every effect a repair node* —
+  the reading §1.4's own `CHANGELOG` line already carries ("a bus that carries **only** AU5 repair
+  nodes"). The relaxation exists so a **repaired** dialogue bus can be normalized; a bus with no
+  effects carries no repair, and extending it would silently rename an editor's submix to keep its
+  own name while appending delivery processing to it. Reading it vacuously would also have flipped
+  `normalization_context_refuses_each_malformed_argument`'s existing `Dialogue`-bus-with-no-effects
+  case from a refusal to an acceptance, which is a behaviour change no rule asked for. The pin is
+  updated as rule 113 requires — it gains the `audio_gain` negative case, a `tracks`-differ negative
+  case, and a positive case asserting the extended bus's id, name, fader, sidechain and appended
+  order — and its original empty-bus assertion is left green, which is the evidence that the
+  relaxation only widens acceptance where a repair really is present.
+- **R111. `decode_audio_range` is widened to `pub`, and it takes a seventh argument.** §5.8 rule 115
+  spells the capture's decode as `decode_audio_range(asset.path, asset.fps, from, to, 48_000, 2)`,
+  but that function is `pub(crate)` in `kinewright-media`'s `audio.rs` and the agent is a different
+  crate; §8's Part B media file list does not mention it, so nothing in the slice as written could
+  have made the call. It is now `pub` and re-exported from media's `lib.rs`, one word and one name.
+  A second decoder agent-side was the alternative, and it would have been a second answer to "what
+  is in this source range" — R85's argument across a crate boundary. The real signature also carries
+  a seventh `&ExportCancellation` parameter the contract's spelling omits (`engine.rs:826` already
+  passes one); the capture passes `ExportCancellation::default()`, because there is no cancellable
+  job behind a synchronous tool call. **That is also why `ROOM_TONE_MAX_CAPTURE_MILLISECONDS` is
+  re-checked agent-side (pass-1 F10):** rule 90 puts the 60 s cap on the *writer*, so
+  `write_capture` enforces it **after** the decode has already materialised the samples — a
+  ten-minute request used to buy a confirmation and a ten-minute uninterruptible decode on the
+  handler thread before being told no. The capture therefore refuses an over-long range in the units
+  the caller asked in, before the confirmation and before a byte is read. The store stays
+  authoritative: the agent-side bound is computed from frames and rounds **down**, so it can only
+  reject ranges the store would reject too. **Owed:** media's §8 Part B file list should name `audio.rs`
+  by one word, and `lib.rs`'s `au5b_fixtures` doc comment now says "both are `pub(crate)`" of a pair
+  of which one is `pub`; both are outside the agent implementer's reserved files.
+- **R112. A captured room tone earns no background analysis.** `apply_operation` calls
+  `request_asset_analysis` for every `AddAsset`, which queues a transcription, a silence detection, a
+  scene detection and a beat detection. On a room tone all four are waste and the first is worse than
+  waste: on a machine that has never transcribed anything, `request_transcription` downloads the
+  Whisper model — over HTTPS, hundreds of megabytes — to read a file that is a second of noise by
+  construction. The capture therefore applies its operation through
+  `apply_operation_analyzing(.., analyze: false)`; `apply_operation` is that function with `true` and
+  no other caller changes. This was found rather than reasoned: `tests/mcp_server.rs`'
+  `au5_capture_room_tone_and_fill_a_gap_through_the_real_store` passed and then **aborted the test
+  binary at process exit**, in `aws-lc`'s teardown, with that download still in flight on a
+  `reqwest` worker. The test now pins the absence directly through `get_analysis_status` —
+  by asserting **every job's `phase`** is `not_requested` or `unavailable`, not by searching the
+  serialized job list for the words "queued" and "running" (pass-1 F11). Silence detection on one
+  second of noise can finish between the capture and the assertion, so a substring search would have
+  caught a re-enabled `request_asset_analysis` only through whichever job happened to still be
+  pending; asserting the phase set catches a completed one too.
+- **R113. "Before" and "after" are measured at the same point, on documents that differ only by the
+  prefix — and the readiness gate runs first.** Rule 106 says to measure "on the candidate point"
+  before and after without saying what that point is when the bus does not exist yet. Measuring the
+  *track* stem before and the *bus* stem after would fold a routing change into the number the
+  refusal is built on. The planner therefore applies a **baseline** `UpsertAudioBus` carrying the bus
+  without the repair prefix — a no-op when the bus already exists — and measures
+  `MixSpectrumPoint::Bus` on that, then measures the same point on the candidate. Rule 107's
+  readiness gate is also hoisted **ahead** of both renders: it is free, and an agent waiting on an
+  asynchronous silence analysis should not pay for two mixes to be told to wait.
+- **R114. The profile window's minimum is restated agent-side, in sample frames.** Rule 107's second
+  refusal names 469 ms, which is `NOISE_PROFILE_MINIMUM_FRAMES` (22 528 sample frames at 48 kHz) to
+  the nearest millisecond. Media keeps that constant `pub(crate)`, exactly as it keeps its
+  `AUDIO_RATE` private, so the agent restates it on `MIX_MEASUREMENT_SAMPLE_RATE`'s precedent as
+  `PLAN_REPAIR_MINIMUM_LEARN_SAMPLE_FRAMES = 22_528` and `PLAN_REPAIR_MINIMUM_LEARN_MILLISECONDS =
+  469`. The project-frame minimum is derived by ceiling from the **sample-frame** count, not from the
+  rounded millisecond figure, because 469 ms is sixteen sample frames short of what the profile
+  refuses on: at 30 fps that is 15 project frames, 500 ms. The refusal string quotes 469, which is
+  what a reader can check against §3.7.
+- **R115. Two `plan_dialogue_repair` refusals §5.6 does not name.** (i) A bus that carries **some but
+  not all** of the requested tracks is refused by name. Rule 109 says a track routes to at most one
+  bus, which makes reuse unambiguous for one track, but says nothing about a request spanning a
+  routed track and an unrouted one; writing that bus would silently re-target it, which is the same
+  hazard rule 111's `tracks`-equality condition exists for. (ii) A measurement that answers `None`
+  for the signal-to-noise ratio before or after — §2.4 rule 22's honest answer under ten energetic
+  windows — refuses too, saying which side read `none`, because rule 106's gate is a comparison and
+  there is nothing to compare. Both carry rule 21's percentile-bias sentence, which is spelled once
+  as `REPAIR_PERCENTILE_BIAS_SENTENCE` and shared by every refusal that quotes a measured SNR.
+  (iii) The converse shape — a bus carrying **more** tracks than were asked for — is *not* refused
+  and is *not* re-routed: rule 109's "reuses the track's bus" preserves that bus's own `tracks` as
+  well as its effects, because a chain is per bus and there is nothing else repairing a subset of one
+  could mean, while rewriting `tracks` to the requested subset would silently un-route the tracks the
+  caller did not name. The structured content publishes the requested `tracks` and the bus's actual
+  `audio_bus_tracks` side by side, so the difference is visible rather than inferred.
+- **R116. `next_audio_effect_id` is shared, not re-spelled.** AU3's `normalization_context` allocated
+  audio effect ids with an inline `max + 1` scan over clips, buses and the master chain; rule 109
+  points `plan_dialogue_repair` at "the shared `max + 1` effect-id scan" at the same citation. The
+  scan is now a free `fn next_audio_effect_id(document)` that both planners call, on R50's and R85's
+  reasoning: two spellings of one allocator is a drift the type system cannot catch, and here it
+  would surface as a duplicate effect id inside one bus. No behaviour changes; the AU3 pin
+  `first_effect_id_scans_the_master_chain` is untouched and still green.
+- **R117. The Part B registry quad, measured (rule 83).** `served_surface_is_small_and_keeps_the_
+  internal_registry_discoverable` reports **138 tools, 1 540 264 B serialized = 1 397 156 B of input
+  schemas + 120 458 B of descriptions**, against Part A's 135 / 1 531 264 / 1 391 430 / 117 683. The
+  served quad is **`(7, 5 660, 3 510, 998)`, byte-identical** for the twelfth consecutive
+  measurement, as R22 said it would be. The +9 000 B is the three new rows and nothing else: Part B
+  adds no `Operation` variant and no effect descriptor, so no generated tool and no spliced
+  `effect_documentation()` row moves a byte, and R84's pattern sentence is left exactly as it was.
+  Input schemas +5 726 B = `DialogueRepairPlanArgs` 2 207 + `RoomToneFillPlanArgs` 1 855 +
+  `CaptureRoomToneArgs` 1 664. Descriptions +2 775 B = 995 + 972 + 808, each inside rule 135's
+  1 024 B budget. Schema-plus-description is 3 202 / 2 827 / 2 472 against 3 369 / 2 993 / 2 638
+  serialized, leaving envelopes of 167 / 166 / 166 B. **A row's envelope is 147 B plus its name**,
+  which reproduces every earlier figure in this programme — `get_audio_qc` 147 + 12 = 159,
+  `get_audio_repair` 147 + 16 = 163, `plan_dialogue_repair` 147 + 20 = 167, `plan_room_tone_fill`
+  147 + 19 = 166 — and `capture_room_tone` reads 166 rather than 147 + 17 = 164 because its
+  description quotes the default asset name and `description_bytes` counts those two `"` unescaped
+  while `serialized_bytes` counts them escaped. `plan_dialogue_repair`'s description was 1 034 B on
+  its first measurement, 10 B over the budget; the sentence "Every value on the wire is an integer."
+  was cut, which is 38 B of prose that says nothing the schema does not.
+- **R118. B11's armed bus fader is deliberately small.** Rule 111 / R35 want a **non-zero**
+  `gain_tenth_db` and a `gain_curve` proved to survive both planner orders, because
+  `skip_serializing_if = "i32_is_zero"` would hide a reset. The either-order lane arms them after the
+  *first* planner commits, so in the normalize-then-repair order the convergence loop has already
+  run and cannot absorb them: a −3.0 dB fader showed up as a 2.43 dB loudness error the planner never
+  had a chance to correct, and the tolerance assertion would then have been measuring the fixture's
+  own arithmetic. The armed values are **−2 tenth dB falling to −1** — 0.2 dB to 0.1 dB — which is
+  not zero, which is what R35 needs, and which leaves both orders inside AU3's ±100-hundredth
+  tolerance (measured errors 1 and 39 hundredths).
+- **R119. The fill takes every tile's source range from core's covering helper, phase and all.**
+  §5.4's fixture and §5.3's arithmetic are both written from `source 0..k`, and the planner's first
+  form hard-coded `source_start = TimeCode::ZERO` and asked
+  `map_project_duration_to_source` for the end. That is exact in project **frames** and can still be
+  short in **samples**: the audio mixer maps source samples to project samples one for one, opens
+  the decoder over the clip's source range, plays the mapped project span and stops, so a tile whose
+  source range carries fewer sample frames than the gap demands runs out early and leaves silence in
+  the middle of the hole it was asked to close, while one carrying more is cleanly truncated. Which
+  exact ends cover therefore depends on the **phase** of `source_start`: at 30 -> 25 a seven-frame
+  gap admits the eight-frame `0..8`, which supplies `1 600 x 8 = 12 800` sample frames against a
+  demand of `⌈7 x 48 000 / 25⌉ = 13 440` and is therefore 640 short, and the nine-frame `1..10`,
+  `2..11` and `3..12`, which are not. (`1..9` is **not** among them, pass-2 finding 3: it is eight
+  frames like `0..8` and short by the same 640 — at these two rates the shortfall is a property of
+  the *length*, and the phase only decides which nine-frame ends are exact.) Phase 0 is the one a
+  hard-coded start ships, and it is the one that does not cover. Each tile's range now
+  comes from core's shared
+  `covering_source_range_for_project_duration(project_duration, source_fps, project_fps,
+  source_duration, sample_rate)`, so tiles may begin at a non-zero source frame and may differ from
+  one another by a frame in length; what is fixed is the project span each maps to and that the
+  samples behind it reach the end of that span. `ROOM_TONE_MAX_TILES`' semantics are unchanged, and
+  rule 97's `clip_duration(fill) == gap` assertion still runs, unchanged, over the ranges the helper
+  chose. The 25 fps arm asserts the **committed** fill equals the helper's own answer — `1..10`, nine
+  source frames for a seven-frame gap — and that `track_gaps` is empty afterwards, so the agent's
+  fill and media's seam lane cannot disagree about which range that is. The rate the check is
+  done at is the mix path's own 48 kHz, restated as `ROOM_TONE_FILL_SAMPLE_RATE` beside a `const`
+  assertion against `MIX_MEASUREMENT_SAMPLE_RATE` so the two spellings cannot drift.
+
+  **How far a tile must shrink is core's search, not an agent-side literal (pass-1 F3, pass-2
+  finding 1).** A fill repeats **one** tile, so the tiler needs the largest span its asset can
+  actually *cover*, not the largest it maps to. The first form walked down from the asset's own
+  mapped length by at most `ROOM_TONE_MAX_TILE_SHORTFALL_FRAMES = 4`, derived from the
+  `⌈project_fps / source_fps⌉` lattice — the right argument for a project **faster** than the source,
+  and no argument at all for a project slower than it by 1001/1000. At both NTSC pairs the covering
+  tile is the map period's `0..1001`, 1 001 source frames worth 1 000 project frames, so an asset of
+  1 006..=1 500 frames must step down 5..=499 to reach it. Against four steps, **496 of the 1 300
+  store-producible asset lengths fail at 30 → 29.97 and 744 at 30 → 59.94**, and a tiler that finds
+  no tile skips *every* gap on the track — so an ordinary 33–50 s NTSC capture filled nothing at all.
+  That is R96's own user-visible failure relocated from core's phase window into the agent's
+  constant.
+
+  **The constant is deleted.** `room_tone_longest_tile`, `room_tone_tile_source` and
+  `ROOM_TONE_MAX_TILE_SHORTFALL_FRAMES` are gone; the tiler asks core's shared
+  `longest_coverable_project_tile(source_duration, source_fps, project_fps, sample_rate,
+  max_project_frames)` for the whole remaining gap on each pass, so a span core can cover in one tile
+  is one `AddClip` and a longer one walks the remainder down. The revision's own first text was wrong
+  about which lengths are dead and must not be read as it stood: **1 200 and 1 500 do fill**, at
+  steps 199 and 499, and "raising the constant would not rescue those lengths" was the opposite of
+  the truth for 496 of them. Only **60, 300 and 500** are genuinely uncoverable at 30 → 29.97, at any
+  bound. "Record a longer room tone" is also **not** sound advice here and is withdrawn: the coverable
+  set is not monotone in length — 1 000 and 1 800 fill while 1 006…1 500 did not under the old bound
+  — so the honest answer is that core searches and the per-gap reason says which of its three
+  refusals applied. `au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps` commits a fill
+  from a 40 s NTSC capture end to end and prints its own derivation:
+  `mapped=1199 tile=1000 step=199 source=0..1001`.
+
+  **The helper's error kind rides into the per-gap reason (pass-1, and the core R96 review).** The
+  first form `.ok()`ed core's `TimeMappingError` and collapsed every failure into rule 97's one
+  sentence about exact source ranges — which is how an NTSC project getting **no fill at all** stayed
+  invisible: at 30 → 29.97 the covering phases for a ten-frame span sit around source frame 500, and
+  core's phase window did not reach them. `room_tone_skip_reason` now branches on the kind, because
+  the three are three different pieces of advice: `InexactDuration` is a rate problem no amount of
+  recording fixes, `NoCoveringSourceRange` is a supply problem *at these rates and this asset*, and
+  `SourceTooShortToCover` is the one whose answer really is "record more room tone".
+  `au5_plan_room_tone_fill_names_which_way_the_source_range_failed` asserts two of them are different
+  strings, and `au5_plan_room_tone_fill_commits_a_covering_tile_at_29_97_fps` commits an NTSC fill
+  end to end — source `490..501` for a ten-frame gap, `track_gaps` empty afterwards — against a
+  twenty-second sample, because a three-second one is genuinely too short to hold that phase and
+  earns the second refusal honestly.
+
+  **The measured length rides back with the range (pass-1 F7).** `room_tone_fill_tiles` returns
+  `(source range, project duration)` and the emit loop advances by the duration it already measured
+  through `Document::clip_duration`, rather than re-deriving it through `map_source_range_to_project`
+  and swallowing a disagreement with `unwrap_or(TimeCode::ZERO)` — two spellings of one length, R85's
+  rule in miniature, whose failure mode was two `AddClip`s at the same frame surfacing only as a
+  generic `ClipOverlap`.
+- **R139. All three of core's mapping refusals are matched by name, and the span each names is the
+  tile's.** R137 gave the app the agent's `room_tone_skip_reason` but only two of its arms: a `_ =>`
+  wildcard caught `SourceTooShortToCover` and printed `InexactDuration`'s "no exact source range".
+  That is the misdirection R137 was written to end, on the one refusal whose answer really *is*
+  record more room tone — an editor told there is no exact source range when the truth is "your
+  capture is 61 frames and this gap needs 62" goes to look at the rate pair. All three variants are
+  now named, in the agent's exact words, with `other` left as the catch-all for whatever core adds
+  later; a lane asserts the four sentences are pairwise distinct and that `SourceTooShortToCover`
+  never wears `InexactDuration`'s. Second, the reason was built from the **gap's** length where the
+  agent passes the failing **tile's** `want`: a 241-frame gap whose one-frame remainder is not
+  representable at 30 → 60 read "gap of 241 project frames has no exact source range", a statement
+  about a span the helper was never asked for and which is perfectly coverable. It now reports the
+  tile, and a lane pins that too. Not reachable on today's call path — `minimum_source_frames` is
+  monotone in `want`, so an asset that covered the full tile cannot be too short for a shorter one —
+  but one refactor away, and the parity claim R137 makes was false meanwhile. Also recorded, and
+  since **superseded by R140**: `ROOM_TONE_MAX_TILE_SHORTFALL_FRAMES`' doc claimed four "covers every
+  rate pair … at every asset length", which was false at the NTSC pairs. It was reworded here and
+  then deleted outright with the constant, because the honest conclusion turned out to be not that
+  the claim was overstated but that **the bound itself was wrong**.
+
+**Implementation errata, Part B app (2026-09-10).** R120–R139 is the app crate's reserved range.
+
+- **R120. The four heights of rule 131 are measured, and all four budgets move.** Rule 131 derives
+  its four budgets from "group 8 + header 18 + *n* control rows ≈ 22 each". None of those three
+  figures survives the geometry AU2 shipped and AU5 does not touch. The measured decomposition,
+  which reproduces all four figures exactly:
+
+  | component | measured | rule 131 |
+  | --- | --- | --- |
+  | `ui.group` frame + `card_header` | 31.5 | 8 + 18 = 26 |
+  | one wrapped control row | 33.5, **39.5 marginal** with its `item_spacing.y` | 22 |
+  | noise well | 48.0 (`MIXER_NOISE_WELL_HEIGHT`) | 48 |
+  | hum comb | 96.0 (`MIXER_EQ_CURVE_HEIGHT`) | 96 |
+  | `Learn profile` row | **26.0**, one bare `egui::Button` | omitted |
+  | rule 128's refusal line | **18.0**, refused states only | omitted |
+  | reduction bar | 6.0 | 6 |
+
+  22 is not a token in the file: `size::ICON_SM` is **14.0** (theme.rs:75) and is what
+  `mixer_parameter_control` sets `interact_size.y` to *inside* the cell; the cell itself is requested
+  at `size::ICON_BUTTON` = 26 and egui's widget sizing takes the row to 33.5. Check:
+  de-click `31.5 + 6 + 33.5 = 71.0`; hum `31.5 + 6 + 73 + 6 + 96 = 212.5`; denoise learnable
+  `31.5 + 6 + 73 + 6 + 48 + 6 + 26 + 6 + 6 = 208.5`. The `MEASURED` figures are therefore
+  **denoise 226.5 refused / 208.5 learnable, hum 212.5, de-click 71.0, and the bus pane 536.5
+  default / 522.5 hum-expanded**, and the budgets move **160 → 240, 190 → 220, 70 → 80 and
+  520 → 540**, each keeping the house measured-budget shape (`const BUDGET` beside `const MEASURED`,
+  the figure printed, ±1 px, every arm armed). **The shortfall is the contract's estimate, not slack
+  in the implementation**, and the de-click card is the proof: it carries *no* AU5 geometry at all —
+  no well, no learn row, no reduction bar — and is drawn entirely by AU2 code this slice does not
+  touch, yet it overruns a 70 px budget whose own component sum was 48. No AU5 edit could have caused
+  that, and every AU5 component above is at its contract token or at the bare widget height.
+
+- **R121. R47's named first cut cannot rescue the bus pane, and the case R46 names is not the one an
+  editor meets.** R47 names `MIXER_NOISE_WELL_HEIGHT` 48 → 32 as the first cut if the 520 px content
+  budget overruns; R46 fixes the measurement at the **hum** card expanded, the tallest of the three
+  cards. Only one card is expanded at a time (rule 132), so in R46's case the denoise card is
+  collapsed and **its well is not drawn at all**: the named cut buys exactly 0 px of that arm's
+  overrun. The well therefore stays at 48.
+
+  But R46's case is neither the default nor the worst. `expanded_card` expands the **first** node
+  when nothing is remembered, which on the repair prefix `plan_dialogue_repair` builds is the
+  **denoise** card, and `NoiseLearnRange`'s default is `Analysing` — so the pane an editor meets on
+  first paint carries the 226.5 px refused denoise card and measures **536.5 px**, 16.5 px over the
+  520 this erratum first cited and 6.5 over the 530 it first set. The pin therefore carries **two**
+  arms — 536.5 default and 522.5 hum-expanded — and the budget is **540**, set above the default
+  rather than above R46's. (The 518.5 first recorded here was the denoise card's *learnable* state,
+  which is the state the pane is in least often; it is what corroborates the model, not what the
+  budget is for.) An overrun still costs scroll distance and never clipping, and a future cut that
+  wants to move either figure has to come out of `MIXER_EQ_CURVE_HEIGHT` or the `AUTOMATION`
+  section, both AU2/AU4 surfaces.
+
+- **R122. `is_audio_effect_insertable` is deleted, not re-worded.** Rule 118 names its doc comment
+  (mixer_pane_ui.rs:1616) as one of the two "six" comments that move with the array, so the contract
+  expects the predicate to survive. Rule 119 removes its only non-test caller — the tautological
+  `debug_assert` — and a `pub(crate)` helper reachable only from `#[cfg(test)]` code is dead in the
+  binary target, which fails the app's `-D warnings` gate. Reintroducing the membership claim inside
+  `insertable_menu_defect` would have restored exactly the tautology rule 119 exists to delete, one
+  level down. The predicate is therefore removed and its two test call sites in `mixer_ui.rs` read
+  `INSERTABLE_AUDIO_EFFECTS.contains(&name)` directly. `insertable_menu_defect` carries rule 119's
+  three real claims and is the thing the menu asserts on.
+- **R123. `parameter_label` gains eight arms, not nine.** Rule 120 says nine. The three descriptors
+  carry ten distinct non-`bypass`, non-profile parameter names between them, and two of those —
+  `reduction_tenth_db` (AU2's limiter) and `lookahead_milliseconds` (AU2's compressor and limiter) —
+  already have their arms and already read correctly. The eight new ones are `floor_offset_tenth_db`
+  → "Floor offset", `smoothing_milliseconds` → "Smoothing", `fundamental_hertz` → "Mains",
+  `harmonic_count` → "Harmonics", `depth_tenth_db` → "Depth", `notch_q_hundredths` → "Notch Q",
+  `max_click_milliseconds` → "Max click" and `detector_threshold_tenth_db` → "Threshold".
+- **R124. `effect_display_name` lives in `inspector_ui.rs`, not in `mixer_pane_ui.rs`.** Rule 120 and
+  §8's Part B app line put its three new arms in `mixer_pane_ui.rs`, which imports the function
+  (mixer_pane_ui.rs:25) rather than declaring it: the table has been `inspector_ui.rs`'s since AU2.
+  §8's app file list therefore also touches `inspector_ui.rs`, by three lines. `push_error` and a new
+  `extend_operations` on `InspectorEdits` are made `pub(crate)` in the same file, because rule 129
+  gives the timeline's `Room tone` button its first caller outside the inspector.
+- **R125. `MIXER_NOISE_WELL_HEIGHT` lives in `theme.rs`.** §8's app line does not name `theme.rs`,
+  but rule 125 spells the constant as a token and rule 133 pins `size-mixer-noise-well-height` in
+  DESIGN.md, and every other `size::MIXER_*` token is declared in `theme::size`. Declaring it in
+  `mixer_pane_ui.rs` instead would have made it the only mixer size token outside the module the
+  DESIGN.md token list describes. One added constant; no other change to the file.
+- **R126. The learn channel is threaded, not returned, and the readiness arrives through
+  `MixerTelemetry`.** Rule 126 spells `MixerFrame { selection, reset_loudness, learn_noise_profile }`
+  and AU5 ships exactly that, `Copy` preserved (R43). What the rule does not spell is how the click
+  reaches it from six frames down: `chain_pane` → `bus_pane`/`master_pane` → `chain_cards` →
+  `chain_card` → `card_body` → `learn_row`. A `&mut NoiseLearn<'_>` — rule 128's `NoiseLearnRange`
+  in, the `Option<(AudioChain, EffectId)>` request out — is threaded through those six, the shape
+  `mixer_strips`' `requested: &mut Option<MixerSelection>` already uses. The **readiness** travels
+  the other way, as a new `MixerTelemetry::noise_learn` field: `mixer_telemetry` leaves it at its
+  default because it reads `Playback`, and `mixer_panel` fills it from `Analysis` for the one chain
+  the pane is painting, gated on that chain actually carrying an `audio_denoise` node so a project
+  with no repair anywhere never walks `timeline_silences`.
+- **R127. The app's learn gate is a project-frame gate, not a per-asset source-frame one.** Rule 63
+  computes `NOISE_PROFILE_MINIMUM_SOURCE_FRAMES` per asset, but
+  `Analysis::timeline_silences(document, range, minimum_source_frames)` takes **one** minimum for the
+  whole call, so a per-asset figure has nowhere to go. The app passes the **smallest** minimum any
+  relevant asset needs — nothing long enough is filtered out on the way — and then applies rule 63's
+  **project**-frame gate, `ceil(22 528 / 48 000 × document.fps)`, to the spans it gets back. That is
+  the range `mix_noise_profile` will actually be handed, and `mix_noise_profile` re-checks the
+  rendered sample-frame count itself either way (rule 63), so the app's gate is a gate and never the
+  authority. `NOISE_PROFILE_MINIMUM_SAMPLE_FRAMES` and `NOISE_PROFILE_SAMPLE_RATE` are re-declared in
+  `app.rs` because the media crate's copies are `pub(crate)`; `noise_profile_minimum_frames(fps)`
+  derives both other domains from them and is unit-pinned at 24, 25, 30, 60, 30000/1001 and 48 000.
+- **R128. The learn point is the chain's own mix point.** Rule 127 fixes the *range* and says nothing
+  about `MixSpectrumPoint`. A bus chain learns at `MixSpectrumPoint::Bus(id)` and the master chain at
+  `MixSpectrumPoint::Master` — the only two points a `MixerSelection` can name, and the ones
+  `MixerSelection::chain()` already maps to.
+- **R129. The `Room tone` capture runs on a worker, so the batch lands a frame later.** Rule 129 has
+  the button capture and submit "one `DoBatch` of `[AddAsset?, AddClip…]`". Taken literally on the
+  click frame that decodes up to 60 s of audio on the UI thread, which DESIGN.md's performance
+  contract forbids in its first line ("The UI thread performs no media decode"). The button therefore
+  has two branches, and **both** are one `DoBatch` and one undo entry. With a room-tone asset already
+  in the pool the fill is pure document arithmetic and goes out on the click frame. Without one, the
+  capture runs on a `kinewright-room-tone` worker and the same single batch — `AddAsset` first — goes
+  out from `poll_background` when it lands, with a 50 ms repaint while it is pending. A capture that
+  finishes against a document whose `TimelineRevision` has moved is **refused by name** rather than
+  filled at frames that have shifted. `TimelineRevision` increments on **every** applied command, so
+  an undo, a mixer nudge or an edit on another track during a 60 s decode all refuse it: strict, and
+  the right default for a fill whose frames were derived before the decode began. **The retry is not
+  free**: the refused capture landed no `AddAsset`, so `existing_room_tone_asset` still finds
+  nothing and the next press takes the capture branch again. `capture_room_tone` decodes before it
+  can compute a digest, so the retry pays the full decode; only the *write* is de-duplicated, by the
+  store's content addressing. Parking the finished `MediaAsset` in a session slot would make the
+  retry pure document arithmetic and is the obvious follow-up; AU5 does not do it.
+- **R130. The measured toolbar width, and why it is derived.** R25 measures the toolbar at ≈ 687 px
+  ripple-off and ≈ 739 px with the `RIPPLE` label. The `Room tone` button is 72 × 22 px with the
+  toolbar's own 8 px `item_spacing.x`, so the toolbar now measures **≈ 767 px** ripple-off and
+  **≈ 819 px** with the label, still in a plain `Layout::left_to_right` with no wrap and no scroll.
+  These two figures are **derived from R25's measurement**, not independently measured: the toolbar
+  is laid out inside `KinewrightApp::timeline`, and a headless test cannot construct a
+  `KinewrightApp`, so there is no pin for it in the app crate. 819 px is inside
+  `size::WINDOW_MIN_WIDTH` (1 100) but not inside every dock layout it can be given — the material
+  strip shares the window with the media column and the agent panel — so this is a number a reviewer
+  should look at rather than one AU5 declares safe. The button was **not** cut; R29 makes that a
+  ruling to take deliberately, not an implementer's call.
+- **R131. Two app-side room-tone facts the contract leaves to the implementer.** *(i)* "No room-tone
+  asset exists" is answered by the **store**, not by a document flag: an asset is this project's room
+  tone when its path's parent is `RoomToneStore::room_tone_dir()`, which is the only test rule 89's
+  "an ordinary `MediaAsset`, never a new document type" leaves available. *(ii)* A silence longer
+  than `ROOM_TONE_MAX_CAPTURE_MILLISECONDS` is **trimmed before the decode**, not decoded and then
+  refused — R105's own metadata-first argument, applied at the app's end of it. The button also
+  refuses by name on an unsaved project, because the store is rooted at the project file.
+- **R132. Rule 128's refusal sentence takes its own wrapped line, not the button's row.** Painted
+  beside the `Learn profile` button in one `ui.horizontal`, "Silence analysis is still running for
+  these tracks." is 49 characters that cannot wrap, and it pushed `chain_pane`'s column to
+  **406.1 px** — past `size::MIXER_CHAIN_PANE_WIDTH`, which
+  `the_chain_pane_with_an_automation_section_still_fits_the_dock`'s "still one 400 px column" arm
+  catches the moment rule 132's repair-bearing bus is added to it. The sentence therefore sits under
+  the button as a wrapping `Label`, which costs the denoise card 18 px in its two refused states and
+  nothing in the state an editor spends time in. Recorded because it moves a rule-131 figure: this
+  is the whole difference between the denoise card's 226.5 and its 208.5.
+- **R133. `timeline_ui.rs`' one-`InspectorEdits` pin reads three now, and keeps its real claim.**
+  AU4 rule 105's `the_timeline_has_exactly_one_coalescing_path_and_the_envelope_owns_it` counts
+  `InspectorEdits::default()` and `submit_inspector_edits(` in the production half of the file and
+  asserts **1** of each. Rule 129 adds two, both discrete: the button's own, submitted once at the
+  end of `fill_room_tone_at_selection`, and the one `poll_room_tone` lands a finished capture
+  through. Both counts read **3**. The claim the pin actually defends — that no path in the file may
+  file a **per-frame coalesced** batch but the envelope's — is the `extend_live` / `push_live` scan
+  beneath them, and it is untouched and still passes: neither room-tone path reaches the live API at
+  all.
+- **R134. `InspectorEdits` carries an error category now, because "Look" became a lie.** R124 made
+  `push_error` `pub(crate)` to give it its first caller outside the look cards, and
+  `submit_inspector_edits` funnelled every refusal into `record_error("Look", …)`. That put
+  `ROOM_TONE_NEEDS_CLIP`, `ROOM_TONE_NEEDS_GAP`, `ROOM_TONE_NEEDS_SAVED_PROJECT`,
+  `ROOM_TONE_CAPTURE_NEEDS_SILENCE`, `ROOM_TONE_DOCUMENT_MOVED` and every per-gap arithmetic refusal
+  in the error log under a category the editor has no reason to open. `InspectorEdits` therefore
+  carries `error_category: Option<&'static str>`, defaulting to `LOOK_ERROR_CATEGORY` so every CC4–CC6
+  caller is unchanged, and both room-tone paths set `"Timeline"`. One category per frame, not per
+  message: a surface producing refusals of two kinds in one frame does not exist, and inventing the
+  state for one that might would be state nothing reads. Pinned both ways: the default is asserted to
+  still be `LOOK_ERROR_CATEGORY`, so the 30-odd CC4–CC6 callers cannot be moved silently, and the two
+  room-tone paths are asserted to set `"Timeline"` — neither can be driven without a `KinewrightApp`,
+  so that half reads the production source, as AU4 rule 105's own pin in the same file does.
+- **R135. Each tile's source range is core's *covering* range, not
+  `map_project_duration_to_source(TimeCode::ZERO, …)`.** The first implementation asked for the
+  source end that is exact in project **frames** at phase 0. That is not the same as a range that
+  fills the gap: the mixer maps source samples to project samples one for one, so at 30 → 25 a
+  seven-frame fill of `0..8` maps to exactly seven project frames and is still **640 sample frames**
+  short — the decoder runs out early and the join dips to the silence the fill exists to remove.
+  Which exact ends exist depends on the phase of `source_start`, and phase 0 is the one phase that
+  can fail. `room_tone_fill_operations` therefore calls core's
+  `covering_source_range_for_project_duration(project_duration, source_fps, project_fps,
+  source_duration, sample_rate)`, which sweeps the phase and returns the first range that both maps
+  exactly and supplies the samples — `1..10` rather than `0..8` for that gap — at
+  `ROOM_TONE_SAMPLE_RATE`. Pinned by a 25 fps arm that asserts the button lays exactly the helper's
+  answer and that no residual `track_gap` remains once the fill is applied. Recorded because it
+  reverses this document's own **R101**. R137 corrects how the *repeating* tile is chosen.
+- **R137. The repeating tile is chosen once, not per tile — and by R140 it is core that chooses it.**
+  R135's first implementation asked the covering helper for
+  `map_source_range_to_project(0..asset.duration)` on every non-final tile. That leaves the phase
+  sweep no headroom: the helper has to find a range **inside** `source_duration`, and when the
+  asset's mapped length rounds *up*, the demand exceeds anything the asset can supply and no
+  candidate exists at any phase. At 30 → 25 the demand is `⌈P × 48 000 / 25⌉ = 1 920 P` and the whole
+  supply is `⌊D × 48 000 / 30⌋ = 1 600 D`, so the full tile is impossible whenever
+  `P = round(5D / 6) > 5D / 6` — for `D mod 6 ∈ {1, 2, 3}`, **885 of the 1 771 capture lengths** the
+  store can produce. The consequence was not a short fill but a refused one: `want = whole_tile` is
+  the first iteration, so **any** gap at least as long as the tone refused outright, while a tile one
+  project frame shorter tiled the same gap exactly. The tile is therefore chosen **once**, before the
+  loop, and only the last tile is sized to the remainder. **R140 moves the choosing itself into
+  core**: the app's own step-down and its `ROOM_TONE_MAX_TILE_SHORTFALL_FRAMES = 4` are deleted in
+  favour of `longest_coverable_project_tile`, because four was too small at the NTSC pairs. What
+  survives from this erratum is its **conclusion** — never ask for a span the asset cannot cover —
+  and the agent's `room_tone_skip_reason` split, which R139 completed. The "chosen once, before the
+  loop" *shape* is itself superseded by R141, which asks core once per pass with what is left of the
+  gap; wherever a hoisted tile worked, that emits the identical tiles.
+- **R138 (restated after R140). NTSC needs a room-tone capture of at least ~501 source frames — and
+  above that floor, everything fills.** At 30 → 30000/1001 a project frame demands
+  `48 000 × 1001 / 30 000 = 1 601.6` sample frames and a 30 fps source frame supplies
+  `48 000 / 30 = 1 600`. The mixer maps source samples to project samples **one for one** (§5.3,
+  R135), so a range of `n` source frames can cover a project span it maps to only where the mapping
+  has already absorbed one whole extra source frame: `map(x) = round(x / 1.001)`, and the first `x`
+  at which that rounding gives a frame back is **≈ 499–501** — `499..501` is two source frames
+  carrying one project frame. Measured against the shipped crate, gap `0..40`, 30 fps capture:
+  **30, 60, 300 and 500 source frames refuse; 501 fills, and so does every length above it** —
+  600, 900, 1 000, 1 200, 1 500 and 1 800 — each laying the same covering range `460..501`, forty-one
+  source frames from the middle of the capture. Reaching that range at all is what core's phase
+  window being the ratio's **period** — **1 001** at this pair; 1 000 is the *tile* length, not the
+  period — rather than `⌈r⌉ + 1 = 3` bought; before that
+  widening, every gap in every North American project refused.
+
+  **This erratum's first text was wrong about the middle of that range and is retracted.** It said
+  1 200 and 1 500 refuse while 900, 1 000, 1 001 and 1 800 fill, and inferred a ~1 001-frame
+  recurrence in *fillability*. Those measurements were real but they were measurements of the app's
+  own four-frame step-down, not of the rate pair: 1 200 source frames map to 1 199 project frames
+  whose coverable tile is 1 000 project frames — the 1 001-frame period's own span — which is 199
+  steps down, and 1 500 needs 499. With
+  R140's search the recurrence is in the **tile length**, not in which assets work, and the only
+  genuine cliff is the 501-frame floor. The advice the app used to append — a floor it computed and
+  remembered — is deleted with it; the refusal is now core's own last one, and below the floor that
+  is `NoCoveringSourceRange`, whose sentence ends by naming the *n*-source-frame room-tone asset the
+  samples had to fit inside. Pinned both ways: a 60-frame capture refuses with that sentence, and a
+  501-frame one fills the same gap.
+
+  **The floor itself is a product limitation of the one-for-one mapping, not a defect.** §1.3 puts
+  rate conversion out of scope for AU5; a resampled fill is the one thing that would remove it. Two
+  seconds of room tone is not enough in an NTSC project, and the refusal says which asset was short.
+- **R136. A `Learn` worker that cannot start now says so.** `spawn`'s failure arm cleared
+  `self.pending` before queueing its own error response, and `poll` drops any response whose
+  generation is not the pending one — so `"Could not start the noise profile worker"` could never
+  reach `record_error` and a machine out of threads looked like a button that did nothing. The arm
+  leaves the generation pending and clears only `active`. It is the one path in the worker no fixture
+  can otherwise reach, so `NoiseLearnState` carries a `#[cfg(test)] refuse_next_spawn` seam and
+  `au5_a_learn_worker_that_cannot_start_reports_itself` drives it end to end.
+
+- **R140. The step-down is core's search now, and the four-frame bound is deleted.** R137 gave the
+  app — and, in the same words, `plan_room_tone_fill` — a walk down from the asset's mapped length by
+  at most `ROOM_TONE_MAX_TILE_SHORTFALL_FRAMES = 4`. Four is enough wherever the covering tile is
+  near the asset's own length, which is every rate pair *except* the ones that matter most in North
+  America. At 30 → 29.97 the covering tile is the map period's `0..1001` — 1 001 source frames worth
+  1 000 project frames — so an asset of 1 006..=1 500 frames has to step down by 5..=499 to reach it;
+  **496 of the 1 300 store-producible lengths** fail against a four-frame allowance at 30 → 29.97 and
+  **744** at 30 → 59.94. Because a tiler that finds no tile skips *every* gap on the track, an
+  ordinary 33–50 s NTSC capture filled nothing at all — the same user-visible failure R96's phase
+  window was written to close.
+
+  Core therefore owns the search: `longest_coverable_project_tile(source_duration, source_fps,
+  project_fps, sample_rate, max_project_frames)` returns the largest coverable `want` and its range,
+  as a first-hit **downward walk** rather than a bisection, because coverability is not monotone in
+  `want` (at 30 → 59.94 the odd spans cover and the even ones cannot, at any phase or length). The
+  app deletes `room_tone_longest_tile` and the constant and calls it, passing the **gap's** length as
+  `max_project_frames` so the tile never overshoots; `remaining` still sizes the last tile, and R139's
+  three-way `room_tone_skip_reason` still names the refusal, which is now the search's own last one
+  rather than one the app invented. `plan_room_tone_fill` makes the same swap on its side, which is
+  what keeps the button and the planner answering one rule — the reason R137 gave for matching the
+  agent's bound in the first place, now discharged by sharing the code instead of the number. Pinned
+  by a **forty-second** NTSC arm: 1 200 source frames is exactly a length the four-frame bound
+  refused, and it now fills with no residual `track_gap`. The "one rule" claim was still not quite
+  true when this was written — the two tilers called core differently for the *last* tile — and R141
+  is what makes it so.
+- **R141. Core is asked once per pass, with what is left of the gap — not once for the whole gap
+  with the remainder forced to its own length.** R137's shape hoisted one tile before the loop and
+  then asked `covering_source_range_for_project_duration` for the last tile at **exactly**
+  `remaining`. Coverability is not monotone in `want` — R97's own argument — so "the remainder is
+  uncoverable while `remainder − 1` and `1` both are" is common rather than exotic, and that shape
+  refused whole gaps `plan_room_tone_fill` fills. The reviewer's worked case: a twenty-second
+  (600-frame) store tone and a 1 001-frame gap at **30 → 59.94**, where the tile is 999 and the
+  residue of 2 has no covering range while 1 does — the app refused, the agent emitted
+  `999 @ 0..500`, `1 @ 250..251`, `1 @ 250..251`. Swept against the shipped core, the app refused
+  **300** gap/asset combinations at 30 → 59.94, **226** at 30 → 50 and **240** at 30 → 48 that the
+  agent filled. Reachable rather than theoretical: `RoomToneStore::asset_fps()` is
+  `Rational::default()` = 30/1, so the button's source rate is always 30, and all three are workspace
+  project rates. 30 → 29.97, 30 → 25, 30 → 24, 30 → 23.976, 30 → 30 and 30 → 60 diverge nowhere,
+  which is why every lane committed before this one passed.
+
+  The app therefore takes `room_tone_fill_tiles`' loop exactly: one
+  `longest_coverable_project_tile(asset.duration, asset.fps, project_fps, ROOM_TONE_SAMPLE_RATE,
+  remaining)` per pass, emit, subtract, repeat. Because core answers *the largest coverable span at
+  most `remaining`*, an uncoverable remainder is simply split again and the loop always advances
+  (`want ≥ 1`). R137's "chosen once" survives in effect — with `remaining ≥ whole` core returns the
+  same `whole` every pass, so the tiles are identical wherever the old shape succeeded — and
+  `room_tone_tile_source`, the last wrapper of its family, is deleted with it. The refusal also
+  gains the agent's annotation: the headline names the **gap**, which is the span an editor can see,
+  and `"; N tile(s) covered all but its last M project frame(s)"` names the residue when the two
+  differ, so a 241-frame hole is never reported as "gap of 1 project frames" and a first-pass failure
+  carries no annotation at all. Three new lanes: the 59.94 split, both halves of the annotation, and
+  the unchanged 25 fps and NTSC arms as the regression guard.
+
+  Also corrected here, both in this document's own prose: R96's note that "`room_tone_tile_source`
+  **turns** a refusal into a skipped gap" is past tense now — both tilers of that family are gone —
+  and R138's "the ratio's period (1 000 here)" is **1 001**; 1 000 is the *tile* length. The same two
+  slips in `crates/kinewright-core/tests/au5_core.rs:2186-2192` are core's and are routed there
+  rather than reached across.
 
 No OPEN note remains.
 
@@ -2565,7 +3626,9 @@ rule for `audio_denoise` — and the §2.2 string), `AU3-LOUDNESS-AND-DELIVERY.m
 (`map_project_duration_to_source`); `qa.rs` (the `track_gaps` refactor); `lib.rs`;
 `tests/au5_core.rs`. *Media:* new `room_tone_store.rs` (`RoomToneStore`,
 `ROOM_TONE_STORE_DIRECTORY`, `ROOM_TONE_MAX_FILE_BYTES`, `ROOM_TONE_MINIMUM_CAPTURE_MILLISECONDS`,
-`ROOM_TONE_MAX_CAPTURE_MILLISECONDS`); `lib.rs`; `tests/au5_fixtures.rs` (the seam lanes).
+`ROOM_TONE_MAX_CAPTURE_MILLISECONDS`); `audio.rs` (`decode_audio_range` **`pub(crate)` → `pub`**
+with the `# Errors` section that widening obliges, R106 and the agent's R111); `lib.rs`;
+`tests/au5_fixtures.rs` (the seam lanes, which landed in `src/au5b_fixtures.rs` instead — R100).
 *Agent:* `schema.rs` (`INSPECTOR_TOOL_NAMES` 81 → 84, three descriptions); `server.rs`
 (`capture_room_tone`, `plan_room_tone_fill`, `plan_dialogue_repair`, their argument structs, dispatch
 arms and rows, `normalization_context`'s relaxation, `normalization_bus`'s append signature, the

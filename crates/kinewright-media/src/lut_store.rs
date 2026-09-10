@@ -159,7 +159,10 @@ impl From<LutStoreError> for MediaError {
 }
 
 /// Quote text back without control characters or unbounded length.
-fn sanitize(text: &str) -> String {
+///
+/// `pub(crate)` because `room_tone_store.rs` quotes observations back under
+/// the same rule (AU5 §0 R100).
+pub(crate) fn sanitize(text: &str) -> String {
     let mut sanitized = String::with_capacity(text.len().min(OBSERVED_LIMIT));
     for character in text.chars().take(OBSERVED_LIMIT) {
         if character.is_control() {
@@ -178,7 +181,11 @@ fn sanitize(text: &str) -> String {
 ///
 /// The same spelling M41 requires of a media source fingerprint, repeated here
 /// because it guards a path component.
-fn is_canonical_sha256(hash: &str) -> bool {
+///
+/// `pub(crate)` because the room-tone store guards its own path component with
+/// the identical rule, and two stores under one root must not disagree about
+/// what a digest looks like (AU5 §0 R100).
+pub(crate) fn is_canonical_sha256(hash: &str) -> bool {
     hash.len() == 64
         && hash
             .bytes()

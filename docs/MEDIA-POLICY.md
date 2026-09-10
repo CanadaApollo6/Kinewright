@@ -211,6 +211,20 @@ state. At 48 kHz stereo with 1,024-frame AAC this is normally 8 KiB and at most
 a two-second buffer or an open decoder per clip; only actual overlap increases
 live decoder memory.
 
+## Room-tone store
+
+Captured room tone is a real 48 kHz stereo `f32` WAV written into the project's
+own `<stem>.kinewright-assets` directory — the same root the LUT store uses —
+under `room-tone/<sha256>.wav`, and registered as an ordinary `MediaAsset`, so a
+fill is an ordinary media clip that the mix path, the survival rules and the
+`"track_gap"` QA warning all already understand. Two independent caps guard it
+and are deliberately not one number: a 32 MiB file cap, read from file metadata
+before a byte is touched, guards the reader against a file nobody wrote, while a
+500 ms floor and a 60 s ceiling guard the writer. A capture is truncated to a
+whole 30 fps asset frame before it is written, because an audio-only asset
+probes at `Rational::default()` and a fill's source range is a whole number of
+asset frames.
+
 ## Derived audio and scene analysis
 
 Silence and scene data are reproducible derived assets. They never enter the

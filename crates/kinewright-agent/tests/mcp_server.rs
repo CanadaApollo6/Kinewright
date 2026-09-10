@@ -2502,6 +2502,16 @@ async fn cc7_prepare_commit_and_compare(
 /// whole registry cost is `effect_documentation()`'s rows on the five spliced
 /// effect tools, hatched down to one pattern sentence by §4.2 rule 78. The
 /// served quad does not move for the eleventh consecutive measurement.
+///
+/// AU5 §5.9 Part B (B12) adds three hand-written capabilities — the two
+/// planners `plan_dialogue_repair` and `plan_room_tone_fill`, and the
+/// `capture_room_tone` Action — so 54 + 84 = 138, again with the generated
+/// count unchanged, because Part B adds no `Operation` variant either: the
+/// capture submits an ordinary `AddAsset`. It adds no effect descriptor
+/// either, so `effect_documentation()` does not move a byte and R84's pattern
+/// sentence naming `plan_dialogue_repair` — shipped in Part A, three commits
+/// before the planner existed — is deliberately left exactly as it was. The
+/// served quad does not move for the twelfth consecutive measurement.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
@@ -2528,25 +2538,27 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 135 tools, of which `INSPECTOR_TOOL_NAMES` is 81.
+    // The internal registry: 138 tools, of which `INSPECTOR_TOOL_NAMES` is 84.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        135,
+        138,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
          AU4 Part A adds set_clip_gain_envelope and set_track_automation; \
          AU4 Part B adds plan_audio_ducking and plan_clip_fades; \
-         AU5 Part A adds get_audio_repair"
+         AU5 Part A adds get_audio_repair; \
+         AU5 Part B adds plan_dialogue_repair, capture_room_tone and plan_room_tone_fill"
     );
     assert_eq!(
         operations.len(),
         54,
         "AU2 Part B generates two more mutators; neither part of AU3 generates one; \
          AU4 Part A generates two more; AU4 Part B generates none; \
-         AU5 Part A generates none, because it adds no Operation variant"
+         AU5 Part A generates none, because it adds no Operation variant; \
+         AU5 Part B generates none either, because capture_room_tone submits an ordinary AddAsset"
     );
     for name in [
         "set_track_mix",
@@ -2560,16 +2572,19 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         "plan_audio_ducking",
         "plan_clip_fades",
         "get_audio_repair",
+        "plan_dialogue_repair",
+        "capture_room_tone",
+        "plan_room_tone_fill",
     ] {
         assert!(registry.iter().any(|entry| entry == name), "missing {name}");
     }
     assert_eq!(
         registry.len() - operations.len(),
-        81,
+        84,
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector; \
          AU4 Part A adds no inspector; AU4 Part B adds the two planners; \
-         AU5 Part A adds get_audio_repair"
+         AU5 Part A adds get_audio_repair; AU5 Part B adds all three of its capabilities"
     );
     let spectrum = registry
         .iter()
@@ -2623,6 +2638,22 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         Some("plan_clip_fades"),
         "AU4 §6.3: plan_clip_fades is registered directly after plan_audio_normalization"
     );
+    // AU5 §5.9 rule 117: the ordering assert is EXTENDED, never relaxed. The
+    // three Part B capabilities follow the audio family in one run, with
+    // `capture_room_tone` directly before the planner that consumes what it
+    // writes, so appending a fourth anywhere else fails here.
+    for (before, after) in [
+        ("plan_clip_fades", "plan_dialogue_repair"),
+        ("plan_dialogue_repair", "capture_room_tone"),
+        ("capture_room_tone", "plan_room_tone_fill"),
+    ] {
+        let index = registry.iter().position(|entry| entry == before).unwrap();
+        assert_eq!(
+            registry.get(index + 1).map(String::as_str),
+            Some(after),
+            "AU5 §5.9: {after} is registered directly after {before}"
+        );
+    }
 
     // The served byte counts CC6 recorded, asserted byte-identically: no AU1,
     // AU2, AU3, or AU4 tool is served, and the seven served tools do not embed
@@ -8042,6 +8073,1219 @@ async fn au4_plan_clip_fades_measures_the_real_mix_and_commits_set_clip_audio() 
         "rule 133: the fade planner adds no curve"
     );
 
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+// ===========================================================================
+// AU5 Part B — the agent's real-engine lanes (§7 B2, B6, B7, B10, B11).
+//
+// Every fixture here is exact `wav_f32` bytes through `GeneratedMedia::
+// from_bytes`, never lavfi, for AU5 §3.11's reason: the provisioned FFmpeg's
+// `sine` emits -18 dBFS. Every gated term prints its measurement beside its
+// budget in the `AU3_NORMALIZE` / `AU4_DUCK` house style, and no tolerance is
+// conditioned on the operating system.
+// ===========================================================================
+
+/// AU5 §3.11(e): the SNR gain `plan_dialogue_repair` must buy on fixture (a)
+/// at its **default** `reduction_tenth_db` of 120, in hundredths of a dB.
+///
+/// Part A's own lane gates the same fixture at 600 hundredths with the
+/// reduction set to 200; the planner's default asks for 12 dB rather than 20,
+/// so the contract halves the budget and expects roughly 12 dB measured — a
+/// margin of about 4x.
+const PLAN_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS: i64 = 300;
+
+/// AU5 §3.11(a): 3 s of 48 kHz stereo — `[0, 1 s)` noise only, `[1, 2.5 s)`
+/// tone plus noise, `[2.5, 3 s)` noise only.
+///
+/// The noise is `pseudo_random_amplitude(144_000, 0.010)`, whose first
+/// argument is a **sample** count, so this is 3 s of MONO samples at
+/// `0.010/sqrt(3) = 5.774e-3` RMS = -44.77 dBFS; the 1 kHz tone is
+/// `0.200/sqrt(2) = 0.14142` = -16.99 dBFS. The sum is interleaved to stereo
+/// here, because the promoted helpers are mono and their signatures did not
+/// change (AU5 §0 R45).
+///
+/// The two noise-only stretches are what make this fixture work end to end:
+/// they are 27 dB under the tone, so the silence detector finds them and
+/// rule 107's profile has something to learn from, and they are where the
+/// 10th-percentile floor lives, so a real floor drop moves the measured SNR.
+fn au5_repair_media() -> GeneratedMedia {
+    let mut mono = kinewright_media::test_support::pseudo_random_amplitude(144_000, 0.010);
+    for (index, sample) in kinewright_media::test_support::tone(1_000.0, 0.200, 48_000, 72_000)
+        .into_iter()
+        .enumerate()
+    {
+        mono[48_000 + index] += sample;
+    }
+    let stereo = mono
+        .iter()
+        .flat_map(|sample| [*sample, *sample])
+        .collect::<Vec<_>>();
+    GeneratedMedia::from_bytes(
+        "au5-repair-noisy",
+        "wav",
+        &kinewright_media::test_support::wav_f32(&stereo, 48_000, 2),
+    )
+}
+
+/// AU5 §7 B10's negative arm: **clean** material — 1 s of digital silence
+/// followed by 2 s of a 440 Hz tone, 48 kHz stereo.
+///
+/// The digital silence is deliberate. It gives the silence detector a span to
+/// find, so the planner reaches its measured loop rather than refusing at the
+/// readiness gate; and a profile learned over it reads
+/// `PROFILE_BAND_NEUTRAL_TENTH_DB` in all 31 bands, which AU5 §2.1 rule 5 / R4
+/// define as unity gain. The denoiser is then an exact identity, so the
+/// measured SNR gain is zero and the planner has to refuse.
+fn au5_clean_media() -> GeneratedMedia {
+    let mut mono = vec![0.0_f32; 48_000];
+    mono.extend(kinewright_media::test_support::tone(
+        440.0, 0.300, 48_000, 96_000,
+    ));
+    let stereo = mono
+        .iter()
+        .flat_map(|sample| [*sample, *sample])
+        .collect::<Vec<_>>();
+    GeneratedMedia::from_bytes(
+        "au5-repair-clean",
+        "wav",
+        &kinewright_media::test_support::wav_f32(&stereo, 48_000, 2),
+    )
+}
+
+/// One audio-only asset on one audio track, whole.
+fn au5_audio_document(asset: MediaAsset) -> Document {
+    let duration = asset.duration;
+    Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![Clip {
+                id: ClipId(1),
+                asset: asset.id,
+                source_range: TimeCode::ZERO..duration,
+                content: kinewright_core::ClipContent::Media,
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+                audio_gain_curve: None,
+            }],
+        }],
+        media_pool: vec![asset],
+        duration,
+        ..Document::default()
+    }
+}
+
+/// AU5 §5.6 rule 107 / B9: invoke a capability, tolerating **exactly one**
+/// class of refusal — the asynchronous silence analysis that has not finished
+/// yet — on `au4_plan_audio_ducking_converges_through_the_real_engine`'s own
+/// template (this file's AU4 lane).
+async fn au5_invoke_when_silence_is_ready(
+    client: &RunningService<RoleClient, ()>,
+    name: &str,
+    arguments: serde_json::Value,
+) -> CallToolResult {
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let result = invoke_capability(client, name, arguments.clone()).await;
+        if result.is_error == Some(false) {
+            return result;
+        }
+        let text = result.content[0].as_text().unwrap().text.clone();
+        if !text.contains("silence analysis is not ready") {
+            return result;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "silence analysis did not finish: {text}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The master SNR `get_audio_repair` measures over the whole timeline, in
+/// hundredths of a dB.
+async fn au5_master_snr(client: &RunningService<RoleClient, ()>) -> i64 {
+    let measured = invoke_capability(client, "get_audio_repair", json!({})).await;
+    let body = measured.structured_content.as_ref().unwrap();
+    assert_eq!(measured.is_error, Some(false), "{body}");
+    body["report"]["snr_db_hundredths"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("the fixture must measure a percentile SNR: {body}"))
+}
+
+/// AU5 §7 B10 — **the measured refusal, which is the deliverable.**
+///
+/// `plan_dialogue_repair` runs on §3.11(a)'s fixture through the real engine,
+/// commits, and the SNR is re-measured through `get_audio_repair` — the public
+/// inspector, not the planner's own number — against
+/// `PLAN_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS` with its margin printed. The
+/// negative arm then runs the same planner on clean material and asserts it
+/// **refuses**, names both numbers, and prepares no plan.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au5_plan_dialogue_repair_moves_the_snr_through_the_real_engine() {
+    let noisy = au5_repair_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(noisy.path()).unwrap();
+    assert_eq!(asset.kind, MediaKind::Audio);
+    assert_eq!(asset.duration, TimeCode(90), "3 s at the 30 fps audio grid");
+    let core = Core::spawn(au5_audio_document(asset)).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media.clone()).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let before = au5_master_snr(&client).await;
+    let planned =
+        au5_invoke_when_silence_is_ready(&client, "plan_dialogue_repair", json!({"tracks": [1]}))
+            .await;
+    let body = planned.structured_content.as_ref().unwrap();
+    assert_eq!(planned.is_error, Some(false), "{body}");
+    assert_eq!(body["reused_existing_bus"], false, "{body}");
+    assert_eq!(body["chain_lookahead_milliseconds"], 15, "{body}");
+    assert_eq!(
+        body["repair_prefix"],
+        json!(["audio_denoise", "audio_hum_removal", "audio_declick"]),
+        "{body}"
+    );
+    // Rule 107: the profile is learned over the LONGEST silence span, which on
+    // this fixture is the leading second of noise-only material.
+    let learn = &body["learn_range"];
+    assert_eq!(learn["track"], 1, "{body}");
+    assert!(
+        learn["end_frame"].as_i64().unwrap() - learn["start_frame"].as_i64().unwrap() >= 15,
+        "the learn range must hold a whole 22,528 sample-frame profile window: {body}"
+    );
+
+    let revision = body["timeline_revision"].as_u64().unwrap();
+    let plan_id = body["prepared_edit_plan"]["plan_id"].clone();
+    let committed = client
+        .call_tool(
+            CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                json!({"plan_id": plan_id, "expected_revision": revision})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        committed.is_error,
+        Some(false),
+        "{:?}",
+        committed.structured_content
+    );
+
+    // What landed: one bus carrying the three repair nodes at its head.
+    let document = query_document(&core);
+    assert_eq!(
+        document.audio_mix.buses.len(),
+        1,
+        "{:?}",
+        document.audio_mix
+    );
+    let bus = &document.audio_mix.buses[0];
+    assert_eq!(
+        bus.effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect::<Vec<_>>(),
+        ["audio_denoise", "audio_hum_removal", "audio_declick"]
+    );
+    assert_eq!(
+        kinewright_core::chain_lookahead_milliseconds(&bus.effects),
+        15
+    );
+
+    // The engine's own answer, re-measured through the public inspector.
+    let after = au5_master_snr(&client).await;
+    let gain = after - before;
+    let margin = f64::from(i32::try_from(gain).unwrap())
+        / f64::from(i32::try_from(PLAN_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS).unwrap());
+    println!(
+        "AU5_PLAN_REPAIR_SNR before_hundredths={before} after_hundredths={after} \
+         gain_hundredths={gain} budget={PLAN_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS} margin={margin:.2}"
+    );
+    assert!(
+        gain >= PLAN_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS,
+        "the committed repair must really move the measured SNR: before={before} after={after}"
+    );
+    assert!(
+        margin >= 2.0,
+        "AU5 §3.12: every gated term keeps a 2x margin; measured {margin:.2}x"
+    );
+    // The planner's own measurement agrees with the re-measurement, which is
+    // what makes rule 106's `measured` worth publishing at all.
+    assert!(
+        (body["measured"]["snr_gain_db_hundredths"].as_i64().unwrap() - gain).abs()
+            <= PLAN_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS,
+        "plan {} against re-measured {gain}",
+        body["measured"]
+    );
+    client.cancel().await.unwrap();
+    server.shutdown();
+
+    // ---- The negative arm: clean material refuses, naming both numbers. ----
+    let clean = au5_clean_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(clean.path()).unwrap();
+    let core = Core::spawn(au5_audio_document(asset)).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let refused =
+        au5_invoke_when_silence_is_ready(&client, "plan_dialogue_repair", json!({"tracks": [1]}))
+            .await;
+    let text = refused.content[0].as_text().unwrap().text.clone();
+    assert_eq!(refused.is_error, Some(true), "{text}");
+    assert!(
+        refused.structured_content.is_none(),
+        "a refusal prepares no plan: {refused:?}"
+    );
+    assert!(
+        text.contains("minimum_snr_gain_db_hundredths 100"),
+        "the required number: {text}"
+    );
+    assert!(
+        text.contains("signal-to-noise gain of"),
+        "the measured number: {text}"
+    );
+    assert!(
+        text.contains("HIGHER floor and therefore a LOWER gain"),
+        "and which way the percentile floor biases it (rule 21): {text}"
+    );
+    // Nothing was prepared, so nothing can be committed: the timeline is
+    // exactly where it started.
+    assert_eq!(cc7_revision(&client).await, 0);
+    assert!(query_document(&core).audio_mix.buses.is_empty());
+    println!("AU5_PLAN_REPAIR_REFUSAL {text}");
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// Commit one prepared plan out of a planner's structured content.
+async fn au5_commit_prepared(client: &RunningService<RoleClient, ()>, body: &serde_json::Value) {
+    let revision = body["timeline_revision"].as_u64().unwrap();
+    let plan_id = body["prepared_edit_plan"]["plan_id"].clone();
+    let committed = client
+        .call_tool(
+            CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                json!({"plan_id": plan_id, "expected_revision": revision})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        committed.is_error,
+        Some(false),
+        "{:?}",
+        committed.structured_content
+    );
+}
+
+/// AU5 §5.7 rule 111 / B11's R35 arm: give the one existing bus a **non-zero
+/// fader and a gain curve**, through the ordinary edit-plan path.
+///
+/// The neutral-fader fixture alone would not catch a reset, because
+/// `gain_tenth_db` is `skip_serializing_if = "i32_is_zero"` and the reset
+/// would be invisible in the golden too.
+///
+/// The values are deliberately **small** — 0.2 dB falling to 0.1 dB — for a
+/// reason worth stating: in the normalize-first order the fader is armed
+/// *after* the convergence loop has already run, so anything larger would show
+/// up as a loudness error the planner never had a chance to absorb, and the
+/// tolerance assertion below would be measuring this fixture's own arithmetic
+/// instead of the planners'. What R35 needs is a value that is not zero, not a
+/// value that is loud.
+async fn au5_arm_the_bus_fader(client: &RunningService<RoleClient, ()>, core: &Core) {
+    let document = query_document(core);
+    let bus = document.audio_mix.buses.last().unwrap().clone();
+    let revision = cc7_revision(client).await;
+    let effects = serde_json::to_value(&bus.effects).unwrap();
+    let prepared = prepare_plan(
+        client,
+        revision,
+        json!([{
+            "op": "upsert_audio_bus",
+            "bus": {
+                "id": bus.id.0,
+                "name": bus.name,
+                "tracks": [1],
+                "gain_tenth_db": -2,
+                "gain_curve": {
+                    "keyframes": [
+                        {"at": 0, "value": -2, "interpolation": "linear"},
+                        {"at": 60, "value": -1, "interpolation": "linear"}
+                    ]
+                },
+                "effects": effects
+            }
+        }]),
+    )
+    .await;
+    assert_eq!(
+        prepared.is_error,
+        Some(false),
+        "{:?}",
+        prepared.structured_content
+    );
+    let committed = client
+        .call_tool(commit_request(revision, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(
+        committed.is_error,
+        Some(false),
+        "{:?}",
+        committed.structured_content
+    );
+}
+
+/// AU5 §5.7 / B11 — **S7, in either order.**
+///
+/// `plan_dialogue_repair` and `plan_audio_normalization` run on the same
+/// document in both orders and land the same one bus: the repair prefix, then
+/// the compressor/gain, then the true-peak limiter, declaring exactly
+/// `CHAIN_LOOKAHEAD_MILLISECONDS` = 20 ms — 15 of repair plus 5 of limiter,
+/// the whole budget and not a millisecond of slack. In each order the bus's
+/// **non-zero fader and gain curve** are armed after the first planner commits
+/// and asserted to survive the second (R35), and the committed loudness lands
+/// inside AU3's own tolerance, so the four convergence iterations really did
+/// converge on the *repaired* loudness rather than on the raw one.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au5_the_repair_and_normalization_planners_agree_in_either_order() {
+    let target = -1_600_i64;
+    let tolerance = 100_i64;
+    let normalization = json!({
+        "track_ids": [1],
+        "target_lufs_hundredths": target,
+        "maximum_sample_peak_dbfs_hundredths": -100,
+        "tolerance_hundredths": tolerance
+    });
+    for repair_first in [true, false] {
+        let generated = au5_repair_media();
+        let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let asset = media.probe(generated.path()).unwrap();
+        let core = Core::spawn(au5_audio_document(asset)).unwrap();
+        let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+        let client =
+            ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+                .await
+                .unwrap();
+        let label = if repair_first {
+            "repair-then-normalize"
+        } else {
+            "normalize-then-repair"
+        };
+
+        let first = if repair_first {
+            au5_invoke_when_silence_is_ready(
+                &client,
+                "plan_dialogue_repair",
+                json!({"tracks": [1]}),
+            )
+            .await
+        } else {
+            invoke_capability(&client, "plan_audio_normalization", normalization.clone()).await
+        };
+        let body = first.structured_content.as_ref().unwrap().clone();
+        assert_eq!(first.is_error, Some(false), "{label}: {body}");
+        au5_commit_prepared(&client, &body).await;
+        au5_arm_the_bus_fader(&client, &core).await;
+
+        let second = if repair_first {
+            invoke_capability(&client, "plan_audio_normalization", normalization.clone()).await
+        } else {
+            au5_invoke_when_silence_is_ready(
+                &client,
+                "plan_dialogue_repair",
+                json!({"tracks": [1]}),
+            )
+            .await
+        };
+        let body = second.structured_content.as_ref().unwrap().clone();
+        assert_eq!(
+            second.is_error,
+            Some(false),
+            "{label}: the second planner must EXTEND the first planner's bus rather than refuse \
+             the intersection: {body}"
+        );
+        au5_commit_prepared(&client, &body).await;
+
+        // One bus, whatever the order, and exactly one.
+        let document = query_document(&core);
+        assert_eq!(
+            document.audio_mix.buses.len(),
+            1,
+            "{label}: {:?}",
+            document.audio_mix
+        );
+        let bus = &document.audio_mix.buses[0];
+        let names = bus
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &names[..3],
+            ["audio_denoise", "audio_hum_removal", "audio_declick"],
+            "{label}: the repair prefix is at the HEAD in both orders: {names:?}"
+        );
+        assert_eq!(
+            names.last(),
+            Some(&"audio_true_peak_limiter"),
+            "{label}: the chain still ends in the inter-sample-aware limiter: {names:?}"
+        );
+        assert!(
+            names[3..names.len() - 1]
+                .iter()
+                .all(|name| matches!(*name, "audio_compressor" | "audio_gain")),
+            "{label}: only the delivery processing sits between them: {names:?}"
+        );
+        assert!(
+            !names.contains(&"audio_limiter"),
+            "{label}: never the legacy sample-peak clamp"
+        );
+        assert_eq!(
+            kinewright_core::chain_lookahead_milliseconds(&bus.effects),
+            kinewright_core::CHAIN_LOOKAHEAD_MILLISECONDS,
+            "{label}: 15 of repair plus 5 of limiter is exactly the budget: {names:?}"
+        );
+        // R35: every `AudioBus` field except `effects` rides across.
+        assert_eq!(bus.gain_tenth_db, -2, "{label}: the fader is not reset");
+        let curve = bus
+            .gain_curve
+            .as_ref()
+            .unwrap_or_else(|| panic!("{label}: the gain curve is not dropped"));
+        assert_eq!(curve.keyframes.len(), 2, "{label}: {curve:?}");
+        assert_eq!(curve.keyframes[0].value, -2, "{label}");
+        assert_eq!(curve.keyframes[1].value, -1, "{label}");
+        assert_eq!(bus.tracks, vec![TrackId(1)], "{label}");
+        // Effect ids are unique, in both orders: the delivery processing never
+        // reuses a repair node's id.
+        let mut ids = bus
+            .effects
+            .iter()
+            .map(|effect| effect.id.0)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), bus.effects.len(), "{label}: {:?}", bus.effects);
+
+        // The loudness the convergence landed on is the REPAIRED loudness,
+        // measured through the public inspector on the committed document.
+        let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
+        let levels = levels.structured_content.as_ref().unwrap();
+        let measured = levels["report"]["master"]["integrated_lufs_hundredths"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{label}: the committed mix must measure: {levels}"));
+        println!(
+            "AU5_REPAIR_NORMALIZE order={label} measured_lufs_hundredths={measured} \
+             target={target} tolerance={tolerance} error={}",
+            (measured - target).abs()
+        );
+        assert!(
+            (measured - target).abs() <= tolerance,
+            "{label}: the committed loudness must sit inside AU3's tolerance: {measured}"
+        );
+        client.cancel().await.unwrap();
+        server.shutdown();
+    }
+}
+
+/// AU5 §5.8 rule 115: approve the one confirmation `capture_room_tone` raises,
+/// asserting the sentence the operator is actually shown.
+async fn au5_approve_capture(broker: kinewright_agent::ConfirmationBroker, approve: bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(request) = broker.pending_requests().into_iter().next() {
+            assert_eq!(request.tool_name, "capture_room_tone");
+            assert!(
+                request.description.contains("room-tone store"),
+                "the operator is told where the bytes go: {}",
+                request.description
+            );
+            assert!(
+                request.description.contains("source frames 0..30"),
+                "and which range is captured: {}",
+                request.description
+            );
+            if approve {
+                assert!(broker.approve(request.id));
+            } else {
+                assert!(broker.reject(request.id, "not this take"));
+            }
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "capture_room_tone must publish a confirmation before it writes a byte"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// AU5 §7 B2 and B7 — capture, fill, and both idempotences, through the real
+/// store and the real decoder.
+///
+/// The timeline is §5.4's shape: clip A over source `0..30`, a **30-frame
+/// interior gap**, clip B over source `0..30`. One second of the fixture's
+/// leading noise is captured into the project's room-tone store, one
+/// `plan_room_tone_fill` fills the gap with a single butt-joined tile, and
+/// both halves are then re-run to prove they are no-ops: a second identical
+/// capture returns the same `asset_id` and emits **no** operation, and a
+/// second fill proposes nothing, because a filled gap is not a gap.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
+    let generated = au5_repair_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let clip = |id: u64, at: i64| Clip {
+        id: ClipId(id),
+        asset: asset.id,
+        source_range: TimeCode::ZERO..TimeCode(30),
+        content: kinewright_core::ClipContent::Media,
+        timeline_start: TimeCode(at),
+        effects: Vec::new(),
+        transition_in: None,
+        link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
+        speed_percent: 100,
+        audio_gain_curve: None,
+    };
+    let document = Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![clip(1, 0), clip(2, 60)],
+        }],
+        media_pool: vec![asset.clone()],
+        duration: TimeCode(90),
+        ..Document::default()
+    };
+    let core = Core::spawn(document).unwrap();
+    let project = kinewright_media::test_support::TempDirectory::new("au5-room-tone");
+    let handle = Arc::new(std::sync::RwLock::new(Some(
+        project.path("show.kinewright"),
+    )));
+    let server = McpServer::start_isolated_with_project_path(
+        core.clone(),
+        media.clone(),
+        media,
+        Arc::clone(&handle),
+    )
+    .unwrap();
+    let confirmations = server.confirmations();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    // A refused confirmation writes nothing at all, which is the whole reason
+    // the confirmation is raised before the decode rather than after it.
+    let capture = json!({
+        "expected_revision": 0,
+        "asset_id": asset.id.0,
+        "source_start_frame": 0,
+        "source_end_frame": 30
+    });
+    let (refused, ()) = tokio::join!(
+        invoke_capability(&client, "capture_room_tone", capture.clone()),
+        au5_approve_capture(confirmations.clone(), false),
+    );
+    assert_eq!(refused.is_error, Some(true));
+    let body = refused.structured_content.as_ref().unwrap();
+    assert_eq!(body["code"], "capture_refused", "{body}");
+    assert_eq!(body["details"]["store_file_written"], false, "{body}");
+    assert_eq!(body["details"]["document_changed"], false, "{body}");
+    assert!(
+        !project.path("show.kinewright-assets").exists(),
+        "a refused capture leaves no store directory behind"
+    );
+
+    // The approved capture: one 48 kHz stereo second, written under its own
+    // digest, probed, and registered as ONE AddAsset carrying an overridden
+    // name.
+    let (captured, ()) = tokio::join!(
+        invoke_capability(&client, "capture_room_tone", capture.clone()),
+        au5_approve_capture(confirmations.clone(), true),
+    );
+    let body = captured.structured_content.as_ref().unwrap();
+    assert_eq!(captured.is_error, Some(false), "{body}");
+    assert_eq!(body["applied"], true, "{body}");
+    assert_eq!(body["reused_existing_asset"], false, "{body}");
+    let tone = &body["room_tone_asset"];
+    assert_eq!(tone["milliseconds"], 1_000, "{tone}");
+    assert_eq!(tone["sample_frames"], 48_000, "{tone}");
+    assert_eq!(
+        tone["frames"], 30,
+        "1 s is a whole 30 fps asset frame count: {tone}"
+    );
+    assert_eq!(tone["fps"], "30/1", "an audio-only asset probes at 30 fps");
+    // R46 / rule 115: `probe_path` names a store file after its own digest, so
+    // the capture OVERRIDES that name rather than carrying it.
+    let name = tone["name"].as_str().unwrap();
+    assert!(name.starts_with("Room tone — "), "{tone}");
+    assert!(
+        !name.contains(tone["sha256"].as_str().unwrap()),
+        "the registered name must not be the digest `probe_path` read off the store file: {tone}"
+    );
+    assert!(
+        name.ends_with(&document_source_name(&core, asset.id)),
+        "it names the SOURCE the tone was captured from: {tone}"
+    );
+    let store_path = PathBuf::from(tone["store_path"].as_str().unwrap());
+    assert!(store_path.is_file(), "{store_path:?}");
+    assert_eq!(
+        store_path.parent().unwrap().file_name().unwrap(),
+        "room-tone"
+    );
+    assert_eq!(
+        store_path.file_stem().unwrap().to_str().unwrap(),
+        tone["sha256"].as_str().unwrap(),
+        "the store is content-addressed"
+    );
+
+    // Exactly one operation landed, and it was an AddAsset.
+    let document = query_document(&core);
+    assert_eq!(document.media_pool.len(), 2, "{:?}", document.media_pool);
+    let room_tone = document.media_pool.last().unwrap();
+    assert_eq!(room_tone.duration, TimeCode(30));
+    assert_eq!(room_tone.name, name);
+    let after_capture = cc7_revision(&client).await;
+    assert_eq!(after_capture, 1, "one AddAsset, one revision");
+    // AU5 §0 R112: a captured room tone earns NO background analysis. Queueing
+    // a transcription on a second of noise means downloading the Whisper model
+    // to read a file with no speech in it, and the abort that used to end this
+    // test binary was that download still in flight at process exit.
+    let jobs = invoke_capability(
+        &client,
+        "get_analysis_status",
+        json!({"asset_id": room_tone.id.0}),
+    )
+    .await;
+    let jobs = jobs.structured_content.as_ref().unwrap();
+    // F11: assert the SHAPE, not the absence of two words. Silence detection on
+    // one second of noise can finish between the capture and this line, and a
+    // `"ready"` phase would sail through a substring search — so a regression
+    // that re-enabled `request_asset_analysis` would be caught only by
+    // whichever job happened to still be pending. Every phase is checked, and
+    // the only two a never-requested asset may report are these.
+    // Pass-2 finding 5: assert the list is non-empty first, so a shape change
+    // that answered `[]` for an un-requested asset would turn this pin
+    // green-and-vacuous rather than red.
+    let jobs = jobs["jobs"].as_array().unwrap();
+    assert!(
+        !jobs.is_empty(),
+        "the status surface must report every kind"
+    );
+    for job in jobs {
+        assert!(
+            matches!(job["phase"].as_str(), Some("not_requested" | "unavailable")),
+            "the capture must queue no analysis at all: {job}"
+        );
+    }
+
+    // Rule 116: a second identical capture is a NO-OP — the same asset id, no
+    // operation, and the revision does not move. It still asks first, because
+    // the caller cannot know it is a repeat.
+    let (again, ()) = tokio::join!(
+        invoke_capability(
+            &client,
+            "capture_room_tone",
+            json!({
+                "expected_revision": after_capture,
+                "asset_id": asset.id.0,
+                "source_start_frame": 0,
+                "source_end_frame": 30
+            })
+        ),
+        au5_approve_capture(confirmations.clone(), true),
+    );
+    let body = again.structured_content.as_ref().unwrap();
+    assert_eq!(again.is_error, Some(false), "{body}");
+    assert_eq!(body["reused_existing_asset"], true, "{body}");
+    assert_eq!(body["applied"], false, "{body}");
+    // F2 / rule 114: the reused branch publishes the SAME `room_tone_asset`
+    // shape the applied branch does, so a caller reads one key either way —
+    // `import_lut_asset`'s own rule, which is what "on its exact shape" means.
+    assert_eq!(
+        body["room_tone_asset"]["asset_id"], room_tone.id.0,
+        "{body}"
+    );
+    assert_eq!(body["room_tone_asset"]["name"], room_tone.name, "{body}");
+    assert_eq!(body["room_tone_asset"]["sha256"], tone["sha256"], "{body}");
+    assert_eq!(
+        body["room_tone_asset"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        tone.as_object().unwrap().keys().collect::<Vec<_>>(),
+        "the two branches publish the same key set"
+    );
+    assert_eq!(cc7_revision(&client).await, after_capture);
+
+    // §5.5: the fill. One 30-frame gap, one tile of the 30-frame sample, and
+    // `asset_id` defaulted to the sole registered room-tone asset.
+    let planned = invoke_capability(&client, "plan_room_tone_fill", json!({"track": 1})).await;
+    let body = planned.structured_content.as_ref().unwrap();
+    assert_eq!(planned.is_error, Some(false), "{body}");
+    assert_eq!(body["asset_id"], room_tone.id.0, "{body}");
+    assert_eq!(
+        body["gaps"],
+        json!([{"start": 30, "end": 60, "tiles": 1, "skipped_reason": null}]),
+        "{body}"
+    );
+    au5_commit_prepared(&client, body).await;
+
+    // What landed: one ordinary media clip of the room-tone asset, butt-joined
+    // at the gap, at `speed_percent = 100` and with no fade of any kind.
+    let document = query_document(&core);
+    let filled = document.tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.asset == room_tone.id)
+        .expect("the fill is an ordinary media clip");
+    assert_eq!(filled.timeline_start, TimeCode(30));
+    assert_eq!(filled.source_range, TimeCode::ZERO..TimeCode(30));
+    assert_eq!(filled.speed_percent, 100, "rule 44");
+    assert_eq!(filled.audio_fade_in_frames, TimeCode::ZERO, "rule 95");
+    assert_eq!(filled.audio_fade_out_frames, TimeCode::ZERO);
+    assert!(filled.audio_gain_curve.is_none());
+    // Rule 97's own assertion, taken from the committed document.
+    assert_eq!(document.clip_duration(filled).unwrap(), TimeCode(30));
+    // The gap is gone, which is the only observable "the hole is closed"
+    // signal the product has (rule 96).
+    assert_eq!(
+        document.track_gaps(TrackId(1)),
+        Some(Vec::new()),
+        "{:?}",
+        document.tracks[0].clips
+    );
+
+    // Rule 104: idempotent by construction. A filled gap is not a gap.
+    let repeat = invoke_capability(&client, "plan_room_tone_fill", json!({"track": 1})).await;
+    let body = repeat.structured_content.as_ref().unwrap();
+    assert_eq!(repeat.is_error, Some(false), "{body}");
+    assert_eq!(body["gaps"], json!([]), "{body}");
+    assert_eq!(
+        body["prepared_edit_plan"],
+        serde_json::Value::Null,
+        "{body}"
+    );
+    assert!(
+        repeat.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("no leading or interior gap to fill"),
+        "{repeat:?}"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// The pooled name of one asset, for AU5 §5.8's `"Room tone — {source}"` pin.
+fn document_source_name(core: &Core, asset: AssetId) -> String {
+    query_document(core)
+        .media_pool
+        .iter()
+        .find(|candidate| candidate.id == asset)
+        .expect("the source asset is pooled")
+        .name
+        .clone()
+}
+
+/// AU5 §5.3 rule 97 / §0 R96 / B6 — **the 25 fps arm, committed.**
+///
+/// A 25 fps project reading the 30 fps audio-only asset over a **7-frame gap**.
+/// `map_frames(8, 30, 25) = round(40/6) = 7`, so source `0..8` is exact in
+/// project *frames* and 640 sample frames short of what the gap demands,
+/// because the mixer maps source samples to project samples one for one and
+/// then stops. The planner must therefore take its tile from core's
+/// **covering** range, which starts at a non-zero source frame; this lane
+/// asserts the committed fill is exactly that range — the same shared helper
+/// media's seam lane builds its reference from, so the two cannot disagree —
+/// that it measures exactly the gap, that Core accepted it without a
+/// `ClipOverlap`, and that **no residual gap is left behind**, which is the
+/// only observable "the hole is closed" signal the product has.
+#[tokio::test(flavor = "multi_thread")]
+async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_25_fps() {
+    let generated = au5_repair_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    assert_eq!(asset.fps, Rational::new(30, 1).unwrap());
+    let clip = |id: u64, at: i64| Clip {
+        id: ClipId(id),
+        asset: asset.id,
+        source_range: TimeCode::ZERO..TimeCode(30),
+        content: kinewright_core::ClipContent::Media,
+        timeline_start: TimeCode(at),
+        effects: Vec::new(),
+        transition_in: None,
+        link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
+        speed_percent: 100,
+        audio_gain_curve: None,
+    };
+    let document = Document {
+        fps: Rational::new(25, 1).unwrap(),
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![clip(1, 0), clip(2, 32)],
+        }],
+        media_pool: vec![asset.clone()],
+        duration: TimeCode(57),
+        ..Document::default()
+    };
+    assert_eq!(
+        document.track_gaps(TrackId(1)),
+        Some(vec![TimeCode(25)..TimeCode(32)]),
+        "30 source frames map to 25 project frames at 25 fps, so the gap is 25..32"
+    );
+    let expected = kinewright_core::covering_source_range_for_project_duration(
+        TimeCode(7),
+        asset.fps,
+        document.fps,
+        asset.duration,
+        48_000,
+    )
+    .expect("a 7-frame gap has a covering range at 30 -> 25");
+    assert_ne!(
+        expected.start,
+        TimeCode::ZERO,
+        "R96: source 0..8 is exact in frames and short in samples, so phase 0 is not the answer"
+    );
+
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let planned = invoke_capability(
+        &client,
+        "plan_room_tone_fill",
+        json!({"track": 1, "asset_id": asset.id.0}),
+    )
+    .await;
+    let body = planned.structured_content.as_ref().unwrap();
+    assert_eq!(planned.is_error, Some(false), "{body}");
+    assert_eq!(
+        body["gaps"],
+        json!([{"start": 25, "end": 32, "tiles": 1, "skipped_reason": null}]),
+        "{body}"
+    );
+    au5_commit_prepared(&client, body).await;
+
+    let document = query_document(&core);
+    let filled = document.tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.timeline_start == TimeCode(25))
+        .expect("the fill lands at the gap start");
+    assert_eq!(
+        filled.source_range, expected,
+        "the committed tile is core's covering range, phase and all"
+    );
+    assert_eq!(document.clip_duration(filled).unwrap(), TimeCode(7));
+    assert_eq!(
+        document.track_gaps(TrackId(1)),
+        Some(Vec::new()),
+        "no residual gap: {:?}",
+        document.tracks[0].clips
+    );
+    println!(
+        "AU5_ROOM_TONE_FILL_25FPS gap=7 source={}..{} covered_frames={}",
+        expected.start.0,
+        expected.end.0,
+        expected.end.0 - expected.start.0
+    );
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// Twenty seconds of 48 kHz stereo room tone — the same noise §3.11(a) uses,
+/// long enough that an NTSC covering phase (around source frame 500) exists
+/// inside it.
+fn au5_long_room_tone_media() -> GeneratedMedia {
+    au5_room_tone_media_of(960_000)
+}
+
+/// Forty seconds — **1 200 source frames at 30 fps**, the length pass-2
+/// finding 1 showed the old four-frame shortfall bound could not tile at all.
+///
+/// At 30 -> 29.97 the tile that works is the map period's `0..1001`, so a
+/// 1 200-frame asset has to step down 199 project frames to reach it. Against a
+/// four-frame allowance it found no tile and skipped **every** gap on the
+/// track; core's `longest_coverable_project_tile` finds it, and the lane below
+/// is what says so.
+fn au5_ntsc_long_room_tone_media() -> GeneratedMedia {
+    au5_room_tone_media_of(1_920_000)
+}
+
+fn au5_room_tone_media_of(mono_samples: usize) -> GeneratedMedia {
+    let mono = kinewright_media::test_support::pseudo_random_amplitude(mono_samples, 0.010);
+    let stereo = mono
+        .iter()
+        .flat_map(|sample| [*sample, *sample])
+        .collect::<Vec<_>>();
+    GeneratedMedia::from_bytes(
+        &format!("au5-room-tone-{mono_samples}"),
+        "wav",
+        &kinewright_media::test_support::wav_f32(&stereo, 48_000, 2),
+    )
+}
+
+/// AU5 §5.3 / §0 R96, R119 — **the NTSC lane.**
+///
+/// A 30000/1001 project reading the 30 fps audio-only asset. This is the rate
+/// pair the core review found the planner silently failing on: covering needs a
+/// source start hundreds of frames in (at `D = 1` the phases that work are
+/// around 499..501), and the helper's phase window was too narrow to reach
+/// them, so **every** gap on an NTSC timeline was skipped. The agent half made
+/// that invisible by `.ok()`ing the helper's error into one per-gap sentence
+/// about exact source ranges; the reason now carries the error's own kind
+/// (R119), and this lane asserts the fill really is proposed, really is core's
+/// own covering range, and really closes the gap.
+#[tokio::test(flavor = "multi_thread")]
+async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_29_97_fps() {
+    // Twenty seconds, not three: at 30 -> 29.97 the covering phases for a
+    // ten-frame span sit around source frame 500, so a three-second sample is
+    // provably too short and core answers `NoCoveringSourceRange` — a real
+    // refusal with a real reason, and the wrong fixture for this lane.
+    let generated = au5_long_room_tone_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    assert_eq!(
+        asset.duration,
+        TimeCode(600),
+        "20 s at the 30 fps audio grid"
+    );
+    let project_fps = Rational::new(30_000, 1_001).unwrap();
+    let clip = |id: u64, at: i64| Clip {
+        id: ClipId(id),
+        asset: asset.id,
+        source_range: TimeCode::ZERO..TimeCode(30),
+        content: kinewright_core::ClipContent::Media,
+        timeline_start: TimeCode(at),
+        effects: Vec::new(),
+        transition_in: None,
+        link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
+        speed_percent: 100,
+        audio_gain_curve: None,
+    };
+    let document = Document {
+        fps: project_fps,
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![clip(1, 0), clip(2, 40)],
+        }],
+        media_pool: vec![asset.clone()],
+        duration: TimeCode(70),
+        ..Document::default()
+    };
+    assert_eq!(
+        document.track_gaps(TrackId(1)),
+        Some(vec![TimeCode(30)..TimeCode(40)]),
+        "30 source frames map to 30 project frames at 29.97, so the gap is 30..40"
+    );
+    let expected = kinewright_core::covering_source_range_for_project_duration(
+        TimeCode(10),
+        asset.fps,
+        project_fps,
+        asset.duration,
+        48_000,
+    )
+    .expect("core's widened phase window reaches an NTSC covering range");
+
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let planned = invoke_capability(
+        &client,
+        "plan_room_tone_fill",
+        json!({"track": 1, "asset_id": asset.id.0}),
+    )
+    .await;
+    let body = planned.structured_content.as_ref().unwrap();
+    assert_eq!(planned.is_error, Some(false), "{body}");
+    assert_eq!(
+        body["gaps"],
+        json!([{"start": 30, "end": 40, "tiles": 1, "skipped_reason": null}]),
+        "an NTSC project must get a fill, not a per-gap reason: {body}"
+    );
+    au5_commit_prepared(&client, body).await;
+
+    let document = query_document(&core);
+    let filled = document.tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.timeline_start == TimeCode(30))
+        .expect("the fill lands at the gap start");
+    assert_eq!(filled.source_range, expected);
+    assert_eq!(document.clip_duration(filled).unwrap(), TimeCode(10));
+    assert_eq!(
+        document.track_gaps(TrackId(1)),
+        Some(Vec::new()),
+        "no residual gap: {:?}",
+        document.tracks[0].clips
+    );
+    println!(
+        "AU5_ROOM_TONE_FILL_29_97FPS gap=10 source={}..{}",
+        expected.start.0, expected.end.0
+    );
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU5 §0 R119 / pass-2 finding 1 — **the length the four-frame bound could not
+/// tile.**
+///
+/// A 1 200-source-frame (40 s) room tone in a 29.97 project. Its own mapped
+/// length is 1 199 project frames, and the only span it can cover is the map
+/// period's 1 000 — so the tiler has to step down **199** frames to find it.
+/// The agent's former `ROOM_TONE_MAX_TILE_SHORTFALL_FRAMES = 4` gave up at
+/// step 4 and therefore skipped *every* gap on the track, which is the exact
+/// user-visible failure R96 was written to close, relocated from core's phase
+/// window into the agent's own constant. Core's
+/// `longest_coverable_project_tile` owns the search now and the constant is
+/// gone; this lane is what proves it, end to end and committed.
+#[tokio::test(flavor = "multi_thread")]
+async fn au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps() {
+    let generated = au5_ntsc_long_room_tone_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    assert_eq!(
+        asset.duration,
+        TimeCode(1_200),
+        "40 s at the 30 fps audio grid"
+    );
+    let project_fps = Rational::new(30_000, 1_001).unwrap();
+    // The step-down this length really needs, taken from core rather than
+    // restated: a bound of 4 could never have reached it.
+    let (tile, source) = kinewright_core::longest_coverable_project_tile(
+        asset.duration,
+        asset.fps,
+        project_fps,
+        48_000,
+        TimeCode(1_199),
+    )
+    .expect("core's search finds the map period's tile");
+    let mapped = kinewright_core::map_source_range_to_project(
+        TimeCode::ZERO..asset.duration,
+        asset.fps,
+        project_fps,
+    )
+    .unwrap();
+    assert!(
+        mapped.0 - tile.0 > 4,
+        "this lane is only meaningful if the step-down exceeds the deleted bound: \
+         mapped={mapped:?} tile={tile:?}"
+    );
+    println!(
+        "AU5_ROOM_TONE_FILL_NTSC_1200 mapped={} tile={} step={} source={}..{}",
+        mapped.0,
+        tile.0,
+        mapped.0 - tile.0,
+        source.start.0,
+        source.end.0
+    );
+
+    let clip = |id: u64, at: i64| Clip {
+        id: ClipId(id),
+        asset: asset.id,
+        source_range: TimeCode::ZERO..TimeCode(30),
+        content: kinewright_core::ClipContent::Media,
+        timeline_start: TimeCode(at),
+        effects: Vec::new(),
+        transition_in: None,
+        link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
+        speed_percent: 100,
+        audio_gain_curve: None,
+    };
+    let document = Document {
+        fps: project_fps,
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![clip(1, 0), clip(2, 40)],
+        }],
+        media_pool: vec![asset.clone()],
+        duration: TimeCode(70),
+        ..Document::default()
+    };
+    assert_eq!(
+        document.track_gaps(TrackId(1)),
+        Some(vec![TimeCode(30)..TimeCode(40)])
+    );
+
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let planned = invoke_capability(
+        &client,
+        "plan_room_tone_fill",
+        json!({"track": 1, "asset_id": asset.id.0}),
+    )
+    .await;
+    let body = planned.structured_content.as_ref().unwrap();
+    assert_eq!(planned.is_error, Some(false), "{body}");
+    assert_eq!(
+        body["gaps"],
+        json!([{"start": 30, "end": 40, "tiles": 1, "skipped_reason": null}]),
+        "a 40 s NTSC capture must fill, not skip every gap on the track: {body}"
+    );
+    au5_commit_prepared(&client, body).await;
+    let document = query_document(&core);
+    assert_eq!(
+        document.track_gaps(TrackId(1)),
+        Some(Vec::new()),
+        "no residual gap: {:?}",
+        document.tracks[0].clips
+    );
     client.cancel().await.unwrap();
     server.shutdown();
 }

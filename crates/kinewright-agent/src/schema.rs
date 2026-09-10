@@ -13,7 +13,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 81] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 84] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -99,6 +99,15 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 81] = [
     "plan_audio_ducking",
     "plan_audio_normalization",
     "plan_clip_fades",
+    // AU5 §5.9 rule 117: Part B's three capabilities keep the same family
+    // ordering. `plan_` infers `CapabilityKind::Planner` and `capture_` infers
+    // nothing at all, so `capture_room_tone` falls through to
+    // `CapabilityKind::Action` (runtime.rs:165-181) — which is what it is, and
+    // which is why it needs no `CAPABILITY_KIND_OVERRIDES` entry either. The
+    // capture sits directly before the planner that consumes what it writes.
+    "plan_dialogue_repair",
+    "capture_room_tone",
+    "plan_room_tone_fill",
     "get_analysis_status",
     "get_caption_presets",
     "get_captions",

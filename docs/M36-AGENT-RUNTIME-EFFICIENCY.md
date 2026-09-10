@@ -120,6 +120,16 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-09, after AU4 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-10, after AU5 Part A) | 135 | 1,531,264 B | 1,391,430 B | 117,683 B |
 | Served MCP runtime (2026-09-10, after AU5 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-10, after AU5 Part B) | 138 | 1,540,264 B | 1,397,156 B | 120,458 B |
+| Served MCP runtime (2026-09-10, after AU5 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
+
+AU5 Part B's three capabilities, measured one row each (AU5 §5.9 rule 117):
+
+| Capability | Kind | Serialized | Input schema | Description |
+|---|---|---:|---:|---:|
+| `plan_dialogue_repair` | Planner | 3,369 B | 2,207 B | 995 B |
+| `capture_room_tone` | Action | 2,638 B | 1,664 B | 808 B |
+| `plan_room_tone_fill` | Planner | 2,993 B | 1,855 B | 972 B |
 
 That is a 99.1% reduction in initially advertised serialized tool metadata at
 the M36 baseline, 99.4% at the 2026-08-24 measurement, 99.56% after CC6
@@ -312,6 +322,59 @@ and 20 B is the fade planner's, summing to the 6,894 B measured. The served
 quad is byte-identical for the eleventh consecutive measurement at
 7 / 5,660 B / 3,510 B / 998 B, and the reduction holds at 99.63%, 5,660 B
 served against a 1,531,264 B registry.
+
+AU5 Part B adds three capabilities and no operation at all: the two planners
+`plan_dialogue_repair` and `plan_room_tone_fill`, and `capture_room_tone`,
+which is a `CapabilityKind::Action` by inference — it carries no `get_` or
+`plan_` prefix and no `CAPABILITY_KIND_OVERRIDES` entry — so the counts go to
+54 generated operations + 84 hand-written capabilities = 138 and the registry
+grows by 9,000 B to 1,540,264 B. As in AU4 Part B, this costs nothing outside
+the three new rows: none of the three touches the `Operation` model, and
+`capture_room_tone` writes its asset through the ordinary `AddAsset` variant
+that already existed, so no pre-existing tool moves a byte. Part B also adds no
+effect descriptor, so `effect_documentation()` is byte-unchanged and Part A's
+pattern sentence — which has named `plan_dialogue_repair` on five spliced tool
+descriptions since three commits before the planner existed — is deliberately
+left exactly as it was rather than rewritten for a second measurement of the
+same ledger.
+
+The split is the three rows whole, and it sums exactly:
+
+- **5,726 B** of input schema, `DialogueRepairPlanArgs` (2,207 B),
+  `RoomToneFillPlanArgs` (1,855 B) and `CaptureRoomToneArgs` (1,664 B), all
+  three `deny_unknown_fields`;
+- **2,775 B** of description, 995 B, 972 B and 808 B, each inside the 1,024 B
+  budget.
+
+That is 5,726 + 2,775 = 8,501 B against 9,000 B serialized; the remaining
+499 B are the three rows' names, annotations and JSON envelopes. A row's
+envelope is **147 B plus the length of its name**, which reproduces every
+earlier measurement in this document — `get_audio_qc` 147 + 12 = 159,
+`get_audio_repair` 147 + 16 = 163, `plan_dialogue_repair` 147 + 20 = 167,
+`plan_room_tone_fill` 147 + 19 = 166 — and `capture_room_tone` measures 166
+rather than its 147 + 17 = 164 because its description quotes the default asset
+name and the description column counts those two `"` unescaped while the
+serialized column counts them escaped. The two annotation sets cost the same
+number of bytes: a read-only planner spells `true`/`false` where the
+byte-writing Action spells `false`/`true`.
+
+Each description spends its budget the same way AU4's two planners do, and for
+the same reason: `get_capability` and `search_capabilities` publish
+`first_sentence(description)` and drop the rest, so the one clause an agent
+must not miss has to live in sentence one. For `plan_dialogue_repair` that is
+that the planner **refuses** when the measured signal-to-noise gain misses
+`minimum_snr_gain_db_hundredths`, together with the direction the percentile
+floor biases that measurement — a caller that does not know the floor is a
+10th-percentile window rather than a detected silence reads an honest refusal
+on continuous speech as a bug. For `plan_room_tone_fill` it is that only
+leading and interior gaps are filled, on the same track and butt-joined, and
+that a gap it cannot fill to the exact frame is skipped with a reason instead
+of failing the whole plan. For `capture_room_tone` it is that the tool
+**writes bytes** under the project directory and therefore asks first. The
+served quad is byte-identical for the twelfth consecutive measurement at
+7 / 5,660 B / 3,510 B / 998 B — all three capabilities are registry-only,
+reached through `invoke_capability`, whose argument schema is generic — so the
+reduction holds at 99.63%, 5,660 B served against a 1,540,264 B registry.
 
 The registry grew with the colour tools; the served surface stays at seven
 tools. The `color_curves` descriptor (133
