@@ -452,25 +452,32 @@ fn audio_descriptor_tables_match_the_contract_exactly() {
         .map(|descriptor| descriptor.name)
         .filter(|name| is_audio_effect(name))
         .collect();
-    assert_eq!(registered_audio, AUDIO_EFFECT_NAMES);
+    // AU5 §2.1 appended three more audio descriptors, so this is a prefix
+    // assertion now: AU2's eight come first, in AU2's order, and AU5's own
+    // count is pinned in `au5_core.rs`.
+    assert_eq!(
+        registered_audio[..AUDIO_EFFECT_NAMES.len()],
+        AUDIO_EFFECT_NAMES
+    );
     assert!(!is_audio_effect("audio_parametric"));
     assert!(!is_audio_effect("brightness"));
 
     // The three new descriptors are appended after `audio_limiter`, and the
-    // registry grew from 22 entries to 25.
-    assert_eq!(kinewright_core::EFFECT_DESCRIPTORS.len(), 25);
-    let tail: Vec<&str> = kinewright_core::EFFECT_DESCRIPTORS
+    // registry grew from 22 entries to 25 — then to 28 under AU5 §2.1.
+    assert_eq!(kinewright_core::EFFECT_DESCRIPTORS.len(), 28);
+    let after_limiter: Vec<&str> = kinewright_core::EFFECT_DESCRIPTORS
         .iter()
-        .rev()
-        .take(3)
         .map(|descriptor| descriptor.name)
+        .skip_while(|name| *name != "audio_limiter")
+        .skip(1)
+        .take(3)
         .collect();
     assert_eq!(
-        tail,
+        after_limiter,
         [
-            "audio_true_peak_limiter",
+            "audio_parametric_eq",
             "audio_gate",
-            "audio_parametric_eq"
+            "audio_true_peak_limiter"
         ]
     );
 
@@ -631,7 +638,10 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
             "audio_compressor",
             "rms_window_milliseconds",
             20,
-            "is read once when the chain is built and cannot be keyframed",
+            // AU5 §2.2 rule 13 amended this string: the profile rows are
+            // re-derived on a `parameter_epoch` bump, so "once ... when the
+            // chain is built" became false.
+            "is read when the chain is built or retuned and cannot be keyframed",
         ),
     ] {
         assert!(is_static_audio_parameter(effect, parameter));

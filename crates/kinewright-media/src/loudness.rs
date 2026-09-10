@@ -216,7 +216,11 @@ fn mean(values: impl Iterator<Item = f64>) -> Option<f64> {
 
 /// CC6 §10.4's nearest rank in integer arithmetic: `min(n − 1, ceil(p·n) − 1)`
 /// with `p` in percent, so `0.10 × 200` is rank 20 and not `20.000…04`.
-fn nearest_rank_index(count: usize, percent: usize) -> usize {
+///
+/// `pub(crate)` per AU5 §0 R21: AU5 §3.7 rule 61(ii)'s profile percentile and
+/// §3.9's 10th/90th window percentiles are the same ranking rule, read from
+/// `spectrum.rs` and `export.rs`.
+pub(crate) fn nearest_rank_index(count: usize, percent: usize) -> usize {
     let rank = (count * percent).div_ceil(100);
     rank.max(1).min(count) - 1
 }

@@ -181,7 +181,13 @@ fn capability_kind(name: &str, operation_names: &BTreeSet<String>) -> Capability
     CapabilityKind::Action
 }
 
-fn first_sentence(description: &str) -> String {
+/// The first sentence of a description, up to and including its first `.`.
+///
+/// `pub(crate)` because it is what `get_capability` and `search_capabilities`
+/// publish, so a tool asserting "my load-bearing clause is in the first
+/// sentence" has to ask this function rather than re-spell its rule
+/// (AU5 §4.1 rule 76).
+pub(crate) fn first_sentence(description: &str) -> String {
     let end = description
         .find('.')
         .map_or(description.len(), |index| index + 1);

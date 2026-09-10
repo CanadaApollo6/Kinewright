@@ -139,6 +139,31 @@ total and discards it, so output frame `k` still carries project frame
 `target + k` and the transport clock is unchanged. A live edit that changes any
 chain's lookahead stops and re-cues playback once.
 
+AU5's repair nodes add one block algorithm to that per-frame path, and it is
+anchored, not free-running. `audio_denoise` runs a 512-frame periodic-Hann STFT
+at a 128-frame hop (75 % overlap, reconstructed by overlap-add and divided by the
+exact Hann-squared constant 1.5) at 48 kHz, and the window is derived from the
+node's own declared latency — the largest power of two at or under
+`stage_latency_frames(12 ms, rate)` — so 44.1 kHz and 96 kHz get 512 and 1 024
+frames from the same declaration. The block clock ticks on **every** sample
+frame, including frames the node is bypassed or has nothing learned to gate, so
+the block grid is anchored at project sample 0 in playback and in export alike:
+the seek preroll already replays from frame 0 whenever any bus exists, and that
+preroll is what makes the two paths structurally identical rather than luckily
+equal. It also means a denoiser on the chain runs an STFT for every prerolled
+frame, which is why `forward_fft` reads a per-stage twiddle table computed once
+per stage size rather than calling `sin_cos` per butterfly; the table is
+bit-identical to the arithmetic it replaced, so no measurement moves. The three
+repair nodes declare **12 ms** (`audio_denoise`, whose delay is the OLA's
+`window − 1` plus a residual pad), **0 ms** (`audio_hum_removal`, which has no
+`lookahead_milliseconds` row at all) and **3 ms** (`audio_declick`, whose delay
+line holds the click detector's ceiling, its 1 ms pre/post guard and its
+two-frame second-difference history) — 15 ms of the 20 ms chain budget, leaving
+exactly the 5 ms a true-peak limiter needs. Every one of those declarations is
+read from the effect descriptor in the mix path as well as in validation, so a
+node whose `lookahead_milliseconds` is absent from the document still gets its
+declared delay rather than none.
+
 Level measurement streams. `mix_pass` hands each chunk to an observer (per
 track, per bus, and the pre-clamp master) inside the per-family windows the
 latency trims define, and one `LoudnessMeter` per family accumulates 100 ms

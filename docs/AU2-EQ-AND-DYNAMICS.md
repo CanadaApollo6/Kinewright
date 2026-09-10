@@ -96,9 +96,11 @@ Part B's registry totals.
   static pair: `is_static_audio_parameter` is true for exactly
   `("audio_compressor" | "audio_true_peak_limiter", "lookahead_milliseconds")` and
   `("audio_compressor", "rms_window_milliseconds")`; a curve on the RMS window is rejected with
-  `InvalidEffectAutomation { reason: "is read once when the chain is built and cannot be
+  `InvalidEffectAutomation { reason: "is read when the chain is built or retuned and cannot be
   keyframed" }` while the lookahead pair keeps `"sets processing latency and cannot be
-  keyframed"`. `chain_lookahead_milliseconds` filters on the lookahead name explicitly and does
+  keyframed"`. (**Amended by AU5 §2.2 rule 13** — see E65; the string read
+  `"is read once when the chain is built and cannot be keyframed"` from AU2 until AU5 Part A.)
+  `chain_lookahead_milliseconds` filters on the lookahead name explicitly and does
   not count the window (A7 pins a `detector = 1, rms_window_milliseconds = 100` compressor at
   0 ms). The per-effect keyframe checks moved into a private
   `validate_audio_bus_automation(duration, bus, effect)` to keep `validate_audio_bus` under the
@@ -375,6 +377,37 @@ OPEN-2 (per-family head-and-tail stem trim, A2).
   name and node id. The `Playback::update_audio_mix` trait doc comment now describes the AU2
   live set and the re-cue on a lookahead change.
 
+**AU5 Part A amendments (2026-09-10):**
+
+- **E65. The second static-parameter reason string changed.** AU5 §2.2 rule 9 states the static
+  rule once — *a static parameter takes no keyframe; the runtime reads static parameters at
+  construction and re-derives them on every `parameter_epoch` bump, except those in
+  `node_structure`, which force a rebuild* — and puts `audio_denoise`'s 31 profile rows on the
+  **re-derive** side, which is what makes a `Learn` audible without a re-cue. That makes AU2's
+  `"is read once when the chain is built and cannot be keyframed"` false as written, so the
+  string becomes **`"is read when the chain is built or retuned and cannot be keyframed"`**
+  everywhere it is pinned: `crates/kinewright-core/src/operation.rs`,
+  `crates/kinewright-core/tests/au2_core.rs`, and E16 above, all amended in AU5 Part A. The
+  **first** reason, `"sets processing latency and cannot be keyframed"`, is unchanged, and is
+  the one AU5's two new `lookahead_milliseconds` rows raise. `is_static_audio_parameter` is now
+  true for five pairs' worth of names — AU2's three plus
+  `("audio_denoise" | "audio_declick", "lookahead_milliseconds")` — and for every one of
+  `audio_denoise`'s 31 profile rows. See `docs/AU5-REPAIR-AND-ROOM-TONE.md` §0 R6, R36 and
+  §2.2 rule 13.
+- **E66. `audio_denoise` narrows §3.7's bypass rule.** AU2's rule is that *every dynamics node
+  keeps its detector, envelope, window and release state running while bypassed, so un-bypassing
+  cannot emit `Lh` frames of material the gain computer never analysed*. AU5's denoiser is a
+  block algorithm whose transform costs ~25× a detector, so on its `direct` branch — set when
+  `bypass == 1`, or `reduction_tenth_db == 0`, or all 31 profile bands are at their neutral — it
+  keeps its **ring** and its **block clock** running but **not** its transform, and emits from a
+  `DelayLine(latency_frames)` that has been fed unconditionally all along. AU2's obligation is
+  discharged instead by `direct_switch_remaining`: when `direct` clears, the accumulator and
+  smoother are zeroed and the node keeps emitting from that delay line for `window − 1` frames,
+  which is more than the `window − hop` the accumulator needs to reach full overlap, so the
+  switch can never dip. This is a **narrowing** of AU2's rule for one node, recorded as a
+  deviation rather than claimed as conformance; the four AU2 dynamics nodes are unchanged. See
+  `docs/AU5-REPAIR-AND-ROOM-TONE.md` §0 R40, R49 and §3.2 rule 41.
+
 ## 1. Scope
 
 ### 1.1 The editor job
@@ -608,7 +641,13 @@ impl Effect {
 `("audio_compressor", "lookahead_milliseconds")` and
 `("audio_true_peak_limiter", "lookahead_milliseconds")`. `AudioEffectRuntime::new`
 (audio.rs:403-416) reads the value once with `Effect::static_integer_parameter`;
-`process_frame` never reads it.
+`process_frame` never reads it. (E16 added a third pair, the compressor's RMS window;
+**AU5 §2.2 rules 9 to 13 widened the predicate again** — to `audio_denoise`'s and
+`audio_declick`'s `lookahead_milliseconds` and to `audio_denoise`'s 31 profile rows — and
+amended the second rejection's reason string to
+`"is read when the chain is built or retuned and cannot be keyframed"`, because a static
+parameter is now re-derived on a `parameter_epoch` bump rather than read once. See E65 and
+`docs/AU5-REPAIR-AND-ROOM-TONE.md` §2.2.)
 
 (AU4 adds no entry to either predicate: its five automation owners — clip gain, track gain
 and pan, bus and master fader — are rides, not switches, and take every interpolation;

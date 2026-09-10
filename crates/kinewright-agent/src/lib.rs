@@ -2,6 +2,7 @@
 
 mod acp;
 mod audio_qc_tool;
+mod audio_repair_tool;
 mod branch;
 mod color_qc_tool;
 mod color_scopes;

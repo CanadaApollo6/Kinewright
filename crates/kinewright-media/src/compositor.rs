@@ -2702,6 +2702,20 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 | EffectUniform::TruePeakLookahead
                 | EffectUniform::TruePeakRelease
                 | EffectUniform::TruePeakDetector
+                // AU5 §2.1: the twelve repair uniforms. Final, not a stub —
+                // every audio uniform is ignored by the compositor.
+                | EffectUniform::DenoiseReduction
+                | EffectUniform::DenoiseFloorOffset
+                | EffectUniform::DenoiseSmoothing
+                | EffectUniform::DenoiseLookahead
+                | EffectUniform::DenoiseProfileBand
+                | EffectUniform::HumFundamental
+                | EffectUniform::HumHarmonicCount
+                | EffectUniform::HumDepth
+                | EffectUniform::HumNotchQ
+                | EffectUniform::DeclickMaxClick
+                | EffectUniform::DeclickThreshold
+                | EffectUniform::DeclickLookahead
                 | EffectUniform::ColorNode => {}
                 EffectUniform::LutPreset => params.lut_preset = value,
                 EffectUniform::LutIntensity => params.lut_intensity = value / 100.0,

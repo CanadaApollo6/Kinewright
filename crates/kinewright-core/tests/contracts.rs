@@ -5887,3 +5887,152 @@ fn au3_export_settings_and_delivery_audio_wire_shapes_are_additive() {
     assert_eq!(encoded["exceptions"], serde_json::json!([]));
     assert_integer_leaves(&encoded, "delivery_audio_verification");
 }
+
+/// AU5 §2.1: the three repair descriptors are additive in the registry.
+///
+/// Every descriptor still has a neutral inside its own domain and no repeated
+/// row name, and the twelve new `EffectUniform` variants are genuinely new: no
+/// pre-AU5 row carries one.
+#[test]
+fn au5_repair_descriptors_are_additive_in_the_registry() {
+    // Every descriptor in the registry still has a neutral inside its own
+    // domain, minimum below maximum, and a unique parameter name per effect —
+    // the three AU5 entries included.
+    for descriptor in EFFECT_DESCRIPTORS {
+        let mut names: Vec<&str> = descriptor
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name)
+            .collect();
+        let rows = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), rows, "{} repeats a row", descriptor.name);
+        for parameter in descriptor.parameters {
+            assert!(
+                parameter.min <= parameter.max,
+                "{}.{} min over max",
+                descriptor.name,
+                parameter.name
+            );
+            assert!(
+                (parameter.min..=parameter.max).contains(&parameter.neutral),
+                "{}.{} neutral outside its domain",
+                descriptor.name,
+                parameter.name
+            );
+        }
+    }
+
+    // The twelve AU5 uniforms are new: no pre-AU5 row carries one, and the
+    // three `bypass` rows carry the pre-AU5 shared one.
+    let repair = ["audio_denoise", "audio_hum_removal", "audio_declick"];
+    let new_uniforms: std::collections::BTreeSet<String> = EFFECT_DESCRIPTORS
+        .iter()
+        .filter(|descriptor| repair.contains(&descriptor.name))
+        .flat_map(|descriptor| descriptor.parameters)
+        .filter(|parameter| parameter.uniform != EffectUniform::AudioBypass)
+        .map(|parameter| format!("{:?}", parameter.uniform))
+        .collect();
+    assert_eq!(new_uniforms.len(), 12);
+    for descriptor in EFFECT_DESCRIPTORS
+        .iter()
+        .filter(|descriptor| !repair.contains(&descriptor.name))
+    {
+        for parameter in descriptor.parameters {
+            assert!(
+                !new_uniforms.contains(&format!("{:?}", parameter.uniform)),
+                "{}.{} reuses an AU5 uniform",
+                descriptor.name,
+                parameter.name
+            );
+        }
+    }
+}
+
+/// AU5 §2.4, §3.7, §3.8: every new report type is additive and integer-only.
+///
+/// A pre-AU5 bus loads unchanged and re-serializes to the same bytes — AU5 adds
+/// no document field at all, only descriptor rows — and every new wire type
+/// carries only integers, booleans, strings, and nulls (rule 20), which is what
+/// lets all of them derive `Eq`.
+#[test]
+fn au5_repair_report_wire_shapes_are_additive() {
+    const PRE_AU5_BUS: &str = r#"{"id":1,"name":"Dialogue","tracks":[1],"effects":[{"id":1,"name":"audio_compressor","parameters":{"lookahead_milliseconds":5,"threshold_tenth_db":-180}}]}"#;
+    let bus: AudioBus = serde_json::from_str(PRE_AU5_BUS).unwrap();
+    assert_eq!(serde_json::to_string(&bus).unwrap(), PRE_AU5_BUS);
+
+    let request = kinewright_core::MixNoiseProfileRequest {
+        range: None,
+        point: kinewright_core::MixSpectrumPoint::Bus(AudioBusId(1)),
+    };
+    let encoded = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        serde_json::from_value::<kinewright_core::MixNoiseProfileRequest>(encoded.clone()).unwrap(),
+        request
+    );
+    assert!(encoded.get("range").is_none(), "an absent range is omitted");
+
+    let profile = kinewright_core::NoiseProfileReport {
+        range: TimeCode(0)..TimeCode(300),
+        point: kinewright_core::MixSpectrumPoint::Bus(AudioBusId(1)),
+        sample_rate: 48_000,
+        sample_frames: 480_000,
+        windows: 10,
+        bands: [-620_i32; 31],
+    };
+    let encoded = serde_json::to_value(&profile).unwrap();
+    assert_eq!(
+        serde_json::from_value::<kinewright_core::NoiseProfileReport>(encoded.clone()).unwrap(),
+        profile
+    );
+    assert_eq!(encoded["bands"].as_array().unwrap().len(), 31);
+    assert_integer_leaves(&encoded, "noise_profile_report");
+
+    let levels = kinewright_core::MixWindowLevelReport {
+        range: TimeCode(0)..TimeCode(300),
+        point: kinewright_core::MixSpectrumPoint::Master,
+        sample_rate: 48_000,
+        window_milliseconds: 10,
+        hop_milliseconds: 10,
+        windows: vec![Some(-2_400), None, Some(-1_800)],
+    };
+    let encoded = serde_json::to_value(&levels).unwrap();
+    assert_eq!(
+        serde_json::from_value::<kinewright_core::MixWindowLevelReport>(encoded.clone()).unwrap(),
+        levels
+    );
+    assert_integer_leaves(&encoded, "mix_window_level_report");
+
+    let repair_report = kinewright_core::AudioRepairReport {
+        range: TimeCode(0)..TimeCode(300),
+        point: kinewright_core::MixSpectrumPoint::Master,
+        sample_rate: 48_000,
+        sample_frames: 480_000,
+        window_milliseconds: kinewright_core::REPAIR_WINDOW_MILLISECONDS,
+        windows: 1_000,
+        noise_floor_dbfs_hundredths: Some(-5_500),
+        signal_dbfs_hundredths: Some(-1_500),
+        snr_db_hundredths: Some(4_000),
+        hum_50_excess_db_hundredths: Some(0),
+        hum_60_excess_db_hundredths: Some(0),
+        hum_50_harmonic_excess_db_hundredths: vec![0, 0, 0, 0],
+        hum_60_harmonic_excess_db_hundredths: vec![0, 0, 0, 0],
+        click_count: 0,
+        click_density_per_minute: 0,
+        findings: Vec::new(),
+        evidence_only: true,
+        provenance: kinewright_core::AudioRepairProvenance::default(),
+    };
+    let encoded = serde_json::to_value(&repair_report).unwrap();
+    assert_eq!(
+        serde_json::from_value::<kinewright_core::AudioRepairReport>(encoded.clone()).unwrap(),
+        repair_report
+    );
+    assert_eq!(encoded["evidence_only"], serde_json::json!(true));
+    assert!(
+        encoded.get("findings").is_none(),
+        "an empty list is omitted"
+    );
+    assert_integer_leaves(&encoded, "audio_repair_report");
+}

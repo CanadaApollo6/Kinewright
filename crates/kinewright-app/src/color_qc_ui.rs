@@ -476,6 +476,45 @@ impl Analysis for BaselineProofAnalysis {
         self.inner.audio_qc(document, request)
     }
 
+    /// AU5 §4.5 rule 86: the learned noise profile forwards exactly as
+    /// `audio_qc` does. Without this arm the proxy would answer
+    /// `NotImplemented` while the engine behind it can measure, which is the
+    /// one way this wrapper can change an answer rather than only sharing a
+    /// working proof.
+    fn mix_noise_profile(
+        &self,
+        document: &Document,
+        request: &kinewright_core::MixNoiseProfileRequest,
+    ) -> Result<kinewright_core::NoiseProfileReport, MediaError> {
+        self.inner.mix_noise_profile(document, request)
+    }
+
+    /// AU5 §4.5 rule 86: the short-window RMS levels forward exactly as
+    /// `audio_qc` does. Without this arm the proxy would answer
+    /// `NotImplemented` while the engine behind it can measure, which is the
+    /// one way this wrapper can change an answer rather than only sharing a
+    /// working proof.
+    fn mix_window_levels(
+        &self,
+        document: &Document,
+        request: &kinewright_core::MixWindowRequest,
+    ) -> Result<kinewright_core::MixWindowLevelReport, MediaError> {
+        self.inner.mix_window_levels(document, request)
+    }
+
+    /// AU5 §4.5 rule 86: the repair measurement forwards exactly as
+    /// `audio_qc` does. Without this arm the proxy would answer
+    /// `NotImplemented` while the engine behind it can measure, which is the
+    /// one way this wrapper can change an answer rather than only sharing a
+    /// working proof.
+    fn audio_repair(
+        &self,
+        document: &Document,
+        request: &kinewright_core::AudioRepairRequest,
+    ) -> Result<kinewright_core::AudioRepairReport, MediaError> {
+        self.inner.audio_repair(document, request)
+    }
+
     /// AU3 §4.3: the delivery audio verification forwards for the same reason
     /// `audio_qc` does. The export worker measures the written file through
     /// whatever `Analysis` the app holds, and that is this proxy whenever a
@@ -2613,8 +2652,14 @@ mod tests {
         assert_eq!(centidegrees(-100), "-1.00°");
     }
 
-    /// An [`Analysis`] whose `audio_qc` answers the typed short-range refusal
-    /// with the request echoed through the error's fields (A17's double).
+    /// An [`Analysis`] whose measurement methods answer the typed short-range
+    /// refusals with the request echoed through the error's fields (AU3 §7
+    /// A17's double, extended by AU5 §7 A17 to the three repair measurements).
+    ///
+    /// A typed error is what makes "forwarded" distinguishable from
+    /// "defaulted": every un-overridden method on the trait answers
+    /// `NotImplemented`, so only an echoed refusal proves the call reached the
+    /// engine behind the proxy with its request intact.
     struct ShortRangeAnalysis;
 
     impl Analysis for ShortRangeAnalysis {
@@ -2726,6 +2771,85 @@ mod tests {
                 required,
             })
         }
+        /// AU5 §7 A17: echo the range and the point through the typed error,
+        /// so a forwarded call is distinguishable from the default.
+        fn mix_noise_profile(
+            &self,
+            _document: &Document,
+            request: &kinewright_core::MixNoiseProfileRequest,
+        ) -> Result<kinewright_core::NoiseProfileReport, MediaError> {
+            Err(MediaError::MixLoudnessRangeTooShort {
+                sample_frames: range_code(request.range.as_ref()),
+                required: point_code(request.point),
+            })
+        }
+        /// AU5 §7 A17: echo the two millisecond arguments, which is what
+        /// separates this request from every other one on the trait.
+        fn mix_window_levels(
+            &self,
+            _document: &Document,
+            request: &kinewright_core::MixWindowRequest,
+        ) -> Result<kinewright_core::MixWindowLevelReport, MediaError> {
+            Err(MediaError::MixLoudnessRangeTooShort {
+                sample_frames: u64::from(request.window_milliseconds),
+                required: u64::from(request.hop_milliseconds),
+            })
+        }
+        /// AU5 §7 A17: the **other** typed short-range variant, so a test can
+        /// tell `audio_repair` from `mix_noise_profile` by the error alone.
+        ///
+        /// Cross-wiring the two arms does not compile *today* —
+        /// `MixNoiseProfileRequest` and `AudioRepairRequest` are structurally
+        /// identical but nominally distinct, as are their two reports. The
+        /// split is the defence for the day somebody de-duplicates that pair
+        /// into one type, which would make a forwarded-the-wrong-one proxy
+        /// type-check; two different variants keep the tests falsifying it in
+        /// advance.
+        fn audio_repair(
+            &self,
+            _document: &Document,
+            request: &kinewright_core::AudioRepairRequest,
+        ) -> Result<kinewright_core::AudioRepairReport, MediaError> {
+            Err(MediaError::MixSpectrumRangeTooShort {
+                sample_frames: range_code(request.range.as_ref()),
+                required: point_code(request.point),
+            })
+        }
+    }
+
+    /// The end of a request's range, or 0 for "the whole document".
+    fn range_code(range: Option<&std::ops::Range<TimeCode>>) -> u64 {
+        range.map_or(0, |range| range.end.0.unsigned_abs())
+    }
+
+    /// A mix point folded into one integer, so a typed error can carry it.
+    ///
+    /// Injective for ids under the 1 000 000 stride, which is every id these
+    /// tests use; a track and a bus can only collide once one of them is
+    /// numbered in the millions.
+    fn point_code(point: kinewright_core::MixSpectrumPoint) -> u64 {
+        match point {
+            kinewright_core::MixSpectrumPoint::Master => 0,
+            kinewright_core::MixSpectrumPoint::Track(track) => 1_000_000 + track.0,
+            kinewright_core::MixSpectrumPoint::Bus(bus) => 2_000_000 + bus.0,
+        }
+    }
+
+    /// A [`BaselineProofAnalysis`] over [`ShortRangeAnalysis`], built the way
+    /// `au3_the_baseline_proof_analysis_forwards_the_audio_measurements`
+    /// builds one.
+    fn short_range_proxy(document: &Arc<Document>) -> BaselineProofAnalysis {
+        BaselineProofAnalysis {
+            inner: Arc::new(ShortRangeAnalysis),
+            cache: Arc::new(WorkingProofCache::default()),
+            document: Arc::clone(document),
+            key: WorkingProofKey {
+                session_id: 1,
+                revision: 1,
+                frame: TimeCode(0),
+            },
+            baseline: Mutex::new(None),
+        }
     }
 
     /// AU3 §7 A17 and B14: `BaselineProofAnalysis` forwards `audio_qc` and
@@ -2788,6 +2912,115 @@ mod tests {
             "including the absence of one; it answered {untargeted:?}"
         );
 
+        assert_eq!(
+            proxy.baseline_metadata(),
+            None,
+            "a measurement forward renders no working proof"
+        );
+    }
+
+    /// AU5 §7 A17 (§4.5 rule 86): `BaselineProofAnalysis` forwards
+    /// `mix_noise_profile`.
+    ///
+    /// A trait method with a `NotImplemented` default compiles silently when
+    /// its arm is forgotten, so the pin is a double that answers a **typed**
+    /// error carrying the request back: only a forwarded call can produce it,
+    /// and only an intact one can produce these fields.
+    #[test]
+    fn au5_the_baseline_proof_analysis_forwards_the_noise_profile() {
+        use kinewright_core::{MixNoiseProfileRequest, MixSpectrumPoint};
+
+        let document = document();
+        let proxy = short_range_proxy(&document);
+        let request = MixNoiseProfileRequest {
+            range: Some(TimeCode(30)..TimeCode(90)),
+            point: MixSpectrumPoint::Track(kinewright_core::TrackId(7)),
+        };
+        let forwarded = proxy.mix_noise_profile(&document, &request);
+        assert!(
+            matches!(
+                forwarded,
+                Err(MediaError::MixLoudnessRangeTooShort {
+                    sample_frames: 90,
+                    required: 1_000_007,
+                })
+            ),
+            "the proxy forwards mix_noise_profile with its range and point intact; \
+             it answered {forwarded:?}"
+        );
+        assert_eq!(
+            proxy.baseline_metadata(),
+            None,
+            "a measurement forward renders no working proof"
+        );
+    }
+
+    /// AU5 §7 A17 (§4.5 rule 86): `BaselineProofAnalysis` forwards
+    /// `mix_window_levels` — the method AU4's `plan_clip_fades` now measures
+    /// through, so a missing arm would answer `NotImplemented` to a planner
+    /// that used to work.
+    #[test]
+    fn au5_the_baseline_proof_analysis_forwards_the_window_levels() {
+        use kinewright_core::{MixSpectrumPoint, MixWindowRequest};
+
+        let document = document();
+        let proxy = short_range_proxy(&document);
+        let request = MixWindowRequest {
+            range: None,
+            point: MixSpectrumPoint::Master,
+            window_milliseconds: 50,
+            hop_milliseconds: 25,
+        };
+        let forwarded = proxy.mix_window_levels(&document, &request);
+        assert!(
+            matches!(
+                forwarded,
+                Err(MediaError::MixLoudnessRangeTooShort {
+                    sample_frames: 50,
+                    required: 25,
+                })
+            ),
+            "the proxy forwards mix_window_levels with both millisecond arguments intact; \
+             it answered {forwarded:?}"
+        );
+        assert_eq!(
+            proxy.baseline_metadata(),
+            None,
+            "a measurement forward renders no working proof"
+        );
+    }
+
+    /// AU5 §7 A17 (§4.5 rule 86): `BaselineProofAnalysis` forwards
+    /// `audio_repair`, the measurement behind `get_audio_repair`.
+    ///
+    /// The double answers the *other* typed short-range variant here. Today
+    /// an arm that forwarded `mix_noise_profile` from inside `audio_repair`
+    /// would not compile — the two request and report types are nominally
+    /// distinct — but they are structurally identical, so the day they are
+    /// de-duplicated into one type that mistake type-checks. The variant
+    /// split is what keeps this test falsifying it in advance.
+    #[test]
+    fn au5_the_baseline_proof_analysis_forwards_the_repair_measurement() {
+        use kinewright_core::{AudioRepairRequest, MixSpectrumPoint};
+
+        let document = document();
+        let proxy = short_range_proxy(&document);
+        let request = AudioRepairRequest {
+            range: Some(TimeCode(0)..TimeCode(120)),
+            point: MixSpectrumPoint::Bus(kinewright_core::AudioBusId(4)),
+        };
+        let forwarded = proxy.audio_repair(&document, &request);
+        assert!(
+            matches!(
+                forwarded,
+                Err(MediaError::MixSpectrumRangeTooShort {
+                    sample_frames: 120,
+                    required: 2_000_004,
+                })
+            ),
+            "the proxy forwards audio_repair with its range and point intact; \
+             it answered {forwarded:?}"
+        );
         assert_eq!(
             proxy.baseline_metadata(),
             None,

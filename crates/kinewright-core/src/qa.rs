@@ -343,6 +343,7 @@ pub fn qa_document(document: &Document) -> QaReport {
             previous_was_media = matches!(clip.content, ClipContent::Media);
         }
     }
+    issues.extend(noise_profile_issues(document));
     if document.duration > TimeCode::ZERO && !has_audible_media {
         let message = if has_audio_bearing_clip {
             "Every audio-bearing track is muted or silenced by another track's solo."
@@ -362,6 +363,65 @@ pub fn qa_document(document: &Document) -> QaReport {
         document_duration: document.duration,
         issues,
     }
+}
+
+/// AU5 §2.3 rule 18: an `audio_denoise` node that reduces but has learned
+/// nothing.
+///
+/// Raised at `Warning` for every denoise node — bus or master — whose
+/// `reduction_tenth_db` resolves above 0 and whose 31 profile bands are all at
+/// [`PROFILE_BAND_NEUTRAL_TENTH_DB`] or absent, which is the same thing on the
+/// wire: omit-defaults never writes an unlearned node's rows.
+///
+/// It deliberately does **not** block export — [`QaReport::export_ready`]
+/// counts `Error` only — consistent with `track_gap`, and correct, because
+/// R4's neutral has already made the configuration harmless rather than
+/// destructive. It is advice about a wasted node, not a gate.
+///
+/// "Resolves above 0" reads the whole automation curve through
+/// [`parameter_range`], so a node parked at 0 that rides up under a keyframe
+/// still earns the warning.
+fn noise_profile_issues(document: &Document) -> Vec<QaIssue> {
+    let mut issues = Vec::new();
+    let owners = document
+        .audio_mix
+        .buses
+        .iter()
+        .map(|bus| (format!("bus {}", bus.id.0), &bus.effects))
+        .chain(std::iter::once((
+            "the master".to_owned(),
+            &document.audio_mix.master.effects,
+        )));
+    for (owner, effects) in owners {
+        for effect in effects
+            .iter()
+            .filter(|effect| effect.name == "audio_denoise")
+        {
+            let (_, maximum_reduction) = parameter_range(effect, "reduction_tenth_db", 0);
+            if maximum_reduction <= 0 {
+                continue;
+            }
+            let learned = crate::NOISE_PROFILE_PARAMETER_NAMES.iter().any(|name| {
+                parameter_range(effect, name, crate::PROFILE_BAND_NEUTRAL_TENTH_DB).1
+                    > crate::PROFILE_BAND_NEUTRAL_TENTH_DB
+            });
+            if learned {
+                continue;
+            }
+            issues.push(issue(
+                QaSeverity::Warning,
+                "noise_profile_missing",
+                format!(
+                    "denoise node {effect_id} on {owner} has a reduction of {maximum_reduction} tenth dB but no learned profile; learn one or the node does nothing",
+                    effect_id = effect.id.0,
+                ),
+                None,
+                None,
+                None,
+            ));
+        }
+    }
+    issues
 }
 
 #[allow(clippy::similar_names)]

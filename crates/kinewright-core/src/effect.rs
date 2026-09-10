@@ -64,7 +64,8 @@ pub enum EffectUniform {
     DuckRelease,
     /// The shared bypass control of every audio node (AU2 §2.1).
     ///
-    /// One variant serves all eight `bypass` rows, exactly as
+    /// One variant serves all eleven `bypass` rows — AU2's eight plus AU5's
+    /// three repair nodes — exactly as
     /// [`EffectUniform::ColorNode`] serves every colour node's: nothing
     /// requires a uniform to be unique per descriptor, and every audio
     /// uniform is ignored by the compositor.
@@ -101,6 +102,35 @@ pub enum EffectUniform {
     TruePeakLookahead,
     TruePeakRelease,
     TruePeakDetector,
+    /// AU5 §2.1: `audio_denoise`'s maximum attenuation, in tenth dB.
+    DenoiseReduction,
+    /// AU5 §2.1: `audio_denoise`'s over/under-subtraction of the learned floor.
+    DenoiseFloorOffset,
+    /// AU5 §2.1: `audio_denoise`'s per-bin gain smoothing time constant.
+    DenoiseSmoothing,
+    /// AU5 §2.1: `audio_denoise`'s whole algorithmic delay. Static (§2.2).
+    DenoiseLookahead,
+    /// AU5 §2.1: all 31 of `audio_denoise`'s learned noise-floor bands.
+    ///
+    /// One variant serves the whole block, exactly as [`EffectUniform::AudioBypass`]
+    /// serves eleven `bypass` rows: nothing requires a uniform to be unique per
+    /// descriptor, and a 31-row block therefore costs one variant, not 31
+    /// (AU5 §2.1 rule 2).
+    DenoiseProfileBand,
+    /// AU5 §2.1: `audio_hum_removal`'s mains frequency.
+    HumFundamental,
+    /// AU5 §2.1: how many `h x fundamental_hertz` sections the cascade runs.
+    HumHarmonicCount,
+    /// AU5 §2.1: each hum section's peaking gain, as a negative figure.
+    HumDepth,
+    /// AU5 §2.1: each hum section's Q, in hundredths.
+    HumNotchQ,
+    /// AU5 §2.1: the longest flagged span `audio_declick` repairs.
+    DeclickMaxClick,
+    /// AU5 §2.1: how far over the trailing reference a sample must sit.
+    DeclickThreshold,
+    /// AU5 §2.1: `audio_declick`'s whole algorithmic delay. Static (§2.2).
+    DeclickLookahead,
     /// Consumed by the ordered colour-node storage buffer, never by the
     /// `LayerParams` uniform block.
     ///
@@ -1363,7 +1393,8 @@ const CREATIVE_LOOK_DESCRIPTOR_PARAMETERS: [EffectParameterDescriptor;
 
 /// The shared bypass control of every audio node (AU2 §2.1).
 ///
-/// One `EffectParameterDescriptor` reused by all eight audio descriptors,
+/// One `EffectParameterDescriptor` reused by all eleven audio descriptors —
+/// AU2's eight plus AU5 §2.1's three repair nodes —
 /// following [`COLOR_NODE_BYPASS_DESCRIPTOR`]. `bypass = 1` turns the node's
 /// gain computer off; the node's delay line is still applied, so bypass never
 /// changes a chain's declared lookahead. Hold-only (AU2 §2.2).
@@ -1375,8 +1406,9 @@ const AUDIO_BYPASS_DESCRIPTOR: EffectParameterDescriptor = EffectParameterDescri
     uniform: EffectUniform::AudioBypass,
 };
 
-/// The latency-bearing parameter shared by `audio_compressor` and
-/// `audio_true_peak_limiter` (AU2 §2.2).
+/// The latency-bearing parameter shared by `audio_compressor`,
+/// `audio_true_peak_limiter`, `audio_denoise` and `audio_declick`
+/// (AU2 §2.2, widened by AU5 §2.2 rule 10).
 ///
 /// Read once when a chain runtime is built and never keyframed, so it is the
 /// one parameter [`chain_lookahead_milliseconds`](crate::chain_lookahead_milliseconds)
@@ -1390,6 +1422,114 @@ pub(crate) const AUDIO_LOOKAHEAD_PARAMETER: &str = "lookahead_milliseconds";
 /// but it is *not* latency and never enters
 /// [`chain_lookahead_milliseconds`](crate::chain_lookahead_milliseconds).
 pub(crate) const AUDIO_RMS_WINDOW_PARAMETER: &str = "rms_window_milliseconds";
+
+/// AU5 §2.1: how many ISO third-octave bands one learned noise profile carries.
+pub const NOISE_PROFILE_BAND_COUNT: usize = 31;
+
+/// AU5 §2.1 rule 5 (R4): the neutral of every one of the 31 profile rows, in
+/// tenth dBFS on `band_level_hundredths`' scale (AU5 §3.3 rule 43).
+///
+/// All 31 at this value means *no profile has been learned*, and the runtime
+/// reads that as unity gain. A neutral of 0 would instead make the gain law's
+/// numerator negative for every real signal, so an unlearned node would
+/// attenuate everything by the whole `reduction_tenth_db` while `export_ready`
+/// — which counts errors only — shipped it. A -120 dB floor gates nothing, so
+/// the identity survives any combination of `reduction_tenth_db`.
+pub const PROFILE_BAND_NEUTRAL_TENTH_DB: i64 = -1_200;
+
+/// AU5 §2.1: the 31 profile row names, low band to high.
+///
+/// Spelled once here so [`is_noise_profile_parameter`] and the descriptor
+/// itself cannot disagree about which rows are the profile.
+pub const NOISE_PROFILE_PARAMETER_NAMES: [&str; NOISE_PROFILE_BAND_COUNT] = [
+    "profile_band01_tenth_db",
+    "profile_band02_tenth_db",
+    "profile_band03_tenth_db",
+    "profile_band04_tenth_db",
+    "profile_band05_tenth_db",
+    "profile_band06_tenth_db",
+    "profile_band07_tenth_db",
+    "profile_band08_tenth_db",
+    "profile_band09_tenth_db",
+    "profile_band10_tenth_db",
+    "profile_band11_tenth_db",
+    "profile_band12_tenth_db",
+    "profile_band13_tenth_db",
+    "profile_band14_tenth_db",
+    "profile_band15_tenth_db",
+    "profile_band16_tenth_db",
+    "profile_band17_tenth_db",
+    "profile_band18_tenth_db",
+    "profile_band19_tenth_db",
+    "profile_band20_tenth_db",
+    "profile_band21_tenth_db",
+    "profile_band22_tenth_db",
+    "profile_band23_tenth_db",
+    "profile_band24_tenth_db",
+    "profile_band25_tenth_db",
+    "profile_band26_tenth_db",
+    "profile_band27_tenth_db",
+    "profile_band28_tenth_db",
+    "profile_band29_tenth_db",
+    "profile_band30_tenth_db",
+    "profile_band31_tenth_db",
+];
+
+/// One profile row: `-1200..=0` tenth dBFS, neutral
+/// [`PROFILE_BAND_NEUTRAL_TENTH_DB`], on the one shared uniform.
+const fn profile_band_descriptor(name: &'static str) -> EffectParameterDescriptor {
+    EffectParameterDescriptor {
+        name,
+        min: PROFILE_BAND_NEUTRAL_TENTH_DB,
+        max: 0,
+        neutral: PROFILE_BAND_NEUTRAL_TENTH_DB,
+        uniform: EffectUniform::DenoiseProfileBand,
+    }
+}
+
+/// AU5 §2.1: `audio_denoise`'s 36 rows — five controls and the 31-row profile
+/// block — built once so the block cannot drift from
+/// [`NOISE_PROFILE_PARAMETER_NAMES`].
+const fn denoise_parameters() -> [EffectParameterDescriptor; 5 + NOISE_PROFILE_BAND_COUNT] {
+    let mut parameters = [AUDIO_BYPASS_DESCRIPTOR; 5 + NOISE_PROFILE_BAND_COUNT];
+    parameters[1] = EffectParameterDescriptor {
+        name: "reduction_tenth_db",
+        min: 0,
+        max: 400,
+        neutral: 0,
+        uniform: EffectUniform::DenoiseReduction,
+    };
+    parameters[2] = EffectParameterDescriptor {
+        name: "floor_offset_tenth_db",
+        min: -200,
+        max: 200,
+        neutral: 0,
+        uniform: EffectUniform::DenoiseFloorOffset,
+    };
+    parameters[3] = EffectParameterDescriptor {
+        name: "smoothing_milliseconds",
+        min: 0,
+        max: 200,
+        neutral: 50,
+        uniform: EffectUniform::DenoiseSmoothing,
+    };
+    parameters[4] = EffectParameterDescriptor {
+        name: AUDIO_LOOKAHEAD_PARAMETER,
+        min: 12,
+        max: 12,
+        neutral: 12,
+        uniform: EffectUniform::DenoiseLookahead,
+    };
+    let mut band = 0;
+    while band < NOISE_PROFILE_BAND_COUNT {
+        parameters[5 + band] = profile_band_descriptor(NOISE_PROFILE_PARAMETER_NAMES[band]);
+        band += 1;
+    }
+    parameters
+}
+
+const AUDIO_DENOISE_PARAMETERS: [EffectParameterDescriptor; 5 + NOISE_PROFILE_BAND_COUNT] =
+    denoise_parameters();
 
 /// Built-in effect metadata used by validation, rendering, and agent documentation.
 pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
@@ -2080,6 +2220,92 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
                 max: 1,
                 neutral: 1,
                 uniform: EffectUniform::TruePeakDetector,
+            },
+        ],
+    },
+    // AU5 §2.1: the STFT broadband gate. All-neutral is a structural identity
+    // twice over — `reduction_tenth_db` 0 makes the gain floor `10^0 = 1`, and
+    // all 31 bands at `PROFILE_BAND_NEUTRAL_TENTH_DB` means nothing has been
+    // learned, which the runtime reads as unity gain (rule 5, R4).
+    EffectDescriptor {
+        name: "audio_denoise",
+        parameters: &AUDIO_DENOISE_PARAMETERS,
+    },
+    // AU5 §2.1: the fixed-frequency peaking cascade. All-neutral is an exact
+    // identity: `depth_tenth_db` 0 makes every section's numerator and
+    // denominator bitwise equal, so the cascade is a pass-through sample for
+    // sample (AU5 §3.4 rule 49). It carries no `lookahead_milliseconds` row at
+    // all, so it contributes exactly 0 to a chain's declared latency.
+    EffectDescriptor {
+        name: "audio_hum_removal",
+        parameters: &[
+            AUDIO_BYPASS_DESCRIPTOR,
+            EffectParameterDescriptor {
+                name: "fundamental_hertz",
+                min: 50,
+                max: 60,
+                neutral: 50,
+                uniform: EffectUniform::HumFundamental,
+            },
+            EffectParameterDescriptor {
+                name: "harmonic_count",
+                min: 1,
+                max: 10,
+                neutral: 1,
+                uniform: EffectUniform::HumHarmonicCount,
+            },
+            EffectParameterDescriptor {
+                name: "depth_tenth_db",
+                min: -600,
+                max: 0,
+                neutral: 0,
+                uniform: EffectUniform::HumDepth,
+            },
+            // Named for the `_q_hundredths` suffix, not a bare `q_hundredths`:
+            // the app's `mixer_unit` tests `_q_hundredths` -> Q *before*
+            // `_hundredths` -> Ratio, so a bare spelling would have read
+            // "12.0:1" (AU5 §0 R17).
+            EffectParameterDescriptor {
+                name: "notch_q_hundredths",
+                min: 100,
+                max: 1_800,
+                neutral: 1_200,
+                uniform: EffectUniform::HumNotchQ,
+            },
+        ],
+    },
+    // AU5 §2.1: the second-difference click detector and its repair. All-neutral
+    // is an exact identity: `max_click_milliseconds` 0 means no span is short
+    // enough to qualify, so the detector runs, flags nothing, repairs nothing,
+    // and the output is the delayed input bit for bit.
+    EffectDescriptor {
+        name: "audio_declick",
+        parameters: &[
+            AUDIO_BYPASS_DESCRIPTOR,
+            // Deliberately *not* static (AU5 §2.2 rule 11): it is a threshold,
+            // not an allocation — the ring, guard and repair buffer are sized
+            // from this row's *maximum* at construction — so an editor can
+            // reach for it while listening.
+            EffectParameterDescriptor {
+                name: "max_click_milliseconds",
+                min: 0,
+                max: 1,
+                neutral: 0,
+                uniform: EffectUniform::DeclickMaxClick,
+            },
+            EffectParameterDescriptor {
+                name: "detector_threshold_tenth_db",
+                min: 60,
+                max: 400,
+                neutral: 240,
+                uniform: EffectUniform::DeclickThreshold,
+            },
+            EffectParameterDescriptor {
+                name: AUDIO_LOOKAHEAD_PARAMETER,
+                min: 3,
+                max: 3,
+                neutral: 3,
+                uniform: EffectUniform::DeclickLookahead,
             },
         ],
     },
@@ -3066,11 +3292,12 @@ impl EffectCompatibilityStage {
     }
 }
 
-/// Whether an effect name is one of the eight bus-only audio nodes.
+/// Whether an effect name is one of the eleven bus-only audio nodes.
 ///
 /// AU2 §2.1 grew the list from five to eight with `audio_parametric_eq`,
-/// `audio_gate`, and `audio_true_peak_limiter`. `audio_eq` and `audio_limiter`
-/// stay registered, valid, and processed.
+/// `audio_gate`, and `audio_true_peak_limiter`; AU5 §2.1 grew it to eleven with
+/// the three repair nodes. `audio_eq` and `audio_limiter` stay registered,
+/// valid, and processed.
 #[must_use]
 pub fn is_audio_effect(name: &str) -> bool {
     matches!(
@@ -3083,28 +3310,80 @@ pub fn is_audio_effect(name: &str) -> bool {
             | "audio_parametric_eq"
             | "audio_gate"
             | "audio_true_peak_limiter"
+            | "audio_denoise"
+            | "audio_hum_removal"
+            | "audio_declick"
     )
 }
 
-/// AU2 §2.2: parameters read once when a chain runtime is built, never per
-/// frame.
+/// AU5 §4.4 rule 84: whether an audio node runs a gain computer and therefore
+/// publishes a gain-reduction slot.
 ///
-/// True for exactly three pairs:
-/// `("audio_compressor", "lookahead_milliseconds")` and
-/// `("audio_true_peak_limiter", "lookahead_milliseconds")`, which set the
-/// node's signal-path delay and so fix the whole graph's latency; and
+/// Hoisted into core because it existed twice — byte-identically — in
+/// `kinewright-media`'s `audio.rs`, driving `gain_reduction_keys`, and in the
+/// app's `mixer_pane_ui.rs`, driving `reduction_bar`. Had AU5 changed only the
+/// app copy the bar would have had no data, and only the media copy the data
+/// would have had no bar. `audio_denoise` joins the four AU2 nodes: its
+/// per-block minimum bin gain is a reduction figure of exactly the kind the
+/// existing bar draws. Hum removal and de-click are not gain computers and get
+/// no bar.
+#[must_use]
+pub fn has_gain_computer(effect: &str) -> bool {
+    matches!(
+        effect,
+        "audio_compressor"
+            | "audio_ducking"
+            | "audio_gate"
+            | "audio_true_peak_limiter"
+            | "audio_denoise"
+    )
+}
+
+/// AU5 §2.1 rule 7: whether a parameter name is one of `audio_denoise`'s 31
+/// learned noise-floor rows.
+///
+/// The single definition read by [`is_static_audio_parameter`], the agent's
+/// `effect_documentation` and `render_effects`, and the app's
+/// `insert_audio_effect` and `card_body`, so "which rows are the profile"
+/// cannot drift between five files. It answers on the *name* alone; pair it
+/// with the effect name where the effect matters, as
+/// [`is_static_audio_parameter`] does.
+#[must_use]
+pub fn is_noise_profile_parameter(name: &str) -> bool {
+    name.starts_with("profile_band") && name.ends_with("_tenth_db")
+}
+
+/// AU2 §2.2, restated by AU5 §2.2 rule 9: a static parameter takes no
+/// keyframe; the runtime reads static parameters at construction and
+/// **re-derives** them on every `parameter_epoch` bump, except those in
+/// `node_structure`, which force a rebuild instead.
+///
+/// True for exactly five pairs' worth of names plus one block:
+/// `("audio_compressor" | "audio_true_peak_limiter" | "audio_denoise" |
+/// "audio_declick", "lookahead_milliseconds")`, which set the node's
+/// signal-path delay and so fix the whole graph's latency;
 /// `("audio_compressor", "rms_window_milliseconds")`, whose detector window is
-/// allocated once at construction (AU2 §0 E16). `validate_audio_bus` rejects
-/// any curve on all three — with distinct reasons, since only the first two
-/// are latency — and the runtime reads them with
-/// [`Effect::static_integer_parameter`].
+/// allocated once at construction (AU2 §0 E16); and every one of
+/// `audio_denoise`'s 31 [`is_noise_profile_parameter`] rows, which are
+/// re-derived on an epoch bump so a `Learn` is audible without a re-cue
+/// (AU5 §3.2 rule 41). `audio_declick`'s `max_click_milliseconds` is
+/// deliberately absent (AU5 §2.2 rule 11): it is a threshold, not an
+/// allocation.
+///
+/// `validate_audio_bus` rejects any curve on all of them, with two distinct
+/// reasons — only the lookahead rows are latency — and the runtime reads them
+/// with [`Effect::static_integer_parameter`].
 #[must_use]
 pub fn is_static_audio_parameter(effect: &str, parameter: &str) -> bool {
     match parameter {
         AUDIO_LOOKAHEAD_PARAMETER => {
-            matches!(effect, "audio_compressor" | "audio_true_peak_limiter")
+            matches!(
+                effect,
+                "audio_compressor" | "audio_true_peak_limiter" | "audio_denoise" | "audio_declick"
+            )
         }
         AUDIO_RMS_WINDOW_PARAMETER => effect == "audio_compressor",
+        p if is_noise_profile_parameter(p) => effect == "audio_denoise",
         _ => false,
     }
 }

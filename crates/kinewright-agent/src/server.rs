@@ -26,19 +26,20 @@ use kinewright_core::{
     KeyframeInterpolation, LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, LutAsset,
     MUSIC_STRUCTURE_DEFAULT_METER_BEATS, MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId,
     MediaAsset, MediaAvailabilityKind, MediaCacheFamily, MediaCacheInventory, MediaKind,
-    MixLevelRequest, MixSpectrumPoint, MixSpectrumRequest, Operation, ParamValue, Playback, Query,
-    QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus, SilenceStatus,
-    SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
-    SubjectFocusBasisPointConstraint, SubjectReframeSettings, SyncGroupId,
-    TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, ThreePointMode, TimeCode,
-    TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track, TrackId, TrackKind,
-    TranscriptStatus, animated_caption_operations_at, apply_batch, authored_caption_cues,
-    beat_montage_plan, beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors,
-    beat_pacing_plan, caption_cues, dedup_timeline_words, delivery_conformance,
-    document_for_delivery_profile, document_for_delivery_variant, is_filler_word,
-    map_source_range_to_project, music_fit_plan_with_end_anchor, music_structure_analysis,
-    plan_speaker_multicam, plan_subject_reframe_basis_points_with_containment, qa_document,
+    MixLevelRequest, MixSpectrumPoint, MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest,
+    Operation, ParamValue, Playback, Query, QueryResult, ReframeFocusBounds, RelinkCandidate,
+    SceneStatus, SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings,
+    SubjectCenterBasisPointSample, SubjectFocusBasisPointConstraint, SubjectReframeSettings,
+    SyncGroupId, TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
+    ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision,
+    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track,
+    TrackId, TrackKind, TranscriptStatus, animated_caption_operations_at, apply_batch,
+    authored_caption_cues, beat_montage_plan, beat_montage_plan_near_anchors_with_report,
+    beat_montage_plan_with_anchors, beat_pacing_plan, caption_cues, dedup_timeline_words,
+    delivery_conformance, document_for_delivery_profile, document_for_delivery_variant,
+    is_filler_word, map_source_range_to_project, music_fit_plan_with_end_anchor,
+    music_structure_analysis, plan_speaker_multicam,
+    plan_subject_reframe_basis_points_with_containment, qa_document,
     validate_beat_montage_plan_cadence,
 };
 use rmcp::{
@@ -60,6 +61,9 @@ use tokio::sync::oneshot;
 
 use crate::{
     audio_qc_tool::{AUDIO_QC_DESCRIPTION, AudioQcArgs, AudioQcRefusal, get_audio_qc},
+    audio_repair_tool::{
+        AUDIO_REPAIR_DESCRIPTION, AudioRepairArgs, AudioRepairRefusal, get_audio_repair,
+    },
     color_qc_tool::{COLOR_QC_DESCRIPTION, ColorQcArgs, get_color_qc},
     color_scopes::{
         AnalyzeColorShotArgs, PlanShotMatchArgs, ScopeError, VideoScopesV2Args, analyze_color_shot,
@@ -929,6 +933,10 @@ impl KinewrightMcp {
             "get_audio_qc" => {
                 let args: AudioQcArgs = decode_args("get_audio_qc", arguments)?;
                 self.audio_qc(&args)
+            }
+            "get_audio_repair" => {
+                let args: AudioRepairArgs = decode_args("get_audio_repair", arguments)?;
+                self.audio_repair(&args)
             }
             "plan_shot_match" => {
                 let args: PlanShotMatchArgs = decode_args("plan_shot_match", arguments)?;
@@ -3863,6 +3871,24 @@ impl KinewrightMcp {
                 Ok(color_scope_error_result("get_audio_qc", &error))
             }
             Err(AudioQcRefusal::Text(text)) => Ok(error_text(text)),
+        }
+    }
+
+    /// AU5 §4.1: measure one mix point's repair artefacts over a project
+    /// range and publish evidence, nothing else.
+    ///
+    /// The revision is read once and republished; nothing on this path can
+    /// advance it. A stale revision is the uniform `stale_revision` envelope;
+    /// both `track` and `bus`, an inverted range and any measurement failure
+    /// are tool-call text, exactly as for `get_audio_qc`.
+    fn audio_repair(&self, args: &AudioRepairArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        match get_audio_repair(&document, revision, self.analysis.as_ref(), args) {
+            Ok(response) => Ok(success_structured(response.text, response.value)),
+            Err(AudioRepairRefusal::Stale(error)) => {
+                Ok(color_scope_error_result("get_audio_repair", &error))
+            }
+            Err(AudioRepairRefusal::Text(text)) => Ok(error_text(text)),
         }
     }
 
@@ -8685,13 +8711,17 @@ impl KinewrightMcp {
             .integrated_lufs_hundredths
     }
 
-    /// AU4 §6.2: propose head and tail audio fades on clips whose first or
-    /// last gating block peaks above the threshold.
+    /// AU4 §6.2, as amended by AU5 §3.8 rule 67 / §0 R80: propose head and
+    /// tail audio fades on clips whose first or last window level reads above
+    /// the threshold.
     ///
-    /// It emits `SetClipAudio` only — no curve, the existing gain and the
-    /// untouched fade carried through — and skips a clip shorter than the
-    /// measurement window with a per-clip reason rather than failing the plan
-    /// (rule 131).
+    /// The level is a short-window RMS level in dBFS over the proposed fade's
+    /// own length, measured in one `mix_window_levels` pass per track; AU4's
+    /// rule 131 read a true peak over one 400 ms loudness gating block per
+    /// clip edge and is superseded. It emits `SetClipAudio` only — no curve,
+    /// the existing gain and the untouched fade carried through — and skips a
+    /// clip that holds no whole measurement window with a per-clip reason
+    /// rather than failing the plan.
     #[allow(clippy::too_many_lines)]
     fn plan_clip_fades(&self, args: &ClipFadesPlanArgs) -> Result<CallToolResult, McpError> {
         let (revision, document) = self.snapshot()?;
@@ -8710,7 +8740,17 @@ impl KinewrightMcp {
         // and a 0-frame fade proposes nothing rather than being floored up
         // into a 1-frame edit the caller did not ask for.
         let fade_frames = milliseconds_to_project_frames(fade_milliseconds, document.fps);
-        let window_frames = gating_block_project_frames(document.fps);
+        // AU5 §3.8 rule 67: AU4's two 400 ms `mix_levels` renders per clip
+        // become ONE `mix_window_levels` pass per track. The window is the
+        // fade itself — the audio the proposed ramp would actually act on —
+        // clamped into the accessor's `1..=1000` millisecond domain, so a clip
+        // no longer has to be a whole loudness gating block long to be
+        // measured at all and the skip-with-a-reason arm for a short clip is
+        // down to genuinely sub-window clips.
+        let window_milliseconds = fade_milliseconds.clamp(1, CLIP_FADE_MAX_WINDOW_MILLISECONDS);
+        let window_frames = milliseconds_to_project_frames(window_milliseconds, document.fps);
+        let window_sample_frames =
+            u64::from(window_milliseconds).saturating_mul(MIX_MEASUREMENT_SAMPLE_RATE) / 1_000;
         let mut operations = Vec::new();
         let mut planned = Vec::new();
         let mut skipped = Vec::new();
@@ -8725,6 +8765,37 @@ impl KinewrightMcp {
             .iter()
             .filter(|track| tracks.contains(&track.id))
         {
+            // One pass over this track's whole stem, whatever its clip count.
+            // A hundred-clip timeline that cost 200 renders costs one — and a
+            // track with nothing to propose on costs none at all.
+            let has_candidate = track.clips.iter().any(|clip| clip.content.is_media());
+            let levels = if fade_frames == 0 || !has_candidate {
+                None
+            } else {
+                match self.analysis.mix_window_levels(
+                    &document,
+                    &MixWindowRequest {
+                        range: None,
+                        point: MixSpectrumPoint::Track(track.id),
+                        window_milliseconds,
+                        hop_milliseconds: window_milliseconds,
+                    },
+                ) {
+                    Ok(report) => Some(report),
+                    Err(error) => {
+                        // One measurement failure is this track's clips'
+                        // per-clip reason, never the whole plan's.
+                        for clip in track.clips.iter().filter(|clip| clip.content.is_media()) {
+                            skipped.push((
+                                clip.id,
+                                track.id,
+                                format!("could not measure this track's stem: {error}"),
+                            ));
+                        }
+                        continue;
+                    }
+                }
+            };
             for clip in &track.clips {
                 if !clip.content.is_media() {
                     continue;
@@ -8744,17 +8815,6 @@ impl KinewrightMcp {
                         continue;
                     }
                 };
-                if duration.0 < window_frames {
-                    skipped.push((
-                        clip.id,
-                        track.id,
-                        format!(
-                            "clip is {} project frames, shorter than the {window_frames}-frame loudness gating block the mix measurement refuses to go under",
-                            duration.0
-                        ),
-                    ));
-                    continue;
-                }
                 let Some(end) = clip.timeline_start.checked_add(duration) else {
                     skipped.push((
                         clip.id,
@@ -8763,19 +8823,27 @@ impl KinewrightMcp {
                     ));
                     continue;
                 };
-                let head = clip.timeline_start..TimeCode(clip.timeline_start.0 + window_frames);
-                let tail = TimeCode(end.0 - window_frames)..end;
-                // Two full `mix_levels` renders per candidate clip, each one
-                // decode of a 400 ms range: a hundred-clip timeline costs 200
-                // passes. Rule 131 accepts that because the gating block is
-                // the shortest range the mix measurement will answer at all;
-                // rule 131's short-window RMS accessor, deferred to AU5 where
-                // repair work needs one anyway, is the way out and this loop
-                // is the caller waiting for it.
-                let (Some(head_peak), Some(tail_peak)) = (
-                    self.measure_track_true_peak(&document, track.id, &head),
-                    self.measure_track_true_peak(&document, track.id, &tail),
-                ) else {
+                let Some(report) = levels.as_ref() else {
+                    // `fade_frames == 0` is the only way to reach this with a
+                    // media clip in hand, and it already carried its own
+                    // reason above; a measurement failure `continue`s the
+                    // TRACK loop and never arrives here.
+                    continue;
+                };
+                let Some((head_level, tail_level)) =
+                    clip_window_levels(report, clip.timeline_start, end, document.fps)
+                else {
+                    skipped.push((
+                        clip.id,
+                        track.id,
+                        format!(
+                            "clip is {} project frames and holds no whole {window_milliseconds} ms measurement window",
+                            duration.0
+                        ),
+                    ));
+                    continue;
+                };
+                let (Some(head_peak), Some(tail_peak)) = (head_level, tail_level) else {
                     skipped.push((
                         clip.id,
                         track.id,
@@ -8808,8 +8876,8 @@ impl KinewrightMcp {
                 planned.push(serde_json::json!({
                     "clip": clip.id,
                     "track": track.id,
-                    "head_true_peak_dbtp_hundredths": head_peak,
-                    "tail_true_peak_dbtp_hundredths": tail_peak,
+                    "head_dbfs_hundredths": head_peak,
+                    "tail_dbfs_hundredths": tail_peak,
                     "fade_in_frames": fade_in.0,
                     "fade_out_frames": fade_out.0,
                 }));
@@ -8827,8 +8895,9 @@ impl KinewrightMcp {
             "threshold_dbfs_hundredths": threshold,
             "fade_milliseconds": fade_milliseconds,
             "fade_frames": fade_frames,
+            "window_milliseconds": window_milliseconds,
             "window_project_frames": window_frames,
-            "window_sample_frames": kinewright_media::LOUDNESS_GATING_BLOCK_FRAMES,
+            "window_sample_frames": window_sample_frames,
             "clips": planned,
             "skipped": skipped_value,
             "prepared_edit_plan": serde_json::Value::Null,
@@ -8838,7 +8907,7 @@ impl KinewrightMcp {
                 String::new()
             } else {
                 format!(
-                    ": no clip head or tail peaks above {threshold} hundredths dBFS with a fade still at zero"
+                    ": no clip head or tail window reads above {threshold} hundredths dBFS with a fade still at zero"
                 )
             };
             return Ok(success_structured(
@@ -8872,31 +8941,47 @@ impl KinewrightMcp {
             body,
         ))
     }
+}
 
-    /// One track stem's true peak over one project window, through the same
-    /// real mix path `get_audio_levels` uses.
-    fn measure_track_true_peak(
-        &self,
-        document: &Document,
-        track: TrackId,
-        window: &std::ops::Range<TimeCode>,
-    ) -> Option<i32> {
-        let report = self
-            .analysis
-            .mix_levels(
-                document,
-                &MixLevelRequest {
-                    range: Some(window.clone()),
-                },
-            )
-            .ok()?;
-        report
-            .tracks
-            .iter()
-            .find(|levels| levels.track == track)?
-            .levels
-            .true_peak_dbtp_hundredths
+/// AU5 §3.8 rule 67: the first and last whole RMS window inside one clip.
+///
+/// `mix_window_levels` anchors its window grid at the report's own range
+/// start, so a clip's windows are *found* rather than requested. Only windows
+/// lying entirely inside the clip are read, so neither level can mix in the
+/// neighbouring clip's audio across a cut. `None` when the clip holds no whole
+/// window, which is the only short-clip refusal left.
+fn clip_window_levels(
+    report: &MixWindowLevelReport,
+    start: TimeCode,
+    end: TimeCode,
+    fps: kinewright_core::Rational,
+) -> Option<(Option<i32>, Option<i32>)> {
+    let window_samples =
+        u64::from(report.window_milliseconds).saturating_mul(u64::from(report.sample_rate)) / 1_000;
+    if window_samples == 0 {
+        return None;
     }
+    // Media's own conversion, not a second spelling of it (R50, R85): the
+    // window indices are only meaningful against the grid `measure_mix_window_
+    // levels` actually laid down, so a change to media's frame->sample
+    // rounding must move both together or neither. Converted **then**
+    // subtracted, exactly as `mix_pass` establishes stem sample 0 —
+    // `keep_from_frames = frame_to_samples(range.start)` (export.rs:1218-1226),
+    // the same spelling `measure_mix_window_levels`' own `requested_frames`
+    // uses — because the conversion truncates and subtracting first loses a
+    // sample at a non-integer sample-per-frame rate such as 30000/1001.
+    let origin = kinewright_media::frame_to_samples(report.range.start, report.sample_rate, fps);
+    let offset = |frame: TimeCode| {
+        kinewright_media::frame_to_samples(frame, report.sample_rate, fps).saturating_sub(origin)
+    };
+    let first = offset(start).div_ceil(window_samples);
+    let last = (offset(end) / window_samples).checked_sub(1)?;
+    if first > last {
+        return None;
+    }
+    let head = *report.windows.get(usize::try_from(first).ok()?)?;
+    let tail = *report.windows.get(usize::try_from(last).ok()?)?;
+    Some((head, tail))
 }
 
 /// AU4 §6.1: the finest silence resolution the ducking planner reads, so a
@@ -8914,15 +8999,20 @@ const DEFAULT_DUCKING_RELEASE_MILLISECONDS: u32 = 400;
 /// AU4 §6.1 rule 126: the default floor extension past the last spoken frame,
 /// in milliseconds (6 project frames at 30 fps).
 const DEFAULT_DUCKING_HOLD_MILLISECONDS: u32 = 200;
-/// AU4 §6.2 rule 132: the default head/tail true peak above which a fade is
+/// AU5 §3.8 rule 67: the longest RMS window `mix_window_levels` answers, in
+/// milliseconds. A fade longer than this is still proposed whole; only the
+/// window the decision is measured over is clamped.
+const CLIP_FADE_MAX_WINDOW_MILLISECONDS: u32 = 1_000;
+/// AU4 §6.2 rule 132: the default head/tail level above which a fade is
 /// proposed, in hundredths of dBFS.
 const DEFAULT_CLIP_FADE_THRESHOLD_DBFS_HUNDREDTHS: i32 = -4_000;
 /// AU4 §6.2 rule 132: the default proposed fade length in milliseconds
 /// (1 project frame at 30 fps).
 const DEFAULT_CLIP_FADE_MILLISECONDS: u32 = 20;
-/// AU4 §6.1 rule 128.1 / §6.2 rule 131: the rate `measure_mix_levels` works
-/// at, so [`kinewright_media::LOUDNESS_GATING_BLOCK_FRAMES`] (19,200 sample
-/// frames) is 400 ms. Media keeps its `AUDIO_RATE` private, so the agent
+/// AU4 §6.1 rule 128.1: the rate `measure_mix_levels` works at, so
+/// [`kinewright_media::LOUDNESS_GATING_BLOCK_FRAMES`] (19,200 sample frames)
+/// is 400 ms. AU5 §3.8 rule 67 gives `mix_window_levels` the same rate, which
+/// is why the fade planner's window converts against it too. Media keeps its `AUDIO_RATE` private, so the agent
 /// restates it here, pins the pair in `au4_the_gating_block_is_400_ms`, and
 /// exports it so a real-engine test can pin it against the rate a decoded
 /// `AudioLoudness` actually reports.
@@ -8974,9 +9064,12 @@ fn milliseconds_to_project_frames(milliseconds: u32, fps: kinewright_core::Ratio
     i64::try_from(numerator.div_ceil(denominator)).unwrap_or(i64::MAX)
 }
 
-/// AU4 §6.1 rule 128.1 / §6.2 rule 131: one loudness gating block in project
-/// frames — 19,200 sample frames at 48 kHz, 400 ms, **12 project frames at
-/// 30 fps**.
+/// AU4 §6.1 rule 128.1: one loudness gating block in project frames —
+/// 19,200 sample frames at 48 kHz, 400 ms, **12 project frames at 30 fps**.
+///
+/// It serves `plan_audio_ducking` alone now. AU4 §6.2 rule 131 also read it,
+/// until AU5 §3.8 rule 67 / §0 R80 replaced the fade planner's gating-block
+/// measurement with a short-window RMS pass.
 fn gating_block_project_frames(fps: kinewright_core::Rational) -> i64 {
     let numerator = u128::from(kinewright_media::LOUDNESS_GATING_BLOCK_FRAMES)
         .saturating_mul(u128::from(fps.numerator()));
@@ -11223,6 +11316,12 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "get_audio_repair",
+            AUDIO_REPAIR_DESCRIPTION,
+            schema_object::<AudioRepairArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "get_scene_changes",
             "Return cached proxy-resolution scene boundaries and confidence scores for one asset.",
             schema_object::<SceneChangesArgs>(),
@@ -11309,7 +11408,7 @@ fn inspector_tools() -> Vec<Tool> {
         // the never-overwrite rule, for the same reason.
         Tool::new(
             "plan_clip_fades",
-            "Propose short audio fade-in and fade-out frame counts on media clips whose head or tail window peaks above threshold_dbfs_hundredths, emitting set_clip_audio only - never adding a curve, never overwriting a fade that is already non-zero - and skipping any clip shorter than that window with a per-clip reason in structured content instead of failing the whole plan. The window is exactly one loudness gating block - 19,200 sample frames at 48 kHz, 12 project frames at 30 fps - because the mix measurement refuses any shorter range, and the decision reads the track stem's true peak over it. Each proposal carries that clip's existing gain and its untouched fade through, and clamps the pair so fade_in plus fade_out never exceeds the clip duration. Returns an opaque prepared_edit_plan preview; the timeline is unchanged until commit_edit_plan.",
+            "Propose short audio fade-in and fade-out frame counts on media clips whose head or tail window reads above threshold_dbfs_hundredths, emitting set_clip_audio only - never adding a curve, never overwriting a fade that is already non-zero - and skipping any clip that holds no whole window with a per-clip reason in structured content instead of failing the whole plan. The window is the proposed fade itself, clamped to 1000 ms - the audio the ramp would act on - and the decision reads the track stem's RMS level in dBFS over it, measured in one short-window pass per track rather than one render per clip edge. Each proposal carries that clip's existing gain and its untouched fade through, and clamps the pair so fade_in plus fade_out never exceeds the clip duration. Returns an opaque prepared_edit_plan preview; the timeline is unchanged until commit_edit_plan.",
             schema_object::<ClipFadesPlanArgs>(),
         )
         .with_annotations(read_only()),
@@ -12031,8 +12130,9 @@ fn success_structured(text: impl Into<String>, value: serde_json::Value) -> Call
 }
 
 /// AU2 §6.2: the one spelling of a spectrum mix point in the agent's text,
-/// so the header line and the structured `report.point` cannot drift.
-fn render_mix_spectrum_point(point: MixSpectrumPoint) -> String {
+/// so the header line and the structured `report.point` cannot drift. AU5
+/// §4.1 reuses it for `get_audio_repair`, which is why it is `pub(crate)`.
+pub(crate) fn render_mix_spectrum_point(point: MixSpectrumPoint) -> String {
     match point {
         MixSpectrumPoint::Master => "master".to_owned(),
         MixSpectrumPoint::Track(track) => format!("track {track}"),
@@ -15029,6 +15129,10 @@ mod tests {
         TrackId, TrackKind, TrackLevels, TrackMix, TranscriptWord, VisualAssetResult,
         audio_qc_exceptions, audio_qc_technical_pass,
     };
+    use kinewright_core::{
+        AudioRepairProvenance, AudioRepairReport, AudioRepairRequest, MixNoiseProfileRequest,
+        MixWindowLevelReport, MixWindowRequest, NoiseProfileReport,
+    };
     use serde_json::json;
     use std::{
         path::Path,
@@ -15081,6 +15185,17 @@ mod tests {
         /// AU4 §6.1 / §6.2: a scripted `Analysis::mix_levels`, so the two
         /// planners' measurement arms are pinned without a decoder.
         mix_levels: Option<MixLevelsDouble>,
+        /// AU5 §4.5 rule 87: a scripted `Analysis::mix_window_levels`, so
+        /// `plan_clip_fades`' rewritten measurement is pinned without a
+        /// decoder. `None` keeps the trait's `NotImplemented` default.
+        mix_window_levels: Option<MixWindowLevelsDouble>,
+        /// AU5 §4.5 rule 87: a scripted `Analysis::mix_noise_profile`, for
+        /// Part B's `plan_dialogue_repair`.
+        mix_noise_profile: Option<MixNoiseProfileDouble>,
+        /// AU5 §4.5 rule 87: a scripted `Analysis::audio_repair`, so
+        /// `get_audio_repair`'s refusal texts and its envelope are pinned
+        /// without a decoder.
+        audio_repair: Option<AudioRepairDouble>,
     }
 
     /// AU3 §4.1: a scripted `Analysis::audio_qc`, so the agent's refusal
@@ -15091,6 +15206,27 @@ mod tests {
     /// AU4 §6.1 / §6.2: a scripted `Analysis::mix_levels`.
     type MixLevelsDouble = Box<
         dyn Fn(&Document, &MixLevelRequest) -> Result<MixLevelReport, MediaError> + Send + Sync,
+    >;
+
+    /// AU5 §3.8: a scripted `Analysis::mix_window_levels`.
+    type MixWindowLevelsDouble = Box<
+        dyn Fn(&Document, &MixWindowRequest) -> Result<MixWindowLevelReport, MediaError>
+            + Send
+            + Sync,
+    >;
+
+    /// AU5 §3.7: a scripted `Analysis::mix_noise_profile`.
+    type MixNoiseProfileDouble = Box<
+        dyn Fn(&Document, &MixNoiseProfileRequest) -> Result<NoiseProfileReport, MediaError>
+            + Send
+            + Sync,
+    >;
+
+    /// AU5 §3.9: a scripted `Analysis::audio_repair`.
+    type AudioRepairDouble = Box<
+        dyn Fn(&Document, &AudioRepairRequest) -> Result<AudioRepairReport, MediaError>
+            + Send
+            + Sync,
     >;
 
     impl Playback for NoopMedia {
@@ -15243,6 +15379,42 @@ mod tests {
             self.audio_qc
                 .as_ref()
                 .map_or(Err(MediaError::NotImplemented), |double| double(request))
+        }
+
+        fn mix_window_levels(
+            &self,
+            document: &Document,
+            request: &MixWindowRequest,
+        ) -> Result<MixWindowLevelReport, MediaError> {
+            self.mix_window_levels
+                .as_ref()
+                .map_or(Err(MediaError::NotImplemented), |double| {
+                    double(document, request)
+                })
+        }
+
+        fn mix_noise_profile(
+            &self,
+            document: &Document,
+            request: &MixNoiseProfileRequest,
+        ) -> Result<NoiseProfileReport, MediaError> {
+            self.mix_noise_profile
+                .as_ref()
+                .map_or(Err(MediaError::NotImplemented), |double| {
+                    double(document, request)
+                })
+        }
+
+        fn audio_repair(
+            &self,
+            document: &Document,
+            request: &AudioRepairRequest,
+        ) -> Result<AudioRepairReport, MediaError> {
+            self.audio_repair
+                .as_ref()
+                .map_or(Err(MediaError::NotImplemented), |double| {
+                    double(document, request)
+                })
         }
 
         fn request_scene_detection(&self, asset: MediaAsset) {
@@ -20692,7 +20864,7 @@ mod tests {
                 "{name} must be read-only"
             );
         }
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 80);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 81);
 
         // M36: every colour planner and every CC5 tool stays inside the
         // kilobyte description budget, measured on the *registered* descriptor
@@ -20714,6 +20886,9 @@ mod tests {
             "track_reframe_subject",
             "get_color_qc",
             "get_audio_qc",
+            // AU5 §4.3: the repair inspector joins the same budget, whose
+            // first sentence carries rule 21's percentile bias.
+            "get_audio_repair",
             // AU4 §6.3 rule 135: both Part B planners join the same budget.
             "plan_audio_ducking",
             "plan_clip_fades",
@@ -20972,6 +21147,176 @@ mod tests {
             serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::String(_) => {
             }
         }
+    }
+
+    /// AU5 §3.9: what the scripted `audio_repair` answers — a measured
+    /// 12-second range with a hum problem and a click problem, so core's four
+    /// thresholds all have something to judge and the rendered text has every
+    /// figure to name.
+    fn scripted_audio_repair(request: &AudioRepairRequest) -> AudioRepairReport {
+        let range = request
+            .range
+            .clone()
+            .unwrap_or(TimeCode::ZERO..TimeCode(60));
+        let measured = kinewright_core::AudioRepairMeasurements {
+            windows: 200,
+            noise_floor_dbfs_hundredths: Some(-4_800),
+            signal_dbfs_hundredths: Some(-3_900),
+            snr_db_hundredths: Some(900),
+            hum_50_excess_db_hundredths: Some(1_150),
+            hum_60_excess_db_hundredths: Some(40),
+            click_count: 19,
+            click_density_per_minute: 570,
+        };
+        AudioRepairReport {
+            range,
+            point: request.point,
+            sample_rate: 48_000,
+            sample_frames: 96_000,
+            window_milliseconds: kinewright_core::REPAIR_WINDOW_MILLISECONDS,
+            windows: measured.windows,
+            noise_floor_dbfs_hundredths: measured.noise_floor_dbfs_hundredths,
+            signal_dbfs_hundredths: measured.signal_dbfs_hundredths,
+            snr_db_hundredths: measured.snr_db_hundredths,
+            hum_50_excess_db_hundredths: measured.hum_50_excess_db_hundredths,
+            hum_60_excess_db_hundredths: measured.hum_60_excess_db_hundredths,
+            hum_50_harmonic_excess_db_hundredths: vec![800, 250, 100, 0],
+            hum_60_harmonic_excess_db_hundredths: vec![40, 0, 0, 0],
+            click_count: measured.click_count,
+            click_density_per_minute: measured.click_density_per_minute,
+            findings: kinewright_core::audio_repair_exceptions(&measured),
+            evidence_only: true,
+            provenance: AudioRepairProvenance::default(),
+        }
+    }
+
+    /// AU5 §4.1 / A15 through a scripted analysis: the stale-revision
+    /// envelope, the inverted-range and two-point refusal texts, the closed
+    /// argument schema, the two-key envelope with every leaf an integer, the
+    /// three core findings in the text, and a revision that never moves.
+    ///
+    /// The scripted double is what makes this a pin on the *agent*: the
+    /// numbers are chosen so all three `Warning` findings fire at once, which
+    /// no fixture conveniently does.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn au5_get_audio_repair_refuses_typed_and_publishes_integer_evidence() {
+        let (core, playback, _) = fixture();
+        let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia {
+            audio_repair: Some(Box::new(|_document, request| {
+                Ok(scripted_audio_repair(request))
+            })),
+            ..NoopMedia::default()
+        });
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let call = |arguments: serde_json::Value| {
+            service.call_blocking(
+                CallToolRequestParams::new("get_audio_repair")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+        };
+
+        // A stale revision is the uniform envelope, refused before measuring.
+        let stale = call(json!({"expected_revision": 7})).unwrap();
+        assert_eq!(stale.is_error, Some(true));
+        let body = stale.structured_content.as_ref().unwrap();
+        assert_eq!(body["code"], "stale_revision");
+        assert_eq!(body["applied"], false);
+        assert_eq!(body["evidence_only"], true);
+        assert_eq!(body["details"]["expected_revision"], 7);
+        assert_eq!(body["details"]["actual_revision"], 0);
+
+        // The range rule, as text, with either bound alone filling the other.
+        let inverted = call(json!({"start_frame": 30, "end_frame": 10})).unwrap();
+        assert_eq!(inverted.is_error, Some(true));
+        assert_eq!(
+            inverted.content[0].as_text().unwrap().text,
+            "get_audio_repair needs start_frame < end_frame; got 30..10"
+        );
+        assert!(inverted.structured_content.is_none());
+        let filled = call(json!({"end_frame": 30})).unwrap();
+        assert_eq!(filled.is_error, Some(false), "{filled:?}");
+        assert_eq!(
+            filled.structured_content.as_ref().unwrap()["report"]["range"],
+            json!({"start": 0, "end": 30}),
+            "an omitted start_frame fills from zero"
+        );
+
+        // The point rule, as text.
+        let both = call(json!({"track": 1, "bus": 1})).unwrap();
+        assert_eq!(both.is_error, Some(true));
+        assert_eq!(
+            both.content[0].as_text().unwrap().text,
+            "get_audio_repair takes at most one of track and bus"
+        );
+
+        // `deny_unknown_fields`: a misspelling is malformed, not ignored.
+        assert!(call(json!({"resolution": "proxy"})).is_err());
+        assert!(call(json!({"start_fram": 0})).is_err());
+
+        // The published measurement: exactly two keys, all-integer leaves.
+        let measured = call(json!({})).unwrap();
+        assert_eq!(measured.is_error, Some(false), "{measured:?}");
+        let body = measured.structured_content.as_ref().unwrap();
+        let mut keys = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["report", "timeline_revision"],
+            "AU5 §4.1: the envelope is the report and the revision, nothing else"
+        );
+        assert_eq!(body["timeline_revision"], 0);
+        assert_eq!(body["report"]["evidence_only"], true);
+        assert!(
+            body["report"].get("export_ready").is_none(),
+            "an evidence report never gates an export"
+        );
+        assert_integer_leaves("envelope", body);
+
+        // The rendered text: every figure with its unit, the percentile clause
+        // in prose, and all three warnings core raised.
+        let text = &measured.content[0].as_text().unwrap().text;
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            [
+                "audio_repair range=0..60 point=master sample_rate=48000 sample_frames=96000 window=10ms windows=200",
+                "noise_floor=-4800 signal=-3900 snr=900 in dBFS hundredths; the floor is the 10th-percentile 10 ms window and the signal the 90th, not a detected silence, so continuous speech reads a higher floor and a lower snr",
+                "hum_50=1150 harmonics=[800,250,100,0] hum_60=40 harmonics=[40,0,0,0] in dB hundredths over the sixth-octave shoulders, summed over four harmonics",
+                "clicks=19 density=570 a minute evidence_only=true",
+                "finding Warning click_density_high click_density_per_minute observed=570 allowed=<= 30",
+                "finding Warning low_signal_to_noise snr_db_hundredths observed=900 allowed=>= 1200",
+                "finding Warning mains_hum_present hum_50_excess_db_hundredths observed=1150 allowed=<= 600",
+            ],
+            "{text}"
+        );
+        assert!(!text.contains('"'), "{text}");
+
+        // A typed short-range refusal is re-spelled with both frame counts.
+        let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia {
+            audio_repair: Some(Box::new(|_document, _request| {
+                Err(MediaError::MixLoudnessRangeTooShort {
+                    sample_frames: 1_600,
+                    required: 4_800,
+                })
+            })),
+            ..NoopMedia::default()
+        });
+        let (core, playback, _) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let short = service
+            .call_blocking(CallToolRequestParams::new("get_audio_repair"))
+            .unwrap();
+        assert_eq!(short.is_error, Some(true), "{short:?}");
+        assert_eq!(
+            short.content[0].as_text().unwrap().text,
+            "get_audio_repair needs at least 4800 sample frames to measure; got 1600"
+        );
     }
 
     /// AU3 §4.1 / A14, A15 through a scripted analysis: the stale-revision
@@ -23161,25 +23506,86 @@ mod tests {
         // grow with its payload. Served is byte-identical for the tenth
         // consecutive measurement: a planner is registry-only, reached
         // through `invoke_capability`, whose argument schema is generic.
+        // AU5 §4.3 Part A adds one hand-written capability, the
+        // `get_audio_repair` inspector, so 54 generated operations + 81
+        // inspectors = 135 and the registry grows by 6,894 B to 1,531,264 B =
+        // 1,391,430 B of input schemas + 117,683 B of descriptions.
+        //
+        // The +1,996 B of input schemas is `AudioRepairArgs`' own schema
+        // entire, and nothing else moves. AU5 adds no `Operation` variant, so
+        // no generated tool changes; and the three new effect descriptors
+        // reach no input schema at all, because the `Operation` schema embeds
+        // `Effect.parameters` as an untyped map (:22986-22990). A new
+        // descriptor is free on this column by construction, which is why 45
+        // new parameter rows cost zero here and something on the next one.
+        //
+        // The +4,735 B of descriptions splits exactly three ways:
+        //
+        //     925 B  `get_audio_repair`'s own prose, inside rule 135's
+        //            1,024 B budget, carrying rule 21's percentile clause AND
+        //            the direction of its bias in the FIRST sentence, because
+        //            `get_capability` and `search_capabilities` publish only
+        //            `first_sentence(description)`;
+        //   3,790 B  758 B of `effect_documentation()` growth on each of the
+        //            five spliced effect tools (add_effect, insert_effect,
+        //            set_effect_param, set_effect_keyframes,
+        //            clear_effect_keyframes) — the three new descriptor names,
+        //            their 14 enumerated rows, and §4.2 rule 78's single
+        //            profile pattern sentence, 175 B with its separator;
+        //      20 B  `plan_clip_fades`' rewritten window sentence, which now
+        //            describes §3.8 rule 67's fade-length RMS window and its
+        //            one-pass-per-track measurement instead of the 400 ms
+        //            gating block it no longer uses, and spells the surviving
+        //            skip with R80(iii)'s own predicate ("holds no whole
+        //            window") rather than AU4's "shorter than that window",
+        //            which over-claims by two bytes' worth of accuracy. Its
+        //            description is 865 B, still inside rule 135's 1,024 B
+        //            budget.
+        //
+        // So 925 + 5 x 758 + 20 = 4,735.
+        //
+        // Rule 78's hatch, measured rather than estimated (R23, R46): an
+        // enumerated profile row is `profile_band01_tenth_db=-1200..=0,
+        // neutral -1200` at 48 B, and 31 of them with their separators are
+        // 1,550 B, so the unhatched growth would have been 2,133 B per spliced
+        // tool and 10,665 B over the five, against the 758 and 3,790 measured
+        // here. The hatch saves 1,375 B a tool and 6,875 B in all. The
+        // contract estimated 49 B a row, 2,065 B a tool and a 6.3 kB saving;
+        // the measurement is 48, 2,133 and 6.9 kB, so the argument holds with
+        // slightly more margin than it claimed.
+        //
+        // Serialized: 3,084 B of the new tool whole plus the same 3,790 B of
+        // description growth on the five effect tools plus `plan_clip_fades`'
+        // 20 B = 6,894. 1,996 + 925 =
+        // 2,921 B is `get_audio_repair`'s schema-plus-description share of the
+        // 3,084 B it costs serialized; the remaining 163 B are its name, its
+        // annotations and its JSON envelope, 4 B dearer than `get_audio_qc`'s
+        // 159 B because the name is 4 B longer.
+        //
+        // Served is byte-identical for the eleventh consecutive measurement:
+        // `get_audio_repair` is registry-only, no AU5 capability is in
+        // `COMPACT_TOOL_NAMES`, and the seven served tools embed no
+        // `Operation` schema, so neither the new inspector nor the three new
+        // descriptors can reach them.
         assert_eq!(
             (
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_524_370, 5_660),
+            (1_531_264, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_389_434,
+            registry_metrics.input_schema_bytes, 1_391_430,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 112_948,
+            registry_metrics.description_bytes, 117_683,
             "registry={registry_metrics:?}"
         );
-        // AU2 §6.4/B15, AU3 §4.2/A16, AU3 §6.4/B13, AU4 §4.3/A19 and
-        // AU4 §6.3/B13: the served quad, byte-identical to CC6's through
-        // every part of both programmes.
+        // AU2 §6.4/B15, AU3 §4.2/A16, AU3 §6.4/B13, AU4 §4.3/A19,
+        // AU4 §6.3/B13 and AU5 §4.3/A18: the served quad, byte-identical to
+        // CC6's through every part of both programmes.
         assert_eq!(
             (
                 served_metrics.tool_count,
@@ -26563,6 +26969,51 @@ mod tests {
 
     /// A scripted `mix_levels` that answers every track with one loudness and
     /// records the ranges it was asked for.
+    /// AU5 §3.8: a scripted `mix_window_levels` whose level is a function of
+    /// the window INDEX — window `i` reads `base - i` hundredths — recording
+    /// each call so "one pass per track" is asserted rather than assumed.
+    ///
+    /// The level varies by index deliberately. A flat level would satisfy any
+    /// index arithmetic at all, including an off-by-one or a read of the wrong
+    /// window entirely, so `clip_window_levels`' load-bearing claim — that
+    /// only windows lying wholly inside a clip are read, and neither level can
+    /// mix in the neighbour's audio across a cut — would be untestable. One
+    /// hundredth of a dB per window is enough to separate neighbours and small
+    /// enough that every window over a twelve-second fixture stays well above
+    /// the -4,000 default threshold.
+    fn au5_window_levels_double(
+        calls: Arc<Mutex<Vec<(MixSpectrumPoint, u32, u32)>>>,
+        base: i32,
+    ) -> MixWindowLevelsDouble {
+        Box::new(move |document: &Document, request: &MixWindowRequest| {
+            calls.lock().unwrap().push((
+                request.point,
+                request.window_milliseconds,
+                request.hop_milliseconds,
+            ));
+            let range = request
+                .range
+                .clone()
+                .unwrap_or(TimeCode::ZERO..document.duration);
+            let rate = MIX_MEASUREMENT_SAMPLE_RATE;
+            let window_samples = u64::from(request.window_milliseconds) * rate / 1_000;
+            let span = u64::try_from(range.end.0 - range.start.0).unwrap_or(0);
+            let samples = span * rate * u64::from(document.fps.denominator())
+                / u64::from(document.fps.numerator());
+            let windows = usize::try_from(samples / window_samples).unwrap_or(0);
+            Ok(MixWindowLevelReport {
+                range,
+                point: request.point,
+                sample_rate: u32::try_from(MIX_MEASUREMENT_SAMPLE_RATE).unwrap(),
+                window_milliseconds: request.window_milliseconds,
+                hop_milliseconds: request.hop_milliseconds,
+                windows: (0..windows)
+                    .map(|index| Some(base - i32::try_from(index).unwrap_or(i32::MAX)))
+                    .collect(),
+            })
+        })
+    }
+
     fn au4_mix_levels_double(
         calls: Arc<Mutex<Vec<std::ops::Range<TimeCode>>>>,
         loudness: i32,
@@ -27357,8 +27808,13 @@ mod tests {
         );
     }
 
-    /// AU4 §7 B12, rule 131: the fade window is one loudness gating block —
-    /// 19,200 sample frames at 48 kHz, 400 ms, 12 project frames at 30 fps.
+    /// AU4 §7 B12, rule 128.1: one loudness gating block is 19,200 sample
+    /// frames at 48 kHz, 400 ms, 12 project frames at 30 fps.
+    ///
+    /// Rule 131 made this the *fade* window too; AU5 §3.8 rule 67 / §0 R80
+    /// did not, so what is pinned here is the ducking planner's block and the
+    /// rate conversion `plan_clip_fades` still shares with it, not a fade
+    /// window.
     #[test]
     fn au4_the_gating_block_is_400_ms() {
         assert_eq!(kinewright_media::LOUDNESS_GATING_BLOCK_FRAMES, 19_200);
@@ -27396,22 +27852,31 @@ mod tests {
         );
     }
 
-    /// AU4 §7 B12: `plan_clip_fades` proposes `SetClipAudio` fade frames only,
-    /// never overwrites a non-zero fade, and skips a clip shorter than the
-    /// measurement window with a per-clip reason while the rest commits.
+    /// AU4 §7 B12, as rewritten by AU5 §3.8 rule 67: `plan_clip_fades`
+    /// proposes `SetClipAudio` fade frames only, never overwrites a non-zero
+    /// fade, and measures every clip in **one** `mix_window_levels` pass per
+    /// track instead of two 400 ms renders per clip.
+    ///
+    /// AU4's debt is discharged here in the arm that changes: the 6-frame clip
+    /// AU4 had to skip — "shorter than the 12-frame loudness gating block the
+    /// mix measurement refuses to go under" — is measured now, because the
+    /// window is the 20 ms fade rather than a 400 ms gating block. The second
+    /// arm keeps the short-clip refusal honest at the only length that can
+    /// still trip it.
     #[test]
-    fn au4_plan_clip_fades_proposes_fades_and_skips_short_clips() {
+    #[allow(clippy::too_many_lines)]
+    fn au4_plan_clip_fades_proposes_fades_and_measures_in_one_pass() {
         let mut document = au4_ducking_document();
         // Track 2 carries a hot 60-frame clip whose fade-in the editor has
-        // already set, plus a 6-frame clip the measurement cannot reach.
+        // already set, plus the 6-frame clip AU4 could not reach.
         document.tracks[1].clips[0].source_range = TimeCode::ZERO..TimeCode(60);
         document.tracks[1].clips[0].audio_fade_in_frames = TimeCode(4);
-        document.tracks[1].clips.push(Clip {
-            id: ClipId(3),
+        let short = |id: u64, start: i64, frames: i64| Clip {
+            id: ClipId(id),
             asset: AssetId(1),
-            source_range: TimeCode::ZERO..TimeCode(6),
+            source_range: TimeCode::ZERO..TimeCode(frames),
             content: kinewright_core::ClipContent::Media,
-            timeline_start: TimeCode(60),
+            timeline_start: TimeCode(start),
             effects: Vec::new(),
             transition_in: None,
             link: None,
@@ -27420,13 +27885,15 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
-        });
+        };
+        document.tracks[1].clips.push(short(3, 60, 6));
+        document.tracks[1].clips.push(short(4, 66, 4));
         let calls = Arc::new(Mutex::new(Vec::new()));
         let analysis = NoopMedia {
-            mix_levels: Some(au4_mix_levels_double(Arc::clone(&calls), -1_600, -1_000)),
+            mix_window_levels: Some(au5_window_levels_double(Arc::clone(&calls), -1_000)),
             ..NoopMedia::default()
         };
-        let service = au4_service(document, analysis);
+        let service = au4_service(document.clone(), analysis);
         let planned = service
             .plan_clip_fades(&ClipFadesPlanArgs {
                 tracks: Some(vec![TrackId(2)]),
@@ -27436,41 +27903,157 @@ mod tests {
             .unwrap();
         assert_eq!(planned.is_error, Some(false), "{planned:?}");
         let body = planned.structured_content.as_ref().unwrap();
-        assert_eq!(body["window_sample_frames"], 19_200);
-        assert_eq!(body["window_project_frames"], 12);
+        // The window is the default 20 ms fade, not a gating block.
+        assert_eq!(body["window_milliseconds"], 20);
+        assert_eq!(body["window_sample_frames"], 960);
+        assert_eq!(body["window_project_frames"], 1);
         assert_eq!(body["fade_frames"], 1);
         assert_eq!(body["threshold_dbfs_hundredths"], -4_000);
-        // The 6-frame clip is skipped, by name, and the plan still commits.
-        let skipped = body["skipped"].as_array().unwrap();
-        assert_eq!(skipped.len(), 1, "{body}");
-        assert_eq!(skipped[0]["clip"], 3);
-        assert!(
-            skipped[0]["reason"]
-                .as_str()
-                .unwrap()
-                .contains("shorter than the 12-frame loudness gating block"),
-            "{body}"
-        );
-        // The 60-frame clip keeps its editor-set fade-in and gains a fade-out.
+        // Nothing is skipped any more: a 4-frame clip is 133 ms, which holds
+        // six whole 20 ms windows (110..=115 below).
+        assert_eq!(body["skipped"], json!([]), "{body}");
         let clips = body["clips"].as_array().unwrap();
-        assert_eq!(clips.len(), 1, "{body}");
+        assert_eq!(clips.len(), 3, "{body}");
+        // The evidence is the RMS window level the decision actually read, and
+        // the double's level is `-1000 - index`, so each figure below names
+        // the window index `clip_window_levels` picked. One project frame is
+        // 1 600 sample frames at 30 fps and a 20 ms window is 960, so for a
+        // clip spanning `[s, e)` sample frames the wholly-inside windows are
+        // `ceil(s / 960) ..= e / 960 - 1`:
+        //
+        //   clip 2, frames  0..60 =      0..96 000 -> windows   0 ..=  99
+        //   clip 3, frames 60..66 = 96 000..105 600 -> windows 100 ..= 109
+        //   clip 4, frames 66..70 = 105 600..112 000 -> windows 110 ..= 115
+        //
+        // Clip 2's tail is window 99, ending exactly at sample 96 000, and
+        // clip 3's head is window 100, starting exactly there: the cut between
+        // them is a window boundary and neither reads a sample of the other.
+        // Window 116 would straddle clip 4's end at 112 000 and is excluded,
+        // which is the other half of the same rule.
         assert_eq!(clips[0]["clip"], 2);
         assert_eq!(clips[0]["fade_in_frames"], 4, "a non-zero fade is kept");
         assert_eq!(clips[0]["fade_out_frames"], 1);
+        assert_eq!(clips[0]["head_dbfs_hundredths"], -1_000, "window 0");
+        assert_eq!(clips[0]["tail_dbfs_hundredths"], -1_099, "window 99");
+        assert_eq!(clips[1]["clip"], 3);
+        assert_eq!(
+            clips[1]["head_dbfs_hundredths"], -1_100,
+            "window 100, the first that starts inside clip 3 rather than 99, \
+             which belongs to the clip before the cut"
+        );
+        assert_eq!(clips[1]["tail_dbfs_hundredths"], -1_109, "window 109");
+        assert_eq!(clips[2]["clip"], 4);
+        assert_eq!(clips[2]["head_dbfs_hundredths"], -1_110, "window 110");
+        assert_eq!(
+            clips[2]["tail_dbfs_hundredths"], -1_115,
+            "window 115, the last that ends inside clip 4; window 116 would \
+             run past its end at sample 112 000"
+        );
         assert!(!body["prepared_edit_plan"]["plan_id"].is_null(), "{body}");
-        // Two windows per clip, both exactly one gating block long.
+        // Rule 67's whole point: ONE pass for the track, whatever its clip
+        // count, and the hop equals the window so no sample is counted twice.
         let measured = calls.lock().unwrap().clone();
-        assert_eq!(measured.len(), 2, "{measured:?}");
-        for range in &measured {
-            assert_eq!(range.end.0 - range.start.0, 12, "{measured:?}");
-        }
-        assert_eq!(measured[0], TimeCode::ZERO..TimeCode(12));
-        assert_eq!(measured[1], TimeCode(48)..TimeCode(60));
+        assert_eq!(
+            measured,
+            vec![(MixSpectrumPoint::Track(TrackId(2)), 20, 20)],
+            "one short-window pass per track, not two renders per clip"
+        );
+
+        // The only refusal left: a clip that holds no whole window — which is
+        // not the same thing as a clip shorter than one, and is why clip 3
+        // (exactly one window, aligned) is measured below while clip 4 (longer
+        // than half a window, aligned across a boundary) is not. At 30 fps a
+        // 20 ms window can never trip it — one frame is 33 ms — so it takes a
+        // 200 ms fade and a 133 ms clip to reach the arm at all.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let analysis = NoopMedia {
+            mix_window_levels: Some(au5_window_levels_double(Arc::clone(&calls), -1_000)),
+            ..NoopMedia::default()
+        };
+        let service = au4_service(document, analysis);
+        let planned = service
+            .plan_clip_fades(&ClipFadesPlanArgs {
+                tracks: Some(vec![TrackId(2)]),
+                threshold_dbfs_hundredths: None,
+                fade_milliseconds: Some(200),
+            })
+            .unwrap();
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(body["window_milliseconds"], 200);
+        assert_eq!(body["window_project_frames"], 6);
+        assert_eq!(body["window_sample_frames"], 9_600);
+        let skipped = body["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{body}");
+        assert_eq!(skipped[0]["clip"], 4);
+        assert_eq!(
+            skipped[0]["reason"],
+            "clip is 4 project frames and holds no whole 200 ms measurement window",
+            "R80(iii)'s predicate: clip 4 spans samples 105 600..112 000 and a \
+             200 ms window is 9 600, so the first window starting inside it is \
+             11 and the last ending inside it is 10 — it holds none, which is \
+             not the same claim as being shorter than one"
+        );
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec![(MixSpectrumPoint::Track(TrackId(2)), 200, 200)],
+        );
+    }
+
+    /// AU5 §0 R87(i): `clip_window_levels` converts each absolute bound and
+    /// subtracts, so a report whose range does not start at frame 0 still
+    /// lands on the grid `measure_mix_window_levels` laid down.
+    ///
+    /// The claim is only falsifiable at a non-integer sample-per-frame rate.
+    /// At 30000/1001 and 48 kHz a project frame is 1 601.6 sample frames, so
+    /// `frame_to_samples(2) = 3 203` (truncated from 3 203.2) and
+    /// `frame_to_samples(5) = 8 008` (exact): converting then subtracting puts
+    /// frame 5 at stem sample **4 805**, while subtracting then converting
+    /// would truncate 4 804.8 to **4 804**. Against a 100 ms = 4 800-sample
+    /// window that one sample is a whole window index — `⌈4805/4800⌉ = 2`
+    /// against `⌈4804/4800⌉ = 1` — so the head level below is the one
+    /// assertion that separates the two spellings.
+    #[test]
+    fn au5_clip_window_levels_offsets_against_a_non_zero_range_start() {
+        let fps = Rational::new(30_000, 1_001).unwrap();
+        let report = MixWindowLevelReport {
+            range: TimeCode(2)..TimeCode(20),
+            point: MixSpectrumPoint::Master,
+            sample_rate: 48_000,
+            window_milliseconds: 100,
+            hop_milliseconds: 100,
+            windows: (0..6_i32).map(|index| Some(-index)).collect(),
+        };
+        assert_eq!(
+            kinewright_media::frame_to_samples(TimeCode(5), 48_000, fps)
+                - kinewright_media::frame_to_samples(report.range.start, 48_000, fps),
+            4_805,
+            "convert then subtract"
+        );
+        assert_eq!(
+            kinewright_media::frame_to_samples(TimeCode(3), 48_000, fps),
+            4_804,
+            "subtract then convert, the spelling R87(i) rejects"
+        );
+        assert_eq!(
+            clip_window_levels(&report, TimeCode(5), TimeCode(20), fps),
+            Some((Some(-2), Some(-5))),
+            "head is window 2, not window 1; tail is window 5, the last ending \
+             inside the clip"
+        );
+        // A clip holding no whole window is `None`, not window 0 by accident.
+        assert_eq!(
+            clip_window_levels(&report, TimeCode(5), TimeCode(6), fps),
+            None
+        );
     }
 
     /// AU4 §7 B12: below the threshold nothing is proposed, the planner says
     /// so rather than preparing an empty plan, and the per-clip evidence for
     /// the clips it could not measure survives that branch.
+    ///
+    /// AU5 §3.8 rule 67 moves the length that trips the short-clip arm, so the
+    /// unmeasurable clip here is 4 frames against a 200 ms window rather than
+    /// 6 against a 400 ms gating block; the branch it proves is the same one.
     #[test]
     fn au4_plan_clip_fades_proposes_nothing_under_the_threshold() {
         let mut document = au4_ducking_document();
@@ -27480,7 +28063,7 @@ mod tests {
         document.tracks[1].clips.push(Clip {
             id: ClipId(3),
             asset: AssetId(1),
-            source_range: TimeCode::ZERO..TimeCode(6),
+            source_range: TimeCode::ZERO..TimeCode(4),
             content: kinewright_core::ClipContent::Media,
             timeline_start: TimeCode(60),
             effects: Vec::new(),
@@ -27492,12 +28075,9 @@ mod tests {
             speed_percent: 100,
             audio_gain_curve: None,
         });
+        let calls = Arc::new(Mutex::new(Vec::new()));
         let analysis = NoopMedia {
-            mix_levels: Some(au4_mix_levels_double(
-                Arc::new(Mutex::new(Vec::new())),
-                -1_600,
-                -5_000,
-            )),
+            mix_window_levels: Some(au5_window_levels_double(Arc::clone(&calls), -5_000)),
             ..NoopMedia::default()
         };
         let service = au4_service(document, analysis);
@@ -27505,7 +28085,7 @@ mod tests {
             .plan_clip_fades(&ClipFadesPlanArgs {
                 tracks: None,
                 threshold_dbfs_hundredths: None,
-                fade_milliseconds: None,
+                fade_milliseconds: Some(200),
             })
             .unwrap();
         assert_eq!(planned.is_error, Some(false), "{planned:?}");
@@ -27520,14 +28100,22 @@ mod tests {
             skipped[0]["reason"]
                 .as_str()
                 .unwrap()
-                .contains("shorter than the 12-frame loudness gating block"),
+                .contains("holds no whole 200 ms measurement window"),
             "the empty-plan branch still carries the per-clip evidence: {body}"
+        );
+        // Every track in the document is measured exactly once.
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec![
+                (MixSpectrumPoint::Track(TrackId(1)), 200, 200),
+                (MixSpectrumPoint::Track(TrackId(2)), 200, 200),
+            ],
         );
         // The other branch of the empty-plan text: here clips really were
         // measured and refused by the threshold, so the clause is true.
         assert_eq!(
             planned.content[0].as_text().unwrap().text,
-            "nothing to propose: no clip head or tail peaks above -4000 hundredths dBFS with a fade still at zero; 1 clip(s) were skipped and nothing was prepared",
+            "nothing to propose: no clip head or tail window reads above -4000 hundredths dBFS with a fade still at zero; 1 clip(s) were skipped and nothing was prepared",
             "{planned:?}"
         );
     }
@@ -27538,13 +28126,10 @@ mod tests {
     #[test]
     fn au4_plan_clip_fades_skips_a_fade_that_rounds_to_zero_frames() {
         let document = au4_ducking_document();
+        let calls = Arc::new(Mutex::new(Vec::new()));
         let analysis = NoopMedia {
             // Hot enough that a floored 1-frame fade would have been proposed.
-            mix_levels: Some(au4_mix_levels_double(
-                Arc::new(Mutex::new(Vec::new())),
-                -1_600,
-                -300,
-            )),
+            mix_window_levels: Some(au5_window_levels_double(Arc::clone(&calls), -300)),
             ..NoopMedia::default()
         };
         let service = au4_service(document, analysis);
@@ -27574,6 +28159,13 @@ mod tests {
             planned.content[0].as_text().unwrap().text,
             "nothing to propose; 1 clip(s) were skipped and nothing was prepared",
             "{planned:?}"
+        );
+        // AU5 §3.8 rule 67: a zero-frame fade measures nothing at all. The
+        // pass is per track, so skipping it is a whole render saved rather
+        // than a per-clip branch.
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "a zero-frame fade must not decode anything"
         );
     }
 
@@ -27626,7 +28218,11 @@ mod tests {
         let fades = summary("plan_clip_fades");
         assert!(fades.contains("set_clip_audio only"), "{fades}");
         assert!(fades.contains("never overwriting a fade"), "{fades}");
-        assert!(fades.contains("skipping any clip shorter"), "{fades}");
+        assert!(
+            fades.contains("skipping any clip that holds no whole window"),
+            "R80(iii)'s predicate, in the words an agent actually reads: a clip \
+             longer than the window can still hold none of them: {fades}"
+        );
         assert!(fades.contains("per-clip reason"), "{fades}");
     }
 }

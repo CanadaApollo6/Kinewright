@@ -13,19 +13,20 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use kinewright_core::{
     Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, AudioQcReport, AudioQcRequest,
-    BeatStatus, ClipId, DeliveryAudioVerification, DeliveryVerification,
-    DeliveryVerificationRequest, Document, EffectId, Export, ExportCancellation, ExportReport,
-    ExportSettings, FrameTexture, LiveAudioChange, LoudnessSnapshot, LoudnessTarget,
-    LutAvailabilityKind, LutAvailabilityStatus, MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE,
-    MatteParams, MatteProof, MatteProofError, MatteProofMetadata, MediaAsset,
-    MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,
-    MediaCacheFamilyStatus, MediaCacheInventory, MediaError, MediaEvent, MediaKind, MixLevelReport,
-    MixLevelRequest, MixPeaks, MixSpectrumReport, MixSpectrumRequest, MonitorProof, Playback,
-    PlaybackState, ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode,
-    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TranscriptStatus, VisualAssetResult, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof,
-    WorkingProofMetadata, audio_qc_technical_pass, delivery_audio_exceptions,
-    export_lut_preflight_with,
+    AudioRepairReport, AudioRepairRequest, BeatStatus, ClipId, DeliveryAudioVerification,
+    DeliveryVerification, DeliveryVerificationRequest, Document, EffectId, Export,
+    ExportCancellation, ExportReport, ExportSettings, FrameTexture, LiveAudioChange,
+    LoudnessSnapshot, LoudnessTarget, LutAvailabilityKind, LutAvailabilityStatus,
+    MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE, MatteParams, MatteProof, MatteProofError,
+    MatteProofMetadata, MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus,
+    MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,
+    MediaError, MediaEvent, MediaKind, MixLevelReport, MixLevelRequest, MixNoiseProfileRequest,
+    MixPeaks, MixSpectrumReport, MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest,
+    MonitorProof, NoiseProfileReport, Playback, PlaybackState, ProgressSink, Rational, RgbaImage,
+    SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, TranscriptStatus, VisualAssetResult, WORKING_PROOF_ENCODING,
+    WORKING_PROOF_STAGE, WorkingProof, WorkingProofMetadata, audio_qc_technical_pass,
+    delivery_audio_exceptions, export_lut_preflight_with,
 };
 
 use crate::{
@@ -875,6 +876,35 @@ impl Analysis for FfmpegMediaEngine {
         request: &AudioQcRequest,
     ) -> Result<AudioQcReport, MediaError> {
         crate::export::measure_audio_qc(document, request)
+    }
+
+    /// AU5 §3.7: learned synchronously through the real mix path at 48 kHz, so
+    /// the profile describes what the node sees.
+    fn mix_noise_profile(
+        &self,
+        document: &Document,
+        request: &MixNoiseProfileRequest,
+    ) -> Result<NoiseProfileReport, MediaError> {
+        crate::export::measure_mix_noise_profile(document, request)
+    }
+
+    /// AU5 §3.8: the short-window RMS accessor AU4's `plan_clip_fades` wanted.
+    fn mix_window_levels(
+        &self,
+        document: &Document,
+        request: &MixWindowRequest,
+    ) -> Result<MixWindowLevelReport, MediaError> {
+        crate::export::measure_mix_window_levels(document, request)
+    }
+
+    /// AU5 §3.9: percentile SNR, mains hum excess and click density, over one
+    /// render, judged by core's `audio_repair_exceptions`.
+    fn audio_repair(
+        &self,
+        document: &Document,
+        request: &AudioRepairRequest,
+    ) -> Result<AudioRepairReport, MediaError> {
+        crate::export::measure_audio_repair(document, request)
     }
 
     fn request_beat_detection(&self, asset: MediaAsset) {

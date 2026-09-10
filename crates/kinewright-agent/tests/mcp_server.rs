@@ -2492,7 +2492,18 @@ async fn cc7_prepare_commit_and_compare(
 /// generated count unchanged. The served quad does not move for the tenth
 /// consecutive measurement: a planner is registry-only, reached through
 /// `invoke_capability`, whose argument schema is generic.
+///
+/// AU5 §4.3 Part A (A18) adds one hand-written capability, the
+/// `get_audio_repair` inspector, registered directly after `get_audio_qc`, so
+/// 54 + 81 = 135 with the generated count unchanged: AU5 adds no `Operation`
+/// variant, so `UNGENERATED_OPERATION_VARIANTS` and the 54 generated mutators
+/// hold. The three new effect descriptors reach no input schema at all — the
+/// `Operation` schema embeds `Effect.parameters` as an untyped map — so their
+/// whole registry cost is `effect_documentation()`'s rows on the five spliced
+/// effect tools, hatched down to one pattern sentence by §4.2 rule 78. The
+/// served quad does not move for the eleventh consecutive measurement.
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let core = Core::spawn(Document::default()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
@@ -2507,7 +2518,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     assert_eq!(
         tools.len(),
         7,
-        "no part of AU1, AU2, AU3, or AU4 adds a served tool"
+        "no part of AU1, AU2, AU3, AU4, or AU5 adds a served tool"
     );
     assert_eq!(
         tools
@@ -2517,23 +2528,25 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 134 tools, of which `INSPECTOR_TOOL_NAMES` is 80.
+    // The internal registry: 135 tools, of which `INSPECTOR_TOOL_NAMES` is 81.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        134,
+        135,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
          AU4 Part A adds set_clip_gain_envelope and set_track_automation; \
-         AU4 Part B adds plan_audio_ducking and plan_clip_fades"
+         AU4 Part B adds plan_audio_ducking and plan_clip_fades; \
+         AU5 Part A adds get_audio_repair"
     );
     assert_eq!(
         operations.len(),
         54,
         "AU2 Part B generates two more mutators; neither part of AU3 generates one; \
-         AU4 Part A generates two more; AU4 Part B generates none"
+         AU4 Part A generates two more; AU4 Part B generates none; \
+         AU5 Part A generates none, because it adds no Operation variant"
     );
     for name in [
         "set_track_mix",
@@ -2546,15 +2559,17 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         "set_track_automation",
         "plan_audio_ducking",
         "plan_clip_fades",
+        "get_audio_repair",
     ] {
         assert!(registry.iter().any(|entry| entry == name), "missing {name}");
     }
     assert_eq!(
         registry.len() - operations.len(),
-        80,
+        81,
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector; \
-         AU4 Part A adds no inspector; AU4 Part B adds the two planners"
+         AU4 Part A adds no inspector; AU4 Part B adds the two planners; \
+         AU5 Part A adds get_audio_repair"
     );
     let spectrum = registry
         .iter()
@@ -2564,6 +2579,18 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         registry.get(spectrum + 1).map(String::as_str),
         Some("get_audio_qc"),
         "AU3 §4.2: get_audio_qc is registered directly after get_audio_spectrum"
+    );
+    // AU5 §4.3 rule 81: the repair inspector joins the audio evidence family
+    // at its end, so the three measurement surfaces stay adjacent and a fourth
+    // one appended anywhere else would fail here.
+    let qc = registry
+        .iter()
+        .position(|entry| entry == "get_audio_qc")
+        .unwrap();
+    assert_eq!(
+        registry.get(qc + 1).map(String::as_str),
+        Some("get_audio_repair"),
+        "AU5 §4.3: get_audio_repair is registered directly after get_audio_qc"
     );
     // AU4 §4.3: each new mutator is generated directly after the scalar tool
     // whose owner it automates, because `operation_tools` follows `Operation`
@@ -4435,6 +4462,349 @@ async fn au3_get_audio_qc_measures_the_real_mix() {
 
     client.cancel().await.unwrap();
     server.shutdown();
+}
+
+/// AU5 §7 A15: `get_audio_repair` is integer-reported, evidence-only and
+/// revision-gated over the live endpoint.
+///
+/// The closed argument schema, the published first sentence, the stale
+/// envelope, the inverted range and the two-point refusal need no decoder and
+/// come first; the measurement itself runs on the real 440 Hz fixture, whose
+/// steady tone is the honest worst case for a percentile floor — a signal with
+/// no silence in it, where the 10th percentile is not a noise floor at all and
+/// the SNR reads near zero. That is exactly the bias rule 21 makes the first
+/// sentence carry, so the test asserts the direction rather than a number.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au5_get_audio_repair_is_evidence_only_and_revision_gated() {
+    let generated = au3_sine_media();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let document = single_clip_document(asset);
+    let duration = document.duration.0;
+    assert_eq!(duration, 60, "the fixture is exactly 60 frames at 30 fps");
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let before = query_document(&core);
+    let revision = invoke_capability(&client, "get_color_context", json!({}))
+        .await
+        .structured_content
+        .as_ref()
+        .unwrap()["timeline_revision"]
+        .as_u64()
+        .unwrap();
+
+    // The published schema: an inspector with exactly the five AU5 §4.1
+    // arguments and nothing else accepted.
+    let opened = client
+        .call_tool(
+            CallToolRequestParams::new("get_capability").with_arguments(
+                json!({"name": "get_audio_repair"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened.is_error, Some(false));
+    let opened = opened.structured_content.as_ref().unwrap();
+    assert_eq!(opened["capability"]["kind"], "inspector");
+    let properties = opened["input_schema"]["properties"].as_object().unwrap();
+    for present in [
+        "expected_revision",
+        "start_frame",
+        "end_frame",
+        "track",
+        "bus",
+    ] {
+        assert!(properties.contains_key(present), "missing {present}");
+    }
+    assert_eq!(properties.len(), 5, "{opened}");
+    assert_eq!(opened["input_schema"]["additionalProperties"], json!(false));
+    // Rule 76: `get_capability` publishes only the first sentence, so the
+    // percentile and the DIRECTION of its bias have to be inside it.
+    let summary = opened["capability"]["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("Measures a percentile noise floor, percentile SNR"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("10th-percentile short window, not a detected silence"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("higher floor and a lower SNR"),
+        "the bias direction is what a planner needs: {summary}"
+    );
+
+    // A stale revision is the uniform envelope, refused before any decode.
+    let stale = invoke_capability(
+        &client,
+        "get_audio_repair",
+        json!({"expected_revision": revision + 7}),
+    )
+    .await;
+    assert_eq!(stale.is_error, Some(true));
+    let stale_body = stale.structured_content.as_ref().unwrap();
+    assert_eq!(stale_body["code"], "stale_revision");
+    assert_eq!(stale_body["applied"], false);
+    assert_eq!(stale_body["evidence_only"], true);
+    assert_eq!(stale_body["details"]["expected_revision"], revision + 7);
+    assert_eq!(stale_body["details"]["actual_revision"], revision);
+
+    // The range rule is `get_audio_levels`': an inverted range is refused by
+    // name rather than clamped.
+    let inverted = invoke_capability(
+        &client,
+        "get_audio_repair",
+        json!({"start_frame": 30, "end_frame": 10}),
+    )
+    .await;
+    assert_eq!(inverted.is_error, Some(true));
+    assert_eq!(
+        inverted.content[0].as_text().unwrap().text,
+        "get_audio_repair needs start_frame < end_frame; got 30..10"
+    );
+
+    // The point rule is `get_audio_spectrum`': at most one of track and bus.
+    let both = invoke_capability(&client, "get_audio_repair", json!({"track": 1, "bus": 1})).await;
+    assert_eq!(both.is_error, Some(true));
+    assert_eq!(
+        both.content[0].as_text().unwrap().text,
+        "get_audio_repair takes at most one of track and bus"
+    );
+
+    // `deny_unknown_fields`: a misspelled bound is a malformed request,
+    // surfaced as a protocol error rather than silently defaulted.
+    let unknown = client
+        .call_tool(
+            CallToolRequestParams::new("invoke_capability").with_arguments(
+                json!({"name": "get_audio_repair", "arguments": {"start_fram": 0}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await;
+    assert!(unknown.is_err(), "{unknown:?}");
+
+    // The measurement itself. `expected_revision` is deliberately absent:
+    // this is an inspector, not a planner.
+    let report = invoke_capability(&client, "get_audio_repair", json!({})).await;
+    assert_eq!(report.is_error, Some(false), "{report:?}");
+    let body = report.structured_content.as_ref().unwrap();
+    // A15: exactly the two keys, and every leaf an integer, bool, string or
+    // null.
+    assert_eq!(
+        body.as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["report", "timeline_revision"],
+        "{body}"
+    );
+    assert_eq!(body["timeline_revision"], revision);
+    assert_integer_leaves("envelope", body);
+    let repair = &body["report"];
+    assert_eq!(repair["evidence_only"], true);
+    assert_eq!(repair["range"], json!({"start": 0, "end": duration}));
+    assert_eq!(repair["point"], json!("master"));
+    assert_eq!(repair["sample_rate"], 48_000);
+    assert_eq!(repair["sample_frames"], 96_000);
+    assert_eq!(repair["window_milliseconds"], 10);
+    assert_eq!(repair["provenance"]["engine"], "kinewright_audio_repair_v1");
+    assert!(
+        repair.get("export_ready").is_none(),
+        "an evidence report never carries an export gate: {repair}"
+    );
+    // Two seconds of steady tone is 200 whole 10 ms windows, all but the odd
+    // edge window energetic, so the percentiles are reported and their
+    // difference is small: the 10th and 90th percentile of a constant signal
+    // are nearly the same window level.
+    let windows = repair["windows"].as_i64().unwrap();
+    assert!(
+        (190..=200).contains(&windows),
+        "a 2 s programme holds 200 whole 10 ms windows: {repair}"
+    );
+    let floor = repair["noise_floor_dbfs_hundredths"].as_i64().unwrap();
+    let signal = repair["signal_dbfs_hundredths"].as_i64().unwrap();
+    let snr = repair["snr_db_hundredths"].as_i64().unwrap();
+    assert_eq!(snr, signal - floor, "the SNR is the difference: {repair}");
+    assert!(
+        snr < 300,
+        "a signal with no silence in it reads a near-zero SNR, which is the \
+         percentile bias rule 21 publishes: {repair}"
+    );
+    // The 440 Hz sine carries no mains hum: every 50 and 60 Hz harmonic sits
+    // at or under its own sixth-octave shoulders, so both summed excesses are
+    // clamped to zero and neither raises `mains_hum_present`.
+    assert_eq!(repair["hum_50_excess_db_hundredths"], 0, "{repair}");
+    assert_eq!(repair["hum_60_excess_db_hundredths"], 0, "{repair}");
+    // The click density is derived from the count, not measured twice.
+    let clicks = repair["click_count"].as_i64().unwrap();
+    assert_eq!(
+        repair["click_density_per_minute"].as_i64().unwrap(),
+        clicks * 60 * 48_000 / 96_000,
+        "{repair}"
+    );
+    for harmonics in [
+        "hum_50_harmonic_excess_db_hundredths",
+        "hum_60_harmonic_excess_db_hundredths",
+    ] {
+        assert_eq!(
+            repair[harmonics].as_array().unwrap().len(),
+            4,
+            "four harmonics or none: {repair}"
+        );
+    }
+
+    // Rule 77: the rendered text names every figure with its unit and repeats
+    // the percentile clause in prose, so a reader of the text alone still
+    // learns what the floor is.
+    let text = report.content[0].as_text().unwrap().text.clone();
+    assert!(
+        text.starts_with(&format!(
+            "audio_repair range=0..60 point=master sample_rate=48000 sample_frames=96000 window=10ms windows={windows}"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "10th-percentile 10 ms window and the signal the 90th, not a detected silence"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("in dBFS hundredths"), "{text}");
+    assert!(text.contains("evidence_only=true"), "{text}");
+    assert!(!text.contains('"'), "{text}");
+
+    // One track's stem is a legal point, and so is a bus.
+    let on_track = invoke_capability(&client, "get_audio_repair", json!({"track": 1})).await;
+    assert_eq!(on_track.is_error, Some(false), "{on_track:?}");
+    assert_eq!(
+        on_track.structured_content.as_ref().unwrap()["report"]["point"],
+        json!({"track": 1}),
+        "{on_track:?}"
+    );
+
+    // Nothing on this path moved the document or the revision.
+    assert_eq!(
+        serde_json::to_string(&query_document(&core)).unwrap(),
+        serde_json::to_string(&before).unwrap(),
+        "an inspector never edits"
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// AU5 §7 A16: `effect_documentation`'s profile hatch, over the live endpoint.
+///
+/// The five spliced tools carry the pattern sentence exactly once and no
+/// `profile_band` row at all, and the sentence's bounds come from the Core
+/// descriptor rather than a literal, so §2.1's table and the published prose
+/// cannot drift. The saving the hatch buys is asserted against the enumeration
+/// it replaces, built here from the same descriptor.
+#[test]
+fn au5_effect_documentation_hatches_the_noise_profile() {
+    let tools = kinewright_agent::operation_tools().unwrap();
+    let denoise = kinewright_core::effect_descriptor("audio_denoise")
+        .expect("AU5 Part A registers the denoiser");
+    let bands = denoise
+        .parameters
+        .iter()
+        .filter(|parameter| kinewright_core::is_noise_profile_parameter(parameter.name))
+        .collect::<Vec<_>>();
+    assert_eq!(bands.len(), 31, "AU5 §2.1: 31 profile rows");
+    // The row spelling `effect_documentation` would otherwise have emitted,
+    // built from the same descriptor the hatch reads.
+    let enumerated = bands
+        .iter()
+        .map(|parameter| {
+            format!(
+                "{}={}..={}, neutral {}",
+                parameter.name, parameter.min, parameter.max, parameter.neutral
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    for name in [
+        "add_effect",
+        "insert_effect",
+        "set_effect_param",
+        "set_effect_keyframes",
+        "clear_effect_keyframes",
+    ] {
+        let description = tools
+            .iter()
+            .find(|definition| definition.tool.name == name)
+            .expect("every spliced effect tool is generated")
+            .tool
+            .description
+            .as_deref()
+            .expect("every generated tool carries a description")
+            .to_owned();
+        assert!(
+            description.contains("audio_denoise("),
+            "{name} must document the new descriptor"
+        );
+        assert!(
+            !description.contains("profile_band0") && !description.contains("profile_band1"),
+            "{name} must never enumerate a profile row"
+        );
+        assert_eq!(
+            description.matches("profile_band{01..31}_tenth_db").count(),
+            1,
+            "{name} carries the pattern sentence exactly once"
+        );
+        assert!(
+            description.contains(
+                "profile_band{01..31}_tenth_db=-1200..=0, neutral -1200, one per ISO third-octave centre 20 Hz..20 kHz low to high; write all 31 or none; learn them with plan_dialogue_repair"
+            ),
+            "{name}: {description}"
+        );
+        assert!(
+            !description.contains(&enumerated),
+            "{name} must not carry the enumeration"
+        );
+        // AU5 §0 R81/R82: the whole AU5 growth on this description is the
+        // three new descriptor sections, and it is 758 B — the per-tool figure
+        // the registry ledger's description-byte split is built from. Pinning
+        // it here makes that split falsifiable without re-measuring the whole
+        // registry.
+        let first = description
+            .find("; audio_denoise(")
+            .expect("the three AU5 descriptors are appended after audio_true_peak_limiter");
+        let trailer = description
+            .find(". cube_lut additionally requires")
+            .expect("the effect documentation ends with the cube_lut trailer");
+        assert_eq!(
+            trailer - first,
+            758,
+            "{name}: AU5's three descriptor sections must measure 758 B"
+        );
+        // The hatch is worth more than four times its own length on every one
+        // of the five tools, which is rule 78's argument measured rather than
+        // asserted.
+        let pattern = description
+            .split_once("profile_band{01..31}")
+            .map(|(_, rest)| {
+                rest.split_once("plan_dialogue_repair")
+                    .map_or(rest.len(), |(head, _)| {
+                        head.len() + "plan_dialogue_repair".len()
+                    })
+            })
+            .unwrap()
+            + "profile_band{01..31}".len();
+        assert!(
+            pattern * 4 < enumerated.len(),
+            "{name}: pattern {pattern} B against enumerated {} B",
+            enumerated.len()
+        );
+    }
 }
 
 /// AU3 §6.3 / §7 B11: the normalization planner converges through the real
@@ -7570,11 +7940,18 @@ async fn au4_music_track_loudness(
 /// AU4 §7 B12: `plan_clip_fades` through the real engine and the live
 /// endpoint.
 ///
-/// The measurement is the real mix path, so the 400 ms head and tail windows
-/// are decoded, not scripted; the clip is a full-scale-ish steady tone, so
-/// both windows peak well above the -4000 hundredth default. The plan emits
+/// The measurement is the real mix path, so the head and tail windows are
+/// decoded, not scripted; the clip is a full-scale-ish steady tone, so both
+/// windows read well above the -4000 hundredth default. The plan emits
 /// `SetClipAudio` only, and the committed document carries the fades and
 /// nothing else.
+///
+/// **AU5 §7 A17's regression.** AU4's two 400 ms `mix_levels` renders per clip
+/// became one `mix_window_levels` pass per track (§3.8 rule 67), and this test
+/// is the proof that the accessor agrees with the thing it replaced: the same
+/// fixture proposes the same fades — the editor's 7-frame fade-in kept, a
+/// 1-frame fade-out added — over a 20 ms RMS window instead of a 400 ms true
+/// peak. Only the window figures and the name of the published evidence move.
 #[tokio::test(flavor = "multi_thread")]
 async fn au4_plan_clip_fades_measures_the_real_mix_and_commits_set_clip_audio() {
     let generated = au4_music_media();
@@ -7619,9 +7996,10 @@ async fn au4_plan_clip_fades_measures_the_real_mix_and_commits_set_clip_audio() 
     assert_eq!(planned.is_error, Some(false), "{planned:?}");
     let body = planned.structured_content.as_ref().unwrap();
     let revision = body["timeline_revision"].as_u64().unwrap();
-    // Rule 131 in the terms B12 asks for.
-    assert_eq!(body["window_sample_frames"], 19_200);
-    assert_eq!(body["window_project_frames"], 12);
+    // Rule 131 in the terms B12 asks for, on AU5's window.
+    assert_eq!(body["window_milliseconds"], 20);
+    assert_eq!(body["window_sample_frames"], 960);
+    assert_eq!(body["window_project_frames"], 1);
     assert_eq!(body["fade_frames"], 1, "20 ms is 1 project frame at 30 fps");
     assert_eq!(body["skipped"], json!([]));
     let clips = body["clips"].as_array().unwrap();
@@ -7629,7 +8007,7 @@ async fn au4_plan_clip_fades_measures_the_real_mix_and_commits_set_clip_audio() 
     assert_eq!(clips[0]["fade_in_frames"], 7, "a non-zero fade is kept");
     assert_eq!(clips[0]["fade_out_frames"], 1);
     assert!(
-        clips[0]["tail_true_peak_dbtp_hundredths"].as_i64().unwrap() > -4_000,
+        clips[0]["tail_dbfs_hundredths"].as_i64().unwrap() > -4_000,
         "the sine's tail window is hot: {body}"
     );
 

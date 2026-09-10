@@ -118,6 +118,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-09, after AU4 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-09, after AU4 Part B) | 134 | 1,524,370 B | 1,389,434 B | 112,948 B |
 | Served MCP runtime (2026-09-09, after AU4 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-10, after AU5 Part A) | 135 | 1,531,264 B | 1,391,430 B | 117,683 B |
+| Served MCP runtime (2026-09-10, after AU5 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 
 That is a 99.1% reduction in initially advertised serialized tool metadata at
 the M36 baseline, 99.4% at the 2026-08-24 measurement, 99.56% after CC6
@@ -281,11 +283,42 @@ planner is registry-only, reached through `invoke_capability`, whose argument
 schema is generic and embeds no planner argument type. The reduction holds at
 99.63%, 5,660 B served against a 1,524,370 B registry.
 
+AU5 Part A adds one tool, the `get_audio_repair` inspector, and three effect
+descriptors: 54 generated operations + 81 inspectors = 135, and the registry
+grows by 6,894 B to 1,531,264 B. The 1,996 B of new input schema is
+`AudioRepairArgs`' own schema entire — AU5 adds no `Operation` variant, and a
+new *descriptor* reaches no input schema at all, because the `Operation` schema
+embeds `Effect.parameters` as an untyped map. Forty-five new parameter rows are
+therefore free on the input-schema column and cost something only on the
+description column, where the 4,735 B splits exactly three ways: 925 B of
+`get_audio_repair`'s own prose, 3,790 B of `effect_documentation()` growth at
+758 B on each of the five spliced effect tools, and 20 B on `plan_clip_fades`,
+whose window sentence now describes the fade-length RMS window and the
+one-pass-per-track measurement that replaced AU4's two 400 ms renders per clip,
+and whose skip clause now carries the same predicate the emitted per-clip
+reason does.
+
+That 758 B is what the profile hatch buys. `audio_denoise` carries 31
+`profile_band{nn}_tenth_db` rows, and an enumerated row measures 48 B, so the
+31 of them with their separators are 1,550 B against the 175 B pattern sentence
+that replaces them: the growth would have been 2,133 B per spliced tool and
+10,665 B over the five, and the hatch saves 1,375 B per tool and 6,875 B in
+all — an eighth kind of pattern documentation on the same argument that gave
+`color_curves` its compact form. Unlike the earlier hatches this one is
+mandatory rather than economical: the 31 rows are written all-or-none by a
+measurement, so an agent has no use for their individual bounds. Serialized,
+3,084 B is the new tool whole, 3,790 B is the effect-tool description growth
+and 20 B is the fade planner's, summing to the 6,894 B measured. The served
+quad is byte-identical for the eleventh consecutive measurement at
+7 / 5,660 B / 3,510 B / 998 B, and the reduction holds at 99.63%, 5,660 B
+served against a 1,531,264 B registry.
+
 The registry grew with the colour tools; the served surface stays at seven
 tools. The `color_curves` descriptor (133
 parameters) is summarized as a compact pattern in tool documentation, keeping
-roughly 18.8 KB out of the registry, and AU2 gives `audio_parametric_eq`'s
-twelve peaking-band rows the same treatment.
+roughly 18.8 KB out of the registry, AU2 gives `audio_parametric_eq`'s
+twelve peaking-band rows the same treatment, and AU5 gives `audio_denoise`'s
+31 learned noise-floor bands theirs, keeping a further 6.9 KB out.
 It is not yet a claim of 99.1% fewer provider tokens. Providers transform,
 cache, and meter tool definitions differently. A controlled benchmark between
 the pre-M36 revision and the current runtime is the acceptance gate for model-

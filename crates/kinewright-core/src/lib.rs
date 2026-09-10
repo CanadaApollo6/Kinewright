@@ -3,6 +3,7 @@
 mod actor;
 mod agent;
 mod audio_qc;
+mod audio_repair;
 mod automation;
 mod captions;
 pub mod cc7_scenarios;
@@ -36,6 +37,12 @@ pub use audio_qc::{
     AudioClipping, AudioQcException, AudioQcMeasurements, AudioQcProvenance, AudioQcReport,
     AudioQcRequest, audio_qc_exceptions, audio_qc_technical_pass, delivery_audio_exceptions,
     loudness_target_exceptions,
+};
+pub use audio_repair::{
+    AUDIO_REPAIR_ENGINE, AudioRepairMeasurements, AudioRepairProvenance, AudioRepairReport,
+    AudioRepairRequest, REPAIR_CLICK_DENSITY_PER_MINUTE, REPAIR_HUM_EXCESS_HUNDREDTHS,
+    REPAIR_LOW_SNR_HUNDREDTHS, REPAIR_MINIMUM_WINDOWS, REPAIR_WINDOW_MILLISECONDS,
+    audio_repair_exceptions,
 };
 pub use automation::{
     AutomationCurve, AutomationCurveError, HoldStep, Keyframe, KeyframeInterpolation,
@@ -132,15 +139,17 @@ pub use effect::{
     MATTE_WINDOW_CENTER_MAX_BASIS_POINTS, MATTE_WINDOW_CENTER_MIN_BASIS_POINTS,
     MATTE_WINDOW_HALF_EXTENT_MAX_BASIS_POINTS, MATTE_WINDOW_HALF_EXTENT_MIN_BASIS_POINTS,
     MATTE_WINDOW_LIMIT, MATTE_WINDOW_PARAMETER_COUNT, MATTE_WINDOW_ROTATION_LIMIT_CENTIDEGREES,
-    MatteParams, MatteQualifierParams, MatteWindowParams, POST_PRIMARY_LUT_EFFECT_NAMES,
-    PRIMARY_CORRECTION_DESCRIPTOR_PARAMETER_COUNT, ResolvedCurves, active_color_nodes,
-    classify_color_node, color_curve_order_violation, color_curve_parameter_names,
-    color_node_inactive_reason, color_stage_order_violation, effect_compatibility_stage,
-    effect_descriptor, is_audio_effect, is_hold_only_matte_parameter, is_legacy_display_effect,
-    is_lut_color_node, is_managed_color_node, is_matte_capable_color_node, is_matte_parameter,
-    is_static_audio_parameter, lut_node_count, lut_node_may_be_active, managed_color_node_count,
-    matte_capable, matte_parameter_names, matte_parameters, matte_window_parameter_names,
-    matte_window_parameters,
+    MatteParams, MatteQualifierParams, MatteWindowParams, NOISE_PROFILE_BAND_COUNT,
+    NOISE_PROFILE_PARAMETER_NAMES, POST_PRIMARY_LUT_EFFECT_NAMES,
+    PRIMARY_CORRECTION_DESCRIPTOR_PARAMETER_COUNT, PROFILE_BAND_NEUTRAL_TENTH_DB, ResolvedCurves,
+    active_color_nodes, classify_color_node, color_curve_order_violation,
+    color_curve_parameter_names, color_node_inactive_reason, color_stage_order_violation,
+    effect_compatibility_stage, effect_descriptor, has_gain_computer, is_audio_effect,
+    is_hold_only_matte_parameter, is_legacy_display_effect, is_lut_color_node,
+    is_managed_color_node, is_matte_capable_color_node, is_matte_parameter,
+    is_noise_profile_parameter, is_static_audio_parameter, lut_node_count, lut_node_may_be_active,
+    managed_color_node_count, matte_capable, matte_parameter_names, matte_parameters,
+    matte_window_parameter_names, matte_window_parameters,
 };
 pub use journal::JournalCommand;
 pub use media::{
@@ -154,13 +163,14 @@ pub use media::{
     MatteCoverageError, MatteCoverageStatistics, MatteProof, MatteProofError, MatteProofMetadata,
     MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,
     MediaCacheFamilyStatus, MediaCacheInventory, MediaError, MediaEvent, MixLevelReport,
-    MixLevelRequest, MixPeaks, MixSpectrumPoint, MixSpectrumReport, MixSpectrumRequest,
-    MonitorProof, MonitorProofMetadata, MonitorProofRenderKind, Playback, PlaybackState,
-    ProgressSink, RgbaImage, SceneChange, SceneStatus, SilenceSpan, SilenceStatus, SpectrumBand,
-    ThumbnailFrame, ThumbnailKey, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TrackLevels, TranscriptStatus, TranscriptWord, VisualAssetResult,
-    VisualRequestKind, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WaveformData, WaveformPeak,
-    WorkingProof, WorkingProofMetadata, export_lut_preflight_with, export_media_preflight,
+    MixLevelRequest, MixNoiseProfileRequest, MixPeaks, MixSpectrumPoint, MixSpectrumReport,
+    MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest, MonitorProof, MonitorProofMetadata,
+    MonitorProofRenderKind, NoiseProfileReport, Playback, PlaybackState, ProgressSink, RgbaImage,
+    SceneChange, SceneStatus, SilenceSpan, SilenceStatus, SpectrumBand, ThumbnailFrame,
+    ThumbnailKey, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TrackLevels, TranscriptStatus, TranscriptWord, VisualAssetResult, VisualRequestKind,
+    WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WaveformData, WaveformPeak, WorkingProof,
+    WorkingProofMetadata, export_lut_preflight_with, export_media_preflight,
     matte_coverage_statistics,
 };
 pub use model::{

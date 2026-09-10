@@ -10,10 +10,11 @@ use crossbeam_channel::{Receiver, Sender};
 use thiserror::Error;
 
 use crate::{
-    AssetId, AudioBusId, AudioQcException, AudioQcReport, AudioQcRequest, ClipId, ColorDescription,
-    DeliveryVerification, DeliveryVerificationRequest, Document, EffectId, LoudnessTarget,
-    LutAsset, LutAssetId, MediaAsset, MediaSourceFingerprint, NormalizedRoi, Rational,
-    SCOPE_BASIS_POINTS, TimeCode, TrackId, TrackKind, TrackMix,
+    AssetId, AudioBusId, AudioQcException, AudioQcReport, AudioQcRequest, AudioRepairReport,
+    AudioRepairRequest, ClipId, ColorDescription, DeliveryVerification,
+    DeliveryVerificationRequest, Document, EffectId, LoudnessTarget, LutAsset, LutAssetId,
+    MediaAsset, MediaSourceFingerprint, NormalizedRoi, Rational, SCOPE_BASIS_POINTS, TimeCode,
+    TrackId, TrackKind, TrackMix,
 };
 
 /// The runtime truth about whether an imported source can currently be read.
@@ -1294,6 +1295,96 @@ pub struct MixSpectrumReport {
     pub bands: Vec<SpectrumBand>,
 }
 
+/// AU5 §3.7: learn a noise floor from one project range at one mix point.
+///
+/// The same shape as [`MixSpectrumRequest`] because the profile *is*
+/// `mix_spectrum` with a different reduction; the three things that differ
+/// are named in AU5 §3.7 rule 61 and live in media.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub struct MixNoiseProfileRequest {
+    /// Omitted or `null` measures the whole document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub range: Option<std::ops::Range<TimeCode>>,
+    pub point: MixSpectrumPoint,
+}
+
+/// One learned noise profile (AU5 §3.7).
+///
+/// `bands` is on the wire unit AU5 §3.3 rule 43 defines once — the band level
+/// `band_level_hundredths` reports, carried in tenth dB, so a full-scale sine
+/// reads 0 — and is exactly the 31 values `audio_denoise`'s
+/// `profile_band01_tenth_db` … `profile_band31_tenth_db` rows take, low band to
+/// high.
+///
+/// At the profile's 4 096-frame window the Hann main lobe is 46.9 Hz, so the
+/// **eleven** bands from 20 Hz to 200 Hz are narrower than the lobe and their
+/// readings are dominated by leakage from their neighbours. They are still
+/// reported as learned: AU5 §3.3 rule 44's interpolation is what smooths them,
+/// and the alternative — refusing to learn the bottom of the spectrum, which is
+/// exactly where rumble lives — would be worse.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub struct NoiseProfileReport {
+    pub range: std::ops::Range<TimeCode>,
+    pub point: MixSpectrumPoint,
+    pub sample_rate: u32,
+    pub sample_frames: u64,
+    /// How many analysis windows the percentile is taken over.
+    pub windows: u32,
+    /// 31 ISO third-octave bands, low to high, in tenth dB — exactly the
+    /// values `audio_denoise`'s [`NOISE_PROFILE_PARAMETER_NAMES`](crate::NOISE_PROFILE_PARAMETER_NAMES)
+    /// rows take.
+    pub bands: [i32; crate::NOISE_PROFILE_BAND_COUNT],
+}
+
+/// AU5 §3.8: short-window RMS levels over one project range at one mix point.
+///
+/// `window_milliseconds` is `1..=1000` and `hop_milliseconds` is
+/// `1..=window_milliseconds`; both are rejected outside their range **by
+/// name**, so a caller learns which one it got wrong.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub struct MixWindowRequest {
+    /// Omitted or `null` measures the whole document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub range: Option<std::ops::Range<TimeCode>>,
+    pub point: MixSpectrumPoint,
+    /// `1..=1000`.
+    pub window_milliseconds: u32,
+    /// `1..=window_milliseconds`.
+    pub hop_milliseconds: u32,
+}
+
+/// The measured short-window RMS levels of one mix point (AU5 §3.8).
+///
+/// Deliberately **not** BS.1770 — no 400 ms gating block, no K-weighting —
+/// which is exactly why AU4's `plan_clip_fades` wanted it.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub struct MixWindowLevelReport {
+    pub range: std::ops::Range<TimeCode>,
+    pub point: MixSpectrumPoint,
+    pub sample_rate: u32,
+    pub window_milliseconds: u32,
+    pub hop_milliseconds: u32,
+    /// One entry per window, in order: dBFS hundredths, or `None` for a window
+    /// under `SILENCE_POWER`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub windows: Vec<Option<i32>>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExportCancellation(Arc<AtomicBool>);
 
@@ -2069,6 +2160,62 @@ pub trait Analysis: Send + Sync {
         document: &Document,
         request: &AudioQcRequest,
     ) -> Result<AudioQcReport, MediaError> {
+        let _ = (document, request);
+        Err(MediaError::NotImplemented)
+    }
+    /// AU5 §3.7: learn a noise floor from one project range at one point,
+    /// synchronously through the real mix path.
+    ///
+    /// The profile must describe what the *node* sees — post track gain, pan
+    /// and routing, pre-chain — which an asset-domain analysis structurally
+    /// cannot, so this is deliberately not a cached `AnalysisKind`.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::NotImplemented`] by default; a range rendering fewer than
+    /// `NOISE_PROFILE_MINIMUM_FRAMES` audio sample frames is refused with
+    /// [`MediaError::MixLoudnessRangeTooShort`], re-spelled with the
+    /// noise-profile minimum; or a media error when the range is invalid or the
+    /// mix cannot be rendered.
+    fn mix_noise_profile(
+        &self,
+        document: &Document,
+        request: &MixNoiseProfileRequest,
+    ) -> Result<NoiseProfileReport, MediaError> {
+        let _ = (document, request);
+        Err(MediaError::NotImplemented)
+    }
+    /// AU5 §3.8: short-window RMS levels over one project range at one point.
+    ///
+    /// Deliberately **not** BS.1770 — no 400 ms gating block, no K-weighting —
+    /// which is exactly why `plan_clip_fades` wanted it.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::NotImplemented`] by default;
+    /// [`MediaError::MixLoudnessRangeTooShort`] for a range under one window;
+    /// or a media error when the range or either millisecond argument is
+    /// invalid, or the mix cannot be rendered.
+    fn mix_window_levels(
+        &self,
+        document: &Document,
+        request: &MixWindowRequest,
+    ) -> Result<MixWindowLevelReport, MediaError> {
+        let _ = (document, request);
+        Err(MediaError::NotImplemented)
+    }
+    /// AU5 §3.9: measure one mix point for the three repair artefacts —
+    /// percentile SNR, mains hum excess and click density — over one render.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::NotImplemented`] by default, or a media error when the
+    /// range is invalid or the mix cannot be rendered or measured.
+    fn audio_repair(
+        &self,
+        document: &Document,
+        request: &AudioRepairRequest,
+    ) -> Result<AudioRepairReport, MediaError> {
         let _ = (document, request);
         Err(MediaError::NotImplemented)
     }

@@ -725,12 +725,17 @@ pub struct ChainLookahead {
 /// AU2 §3.6: the declared processing latency of one ordered chain, in
 /// milliseconds.
 ///
-/// Sums the **static** `lookahead_milliseconds` of every `audio_compressor`
-/// and `audio_true_peak_limiter` in the slice, using the descriptor neutral
-/// when the parameter is absent, whether or not the node is bypassed: a
-/// bypassed node keeps its delay line, so toggling bypass changes no
-/// alignment. The compressor's `rms_window_milliseconds` is static too (AU2 §0
-/// E16) but is not latency, so it is never counted here.
+/// Sums the **static** `lookahead_milliseconds` of every node whose lookahead
+/// row [`is_static_audio_parameter`](crate::is_static_audio_parameter)
+/// accepts — `audio_compressor` and `audio_true_peak_limiter` from AU2, and
+/// `audio_denoise` (12 ms) and `audio_declick` (3 ms) since AU5 §2.2 rule
+/// 10 — using the descriptor neutral when the parameter is absent, whether or
+/// not the node is bypassed: a bypassed node keeps its delay line, so toggling
+/// bypass changes no alignment. `audio_hum_removal` carries no lookahead row
+/// at all and so contributes exactly 0, which is what makes AU5 §2.3 rule 16's
+/// repair chain 12 + 0 + 3 = 15 ms. The compressor's `rms_window_milliseconds`
+/// is static too (AU2 §0 E16) but is not latency, so it is never counted
+/// here.
 #[must_use]
 pub fn chain_lookahead_milliseconds(effects: &[Effect]) -> i64 {
     effects

@@ -9,28 +9,36 @@ use ffmpeg_next as ffmpeg;
 use kinewright_core::{
     AUDIO_QC_CLIPPED_RUN_SAMPLES, AUDIO_QC_SILENCE_DBFS_HUNDREDTHS,
     AUDIO_QC_SILENCE_WINDOW_MILLISECONDS, AudioBusId, AudioChannelClipping, AudioClipping,
-    AudioQcMeasurements, AudioQcProvenance, AudioQcReport, AudioQcRequest, BusLevels,
-    ColorDescription, DELIVERY_BIT_DEPTH_ALLOWED, DeliveryColorError, DeliveryColorMismatch,
-    DeliveryEncodeDepth, DeliveryProfile, Document, Effect, EffectId, ExportAudioReport,
-    ExportCancellation, ExportProgress, ExportReport, ExportSettings, FrameRounding,
+    AudioQcMeasurements, AudioQcProvenance, AudioQcReport, AudioQcRequest, AudioRepairMeasurements,
+    AudioRepairProvenance, AudioRepairReport, AudioRepairRequest, BusLevels, ColorDescription,
+    DELIVERY_BIT_DEPTH_ALLOWED, DeliveryColorError, DeliveryColorMismatch, DeliveryEncodeDepth,
+    DeliveryProfile, Document, Effect, EffectId, ExportAudioReport, ExportCancellation,
+    ExportProgress, ExportReport, ExportSettings, FrameRounding,
     LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, LoudnessTarget, MediaError, MixLevelReport,
-    MixLevelRequest, MixSpectrumPoint, MixSpectrumReport, MixSpectrumRequest, ParamValue,
-    ProgressSink, TimeCode, TrackId, TrackLevels, audio_qc_exceptions, audio_qc_technical_pass,
+    MixLevelRequest, MixNoiseProfileRequest, MixSpectrumPoint, MixSpectrumReport,
+    MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest, NOISE_PROFILE_BAND_COUNT,
+    NoiseProfileReport, PROFILE_BAND_NEUTRAL_TENTH_DB, ParamValue, ProgressSink,
+    REPAIR_MINIMUM_WINDOWS, REPAIR_WINDOW_MILLISECONDS, TimeCode, TrackId, TrackLevels,
+    audio_qc_exceptions, audio_qc_technical_pass, audio_repair_exceptions,
     delivery_color_mismatches, map_frames_with_rounding,
 };
 
 use crate::{
     audio::{
-        AudioMixProcessor, ClipAudioShaping, decode_audio_range, graph_latency_frames,
-        limit_audio_mix, process_buffer_static,
+        AudioMixProcessor, ClipAudioShaping, decode_audio_range, detect_clicks,
+        graph_latency_frames, limit_audio_mix, process_buffer_static, stage_latency_frames,
     },
     clock::{frame_to_samples, samples_to_frame},
     compositor::GpuContext,
     decode::backend,
-    loudness::{LOUDNESS_GATING_BLOCK_FRAMES, LoudnessMeter},
+    loudness::{LOUDNESS_GATING_BLOCK_FRAMES, LoudnessMeter, nearest_rank_index},
     lut_store::LutLibrary,
     render::FrameRenderer,
-    spectrum::{SPECTRUM_MINIMUM_FRAMES, third_octave_spectrum},
+    spectrum::{
+        NOISE_PROFILE_HOP_FRAMES, NOISE_PROFILE_MINIMUM_FRAMES, NOISE_PROFILE_PERCENT,
+        NOISE_PROFILE_SEGMENT_FRAMES, SILENCE_POWER, SPECTRUM_HOP_FRAMES, SPECTRUM_MINIMUM_FRAMES,
+        SPECTRUM_SEGMENT_FRAMES, third_octave_band_percentile, third_octave_spectrum,
+    },
     timeline::timeline_audio_segments,
 };
 
@@ -1778,12 +1786,20 @@ pub(crate) fn measure_mix_spectrum(
             .ok_or_else(|| MediaError::Backend(format!("bus {} is not in the document", bus.0)))?,
     };
     let channels = usize::from(AUDIO_CHANNELS);
-    let measured = third_octave_spectrum(samples, channels, AUDIO_RATE).ok_or(
-        MediaError::MixSpectrumRangeTooShort {
-            sample_frames: u64::try_from(samples.len() / channels.max(1)).unwrap_or(0),
-            required: SPECTRUM_MINIMUM_FRAMES,
-        },
-    )?;
+    // AU5 §0 R33: AU2's caller passes today's constants explicitly, so its
+    // goldens are byte-unchanged by the parameterisation (A4).
+    let measured = third_octave_spectrum(
+        samples,
+        channels,
+        AUDIO_RATE,
+        SPECTRUM_SEGMENT_FRAMES,
+        SPECTRUM_HOP_FRAMES,
+        SPECTRUM_MINIMUM_FRAMES,
+    )
+    .ok_or(MediaError::MixSpectrumRangeTooShort {
+        sample_frames: u64::try_from(samples.len() / channels.max(1)).unwrap_or(0),
+        required: SPECTRUM_MINIMUM_FRAMES,
+    })?;
     Ok(MixSpectrumReport {
         range,
         point: request.point,
@@ -1792,6 +1808,404 @@ pub(crate) fn measure_mix_spectrum(
         segments: measured.segments,
         bands: measured.bands,
     })
+}
+
+// ---- AU5 §3.7-§3.9: the three repair measurements ------------------------
+
+/// AU5 §3.3 rule 43 (R34): the **three conversions**, normatively and nowhere
+/// else, from one measured band level to one wire profile row.
+///
+/// (i) A band that answers `None` — no bins, or band power under
+/// `SILENCE_POWER` — is written as `PROFILE_BAND_NEUTRAL_TENTH_DB` (-1200), the
+/// neutral, so an unlearnable band gates nothing and a learn over digital
+/// silence yields the all-neutral profile AU5 §3.2 rule 41 already handles.
+/// (ii) Hundredths become tenths by `i32::div_euclid(10)` on the rounded
+/// hundredths figure — round toward **negative infinity** — so a band is never
+/// written quieter than it measured and the conversion is one expression with
+/// one answer on every OS. (iii) The result is **clamped into `-1200..=0`**, the
+/// descriptor domain, so a band louder than a full-scale sine writes 0 rather
+/// than failing `SetEffectParam` inside a prepared plan.
+fn profile_band_tenth_db(band_level_hundredths: Option<i32>) -> i32 {
+    let neutral = i32::try_from(PROFILE_BAND_NEUTRAL_TENTH_DB).unwrap_or(-1_200);
+    let Some(hundredths) = band_level_hundredths else {
+        return neutral;
+    };
+    hundredths.div_euclid(10).clamp(neutral, 0)
+}
+
+/// The stem for one mix point out of a rendered pass.
+fn stem_at_point(stems: &MixStems, point: MixSpectrumPoint) -> Result<&[f32], MediaError> {
+    match point {
+        MixSpectrumPoint::Master => Ok(&stems.master),
+        MixSpectrumPoint::Track(track) => stems
+            .tracks
+            .iter()
+            .find(|(id, _)| *id == track)
+            .map(|(_, samples)| samples.as_slice())
+            .ok_or_else(|| {
+                MediaError::Backend(format!("track {} is not in the document", track.0))
+            }),
+        MixSpectrumPoint::Bus(bus) => stems
+            .buses
+            .iter()
+            .find(|(id, _)| *id == bus)
+            .map(|(_, samples)| samples.as_slice())
+            .ok_or_else(|| MediaError::Backend(format!("bus {} is not in the document", bus.0))),
+    }
+}
+
+/// AU5 §3.7 rule 61: learn a noise floor from one project range at one point.
+///
+/// Measured **synchronously through the mix path**, not cached per asset, for
+/// the reason rule 62 gives: the profile must describe what the *node* sees —
+/// post track gain, pan and routing, pre-chain — which an asset-domain analysis
+/// structurally cannot.
+///
+/// # Errors
+///
+/// Returns [`MediaError::MixLoudnessRangeTooShort`] with the noise-profile
+/// minimum interpolated when the range renders fewer than
+/// `NOISE_PROFILE_MINIMUM_FRAMES` audio sample frames, or a media error when the
+/// range is empty, the point is not in the document, or the mix cannot be
+/// rendered.
+pub(crate) fn measure_mix_noise_profile(
+    document: &Document,
+    request: &MixNoiseProfileRequest,
+) -> Result<NoiseProfileReport, MediaError> {
+    let range = clamped_measurement_range(document, request.range.clone(), "noise profile")?;
+    // AU5 §3.7 rule 63 (R37): refused before anything is decoded, on the caller's
+    // own conversion...
+    let requested_frames = frame_to_samples(range.end, AUDIO_RATE, document.fps)
+        .saturating_sub(frame_to_samples(range.start, AUDIO_RATE, document.fps));
+    if requested_frames < NOISE_PROFILE_MINIMUM_FRAMES {
+        return Err(MediaError::MixLoudnessRangeTooShort {
+            sample_frames: requested_frames,
+            required: NOISE_PROFILE_MINIMUM_FRAMES,
+        });
+    }
+    let settings = measurement_settings(document);
+    let stems = mix_audio_stems(document, range.clone(), &settings)?;
+    let samples = stem_at_point(&stems, request.point)?;
+    let channels = usize::from(AUDIO_CHANNELS);
+    let sample_frames = u64::try_from(samples.len() / channels.max(1)).unwrap_or(0);
+    // ...and **re-checked here** on the rendered count, rather than trusting the
+    // caller's frame-domain conversion (rule 63).
+    if sample_frames < NOISE_PROFILE_MINIMUM_FRAMES {
+        return Err(MediaError::MixLoudnessRangeTooShort {
+            sample_frames,
+            required: NOISE_PROFILE_MINIMUM_FRAMES,
+        });
+    }
+    let measured = third_octave_band_percentile(
+        samples,
+        channels,
+        AUDIO_RATE,
+        NOISE_PROFILE_SEGMENT_FRAMES,
+        NOISE_PROFILE_HOP_FRAMES,
+        NOISE_PROFILE_MINIMUM_FRAMES,
+        NOISE_PROFILE_PERCENT,
+    )
+    .ok_or(MediaError::MixLoudnessRangeTooShort {
+        sample_frames,
+        required: NOISE_PROFILE_MINIMUM_FRAMES,
+    })?;
+    let mut bands = [0_i32; NOISE_PROFILE_BAND_COUNT];
+    for (band, measured) in bands.iter_mut().zip(&measured.bands) {
+        *band = profile_band_tenth_db(*measured);
+    }
+    Ok(NoiseProfileReport {
+        range,
+        point: request.point,
+        sample_rate: AUDIO_RATE,
+        sample_frames,
+        windows: measured.windows,
+        bands,
+    })
+}
+
+/// AU5 §3.8: one window's RMS level in dBFS hundredths, or `None` under
+/// [`SILENCE_POWER`].
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn window_level_hundredths(window: &[f32]) -> Option<i32> {
+    if window.is_empty() {
+        return None;
+    }
+    let sum: f64 = window
+        .iter()
+        .map(|sample| f64::from(*sample) * f64::from(*sample))
+        .sum();
+    let mean_square = sum / window.len() as f64;
+    if mean_square < SILENCE_POWER {
+        return None;
+    }
+    Some((10.0 * mean_square.log10() * 100.0).round() as i32)
+}
+
+/// AU5 §3.8 rule 65: short-window RMS levels over one project range at one
+/// point.
+///
+/// Deliberately **not** BS.1770 — no 400 ms gating block, no K-weighting —
+/// which is exactly why AU4's `plan_clip_fades` wanted it. A level is plain
+/// `10*log10(mean square)` over every channel of the window, so a full-scale
+/// square wave reads 0.00 dBFS and a full-scale sine reads -3.01.
+///
+/// # Errors
+///
+/// Returns [`MediaError::MixLoudnessRangeTooShort`] for a range under one whole
+/// window, or a media error when the range is empty, either millisecond
+/// argument is outside its domain, the point is not in the document, or the mix
+/// cannot be rendered.
+pub(crate) fn measure_mix_window_levels(
+    document: &Document,
+    request: &MixWindowRequest,
+) -> Result<MixWindowLevelReport, MediaError> {
+    // Rejected **by name**, so a caller learns which one it got wrong.
+    if !(1..=1_000).contains(&request.window_milliseconds) {
+        return Err(MediaError::Backend(format!(
+            "window_milliseconds {} is outside 1..=1000",
+            request.window_milliseconds
+        )));
+    }
+    if request.hop_milliseconds == 0 || request.hop_milliseconds > request.window_milliseconds {
+        return Err(MediaError::Backend(format!(
+            "hop_milliseconds {} is outside 1..={}",
+            request.hop_milliseconds, request.window_milliseconds
+        )));
+    }
+    let range = clamped_measurement_range(document, request.range.clone(), "mix window levels")?;
+    // AU5 §3.8 rule 66: the same truncating helper the nodes use, so a window is
+    // an exact frame count at every rate.
+    let window_frames = stage_latency_frames(i64::from(request.window_milliseconds), AUDIO_RATE);
+    let hop_frames = stage_latency_frames(i64::from(request.hop_milliseconds), AUDIO_RATE).max(1);
+    let requested_frames = frame_to_samples(range.end, AUDIO_RATE, document.fps)
+        .saturating_sub(frame_to_samples(range.start, AUDIO_RATE, document.fps));
+    if requested_frames < u64::try_from(window_frames).unwrap_or(u64::MAX) {
+        return Err(MediaError::MixLoudnessRangeTooShort {
+            sample_frames: requested_frames,
+            required: u64::try_from(window_frames).unwrap_or(u64::MAX),
+        });
+    }
+    let settings = measurement_settings(document);
+    let stems = mix_audio_stems(document, range.clone(), &settings)?;
+    let samples = stem_at_point(&stems, request.point)?;
+    let channels = usize::from(AUDIO_CHANNELS);
+    let frames = samples.len() / channels.max(1);
+    let mut windows = Vec::new();
+    let mut start = 0_usize;
+    while start + window_frames <= frames {
+        windows.push(window_level_hundredths(
+            &samples[start * channels..(start + window_frames) * channels],
+        ));
+        start += hop_frames;
+    }
+    Ok(MixWindowLevelReport {
+        range,
+        point: request.point,
+        sample_rate: AUDIO_RATE,
+        window_milliseconds: request.window_milliseconds,
+        hop_milliseconds: request.hop_milliseconds,
+        windows,
+    })
+}
+
+/// AU5 §3.9: the Goertzel block, in sample frames.
+///
+/// **AU5 §0 R64 raised it from 4 800 to 24 000.** R18 fixes the floor at
+/// "≥ 4 800" and the contract's 4 800 is justified only as "enough to resolve 50
+/// from 60 Hz", which it is — but the *shoulders* the excess is measured against
+/// sit at `f * 2^(±1/6)`, only 5.45 and 6.12 Hz from a 50 Hz fundamental. Over
+/// 4 800 rectangular samples those are 0.545 and 0.612 bins away, where a pure
+/// 50 Hz tone still reads -4.8 and -6.2 dB, so the largest excess any hum can
+/// show is about 5 dB — under `REPAIR_HUM_EXCESS_HUNDREDTHS` (600), and the
+/// finding could never fire. At 24 000 frames (500 ms, 2 Hz bins) the same
+/// shoulders read -21 and -34 dB and the measurement means what §2.4 rule 24
+/// says it means.
+const HUM_GOERTZEL_BLOCK_FRAMES: usize = 24_000;
+
+/// AU5 §3.9: how many harmonics of each mains frequency are summed.
+const HUM_HARMONICS: usize = 4;
+
+/// AU5 §3.9: the shoulder offset, a sixth of an octave either side.
+fn sixth_octave_ratio() -> f64 {
+    2.0_f64.powf(1.0 / 6.0)
+}
+
+/// AU5 §3.9: the mean-square power at one frequency, by Goertzel over as many
+/// whole [`HUM_GOERTZEL_BLOCK_FRAMES`] blocks as the range holds.
+///
+/// No FFT and no new dependency. A sine of amplitude `A` exactly on the
+/// analysis frequency gives `|X| = A*N/2`, so the mean-square power is
+/// `2|X|^2/N^2`, which is what this returns, averaged over blocks and channels.
+#[allow(clippy::cast_precision_loss)]
+fn goertzel_power(samples: &[f32], channels: usize, rate: u32, hertz: f64) -> Option<f64> {
+    let channels = channels.max(1);
+    let frames = samples.len() / channels;
+    let block = HUM_GOERTZEL_BLOCK_FRAMES;
+    if frames < block {
+        return None;
+    }
+    let blocks = frames / block;
+    let omega = 2.0 * std::f64::consts::PI * hertz / f64::from(rate);
+    let coefficient = 2.0 * omega.cos();
+    let mut total = 0.0_f64;
+    for index in 0..blocks {
+        for channel in 0..channels {
+            let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
+            for frame in 0..block {
+                let sample = f64::from(samples[(index * block + frame) * channels + channel]);
+                let s0 = coefficient.mul_add(s1, sample) - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+            let real = s1 - s2 * omega.cos();
+            let imaginary = s2 * omega.sin();
+            let magnitude_squared = real.mul_add(real, imaginary * imaginary);
+            total += 2.0 * magnitude_squared / (block as f64 * block as f64);
+        }
+    }
+    Some(total / (blocks * channels) as f64)
+}
+
+/// AU5 §3.9: one harmonic's excess over the **mean of its two sixth-octave
+/// shoulders**, in dB.
+fn harmonic_excess_db(samples: &[f32], channels: usize, rate: u32, hertz: f64) -> Option<f64> {
+    let ratio = sixth_octave_ratio();
+    let level = |hertz: f64| {
+        goertzel_power(samples, channels, rate, hertz)
+            .map(|power| 10.0 * power.max(SILENCE_POWER).log10())
+    };
+    let centre = level(hertz)?;
+    let low = level(hertz / ratio)?;
+    let high = level(hertz * ratio)?;
+    Some(centre - f64::midpoint(low, high))
+}
+
+/// AU5 §3.9: the summed excess over four harmonics, and the four values.
+#[allow(clippy::cast_possible_truncation)]
+fn hum_excess_hundredths(
+    samples: &[f32],
+    channels: usize,
+    rate: u32,
+    fundamental: f64,
+) -> (Option<i32>, Vec<i32>) {
+    let mut per_harmonic = Vec::with_capacity(HUM_HARMONICS);
+    let mut summed = 0.0_f64;
+    for harmonic in 1..=HUM_HARMONICS {
+        #[allow(clippy::cast_precision_loss)]
+        let hertz = fundamental * harmonic as f64;
+        let Some(excess) = harmonic_excess_db(samples, channels, rate, hertz) else {
+            return (None, Vec::new());
+        };
+        per_harmonic.push((excess * 100.0).round() as i32);
+        summed += excess.max(0.0);
+    }
+    (Some((summed * 100.0).round() as i32), per_harmonic)
+}
+
+/// AU5 §3.9 rule 68: measure one mix point for the three repair artefacts —
+/// percentile SNR, mains hum excess and click density — over **one** render.
+///
+/// # Errors
+///
+/// Returns a media error when the range is empty, the point is not in the
+/// document, or the mix cannot be rendered.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub(crate) fn measure_audio_repair(
+    document: &Document,
+    request: &AudioRepairRequest,
+) -> Result<AudioRepairReport, MediaError> {
+    let range = clamped_measurement_range(document, request.range.clone(), "audio repair")?;
+    let settings = measurement_settings(document);
+    let stems = mix_audio_stems(document, range.clone(), &settings)?;
+    let samples = stem_at_point(&stems, request.point)?;
+    let channels = usize::from(AUDIO_CHANNELS);
+    let frames = samples.len() / channels.max(1);
+    let sample_frames = u64::try_from(frames).unwrap_or(0);
+
+    // The percentiles. Hop = window; a window under `SILENCE_POWER` is excluded
+    // from the population and does not count into `windows`.
+    let window_frames = stage_latency_frames(i64::from(REPAIR_WINDOW_MILLISECONDS), AUDIO_RATE);
+    let mut levels = Vec::new();
+    let mut start = 0_usize;
+    while window_frames > 0 && start + window_frames <= frames {
+        if let Some(level) =
+            window_level_hundredths(&samples[start * channels..(start + window_frames) * channels])
+        {
+            levels.push(level);
+        }
+        start += window_frames;
+    }
+    levels.sort_unstable();
+    let windows = u32::try_from(levels.len()).unwrap_or(u32::MAX);
+    let (noise_floor, signal, snr) = if windows >= REPAIR_MINIMUM_WINDOWS {
+        let floor = levels[nearest_rank_index(levels.len(), 10)];
+        let signal = levels[nearest_rank_index(levels.len(), 90)];
+        (Some(floor), Some(signal), Some(signal - floor))
+    } else {
+        (None, None, None)
+    };
+
+    let (hum_50, hum_50_harmonics) = hum_excess_hundredths(samples, channels, AUDIO_RATE, 50.0);
+    let (hum_60, hum_60_harmonics) = hum_excess_hundredths(samples, channels, AUDIO_RATE, 60.0);
+
+    // Clicks: AU5 §3.5 rule 57's detector, at the descriptor's neutral
+    // threshold and its **maximum** repairable span — the inspector counts what
+    // the node could repair at all, not what a node parked at the neutral
+    // `max_click_milliseconds = 0` would repair, which is nothing (AU5 §0 R65).
+    let threshold = descriptor_value("audio_declick", "detector_threshold_tenth_db", |p| {
+        p.neutral
+    });
+    let max_click = descriptor_value("audio_declick", "max_click_milliseconds", |p| p.max);
+    let clicks = detect_clicks(samples, AUDIO_CHANNELS, AUDIO_RATE, threshold, max_click);
+    let click_count = clicks.count();
+    let click_density_per_minute = u64::from(click_count)
+        .saturating_mul(60)
+        .saturating_mul(u64::from(AUDIO_RATE))
+        .checked_div(sample_frames)
+        .and_then(|density| u32::try_from(density).ok())
+        .unwrap_or(0);
+
+    let measurements = AudioRepairMeasurements {
+        windows,
+        noise_floor_dbfs_hundredths: noise_floor,
+        signal_dbfs_hundredths: signal,
+        snr_db_hundredths: snr,
+        hum_50_excess_db_hundredths: hum_50,
+        hum_60_excess_db_hundredths: hum_60,
+        click_count,
+        click_density_per_minute,
+    };
+    Ok(AudioRepairReport {
+        range,
+        point: request.point,
+        sample_rate: AUDIO_RATE,
+        sample_frames,
+        window_milliseconds: REPAIR_WINDOW_MILLISECONDS,
+        windows,
+        noise_floor_dbfs_hundredths: noise_floor,
+        signal_dbfs_hundredths: signal,
+        snr_db_hundredths: snr,
+        hum_50_excess_db_hundredths: hum_50,
+        hum_60_excess_db_hundredths: hum_60,
+        hum_50_harmonic_excess_db_hundredths: hum_50_harmonics,
+        hum_60_harmonic_excess_db_hundredths: hum_60_harmonics,
+        click_count,
+        click_density_per_minute,
+        findings: audio_repair_exceptions(&measurements),
+        evidence_only: true,
+        provenance: AudioRepairProvenance::default(),
+    })
+}
+
+/// One figure off a built-in descriptor row, so no threshold is re-spelled here.
+fn descriptor_value(
+    effect: &str,
+    parameter: &str,
+    pick: impl Fn(&kinewright_core::EffectParameterDescriptor) -> i64,
+) -> i64 {
+    kinewright_core::effect_descriptor(effect)
+        .and_then(|descriptor| descriptor.parameter(parameter))
+        .map_or(0, pick)
 }
 
 /// AU1 §6.1: the throwaway settings a measurement pass needs.
@@ -3347,5 +3761,38 @@ mod tests {
         assert_eq!(report.limiter_passes, 1);
         assert_eq!(report.peak_reduction_hundredths, 0);
         assert!(report.on_target, "{report:?}");
+    }
+
+    /// AU5 §7 A4 / §3.3 rule 43 (R34): the **three conversions**, each driven
+    /// directly.
+    #[test]
+    fn au5_the_profile_wire_conversion_holds_its_three_rules() {
+        // (i) A band that answers `None` is written as the neutral, so a learn
+        // over digital silence yields the all-neutral profile rule 41 handles.
+        assert_eq!(profile_band_tenth_db(None), -1_200);
+        // (ii) Hundredths become tenths by `div_euclid(10)` — toward negative
+        // infinity — so a band is never written quieter than it measured.
+        assert_eq!(profile_band_tenth_db(Some(-724)), -73);
+        assert_eq!(profile_band_tenth_db(Some(-720)), -72);
+        assert_eq!(profile_band_tenth_db(Some(-1)), -1);
+        assert_eq!((-724_i32).div_euclid(10), -73);
+        // (iii) Clamped into the descriptor domain, so a band louder than a
+        // full-scale sine writes 0 rather than failing `SetEffectParam` inside a
+        // prepared plan, and one under -120 dBFS writes the neutral.
+        assert_eq!(profile_band_tenth_db(Some(300)), 0);
+        assert_eq!(profile_band_tenth_db(Some(-99_999)), -1_200);
+    }
+
+    /// AU5 §3.8 rule 65: a window under `SILENCE_POWER` reports `None`, and a
+    /// full-scale sine reads -3.01 dBFS on the plain RMS scale.
+    #[test]
+    fn au5_a_window_level_is_plain_rms_dbfs() {
+        assert_eq!(window_level_hundredths(&[0.0; 512]), None);
+        let full_scale = crate::test_support::tone(1_000.0, 1.0, 48_000, 4_800);
+        let level = window_level_hundredths(&full_scale).expect("a tone carries energy");
+        assert!(
+            (level + 301).abs() <= 5,
+            "a full-scale sine reads {level} hundredths dBFS, not -301"
+        );
     }
 }

@@ -1251,6 +1251,12 @@ frame (21.3 ms) of padding may trail. Neither is compensated; on a ≥ 5 s fixtu
 integrated is under 5 hundredths and on true peak none; no test pins decoded and source
 `sample_frames` equal or any sample-exact alignment.
 
+**Descendants.** AU5 §3.11's repair lanes
+(`crates/kinewright-media/tests/au5_fixtures.rs`) are this section's house style carried forward:
+exact `wav_f32` bytes rather than lavfi for the same reason §5.8 gives, one printed measurement line
+per lane, a named budget constant carrying its derivation, a `FIXTURE_MINIMUM_MARGIN` of 2.0, and no
+`cfg`-conditioned tolerance anywhere.
+
 ### 5.9 Part B media evidence map (brief a, i)
 
 (a) §5.8. (i) §5.6; `export_document_reporting` on the engine returns the step's report.

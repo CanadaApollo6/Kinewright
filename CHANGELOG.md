@@ -62,12 +62,28 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   block. `lufs=none` in `get_audio_levels` therefore means silent only.
   `no_audible_media` now also fires for a timeline whose every audio-bearing
   track is muted or solo-silenced, with a message that says so.
+- An audio node's declared latency is now read from its descriptor in the mix
+  path as well as in validation, so a node whose `lookahead_milliseconds` is
+  absent from the document no longer runs with zero delay.
 - Unrouted tracks are now summed in document order in both playback and export;
   export audio may differ by one ulp per sample from earlier builds when two or
   more unrouted tracks are audible at once (previously nondeterministic run to
   run).
 
 ### Added
+- AU5 Part A, repair nodes and measurement: three audio chain nodes —
+  `audio_denoise` (an STFT broadband gate driven by a 31-band learned noise
+  profile, 12 ms declared latency), `audio_hum_removal` (a fixed 50/60 Hz
+  peaking cascade over up to ten harmonics, no latency) and `audio_declick` (a
+  second-difference detector with a trailing reference that excludes flagged
+  samples, a 1 ms pre/post guard and Catmull-Rom repair, 3 ms declared latency)
+  — with all three neutrals bit-exact identities; and three measurements on
+  `Analysis` — `mix_noise_profile`, which learns the 31 bands synchronously
+  through the real mix path, `mix_window_levels`, the short-window RMS accessor
+  AU4 deferred, and `audio_repair`, which reports a percentile signal-to-noise
+  ratio, mains-hum excess over sixth-octave shoulders and click density, judged
+  by core's `audio_repair_exceptions`. See
+  docs/AU5-REPAIR-AND-ROOM-TONE.md.
 - AU4 Part B, automation editing: a rubber band on every audio clip in the
   timeline (the same band the waveform paints in; click to add a key, drag to
   move it, right-click or Delete to remove; snaps to project frames, Alt

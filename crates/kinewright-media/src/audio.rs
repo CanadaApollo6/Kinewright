@@ -11,9 +11,31 @@ use std::{
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
-    AudioBus, AudioBusId, AudioChain, AudioMaster, AutomationCurve, ChainLookahead, Clip, ClipId,
-    Document, Effect, EffectId, ExportCancellation, MediaError, MixPeaks, PanLaw, Rational,
-    TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, TimeCode, TrackId,
+    AudioBus,
+    AudioBusId,
+    AudioChain,
+    AudioMaster,
+    AutomationCurve,
+    ChainLookahead,
+    Clip,
+    ClipId,
+    Document,
+    Effect,
+    EffectId,
+    ExportCancellation,
+    MediaError,
+    MixPeaks,
+    NOISE_PROFILE_BAND_COUNT,
+    NOISE_PROFILE_PARAMETER_NAMES,
+    PROFILE_BAND_NEUTRAL_TENTH_DB,
+    PanLaw,
+    Rational,
+    TRACK_MIX_PAN_MAX,
+    TRACK_MIX_PAN_MIN,
+    TimeCode,
+    TrackId,
+    // AU5 §4.4 rule 84: hoisted to core, where the app reads the same one.
+    has_gain_computer,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -25,6 +47,7 @@ use crate::{
         TRUE_PEAK_GROUP_DELAY_FRAMES, TruePeakEstimator,
     },
     loudness::LiveLoudnessMeter,
+    spectrum::{Complex, forward_fft, hann_window, inverse_fft, third_octave_band_edges},
     timeline::timeline_audio_segments,
 };
 
@@ -216,14 +239,6 @@ impl GainReductionState {
     fn clear(&self) {
         self.0.store(0.0_f32.to_bits(), Ordering::Release);
     }
-}
-
-/// AU2 §3.8: the nodes that have a gain computer and therefore a slot.
-fn has_gain_computer(name: &str) -> bool {
-    matches!(
-        name,
-        "audio_compressor" | "audio_ducking" | "audio_gate" | "audio_true_peak_limiter"
-    )
 }
 
 /// AU2 §3.8/§5.6: every gain-reduction slot key one document asks for, each
@@ -779,6 +794,872 @@ struct TruePeakLimiterState {
     minimum_gain: f32,
 }
 
+// ---- AU5 §3.2-§3.5: the three repair nodes -------------------------------
+
+/// AU5 §3.2 rule 31: the Hann-squared overlap constant at `hop = window / 4`.
+///
+/// Exactly 1.5 for a periodic Hann at 75 % overlap — the `cos t` and `cos 2t`
+/// terms cancel over the four shifts, leaving `4 * mean(w^2) = 4 * 3/8`
+/// (AU5 §0 R19). It is a constant, not a measured sum, for the same reason
+/// `SPECTRUM_MINIMUM_FRAMES` is.
+const DENOISE_OVERLAP_CONSTANT: f64 = 1.5;
+
+/// AU5 §3.2 rule 32: the smallest window the OLA will run, so a degenerate
+/// rate cannot produce a zero-length transform.
+const DENOISE_MINIMUM_WINDOW: usize = 4;
+
+/// AU5 §3.4 rule 48: the sections allocated at construction, from
+/// `harmonic_count`'s descriptor **maximum** rather than its stored value, so a
+/// live retune never allocates.
+const HUM_SECTIONS: usize = 10;
+
+/// AU5 §3.4 rule 47: a section whose centre reaches this fraction of the sample
+/// rate is `IDENTITY` and skipped, rather than being designed above Nyquist.
+const HUM_MAXIMUM_CENTER_FRACTION: f64 = 0.45;
+
+/// AU5 §3.5 rule 53: the trailing mean-square window the detector references.
+const DECLICK_REFERENCE_MILLISECONDS: i64 = 20;
+
+/// AU5 §3.5 rule 54: the pre/post `d2` guard either side of a flagged span.
+///
+/// 1 ms, not 2: rule 55's budget does not fit 2 ms at a 3 ms declaration, and
+/// the declaration cannot rise to 5 ms because §2.3's normalization row would
+/// become `12 + 5 + 5 = 22 > 20` and the whole budget argument would collapse.
+const DECLICK_GUARD_MILLISECONDS: i64 = 1;
+
+/// AU5 §3.5 rule 55: `audio_declick`'s declared latency, matching its
+/// `3..=3` descriptor row.
+const DECLICK_DECLARED_MILLISECONDS: i64 = 3;
+
+/// AU5 §3.5 rule 55: `x[n-1]` and `x[n-2]`, the only history `d2` needs.
+const DECLICK_DETECTOR_FRAMES: usize = 2;
+
+/// AU5 §3.5 rule 53: the reference holds its last value while fewer than one
+/// in this many of the window's samples are unflagged.
+const DECLICK_REFERENCE_MINIMUM_FRACTION: usize = 4;
+
+/// AU5 §3.3 rule 44, normative and spelled **once**: the per-bin floor power a
+/// learned profile implies at one runtime window size.
+///
+/// ```text
+/// L_k          = linear interpolation, in tenth dB, of the 31 band values
+///                against log10(f) at the 31 exact ISO centres; held flat
+///                below the first centre and above the last
+/// bins_in_band = max(1, count of one-sided runtime bins whose centre falls in
+///                the third-octave band containing f_k, edges f_c * 2^(+-1/6))
+/// bin_floor_power[k] = 10^(L_k / 100) * 0.5 / bins_in_band
+///                      * (sum_n w_n^2) * window / 2
+/// ```
+///
+/// **The derivation, once.** `10^(L/100)` is the band's mean-square power
+/// relative to a full-scale sine's; `* 0.5` converts it to absolute mean-square
+/// power, because a full-scale sine's mean square is 0.5 and that is exactly the
+/// normalisation AU5 §3.3 rule 43 fixes the wire unit on. Dividing by
+/// `bins_in_band` spreads that power evenly over the band's one-sided runtime
+/// bins — without it the floor is overstated by `10*log10(bins_in_band)`, up to
+/// about 17 dB of over-gating at the top of the spectrum. The last factor
+/// converts a time-domain mean square into the squared magnitude the
+/// **unnormalised**, Hann-windowed, `window`-point `forward_fft` actually
+/// produces: by Parseval `sum_k |X_k|^2 = N * sum_n (w_n x_n)^2`, so a signal of
+/// mean square `P` spread over the whole spectrum gives `E|X_k|^2 = P * sum w^2`
+/// in each of the `N` two-sided bins; a band carrying `P_band` over
+/// `bins_in_band` of the `N/2` one-sided bins therefore reads
+/// `E|X_k|^2 = (P_band / bins_in_band) * (N/2) * sum w^2`.
+///
+/// **`sum_n w_n^2` is read from the window itself, never written down
+/// (AU5 §0 R75).** The contract's `window^2 / 4` assumes `sum w^2 = N/2`, which
+/// is the **sine** window's constant; a periodic Hann has `3N/8` exactly
+/// (`sum_{n<512} (0.5(1 - cos 2 pi n/512))^2 = 192 = 3*512/8`), so the closed
+/// form overstated every bin floor by `4/3` — **+1.25 dB** of over-subtraction
+/// at every frequency. `third_octave_spectrum` already computes its own
+/// `window_power` from the window it uses; this does the same, from the same
+/// `hann_window`, so the two cannot drift again and no constant can be wrong.
+/// Sanity check, now non-circular: one band covering all `N/2` bins at 0 dB
+/// gives `(0.5/(N/2)) * (N/2) * 3N/8 = 3N/16` per bin, which is
+/// `10*log10(3/4) = -1.25 dB` under the old closed form and is what
+/// `au5_the_bin_floor_conversion_holds_its_derivation` now measures against a
+/// real transform rather than asserting is finite.
+///
+/// Computed **once at construction**, never per block (rule 45).
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn denoise_bin_floor_power(
+    bands: &[i64; NOISE_PROFILE_BAND_COUNT],
+    window: usize,
+    sample_rate: u32,
+) -> Vec<f64> {
+    let bins = window / 2 + 1;
+    let bin_width = f64::from(sample_rate) / window as f64;
+    let log_centers: Vec<f64> = (0..NOISE_PROFILE_BAND_COUNT)
+        .map(|index| crate::spectrum::exact_band_center(index).log10())
+        .collect();
+    let mut bins_in_band = [0_usize; NOISE_PROFILE_BAND_COUNT];
+    for bin in 0..bins {
+        let hertz = bin as f64 * bin_width;
+        if let Some(index) = denoise_strict_band_index(hertz) {
+            bins_in_band[index] += 1;
+        }
+    }
+    // AU5 §0 R75: read `sum w^2` from the window, never from a constant.
+    let window_power: f64 = hann_window(window).iter().map(|w| w * w).sum();
+    let window_factor = window_power * window as f64 / 2.0;
+    (0..bins)
+        .map(|bin| {
+            let hertz = bin as f64 * bin_width;
+            let level = denoise_interpolated_level(bands, &log_centers, hertz);
+            let count = bins_in_band[denoise_band_index(hertz)].max(1) as f64;
+            10.0_f64.powf(level / 100.0) * 0.5 / count * window_factor
+        })
+        .collect()
+}
+
+/// AU5 §3.3 rule 44: the third-octave band whose edges `f_c * 2^(+-1/6)`
+/// actually contain `hertz`, and nothing else.
+///
+/// This is what `bins_in_band` counts: a bin above the 20 kHz band's upper edge
+/// belongs to no band at all, so counting it would inflate the top band's
+/// divisor from about 49 to 65 at a 512-point window.
+fn denoise_strict_band_index(hertz: f64) -> Option<usize> {
+    (0..NOISE_PROFILE_BAND_COUNT).find(|index| {
+        let (low, high) = third_octave_band_edges(*index);
+        hertz >= low && hertz < high
+    })
+}
+
+/// AU5 §3.3 rule 44: the same band, clamped to the end bands so a bin below
+/// 17.8 Hz or above 22.6 kHz still has a divisor to read.
+fn denoise_band_index(hertz: f64) -> usize {
+    if let Some(index) = denoise_strict_band_index(hertz) {
+        return index;
+    }
+    if hertz < third_octave_band_edges(0).0 {
+        0
+    } else {
+        NOISE_PROFILE_BAND_COUNT - 1
+    }
+}
+
+/// AU5 §3.3 rule 44: `L_k`, in tenth dB, linearly interpolated against
+/// `log10(f)` and held flat outside the first and last exact ISO centres.
+#[allow(clippy::cast_precision_loss)]
+fn denoise_interpolated_level(
+    bands: &[i64; NOISE_PROFILE_BAND_COUNT],
+    log_centers: &[f64],
+    hertz: f64,
+) -> f64 {
+    if hertz <= 0.0 {
+        return bands[0] as f64;
+    }
+    let log_hertz = hertz.log10();
+    if log_hertz <= log_centers[0] {
+        return bands[0] as f64;
+    }
+    let last = NOISE_PROFILE_BAND_COUNT - 1;
+    if log_hertz >= log_centers[last] {
+        return bands[last] as f64;
+    }
+    for index in 0..last {
+        if log_hertz <= log_centers[index + 1] {
+            let span = log_centers[index + 1] - log_centers[index];
+            let position = (log_hertz - log_centers[index]) / span;
+            let low = bands[index] as f64;
+            let high = bands[index + 1] as f64;
+            return low + position * (high - low);
+        }
+    }
+    bands[last] as f64
+}
+
+/// AU5 §2.1 rule 5: the 31 stored profile bands, each falling back to the
+/// descriptor neutral, which is what "no profile has been learned" *is*.
+fn denoise_profile_bands(effect: &Effect) -> [i64; NOISE_PROFILE_BAND_COUNT] {
+    let mut bands = [PROFILE_BAND_NEUTRAL_TENTH_DB; NOISE_PROFILE_BAND_COUNT];
+    for (band, name) in bands.iter_mut().zip(NOISE_PROFILE_PARAMETER_NAMES) {
+        *band = static_audio_value(effect, name, PROFILE_BAND_NEUTRAL_TENTH_DB);
+    }
+    bands
+}
+
+/// AU5 §3.2 rule 33: everything the STFT gate carries between sample frames.
+///
+/// **Scratch, honestly (AU5 §0 R19).** Per channel: the input ring
+/// (512 f64 = 4 kB), the OLA accumulator (512 f64 = 4 kB) and the per-bin
+/// smoother (257 f64 ~ 2 kB), about **10 kB**, so 20 kB for stereo; plus the
+/// shared complex scratch (512 x 16 B = 8 kB), the window (4 kB) and the bin
+/// floors (257 x 8 B ~ 2 kB), about **34 kB** per stereo instance. The design
+/// brief's "8 kB" was roughly 4x low.
+#[derive(Debug)]
+struct DenoiseState {
+    /// The STFT window, the largest power of two at or under `latency_frames`.
+    window: usize,
+    /// `window / 4`: 75 % overlap, which is what makes the Hann-squared
+    /// overlap constant exactly [`DENOISE_OVERLAP_CONSTANT`].
+    hop: usize,
+    /// Per channel, the newest `window` input frames.
+    ring: Vec<Vec<f64>>,
+    cursor: usize,
+    since_block: usize,
+    /// Per channel, `window` `f64` of overlap-add, read one frame at a time.
+    accumulator: Vec<Vec<f64>>,
+    accumulator_read: usize,
+    /// Per channel, `window / 2 + 1` smoothed bin gains.
+    smoother: Vec<Vec<f64>>,
+    /// AU5 §3.10 rule 72: the smoother starts from the first block's own gains,
+    /// identically in a fresh runtime and a retargeted one.
+    smoother_primed: bool,
+    /// One `window`-point complex buffer, reused per channel.
+    scratch: Vec<Complex>,
+    /// The periodic Hann, analysis and synthesis — literally
+    /// `third_octave_spectrum`'s numbers (rule 27).
+    shape: Vec<f64>,
+    /// Re-derived at construction and on every epoch bump (§3.3 rule 44).
+    bin_floor_power: Vec<f64>,
+    /// AU5 §3.2 rule 41: the bit-exact identity path, fed on **every** frame.
+    bypass_delay: DelayLine,
+    /// The residual `latency - (window - 1)` after the OLA — 65 / 18 / 129 at
+    /// 48 / 44.1 / 96 kHz.
+    output_pad: DelayLine,
+    bypass_scratch: Vec<f32>,
+    emit_scratch: Vec<f32>,
+    direct: bool,
+    direct_switch_remaining: usize,
+    /// AU5 §3.4/§4.4 rule 85: published by `take_gain_reduction`.
+    minimum_gain: f32,
+    /// `10^(-reduction_tenth_db / 200)`, an amplitude ratio. Read **per project
+    /// frame** (AU5 §0 R71), because `reduction_tenth_db` is not a static
+    /// parameter and is the control an editor reaches for most on this node.
+    gain_floor: f64,
+    /// `a = 10^(floor_offset_tenth_db / 200)`, an amplitude ratio. Per frame.
+    floor_scale: f64,
+    /// `1 - exp(-hop / (smoothing_milliseconds * rate / 1000))`, or 1 at zero.
+    /// Per frame.
+    alpha: f64,
+    /// The `reduction_tenth_db` the two figures above were derived from, kept
+    /// as the integer it is on the wire so AU5 §3.2 rule 41's
+    /// `reduction_tenth_db == 0` term reads the **same** per-frame value as the
+    /// gain law it guards rather than a second boolean beside it.
+    reduction_tenth_db: i64,
+    /// AU5 §3.2 rule 41's `every band is at the neutral` term. Epoch-derived,
+    /// because only the bands force the bin floor table to be rebuilt.
+    profile_neutral: bool,
+    /// The `parameter_epoch` the bin floor table and `profile_neutral` were
+    /// derived at (rule 9, rule 73).
+    derived_epoch: u64,
+    /// `(project frame, parameter epoch)` — the per-frame gain-law cache, the
+    /// same key `bypass` and the `audio_declick` arm use, so a project-frame
+    /// staircase costs one map probe per project frame and not one per sample.
+    cached: Option<(TimeCode, u64)>,
+}
+
+impl DenoiseState {
+    fn new(effect: &Effect, channels: usize, sample_rate: u32, latency_frames: usize) -> Self {
+        // AU5 §3.2 rule 32: `window` is the largest power of two at or under
+        // the declared latency, `hop = window / 4`, and the OLA delay is
+        // `window - 1` — not `window`, because an output sample at `p` is
+        // complete only once the window *starting* at `p` has been added.
+        let window = latency_frames
+            .max(DENOISE_MINIMUM_WINDOW)
+            .next_power_of_two()
+            .min(if latency_frames < DENOISE_MINIMUM_WINDOW {
+                DENOISE_MINIMUM_WINDOW
+            } else if latency_frames.is_power_of_two() {
+                latency_frames
+            } else {
+                latency_frames.next_power_of_two() / 2
+            });
+        let hop = (window / 4).max(1);
+        let bins = window / 2 + 1;
+        let mut state = Self {
+            window,
+            hop,
+            ring: vec![vec![0.0; window]; channels],
+            cursor: 0,
+            since_block: 0,
+            accumulator: vec![vec![0.0; window]; channels],
+            accumulator_read: 0,
+            smoother: vec![vec![1.0; bins]; channels],
+            smoother_primed: false,
+            scratch: vec![Complex::default(); window],
+            shape: hann_window(window),
+            bin_floor_power: vec![0.0; bins],
+            bypass_delay: DelayLine::new(latency_frames, channels),
+            output_pad: DelayLine::new(latency_frames.saturating_sub(window - 1), channels),
+            bypass_scratch: vec![0.0; channels],
+            emit_scratch: vec![0.0; channels],
+            direct: true,
+            direct_switch_remaining: 0,
+            minimum_gain: 1.0,
+            gain_floor: 1.0,
+            floor_scale: 1.0,
+            alpha: 1.0,
+            reduction_tenth_db: 0,
+            profile_neutral: true,
+            derived_epoch: 0,
+            cached: None,
+        };
+        state.derive_epoch(effect, sample_rate, 0);
+        state.derive_frame(effect, sample_rate, TimeCode::ZERO, 0);
+        state.direct = state.profile_neutral || state.reduction_tenth_db == 0;
+        state
+    }
+
+    /// AU5 §2.2 rule 9 and §3.2 rule 41: the **static** reads — the 31 profile
+    /// bands and the bin floor table they imply — re-derived at construction and
+    /// on every `parameter_epoch` bump.
+    ///
+    /// This is the one place a static parameter is read after construction, and
+    /// it is what makes a `Learn` audible without a re-cue: `node_structure`
+    /// deliberately does not carry the 31 bands (rule 60), so `retarget_chain`
+    /// preserves the OLA accumulator, the smoother and both delay lines.
+    fn derive_epoch(&mut self, effect: &Effect, sample_rate: u32, epoch: u64) {
+        let bands = denoise_profile_bands(effect);
+        self.bin_floor_power = denoise_bin_floor_power(&bands, self.window, sample_rate);
+        self.profile_neutral = bands
+            .iter()
+            .all(|band| *band == PROFILE_BAND_NEUTRAL_TENTH_DB);
+        self.derived_epoch = epoch;
+    }
+
+    /// AU5 §0 R71: the three gain-law controls, read **per project frame**.
+    ///
+    /// `reduction_tenth_db`, `floor_offset_tenth_db` and `smoothing_milliseconds`
+    /// are not in `is_static_audio_parameter` and §2.1's table marks none of them
+    /// static, so they are ordinary keyable parameters and a curve on one must be
+    /// heard. Reading them here — on the `(project frame, parameter epoch)` key
+    /// the `audio_declick` arm and `bypass` already use — is what rule 11 asks
+    /// for in the analogous `max_click_milliseconds` case, and it keeps rule 41's
+    /// `reduction == 0` term reading the *same* value as the gain law it guards.
+    /// The block only ever consumes the latest value, so this is a block-boundary
+    /// read spelled on a per-project-frame cache.
+    #[allow(clippy::cast_precision_loss)]
+    fn derive_frame(&mut self, effect: &Effect, sample_rate: u32, at: TimeCode, epoch: u64) {
+        let reduction = audio_value(effect, "reduction_tenth_db", at, 0);
+        let offset = audio_value(effect, "floor_offset_tenth_db", at, 0);
+        let smoothing = audio_value(effect, "smoothing_milliseconds", at, 50);
+        self.gain_floor = 10.0_f64.powf(-(reduction as f64) / 200.0);
+        self.floor_scale = 10.0_f64.powf(offset as f64 / 200.0);
+        self.alpha = if smoothing <= 0 {
+            1.0
+        } else {
+            1.0 - (-(self.hop as f64) / (smoothing as f64 * f64::from(sample_rate) / 1000.0)).exp()
+        };
+        self.reduction_tenth_db = reduction;
+        self.cached = Some((at, epoch));
+    }
+
+    /// AU5 §3.2 rule 37: one block, per channel.
+    fn run_block(&mut self) {
+        let window = self.window;
+        let bins = window / 2 + 1;
+        let mut minimum = 1.0_f64;
+        for channel in 0..self.ring.len() {
+            for (index, slot) in self.scratch.iter_mut().enumerate() {
+                let value = self.ring[channel][(self.cursor + index) % window] * self.shape[index];
+                *slot = Complex::new(value, 0.0);
+            }
+            forward_fft(&mut self.scratch);
+            for bin in 0..bins {
+                let magnitude = self.scratch[bin].re.hypot(self.scratch[bin].im);
+                let floor = self.bin_floor_power[bin].sqrt();
+                let raw = ((magnitude - self.floor_scale * floor) / magnitude.max(f64::EPSILON))
+                    .clamp(self.gain_floor, 1.0);
+                let previous = self.smoother[channel][bin];
+                let gain = if self.smoother_primed {
+                    self.alpha.mul_add(raw - previous, previous)
+                } else {
+                    raw
+                };
+                self.smoother[channel][bin] = gain;
+                self.scratch[bin].re *= gain;
+                self.scratch[bin].im *= gain;
+                // Mirror onto the negative-frequency bin so the spectrum stays
+                // conjugate-symmetric and the inverse is real.
+                // AU5 §0 R76: `bins = window/2 + 1`, so the loop reaches the
+                // Nyquist bin, whose mirror is itself — gaining it again would
+                // apply `g^2` to one bin in 257.
+                let mirror = window - bin;
+                if bin > 0 && mirror < window && mirror != bin {
+                    self.scratch[mirror].re *= gain;
+                    self.scratch[mirror].im *= gain;
+                }
+                minimum = minimum.min(gain);
+            }
+            inverse_fft(&mut self.scratch);
+            // The accumulator slot for output index `p` is `accumulator_read`
+            // at the frame that completes `p`, so one block covers the whole
+            // `window`-long buffer starting there.
+            for index in 0..window {
+                let slot = (self.accumulator_read + index) % window;
+                self.accumulator[channel][slot] += self.scratch[index].re * self.shape[index];
+            }
+        }
+        self.smoother_primed = true;
+        #[allow(clippy::cast_possible_truncation)]
+        let minimum = minimum as f32;
+        self.minimum_gain = self.minimum_gain.min(minimum);
+    }
+
+    /// AU5 §3.2 rule 36, step 1: the ring, written on **every** frame.
+    fn write_ring(&mut self, samples: &[f32], channels: usize) {
+        for (channel, sample) in samples.iter().enumerate().take(channels) {
+            self.ring[channel][self.cursor] = f64::from(*sample);
+        }
+        self.cursor = (self.cursor + 1) % self.window;
+    }
+
+    /// AU5 §3.2 rule 36, step 3: the block clock, which runs on **every** frame
+    /// including `direct` ones, so the grid stays anchored at project sample 0
+    /// and a switch never re-phases it. Only the transform differs.
+    fn advance_block_clock(&mut self, direct_now: bool) {
+        self.since_block += 1;
+        if self.since_block >= self.hop {
+            self.since_block = 0;
+            if !direct_now {
+                self.run_block();
+            }
+        }
+    }
+
+    /// AU5 §3.2 rule 36, step 4: pop one frame of overlap-add, zeroing the slot
+    /// as it goes — which is the "rotate by `hop`, zeroing the vacated tail"
+    /// rule 37 states, spread one frame at a time.
+    #[allow(clippy::cast_possible_truncation)]
+    fn pop_accumulator(&mut self, out: &mut [f32], channels: usize) {
+        for (channel, sample) in out.iter_mut().enumerate().take(channels) {
+            let slot = self.accumulator_read;
+            *sample = (self.accumulator[channel][slot] / DENOISE_OVERLAP_CONSTANT) as f32;
+            self.accumulator[channel][slot] = 0.0;
+        }
+        self.accumulator_read = (self.accumulator_read + 1) % self.window;
+    }
+
+    /// AU5 §3.10 rule 71 (R32): the OLA path alone, read **before**
+    /// `output_pad`.
+    ///
+    /// The same three steps `step` runs, with the identity feed and the pad
+    /// removed, so the `window - 1` delay this pins is the production one. The
+    /// declared delay — OLA plus pad — is pinned separately by the impulse.
+    #[cfg(test)]
+    fn step_ola_only(&mut self, samples: &mut [f32]) {
+        let channels = samples.len().min(self.ring.len());
+        self.write_ring(samples, channels);
+        self.advance_block_clock(false);
+        self.pop_accumulator(samples, channels);
+    }
+
+    /// AU5 §3.2 rule 36: one sample frame, in the order the rule fixes.
+    #[allow(clippy::cast_possible_truncation)]
+    fn step(&mut self, samples: &mut [f32], direct_now: bool) {
+        let channels = samples.len().min(self.ring.len());
+        if channels == 0 {
+            return;
+        }
+        // AU5 §3.2 rule 41: when `direct` clears, the accumulator and the
+        // smoother are zeroed and the switch window opens; when it sets, the
+        // switch is immediate and exact, because `bypass_delay` has been fed
+        // all along.
+        if direct_now != self.direct {
+            if !direct_now {
+                for channel in &mut self.accumulator {
+                    channel.fill(0.0);
+                }
+                for channel in &mut self.smoother {
+                    channel.fill(1.0);
+                }
+                self.smoother_primed = false;
+                self.direct_switch_remaining = self.window - 1;
+            }
+            self.direct = direct_now;
+        }
+        // 1. The ring, on every frame.
+        self.write_ring(samples, channels);
+        // 2. The identity path, fed **unconditionally**.
+        self.bypass_scratch[..channels].copy_from_slice(&samples[..channels]);
+        self.bypass_delay
+            .process(&mut self.bypass_scratch[..channels]);
+        // 3. The block clock, on every frame.
+        self.advance_block_clock(direct_now);
+        // 4. The emit. The accumulator frame is always popped — discarded on
+        //    the `direct` branch — and always fed through `output_pad`, so the
+        //    pad holds real reconstruction by the time the switch window ends:
+        //    `window - hop` frames to reach full overlap plus `pad` frames to
+        //    fill the line is 384 + 65 = 449 at 48 kHz, inside the 511-frame
+        //    window rule 41 opens.
+        let mut emit = std::mem::take(&mut self.emit_scratch);
+        self.pop_accumulator(&mut emit, channels);
+        self.output_pad.process(&mut emit[..channels]);
+        self.emit_scratch = emit;
+        if direct_now || self.direct_switch_remaining > 0 {
+            self.direct_switch_remaining = self.direct_switch_remaining.saturating_sub(1);
+            samples[..channels].copy_from_slice(&self.bypass_scratch[..channels]);
+        } else {
+            samples[..channels].copy_from_slice(&self.emit_scratch[..channels]);
+        }
+    }
+}
+
+/// AU5 §3.4 rule 48: the ten sections and their parameter cache.
+///
+/// One [`BiquadSection`] per harmonic, each already `channels` wide — the
+/// `audio_parametric_eq` idiom (audio.rs:1000-1010), not a per-channel array of
+/// sections, because `BiquadSection` owns its own per-channel memory.
+#[derive(Debug)]
+struct HumState {
+    sections: Vec<BiquadSection>,
+    /// `(project frame, parameter epoch)`, the parametric-EQ idiom.
+    cached: Option<(TimeCode, u64)>,
+}
+
+/// AU5 §3.4 rule 47: the ten peaking sections one hum node designs at one
+/// project frame, the ones past `harmonic_count` carrying `IDENTITY`.
+#[allow(clippy::cast_precision_loss)]
+fn hum_coefficients(
+    effect: &Effect,
+    at: TimeCode,
+    sample_rate: u32,
+) -> [BiquadCoefficients; HUM_SECTIONS] {
+    let fundamental = audio_value(effect, "fundamental_hertz", at, 50) as f64;
+    let count = audio_value(effect, "harmonic_count", at, 1)
+        .clamp(0, i64::try_from(HUM_SECTIONS).unwrap_or(i64::MAX));
+    let gain_db = audio_value(effect, "depth_tenth_db", at, 0) as f64 / 10.0;
+    let q = audio_value(effect, "notch_q_hundredths", at, 1_200) as f64 / 100.0;
+    let ceiling = HUM_MAXIMUM_CENTER_FRACTION * f64::from(sample_rate);
+    let mut sections = [BiquadCoefficients::IDENTITY; HUM_SECTIONS];
+    for (index, section) in sections.iter_mut().enumerate() {
+        let harmonic = i64::try_from(index).unwrap_or(i64::MAX).saturating_add(1);
+        let hertz = harmonic as f64 * fundamental;
+        if harmonic <= count && hertz < ceiling {
+            *section = BiquadCoefficients::peaking(hertz, gain_db, q, sample_rate);
+        }
+    }
+    sections
+}
+
+/// AU5 §3.4 rule 51: the hum cascade's analytic magnitude at one frequency.
+///
+/// Lands beside [`parametric_eq_magnitude_db`] and is read by the Mixer's comb
+/// and by AU5 §3.11(b)'s analytic arm, which compares the **measured** tone
+/// response against the **design** rather than against a second implementation
+/// — AU2's rule.
+///
+/// `at` resolves keyframes exactly as playback does; `sample_rate` is the rate
+/// the response is designed at, which the app pins at 48 000 Hz because it
+/// cannot know the device rate.
+#[must_use]
+pub fn hum_removal_magnitude_db(
+    effect: &Effect,
+    at: TimeCode,
+    hertz: f64,
+    sample_rate: u32,
+) -> f64 {
+    hum_coefficients(effect, at, sample_rate)
+        .into_iter()
+        .map(|section| section.magnitude_db(hertz, sample_rate))
+        .sum()
+}
+
+/// AU5 §3.5: one flagged, repairable span of frames, inclusive at both ends.
+type ClickSpan = (u64, u64);
+
+/// AU5 §3.5 rule 57: what the detector found, in detect-only mode.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct ClickReport {
+    /// Frame spans the node **would repair**, merged across channels, in order.
+    pub(crate) spans: Vec<ClickSpan>,
+}
+
+impl ClickReport {
+    pub(crate) fn count(&self) -> u32 {
+        u32::try_from(self.spans.len()).unwrap_or(u32::MAX)
+    }
+}
+
+/// AU5 §3.5 rules 52-54: one channel's second-difference detector.
+///
+/// The reference is a **strictly causal trailing** mean square over
+/// [`DECLICK_REFERENCE_MILLISECONDS`] of `d2`, ending at `n - 1`, that
+/// **excludes flagged samples**. Without the exclusion the detector is
+/// self-masking on its own fixture — see the arithmetic beside
+/// `DECLICK_ERROR_DROP_BUDGET_TENTH_DB` in `tests/au5_fixtures.rs` and the
+/// naive-window arm of `the_declick_reference_excludes_flagged_samples`.
+#[derive(Debug)]
+struct DeclickDetector {
+    previous: f64,
+    previous2: f64,
+    window: VecDeque<(f64, bool)>,
+    window_frames: usize,
+    sum: f64,
+    unflagged: usize,
+    reference: f64,
+    /// How many consecutive unflagged frames end at the frame before this one.
+    unflagged_run: u64,
+    /// `(start, last flagged index, the lead guard was clean)`.
+    open: Option<(u64, u64, bool)>,
+    /// A closed run still waiting for its trailing guard.
+    closed: Option<(u64, u64, bool)>,
+}
+
+impl DeclickDetector {
+    fn new(window_frames: usize) -> Self {
+        Self {
+            previous: 0.0,
+            previous2: 0.0,
+            window: VecDeque::with_capacity(window_frames),
+            window_frames: window_frames.max(1),
+            sum: 0.0,
+            unflagged: 0,
+            reference: 0.0,
+            unflagged_run: 0,
+            open: None,
+            closed: None,
+        }
+    }
+
+    /// One sample. Returns a span the node should repair, once its trailing
+    /// guard has been proved clean.
+    fn push(
+        &mut self,
+        index: u64,
+        sample: f32,
+        ratio: f64,
+        guard: u64,
+        ceiling: u64,
+    ) -> Option<ClickSpan> {
+        let value = f64::from(sample);
+        let second_difference = self.previous.mul_add(-2.0, value) + self.previous2;
+        self.previous2 = self.previous;
+        self.previous = value;
+        // The reference is the window ending at `n - 1`, so it is read before
+        // this sample joins it.
+        let flagged = self.reference > 0.0 && second_difference.abs() > ratio * self.reference;
+        self.record(second_difference, flagged);
+
+        let mut repair = None;
+        if flagged {
+            // A flagged sample invalidates any trailing guard in progress.
+            self.closed = None;
+            if let Some((_, last, _)) = &mut self.open {
+                *last = index;
+            } else {
+                let lead_ok = self.unflagged_run >= guard;
+                self.open = Some((index, index, lead_ok));
+            }
+            self.unflagged_run = 0;
+        } else {
+            self.unflagged_run += 1;
+            if let Some((start, last, lead_ok)) = self.open.take() {
+                self.closed = Some((start, last, lead_ok));
+            }
+            if let Some((start, last, lead_ok)) = self.closed
+                && index >= last + guard
+            {
+                self.closed = None;
+                // AU5 §3.5 rule 57: a `ClickReport` counts exactly the spans the
+                // node **would repair** — the length ceiling *and* the guard —
+                // so "what is a click" cannot drift between node and inspector.
+                if lead_ok && last - start < ceiling {
+                    repair = Some((start, last));
+                }
+            }
+        }
+        repair
+    }
+
+    fn record(&mut self, second_difference: f64, flagged: bool) {
+        self.window.push_back((second_difference, flagged));
+        if !flagged {
+            self.sum += second_difference * second_difference;
+            self.unflagged += 1;
+        }
+        if self.window.len() > self.window_frames
+            && let Some((evicted, was_flagged)) = self.window.pop_front()
+            && !was_flagged
+        {
+            self.sum -= evicted * evicted;
+            self.unflagged -= 1;
+        }
+        // The reference holds its last value while fewer than a quarter of the
+        // window's samples are unflagged.
+        if self.unflagged * DECLICK_REFERENCE_MINIMUM_FRACTION >= self.window_frames {
+            #[allow(clippy::cast_precision_loss)]
+            let count = self.unflagged as f64;
+            self.reference = (self.sum / count).sqrt();
+        }
+    }
+}
+
+/// AU5 §3.5 rule 56: the signal path, `latency_frames` long, with the
+/// positional write a repair needs.
+///
+/// `dsp::DelayLine` is deliberately opaque — it swaps one frame at a time and
+/// exposes no buffer — and `dsp.rs` is not on AU5 Part A's file list, so the
+/// de-click line is spelled here (AU5 §0 R63). The semantics are identical: the
+/// output at frame `n` is the input at frame `n - frames`, bit for bit when
+/// nothing is repaired, which is what makes `max_click_milliseconds = 0` an
+/// identity.
+#[derive(Debug)]
+struct DeclickLine {
+    buffer: Vec<f32>,
+    frames: usize,
+    channels: usize,
+    written: u64,
+}
+
+impl DeclickLine {
+    fn new(frames: usize, channels: usize) -> Self {
+        Self {
+            buffer: vec![0.0; frames.saturating_mul(channels)],
+            frames,
+            channels,
+            written: 0,
+        }
+    }
+
+    /// Emit the frame written `frames` frames ago and take this one in.
+    fn process(&mut self, frame: &mut [f32]) {
+        if self.frames == 0 {
+            self.written += 1;
+            return;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let base = (self.written % self.frames as u64) as usize * self.channels;
+        for (channel, sample) in frame.iter_mut().enumerate().take(self.channels) {
+            std::mem::swap(&mut self.buffer[base + channel], sample);
+        }
+        self.written += 1;
+    }
+
+    /// The stored sample at absolute frame `index`, if it is still in the line.
+    fn get(&self, index: u64, channel: usize) -> Option<f32> {
+        if self.frames == 0 || index >= self.written || index + self.frames as u64 <= self.written {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let slot = (index % self.frames as u64) as usize * self.channels + channel;
+        self.buffer.get(slot).copied()
+    }
+
+    fn set(&mut self, index: u64, channel: usize, value: f32) {
+        if self.frames == 0 || index >= self.written || index + self.frames as u64 <= self.written {
+            return;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let slot = (index % self.frames as u64) as usize * self.channels + channel;
+        if let Some(sample) = self.buffer.get_mut(slot) {
+            *sample = value;
+        }
+    }
+}
+
+/// AU5 §3.5: everything the de-click node carries between sample frames.
+#[derive(Debug)]
+struct DeclickState {
+    line: DeclickLine,
+    detectors: Vec<DeclickDetector>,
+    index: u64,
+    guard_frames: u64,
+    /// `(project frame, parameter epoch, threshold ratio, span ceiling)`.
+    cached: Option<(TimeCode, u64, f64, u64)>,
+}
+
+/// AU5 §3.5 rule 56: Catmull-Rom across one flagged span, in `f32`.
+///
+/// Chosen over linear because its residual over an `H`-frame span of a
+/// band-limited signal is `A(wH)^4/384`, four orders below linear's
+/// `A(wH)^2/8`.
+///
+/// **The tangents are carried into the segment's own parameter units
+/// (AU5 §0 R66).** The four control points are the two good samples either side
+/// of the span, so `p0`-`p1` and `p2`-`p3` are **one sample** apart while
+/// `p1`-`p2` is `span` samples apart. The uniform Catmull-Rom tangent
+/// `(p2 - p0)/2` conflates those two scales and understates the slope at the
+/// ends by roughly `span/2`; on §3.11(c)'s fixture that leaves a residual of
+/// 1e-2 rather than the 1e-4 the interpolation bound predicts. The Hermite form
+/// below is the same spline with `m1 = (p1 - p0) * span` and
+/// `m2 = (p3 - p2) * span`, which is what "Catmull-Rom from the two good
+/// samples either side" means when the gap is wider than one sample.
+fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, span: f32, t: f32) -> f32 {
+    let m1 = (p1 - p0) * span;
+    let m2 = (p3 - p2) * span;
+    let t2 = t * t;
+    let t3 = t2 * t;
+    (2.0 * t3 - 3.0 * t2 + 1.0) * p1
+        + (t3 - 2.0 * t2 + t).mul_add(m1, (-2.0 * t3 + 3.0 * t2) * p2)
+        + (t3 - t2) * m2
+}
+
+/// AU5 §3.5 rule 57: the same detector and the same rule 54 acceptance test the
+/// node applies, in detect-only mode.
+///
+/// This is where AU5 §3.9's `click_count` and `click_density_per_minute` come
+/// from, so the inspector and the node can never disagree about what a click
+/// is. Spans found on different channels at the same frames are merged, so a
+/// stereo click is one click.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn detect_clicks(
+    samples: &[f32],
+    channels: u16,
+    rate: u32,
+    threshold_tenth_db: i64,
+    max_click_milliseconds: i64,
+) -> ClickReport {
+    let channels = usize::from(channels).max(1);
+    let window_frames = stage_latency_frames(DECLICK_REFERENCE_MILLISECONDS, rate).max(1);
+    let guard = stage_latency_frames(DECLICK_GUARD_MILLISECONDS, rate) as u64;
+    let ceiling = stage_latency_frames(max_click_milliseconds, rate) as u64;
+    let ratio = 10.0_f64.powf(threshold_tenth_db as f64 / 200.0);
+    let mut detectors: Vec<DeclickDetector> = (0..channels)
+        .map(|_| DeclickDetector::new(window_frames))
+        .collect();
+    let mut spans: Vec<ClickSpan> = Vec::new();
+    for (frame, block) in samples.chunks_exact(channels).enumerate() {
+        let index = frame as u64;
+        for (channel, sample) in block.iter().enumerate() {
+            if let Some(span) = detectors[channel].push(index, *sample, ratio, guard, ceiling) {
+                spans.push(span);
+            }
+        }
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<ClickSpan> = Vec::with_capacity(spans.len());
+    for (start, end) in spans {
+        match merged.last_mut() {
+            Some((_, last_end)) if start <= *last_end + 1 => *last_end = (*last_end).max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    ClickReport { spans: merged }
+}
+
+/// AU5 §3.5 rule 55, normative: the construction assert, over the **whole**
+/// domain of `max_click_milliseconds` at one rate.
+///
+/// ```text
+/// stage_latency_frames(DECLICK_DECLARED_MILLISECONDS, rate)
+///     >= stage_latency_frames(max_click, rate)
+///      + stage_latency_frames(DECLICK_GUARD_MILLISECONDS, rate)
+///      + DECLICK_DETECTOR_FRAMES
+/// ```
+///
+/// A real `assert!`, not a `debug_assert!`, so a release build cannot hide a
+/// regression; `AudioEffectRuntime::new` calls it and a standalone Part A test
+/// walks the same domain at 44 100 / 48 000 / 96 000 Hz.
+pub(crate) fn assert_declick_budget_fits(sample_rate: u32) {
+    let declared = stage_latency_frames(DECLICK_DECLARED_MILLISECONDS, sample_rate);
+    let guard = stage_latency_frames(DECLICK_GUARD_MILLISECONDS, sample_rate);
+    let (minimum, maximum) = kinewright_core::effect_descriptor("audio_declick")
+        .and_then(|descriptor| descriptor.parameter("max_click_milliseconds"))
+        .map_or((0, 1), |parameter| (parameter.min, parameter.max));
+    for max_click in minimum..=maximum {
+        let required =
+            stage_latency_frames(max_click, sample_rate) + guard + DECLICK_DETECTOR_FRAMES;
+        assert!(
+            declared >= required,
+            "AU5 §3.5 rule 55: audio_declick declares {declared} frames at {sample_rate} Hz but \
+             max_click_milliseconds {max_click} needs {required}"
+        );
+    }
+}
+
 #[derive(Debug)]
 enum AudioEffectState {
     Stateless,
@@ -791,6 +1672,14 @@ enum AudioEffectState {
     Gate(GateState),
     Ducking(DuckingState),
     TruePeakLimiter(TruePeakLimiterState),
+    /// AU5 §3.2: the STFT gate. Boxed because `DenoiseState` is by far the
+    /// largest variant — about 34 kB of scratch for a stereo instance — and an
+    /// unboxed one would inflate every other node's `AudioEffectRuntime`.
+    Denoise(Box<DenoiseState>),
+    /// AU5 §3.4: the fixed-frequency peaking cascade.
+    HumRemoval(HumState),
+    /// AU5 §3.5: the second-difference detector, its guard and its repair.
+    Declick(DeclickState),
 }
 
 #[derive(Debug)]
@@ -869,6 +1758,43 @@ impl AudioEffectRuntime {
                     minimum_gain: 1.0,
                 })
             }
+            // AU5 §3.2: the STFT gate. `latency_frames` already comes from the
+            // descriptor (§3.6), so a document that omits `lookahead_milliseconds`
+            // still builds a 512-frame window at 48 kHz rather than a degenerate one.
+            "audio_denoise" => AudioEffectState::Denoise(Box::new(DenoiseState::new(
+                effect,
+                channels,
+                sample_rate,
+                latency_frames,
+            ))),
+            // AU5 §3.4 rule 48: ten sections from the descriptor **maximum**, the
+            // ones past the stored `harmonic_count` carrying `IDENTITY`, so a live
+            // retune never allocates.
+            "audio_hum_removal" => AudioEffectState::HumRemoval(HumState {
+                sections: (0..HUM_SECTIONS)
+                    .map(|_| BiquadSection::new(channels))
+                    .collect(),
+                cached: None,
+            }),
+            "audio_declick" => {
+                // AU5 §3.5 rule 55: a real assert, reachable in release.
+                assert_declick_budget_fits(sample_rate);
+                AudioEffectState::Declick(DeclickState {
+                    line: DeclickLine::new(latency_frames, channels),
+                    detectors: (0..channels)
+                        .map(|_| {
+                            DeclickDetector::new(
+                                stage_latency_frames(DECLICK_REFERENCE_MILLISECONDS, sample_rate)
+                                    .max(1),
+                            )
+                        })
+                        .collect(),
+                    index: 0,
+                    guard_frames: stage_latency_frames(DECLICK_GUARD_MILLISECONDS, sample_rate)
+                        as u64,
+                    cached: None,
+                })
+            }
             _ => AudioEffectState::Stateless,
         };
         Self {
@@ -915,9 +1841,17 @@ impl AudioEffectRuntime {
             AudioEffectState::Gate(state) => &mut state.minimum_gain,
             AudioEffectState::Ducking(state) => &mut state.minimum_gain,
             AudioEffectState::TruePeakLimiter(state) => &mut state.minimum_gain,
+            // AU5 §4.4 rule 85: the denoiser's per-block minimum bin gain,
+            // published through the existing `MixPeaks.gain_reduction` slot. No
+            // new `MixerUnit`, no new telemetry field.
+            AudioEffectState::Denoise(state) => &mut state.minimum_gain,
+            // Hum removal and de-click are not gain computers and get no bar,
+            // exactly as `has_gain_computer` says in core.
             AudioEffectState::Stateless
             | AudioEffectState::Eq { .. }
-            | AudioEffectState::ParametricEq(_) => return None,
+            | AudioEffectState::ParametricEq(_)
+            | AudioEffectState::HumRemoval(_)
+            | AudioEffectState::Declick(_) => return None,
         };
         let gain = std::mem::replace(minimum, 1.0);
         Some((-20.0 * gain.max(f32::MIN_POSITIVE).log10()).max(0.0))
@@ -1281,6 +2215,119 @@ impl AudioEffectRuntime {
                     *sample *= envelope;
                 }
             }
+            // AU5 §3.2: the STFT gate. The analysis runs **ahead** of a delay
+            // line on the signal path, so the node's total delay is exactly
+            // `latency_frames` whatever the block clock does — AU2's precedent
+            // (`CompressorState.delay`, `TruePeakLimiterState.delay`) exactly.
+            ("audio_denoise", AudioEffectState::Denoise(state)) => {
+                // AU5 §2.2 rule 9: the 31 profile bands and the bin floor table
+                // are re-derived on every epoch bump, which is what makes a
+                // `Learn` audible without a re-cue.
+                if state.derived_epoch != parameter_epoch {
+                    state.derive_epoch(&self.effect, sample_rate, parameter_epoch);
+                }
+                // AU5 §0 R71: the three gain-law controls are ordinary keyable
+                // parameters and are read per project frame, on the same cache
+                // `bypass` uses. Rule 41's `direct` predicate is then three
+                // reads of the same vintage: `bypass` and `reduction == 0` per
+                // frame, the all-neutral profile per epoch.
+                if state.cached != Some((project_at, parameter_epoch)) {
+                    state.derive_frame(&self.effect, sample_rate, project_at, parameter_epoch);
+                }
+                let direct_now = bypassed || state.profile_neutral || state.reduction_tenth_db == 0;
+                state.step(samples, direct_now);
+            }
+            // AU5 §3.4: the peaking cascade. `depth_tenth_db = 0` is a bit-exact
+            // identity — RBJ peaking at `A = 1` gives `b = a` term for term — so
+            // the neutral node is a pass-through sample for sample (rule 49).
+            ("audio_hum_removal", AudioEffectState::HumRemoval(state)) => {
+                if bypassed {
+                    return;
+                }
+                if state.cached != Some((project_at, parameter_epoch)) {
+                    for (section, coefficients) in state.sections.iter_mut().zip(hum_coefficients(
+                        &self.effect,
+                        project_at,
+                        sample_rate,
+                    )) {
+                        section.set_coefficients(coefficients);
+                    }
+                    state.cached = Some((project_at, parameter_epoch));
+                }
+                for section in &mut state.sections {
+                    section.process(samples);
+                }
+            }
+            // AU5 §3.5 rule 56: the detector reads the **undelayed** input and a
+            // repair writes into the delay line's buffer at the span's position.
+            // When nothing is repaired the output is the delayed input bit for
+            // bit, which is what makes `max_click_milliseconds = 0` an identity.
+            ("audio_declick", AudioEffectState::Declick(state)) => {
+                let (ratio, ceiling) = match state.cached {
+                    Some((at, epoch, ratio, ceiling))
+                        if at == project_at && epoch == parameter_epoch =>
+                    {
+                        (ratio, ceiling)
+                    }
+                    _ => {
+                        // AU5 §2.2 rule 11: `max_click_milliseconds` is a
+                        // threshold, not an allocation, so it is read here and
+                        // not at construction — but on the project-frame cache,
+                        // so a pre-AU5 chunk pays no extra map probe.
+                        let threshold = audio_value(
+                            &self.effect,
+                            "detector_threshold_tenth_db",
+                            project_at,
+                            240,
+                        );
+                        let ratio = 10.0_f64.powf(threshold as f64 / 200.0);
+                        let ceiling = stage_latency_frames(
+                            audio_value(&self.effect, "max_click_milliseconds", project_at, 0),
+                            sample_rate,
+                        ) as u64;
+                        state.cached = Some((project_at, parameter_epoch, ratio, ceiling));
+                        (ratio, ceiling)
+                    }
+                };
+                let index = state.index;
+                let guard = state.guard_frames;
+                let channels = samples.len().min(state.detectors.len());
+                // The detector runs on every frame, bypassed or not, exactly as
+                // AU2 §2.1 requires of every node's analysis: bypass skips only
+                // the repair, never the delay line and never the state.
+                for (channel, sample) in samples.iter().enumerate().take(channels) {
+                    let Some(span) =
+                        state.detectors[channel].push(index, *sample, ratio, guard, ceiling)
+                    else {
+                        continue;
+                    };
+                    if bypassed {
+                        continue;
+                    }
+                    let (start, end) = span;
+                    let (Some(p0), Some(p1), Some(p2), Some(p3)) = (
+                        state.line.get(start.wrapping_sub(2), channel),
+                        state.line.get(start.wrapping_sub(1), channel),
+                        state.line.get(end + 1, channel),
+                        state.line.get(end + 2, channel),
+                    ) else {
+                        continue;
+                    };
+                    #[allow(clippy::cast_precision_loss)]
+                    let steps = (end - start + 2) as f32;
+                    for frame in start..=end {
+                        #[allow(clippy::cast_precision_loss)]
+                        let position = (frame - start + 1) as f32 / steps;
+                        state.line.set(
+                            frame,
+                            channel,
+                            catmull_rom(p0, p1, p2, p3, steps, position),
+                        );
+                    }
+                }
+                state.index += 1;
+                state.line.process(samples);
+            }
             _ => {}
         }
     }
@@ -1357,18 +2404,29 @@ fn node_structure(effect: &Effect) -> (EffectId, &str, i64) {
     )
 }
 
-/// AU2 §3.6: one node's declared lookahead in milliseconds, read statically.
+/// AU5 §3.6 rule 58: one node's declared latency, read exactly as core reads it.
+///
+/// The neutral comes from the **descriptor**, never from a literal here: core's
+/// `chain_lookahead_milliseconds` (model.rs:735-755) falls back to
+/// `effect_descriptor(name).parameter(LOOKAHEAD).neutral`, and the two agreed
+/// before AU5 only by coincidence — compressor neutral 0, limiter neutral 5 —
+/// while `audio_denoise`'s is 12.
+///
+/// Rule 59, on why this is a blocker and not a tidy-up: N0 requires defaults to
+/// be omitted on the wire and the agent writes `Effect.parameters` freely, so an
+/// `audio_denoise` whose `lookahead_milliseconds` is simply absent would have
+/// yielded `latency_frames = 0` in media — a degenerate window, a bus pad that
+/// mis-sums, a `process_buffer_static` length change — while **core** declared
+/// 12 ms and compensated for it. It is silent, rate-dependent, and it corrupts
+/// both paths identically, so §3.10's parity tests would stay green (A2).
 fn node_lookahead_milliseconds(effect: &Effect) -> i64 {
-    if kinewright_core::is_static_audio_parameter(&effect.name, AUDIO_LOOKAHEAD_PARAMETER) {
-        let neutral = if effect.name == "audio_true_peak_limiter" {
-            5
-        } else {
-            0
-        };
-        static_audio_value(effect, AUDIO_LOOKAHEAD_PARAMETER, neutral)
-    } else {
-        0
+    if !kinewright_core::is_static_audio_parameter(&effect.name, AUDIO_LOOKAHEAD_PARAMETER) {
+        return 0;
     }
+    let neutral = kinewright_core::effect_descriptor(&effect.name)
+        .and_then(|descriptor| descriptor.parameter(AUDIO_LOOKAHEAD_PARAMETER))
+        .map_or(0, |parameter| parameter.neutral);
+    static_audio_value(effect, AUDIO_LOOKAHEAD_PARAMETER, neutral)
 }
 
 /// AU2 §5.8: whether an installed chain and a document chain share a structure.
@@ -3708,7 +4766,7 @@ mod tests {
         ParamValue, Track, TrackId, TrackKind, TrackMix, Transition,
     };
 
-    use crate::test_support::GeneratedMedia;
+    use crate::test_support::{GeneratedMedia, pseudo_random_amplitude, rms, tone, wav_f32};
 
     use super::*;
 
@@ -5333,33 +6391,6 @@ mod tests {
         }
     }
 
-    #[allow(clippy::cast_precision_loss)]
-    fn tone(frequency: f64, amplitude: f32, rate: u32, frames: usize) -> Vec<f32> {
-        (0..frames)
-            .map(|frame| {
-                let phase = 2.0 * std::f64::consts::PI * frequency * frame as f64 / f64::from(rate);
-                #[allow(clippy::cast_possible_truncation)]
-                let sample = (phase.sin() as f32) * amplitude;
-                sample
-            })
-            .collect()
-    }
-
-    /// A deterministic xorshift buffer, never a negative zero.
-    #[allow(clippy::cast_precision_loss)]
-    fn pseudo_random_amplitude(frames: usize, amplitude: f32) -> Vec<f32> {
-        let mut state = 0x2545_f491_4f6c_dd1d_u64;
-        (0..frames)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                let unit = (state >> 40) as f32 / 8_388_608.0 - 1.0;
-                unit * amplitude
-            })
-            .collect()
-    }
-
     fn pseudo_random(frames: usize) -> Vec<f32> {
         pseudo_random_amplitude(frames, 0.25)
     }
@@ -5385,16 +6416,6 @@ mod tests {
             },
         );
         effect
-    }
-
-    fn rms(samples: &[f32]) -> f64 {
-        let sum: f64 = samples
-            .iter()
-            .map(|sample| f64::from(*sample) * f64::from(*sample))
-            .sum();
-        #[allow(clippy::cast_precision_loss)]
-        let count = samples.len().max(1) as f64;
-        (sum / count).sqrt()
     }
 
     fn sample_peak(samples: &[f32]) -> f32 {
@@ -5602,7 +6623,30 @@ mod tests {
         }
     }
 
-    /// Non-neutral settings for every one of the eight audio node names.
+    /// AU5 §3.11: the input the sweep drives one node with.
+    ///
+    /// AU2's single 1 kHz tone cannot exercise two of AU5's three nodes: a
+    /// de-click node is an identity on material with no click in it, by
+    /// construction (rule 56), and a hum cascade at 50 Hz has no section within
+    /// an octave of 1 kHz. Each gets material its own contract describes, and
+    /// the sweep compares against **that** buffer, so the "changes a tone"
+    /// assertion is still the one `process_frame`'s fall-through arm cannot pass
+    /// by accident.
+    fn sweep_input(name: &str, default: &[f32]) -> Vec<f32> {
+        match name {
+            "audio_declick" => {
+                let mut clicked = default.to_vec();
+                for offset in 0..8 {
+                    clicked[2_400 + offset] = if offset % 2 == 0 { 0.9 } else { -0.9 };
+                }
+                clicked
+            }
+            "audio_hum_removal" => tone(100.0, 0.5, 48_000, default.len()),
+            _ => default.to_vec(),
+        }
+    }
+
+    /// Non-neutral settings for every one of the eleven audio node names.
     fn bypass_sweep_settings() -> Vec<(&'static str, Vec<(&'static str, i64)>)> {
         vec![
             ("audio_gain", vec![("gain_tenth_db", -60)]),
@@ -5642,6 +6686,40 @@ mod tests {
                     ("true_peak", 1),
                 ],
             ),
+            // AU5 §2.1: a learned profile at -10 dB in every band with the full
+            // 40 dB reduction, so the node is off the `direct` branch and the
+            // gate really runs.
+            ("audio_denoise", {
+                let mut parameters = vec![
+                    ("reduction_tenth_db", 400),
+                    ("floor_offset_tenth_db", 0),
+                    ("smoothing_milliseconds", 0),
+                    ("lookahead_milliseconds", 12),
+                ];
+                parameters.extend(
+                    NOISE_PROFILE_PARAMETER_NAMES
+                        .iter()
+                        .map(|name| (*name, -100_i64)),
+                );
+                parameters
+            }),
+            (
+                "audio_hum_removal",
+                vec![
+                    ("fundamental_hertz", 50),
+                    ("harmonic_count", 2),
+                    ("depth_tenth_db", -600),
+                    ("notch_q_hundredths", 1_200),
+                ],
+            ),
+            (
+                "audio_declick",
+                vec![
+                    ("max_click_milliseconds", 1),
+                    ("detector_threshold_tenth_db", 240),
+                    ("lookahead_milliseconds", 3),
+                ],
+            ),
         ]
     }
 
@@ -5659,16 +6737,17 @@ mod tests {
                 "{name} is no longer an audio effect"
             );
             covered += 1;
+            let driven = sweep_input(name, &input);
             let output = run_chain(
                 &chain_document(vec![audio_effect(1, name, &parameters)]),
                 48_000,
                 1,
-                &input,
+                &driven,
                 Some(&sidechain),
             );
             let difference = output
                 .iter()
-                .zip(&input)
+                .zip(&driven)
                 .map(|(output, input)| (output - input).abs())
                 .fold(0.0_f32, f32::max);
             assert!(difference > 1.0e-3, "{name} left the tone unchanged");
@@ -6491,29 +7570,6 @@ mod tests {
             );
             assert_playback_matches_export(&document, &exported, fps);
         }
-    }
-
-    /// A 32-bit float WAV, written by hand so a single-sample impulse survives
-    /// exactly (AU2 §3.9(c)).
-    fn wav_f32(samples: &[f32], rate: u32, channels: u16) -> Vec<u8> {
-        let data_length = u32::try_from(samples.len() * 4).expect("the fixture should fit");
-        let mut bytes = Vec::with_capacity(44 + samples.len() * 4);
-        bytes.extend_from_slice(b"RIFF");
-        bytes.extend_from_slice(&(36 + data_length).to_le_bytes());
-        bytes.extend_from_slice(b"WAVEfmt ");
-        bytes.extend_from_slice(&16_u32.to_le_bytes());
-        bytes.extend_from_slice(&3_u16.to_le_bytes());
-        bytes.extend_from_slice(&channels.to_le_bytes());
-        bytes.extend_from_slice(&rate.to_le_bytes());
-        bytes.extend_from_slice(&(rate * u32::from(channels) * 4).to_le_bytes());
-        bytes.extend_from_slice(&(channels * 4).to_le_bytes());
-        bytes.extend_from_slice(&32_u16.to_le_bytes());
-        bytes.extend_from_slice(b"data");
-        bytes.extend_from_slice(&data_length.to_le_bytes());
-        for sample in samples {
-            bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-        bytes
     }
 
     /// Impulses at project sample 0, at project frame 3, and at the very last
@@ -9903,5 +10959,980 @@ mod tests {
         destination.resize(200 * 2, 0.0);
         stage.apply(&source, &mut destination, ramp_frames, 200);
         assert_eq!(stage.current[0].to_bits(), stage.target[0].to_bits());
+    }
+
+    // ---------------------------------------------------------------------
+    // AU5 Part A (§3.1-§3.11, A2, A5, A6, A9, A12, A14)
+    // ---------------------------------------------------------------------
+
+    /// AU5 §3.11(c) budget: the RMS-to-RMS error drop the de-click fixture must
+    /// clear, in tenth dB.
+    ///
+    /// 30 dB, and the gate is set low on purpose: the residual is dominated by
+    /// detector edge handling, not by the interpolation bound. Catmull-Rom's
+    /// residual over an 8-frame span of a 440 Hz sine is `A(wH)^4/384 ~ 3.5e-5`
+    /// **peak** (a peak bound quoted against an RMS signal), which over
+    /// 19 x 8 x 2 of 192 000 samples is about 9.9e-7 RMS against about 0.0368
+    /// before — so the honest expectation is 80-90 dB and the printed margin is
+    /// what keeps the constant honest.
+    ///
+    /// §3.11(c)'s click writes 8 frames of ±0.9, whose `d2` reaches
+    /// `4 x 0.9 = 3.6`, which is the second difference of a **sign-alternating**
+    /// run; §3.11(c) writes the click that way for exactly this reason (R31).
+    /// The 440 Hz carrier's `d2` is `A(2 sin(w/2))^2 ~ A w^2 = 0.3 x 0.05760^2 =
+    /// 9.95e-4` peak, **7.04e-4** RMS. At `detector_threshold_tenth_db = 240`
+    /// (24 dB = x15.85) the threshold is **1.12e-2** and the click clears it by
+    /// 322x. If the reference window were allowed to contain the click, its mean
+    /// square would be `8 x 3.6^2 / 960 = 0.108` -> RMS 0.329 -> threshold
+    /// **5.21 > 3.6**, and the node would detect **nothing**. The exclusion is
+    /// the whole detector, and
+    /// `the_declick_reference_excludes_flagged_samples` proves it both ways.
+    const DECLICK_ERROR_DROP_BUDGET_TENTH_DB: f64 = 300.0;
+
+    /// CC6 rule 11.0.5, AU3 §5.8: a budget no measurement approaches proves
+    /// nothing.
+    const AU5_MINIMUM_MARGIN: f64 = 2.0;
+
+    /// AU5 §3.11(c): 19 clicks at `4_800 * (k + 1)`, 8 frames each, the last
+    /// occupying frames `91_200..91_208` of 96 000.
+    const DECLICK_FIXTURE_CLICKS: usize = 19;
+
+    fn denoise_effect(id: u64, reduction: i64, bands: Option<i64>) -> Effect {
+        let mut parameters = vec![
+            ("reduction_tenth_db", reduction),
+            ("lookahead_milliseconds", 12),
+        ];
+        let owned: Vec<(&'static str, i64)> = bands.map_or_else(Vec::new, |band| {
+            NOISE_PROFILE_PARAMETER_NAMES
+                .iter()
+                .map(|name| (*name, band))
+                .collect()
+        });
+        parameters.extend(owned);
+        audio_effect(id, "audio_denoise", &parameters)
+    }
+
+    /// AU5 §7 A2 (B1): media's per-node read equals core's chain sum for
+    /// **every** audio descriptor, with `audio_hum_removal` (no row at all),
+    /// `audio_true_peak_limiter` (5) and `audio_denoise` (12) as the named
+    /// cases — the three the pre-AU5 literal got wrong or right by coincidence.
+    #[test]
+    fn au5_node_lookahead_reads_the_descriptor_for_every_audio_effect() {
+        let mut seen = Vec::new();
+        for descriptor in kinewright_core::EFFECT_DESCRIPTORS {
+            if !kinewright_core::is_audio_effect(descriptor.name) {
+                continue;
+            }
+            let bare = audio_effect(1, descriptor.name, &[]);
+            let media = node_lookahead_milliseconds(&bare);
+            let core = kinewright_core::chain_lookahead_milliseconds(std::slice::from_ref(&bare));
+            assert_eq!(
+                media, core,
+                "{} reads {media} in media and {core} in core",
+                descriptor.name
+            );
+            seen.push((descriptor.name, media));
+        }
+        assert_eq!(seen.len(), 11, "eleven audio descriptors: {seen:?}");
+        assert!(seen.contains(&("audio_hum_removal", 0)));
+        assert!(seen.contains(&("audio_true_peak_limiter", 5)));
+        assert!(seen.contains(&("audio_denoise", 12)));
+        assert!(seen.contains(&("audio_declick", 3)));
+        assert!(seen.contains(&("audio_compressor", 0)));
+
+        // A2's second half: an `audio_denoise` whose `lookahead_milliseconds` is
+        // absent from the parameters map still builds a 512-frame window.
+        let bare = audio_effect(1, "audio_denoise", &[]);
+        let runtime = AudioEffectRuntime::new(&bare, 2, 48_000);
+        assert_eq!(runtime.latency_frames, 576);
+        let AudioEffectState::Denoise(state) = &runtime.state else {
+            panic!("audio_denoise must build a denoise state");
+        };
+        assert_eq!(state.window, 512);
+        assert_eq!(state.hop, 128);
+    }
+
+    /// AU5 §7 A5 and §3.10 rule 71: each node's **declared** delay, pinned by an
+    /// impulse through `process_buffer_static` landing at frame 0 at 44.1 / 48 /
+    /// 96 kHz, bypassed and not.
+    #[test]
+    fn au5_every_repair_node_lands_its_impulse_at_frame_zero() {
+        for rate in [44_100_u32, 48_000, 96_000] {
+            for bypass in [0_i64, 1] {
+                for effect in [
+                    denoise_effect(1, 0, None),
+                    audio_effect(
+                        2,
+                        "audio_hum_removal",
+                        &[("harmonic_count", 3), ("depth_tenth_db", -300)],
+                    ),
+                    audio_effect(3, "audio_declick", &[("lookahead_milliseconds", 3)]),
+                ] {
+                    let mut effect = effect;
+                    effect
+                        .parameters
+                        .insert("bypass".to_owned(), ParamValue::Integer(bypass));
+                    let mut input = vec![0.0_f32; 8_192];
+                    input[0] = 1.0;
+                    let output = process_buffer_static(&effect, rate, 1, &input)
+                        .expect("a repair node must be length-preserving");
+                    assert_eq!(output.len(), input.len());
+                    // The impulse lands at frame 0 after the helper's head trim,
+                    // which is the *declared* delay and nothing else: a hum
+                    // cascade is a filter and is allowed to change the impulse's
+                    // amplitude, so what is pinned is where its energy sits.
+                    let peak = output
+                        .iter()
+                        .enumerate()
+                        .max_by(|left, right| left.1.abs().total_cmp(&right.1.abs()))
+                        .map_or(usize::MAX, |(index, _)| index);
+                    assert_eq!(
+                        peak, 0,
+                        "{} at {rate} Hz (bypass {bypass}) put its impulse at frame {peak}",
+                        effect.name
+                    );
+                    if effect.name != "audio_hum_removal" {
+                        assert!(
+                            (output[0] - 1.0).abs() <= 1.0e-6,
+                            "{} at {rate} Hz (bypass {bypass}) changed the impulse to {}",
+                            effect.name,
+                            output[0]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// AU5 §7 A5 / §3.10 rule 71 (R32): the **OLA delay is pinned directly**,
+    /// not through the impulse, because rule 41 puts an all-neutral
+    /// `audio_denoise` on the `direct` branch and there is no parameter setting
+    /// that both leaves `direct` and reconstructs bit-cleanly.
+    ///
+    /// The unit gain is not a test-only flag: `gain_floor = 1.0` makes
+    /// `clamp(_, 1.0, 1.0)` exactly 1.0 for every bin and `alpha = 1.0` makes
+    /// the smoother the identity, so the block routine under test is the
+    /// production one, differing only in the two numbers rule 37 derives.
+    #[test]
+    fn au5_the_overlap_add_delay_is_exactly_window_minus_one() {
+        for (rate, expected_pad) in [(48_000_u32, 65_usize), (44_100, 18), (96_000, 129)] {
+            let effect = denoise_effect(1, 0, None);
+            let latency = stage_latency_frames(node_lookahead_milliseconds(&effect), rate);
+            let mut state = DenoiseState::new(&effect, 1, rate, latency);
+            // A second arm: the residual pad after the OLA, the one place the
+            // arithmetic is restated because the impulse cannot reach it.
+            assert_eq!(
+                latency - (state.window - 1),
+                expected_pad,
+                "the pad at {rate} Hz"
+            );
+            state.gain_floor = 1.0;
+            state.alpha = 1.0;
+            state.direct = false;
+
+            let window = state.window;
+            let hop = state.hop;
+            let input = pseudo_random_amplitude(4 * window, 0.25);
+            let mut output = Vec::with_capacity(input.len());
+            for sample in &input {
+                let mut frame = [*sample];
+                // The production per-frame path with `direct` clear, but read
+                // **before** `output_pad`, which the declared-delay arm covers.
+                state.step_ola_only(&mut frame);
+                output.push(frame[0]);
+            }
+            let delay = window - 1;
+            let mut worst = 0.0_f64;
+            for index in (window - hop)..(input.len() - delay) {
+                let difference = f64::from(output[index + delay]) - f64::from(input[index]);
+                worst = worst.max(difference.abs());
+            }
+            assert!(
+                worst <= 1.0e-12,
+                "the OLA at {rate} Hz differs from a {delay}-frame delay by {worst}"
+            );
+        }
+    }
+
+    /// AU5 §3.2 rule 41 and §7 A5/A14: the `direct` switch window is exactly
+    /// `window - 1` frames long and the level never dips across a toggle.
+    ///
+    /// A5's literal spelling — "toggles `bypass` mid-buffer through
+    /// `process_buffer_static`" — is impossible, because that helper pins
+    /// `project_at = TimeCode::ZERO` on every frame, so a `Hold` curve on
+    /// `bypass` cannot change value inside one call (AU5 §0 R77). The toggle is
+    /// driven instead through the **epoch** path rule 73 defines, retuning
+    /// `reduction_tenth_db` 200 -> 0 -> 200, which is a real editor gesture and
+    /// exercises exactly the same `direct` predicate.
+    ///
+    /// The signal is **noise**, not a tone, and the assertion is sample-accurate
+    /// rather than an RMS floor, because a starved `output_pad` (the bug AU5 §0
+    /// R61 records) emits frames from before the switch: on a steady tone those
+    /// have the right level and the wrong phase, so only a sample-accurate arm
+    /// can see them.
+    #[test]
+    fn au5_the_direct_switch_window_is_window_minus_one_and_never_dips() {
+        let rate = 48_000_u32;
+        // A profile 110 dB down leaves the node off the `direct` branch — the
+        // bands are not at the neutral and the reduction is not zero — while
+        // gating essentially nothing, so the OLA path is transparent to about
+        // 1e-5 and any difference from the delayed input is a state bug.
+        let reducing = denoise_effect(1, 200, Some(-1_100));
+        let relaxed = denoise_effect(1, 0, Some(-1_100));
+        let latency = stage_latency_frames(node_lookahead_milliseconds(&reducing), rate);
+
+        // Arm 1: the window opens at `window - 1` and is spent one frame per
+        // emit, so exactly `window - 1` frames come off the delay line.
+        let mut state = DenoiseState::new(&reducing, 1, rate, latency);
+        assert!(!state.profile_neutral && state.reduction_tenth_db != 0);
+        let mut frame = [0.5_f32];
+        state.step(&mut frame, true);
+        assert_eq!(state.direct_switch_remaining, 0);
+        let mut from_the_delay_line = 0_usize;
+        for _ in 0..(2 * state.window) {
+            let switching = state.direct_switch_remaining > 0;
+            state.step(&mut frame, false);
+            if switching || from_the_delay_line == 0 {
+                from_the_delay_line += 1;
+            }
+        }
+        assert_eq!(from_the_delay_line, state.window - 1);
+        assert_eq!(state.direct_switch_remaining, 0);
+        let window = state.window;
+
+        // Arm 2: the production path, retuned twice mid-buffer.
+        let input = pseudo_random_amplitude(48_000, 0.25);
+        let mut runtime = AudioEffectRuntime::new(&reducing, 1, rate);
+        let mut output = Vec::with_capacity(input.len());
+        let (off_at, on_at) = (16_000_usize, 24_000);
+        for (index, sample) in input.iter().enumerate() {
+            if index == off_at {
+                runtime.retarget(&relaxed);
+            }
+            if index == on_at {
+                runtime.retarget(&reducing);
+            }
+            let mut frame = [*sample];
+            runtime.process_frame(&mut frame, &[0.0], TimeCode::ZERO, rate);
+            output.push(frame[0]);
+        }
+
+        // Sample-accurate: past the fresh runtime's own OLA warm-up, every
+        // output frame is the input `latency` frames earlier. A starved pad
+        // would put 65 frames of stale noise here after each switch window.
+        let settled = latency + window;
+        let mut worst = (0_usize, 0.0_f32);
+        for index in settled..input.len() {
+            let error = (output[index] - input[index - latency]).abs();
+            if error > worst.1 {
+                worst = (index, error);
+            }
+        }
+        assert!(
+            worst.1 <= 1.0e-3,
+            "the toggle left {} of error at frame {} (switches at {off_at} and {on_at})",
+            worst.1,
+            worst.0
+        );
+
+        // And the level itself never dips across either switch, which is the
+        // sentence rule 41 actually makes.
+        for start in [off_at, on_at] {
+            for block in 0..((latency + window) / 100) {
+                let range = (start + block * 100)..(start + block * 100 + 100);
+                let heard = rms(&output[range.clone()]);
+                let expected = rms(&input[range.start - latency..range.end - latency]);
+                assert!(
+                    heard >= expected * 0.9,
+                    "the switch at {start} dipped block {block} to {heard} against {expected}"
+                );
+            }
+        }
+    }
+
+    /// AU5 §7 A6 / §3.5 rule 55: the construction assert holds over the whole
+    /// `max_click_milliseconds` domain at 44 100 / 48 000 / 96 000 Hz, with
+    /// §3.5's six figures asserted individually, and it is a real `assert!`.
+    #[test]
+    fn au5_the_declick_budget_fits_at_every_rate() {
+        for (rate, declared, click, guard, required) in [
+            (44_100_u32, 132_usize, 44_usize, 44_usize, 90_usize),
+            (48_000, 144, 48, 48, 98),
+            (96_000, 288, 96, 96, 194),
+        ] {
+            assert_eq!(
+                stage_latency_frames(DECLICK_DECLARED_MILLISECONDS, rate),
+                declared
+            );
+            assert_eq!(stage_latency_frames(1, rate), click);
+            assert_eq!(
+                stage_latency_frames(DECLICK_GUARD_MILLISECONDS, rate),
+                guard
+            );
+            assert_eq!(click + guard + DECLICK_DETECTOR_FRAMES, required);
+            assert!(declared >= required);
+            assert_declick_budget_fits(rate);
+        }
+    }
+
+    /// AU5 §3.11(c): 2 s of 440 Hz at 0.300, interleaved to stereo, with 19
+    /// eight-frame clicks whose sign alternates **per frame**.
+    fn declick_fixture() -> (Vec<f32>, Vec<f32>) {
+        let mono = tone(440.0, 0.300, 48_000, 96_000);
+        let mut clean = Vec::with_capacity(mono.len() * 2);
+        for sample in &mono {
+            clean.push(*sample);
+            clean.push(*sample);
+        }
+        let mut corrupt = clean.clone();
+        for click in 0..DECLICK_FIXTURE_CLICKS {
+            let start = 4_800 * (click + 1);
+            for offset in 0..8 {
+                let value = if (click + offset) % 2 == 0 { 0.9 } else { -0.9 };
+                corrupt[(start + offset) * 2] = value;
+                corrupt[(start + offset) * 2 + 1] = value;
+            }
+        }
+        (clean, corrupt)
+    }
+
+    /// AU5 §7 A6 / §3.5 rule 53: the trailing reference **excludes flagged
+    /// samples**, proved by a direct test that the same detector with a naive
+    /// window finds **zero** clicks on §3.11(c)'s fixture and the specified one
+    /// finds nineteen.
+    #[test]
+    fn au5_the_declick_reference_excludes_flagged_samples() {
+        let (clean, corrupt) = declick_fixture();
+        let specified = detect_clicks(&corrupt, 2, 48_000, 240, 1);
+        assert_eq!(
+            specified.count(),
+            u32::try_from(DECLICK_FIXTURE_CLICKS).unwrap()
+        );
+        assert_eq!(detect_clicks(&clean, 2, 48_000, 240, 1).count(), 0);
+
+        let specified_frames: u64 = specified
+            .spans
+            .iter()
+            .map(|(start, end)| end - start + 1)
+            .sum();
+
+        // The naive window: the same second difference and the same threshold,
+        // with **every** sample in the reference. Written here rather than in
+        // the node because it is the thing the node must not do.
+        let ratio = 10.0_f64.powf(240.0 / 200.0);
+        let window_frames = stage_latency_frames(DECLICK_REFERENCE_MILLISECONDS, 48_000);
+        let mut history = VecDeque::<f64>::with_capacity(window_frames);
+        let (mut previous, mut previous2, mut sum) = (0.0_f64, 0.0_f64, 0.0_f64);
+        let mut naive_flags = Vec::with_capacity(corrupt.len() / 2);
+        for frame in 0..corrupt.len() / 2 {
+            let value = f64::from(corrupt[frame * 2]);
+            let second_difference = previous.mul_add(-2.0, value) + previous2;
+            previous2 = previous;
+            previous = value;
+            let reference = if history.len() >= window_frames {
+                #[allow(clippy::cast_precision_loss)]
+                let count = history.len() as f64;
+                (sum / count).sqrt()
+            } else {
+                0.0
+            };
+            naive_flags.push(reference > 0.0 && second_difference.abs() > ratio * reference);
+            history.push_back(second_difference);
+            sum += second_difference * second_difference;
+            if history.len() > window_frames
+                && let Some(evicted) = history.pop_front()
+            {
+                sum -= evicted * evicted;
+            }
+        }
+        let naive_frames = naive_flags.iter().filter(|flagged| **flagged).count();
+        assert!(
+            u64::try_from(naive_frames).unwrap() < specified_frames,
+            "the naive reference flagged {naive_frames} frames, not fewer than {specified_frames}"
+        );
+
+        // The decisive arm: give the naive detector a **perfect** repair of
+        // exactly the frames it flagged — every flagged sample replaced by the
+        // clean one, which no real interpolator could do — and the lane still
+        // fails, because the reference rises as soon as the click enters it and
+        // leaves the middle of every plateau in place.
+        let mut naive_repaired = corrupt.clone();
+        for (frame, flagged) in naive_flags.iter().enumerate() {
+            if *flagged {
+                naive_repaired[frame * 2] = clean[frame * 2];
+                naive_repaired[frame * 2 + 1] = clean[frame * 2 + 1];
+            }
+        }
+        let before = rms(&corrupt
+            .iter()
+            .zip(&clean)
+            .map(|(corrupt, clean)| corrupt - clean)
+            .collect::<Vec<_>>());
+        let after = rms(&naive_repaired
+            .iter()
+            .zip(&clean)
+            .map(|(repaired, clean)| repaired - clean)
+            .collect::<Vec<_>>());
+        let naive_drop = 200.0 * (before / after.max(f64::MIN_POSITIVE)).log10();
+        println!(
+            "AU5_DECLICK_NAIVE naive_flagged_frames={naive_frames} specified_flagged_frames={specified_frames} naive_drop_tenth_db={naive_drop:.1}"
+        );
+        assert!(
+            naive_drop < DECLICK_ERROR_DROP_BUDGET_TENTH_DB,
+            "a naive reference must not reach the budget, but it dropped {naive_drop} tenth dB"
+        );
+    }
+
+    /// AU5 §7 A9 / §3.11(c): the click lane and its printed measurement.
+    ///
+    /// The lane lives here rather than in `tests/au5_fixtures.rs` because the
+    /// RMS-to-RMS quantity needs the node's own output buffer, and
+    /// `process_buffer_static` is `pub(crate)` (AU5 §0 R62). The fixture bytes
+    /// and the helpers are the promoted ones either way.
+    #[test]
+    fn au5_the_declick_fixture_drops_its_error() {
+        let (clean, corrupt) = declick_fixture();
+        assert_eq!(clean.len(), 96_000 * 2);
+        // The last click occupies frames 91_200..91_208 of 96 000.
+        let last = 4_800 * DECLICK_FIXTURE_CLICKS;
+        assert_eq!(last, 91_200);
+        assert!(last + 8 <= 96_000);
+
+        let node = audio_effect(
+            1,
+            "audio_declick",
+            &[
+                ("max_click_milliseconds", 1),
+                ("detector_threshold_tenth_db", 240),
+                ("lookahead_milliseconds", 3),
+            ],
+        );
+        let repaired = process_buffer_static(&node, 48_000, 2, &corrupt)
+            .expect("the node is length-preserving");
+        let before = rms(&corrupt
+            .iter()
+            .zip(&clean)
+            .map(|(corrupt, clean)| corrupt - clean)
+            .collect::<Vec<_>>());
+        let after = rms(&repaired
+            .iter()
+            .zip(&clean)
+            .map(|(repaired, clean)| repaired - clean)
+            .collect::<Vec<_>>());
+        let drop_tenth_db = 200.0 * (before / after.max(f64::MIN_POSITIVE)).log10();
+        let margin = drop_tenth_db / DECLICK_ERROR_DROP_BUDGET_TENTH_DB;
+        let clicks = detect_clicks(&corrupt, 2, 48_000, 240, 1).count();
+        println!(
+            "AU5_DECLICK measured_drop_tenth_db={drop_tenth_db:.1} quantity=rms_to_rms \
+             before_rms={before:.6} after_rms={after:.9} clicks={clicks} margin={margin:.2}"
+        );
+        assert_eq!(clicks, u32::try_from(DECLICK_FIXTURE_CLICKS).unwrap());
+        assert!(
+            drop_tenth_db >= DECLICK_ERROR_DROP_BUDGET_TENTH_DB,
+            "the error drop was {drop_tenth_db} tenth dB, under the budget"
+        );
+        assert!(
+            margin >= AU5_MINIMUM_MARGIN,
+            "the de-click margin is only {margin:.2}x"
+        );
+
+        // The transient control: a 5 ms exponential burst reports zero clicks
+        // and is returned **unmodified within 1e-6**. It is the **guard**, not
+        // the length test, that rejects it (R41).
+        let mut burst = clean.clone();
+        for frame in 0..240_usize {
+            #[allow(clippy::cast_precision_loss)]
+            let time = frame as f32 / 48_000.0;
+            let envelope = 0.8 * (-time / 0.001_f32).exp();
+            #[allow(clippy::cast_precision_loss)]
+            let phase = 2.0 * std::f32::consts::PI * 2_000.0 * time;
+            let value = envelope * phase.sin();
+            burst[(48_000 + frame) * 2] += value;
+            burst[(48_000 + frame) * 2 + 1] += value;
+        }
+        assert_eq!(detect_clicks(&burst, 2, 48_000, 240, 1).count(), 0);
+        let through = process_buffer_static(&node, 48_000, 2, &burst).unwrap();
+        let difference = through
+            .iter()
+            .zip(&burst)
+            .map(|(through, burst)| (through - burst).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            difference <= 1.0e-6,
+            "the 5 ms burst was modified by {difference}"
+        );
+    }
+
+    /// AU5 §0 R71 / §2.2 rules 9-11: a keyframe curve on `reduction_tenth_db` is
+    /// **heard**.
+    ///
+    /// The three gain-law controls are not in `is_static_audio_parameter` and
+    /// §2.1's table marks none of them static, so validation accepts a curve on
+    /// them — which means the runtime must follow it. Before AU5 §0 R71's fix
+    /// the runtime read all three through `static_audio_value`, so the curve was
+    /// accepted and then silently discarded, in **both** paths identically:
+    /// exactly AU2 §0 E16's divergence, adopted for the one control an editor
+    /// reaches for most, and invisible to any parity assert.
+    #[test]
+    fn au5_a_keyed_reduction_curve_is_heard() {
+        let rate = 48_000_u32;
+        // A profile 10 dB down is far above 0.25-amplitude noise, so the gate
+        // clamps almost every bin to `g_floor` when the reduction is engaged and
+        // is an exact identity when it is not.
+        let mut keyed = denoise_effect(1, 0, Some(-100));
+        keyed.keyframes.insert(
+            "reduction_tenth_db".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode::ZERO,
+                        value: 0,
+                        interpolation: KeyframeInterpolation::Hold,
+                    },
+                    Keyframe {
+                        at: TimeCode(5),
+                        value: 400,
+                        interpolation: KeyframeInterpolation::Hold,
+                    },
+                ],
+            },
+        );
+        // A curve on all three is legal by construction: none is static, so
+        // `validate_audio_chain_automation` cannot refuse it, and none is
+        // hold-only, so even a `Linear` key is accepted.
+        for name in [
+            "reduction_tenth_db",
+            "floor_offset_tenth_db",
+            "smoothing_milliseconds",
+        ] {
+            assert!(
+                !kinewright_core::is_static_audio_parameter("audio_denoise", name),
+                "{name} must not be static, or rule 11's argument applies to it"
+            );
+            assert!(
+                !kinewright_core::is_hold_only_parameter("audio_denoise", name),
+                "{name} takes any interpolation"
+            );
+        }
+        let document = chain_document(vec![keyed]);
+
+        // 10 fps, so project frame 5 is sample 24 000; the buffer covers frames
+        // 0..10 and the curve steps in the middle of it.
+        let latency = stage_latency_frames(12, rate);
+        let input = pseudo_random_amplitude(48_000, 0.25);
+        let output = run_chain(&document, rate, 1, &input, None);
+
+        // Sample-wise, not RMS: on the `direct` branch the node is bit-exact,
+        // and an aggregate over 19 424 samples would also be satisfied by any
+        // energy-preserving all-pass.
+        let worst_identity = output[latency..20_000]
+            .iter()
+            .zip(&input[0..20_000 - latency])
+            .map(|(output, input)| (output - input).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            worst_identity <= 1.0e-6,
+            "at reduction 0 the node is an identity, but a sample differs by {worst_identity}"
+        );
+        let gated = rms(&output[30_000..44_000]);
+        let ungated = rms(&input[30_000 - latency..44_000 - latency]);
+        assert!(
+            gated <= ungated * 0.5,
+            "at reduction 400 the node must gate: {gated} against {ungated}"
+        );
+    }
+
+    /// AU5 §7 A12: identity and neutrality. Every repair node at its neutrals
+    /// returns its input **bit for bit** through `process_buffer_static`;
+    /// `bypass = 1` does the same and does not change the declared lookahead;
+    /// and an `audio_denoise` at `reduction_tenth_db = 200` with all 31 bands at
+    /// the neutral is **unity**, not a mute.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn au5_every_repair_neutral_is_a_bit_exact_identity() {
+        let input = pseudo_random_amplitude(4_096, 0.25);
+        for name in ["audio_denoise", "audio_hum_removal", "audio_declick"] {
+            let neutral = audio_effect(1, name, &[]);
+            let output = process_buffer_static(&neutral, 48_000, 1, &input).unwrap();
+            assert_eq!(output, input, "an all-neutral {name} must be exact");
+
+            let bypassed = audio_effect(1, name, &[("bypass", 1)]);
+            assert_eq!(
+                node_lookahead_milliseconds(&bypassed),
+                node_lookahead_milliseconds(&neutral),
+                "bypass must not change {name}'s declared lookahead"
+            );
+            let output = process_buffer_static(&bypassed, 48_000, 1, &input).unwrap();
+            assert_eq!(output, input, "a bypassed {name} must be exact");
+        }
+
+        // AU5 §3.2 rule 41's `bypass_delay` exists for the **configured** case,
+        // which an all-neutral node can never exercise: a learned, reducing
+        // denoiser with `bypass = 1` must still be the delayed input bit for
+        // bit, and must still declare 12 ms.
+        let mut configured = denoise_effect(1, 400, Some(-600));
+        assert_ne!(
+            process_buffer_static(&configured, 48_000, 1, &input).unwrap(),
+            input,
+            "a learned reducing denoiser must not be an identity when it is running"
+        );
+        configured
+            .parameters
+            .insert("bypass".to_owned(), ParamValue::Integer(1));
+        assert_eq!(node_lookahead_milliseconds(&configured), 12);
+        assert_eq!(
+            process_buffer_static(&configured, 48_000, 1, &input).unwrap(),
+            input,
+            "a bypassed learned denoiser must pass its delayed input through"
+        );
+        let configured_declick = audio_effect(
+            1,
+            "audio_declick",
+            &[
+                ("max_click_milliseconds", 1),
+                ("detector_threshold_tenth_db", 60),
+                ("lookahead_milliseconds", 3),
+                ("bypass", 1),
+            ],
+        );
+        assert_eq!(node_lookahead_milliseconds(&configured_declick), 3);
+        assert_eq!(
+            process_buffer_static(&configured_declick, 48_000, 1, &input).unwrap(),
+            input,
+            "a bypassed configured de-click must pass its delayed input through"
+        );
+
+        // R4's whole point: a reducing node with no learned profile is unity.
+        let unlearned = denoise_effect(1, 200, None);
+        let output = process_buffer_static(&unlearned, 48_000, 1, &input).unwrap();
+        assert_eq!(
+            output, input,
+            "a 20 dB reduction with no profile must be unity, not a mute"
+        );
+        let explicit = denoise_effect(1, 200, Some(PROFILE_BAND_NEUTRAL_TENTH_DB));
+        let output = process_buffer_static(&explicit, 48_000, 1, &input).unwrap();
+        assert_eq!(output, input, "31 explicit neutrals are the same identity");
+    }
+
+    /// AU5 §7 A12 / §3.10 rule 72: a repair-free document's `mix_audio` is
+    /// `to_bits()`-identical run twice, with a printed `AU5_REPAIR_SHA256`.
+    ///
+    /// The digest is **evidence, not a pin** — this is AU3's `AU3_MIX_AUDIO_SHA256`
+    /// idiom (audio.rs, print-only) carried forward, and comparing a render
+    /// against itself proves determinism, not pre-AU5 identity. What actually
+    /// discharges A12's "`to_bits()`-identical to the pre-AU5 render" is that
+    /// every pre-existing audio test in this module is unchanged and green: a
+    /// document with no repair node never reaches a new arm, and
+    /// `AudioEffectState`'s three new variants are unreachable without one.
+    #[test]
+    fn au5_a_repair_free_document_is_bit_identical_with_a_printed_digest() {
+        crate::initialize_ffmpeg().unwrap();
+        let source = impulse_media();
+        let fps = Rational::new(10, 1).unwrap();
+        let document = impulse_document(source.path(), fps);
+        document.validate().unwrap();
+        let settings = parity_settings(fps);
+        let first = crate::export::mix_audio(&document, &settings).unwrap();
+        let second = crate::export::mix_audio(&document, &settings).unwrap();
+        assert!(
+            first
+                .iter()
+                .zip(&second)
+                .all(|(left, right)| left.to_bits() == right.to_bits()),
+            "a repair-free mix must be bit-identical run twice"
+        );
+        let bytes = first
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        let digest = crate::sha256_bytes(&bytes);
+        println!("AU5_REPAIR_SHA256 samples={} digest={digest}", first.len());
+        assert_eq!(digest.len(), 64);
+    }
+
+    /// AU5 §3.3 rule 44 and §7 A4: the runtime conversion, tested directly at
+    /// three window sizes, including the `max(1, bins_in_band)` floor at 20 Hz
+    /// and the roughly 49 bins at 20 kHz.
+    #[test]
+    fn au5_the_bin_floor_conversion_holds_its_derivation() {
+        let flat = [-600_i64; NOISE_PROFILE_BAND_COUNT];
+        for window in [512_usize, 1_024, 4_096] {
+            let floors = denoise_bin_floor_power(&flat, window, 48_000);
+            assert_eq!(floors.len(), window / 2 + 1);
+            assert!(
+                floors.iter().all(|power| *power > 0.0 && power.is_finite()),
+                "every bin floor at window {window} must be finite and positive"
+            );
+        }
+
+        // The absolute arm (AU5 §0 R75): white noise of **known** mean square,
+        // the band levels it must read analytically, and the floor the
+        // conversion derives, against the mean `|X_k|^2` a real Hann-windowed
+        // `forward_fft` of that noise actually produces. This is the only arm
+        // that can see a wrong `sum w^2`: the contract's `window^2 / 4` reads
+        // 1.25 dB high and a finiteness check cannot tell.
+        for window in [512_usize, 1_024] {
+            let amplitude = 0.25_f32;
+            let mean_square = f64::from(amplitude) * f64::from(amplitude) / 3.0;
+            let nyquist = 24_000.0_f64;
+            // Flat noise, so each band's power is its share of the spectrum.
+            let mut profile = [PROFILE_BAND_NEUTRAL_TENTH_DB; NOISE_PROFILE_BAND_COUNT];
+            for (index, band) in profile.iter_mut().enumerate() {
+                let (low, high) = third_octave_band_edges(index);
+                let power = mean_square * (high.min(nyquist) - low) / nyquist;
+                #[allow(clippy::cast_possible_truncation)]
+                let tenth_db = (10.0 * (power / 0.5).log10() * 10.0).round() as i64;
+                *band = tenth_db.clamp(PROFILE_BAND_NEUTRAL_TENTH_DB, 0);
+            }
+            let floors = denoise_bin_floor_power(&profile, window, 48_000);
+
+            // The measurement: the same window, the same transform, averaged
+            // over enough blocks that the per-bin chi-square settles.
+            let blocks = 200_usize;
+            let noise = pseudo_random_amplitude(window * blocks, amplitude);
+            let shape = crate::spectrum::hann_window(window);
+            let mut measured = vec![0.0_f64; window / 2 + 1];
+            let mut scratch = vec![crate::spectrum::Complex::default(); window];
+            for block in 0..blocks {
+                for (index, slot) in scratch.iter_mut().enumerate() {
+                    let sample = noise[block * window + index];
+                    *slot = crate::spectrum::Complex::new(f64::from(sample) * shape[index], 0.0);
+                }
+                crate::spectrum::forward_fft(&mut scratch);
+                for (bin, accumulated) in measured.iter_mut().enumerate() {
+                    *accumulated += scratch[bin]
+                        .re
+                        .mul_add(scratch[bin].re, scratch[bin].im * scratch[bin].im);
+                }
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let count = blocks as f64;
+            for value in &mut measured {
+                *value /= count;
+            }
+
+            // Interior bins only: the very low bands hold too few bins for the
+            // integer `bins_in_band` divisor to be a good approximation of the
+            // continuous bandwidth, and bins above the 20 kHz band's upper edge
+            // belong to no band at all.
+            //
+            // The assertion is on the **mean** error, not the worst: rule 44's
+            // `bins_in_band` is an integer count standing in for a continuous
+            // bandwidth, so each band carries up to about 1.4 dB of quantisation
+            // either way, and that is scattered and zero-mean. A wrong
+            // `sum w^2` is a *bias* on every bin at once, which is exactly what
+            // a mean sees and a worst-case bound cannot separate from the
+            // quantisation. The worst is printed beside it.
+            let first = window / 8;
+            let last = window * 15 / 32;
+            let mut worst: f64 = 0.0;
+            let mut total = 0.0_f64;
+            for bin in first..last {
+                let error = 10.0 * (floors[bin] / measured[bin]).log10();
+                worst = worst.max(error.abs());
+                total += error;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let bias = total / (last - first) as f64;
+            println!(
+                "AU5_BIN_FLOOR window={window} bias_db={bias:+.3} worst_db={worst:.3} \
+                 bins={first}..{last}"
+            );
+            assert!(
+                bias.abs() <= 0.35,
+                "the bin floor conversion at window {window} is biased {bias:+.3} dB against a \
+                 real transform; the sine window's `N/2` in place of a Hann's `3N/8` is +1.25"
+            );
+        }
+        // The `max(1, ...)` floor: at 512/48 kHz the bin spacing is 93.75 Hz, so
+        // the 20 Hz band holds no bin at all and the floor keeps the conversion
+        // finite rather than dividing by zero.
+        let mut low_only = [PROFILE_BAND_NEUTRAL_TENTH_DB; NOISE_PROFILE_BAND_COUNT];
+        low_only[0] = 0;
+        let floors = denoise_bin_floor_power(&low_only, 512, 48_000);
+        assert!(floors[0].is_finite() && floors[0] > 0.0);
+        // About 49 bins in the 20 kHz band at a 512-point window. The divisor
+        // is recovered from the floor through the **same** window factor the
+        // conversion uses, read from the window rather than from a constant.
+        let mut high_only = [PROFILE_BAND_NEUTRAL_TENTH_DB; NOISE_PROFILE_BAND_COUNT];
+        high_only[NOISE_PROFILE_BAND_COUNT - 1] = 0;
+        let floors = denoise_bin_floor_power(&high_only, 512, 48_000);
+        let window_power: f64 = crate::spectrum::hann_window(512)
+            .iter()
+            .map(|weight| weight * weight)
+            .sum();
+        assert!(
+            (window_power - 192.0).abs() <= 1.0e-9,
+            "a periodic Hann of 512 points has `sum w^2 = 3N/8 = 192`, not {window_power}"
+        );
+        let implied = window_power * 512.0 / 2.0 * 0.5 / floors[250];
+        assert!(
+            (40.0..=60.0).contains(&implied),
+            "the 20 kHz band should hold about 49 bins at a 512-point window, not {implied}"
+        );
+    }
+
+    /// One repair-bearing bus: denoise 12 + hum 0 + declick 3 = 15 ms, the
+    /// §2.3 row that leaves exactly 5 ms of the 20 ms budget.
+    fn parity_document_with_repair_chain(voice: &Path, bed: &Path, fps: Rational) -> Document {
+        let mut document = parity_document(voice, bed, fps);
+        // AU5 §0 R71: the denoiser carries a **keyframe curve** on
+        // `reduction_tenth_db`, stepping 0 -> 200 at project frame 10, so both
+        // `assert_playback_matches_export` arms — chunked playback and the
+        // frame-5 seek — cross the step inside an asserted window. Frame 10,
+        // not the 18..20 window: this bus carries **only** track 2, whose one
+        // clip spans project frames 4..14, so the bus stem is silent after 14
+        // and a step there would change nothing. 10 sits inside "trimmed
+        // source" (6..14), five frames past the seek target, and leaves
+        // 19 200 sample frames of asserted material after rule 41's 511-frame
+        // switch window closes. Crossing the step is a `direct` clear: the
+        // accumulator and smoother are zeroed and the switch window opens, so
+        // the arm pins parity of the *keyed* read, of that transition, and of
+        // the switch window, at 1e-6.
+        let mut keyed = denoise_effect(10, 0, Some(-600));
+        keyed.keyframes.insert(
+            "reduction_tenth_db".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode::ZERO,
+                        value: 0,
+                        interpolation: KeyframeInterpolation::Hold,
+                    },
+                    Keyframe {
+                        at: TimeCode(10),
+                        value: 200,
+                        interpolation: KeyframeInterpolation::Hold,
+                    },
+                ],
+            },
+        );
+        document.audio_mix.buses[0].effects = vec![
+            keyed,
+            audio_effect(
+                11,
+                "audio_hum_removal",
+                &[
+                    ("fundamental_hertz", 50),
+                    ("harmonic_count", 3),
+                    ("depth_tenth_db", -300),
+                    ("notch_q_hundredths", 1_200),
+                ],
+            ),
+            audio_effect(
+                12,
+                "audio_declick",
+                &[
+                    ("max_click_milliseconds", 1),
+                    ("detector_threshold_tenth_db", 240),
+                    ("lookahead_milliseconds", 3),
+                ],
+            ),
+        ];
+        document.audio_mix.buses[0].ducking_sidechain_tracks = Vec::new();
+        document
+    }
+
+    /// AU5 §7 A14: both paths on a repair-bearing fixture at **1e-6**,
+    /// including its frame-5 seek arm, on a chain that is **not** retargeted
+    /// mid-stream; and the §2.3 budget rows.
+    #[test]
+    fn au5_playback_matches_export_on_a_repair_bearing_chain() {
+        crate::initialize_ffmpeg().unwrap();
+        let voice = loud_sine("au5-voice", 440);
+        let bed = loud_sine("au5-bed", 660);
+        let fps = Rational::new(10, 1).unwrap();
+        let settings = parity_settings(fps);
+        let document = transitioned(parity_document_with_repair_chain(
+            voice.path(),
+            bed.path(),
+            fps,
+        ));
+        assert_eq!(
+            document.audio_mix.lookahead_milliseconds(),
+            ChainLookahead {
+                bus_stage: 15,
+                master_stage: 0,
+            }
+        );
+        document.validate().unwrap();
+        let exported = crate::export::mix_audio(&document, &settings).unwrap();
+        assert_playback_matches_export(&document, &exported, fps);
+
+        // The curve is load-bearing (AU5 §0 R71): strip it and the chain never
+        // leaves the `direct` branch, so the arm above would be pinning the
+        // static read it already pinned. The step must be inside the asserted
+        // 18..20 window, which is what this compares.
+        let mut unkeyed = document.clone();
+        unkeyed.audio_mix.buses[0].effects[0].keyframes.clear();
+        let flat = crate::export::mix_audio(&unkeyed, &settings).unwrap();
+        let asserted = interleaved_sample_range(6..14, fps, 48_000, 2);
+        let difference = exported[asserted.clone()]
+            .iter()
+            .zip(&flat[asserted])
+            .map(|(keyed, flat)| (keyed - flat).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            difference > 1.0e-3,
+            "the keyed reduction must change the mix inside the asserted window, not {difference}"
+        );
+
+        // A chain at 15 ms accepts a 5 ms limiter to land at exactly 20; one at
+        // 21 is refused with `AudioBusLookaheadExceeded`.
+        let mut at_twenty = document.clone();
+        at_twenty.audio_mix.buses[0].effects.push(audio_effect(
+            13,
+            "audio_true_peak_limiter",
+            &[("ceiling_tenth_db", -10), ("lookahead_milliseconds", 5)],
+        ));
+        at_twenty.validate().expect("15 + 5 = 20 is legal");
+        let mut over = document.clone();
+        over.audio_mix.buses[0].effects.push(audio_effect(
+            13,
+            "audio_compressor",
+            &[("lookahead_milliseconds", 6)],
+        ));
+        let error = over.validate().expect_err("15 + 6 = 21 is over budget");
+        assert!(
+            format!("{error}").contains("lookahead"),
+            "expected a lookahead refusal, got {error}"
+        );
+    }
+
+    /// AU5 §7 A14 / §3.10 rule 73: a learned profile written into the same node
+    /// and retargeted preserves the OLA accumulator and the delay lines, and
+    /// yields the **identical** bin floor table a fresh runtime derives.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn au5_a_learned_profile_survives_a_retarget_with_the_identical_bin_floors() {
+        let rate = 48_000_u32;
+        let unlearned = denoise_effect(1, 200, None);
+        let learned = denoise_effect(1, 200, Some(-600));
+        assert_eq!(
+            node_structure(&unlearned),
+            node_structure(&learned),
+            "the 31 bands are deliberately not in `node_structure` (rule 60)"
+        );
+
+        let mut retargeted = AudioEffectRuntime::new(&unlearned, 2, rate);
+        let mut frame = [0.25_f32, -0.25];
+        for _ in 0..2_048 {
+            retargeted.process_frame(&mut frame, &[0.0, 0.0], TimeCode::ZERO, rate);
+        }
+        retargeted.retarget(&learned);
+        retargeted.process_frame(&mut frame, &[0.0, 0.0], TimeCode::ZERO, rate);
+
+        let fresh = AudioEffectRuntime::new(&learned, 2, rate);
+        let (AudioEffectState::Denoise(retargeted), AudioEffectState::Denoise(fresh)) =
+            (&retargeted.state, &fresh.state)
+        else {
+            panic!("both must be denoise states");
+        };
+        assert_eq!(
+            retargeted.bin_floor_power, fresh.bin_floor_power,
+            "a retarget must re-derive the identical bin floor table"
+        );
+        assert!(!retargeted.profile_neutral && retargeted.reduction_tenth_db != 0);
+        assert_eq!(retargeted.direct_switch_remaining, retargeted.window - 2);
     }
 }

@@ -386,7 +386,11 @@ pub fn audio_qc_technical_pass(exceptions: &[AudioQcException]) -> bool {
 
 /// `(severity desc, code asc, field asc)`: `color_qc.rs`'s comparator without
 /// the clip and effect terms. A missing field sorts as the empty string.
-fn sort_exceptions(exceptions: &mut [AudioQcException]) {
+///
+/// `pub(crate)` since AU5 §0 R50: `audio_repair_exceptions` must sort by the
+/// same rule, and sharing the one comparator is the only way two modules
+/// cannot drift apart on it.
+pub(crate) fn sort_exceptions(exceptions: &mut [AudioQcException]) {
     exceptions.sort_by(|left, right| {
         severity_rank(left.severity)
             .cmp(&severity_rank(right.severity))

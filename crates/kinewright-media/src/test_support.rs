@@ -384,3 +384,85 @@ fn unique_stem(label: &str) -> String {
         .as_nanos();
     format!("kinewright-{label}-{}-{nonce}", std::process::id())
 }
+
+// ---- AU5 §3.11 (R21, R45): the four promoted audio fixture helpers ---------
+//
+// Moved here from `audio.rs`'s `#[cfg(test)]` module **with their signatures
+// unchanged**: changing them would break `pseudo_random` and every existing
+// AU2/AU3 unit test that calls them. `tests/au5_fixtures.rs` reaches them by
+// the same `#[path]` route `tests/au3_fixtures.rs` already uses.
+
+/// A mono tone of `frames` samples. **Mono**, and it returns a bare sample
+/// vector — a stereo fixture sums mono vectors and interleaves itself.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn tone(frequency: f64, amplitude: f32, rate: u32, frames: usize) -> Vec<f32> {
+    (0..frames)
+        .map(|frame| {
+            let phase = 2.0 * std::f64::consts::PI * frequency * frame as f64 / f64::from(rate);
+            #[allow(clippy::cast_possible_truncation)]
+            let sample = (phase.sin() as f32) * amplitude;
+            sample
+        })
+        .collect()
+}
+
+/// A deterministic xorshift64 buffer, never a negative zero.
+///
+/// Uniform on `[-a, a)` in exact binary steps and identical on every OS, so its
+/// RMS is `a / sqrt(3)`. The first argument is a **sample** count, not a frame
+/// count.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn pseudo_random_amplitude(frames: usize, amplitude: f32) -> Vec<f32> {
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    (0..frames)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let unit = (state >> 40) as f32 / 8_388_608.0 - 1.0;
+            unit * amplitude
+        })
+        .collect()
+}
+
+/// Root mean square over every sample of an interleaved buffer.
+#[must_use]
+pub fn rms(samples: &[f32]) -> f64 {
+    let sum: f64 = samples
+        .iter()
+        .map(|sample| f64::from(*sample) * f64::from(*sample))
+        .sum();
+    #[allow(clippy::cast_precision_loss)]
+    let count = samples.len().max(1) as f64;
+    (sum / count).sqrt()
+}
+
+/// A 32-bit float WAV, written by hand so a single-sample impulse survives
+/// exactly (AU2 §3.9(c)).
+///
+/// # Panics
+///
+/// Panics when the sample count does not fit a RIFF chunk length.
+#[must_use]
+pub fn wav_f32(samples: &[f32], rate: u32, channels: u16) -> Vec<u8> {
+    let data_length = u32::try_from(samples.len() * 4).expect("the fixture should fit");
+    let mut bytes = Vec::with_capacity(44 + samples.len() * 4);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_length).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16_u32.to_le_bytes());
+    bytes.extend_from_slice(&3_u16.to_le_bytes());
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * u32::from(channels) * 4).to_le_bytes());
+    bytes.extend_from_slice(&(channels * 4).to_le_bytes());
+    bytes.extend_from_slice(&32_u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_length.to_le_bytes());
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}

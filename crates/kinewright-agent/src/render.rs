@@ -6,10 +6,11 @@ use std::{
 
 use kinewright_core::{
     AssetId, AssetTranscript, AutomationCurve, ClipContent, ClipId, Document, Effect,
-    FrameRounding, LinkId, PanLaw, ParamValue, Rational, SceneStatus, SilenceSpan, SilenceStatus,
-    TRACK_AUTOMATION_PARAMETERS, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, Title, TrackKind, TranscriptStatus, map_frames_with_rounding,
-    map_source_range_to_project,
+    FrameRounding, LinkId, NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES,
+    PROFILE_BAND_NEUTRAL_TENTH_DB, PanLaw, ParamValue, Rational, SceneStatus, SilenceSpan,
+    SilenceStatus, TRACK_AUTOMATION_PARAMETERS, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, Title, TrackKind, TranscriptStatus, is_noise_profile_parameter,
+    map_frames_with_rounding, map_source_range_to_project,
 };
 
 use crate::shrink_silence_span_for_cutting_with_transcript;
@@ -1010,6 +1011,26 @@ fn word_project_fallback_fps(document: &Document) -> Rational {
     document.fps
 }
 
+/// The one descriptor that carries AU5 §2.1's 31 profile rows, named here as
+/// `schema.rs` names it for the same reason: the compact special case stays
+/// greppable from the module that implements it.
+const DENOISE_EFFECT_NAME: &str = "audio_denoise";
+
+/// Whether one parameter name is a row [`render_noise_profile`] will collect.
+///
+/// Core's [`is_noise_profile_parameter`] is the predicate AU5 §2.1 rule 7
+/// names as the single definition every reader outside `effect.rs` uses, and
+/// it matches an **unbounded** index; the block below collects exactly the 31
+/// names in [`NOISE_PROFILE_PARAMETER_NAMES`]. Requiring both makes the
+/// dropped set and the collected set the same set by construction, so a
+/// `profile_band99_tenth_db` — unreachable today, because core's
+/// `denoise_parameters()` builds the descriptor from that same table and the
+/// domain check refuses anything else — would render as an ordinary row
+/// rather than be dropped by one and missed by the other.
+fn is_rendered_profile_band(name: &str) -> bool {
+    is_noise_profile_parameter(name) && NOISE_PROFILE_PARAMETER_NAMES.contains(&name)
+}
+
 fn render_effects(effects: &[Effect]) -> String {
     if effects.is_empty() {
         return "none".to_owned();
@@ -1020,11 +1041,30 @@ fn render_effects(effects: &[Effect]) -> String {
             rendered.push_str(", ");
         }
         let _ = write!(rendered, "{}:{}(", effect.id, effect.name);
-        for (parameter_index, (name, value)) in effect.parameters.iter().enumerate() {
+        // AU5 §4.2 rule 79: the 31 profile rows leave the parameter loop and
+        // are spelled once below, so a learned denoiser costs one block rather
+        // than 31 rows on every timeline-state render. The drop is gated on
+        // the descriptor that owns them for the same reason
+        // `render_noise_profile` is: a `profile_band`-named parameter on any
+        // other effect has no block to be collected into, so dropping it here
+        // would lose it rather than compact it.
+        let hatched = effect.name == DENOISE_EFFECT_NAME;
+        let mut parameter_index = 0usize;
+        for (name, value) in &effect.parameters {
+            if hatched && is_rendered_profile_band(name) {
+                continue;
+            }
             if parameter_index != 0 {
                 rendered.push(',');
             }
+            parameter_index += 1;
             let _ = write!(rendered, "{name}={}", render_param(value));
+        }
+        if let Some(profile) = render_noise_profile(effect) {
+            if parameter_index != 0 {
+                rendered.push(',');
+            }
+            rendered.push_str(&profile);
         }
         if !effect.keyframes.is_empty() {
             rendered.push_str("; keyframes=");
@@ -1041,6 +1081,57 @@ fn render_effects(effects: &[Effect]) -> String {
     }
     rendered.push(']');
     rendered
+}
+
+/// AU5 §4.2 rule 79: `audio_denoise`'s 31 learned bands as one
+/// `noise_profile=[…]` block, low band to high, or `None` when there is
+/// nothing to say.
+///
+/// **Omitted entirely when every band is at the neutral or absent**, so an
+/// unlearned node — which is every node the app inserts, because
+/// `insert_audio_effect` skips the profile rows — renders exactly the bytes it
+/// did before AU5 and no pre-AU5 golden moves.
+///
+/// It is its own arm rather than a `render_param` call on a joined string
+/// because `render_param` renders `ParamValue::Text` through `{value:?}`, i.e.
+/// quoted: the block would arrive at the reader wrapped in escapes. The values
+/// inside it still go through `render_param`, which renders an integer bare,
+/// so a band that somehow holds a non-integer is still published rather than
+/// silently dropped by the loop above.
+///
+/// An absent band inside a learned profile renders as
+/// [`PROFILE_BAND_NEUTRAL_TENTH_DB`] — a value the document does not hold —
+/// which is safe only because AU5 §2.1's profile rows are a **write-all-31-or-
+/// none** block: core validates that, `insert_audio_effect` skips all 31 at
+/// once, and `mix_noise_profile` writes all 31 at once, so a document holding
+/// some-but-not-all is already invalid. The fill is that rule made visible,
+/// not an arbitrary choice.
+fn render_noise_profile(effect: &Effect) -> Option<String> {
+    // Only one descriptor carries profile rows, so every other effect on the
+    // timeline — every colour node, title and transition — answers here rather
+    // than paying 31 `BTreeMap` lookups and an allocation to discover it has
+    // no profile. `render_effects` calls this for every effect it renders.
+    if effect.name != DENOISE_EFFECT_NAME {
+        return None;
+    }
+    let neutral = ParamValue::Integer(PROFILE_BAND_NEUTRAL_TENTH_DB);
+    let mut learned = false;
+    let mut bands = Vec::with_capacity(NOISE_PROFILE_BAND_COUNT);
+    for name in NOISE_PROFILE_PARAMETER_NAMES {
+        match effect.parameters.get(name) {
+            None => bands.push(render_param(&neutral)),
+            Some(value) => {
+                if *value != neutral {
+                    learned = true;
+                }
+                bands.push(render_param(value));
+            }
+        }
+    }
+    if !learned {
+        return None;
+    }
+    Some(format!("noise_profile=[{}]", bands.join(",")))
 }
 
 fn render_param(value: &ParamValue) -> String {
@@ -1567,6 +1658,138 @@ assets:
         for absent in ["envelope:", "gain_curve", "pan_curve"] {
             assert!(!rendered.contains(absent), "{absent} in {rendered}");
         }
+    }
+
+    /// AU5 §4.2 rule 79 / A16, the carrying half of the golden pair: a
+    /// learned `audio_denoise` spells its 31 bands once, low band to high, as
+    /// one `noise_profile=[…]` block after the node's ordinary rows, and the
+    /// individual `profile_band{nn}_tenth_db` names never appear.
+    #[test]
+    fn au5_timeline_state_renders_a_learned_noise_profile() {
+        let mut document = fixture();
+        let mut parameters = BTreeMap::from([
+            ("bypass".to_owned(), ParamValue::Integer(0)),
+            ("reduction_tenth_db".to_owned(), ParamValue::Integer(120)),
+        ]);
+        // A learned profile: every band its own value, so the block's order is
+        // load-bearing and a reversed table would be visible here.
+        for (index, name) in NOISE_PROFILE_PARAMETER_NAMES.iter().enumerate() {
+            let band = -720 - i64::try_from(index).unwrap();
+            parameters.insert((*name).to_owned(), ParamValue::Integer(band));
+        }
+        document.audio_mix.buses = vec![kinewright_core::AudioBus {
+            id: kinewright_core::AudioBusId(1),
+            name: "Dialogue".to_owned(),
+            tracks: vec![TrackId(7)],
+            gain_tenth_db: 0,
+            effects: vec![Effect {
+                id: kinewright_core::EffectId(31),
+                name: "audio_denoise".to_owned(),
+                parameters,
+                keyframes: BTreeMap::new(),
+            }],
+            ducking_sidechain_tracks: Vec::new(),
+            gain_curve: None,
+        }];
+        let rendered = render_timeline_state(&document);
+        let expected = format!(
+            "effects=[31:audio_denoise(bypass=0,reduction_tenth_db=120,noise_profile=[{}])]",
+            (0..NOISE_PROFILE_BAND_COUNT)
+                .map(|index| (-720 - i64::try_from(index).unwrap()).to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        assert!(rendered.contains(&expected), "{rendered}");
+        assert!(
+            !rendered.contains("profile_band"),
+            "the 31 rows must never be enumerated: {rendered}"
+        );
+        // The block is one row's worth of bytes against the enumeration it
+        // replaces, which is rule 79's whole argument.
+        let enumerated = NOISE_PROFILE_PARAMETER_NAMES
+            .iter()
+            .enumerate()
+            .map(|(index, name)| format!("{name}={}", -720 - i64::try_from(index).unwrap()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let compact = expected
+            .split_once("noise_profile=")
+            .map(|(_, rest)| rest.trim_end_matches(")]").len() + "noise_profile=".len())
+            .unwrap();
+        assert!(
+            compact * 4 < enumerated.len(),
+            "compact {compact} B against enumerated {} B",
+            enumerated.len()
+        );
+    }
+
+    /// AU5 §4.2 rule 79 / A16, the omitting half of the golden pair: an
+    /// unlearned denoiser — every band absent, or every band explicitly at the
+    /// neutral — renders exactly the bytes it would have rendered before AU5,
+    /// and the stored pre-AU5 golden does not move.
+    #[test]
+    fn au5_timeline_state_omits_an_unlearned_noise_profile() {
+        let mut document = fixture();
+        let absent = BTreeMap::from([
+            ("bypass".to_owned(), ParamValue::Integer(0)),
+            ("reduction_tenth_db".to_owned(), ParamValue::Integer(200)),
+        ]);
+        // The other spelling of "unlearned": all 31 rows written, all at the
+        // neutral. `insert_audio_effect` skips them, but a document that wrote
+        // them by hand must render the same bytes.
+        let mut neutral = absent.clone();
+        for name in NOISE_PROFILE_PARAMETER_NAMES {
+            neutral.insert(
+                name.to_owned(),
+                ParamValue::Integer(PROFILE_BAND_NEUTRAL_TENTH_DB),
+            );
+        }
+        for parameters in [absent, neutral] {
+            let rendered = render_effects(&[Effect {
+                id: kinewright_core::EffectId(31),
+                name: "audio_denoise".to_owned(),
+                parameters,
+                keyframes: BTreeMap::new(),
+            }]);
+            assert_eq!(
+                rendered, "[31:audio_denoise(bypass=0,reduction_tenth_db=200)]",
+                "an unlearned profile must cost nothing"
+            );
+        }
+
+        // The hatch drops a row only where there is a block to collect it
+        // into. A `profile_band`-named row on a descriptor that owns no
+        // profile, and an out-of-table band index on one that does, are both
+        // rendered as ordinary rows rather than silently dropped — the two
+        // ways the filter and the collector could disagree about which rows
+        // the block owns.
+        for (name, parameter) in [
+            ("primary_correction", "profile_band01_tenth_db"),
+            ("audio_denoise", "profile_band99_tenth_db"),
+        ] {
+            let rendered = render_effects(&[Effect {
+                id: kinewright_core::EffectId(32),
+                name: name.to_owned(),
+                parameters: BTreeMap::from([(parameter.to_owned(), ParamValue::Integer(-720))]),
+                keyframes: BTreeMap::new(),
+            }]);
+            assert_eq!(
+                rendered,
+                format!("[32:{name}({parameter}=-720)]"),
+                "a row no block collects must still be published"
+            );
+        }
+
+        // And the whole stored golden is byte-unchanged on a document that
+        // carries no repair node at all.
+        for clip in document
+            .tracks
+            .iter_mut()
+            .flat_map(|track| &mut track.clips)
+        {
+            clip.audio_gain_curve = None;
+        }
+        assert_eq!(render_timeline_state(&document), COMPACT_GOLDEN);
     }
 
     /// AU4 §4.1 rule 81: the two `set_track_automation` parameter tokens and

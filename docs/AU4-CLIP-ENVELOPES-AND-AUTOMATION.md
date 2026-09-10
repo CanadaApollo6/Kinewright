@@ -483,6 +483,13 @@ No OPEN note remains.
   "reused, not re-invented" is assertable; `mixer_ui::take_strip_rects` (test-only) lets the
   inspector's `ENVELOPE` block be pressed at recorded coordinates. The `Envelopes` toggle is
   `session.show_envelopes` (project.rs), defaulting on.
+- **E59 (AU5, 2026-09-10). `plan_clip_fades` no longer measures through `measure_mix_levels`.**
+  §6.2 rule 131 describes the two-render head/tail hack and its 400 ms gating-block window; AU5
+  Part A replaced it with one `Analysis::mix_window_levels` call per track over a window equal to
+  the fade itself (`fade_milliseconds.clamp(1, 1000)`), so the sub-gating-block skip arm is gone,
+  the per-clip evidence is `head_dbfs_hundredths` / `tail_dbfs_hundredths` (a short-window RMS,
+  not a true peak), and `window_sample_frames` / `window_project_frames` read 960 / 1 at the 20 ms
+  default. Proposals on every AU4 fixture are unchanged. See AU5 §3.8 and AU5 §0 R80.
 
 ## 1. Scope
 
@@ -1884,6 +1891,8 @@ struct PlanAudioDuckingArgs {
      **per-clip reason** in structured content and plans the rest, rather than failing the whole
      plan. A short-window RMS accessor is deferred to AU5, where repair work needs one anyway; the
      400 ms peak window is evidence-only and its worst failure is a 1-frame fade nobody needed.
+     *Superseded by AU5 Part A (E59): the planner now measures through `mix_window_levels` over
+     the fade window and the skip arm is gone.*
 132. Arguments: `{ tracks: Option<Vec<TrackId>>, threshold_dbfs_hundredths: Option<i32> (default
      -4_000), fade_milliseconds: Option<u32> (default 20) }`. For each media clip whose head window
      peaks above the threshold and whose `audio_fade_in_frames` is 0, propose

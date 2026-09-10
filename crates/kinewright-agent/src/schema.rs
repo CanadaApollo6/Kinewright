@@ -7,13 +7,13 @@ use kinewright_core::{
     MATTE_HUE_WIDTH_DISABLE_CENTIDEGREES, MATTE_MIX_BASIS_POINTS_MAX, MATTE_PARAMETER_COUNT,
     MATTE_WINDOW_LIMIT, Operation, TITLE_PARAMETER_DESCRIPTORS, TRACK_AUTOMATION_PARAMETERS,
     TRANSITION_DESCRIPTORS, TimelineRevision, is_lut_color_node, is_matte_capable_color_node,
-    is_matte_parameter, matte_parameters, matte_window_parameters,
+    is_matte_parameter, is_noise_profile_parameter, matte_parameters, matte_window_parameters,
 };
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 80] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 81] = [
     "get_timeline_state",
     "search_capabilities",
     "get_capability",
@@ -84,6 +84,10 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 80] = [
     // measurements it extends. `get_` infers `CapabilityKind::Inspector`, so
     // no `CAPABILITY_KIND_OVERRIDES` entry is needed here either.
     "get_audio_qc",
+    // AU5 §4.3 rule 81: the repair-measurement surface, beside the three
+    // measurements it joins. `get_` infers `CapabilityKind::Inspector`, so no
+    // `CAPABILITY_KIND_OVERRIDES` entry is needed here either.
+    "get_audio_repair",
     "plan_dialogue_assembly",
     "plan_beat_pacing",
     "plan_beat_montage",
@@ -597,14 +601,19 @@ fn effect_documentation() -> String {
             // CC5 §2.2/M36: the 47 matte parameters are emitted once as a
             // shared legend below, never enumerated per kind. AU2 §4.1/M36:
             // the twelve `audio_parametric_eq` band rows are emitted once as
-            // one generating pattern below, for the same reason.
+            // one generating pattern below, for the same reason. AU5
+            // §4.2/M36: `audio_denoise`'s 31 profile rows likewise — and
+            // there the hatch is mandatory rather than economical, because
+            // 31 rows x 48 B x 5 spliced tools is kilobytes on every effect
+            // tool's description (§0 R82, measured).
             let parametric_eq = effect.name == PARAMETRIC_EQ_EFFECT_NAME;
             for (parameter_index, parameter) in effect
                 .parameters
                 .iter()
                 .filter(|parameter| {
                     let summarised = is_matte_parameter(parameter.name)
-                        || (parametric_eq && is_parametric_eq_band_parameter(parameter.name));
+                        || (parametric_eq && is_parametric_eq_band_parameter(parameter.name))
+                        || is_noise_profile_parameter(parameter.name);
                     !summarised
                 })
                 .enumerate()
@@ -632,6 +641,12 @@ fn effect_documentation() -> String {
             documentation.push_str(&audio_parametric_eq_pattern_documentation(
                 effect.parameters,
             ));
+        }
+        // AU5 §4.2 rule 78, normative: one generating pattern for the 31
+        // profile bands, never 31 enumerated rows.
+        if effect.name == DENOISE_EFFECT_NAME {
+            documentation.push_str("; ");
+            documentation.push_str(&noise_profile_pattern_documentation(effect.parameters));
         }
         documentation.push(')');
         // Legacy compatibility stages remain loadable but are outside the CC1
@@ -815,6 +830,60 @@ neutral {gain_neutral}; q_hundredths={q} hundredths of Q, neutral {q_neutral}",
         gain_neutral = neutral("_gain_tenth_db"),
         q = band("_q_hundredths"),
         q_neutral = neutral("_q_hundredths"),
+    )
+}
+
+/// The canonical AU5 denoise effect name, kept local so the compact
+/// description special case is greppable from the schema module.
+const DENOISE_EFFECT_NAME: &str = "audio_denoise";
+
+/// A compact pattern description of `audio_denoise`'s 31 learned noise-floor
+/// bands (AU5 §4.2 rule 78, M36).
+///
+/// **Normative:** this must never enumerate the `profile_band{nn}_tenth_db`
+/// rows. `effect_documentation()` is spliced into five generated tools'
+/// descriptions, and AU5 §0 R82 measured the cost: an enumerated profile row
+/// is **48 B**, the 31 of them with their separators are **1 550 B**, and this
+/// sentence with its separator is **175 B** — so the hatch turns a 2 133 B
+/// growth per spliced tool into 758 B, saving 6 875 B over the five, on a
+/// table an agent cannot usefully read row by row anyway. It is the same M36
+/// runtime-efficiency argument that gave `color_curves` its pattern form and
+/// the CC5 matte its shared legend. Here it is mandatory rather than
+/// economical: the rows are written all-or-none by a measurement, never one at
+/// a time by an agent reading their bounds.
+///
+/// Every bound, neutral and the band count below is read from the Core
+/// descriptor, so the sentence cannot drift from AU5 §2.1's table.
+fn noise_profile_pattern_documentation(parameters: &[EffectParameterDescriptor]) -> String {
+    let bands = parameters
+        .iter()
+        .filter(|parameter| is_noise_profile_parameter(parameter.name))
+        .collect::<Vec<_>>();
+    let count = bands.len();
+    let bounds = bands.first().map_or_else(
+        || "?".to_owned(),
+        |parameter| {
+            format!(
+                "{}..={}, neutral {}",
+                parameter.min, parameter.max, parameter.neutral
+            )
+        },
+    );
+    // The first and last row's own spelling, so the `{01..31}` range cannot
+    // disagree with the names Core validates.
+    let first = bands.first().map_or("?", |parameter| parameter.name);
+    let last = bands.last().map_or("?", |parameter| parameter.name);
+    let index = |name: &str| {
+        name.trim_start_matches("profile_band")
+            .trim_end_matches("_tenth_db")
+            .to_owned()
+    };
+    format!(
+        "profile_band{{{first_index}..{last_index}}}_tenth_db={bounds}, \
+one per ISO third-octave centre 20 Hz..20 kHz low to high; write all {count} or none; \
+learn them with plan_dialogue_repair",
+        first_index = index(first),
+        last_index = index(last),
     )
 }
 

@@ -4025,6 +4025,8 @@ fn validate_curve(
 /// AU2 §2.2 adds an audio branch: on any [`is_audio_effect`] name, `bypass`,
 /// `detector`, and `true_peak` are hold-only and nothing else is — a frequency,
 /// a gain, a Q, and a time constant all keep every interpolation.
+/// AU5 §2.2 rule 12 adds `harmonic_count` to that branch: a fractional number
+/// of hum notches is meaningless, so the cascade's section count is a switch.
 /// AU4 §2.6 rule 38: `pub` and re-exported from `lib.rs` so the mixer chain
 /// pane's parameter combo can filter with it — its first reader outside core.
 /// AU4 adds no new entry to it: none of the five curve owners is a switch.
@@ -4032,9 +4034,10 @@ fn validate_curve(
 pub fn is_hold_only_parameter(effect_name: &str, name: &str) -> bool {
     // AU2 §2.2 rule 1: an audio node's `bypass`, detector mode, and true-peak
     // flag are switches, not scalars — interpolating between two of their
-    // settings would resolve states no author ever authored.
+    // settings would resolve states no author ever authored. AU5 §2.2 rule 12
+    // adds the hum cascade's `harmonic_count` for the same reason.
     if crate::is_audio_effect(effect_name) {
-        return matches!(name, "bypass" | "detector" | "true_peak");
+        return matches!(name, "bypass" | "detector" | "true_peak" | "harmonic_count");
     }
     let Some(kind) = crate::ColorNodeKind::from_effect_name(effect_name) else {
         return false;
@@ -4823,16 +4826,21 @@ fn validate_audio_chain_automation(
     for (name, curve) in &effect.keyframes {
         // AU2 §2.2 rule 2: a parameter read once when the chain runtime is
         // built takes no curve at all, because the curve would be silently
-        // ignored. Checked before the curve's own structural validation,
-        // because the entry itself is what is rejected. The two reasons stay
-        // distinct: only the lookahead parameters set the graph's latency; the
-        // compressor's RMS window merely sizes a buffer allocated at
-        // construction (AU2 §0 E16).
+        // ignored or re-derived wholesale. Checked before the curve's own
+        // structural validation, because the entry itself is what is rejected.
+        // The two reasons stay distinct: only the lookahead parameters set the
+        // graph's latency; the compressor's RMS window merely sizes a buffer
+        // allocated at construction (AU2 §0 E16) and `audio_denoise`'s 31
+        // profile rows are re-derived on an epoch bump (AU5 §2.2 rule 9).
         if crate::is_static_audio_parameter(&effect.name, name) {
             let reason = if name == crate::effect::AUDIO_LOOKAHEAD_PARAMETER {
                 "sets processing latency and cannot be keyframed"
             } else {
-                "is read once when the chain is built and cannot be keyframed"
+                // AU5 §2.2 rule 13: "once ... when the chain is built" became
+                // false when AU5 put the 31 profile rows on the re-derive side
+                // of rule 9 — they are re-read on every `parameter_epoch`
+                // bump, which is what makes a `Learn` audible without a re-cue.
+                "is read when the chain is built or retuned and cannot be keyframed"
             };
             return Err(OpError::InvalidEffectAutomation {
                 effect: effect.name.clone(),

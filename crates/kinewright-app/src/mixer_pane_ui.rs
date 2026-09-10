@@ -16,7 +16,7 @@ use kinewright_core::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AudioBus,
     AudioChain, AudioMaster, AutomationCurve, CHAIN_LOOKAHEAD_MILLISECONDS, Document, Effect,
     EffectId, LoudnessSnapshot, LoudnessTarget, PanLaw, ParamValue, TimeCode, TrackId,
-    chain_lookahead_milliseconds, effect_descriptor, is_hold_only_parameter,
+    chain_lookahead_milliseconds, effect_descriptor, has_gain_computer, is_hold_only_parameter,
     is_static_audio_parameter,
 };
 
@@ -1257,14 +1257,6 @@ const fn flag_labels(name: &str) -> [(i64, &'static str); 2] {
     }
 }
 
-/// Whether this node reports gain reduction (AU2 §3.8).
-pub(crate) fn has_gain_computer(name: &str) -> bool {
-    matches!(
-        name,
-        "audio_compressor" | "audio_ducking" | "audio_gate" | "audio_true_peak_limiter"
-    )
-}
-
 /// The reduction readout a card header and a bar both show.
 pub(crate) fn reduction_readout(reduction_db: f32) -> String {
     format!("-{reduction_db:.1} dB")
@@ -2275,6 +2267,63 @@ mod tests {
             automation_row_key(AutomationTarget::Node(EffectId(3), "ratio_tenth")),
             keys[2],
             "the key is stable for one target across frames"
+        );
+    }
+
+    /// AU5 §7 A13 (§4.4 rule 84): `has_gain_computer` lives in core **once**,
+    /// and neither of the two copies it replaced has grown back.
+    ///
+    /// The predicate existed twice, byte-identically: here, driving
+    /// `reduction_bar`, and in `kinewright-media`'s `audio.rs`, driving
+    /// `gain_reduction_keys`. AU5 adds `audio_denoise` to it, and a copy left
+    /// behind in either file would silently take the old answer — the app half
+    /// would draw no bar for the denoiser, the media half would publish no
+    /// data for the bar to draw. A grep cannot fail a build, so the pin reads
+    /// both files as text.
+    ///
+    /// `mixer_pane_ui.rs` is read to the start of this test module only,
+    /// because the module quotes the name the pin is looking for. That
+    /// truncation is kept honest by counting the **two call sites** as well:
+    /// they sit in the middle of the production half, so a searched region
+    /// that ever went short would fail loudly instead of passing on an empty
+    /// prefix.
+    #[test]
+    fn au5_has_gain_computer_is_declared_in_neither_crate_that_used_to_own_it() {
+        const PANE: &str = include_str!("mixer_pane_ui.rs");
+        const MEDIA_AUDIO: &str = include_str!("../../kinewright-media/src/audio.rs");
+        let pane = PANE
+            .split_once("\n#[cfg(test)]")
+            .expect("mixer_pane_ui.rs has a test module")
+            .0;
+        for (label, source) in [
+            ("crates/kinewright-app/src/mixer_pane_ui.rs", pane),
+            ("crates/kinewright-media/src/audio.rs", MEDIA_AUDIO),
+        ] {
+            assert_eq!(
+                source.matches("fn has_gain_computer").count(),
+                0,
+                "{label} still declares its own `has_gain_computer`; AU5 rule 84 deletes both \
+                 copies and reads `kinewright_core::has_gain_computer` instead"
+            );
+        }
+        assert!(
+            pane.contains("has_gain_computer,"),
+            "and this file reads the core predicate through its `kinewright_core` import"
+        );
+        // Rule 84's second half — "both callers read the core one" — pinned in
+        // the same test, and the reason the truncation above cannot make this
+        // pin vacuous: the two call sites sit at the middle of the production
+        // half, so a `#[cfg(test)]` item landing earlier in the file would
+        // shorten `pane` past them and fail here rather than pass silently.
+        assert_eq!(
+            pane.matches("has_gain_computer(&effect.name)").count(),
+            2,
+            "the header readout and `reduction_bar`'s gate both read the core predicate, \
+             and both are inside the region this pin searches"
+        );
+        assert!(
+            has_gain_computer("audio_denoise"),
+            "which is the one that knows about the denoiser, so `reduction_bar` gets a bar"
         );
     }
 }
