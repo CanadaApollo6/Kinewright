@@ -2,6 +2,7 @@
 
 mod actor;
 mod agent;
+pub mod au6_scenarios;
 mod audio_qc;
 mod audio_repair;
 mod automation;
@@ -29,6 +30,17 @@ pub use actor::{Command, Core, CoreDisconnected, Event, Query, QueryResult, Time
 pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
+};
+pub use au6_scenarios::{
+    AU6_A_DUCK_KEYFRAMES, AU6_BUDGETS, AU6_C_LEARNED_PROFILE_TENTH_DB, AU6_E_DUCK_KEYFRAMES,
+    AU6_EXPORT_JOBS, AU6_QUESTIONS, AU6_SCENARIO_SPECS, AU6_SCENARIOS, AU6_SOURCE_BUDGETS,
+    AU6_THRESHOLD_CONSTANTS, Au6Budget, Au6BudgetKind, Au6BusSpec, Au6ClipSpec, Au6ExportJob,
+    Au6PersonPath, Au6Scenario, Au6ScenarioSpec, Au6Speaker, Au6TrackRole, Au6TrackSpec, Au6Turn,
+    Au6Unit, au6_b_fade_operations, au6_c_analytic_mean_band_tenth_db,
+    au6_c_canonical_operations_with_room_tone, au6_c_declick_only_operations,
+    au6_c_fill_operations, au6_c_gap_operations, au6_c_repair_operations, au6_canonical_operations,
+    au6_d_angle_cut_operations, au6_d_sync_group, au6_export_settings, au6_profile_export_settings,
+    au6_spec,
 };
 pub use audio_qc::{
     AUDIO_QC_CHANNEL_BALANCE_CLAMP_LU_HUNDREDTHS, AUDIO_QC_CHANNEL_IMBALANCE_LU_HUNDREDTHS,

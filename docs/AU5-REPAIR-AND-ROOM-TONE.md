@@ -602,7 +602,8 @@ cannot collide if each owns a range and one anchor line.
   measurement and its 400 ms window, and rules 131 and 132 there are now read through this
   erratum. AU4's §0 wants a one-line pointer erratum, exactly as AU2's §0 carries R6's and R40's;
   it is not written here because `AU4-CLIP-ENVELOPES-AND-AUTOMATION.md` is outside §8's Part A file
-  list and outside the agent implementer's reserved files.
+  list and outside the agent implementer's reserved files. (Closed 2026-09-10 by AU6 §12.1 item 9(a): that pointer
+  already exists as AU4 §0 **E59**, `docs/AU4-CLIP-ENVELOPES-AND-AUTOMATION.md:486-492`.)
 - **R81. The Part A registry quad, measured (rule 83).** `served_surface_is_small_and_keeps_the_
   internal_registry_discoverable` reports **135 tools, 1 531 264 B serialized = 1 391 430 B of
   input schemas + 117 683 B of descriptions**, against AU4 Part B's 134 / 1 524 370 / 1 389 434 /

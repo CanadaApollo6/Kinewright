@@ -35,6 +35,12 @@ pub mod test_support;
 #[cfg(any(test, feature = "test-util"))]
 pub mod cc7_sources;
 
+/// AU6 §3's source generators, gated exactly as [`cc7_sources`] is and for the
+/// same reason: every buffer is written through `test_support`'s
+/// `GeneratedMedia`, which is itself behind this feature.
+#[cfg(any(test, feature = "test-util"))]
+pub mod au6_sources;
+
 #[cfg(test)]
 mod media_matrix_tests;
 
@@ -59,10 +65,19 @@ mod cc7_fixtures;
 /// AU5 §5.4's seam lanes. They live in `src/` rather than in
 /// `tests/au5_fixtures.rs` for exactly AU5 §0 R62's reason and are recorded as
 /// R100: the seam pin compares `export::mix_audio`'s samples against a
-/// per-piece decode, and `mix_audio` is `pub(crate)` (export.rs:1078), as is
-/// `test_support`, behind the `test-util` feature no default build enables.
+/// per-piece decode, and `mix_audio` is `pub(crate)` (export.rs:1078), behind
+/// the `test-util` feature no default build enables (AU6 §12.1 item 9(b):
+/// `test_support` is a `pub mod`, and the clause that said otherwise is gone).
 #[cfg(test)]
 mod au5b_fixtures;
+
+/// AU6 §11's media gates and the audio programme's first fixture manifest.
+/// In `src/` for A9/E9's reason: `mix_audio_stems` and `MixStems` are
+/// `pub(crate)` (export.rs:999, :1099), so the stem-identity gates of §4(a)(5)
+/// and §4(d)(1) are unreachable from `tests/`, and AU6 does not widen the
+/// public surface to reach them.
+#[cfg(test)]
+mod au6_fixtures;
 
 #[cfg(test)]
 mod gpu_test_support;
