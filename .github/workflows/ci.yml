@@ -30,10 +30,17 @@ jobs:
       - name: Provision FFmpeg, build, test, and lint
         shell: pwsh
         run: |
+          # pwsh does not stop on a native command's non-zero exit, so without
+          # these checks the step's status is the last command's and a failing
+          # `cargo test` is reported as success.
+          $ErrorActionPreference = 'Stop'
           & .\scripts\setup-ffmpeg.ps1
           cargo build --workspace
+          if ($LASTEXITCODE -ne 0) { throw "cargo build --workspace exited $LASTEXITCODE" }
           cargo test --workspace
+          if ($LASTEXITCODE -ne 0) { throw "cargo test --workspace exited $LASTEXITCODE" }
           cargo clippy --workspace --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "cargo clippy --workspace --all-targets exited $LASTEXITCODE" }
 
   linux:
     name: Linux workspace
