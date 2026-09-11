@@ -1556,13 +1556,13 @@
           },
           "luma_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 281,
-            "margin": 3558.7189
+            "measured": 274,
+            "margin": 3649.635
           },
           "rgb_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 77446,
-            "margin": 12.9122
+            "measured": 77447,
+            "margin": 12.9121
           },
           "psnr_db_hundredths": {
             "budget": 3300,

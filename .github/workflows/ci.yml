@@ -63,8 +63,15 @@ jobs:
 
       - name: Provision FFmpeg, build, test, and lint
         run: |
+          # `set -e` alone is not enough: sourcing a script that manipulates
+          # shell options can switch it back off, which is how a failing
+          # `cargo test --workspace` reported success here for months. Each
+          # command carries its own check, so the step's status cannot become
+          # the last command's.
+          set -euo pipefail
           source ./scripts/setup-ffmpeg.sh
-          cargo build --workspace
-          readelf -d target/debug/kinewright-eval | grep -F '[libavcodec.so.62]'
-          cargo test --workspace
-          cargo clippy --workspace --all-targets -- -D warnings
+          set -euo pipefail
+          cargo build --workspace || exit 1
+          readelf -d target/debug/kinewright-eval | grep -F '[libavcodec.so.62]' || exit 1
+          cargo test --workspace || exit 1
+          cargo clippy --workspace --all-targets -- -D warnings || exit 1
