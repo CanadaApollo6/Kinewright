@@ -707,15 +707,7 @@ pub(crate) fn mixer_strips(
             ui.horizontal_top(|ui| {
                 for (index, track) in document.tracks.iter().enumerate() {
                     track_strip(
-                        ui,
-                        document,
-                        track,
-                        index,
-                        selection,
-                        requested,
-                        levels,
-                        position,
-                        chain,
+                        ui, document, track, index, selection, requested, levels, position, chain,
                         edits,
                     );
                 }
