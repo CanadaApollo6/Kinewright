@@ -448,13 +448,15 @@
     "one_clause_each": true
   },
   "scorecard": {
-    "part_a": "complete",
     "person_agent_parity": 5,
     "person_identical_document": 4,
     "person_equivalent_document": 1,
+    "bus_name_typed_not_chosen": true,
     "agent_tasks": 6,
-    "sentence": "4 of 5 scenarios complete by the person to the identical canonical document and (c) to an equivalent one whose repair nodes carry the app's explicit descriptor neutrals (R61); 6 of 6 tasks by the scripted agent; the model lane is pending the real-harness run.",
-    "model_lane": "pending"
+    "sentence": "5 of 5 scenarios complete by the person through the app's own builders: 4 of 5 to the identical canonical document, and (c) to an equivalent one whose repair nodes carry the app's explicit descriptor neutrals (R61). 6 of 6 tasks by the scripted agent; the model lane is pending the real-harness run.",
+    "model_lane": "pending",
+    "linux_workspace_gate": "cargo test --workspace clean at 0b2290b, Linux CI run 34633080767",
+    "windows_workspace_gate": "no AU6 test has ever run on Windows; the job aborted on four pre-existing kinewright-agent failures and reported success because the pwsh step did not check $LASTEXITCODE (§0.3 review finding 2)"
   },
   "m36": {
     "registry": 138,
