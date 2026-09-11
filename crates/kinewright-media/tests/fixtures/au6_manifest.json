@@ -1,0 +1,169 @@
+{
+  "contract": "au6_workflow_evaluation",
+  "contract_token": "au6_workflow_evaluation",
+  "manifest_version": 1,
+  "scenarios": [
+    { "id": "a", "name": "Interview", "frames": 300 },
+    { "id": "b", "name": "Podcast", "frames": 300 },
+    { "id": "c", "name": "LocationDialogue", "frames": 312 },
+    { "id": "d", "name": "Multicam", "frames": 300 },
+    { "id": "e", "name": "Delivery", "frames": 200, "reuses": "a" }
+  ],
+  "geometry": {
+    "fps": 25,
+    "width": 320,
+    "height": 180,
+    "sample_rate": 48000,
+    "channels": 2,
+    "samples_per_frame": 1920,
+    "window_milliseconds": 200,
+    "hop_milliseconds": 200,
+    "frames_per_window": 5,
+    "gating": {
+      "block_sample_frames": 19200,
+      "minimum_project_frames": 10
+    },
+    "duck": {
+      "attack_ms": 150,
+      "hold_ms": 200,
+      "release_ms": 400,
+      "parked_window_index": 4
+    }
+  },
+  "sources": {
+    "note": "sha256 is generated per run; sources are authored in au6_sources.rs",
+    "video_only_recipe_len": 28,
+    "mux_recipe_len": 33,
+    "muxed_source_in_document": false
+  },
+  "learn": {
+    "authored_range": [275, 312],
+    "project_range": [274, 312],
+    "minimum_project_frames": 12,
+    "detected_silences": [[60, 76], [124, 140], [210, 226], [274, 312]]
+  },
+  "profile": {
+    "learned_tenth_db": [
+      -853, -846, -809, -588, -497, -457, -530, -615, -502, -601, -580,
+      -619, -643, -659, -645, -626, -618, -604, -593, -576, -566, -559,
+      -546, -538, -530, -517, -505, -496, -484, -476, -463
+    ],
+    "worst_band": 5,
+    "allowance_tenth_db": 60,
+    "monotone_from_band": 13
+  },
+  "declick": {
+    "click_shape": { "samples": 2, "amplitude_hundredths": 50 },
+    "contribution_in_chain": { "whole": 0.5, "pm10ms": 17.2, "pm1ms": 71.6 }
+  },
+  "thresholds": {
+    "interview_dialogue_over_bed_min_lu_hundredths": 300,
+    "voice_match_max_lu_hundredths": 100,
+    "duck_depth_min_hundredths": 900,
+    "podcast_spread_reduction_min_hundredths": 200,
+    "podcast_lra_max_lu_hundredths": 700,
+    "repair_snr_gain_min_hundredths": 400,
+    "hum_drop_min_db_hundredths": 600,
+    "repair_speech_loss_max_db_hundredths": 200,
+    "declick_error_drop_min_tenth_db": 120,
+    "learn_gap_below_silence_min_hundredths": 250,
+    "profile_leakage_allowance_tenth_db": 60,
+    "master_passthrough_max_lu_hundredths": 50,
+    "delivery_deviation_max_lu_hundredths": 100,
+    "delivery_true_peak_margin_min_hundredths": 100,
+    "target_separation_lu_hundredths": 700,
+    "target_separation_tolerance_lu_hundredths": 50
+  },
+  "budgets": {
+    "note": "measured column confirmed at §12 step 4; never widen a budget"
+  },
+  "export_jobs": [
+    { "id": "ebu_r128", "profile": "EbuR128", "normalize": true, "depth": "Eight" },
+    { "id": "streaming", "profile": "Streaming1080", "normalize": true, "depth": "Eight" }
+  ],
+  "canonical_documents": {
+    "items": [5, 6, 7]
+  },
+  "pins": {
+    "duck_keyframes": "AU6_A_DUCK_KEYFRAMES",
+    "learn_project_range": "AU6_C_LEARN_PROJECT_RANGE",
+    "learned_profile_tenth_db": "AU6_C_LEARNED_PROFILE_TENTH_DB"
+  },
+  "transcriptions": {
+    "item": 20
+  },
+  "parity": {
+    "curve_owners": 27
+  },
+  "multicam": {
+    "cuts": [75, 150, 225],
+    "angle_ripple": "evidence_not_gate"
+  },
+  "delivery": {
+    "raster_invariance": "profile.resolution is the profile's; render overrides to document.resolution"
+  },
+  "performance": {
+    "media_lane": {
+      "measured_seconds": 90,
+      "budget_seconds": 180,
+      "engine_constructions": 1,
+      "encodes": 2,
+      "encode_programme_seconds": 8,
+      "breakdown": {
+        "interview": 20,
+        "podcast": 18,
+        "repair": 11,
+        "multicam_mix": 9,
+        "delivery": 30,
+        "stem_pins": 2
+      }
+    },
+    "agent_lane": {
+      "measured_seconds": 60,
+      "budget_seconds": 120,
+      "tests_using_start_with_exporter": ["au6_a5a", "au6_a5b"],
+      "encodes": 1,
+      "encode_programme_seconds": 12,
+      "breakdown": {
+        "au6_a1": 5,
+        "au6_a2": 9,
+        "au6_a3": 15,
+        "au6_a4": 5,
+        "au6_a5a": 24,
+        "au6_a5b": 2
+      }
+    },
+    "measurement": {
+      "os": "linux",
+      "kernel": "pending-step-4",
+      "toolchain": "rustc 1.98.1",
+      "ffmpeg": "8.0",
+      "commit": "7ca49c8",
+      "profile": "debug"
+    }
+  },
+  "eval": {
+    "part": "B",
+    "deferred": true
+  },
+  "review": {
+    "questions": "core item 11"
+  },
+  "scorecard": {
+    "part_a": "in_progress"
+  },
+  "m36": {
+    "registry": 138,
+    "generated_bytes": 1540264,
+    "tool_bytes": 1397156,
+    "schema_bytes": 120458,
+    "tools": 7,
+    "list_bytes": 5660,
+    "changed_by_au6": false
+  },
+  "external_owners": {
+    "silence_threshold": "DEFAULT_SILENCE_THRESHOLD_DBFS_HUNDREDTHS",
+    "gating_block": "LOUDNESS_GATING_BLOCK_FRAMES",
+    "noise_profile_percent": "NOISE_PROFILE_PERCENT"
+  }
+}

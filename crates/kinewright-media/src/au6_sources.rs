@@ -45,26 +45,25 @@
 use std::{ops::Range, path::PathBuf};
 
 use kinewright_core::{
-    Au6Scenario, Au6Speaker, Au6TrackRole, MediaAsset, Rational, TimeCode, TrackId, TrackKind,
     au6_scenarios::{
-        AU6_A_BED_LEVEL_DBFS_HUNDREDTHS, AU6_A_BED_PARTIALS_MILLIHERTZ, AU6_C_CLICK_FRAMES,
-        AU6_C_HUM_FUNDAMENTAL_HERTZ, AU6_C_HUM_LEVEL_DBFS_HUNDREDTHS,
-        AU6_C_HUM_PARTIAL_AMPLITUDE_RATIO_HUNDREDTHS, AU6_C_HUM_PARTIALS,
-        AU6_C_NOISE_LEVEL_DBFS_HUNDREDTHS, AU6_C_PROGRAMME_FRAMES, AU6_C_VOICE_CARRIER,
-        AU6_C_VOICE_LEVEL_DBFS_HUNDREDTHS, AU6_CHANNELS, AU6_CLICK_AMPLITUDE_HUNDREDTHS,
-        AU6_CLICK_SAMPLES, AU6_D_ANGLE_NAMES, AU6_D_ANGLE_OFFSETS_FRAMES,
-        AU6_D_MASTER_LEVEL_DBFS_HUNDREDTHS, AU6_D_SCRATCH_NOISE_LEVEL_DBFS_HUNDREDTHS,
-        AU6_ENCODE_PROGRAMME_FRAMES, AU6_PODCAST_AM_DEPTH_TENTH_DB, AU6_PODCAST_AM_HERTZ,
-        AU6_SAMPLE_RATE, AU6_SAMPLES_PER_FRAME, AU6_SOURCE_FPS, AU6_SOURCE_HEIGHT,
-        AU6_SOURCE_WIDTH, AU6_TURN_EDGE_FADE_MS, AU6_TURNS, AU6_VOICE_A_BAND_INDEX,
-        AU6_VOICE_B_BAND_INDEX, AU6_VOICE_ENVELOPE_HERTZ, AU6_VOICE_PARTIALS, au6_spec,
-        au6_turns_of,
+        au6_spec, au6_turns_of, AU6_A_BED_LEVEL_DBFS_HUNDREDTHS, AU6_A_BED_PARTIALS_MILLIHERTZ,
+        AU6_CHANNELS, AU6_CLICK_AMPLITUDE_HUNDREDTHS, AU6_CLICK_SAMPLES, AU6_C_CLICK_FRAMES,
+        AU6_C_HUM_FUNDAMENTAL_HERTZ, AU6_C_HUM_LEVEL_DBFS_HUNDREDTHS, AU6_C_HUM_PARTIALS,
+        AU6_C_HUM_PARTIAL_AMPLITUDE_RATIO_HUNDREDTHS, AU6_C_NOISE_LEVEL_DBFS_HUNDREDTHS,
+        AU6_C_PROGRAMME_FRAMES, AU6_C_VOICE_CARRIER, AU6_C_VOICE_LEVEL_DBFS_HUNDREDTHS,
+        AU6_D_ANGLE_NAMES, AU6_D_ANGLE_OFFSETS_FRAMES, AU6_D_MASTER_LEVEL_DBFS_HUNDREDTHS,
+        AU6_D_SCRATCH_NOISE_LEVEL_DBFS_HUNDREDTHS, AU6_ENCODE_PROGRAMME_FRAMES,
+        AU6_PODCAST_AM_DEPTH_TENTH_DB, AU6_PODCAST_AM_HERTZ, AU6_SAMPLES_PER_FRAME,
+        AU6_SAMPLE_RATE, AU6_SOURCE_FPS, AU6_SOURCE_HEIGHT, AU6_SOURCE_WIDTH, AU6_TURNS,
+        AU6_TURN_EDGE_FADE_MS, AU6_VOICE_A_BAND_INDEX, AU6_VOICE_B_BAND_INDEX,
+        AU6_VOICE_ENVELOPE_HERTZ, AU6_VOICE_PARTIALS,
     },
+    Au6Scenario, Au6Speaker, Au6TrackRole, MediaAsset, Rational, TimeCode, TrackId, TrackKind,
 };
 
 use crate::{
     cc7_sources::cc7_bt709_limited_source_codes,
-    test_support::{GeneratedMedia, pseudo_random_amplitude, tone, wav_f32},
+    test_support::{pseudo_random_amplitude, tone, wav_f32, GeneratedMedia},
 };
 
 // ===========================================================================
@@ -134,7 +133,12 @@ pub fn au6_band_center_hertz(speaker: Au6Speaker) -> f64 {
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
-fn schroeder_carrier(center_hertz: f64, partials: usize, amplitude: f32, frames: usize) -> Vec<f32> {
+fn schroeder_carrier(
+    center_hertz: f64,
+    partials: usize,
+    amplitude: f32,
+    frames: usize,
+) -> Vec<f32> {
     let low = center_hertz * 2.0_f64.powf(-1.0 / 6.0);
     let high = center_hertz * 2.0_f64.powf(1.0 / 6.0);
     let mut mono = vec![0.0_f32; frames];
@@ -191,7 +195,8 @@ const SYLLABIC_MEAN_SQUARE: f64 = 0.375;
 fn apply_edge_fades(buffer: &mut [f32], fade_samples: usize) {
     let len = buffer.len();
     for i in 0..fade_samples.min(len / 2) {
-        let gain = (0.5 - 0.5 * (std::f64::consts::PI * i as f64 / fade_samples as f64).cos()) as f32;
+        let gain =
+            (0.5 - 0.5 * (std::f64::consts::PI * i as f64 / fade_samples as f64).cos()) as f32;
         buffer[i] *= gain;
         buffer[len - 1 - i] *= gain;
     }
@@ -259,8 +264,8 @@ fn utterances(
     let mut mono = vec![0.0_f32; samples_for_frames(frames)];
     for turn in turns {
         let start = usize::try_from(turn.start.0).expect("a turn starts at or after frame 0") * SPF;
-        let len = usize::try_from(turn.end.0 - turn.start.0).expect("a turn has a positive length")
-            * SPF;
+        let len =
+            usize::try_from(turn.end.0 - turn.start.0).expect("a turn has a positive length") * SPF;
         assert!(
             start + len <= mono.len(),
             "turn {turn:?} runs past the {frames}-frame buffer"
@@ -308,7 +313,12 @@ fn utterances(
 /// digital silence. Mono.
 #[must_use]
 pub fn au6_voice_pcm(speaker: Au6Speaker, level_dbfs_hundredths: i32, frames: u32) -> Vec<f32> {
-    au6_voice_on_turns_pcm(speaker, &au6_turns_of(speaker), level_dbfs_hundredths, frames)
+    au6_voice_on_turns_pcm(
+        speaker,
+        &au6_turns_of(speaker),
+        level_dbfs_hundredths,
+        frames,
+    )
 }
 
 /// [`au6_voice_pcm`] on an explicit turn list: (c)'s dialogue is speaker A's
@@ -572,10 +582,11 @@ fn au6_c_degraded_mono() -> Vec<f32> {
 #[must_use]
 pub fn au6_d_master_pcm(frames: u32) -> Vec<f32> {
     let mut mono = au6_voice_pcm(Au6Speaker::A, AU6_D_MASTER_LEVEL_DBFS_HUNDREDTHS, frames);
-    for (slot, sample) in mono
-        .iter_mut()
-        .zip(au6_voice_pcm(Au6Speaker::B, AU6_D_MASTER_LEVEL_DBFS_HUNDREDTHS, frames))
-    {
+    for (slot, sample) in mono.iter_mut().zip(au6_voice_pcm(
+        Au6Speaker::B,
+        AU6_D_MASTER_LEVEL_DBFS_HUNDREDTHS,
+        frames,
+    )) {
         *slot += sample;
     }
     mono
@@ -608,18 +619,23 @@ pub fn au6_scenario_tracks(scenario: Au6Scenario) -> Vec<(Au6TrackRole, Vec<f32>
             .level_dbfs_hundredths
             .expect("every audio track carries an authored level");
         let mono = match (spec.scenario, track.role) {
-            (Au6Scenario::Interview, Au6TrackRole::VoiceA | Au6TrackRole::VoiceB) => {
-                au6_voice_pcm(track.carrier.expect("a voice track names its carrier"), level, frames)
-            }
+            (Au6Scenario::Interview, Au6TrackRole::VoiceA | Au6TrackRole::VoiceB) => au6_voice_pcm(
+                track.carrier.expect("a voice track names its carrier"),
+                level,
+                frames,
+            ),
             (Au6Scenario::Interview, Au6TrackRole::MusicBed) => au6_chord_bed_pcm(level, frames),
             (Au6Scenario::Podcast, Au6TrackRole::VoiceA) => au6_steady_voice_pcm(
                 track.carrier.expect("a voice track names its carrier"),
                 level,
                 frames,
             ),
-            (Au6Scenario::Podcast, Au6TrackRole::VoiceB) => {
-                au6_ride_pcm(level, AU6_PODCAST_AM_HERTZ, AU6_PODCAST_AM_DEPTH_TENTH_DB, frames)
-            }
+            (Au6Scenario::Podcast, Au6TrackRole::VoiceB) => au6_ride_pcm(
+                level,
+                AU6_PODCAST_AM_HERTZ,
+                AU6_PODCAST_AM_DEPTH_TENTH_DB,
+                frames,
+            ),
             (Au6Scenario::LocationDialogue, Au6TrackRole::Dialogue) => au6_c_degraded_mono(),
             (Au6Scenario::Multicam, Au6TrackRole::Scratch) => {
                 let master = master.get_or_insert_with(|| au6_d_master_pcm(frames));
@@ -658,7 +674,11 @@ fn track_label(scenario: Au6Scenario, role: Au6TrackRole, track: TrackId) -> Str
 
 /// One interleaved stereo buffer as an exact IEEE-float `.wav`.
 fn wav_media(label: &str, stereo: &[f32]) -> GeneratedMedia {
-    GeneratedMedia::from_bytes(label, "wav", &wav_f32(stereo, AU6_SAMPLE_RATE, AU6_CHANNELS))
+    GeneratedMedia::from_bytes(
+        label,
+        "wav",
+        &wav_f32(stereo, AU6_SAMPLE_RATE, AU6_CHANNELS),
+    )
 }
 
 /// AU6 §3.1's `au6_source`: the generated file for the **first** track of
@@ -824,7 +844,7 @@ pub const AU6_RECIPE_WAV_INPUT: &str = "<temp.wav>";
 /// AU6 §3.3: `cc7_source`'s recipe unchanged — **no second input, no
 /// `-c:a`** — the argument vector of every video-only source, with the raw
 /// input as [`AU6_RECIPE_YUV_INPUT`]. Recorded verbatim in the manifest.
-pub const AU6_VIDEO_ONLY_RECIPE: [&str; 26] = [
+pub const AU6_VIDEO_ONLY_RECIPE: [&str; 28] = [
     "-f",
     "rawvideo",
     "-pix_fmt",
@@ -860,7 +880,7 @@ pub const AU6_VIDEO_ONLY_RECIPE: [&str; 26] = [
 /// what AU3's `lane_media` already writes; `pcm_f32le` and `pcm_s24le` were
 /// measured as working alternatives, the first being the one to pick if a
 /// later slice needs bit-exactness with the authored buffer.
-pub const AU6_MUX_RECIPE: [&str; 31] = [
+pub const AU6_MUX_RECIPE: [&str; 33] = [
     "-f",
     "rawvideo",
     "-pix_fmt",
@@ -973,7 +993,11 @@ pub fn au6_muxed_source() -> GeneratedMedia {
     let frames = AU6_ENCODE_PROGRAMME_FRAMES;
     let raw = RawInput::write("au6-mux", "yuv", &flat_planes(PICTURE_DISPLAY_CODE, frames));
     let bed = au6_to_stereo(&au6_chord_bed_pcm(AU6_A_BED_LEVEL_DBFS_HUNDREDTHS, frames));
-    let wav = RawInput::write("au6-mux", "wav", &wav_f32(&bed, AU6_SAMPLE_RATE, AU6_CHANNELS));
+    let wav = RawInput::write(
+        "au6-mux",
+        "wav",
+        &wav_f32(&bed, AU6_SAMPLE_RATE, AU6_CHANNELS),
+    );
     let arguments = bind_recipe(&AU6_MUX_RECIPE, &raw.input(), Some(&wav.input()));
     let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
     GeneratedMedia::ffmpeg("au6-mux", &arguments, "mkv")
