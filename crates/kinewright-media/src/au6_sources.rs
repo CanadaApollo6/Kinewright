@@ -824,7 +824,7 @@ pub const AU6_RECIPE_WAV_INPUT: &str = "<temp.wav>";
 /// AU6 §3.3: `cc7_source`'s recipe unchanged — **no second input, no
 /// `-c:a`** — the argument vector of every video-only source, with the raw
 /// input as [`AU6_RECIPE_YUV_INPUT`]. Recorded verbatim in the manifest.
-pub const AU6_VIDEO_ONLY_RECIPE: [&str; 26] = [
+pub const AU6_VIDEO_ONLY_RECIPE: [&str; 28] = [
     "-f",
     "rawvideo",
     "-pix_fmt",
@@ -860,7 +860,7 @@ pub const AU6_VIDEO_ONLY_RECIPE: [&str; 26] = [
 /// what AU3's `lane_media` already writes; `pcm_f32le` and `pcm_s24le` were
 /// measured as working alternatives, the first being the one to pick if a
 /// later slice needs bit-exactness with the authored buffer.
-pub const AU6_MUX_RECIPE: [&str; 31] = [
+pub const AU6_MUX_RECIPE: [&str; 33] = [
     "-f",
     "rawvideo",
     "-pix_fmt",
