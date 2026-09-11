@@ -455,6 +455,13 @@ fn export_to_temporary(
         // `profile=high10` is not set either: the pixel format selects High 10,
         // measured byte-identical with and without it on the pinned build.
         video_options.set("x264-params", DELIVERY_X264_PARAMS);
+        // AU3 §7 B6: x264 core 165's ABR frame-thread pool is not run-to-run
+        // deterministic. Two sequential encodes of one document on the Linux
+        // FFmpeg 8 pin differed in one GOP by ±2 luma codes and 31 mdat bytes
+        // while the AAC stream stayed byte-identical. One thread keeps the
+        // delivery encode bit-stable so off / skipped / acting file compares
+        // can prove the loudness step, not the encoder.
+        video_options.set("threads", "1");
     }
     let mut video_encoder = video_encoder
         .open_as_with(video_codec, video_options)

@@ -64,6 +64,11 @@ editor runtime designed around machine use.
 The synthesis is not "copy every feature." It is to encode professional depth
 and creator convenience as a coherent machine-facing contract.
 
+> Status note (2026-09-11): CC0–CC7 and AU1–AU5 have since landed the colour
+> and audio primitives listed under gap 4. This thesis still describes the
+> architectural target; the living status is in
+> [Roadmap and development workflows](ROADMAP-AND-WORKFLOWS.md).
+
 ## The largest remaining gaps
 
 ### 1. Perception is precise but not yet scalable
