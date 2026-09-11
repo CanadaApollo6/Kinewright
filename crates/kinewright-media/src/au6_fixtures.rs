@@ -36,24 +36,26 @@ use kinewright_core::{
     TrackKind, apply_batch,
     au6_scenarios::{
         AU6_A_BED_LEVEL_DBFS_HUNDREDTHS, AU6_A_BED_TRACK, AU6_A_CLIPS, AU6_A_DIALOGUE_BUS_NAME,
-        AU6_A_MUSIC_BUS, AU6_A_MUSIC_BUS_NAME, AU6_A_VOICE_A_LEVEL_DBFS_HUNDREDTHS,
+        AU6_A_DUCK_KEYFRAMES, AU6_A_MUSIC_BUS, AU6_A_MUSIC_BUS_NAME,
+        AU6_A_VOICE_A_LEVEL_DBFS_HUNDREDTHS,
         AU6_A_VOICE_A_TRACK, AU6_A_VOICE_B_LEVEL_DBFS_HUNDREDTHS, AU6_A_VOICE_B_TRACK,
         AU6_AGENT_LANE_BUDGET_SECONDS, AU6_AUTHORED_LEVEL_TOLERANCE_HUNDREDTHS,
-        AU6_B_VOICE_A_LEVEL_DBFS_HUNDREDTHS, AU6_B_VOICE_A_TRACK, AU6_B_VOICE_B_BUS,
+        AU6_B_VOICE_A_LEVEL_DBFS_HUNDREDTHS, AU6_B_VOICE_A_TRACK, AU6_B_VOICE_B_BUS, AU6_BUDGETS,
         AU6_B_VOICE_B_LEVEL_DBFS_HUNDREDTHS, AU6_B_VOICE_B_TRACK, AU6_C_CLICK_COUNT,
         AU6_C_CLICK_FRAMES, AU6_C_DETECTED_SILENCES, AU6_C_DIALOGUE_TRACK, AU6_C_GAP_RANGE,
         AU6_C_GAPS, AU6_C_HUM_FUNDAMENTAL_HERTZ, AU6_C_HUM_LEVEL_DBFS_HUNDREDTHS,
         AU6_C_HUM_PARTIALS, AU6_C_LEAKAGE_WORST_BAND, AU6_C_LEARN_PROJECT_RANGE,
-        AU6_C_LEARN_SOURCE_RANGE, AU6_C_LEARNED_PROFILE_TENTH_DB,
+        AU6_C_LEARN_SOURCE_RANGE, AU6_C_LEARNED_PROFILE_TENTH_DB, AU6_C_MIDDLE_CLIP_ID,
         AU6_C_NOISE_LEVEL_DBFS_HUNDREDTHS, AU6_C_ONE_FRAME_OFFSET_BAND0_TENTH_DB,
         AU6_C_ONE_FRAME_OFFSET_MAX_DELTA_TENTH_DB, AU6_C_PROFILE_HUM_BUMP_BANDS,
         AU6_C_PROFILE_LOW_FALLOFF_BANDS, AU6_C_PROFILE_MONOTONE_FROM_BAND, AU6_C_PROGRAMME_FRAMES,
-        AU6_C_REPAIR_BUS, AU6_C_ROOM_TONE_ASSET_FRAMES, AU6_C_ROOM_TONE_FPS, AU6_C_VOICE_CARRIER,
-        AU6_C_VOICE_LEVEL_DBFS_HUNDREDTHS, AU6_CHANNELS, AU6_CLICK_SAMPLES,
-        AU6_D_ANGLE_OFFSETS_FRAMES, AU6_D_CUT_FRAMES, AU6_D_MASTER_CLIP_ID,
-        AU6_D_MASTER_LEVEL_DBFS_HUNDREDTHS, AU6_D_MASTER_TRACK, AU6_D_SCRATCH_1_TRACK,
-        AU6_D_SCRATCH_2_TRACK, AU6_D_SCRATCH_NOISE_LEVEL_DBFS_HUNDREDTHS,
-        AU6_D_VISIBLE_ANGLE_PER_SEGMENT, AU6_DECLICK_ERROR_DROP_MIN_TENTH_DB,
+        AU6_C_REPAIR_BUS, AU6_C_RIGHT_CLIP_ID, AU6_C_ROOM_TONE_ASSET_FRAMES, AU6_C_ROOM_TONE_FPS,
+        AU6_C_VOICE_CARRIER, AU6_C_VOICE_LEVEL_DBFS_HUNDREDTHS, AU6_CHANNELS, AU6_CLICK_SAMPLES,
+        AU6_D_ANGLE_OFFSETS_FRAMES, AU6_D_CUT_FRAMES, AU6_D_DELETED_CLIP_IDS,
+        AU6_D_MASTER_CLIP_ID, AU6_D_MASTER_LEVEL_DBFS_HUNDREDTHS, AU6_D_MASTER_TRACK,
+        AU6_D_SCRATCH_1_TRACK, AU6_D_SCRATCH_2_TRACK,
+        AU6_D_SCRATCH_NOISE_LEVEL_DBFS_HUNDREDTHS, AU6_D_VISIBLE_ANGLE_PER_SEGMENT,
+        AU6_DECLICK_ERROR_DROP_MIN_TENTH_DB,
         AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS, AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS,
         AU6_DUCK_DEPTH_MIN_HUNDREDTHS, AU6_ENCODE_PROGRAMME_FRAMES, AU6_EXPORT_JOBS,
         AU6_FRAMES_PER_WINDOW, AU6_HANN_MAIN_LOBE_BINS_RESTATED, AU6_HOP_MILLISECONDS,
@@ -72,16 +74,17 @@ use kinewright_core::{
         AU6_PODCAST_SPREAD_REDUCTION_MIN_HUNDREDTHS, AU6_PROFILE_LEAKAGE_ALLOWANCE_TENTH_DB,
         AU6_PROGRAMME_FRAMES, AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS,
         AU6_REPAIR_SPEECH_LOSS_MAX_DB_HUNDREDTHS, AU6_SAMPLE_RATE, AU6_SAMPLES_PER_FRAME,
-        AU6_SILENCE_THRESHOLD_RESTATED_DBFS_HUNDREDTHS, AU6_SOURCE_FPS, AU6_SOURCE_HEIGHT,
-        AU6_SOURCE_WIDTH, AU6_TARGET_SEPARATION_LU_HUNDREDTHS,
-        AU6_TARGET_SEPARATION_TOLERANCE_LU_HUNDREDTHS, AU6_TURNS, AU6_VOICE_A_BAND_INDEX,
-        AU6_VOICE_B_BAND_INDEX, AU6_VOICE_BAND_SEPARATION_BANDS, AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS,
-        AU6_WINDOW_MILLISECONDS, AU6_WINDOW_PROGRAMME, Au6Scenario, Au6Speaker, Au6TrackRole,
+        AU6_SCENARIOS, AU6_SILENCE_THRESHOLD_RESTATED_DBFS_HUNDREDTHS, AU6_SOURCE_BUDGETS,
+        AU6_SOURCE_FPS, AU6_SOURCE_HEIGHT, AU6_SOURCE_WIDTH, AU6_TARGET_SEPARATION_LU_HUNDREDTHS,
+        AU6_TARGET_SEPARATION_TOLERANCE_LU_HUNDREDTHS, AU6_THRESHOLD_CONSTANTS, AU6_TURNS,
+        AU6_VOICE_A_BAND_INDEX, AU6_VOICE_B_BAND_INDEX, AU6_VOICE_BAND_SEPARATION_BANDS,
+        AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS, AU6_WINDOW_MILLISECONDS, AU6_WINDOW_PROGRAMME,
+        Au6Budget, Au6BudgetKind, Au6PersonPath, Au6Scenario, Au6Speaker, Au6TrackRole,
         au6_a_duck_curve, au6_c_analytic_mean_band_tenth_db, au6_c_declick_only_operations,
         au6_c_fill_operations, au6_c_gap_operations, au6_c_point_mass_band_tenth_db_wrong_model,
         au6_c_repair_operations, au6_canonical_operations, au6_d_sync_group,
-        au6_duck_gap_window_indices, au6_duck_speech_window_indices, au6_export_settings,
-        au6_profile_export_settings, au6_spec, au6_turns_of,
+        au6_duck_gap_window_indices, au6_duck_speech_window_indices, au6_e_duck_curve,
+        au6_export_settings, au6_profile_export_settings, au6_spec, au6_turns_of,
     },
 };
 
@@ -2521,11 +2524,49 @@ fn au6_the_performance_block_matches_its_code_constants() {
     );
 }
 
+/// The manifest key one §2.8 constant is published under: its name without
+/// the `AU6_` prefix, lowercased. Generating the key rather than writing it
+/// out twice is what makes §11.0.3 ("manifest thresholds are asserted equal
+/// to the code constants") a check the manifest cannot drift past.
+fn au6_threshold_key(constant: &str) -> String {
+    constant
+        .strip_prefix("AU6_")
+        .expect("every §2.8 constant is AU6-prefixed")
+        .to_ascii_lowercase()
+}
+
+/// §4.1's margin for one row, in hundredths: `measured / budget` for a
+/// **Floor**, `budget / measured` for a **Ceiling**, and `None` for the rows
+/// note 3 records as "infinite (measured exactly zero)".
+fn au6_margin_hundredths(budget: &Au6Budget) -> Option<i64> {
+    match budget.kind {
+        Au6BudgetKind::Floor => Some(budget.measured * 100 / budget.budget),
+        Au6BudgetKind::Ceiling => Some(budget.budget * 100 / budget.measured),
+        Au6BudgetKind::Exact | Au6BudgetKind::MeasuredZero => None,
+        Au6BudgetKind::TwoSided | Au6BudgetKind::RecordedMargin => {
+            panic!("AU6 ships no {:?} row", budget.kind)
+        }
+    }
+}
+
+/// §11.3's "no unresolved placeholder", asserted rather than promised.
+const AU6_MANIFEST_PLACEHOLDER_NEEDLES: [&str; 6] = [
+    "[probe]",
+    "[probe-2]",
+    "[probe-3]",
+    "TODO",
+    "TBD",
+    "FIXME",
+];
+
 #[test]
 fn au6_manifest_declares_every_required_fixture_and_constant() {
     let manifest: serde_json::Value = serde_json::from_str(AU6_MANIFEST).expect("manifest parses");
     let object = manifest.as_object().expect("object");
-    const KEYS: [&str; 24] = [
+    // R21: §11.3's prose names twenty-six keys and then asserts "twenty-four".
+    // The two the count dropped are `required_fixtures` and `manifest_self_test`,
+    // both of which the same sentence requires; the count follows the list.
+    const KEYS: [&str; 26] = [
         "contract",
         "contract_token",
         "manifest_version",
@@ -2550,13 +2591,424 @@ fn au6_manifest_declares_every_required_fixture_and_constant() {
         "scorecard",
         "m36",
         "external_owners",
+        "required_fixtures",
+        "manifest_self_test",
     ];
     assert_eq!(object.len(), KEYS.len());
     for key in KEYS {
         assert!(object.contains_key(key), "missing manifest key {key}");
     }
     assert_eq!(manifest["contract"], AU6_CONTRACT);
+    assert_eq!(manifest["contract_token"], AU6_CONTRACT);
     assert_eq!(manifest["manifest_version"], 1);
+
+    for needle in AU6_MANIFEST_PLACEHOLDER_NEEDLES {
+        assert!(
+            !AU6_MANIFEST.contains(needle),
+            "§11.3 forbids an unresolved placeholder, and the manifest holds `{needle}`"
+        );
+    }
+
+    // --- §11.0.3 / §11.3: one key per §2.8 constant, equal to the code ----
+    let thresholds = manifest["thresholds"]
+        .as_object()
+        .expect("thresholds is an object");
+    assert_eq!(
+        thresholds.len(),
+        AU6_THRESHOLD_CONSTANTS.len() + 1,
+        "thresholds holds one key per §2.8 constant plus §11.2 item 9's \
+         `distinctness` block, and nothing else"
+    );
+    let units = manifest["thresholds"]["distinctness"]["units"]
+        .as_object()
+        .expect("the distinctness block publishes a unit per constant");
+    assert_eq!(units.len(), AU6_THRESHOLD_CONSTANTS.len());
+    for (constant, value, unit) in AU6_THRESHOLD_CONSTANTS {
+        let key = au6_threshold_key(constant);
+        assert_eq!(
+            thresholds.get(&key).and_then(serde_json::Value::as_i64),
+            Some(value),
+            "manifest thresholds.{key} must equal {constant}"
+        );
+        assert_eq!(
+            units.get(&key).and_then(serde_json::Value::as_str),
+            Some(format!("{unit:?}").as_str()),
+            "manifest thresholds.distinctness.units.{key} must name {constant}'s unit"
+        );
+    }
+
+    // --- §11.3: one budget row per §4.1 row, equal to the code ------------
+    let rows = manifest["budgets"]["rows"]
+        .as_array()
+        .expect("budgets.rows is an array");
+    let declared = AU6_BUDGETS
+        .iter()
+        .chain(AU6_SOURCE_BUDGETS.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), declared.len());
+    assert_eq!(
+        manifest["budgets"]["row_count"].as_u64(),
+        Some(declared.len() as u64)
+    );
+    for (row, budget) in rows.iter().zip(declared.iter()) {
+        let term = row["term"].as_str().expect("every row names its term");
+        assert_eq!(term, budget.term);
+        assert_eq!(
+            row["constant"].as_str(),
+            Some(budget.constant),
+            "{term}: constant"
+        );
+        assert_eq!(row["budget"].as_i64(), Some(budget.budget), "{term}: budget");
+        assert_eq!(
+            row["measured"].as_i64(),
+            Some(budget.measured),
+            "{term}: measured"
+        );
+        assert_eq!(
+            row["kind"].as_str(),
+            Some(format!("{:?}", budget.kind).as_str()),
+            "{term}: kind"
+        );
+        let margin = au6_margin_hundredths(budget);
+        assert_eq!(
+            row["margin_hundredths"].as_i64(),
+            margin,
+            "{term}: margin_hundredths"
+        );
+        assert_eq!(
+            row["margin"].as_str(),
+            Some(
+                margin
+                    .map_or_else(
+                        || "infinite (measured exactly zero)".to_owned(),
+                        |margin| format!("{}.{:02}x", margin / 100, margin % 100),
+                    )
+                    .as_str()
+            ),
+            "{term}: margin"
+        );
+        let failing = row["failing_direction"]
+            .as_str()
+            .expect("every row names its failing direction (11.0.5)");
+        assert!(
+            failing.starts_with("au6_"),
+            "{term}: the failing direction is a fixture name, not prose: {failing}"
+        );
+        assert!(
+            !row["failing_direction_measured"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "{term}: §4.2 records what the failing direction measures"
+        );
+        assert_eq!(row["reported_not_gated"].as_bool(), Some(false));
+    }
+    for name in manifest["budgets"]["cuttable"]
+        .as_array()
+        .expect("the two cuttable fixtures are named")
+    {
+        let name = name.as_str().expect("a fixture name");
+        assert!(
+            AU6_MEDIA_TESTS.contains(&name),
+            "a cuttable fixture that is not in the media inventory: {name}"
+        );
+    }
+    assert!(
+        manifest["budgets"]["cut"]
+            .as_array()
+            .expect("the cut list exists")
+            .is_empty(),
+        "nothing was cut; §12's cut order was not used"
+    );
+
+    // --- §2.7: the export jobs are the code's, ids and all ----------------
+    let jobs = manifest["export_jobs"]
+        .as_array()
+        .expect("export_jobs is an array");
+    assert_eq!(jobs.len(), AU6_EXPORT_JOBS.len());
+    for (row, job) in jobs.iter().zip(AU6_EXPORT_JOBS.iter()) {
+        assert_eq!(row["id"].as_str(), Some(job.id));
+        assert_eq!(
+            row["profile"].as_str(),
+            Some(format!("{:?}", job.profile).as_str())
+        );
+        assert_eq!(
+            row["target_lufs_hundredths"].as_i64(),
+            Some(i64::from(job.target.integrated_lufs_hundredths))
+        );
+        assert_eq!(row["normalize"].as_bool(), Some(job.normalize));
+        assert_eq!(
+            row["depth"].as_str(),
+            Some(format!("{:?}", job.depth).as_str())
+        );
+    }
+    assert_eq!(
+        manifest["delivery"]["target_separation_lu_hundredths"].as_i64(),
+        Some(i64::from(AU6_TARGET_SEPARATION_LU_HUNDREDTHS))
+    );
+
+    // --- §6.6: the scorecard sentence is a count, not a self-declaration --
+    let expressible = AU6_SCENARIOS
+        .iter()
+        .filter(|scenario| au6_spec(**scenario).person_path == Au6PersonPath::Expressible)
+        .count();
+    assert_eq!(
+        manifest["scorecard"]["person_agent_parity"].as_u64(),
+        Some(expressible as u64),
+        "§6.6 publishes the count of Au6PersonPath::Expressible entries"
+    );
+    assert_eq!(
+        manifest["scorecard"]["person_identical_document"]
+            .as_u64()
+            .zip(manifest["scorecard"]["person_equivalent_document"].as_u64())
+            .map(|(identical, equivalent)| identical + equivalent),
+        Some(expressible as u64),
+        "R61: (c) reaches an equivalent document, not the identical one, and \
+         the two counts still add to the parity figure"
+    );
+
+    // --- §11.3: `required_fixtures` and the self-test ---------------------
+    let required = &manifest["required_fixtures"];
+    assert_eq!(required["core"].as_u64(), Some(AU6_CORE_TESTS.len() as u64));
+    assert_eq!(
+        required["media"].as_u64(),
+        Some(AU6_MEDIA_TESTS.len() as u64)
+    );
+    assert_eq!(
+        required["agent"].as_u64(),
+        Some(AU6_AGENT_TESTS.len() as u64)
+    );
+    assert_eq!(required["app"].as_u64(), Some(AU6_APP_TESTS.len() as u64));
+    assert_eq!(required["eval"].as_u64(), Some(AU6_EVAL_TESTS.len() as u64));
+    assert_eq!(
+        required["inventory"].as_u64(),
+        Some(AU6_INVENTORY_TESTS.len() as u64)
+    );
+    assert_eq!(
+        required["explicit_names"].as_u64(),
+        Some(AU6_EXPLICIT_TEST_NAMES.len() as u64)
+    );
+    assert_eq!(
+        required["total"].as_u64(),
+        Some(
+            (AU6_CORE_TESTS.len()
+                + AU6_MEDIA_TESTS.len()
+                + AU6_AGENT_TESTS.len()
+                + AU6_APP_TESTS.len()
+                + AU6_EVAL_TESTS.len()
+                + AU6_INVENTORY_TESTS.len()) as u64
+        )
+    );
+    assert_eq!(
+        required["test_sources"].as_u64(),
+        Some(AU6_TEST_SOURCES.len() as u64)
+    );
+    assert_eq!(
+        required["forbidden_helpers"].as_u64(),
+        Some(AU6_FORBIDDEN_HELPERS.len() as u64)
+    );
+
+    let self_test = &manifest["manifest_self_test"];
+    assert_eq!(self_test["top_level_keys"].as_u64(), Some(KEYS.len() as u64));
+    assert_eq!(
+        self_test["threshold_keys"].as_u64(),
+        Some(AU6_THRESHOLD_CONSTANTS.len() as u64)
+    );
+    assert_eq!(
+        self_test["budget_rows"].as_u64(),
+        Some(declared.len() as u64)
+    );
+    assert_eq!(self_test["unresolved_placeholders"].as_u64(), Some(0));
+    assert_eq!(
+        self_test["asserted_by"].as_str(),
+        Some("au6_manifest_declares_every_required_fixture_and_constant")
+    );
+
+    // --- The blocks that restate a pinned constant ------------------------
+    assert_eq!(
+        manifest["sources"]["shapes"]["video_only_recipe_len"].as_u64(),
+        Some(AU6_VIDEO_ONLY_RECIPE.len() as u64)
+    );
+    assert_eq!(
+        manifest["sources"]["shapes"]["mux_recipe_len"].as_u64(),
+        Some(AU6_MUX_RECIPE.len() as u64)
+    );
+    assert_eq!(
+        manifest["sources"]["video_only_recipe"]
+            .as_array()
+            .expect("the exact argument vector of §3.3")
+            .iter()
+            .map(|argument| argument.as_str().expect("a string argument"))
+            .collect::<Vec<_>>(),
+        AU6_VIDEO_ONLY_RECIPE.to_vec()
+    );
+    assert_eq!(
+        manifest["sources"]["mux_recipe"]
+            .as_array()
+            .expect("the exact argument vector of §3.3")
+            .iter()
+            .map(|argument| argument.as_str().expect("a string argument"))
+            .collect::<Vec<_>>(),
+        AU6_MUX_RECIPE.to_vec()
+    );
+    let buffers = manifest["sources"]["buffers"]
+        .as_array()
+        .expect("one entry per authored buffer");
+    let declared_buffers = AU6_SCENARIOS
+        .iter()
+        .flat_map(|scenario| {
+            let spec = au6_spec(*scenario);
+            spec.tracks.iter().map(move |track| (spec, track))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(buffers.len(), declared_buffers.len());
+    for (row, (spec, track)) in buffers.iter().zip(declared_buffers.iter()) {
+        let label = format!("{}/{}", spec.id, track.track.0);
+        assert_eq!(row["scenario"].as_str(), Some(spec.id), "{label}");
+        assert_eq!(row["track"].as_u64(), Some(track.track.0), "{label}");
+        assert_eq!(
+            row["role"].as_str(),
+            Some(format!("{:?}", track.role).as_str()),
+            "{label}"
+        );
+        assert_eq!(
+            row["authored_level_dbfs_hundredths"].as_i64(),
+            track.level_dbfs_hundredths.map(i64::from),
+            "{label}"
+        );
+        assert_eq!(
+            row["frames"].as_u64(),
+            Some(u64::from(spec.asset_frames)),
+            "{label}"
+        );
+    }
+    assert_eq!(
+        manifest["sources"]["gaps"]["authored"]
+            .as_array()
+            .expect("(c)'s four authored gaps")
+            .iter()
+            .map(|gap| (gap[0].as_i64().unwrap(), gap[1].as_i64().unwrap()))
+            .collect::<Vec<_>>(),
+        AU6_C_GAPS
+            .iter()
+            .map(|gap| (gap.start.0, gap.end.0))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        manifest["sources"]["click_free"]["click_count"].as_u64(),
+        Some(AU6_C_CLICK_COUNT as u64)
+    );
+    assert_eq!(
+        manifest["sources"]["voices"]["bands_apart"].as_i64(),
+        Some(i64::from(
+            AU6_VOICE_B_BAND_INDEX as i32 - AU6_VOICE_A_BAND_INDEX as i32
+        ))
+    );
+    assert_eq!(
+        manifest["learn"]["project_range"]
+            .as_array()
+            .map(|range| (range[0].as_i64().unwrap(), range[1].as_i64().unwrap())),
+        Some((
+            AU6_C_LEARN_PROJECT_RANGE.start.0,
+            AU6_C_LEARN_PROJECT_RANGE.end.0
+        ))
+    );
+    assert_eq!(
+        manifest["profile"]["learned_tenth_db"]
+            .as_array()
+            .expect("the 31 pinned bands")
+            .iter()
+            .map(|band| band.as_i64().unwrap() as i32)
+            .collect::<Vec<_>>(),
+        AU6_C_LEARNED_PROFILE_TENTH_DB.to_vec()
+    );
+    assert_eq!(
+        manifest["profile"]["shape"]["monotone_from_band"].as_u64(),
+        Some(AU6_C_PROFILE_MONOTONE_FROM_BAND as u64)
+    );
+    assert_eq!(
+        manifest["pins"]["duck_keyframes"]["count"].as_u64(),
+        Some(AU6_A_DUCK_KEYFRAMES.len() as u64)
+    );
+    assert_eq!(
+        manifest["pins"]["learn_project_range"]["value"]
+            .as_array()
+            .map(|range| (range[0].as_i64().unwrap(), range[1].as_i64().unwrap())),
+        Some((
+            AU6_C_LEARN_PROJECT_RANGE.start.0,
+            AU6_C_LEARN_PROJECT_RANGE.end.0
+        ))
+    );
+    assert_eq!(
+        manifest["pins"]["learned_profile_tenth_db"]["bands"].as_u64(),
+        Some(NOISE_PROFILE_BAND_COUNT as u64)
+    );
+    assert_eq!(
+        manifest["transcriptions"]["owners"]["DEFAULT_SILENCE_THRESHOLD_DBFS_HUNDREDTHS"].as_i64(),
+        Some(i64::from(DEFAULT_SILENCE_THRESHOLD_DBFS_HUNDREDTHS))
+    );
+    assert_eq!(
+        manifest["transcriptions"]["owners"]["LOUDNESS_GATING_BLOCK_FRAMES"].as_u64(),
+        Some(LOUDNESS_GATING_BLOCK_FRAMES as u64)
+    );
+    assert_eq!(
+        manifest["transcriptions"]["owners"]["NOISE_PROFILE_PERCENT"].as_u64(),
+        Some(NOISE_PROFILE_PERCENT as u64)
+    );
+    assert_eq!(
+        manifest["transcriptions"]["owners"]["PROFILE_BAND_NEUTRAL_TENTH_DB"].as_i64(),
+        Some(i64::from(PROFILE_BAND_NEUTRAL_TENTH_DB))
+    );
+    assert_eq!(
+        manifest["multicam"]["cuts"]
+            .as_array()
+            .expect("(d)'s three cuts")
+            .iter()
+            .map(|cut| cut.as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        AU6_D_CUT_FRAMES.to_vec()
+    );
+    assert_eq!(
+        manifest["multicam"]["master_cut_divergence_sample"].as_i64(),
+        Some(AU6_MEASURED_MASTER_CUT_DIVERGENCE_SAMPLE)
+    );
+    assert_eq!(
+        manifest["multicam"]["master_stem_samples"].as_i64(),
+        Some(AU6_MASTER_STEM_SAMPLES)
+    );
+    assert_eq!(
+        manifest["canonical_documents"]["clip_ids"]["c_right"].as_u64(),
+        Some(AU6_C_RIGHT_CLIP_ID.0)
+    );
+    assert_eq!(
+        manifest["canonical_documents"]["clip_ids"]["c_middle"].as_u64(),
+        Some(AU6_C_MIDDLE_CLIP_ID.0)
+    );
+    assert_eq!(
+        manifest["canonical_documents"]["clip_ids"]["d_deleted"]
+            .as_array()
+            .expect("(d)'s four deletes")
+            .iter()
+            .map(|clip| clip.as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        AU6_D_DELETED_CLIP_IDS
+            .iter()
+            .map(|clip| clip.0)
+            .collect::<Vec<_>>()
+    );
+    for scenario in AU6_SCENARIOS {
+        let spec = au6_spec(scenario);
+        assert_eq!(
+            manifest["canonical_documents"]["operation_counts"][spec.id].as_u64(),
+            Some(au6_canonical_operations(scenario).len() as u64),
+            "{}: operation count",
+            spec.id
+        );
+    }
+    assert_eq!(
+        manifest["canonical_documents"]["delivery"]["duck_keyframes_e"].as_u64(),
+        Some(au6_e_duck_curve().keyframes.len() as u64)
+    );
 }
 
 const AU6_CORE_TESTS: [&str; 13] = [
