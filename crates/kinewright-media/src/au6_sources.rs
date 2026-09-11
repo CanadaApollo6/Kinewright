@@ -45,7 +45,8 @@
 use std::{ops::Range, path::PathBuf};
 
 use kinewright_core::{
-    Au6Scenario, Au6Speaker, Au6TrackRole, MediaAsset, Rational, TimeCode, TrackId, TrackKind,
+    Au6Scenario, Au6Speaker, Au6TrackRole, Au6Turn, MediaAsset, Rational, TimeCode, TrackId,
+    TrackKind,
     au6_scenarios::{
         AU6_A_BED_LEVEL_DBFS_HUNDREDTHS, AU6_A_BED_PARTIALS_MILLIHERTZ, AU6_C_CLICK_FRAMES,
         AU6_C_HUM_FUNDAMENTAL_HERTZ, AU6_C_HUM_LEVEL_DBFS_HUNDREDTHS,
@@ -481,6 +482,10 @@ pub fn au6_hum_pcm(
 /// 1.46×. The 2-sample click's `d2` is `4 × 0.5 = 2.0` against a 20 ms
 /// reference of ≈ 7e-3 RMS at the −42 dBFS floor, an 18× clearance, and
 /// `click_count` reads 12 exactly on every probe run.
+///
+/// # Panics
+///
+/// Panics when a click frame is negative.
 pub fn au6_clicks_into(mono: &mut [f32], frames: &[i64]) {
     let amplitude = f64::from(AU6_CLICK_AMPLITUDE_HUNDREDTHS) / 100.0;
     #[allow(clippy::cast_possible_truncation)]
@@ -497,6 +502,10 @@ pub fn au6_clicks_into(mono: &mut [f32], frames: &[i64]) {
 /// AU6 §3.2 rule 7: a camera's scratch take of `master` — the master delayed
 /// by `offset_frames`, **halved**, plus `pseudo_random_amplitude` noise at
 /// `noise_level_dbfs_hundredths`. Mono in, mono out, the master's length.
+///
+/// # Panics
+///
+/// Panics when `offset_frames` is negative.
 #[must_use]
 pub fn au6_scratch_pcm(
     master: &[f32],
@@ -522,7 +531,7 @@ pub fn au6_scratch_pcm(
 /// The four turns of [`AU6_TURNS`] as project ranges, the turn list (c)'s
 /// single voice speaks on.
 fn all_turns() -> Vec<Range<TimeCode>> {
-    AU6_TURNS.iter().map(|turn| turn.range()).collect()
+    AU6_TURNS.iter().map(Au6Turn::range).collect()
 }
 
 /// (c)'s **clean** voice — speaker A's carrier on all four turns at
@@ -605,6 +614,11 @@ fn source_scenario(scenario: Au6Scenario) -> Au6Scenario {
 /// buffer is `asset_frames` long — (e) returns (a)'s 300-frame buffers
 /// byte-identically, because its 8 s document is a clip truncation, not a
 /// shorter asset (B2).
+///
+/// # Panics
+///
+/// Panics when an audio track is missing its authored level or carrier, or
+/// when `scenario` authors no buffer for a requested role.
 #[must_use]
 pub fn au6_scenario_tracks(scenario: Au6Scenario) -> Vec<(Au6TrackRole, Vec<f32>)> {
     let spec = au6_spec(source_scenario(scenario));
