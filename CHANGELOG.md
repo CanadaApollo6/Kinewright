@@ -45,6 +45,10 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   whatever is there.
 
 ### Changed
+- Roadmap and dated product-position docs now match HEAD: AU1–AU5 and CC0–CC7
+  are on `main`, Linux is a supported platform, and AU6 is named as next
+  without a contract. Historical August 2026 snapshots keep their original
+  claims and point forward to `docs/ROADMAP-AND-WORKFLOWS.md`.
 - `plan_audio_normalization` now extends a bus that carries only AU5 repair
   nodes instead of refusing it. Before AU5 the planner refused outright as soon
   as the requested tracks intersected any existing bus, so a repaired dialogue

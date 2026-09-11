@@ -1,8 +1,9 @@
 # Competitive Audit — August 2026
 
-> Historical pre-M32 snapshot. The current post-M35 assessment is
-> [Product position after M35](PRODUCT-POSITION-M35-2026-08.md); it reflects
-> M32-M35 and current official product material, including DaVinci Resolve 21.
+> Historical pre-M32 snapshot (August 2026). The post-M35 assessment is
+> [Product position after M35](PRODUCT-POSITION-M35-2026-08.md); that file is
+> itself a dated August 2026 snapshot (Windows-only, pre-CC/AU). The living
+> plan is [Roadmap and development workflows](ROADMAP-AND-WORKFLOWS.md).
 
 Where Kinewright stands against DaVinci Resolve 20, Premiere Pro 2026, and
 CapCut Desktop 2026; why the app still feels janky; and a proposed refocus.
