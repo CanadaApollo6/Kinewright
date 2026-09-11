@@ -388,7 +388,8 @@
   },
   "performance": {
     "media_lane": {
-      "measured_seconds": 437,
+      "measured_seconds": 458,
+      "measured_seconds_at_049eb90": 437,
       "measured_seconds_ci": 667,
       "budget_seconds": 180,
       "engine_constructions": 1,
@@ -405,7 +406,8 @@
       }
     },
     "agent_lane": {
-      "measured_seconds": 134,
+      "measured_seconds": 131,
+      "measured_seconds_at_080243e": 134,
       "budget_seconds": 120,
       "tests_using_start_with_exporter": ["au6_a5a", "au6_a5b"],
       "encodes": 1,
@@ -432,7 +434,7 @@
       "kernel": "6.12.94+",
       "toolchain": "rustc 1.98.1",
       "ffmpeg": "8.0",
-      "commit": "049eb90",
+      "commit": "cd9042b",
       "profile": "debug"
     },
     "recorded_never_gated": true
