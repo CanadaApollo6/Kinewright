@@ -109,7 +109,11 @@ impl<'a> MixerChain<'a> {
     }
 
     /// The edited copy of this chain's effect list.
-    fn effects_mut(self, edits: &mut MixerChainEdits) -> &mut Vec<Effect> {
+    ///
+    /// `pub(crate)` for AU6 §6.1 step 4 (R62): (b)'s and (c)'s person-path
+    /// tests live in `mixer_ui.rs` and drive `+ Effect` through this list,
+    /// exactly as `insertion_menu` does.
+    pub(crate) fn effects_mut(self, edits: &mut MixerChainEdits) -> &mut Vec<Effect> {
         match self {
             Self::Bus(bus) => &mut edits.bus(bus).effects,
             Self::Master(master) => &mut edits.master(master).effects,
@@ -121,7 +125,15 @@ impl<'a> MixerChain<'a> {
 
     /// The edited copy of one node of this chain, addressed by id rather than
     /// position so a reorder earlier in the same frame cannot retarget it.
-    fn effect_mut(self, edits: &mut MixerChainEdits, effect: EffectId) -> Option<&mut Effect> {
+    ///
+    /// `pub(crate)` for AU6 §6.1 step 4 (R62): a card parameter's write is
+    /// `effect_mut(..).parameters.insert(..)`, and the person-path tests
+    /// drive that write one control at a time.
+    pub(crate) fn effect_mut(
+        self,
+        edits: &mut MixerChainEdits,
+        effect: EffectId,
+    ) -> Option<&mut Effect> {
         self.effects_mut(edits)
             .iter_mut()
             .find(|candidate| candidate.id == effect)

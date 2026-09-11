@@ -2703,7 +2703,14 @@ fn source_boundary_project_delta(
     }
 }
 
-fn linked_delete_operations(document: &Document, primary: ClipId, ripple: bool) -> Vec<Operation> {
+/// `pub(crate)` for AU6 §6.1 step 4 (R62): (d)'s person-path test lives in
+/// `mixer_ui.rs` and drives the blade's delete through this builder rather
+/// than restating the `DeleteClip` it emits.
+pub(crate) fn linked_delete_operations(
+    document: &Document,
+    primary: ClipId,
+    ripple: bool,
+) -> Vec<Operation> {
     let mut members = linked_members(document, primary);
     if members.is_empty() {
         return Vec::new();
