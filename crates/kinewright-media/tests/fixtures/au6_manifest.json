@@ -104,7 +104,7 @@
   },
   "performance": {
     "media_lane": {
-      "measured_seconds": 90,
+      "measured_seconds": 437,
       "budget_seconds": 180,
       "engine_constructions": 1,
       "encodes": 2,
@@ -138,7 +138,7 @@
       "kernel": "6.12.94+",
       "toolchain": "rustc 1.98.1",
       "ffmpeg": "8.0",
-      "commit": "080243e",
+      "commit": "049eb90",
       "profile": "debug"
     }
   },
@@ -150,7 +150,7 @@
     "questions": "core item 11"
   },
   "scorecard": {
-    "part_a": "in_progress"
+    "part_a": "complete"
   },
   "m36": {
     "registry": 138,
