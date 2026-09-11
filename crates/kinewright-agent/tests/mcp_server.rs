@@ -9314,8 +9314,9 @@ async fn au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps() {
 use kinewright_core::au6_scenarios::{
     AU6_A_BED_TRACK, AU6_A_DUCK_ATTACK_MS, AU6_A_DUCK_DEPTH_TENTH_DB, AU6_A_DUCK_HOLD_MS,
     AU6_A_DUCK_RELEASE_MS, AU6_A_VOICE_A_TRACK, AU6_A_VOICE_B_TRACK, AU6_B_VOICE_A_TRACK,
-    AU6_B_VOICE_B_TRACK, AU6_C_DIALOGUE_TRACK, AU6_C_LEARN_SOURCE_RANGE, AU6_C_RIGHT_CLIP_ID,
-    AU6_SOURCE_FPS, Au6Scenario, au6_c_gap_operations, au6_canonical_operations, au6_spec,
+    AU6_B_VOICE_B_TRACK, AU6_C_DIALOGUE_ASSET, AU6_C_DIALOGUE_TRACK, AU6_C_LEARN_SOURCE_RANGE,
+    AU6_C_RIGHT_CLIP_ID, AU6_SOURCE_FPS, Au6Scenario, au6_c_canonical_operations_with_room_tone,
+    au6_c_gap_operations, au6_canonical_operations, au6_spec,
 };
 use kinewright_media::au6_sources::{au6_scenario_sources, au6_stamp_on_project_grid};
 
@@ -9692,6 +9693,18 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
         revision + 5,
     )
     .await;
+
+    // §5.1(4): the committed document is the canonical one. The two
+    // `plan_audio_normalization` calls were evidence only, so the bus each
+    // would have built is asserted absent by the same equality.
+    let mut expected = scene.document.clone();
+    apply_batch(
+        &mut expected,
+        &au6_canonical_operations(Au6Scenario::Podcast),
+    )
+    .expect("canonical (b)");
+    assert_eq!(query_document(&core), expected);
+
     client.cancel().await.unwrap();
     server.shutdown();
 }
@@ -9910,6 +9923,34 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
         past_end.structured_content.as_ref().unwrap()["code"],
         "invalid_source_range"
     );
+
+    // §5.1(4): the committed document is (c)'s three-commit ledger — gap,
+    // fill, repair — on top of the capture's own `AddAsset`. That asset's
+    // record is written from a file `au6_scenarios` cannot read (R6), so it
+    // is lifted from the document the server committed and **everything
+    // else** is asserted, including the 31 profile rows the planner learned.
+    // The refusals above are evidence-only, and the same equality proves it.
+    let committed = query_document(&core);
+    let room_tone = committed
+        .media_pool
+        .iter()
+        .find(|asset| asset.id != AU6_C_DIALOGUE_ASSET)
+        .expect("capture_room_tone registered exactly one new asset")
+        .clone();
+    let mut expected = scene.document.clone();
+    apply_batch(
+        &mut expected,
+        &[Operation::AddAsset {
+            asset: room_tone.clone(),
+        }],
+    )
+    .expect("the capture's own AddAsset");
+    apply_batch(
+        &mut expected,
+        &au6_c_canonical_operations_with_room_tone(room_tone.id),
+    )
+    .expect("canonical (c)");
+    assert_eq!(committed, expected);
 
     client.cancel().await.unwrap();
     server.shutdown();
