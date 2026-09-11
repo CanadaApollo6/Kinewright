@@ -8890,20 +8890,34 @@ mod tests {
             "the seam median must be a red, was {median}"
         );
 
-        // Two million samples is the order of a 1080p full-frame ROI. The old
-        // double loop took tens of minutes; this must be a fraction of a
-        // second. The threshold is generous so a loaded CI box does not flake,
-        // but it is four orders of magnitude below quadratic.
-        let mut large = (0..2_000_000_i64)
+        // Two million samples is the order of a 1080p full-frame ROI, and the
+        // double loop this replaced took tens of minutes on that many.
+        //
+        // The claim is a complexity one, so the bound is **relative to one
+        // `sort_unstable` of the same data** rather than a wall clock: the
+        // sort is what dominates `circular_median_centidegrees`, everything
+        // after it is one linear prefix pass and one monotone sweep, and a
+        // quadratic scorer would be five orders of magnitude above the sort
+        // on any machine. An absolute two-second threshold measured 2.36 s on
+        // a `windows-latest` runner — a loaded box, not a regression — and a
+        // wall clock cannot tell those apart.
+        let large = (0..2_000_000_i64)
             .map(|index| (index * 7_919) % 36_000)
             .collect::<Vec<_>>();
+        let mut reference = large.clone();
+        let sorting = std::time::Instant::now();
+        reference.sort_unstable();
+        // A floor keeps the ratio meaningful if the platform clock is coarse.
+        let sort_elapsed = sorting.elapsed().max(std::time::Duration::from_millis(1));
+        let mut subject = large;
         let started = std::time::Instant::now();
-        let measured = circular_median_centidegrees(&mut large).expect("a median exists");
+        let measured = circular_median_centidegrees(&mut subject).expect("a median exists");
         let elapsed = started.elapsed();
         assert!((0..36_000).contains(&measured));
         assert!(
-            elapsed < std::time::Duration::from_secs(2),
-            "two million samples took {elapsed:?}; the sweep is not O(n log n)"
+            elapsed < sort_elapsed * 50,
+            "two million samples took {elapsed:?} against {sort_elapsed:?} to sort the same \
+             data; the sweep is not O(n log n)"
         );
     }
 
