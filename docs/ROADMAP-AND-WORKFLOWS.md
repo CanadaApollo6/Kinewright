@@ -1,13 +1,9 @@
 # Roadmap and development workflows
 
-Status: active operating plan, September 2026 (AU5b on `main`). This is
-the forward-looking companion to the numbered milestone documents. Those
-documents preserve what was attempted and verified; this document defines what
-Kinewright works on next and how a capability becomes part of the editor.
-Dated August 2026 snapshots (`PRODUCT-POSITION-M35-2026-08.md`,
-`COMPETITIVE-AUDIT-2026-08.md`, `AUDIT-2026-08.md`) remain historical; they
-record the product at that date, including a Windows-only first boundary and a
-pre-CC/AU surface, and are not the current plan.
+Status: active operating plan, August 2026. This is the forward-looking companion
+to the numbered milestone documents. Those documents preserve what was attempted
+and verified; this document defines what Kinewright works on next and how a
+capability becomes part of the editor.
 
 ## The outcome
 
@@ -129,17 +125,17 @@ A capability is not complete until all applicable items below are true:
 ## Capability portfolio
 
 The order within each track is driven by complete user jobs and dependencies.
-The colour programme table is complete; audio is the active slice.
+Colour begins immediately, while non-colour work continues in parallel.
 
 | Track | Existing base | Next workflow goals |
 | --- | --- | --- |
-| Editorial and long-form | Three-point edits, slip/roll/slide, replace, fit-to-fill, bins, string-outs, sync groups, transcript editing, independent Source/Program monitoring, source patching and track targeting | Compound/nested structure, long-sequence navigation and revision |
+| Editorial and long-form | Three-point edits, slip/roll/slide, replace, fit-to-fill, bins, string-outs, sync groups, transcript editing | Dual source/program workflow, source patching and track targeting, compound/nested structure, long-sequence navigation and revision |
 | Media and interchange | Import, project media, verified source identity, offline/changed status, undoable relink, ephemeral scaled preview memory, scoped cache visibility/clearing, hostile-media policy, save/recovery | Generated playable proxies, richer metadata, managed/project-relative media, interchange that preserves supported edit semantics |
-| Colour | Managed SDR Rec.709 input → high-precision working → primary, wheels, curves, looks, and node-owned secondaries → monitor/delivery pipeline; typed source assumptions and metadata; ten primary controls; CPU/GPU/proof/export parity; project-owned hashed LUTs and a human `.cube` workflow; post-composite scopes, ROI/temporal evidence, and matching proposals; colour QC and 8/10-bit managed delivery; `color-workflow-v6` evaluation suite | HDR, camera RAW, ACES/OCIO, calibrated-monitor output, and temporal NR (later programmes). Remaining CC3–CC7 platform smoke and CC7's real-harness run / blind review |
-| Audio | Multi-track mixing at export parity; per-track gain/pan/mute/solo and a live Mixer; bus and master chains with parametric EQ, compressor, gate, and true-peak limiter; BS.1770-4 loudness metering, optional export normalize, and decoded-file audio verify; clip/track/bus/master automation; denoise, hum removal, de-click, room-tone capture/fill, and repair planners | AU6 workflow evaluation (no contract yet). Remaining hands-on smoke for AU1 / AU3b / AU4b / AU5b |
-| Motion, compositing, and retiming | GPU compositor, effects, keyframes, masks/tracking, transitions, constant-speed controls, grade-node mattes | Keyframe editing UI, speed ramps, adjustment/compound layers, transform and compositing polish |
+| Colour | Managed SDR Rec.709 input → high-precision working → primary correction → monitor/delivery pipeline, typed source assumptions and metadata, ten primary controls, CPU/GPU/proof/export parity, four built-in looks, agent/core `.cube` LUT support, masks, chroma key, professional post-composite scopes, ROI/temporal evidence, and reference-shot matching proposals | Curves/wheels, grade-scoped secondaries, human LUT workflow, look management, delivery QC |
+| Audio | Multi-track mixing, buses, EQ/compression/ducking operations, waveform/transcript analysis, per-track gain/pan/mute/solo, track stage, per-track/bus/master meters, mixer panel, live mixing, measured levels | Bus and master control UI, parametric EQ/dynamics, loudness metering and loudness-aware delivery, clip envelopes/automation, repair and room tone |
+| Motion, compositing, and retiming | GPU compositor, effects, keyframes, masks/tracking, transitions, constant-speed controls | Keyframe editing UI, speed ramps, effect-scoped mattes, adjustment/compound layers, transform and compositing polish |
 | Multicam | Sync groups and agent speaker/angle planning primitives | Angle viewer, live switching and revision, audio-follow policy, explicit master-audio handling |
-| Delivery and performance | Shared render path, H.264/AAC export queue and profiles, colour/audio tags and QC, decoded delivery verification, scoped cache visibility/clearing | Codec/preset breadth, long-project responsiveness, interruption and recovery testing |
+| Delivery and performance | Shared render path, H.264/AAC export queue and profiles | Codec/preset breadth, colour/audio tags and QC, cache control, long-project responsiveness, interruption and recovery testing |
 | Creator workflows | Captions, titles, transcript operations, reframing primitives | Caption finishing, reusable packages/templates, aspect-ratio variants, reviewable batch versioning |
 
 This table is intentionally broader than the current eval programme. A general
@@ -150,13 +146,11 @@ video editor will not reach practical parity by optimizing montage taste alone.
 Planning runs in target three-to-four-week cycles. The exit gate, not the calendar,
 decides whether a slice is complete. Each cycle names one primary capability slice
 and owner in its implementation brief, one bounded reliability improvement, and one
-focused eval update. The colour programme table is complete (CC0–CC7). Audio is
-the active slice: AU1–AU5 are on `main` and **AU6 workflow evaluation is next
-and has no contract**. Do not start AU6 from this document; write
-`docs/AU6-*.md` first. Dependency work may continue in the secondary lane but
+focused eval update. With CC2 complete, colour and non-colour slices continue to
+alternate as the primary; dependency work may continue in the secondary lane but
 cannot silently become a second unbounded project.
 
-Completed cycle intentions:
+The first three cycle intentions are:
 
 1. **CC0 colour contract — completed 2026-08-24.** The implementation now carries
    explicit source/working/monitoring/delivery metadata through probe, project,
@@ -306,50 +300,16 @@ regressions.
    agent gets the generated `set_track_mix` and the read-only `get_audio_levels`
    over `Analysis::mix_levels`. The contract is `AU1-MANUAL-MIX.md`.
 
-12. **AU2 EQ and dynamics — implemented 2026-09-08.** Parametric EQ, compressor,
-    gate, and true-peak limiter as bus/master chain nodes; bus fader and master
-    chain editing in the Mixer; constant-power pan as a second law; live Mixer
-    parameter edits; `get_audio_spectrum`. The contract is `AU2-EQ-AND-DYNAMICS.md`.
-
-13. **AU3 loudness and delivery — implemented 2026-09-09, pending the hands-on
-    export.** BS.1770-4 momentary/short-term/integrated/LRA and true-peak
-    metering in the Mixer; `get_audio_qc`; optional export loudness
-    normalization with a true-peak limiter under the ceiling; decoded-file
-    audio verify. The contract is `AU3-LOUDNESS-AND-DELIVERY.md`.
-
-14. **AU4 clip envelopes and automation — implemented 2026-09-09, pending the
-    hands-on ride.** Clip/track/bus/master curves with integer-exact evaluation
-    that survives trim/split/slip/speed under a stated policy; rubber-band
-    envelopes; Mixer automation; `plan_audio_ducking` / `plan_clip_fades`. The
-    contract is `AU4-CLIP-ENVELOPES-AND-AUTOMATION.md`.
-
-15. **AU5 repair and room tone — implemented 2026-09-10, pending the hands-on
-    repair session.** Denoise, hum removal, and de-click as latency-declaring
-    chain nodes; room-tone store and fill; Mixer repair cards; `get_audio_repair`,
-    `capture_room_tone`, `plan_room_tone_fill`, and `plan_dialogue_repair`;
-    normalize-after-repair. The contract is `AU5-REPAIR-AND-ROOM-TONE.md`.
-
-**Next (not started):** AU6 workflow evaluation — two-person interview with
-music bed, podcast with uneven voices, noisy location dialogue, event/multicam
-with a master audio track, and encoded delivery at two loudness targets. No
-`docs/AU6-*.md` exists. AU6 should evaluate the shipped AU1–AU5 surface; named
-deferrals from AU4 and AU5 are not in scope unless a later contract says so.
-
 Within that cadence, three workstreams remain active:
 
-1. **Audio finishing.** AU1–AU5 are on `main`. AU6 workflow evaluation is next
-   and has no contract. Hands-on smoke for AU1 / AU3b / AU4b / AU5b remains
-   open and is additional to the CI exit gate, not a substitute for writing
-   AU6's contract first.
-2. **Non-audio breadth.** Generated playable proxies, long-form nested
-   structure, multicam viewing, and motion/retiming remain open according to
-   the bottleneck observed in real edits. Colour's later programmes (HDR,
-   camera RAW, ACES/OCIO, calibrated-monitor output, temporal NR) are
-   deliberate and not the current slice.
+1. **Colour foundation and correction.** Implement the staged workflow below,
+   beginning with explicit colour metadata and a managed SDR path.
+2. **Non-colour breadth.** On its primary cycles, start with media relink/proxy
+   control and long-form source/program usability, then deepen manual audio and
+   motion/retiming workflows according to the bottleneck observed in real edits.
 3. **Rotating evaluation.** Keep the M40 generalization gauntlet, but rotate across
    interview, event/multicam, montage, dialogue, product, and colour tasks. Reuse
-   old candidates as regressions rather than the main creative target. The V10
-   montage machine artifact stays frozen pending human review.
+   old candidates as regressions rather than the main creative target.
 
 The workstreams meet at shared infrastructure—typed operations, revision-gated
 plans, proofs, playback/render agreement, and cross-platform delivery—but they do
@@ -373,40 +333,32 @@ grade” must never collapse all three into an unexplained transform.
 
 ### Current foundation and limits
 
-CC0–CC7 are on `main`. The managed SDR Rec.709 path is the current-generation
-colour model: explicit source/working/monitor/delivery descriptions, a
-high-precision working pipeline, ordered correction nodes, project-owned looks,
-node-owned secondaries, colour QC, 8/10-bit managed delivery, and the
-`color-workflow-v6` evaluation suite. Remaining colour work is later programmes
-plus unfinished hands-on and harness review, not missing CC3–CC6 nodes.
+The present implementation includes the first managed SDR vertical slice, with
+deliberate limits that define the remaining colour work:
 
 - Clip effects are typed and serializable, with static values and keyframes.
-- Current-generation colour nodes are `primary_correction`, `color_wheels`,
-  `color_curves`, `technical_lut`, and `creative_look`. The older display-coded
-  `brightness`, `contrast`, and `saturation` effects load for compatibility
-  only, are not offered for new insertion, and report `legacy_colour_semantics`;
-  `color_grade` is canonicalized to `primary_correction` on load. The four
-  built-in looks are generated, hash-pinned assets. File-backed `.cube` LUTs
-  are project-owned hashed assets with a human import workflow (CC4); only the
-  legacy `cube_lut` compatibility stage still resolves an external path.
+- The managed `primary_correction` node is the only current-generation colour
+  control. The older display-coded `brightness`, `contrast`, and `saturation`
+  effects load for compatibility only, are not offered for new insertion, and
+  report `legacy_colour_semantics`; `color_grade` is canonicalized to
+  `primary_correction` on load. Four built-in looks and `.cube` LUT loading also
+  exist as post-primary compatibility stages. File-backed LUTs are currently a
+  core/agent capability and intentionally lack a human file-picker workflow.
 - Managed preview, isolated full-resolution proof, and export share the production
-  visual-layer resolution and compositor semantics. CC6 adds a named
-  `working_linear_post_composite` proof and decoded-output verification of
-  written files.
+  visual-layer resolution and compositor semantics.
 - CC2 scopes are measured at the named managed post-composite monitoring stage and
   provide bounded full-raster or explicitly labelled proxy histograms, statistics,
   clipping, waveform, RGB parade, vectorscope, geometric ROI, temporal sampling,
   and signed reference comparison. The same typed engine feeds the non-blocking
   editor panel and the read-only agent analysis/matching tools.
 - The layer `mask` effect applies to final layer alpha and remains a
-  compositing operation. Effect-scoped colour secondaries are the node-owned
-  mattes on the managed colour nodes (windows, HSL qualifier, feather,
-  keyframes, tracking), which never touch alpha.
+  compositing operation. Since CC5, effect-scoped colour secondaries are the
+  node-owned mattes on the managed colour nodes, which never touch alpha.
 - CC0 preserves explicit source, working, monitoring, and delivery colour
   descriptions with provenance and confidence. Probe keeps unknown values honest;
   editors and agents can inspect them and apply an undoable metadata override.
-  Delivery conformance accepts an explicitly supported 8-bit or 10-bit SDR
-  Rec.709 contract and writes explicit H.264 colour tags.
+  Delivery conformance accepts only an explicitly supported SDR Rec.709 contract
+  and writes explicit H.264/YUV420P colour tags.
 - CC1 decodes supported integer SDR sources through an explicit managed conversion
   into `Rgba16Float`, applies the canonical primary pipeline without intermediate
   display-range clamping, and performs the monitoring/output transform only at the
@@ -415,16 +367,16 @@ plus unfinished hands-on and harness review, not missing CC3–CC6 nodes.
 - The managed cache accounts for high-precision working bytes and returns an
   oversized current frame without retaining it beyond the configured bound.
 - The primary node supplies exposure, temperature, tint, contrast, contrast
-  pivot, blacks, shadows, highlights, whites, and saturation. CC3 adds ASC
-  CDL-style wheels and RGB/luma curves through an invertible `grade709`
-  encoding. There is still no HDR, camera RAW, ACES/OCIO, calibrated-monitor
-  output, or temporal noise-reduction programme.
-- Managed colour nodes execute in serialized `clip.effects` order as an ordered
-  node stack. Multiple technical and creative LUT stages are a supported
-  grading model; stage order is enforced by Core rejection.
-- Unfinished on the shipped surface: CC3–CC7 hands-on platform smoke, and
-  CC7's real-harness eval run and blind review. Those do not reopen the CC
-  table.
+  pivot, blacks, shadows, highlights, whites, and saturation with stable defaults,
+  limits, serialization, undo/redo, editor controls, agent planning, and proof
+  manifests. There is no hue or midtone control yet; those belong to CC3.
+- `primary_correction` nodes execute in serialized `clip.effects` order as an
+  ordered node stack. Only the legacy display-coded effects, built-in looks, and
+  `.cube` LUTs are still flattened into fixed compositor inputs; multiple creative
+  LUT stages are therefore not a supported grading model until CC4.
+
+Those limits determine the remaining implementation order. With CC2 scopes and
+shot matching complete, CC3 expands the correction model with curves and wheels.
 
 ### Colour architecture principles
 
@@ -565,9 +517,9 @@ programme table below is complete.
 | CC7 — Workflow evaluation | Mixed-camera interview, poor white balance/exposure, skin and product, log-like input, creative look, and tracked secondary | Technical gates pass independently; blind human review is limited to creative and workflow-quality questions |
 
 HDR, camera RAW controls, ACES/OCIO integration, calibrated-monitor output, and
-advanced temporal noise reduction are deliberate later programmes. The managed
-SDR path is explicit and high precision; do not claim those later programmes
-from the CC0–CC7 surface.
+advanced temporal noise reduction are deliberate later programmes. CC0–CC6 should
+leave room for them, but we should not claim them before the SDR path is explicit
+and high precision.
 
 ### Agent surface direction
 
@@ -643,46 +595,27 @@ later programmes and are not implied by any slice below.
 
 ### Current foundation and limits
 
-AU1–AU5 are on `main`. The audio base was laid in M12 (multi-track playback
-mixing at export parity), M20/M21 (transition ramps, per-clip gain and fades,
-the master peak meter), M33 (buses, sidechain ducking, and project-frame
-automation on bus effects), and the analysis work that supplies silences,
-beats, and waveform peaks. One stateful `AudioMixProcessor` sums clip-shaped
-per-track buffers through buses to master for both playback and export, so the
-parity contract already exists at the sample level.
+The audio base was laid in M12 (multi-track playback mixing at export parity),
+M20/M21 (transition ramps, per-clip gain and fades, the master peak meter), M33
+(buses, fixed three-band EQ, peak compressor, sidechain ducking, hard limiter, and
+project-frame automation on bus effects), and the analysis work that supplies
+BS.1770 integrated loudness, silences, beats, and waveform peaks. One stateful
+`AudioMixProcessor` sums clip-shaped per-track buffers through buses to master for
+both playback and export, so the parity contract already exists at the sample
+level; AU1 added the track stage to that processor and made its summation order
+deterministic.
 
-What shipped in the audio programme:
-
-- **AU1.** Per-track gain, pan, mute, and solo; a deterministic track stage;
-  per-track/bus/master peak meters; a Mixer that keeps playing while it is
-  edited; `get_audio_levels`. Hands-on platform smoke is still open.
-- **AU2.** Parametric EQ, soft-knee compressor, gate, and true-peak limiter as
-  editable bus and master chain nodes; bus fader; constant-power pan as a
-  second law; `get_audio_spectrum`. Legacy three-band EQ / peak compressor /
-  clamp limiter remain valid compatibility nodes.
-- **AU3.** BS.1770-4 loudness (momentary, short-term, integrated, LRA, true
-  peak) in the Mixer; `get_audio_qc`; optional export loudness normalize;
-  decoded-file audio verify. Hands-on export on a real project is still open.
-- **AU4.** Clip gain envelopes and track/bus/master automation, integer-exact
-  in both paths, surviving trim/split/slip/speed under a stated policy;
-  rubber-band and Mixer editing; `plan_audio_ducking` / `plan_clip_fades`.
-  Hands-on ride during playback is still open. Named deferrals include full
-  automation lanes, write/touch/latch, bezier, and speed/slip-following
-  envelopes.
-- **AU5.** Denoise, hum removal, de-click; room-tone capture and fill; Mixer
-  repair cards; `get_audio_repair`, `capture_room_tone`, `plan_room_tone_fill`,
-  `plan_dialogue_repair`. Hands-on learn/hum/`plan_dialogue_repair` is still
-  open. Named deferrals include source separation, de-reverb, de-clip, de-ess,
-  per-clip repair, adaptive hum, and room-tone crossfades.
-
-**AU6 is next and has no contract.** It should evaluate the shipped surface on
-the jobs already named in the table below, not silently absorb those
-deferrals. Surround delivery, MIDI, virtual instruments, third-party plug-in
-hosting, and spectral editing remain later programmes.
-
-The August 2026 competitive audit scored audio depth at one star against the
-pre-AU surface. That score is historical; do not treat it as the current mix
-depth.
+Before AU1 the limits were equally clear. There was no track-level mix state: a
+track could not be muted, soloed, panned, or set to a level without touching every
+clip on it or wrapping it in an agent-authored bus, and the only meter was the
+master peak. AU1 closed that gap with per-track gain, pan, mute, and solo, a
+deterministic track stage, per-track/bus/master meters, and a Mixer panel that
+keeps playing while it is edited. The rest of the audit's findings stand. Buses
+still have no editable human surface. The EQ is two fixed one-pole crossovers, the
+compressor detects peaks with no knee, and the limiter is a clamp. Loudness is
+measured but never targeted, displayed, or verified on the delivered file. There
+is no repair, room tone, or clip-envelope workflow. The competitive audit scored
+audio depth at one star for exactly these reasons.
 
 ### Audio architecture principles
 
@@ -713,59 +646,55 @@ depth.
 | AU2 — EQ and dynamics | Parametric EQ nodes (low/high shelf, up to four peaking bands, high-pass) on biquads; RMS/peak compressor with soft knee and lookahead; gate/expander; true-peak limiter; bus and master control editing in the mixer; constant-power pan as a second law; spectrum evidence for the agent | Filter magnitude response matches the analytic transfer function at pinned frequencies; gain reduction and ceiling are measured on synthetic material; playback/export parity through every node |
 | AU3 — Loudness and delivery | Momentary, short-term, integrated, LRA, and true-peak metering; per-profile loudness targets; normalization as an explicit export step; audio QC (`get_audio_qc`) with clipping, silence, channel-balance, and target checks; decoded verification of the written file's loudness and true peak | Encoded fixtures land within pinned LU/dBTP budgets on both CI operating systems; the QC report is integer-reported and evidence-only |
 | AU4 — Clip envelopes and automation | Keyframed clip gain envelopes with a rubber-band editor on the clip, track gain and pan automation, bus automation editing in the mixer, audio-aware trim behaviour, agent planners that propose envelopes | Envelope evaluation is integer-exact and identical in both paths; edited envelopes survive split/trim/slip/speed operations under a stated policy |
-| AU5 — Repair and room tone | Broadband noise reduction with a learned profile, hum removal, de-click, room-tone capture and fill for cut gaps. No source-separation / dialogue-isolation model; that remains a named deferral | Repair is measured on synthetic corruptions with pinned SNR gains; fills are seamless at 1e-4 across the join |
+| AU5 — Repair and room tone | Broadband noise reduction with a learned profile, hum removal, de-click, room-tone capture and fill for cut gaps, dialogue isolation where the model can measure improvement | Repair is measured on synthetic corruptions with pinned SNR gains; fills are seamless at 1e-4 across the join |
 | AU6 — Workflow evaluation | Two-person interview with music bed, podcast with uneven voices, noisy location dialogue, event/multicam with a master audio track, and encoded delivery at two loudness targets | Technical gates pass independently; blind human review is limited to balance and intelligibility questions |
 
-**Current status (2026-09-11): AU1–AU5 are implemented on `main` (through
-AU5b). AU6 workflow evaluation is next and has no contract.** Hands-on
-sessions remain open and are additional to the CI exit gates: AU1 live mix
-smoke (Omarchy/Windows); AU3b export on a real project; AU4b a ride drawn
-during playback plus one committed ducking plan; AU5b learn-on-noisy-interview,
-a hum check, and one committed `plan_dialogue_repair`. AU5 landed in two
-parts on one contract (`docs/AU5-REPAIR-AND-ROOM-TONE.md`). Part A — repair
-nodes and measurement — delivers the three descriptors, the in-house inverse
-FFT, the denoise / hum-removal / de-click runtimes, three new `Analysis`
-measurements and the `get_audio_repair` inspector, and discharged exit-gate
-clause 1, "repair is measured on synthetic corruptions with pinned SNR
-gains". Part B — room tone and repair planners — delivers the room-tone
+**Current status (2026-09-10): AU1–AU4 are implemented (AU1 pending its
+hands-on platform smoke, AU3 Part B its hands-on export, AU4 Part B its
+hands-on ride); AU5 lands in two parts on one contract
+(`docs/AU5-REPAIR-AND-ROOM-TONE.md`).** AU5 Part A — repair nodes and
+measurement — delivers the three descriptors, the in-house inverse FFT, the
+denoise / hum-removal / de-click runtimes, three new `Analysis` measurements
+and the `get_audio_repair` inspector, and discharges exit-gate clause 1,
+"repair is measured on synthetic corruptions with pinned SNR gains", on its
+own. AU5 Part B — room tone and repair planners — delivers the room-tone
 store and `capture_room_tone`, `Document::track_gaps` and the fill
 arithmetic, `plan_room_tone_fill`, `plan_dialogue_repair` and its amendment
 to AU3's normalization planner, the three Mixer repair cards with the noise
 well and the `Learn profile` gesture, and the timeline `Room tone` button,
-and discharged clause 2, "fills are seamless at 1e-4 across the join". AU4
-landed in two parts on one contract
-(`docs/AU4-CLIP-ENVELOPES-AND-AUTOMATION.md`). Part A (automation model)
-delivers the five curve owners, the two operations, the survival policy in
-every clip-moving operation and the shared per-sample evaluation, and
-discharged both exit-gate clauses; Part B (automation editing) delivers the
-rubber band on the clip, bus and master automation editing in the Mixer, the
-inspector's envelope list, and the `plan_audio_ducking` / `plan_clip_fades`
-planners.
+and discharges clause 2, "fills are seamless at 1e-4 across the join". Part B
+additionally awaits Riel's hands-on session (a profile learned on a noisy
+location interview and heard, a hum notch checked against its comb, one
+`plan_dialogue_repair` committed and listened to). AU4 landed in two parts on
+one contract (`docs/AU4-CLIP-ENVELOPES-AND-AUTOMATION.md`). Part A
+(automation model) delivers the five curve owners, the two operations, the
+survival policy in every clip-moving operation and the shared per-sample
+evaluation, and discharges BOTH exit-gate clauses — "integer-exact and
+identical in both paths" and "survive split/trim/slip/speed under a stated
+policy"; Part B (automation editing) delivers the rubber band on the clip,
+bus and master automation editing in the Mixer, the inspector's envelope
+list, and the `plan_audio_ducking` / `plan_clip_fades` planners. Part B
+additionally awaits Riel's hands-on session (a ride drawn during playback
+without a re-cue, a bus curve edited in the chain pane, one ducking plan
+committed and listened to).
 
 Each slice writes its contract under `docs/AU<n>-<NAME>.md` before implementation
 and records deferrals explicitly, as the colour slices did.
 
-### Agent surface (shipped AU1–AU5)
-
-Exact tool names are fixed in the AU contracts. Shipped:
+### Agent surface direction
 
 - `get_audio_levels`: per-track, per-bus, and master peak and integrated loudness
-  over a project range, measured through the real mix path (AU1).
-- `get_audio_spectrum`: magnitude evidence at a named graph point (AU2).
+  over a project range, measured through the real mix path (shipped in AU1).
 - `get_audio_qc`: clipping, silence, balance, loudness-target, and true-peak
-  exceptions for a delivery profile (AU3).
-- `get_audio_repair`: percentile SNR, hum excess, and click density (AU5).
-- `set_track_mix`: generated mutator for per-track gain/pan/mute/solo (AU1).
-- `plan_audio_normalization`: true-peak and profile targets; may extend a bus
-  that carries only AU5 repair nodes (AU3, amended AU5).
-- `plan_audio_ducking`, `plan_clip_fades`: envelope and fade proposals (AU4).
-- `capture_room_tone`, `plan_room_tone_fill`, `plan_dialogue_repair`: room-tone
-  and repair planners (AU5).
+  exceptions for a delivery profile.
+- `plan_track_mix`: a revision-gated balance proposal returning exact
+  `set_track_mix` operations.
+- `plan_audio_normalization`: existing; widens to true-peak and profile targets.
+- `plan_dialogue_ducking`, `plan_audio_repair`: proposals over buses and clips,
+  never applied without commit.
 
-There is no `plan_track_mix` and no generic `plan_audio_repair`; those names
-were earlier direction and must not be invented by an agent. Analysis tools
-do not mutate. Plan tools return the exact operations they intend to apply
-and require the project revision they analyzed.
+Analysis tools do not mutate. Plan tools return the exact operations they intend
+to apply and require the project revision they analyzed.
 
 ## Programme scorecard
 
@@ -789,8 +718,8 @@ ownership boundary, and definition of done stable.
 ## Related documents
 
 - [Model-first editor](MODEL-FIRST-EDITOR.md) — architectural product thesis.
-- [M35 product-position snapshot](PRODUCT-POSITION-M35-2026-08.md) — dated
-  August 2026 positioning; not the current plan.
+- [Current product position](PRODUCT-POSITION-M35-2026-08.md) — positioning and
+  competitive boundary at M35.
 - [M32 editorial credibility verification](M32-EDITORIAL-CREDIBILITY-VERIFICATION.md)
   — existing editorial mechanics and source-monitor baseline.
 - [M33 parametric depth verification](M33-PARAMETRIC-DEPTH-VERIFICATION.md) —
@@ -804,13 +733,5 @@ ownership boundary, and definition of done stable.
   edits.
 - [AU1 manual mix](AU1-MANUAL-MIX.md) — per-track mix state, the track stage,
   meters, and the Mixer panel.
-- [AU2 EQ and dynamics](AU2-EQ-AND-DYNAMICS.md) — parametric EQ, compressor,
-  gate, true-peak limiter, and bus/master Mixer editing.
-- [AU3 loudness and delivery](AU3-LOUDNESS-AND-DELIVERY.md) — BS.1770-4
-  metering, audio QC, and optional export normalize.
-- [AU4 clip envelopes and automation](AU4-CLIP-ENVELOPES-AND-AUTOMATION.md) —
-  clip/track/bus/master curves and the rubber-band / Mixer editors.
-- [AU5 repair and room tone](AU5-REPAIR-AND-ROOM-TONE.md) — denoise, hum,
-  de-click, room-tone fill, and repair planners.
 - [Media policy](MEDIA-POLICY.md) — hostile-media behaviour and invariants.
 - [Building Kinewright](BUILDING.md) — Windows, Linux, FFmpeg, and toolchain setup.
