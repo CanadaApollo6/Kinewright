@@ -536,12 +536,90 @@ fn au3_encoded_fixtures_land_within_the_loudness_and_true_peak_budgets() {
 // AU3 §7 B6 — off is byte-identical
 // ---------------------------------------------------------------------------
 
+/// The delivered **AAC elementary stream**, copied out of a written `.mp4`
+/// without re-encoding it (`-c copy` into ADTS).
+///
+/// B6's claim is about the loudness step, which owns the audio and nothing
+/// else, and the video bitstream this build produces is not reproducible in
+/// process (see the fixture below). Copying the audio stream out compares
+/// exactly the bytes the claim is about: a stream copy re-frames nothing and
+/// is itself deterministic.
+fn delivered_audio_stream(label: &str, written: &Path) -> Vec<u8> {
+    let copied = GeneratedMedia::ffmpeg(
+        label,
+        &[
+            "-i",
+            written.to_str().expect("a UTF-8 temporary path"),
+            "-map",
+            "0:a",
+            "-c",
+            "copy",
+        ],
+        "aac",
+    );
+    std::fs::read(copied.path()).expect("the copied audio stream must be readable")
+}
+
+/// Two encodes that must agree, reported as a diagnosis rather than as two
+/// megabyte-long `Vec<u8>` dumps.
+///
+/// `assert_eq!` on the whole buffers prints both in full, which a CI log
+/// truncates, so a failure used to say only that it happened. This names the
+/// lengths, the first differing offset and the bytes around it, which is what
+/// tells a reader whether the drift is one container field or a whole
+/// re-encoded GOP.
+fn assert_encode_identical(left: &[u8], right: &[u8], claim: &str) {
+    if left == right {
+        return;
+    }
+    let first = left
+        .iter()
+        .zip(right.iter())
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| left.len().min(right.len()));
+    let differing = left
+        .iter()
+        .zip(right.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    let window = first.saturating_sub(8)..(first + 8).min(left.len().min(right.len()));
+    panic!(
+        "{claim}\n  lengths {} and {}\n  first difference at byte {first} of {}\n  \
+         {differing} byte(s) differ in the common prefix\n  left  {:02x?}\n  right {:02x?}",
+        left.len(),
+        right.len(),
+        left.len(),
+        &left[window.clone()],
+        &right[window],
+    );
+}
+
 /// AU3 §7 B6: with the setting off nothing is allocated and `encode_audio`
-/// receives `mix_audio`'s bytes, so two exports of one document agree
-/// bit-for-bit — and a skipped normalization changes nothing either.
+/// receives `mix_audio`'s bytes, so two exports of one document deliver a
+/// bit-for-bit identical **audio stream** — and a skipped normalization
+/// changes nothing either.
 ///
 /// The third export is what stops this from being vacuous: with the step
-/// actually acting, the file must differ.
+/// actually acting, the stream must differ.
+///
+/// **AU3 §0 E58: the comparison is the audio stream, not the whole file, and
+/// the reason is measured.** The claim used to be whole-file byte identity.
+/// On the pinned Linux `FFmpeg` 8 build that is not reproducible: when several
+/// of this binary's tests encode concurrently in one process, two exports of
+/// one document produce H.264 streams that differ by 82 bytes from about
+/// frame 13, roughly one run in three. It is not this document, this mix or
+/// this lane's inputs — with the divergence reproduced, all 120 composited
+/// RGBA frames and all 120 YUV frames handed to the encoder hash identically
+/// across the two exports, the encoder is opened with `thread_count == 1`
+/// (verified at runtime, the pin `07dd22b` added), and the AAC stream is
+/// byte-identical at 332 005 bytes in exactly the runs where the file is not.
+/// The same libx264 build driven by the ffmpeg CLI under full CPU load is
+/// byte-deterministic with and without `-threads 1`. So the residue is the
+/// encoder's own in-process behaviour, which the loudness step does not own
+/// and this fixture cannot gate; comparing the whole file only asserted how
+/// busy the machine was. What B6 is *about* — that a disabled or skipped
+/// normalization hands `encode_audio` the untouched mix — is the audio
+/// stream, and that is what is compared.
 #[test]
 fn au3_an_export_that_does_not_normalize_is_byte_identical() {
     let engine = FfmpegMediaEngine::new().expect("the production media engine should start");
@@ -564,14 +642,16 @@ fn au3_an_export_that_does_not_normalize_is_byte_identical() {
         } else {
             assert_eq!(report.audio, None);
         }
-        std::fs::read(&output).expect("the written export must be readable")
+        delivered_audio_stream(name, &output)
     };
 
-    let off = export("off.mp4", false, None);
-    let off_again = export("off-again.mp4", false, None);
-    assert_eq!(
-        off, off_again,
-        "the export path is deterministic, which is what makes the comparison below meaningful"
+    let off = export("off", false, None);
+    let off_again = export("off-again", false, None);
+    assert_encode_identical(
+        &off,
+        &off_again,
+        "the delivered audio stream is deterministic, which is what makes the comparison below \
+         meaningful",
     );
 
     // A target this programme cannot be moved to: +46 dB is outside the
@@ -580,17 +660,19 @@ fn au3_an_export_that_does_not_normalize_is_byte_identical() {
         integrated_lufs_hundredths: 3_000,
         ..STREAMING_PLATFORM_TARGET
     };
-    let skipped = export("skipped.mp4", false, Some(unreachable));
-    assert_eq!(
-        off, skipped,
-        "a skipped normalization step must leave the encode byte-identical to the off case"
+    let skipped = export("skipped", false, Some(unreachable));
+    assert_encode_identical(
+        &off,
+        &skipped,
+        "a skipped normalization step must leave the delivered audio stream byte-identical to \
+         the off case",
     );
 
-    let normalized = export("normalized.mp4", true, None);
+    let normalized = export("normalized", true, None);
     assert_ne!(
         off, normalized,
-        "a step that actually moves the master must change the file, or the two comparisons above \
-         prove nothing"
+        "a step that actually moves the master must change the delivered audio stream, or the \
+         two comparisons above prove nothing"
     );
 }
 

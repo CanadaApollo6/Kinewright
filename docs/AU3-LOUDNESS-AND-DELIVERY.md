@@ -295,6 +295,29 @@ the `pub(crate)` entries are named (§3.9, §5.6, §5.7). No OPEN note remains.
 - **E56. The corrective gain is not range-checked** against −6000..=3600 (§5.6 step 6 does not ask
   for it); there is no runaway — the pass count is a straight-line `if`, the correction fires only
   in the direction a limiter can produce, and the limiter re-clamps whatever the gain does.
+- **E57. The delivery libx264 encode is pinned to one thread** (`video_options.set("threads", "1")`,
+  `crates/kinewright-media/src/export.rs:464`, landed as `07dd22b`). x264 core 165's ABR frame-thread
+  pool is not run-to-run deterministic on the pinned Linux FFmpeg 8 build, and B6's first comparison
+  was reading it. The pin is kept: it is the right setting for a delivery encode and it removed the
+  common case. It did **not** remove the failure — see E58.
+- **E58. B6 compares the delivered AUDIO STREAM, not the whole file, and the reason is measured.**
+  With E57's pin in place the fixture still failed on Linux CI (run 34650711913) and reproduces
+  locally about **one run in three** — but only when several of `tests/au3_fixtures.rs`'s tests
+  encode concurrently in one process; **twenty-plus isolated runs across separate processes never
+  failed**, and every one produced the same bytes. Measured on a reproduced failure: the two files
+  are 1 550 211 and 1 550 293 bytes, the difference is entirely in the **H.264** stream (1 211 586
+  against 1 211 668) and begins at about frame 13, while the **AAC stream is byte-identical at
+  332 005 bytes**; all 120 composited RGBA frames *and* all 120 YUV frames handed to the encoder
+  hash identically across the two exports; the encoder reports `thread_count == 1` at runtime; and
+  the same libx264 build driven by the ffmpeg CLI under full CPU load is byte-deterministic both
+  with and without `-threads 1` (6/6 and 8/8). The residue is therefore the encoder's own
+  in-process behaviour under concurrent instances, which the loudness step neither owns nor can
+  gate — a whole-file comparison was asserting how busy the machine was. B6's claim is that a
+  disabled or skipped normalization hands `encode_audio` the untouched mix, and that is the audio
+  stream: the fixture now copies it out with `-map 0:a -c copy` (a stream copy re-frames nothing)
+  and compares those bytes for all three exports. E54's "three real exports" is unchanged. The
+  video-side nondeterminism is recorded here and owned by no slice; a later slice that needs
+  whole-file reproducibility has to establish it against this build first.
 
 ## 1. Scope
 
