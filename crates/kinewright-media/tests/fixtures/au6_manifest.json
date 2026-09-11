@@ -119,7 +119,7 @@
       }
     },
     "agent_lane": {
-      "measured_seconds": 60,
+      "measured_seconds": 134,
       "budget_seconds": 120,
       "tests_using_start_with_exporter": ["au6_a5a", "au6_a5b"],
       "encodes": 1,
@@ -135,10 +135,10 @@
     },
     "measurement": {
       "os": "linux",
-      "kernel": "pending-step-4",
+      "kernel": "6.12.94+",
       "toolchain": "rustc 1.98.1",
       "ffmpeg": "8.0",
-      "commit": "7ca49c8",
+      "commit": "080243e",
       "profile": "debug"
     }
   },
