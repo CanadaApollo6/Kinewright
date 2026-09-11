@@ -4500,7 +4500,7 @@ pub(crate) fn clip_carries_audio(document: &kinewright_core::Document, clip: &Cl
             .is_some_and(|asset| matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo))
 }
 
-const fn clip_audio_operation(
+pub(crate) const fn clip_audio_operation(
     clip: ClipId,
     gain_tenth_db: i32,
     fade_in_frames: i64,

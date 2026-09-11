@@ -24,8 +24,9 @@ use eframe::egui;
 use kinewright_core::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AudioBus,
     AudioBusId, AudioChain, AudioMaster, Document, EffectId, LoudnessSnapshot, LoudnessTarget,
-    MixPeaks, Operation, PanLaw, Playback, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
-    TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, TimeCode, Track, TrackId, TrackKind, TrackMix,
+    MixPeaks, Operation, PanLaw, Playback, TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX,
+    TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, TimeCode, Track, TrackId, TrackKind,
+    TrackMix, track_automation_coalesce_key,
 };
 
 use crate::{
@@ -279,14 +280,19 @@ fn decayed_level(previous: f32, peak: f32, elapsed: f32) -> f32 {
 pub(crate) enum MixerSelection {
     Bus(AudioBusId),
     Master,
+    Track(TrackId),
 }
 
 impl MixerSelection {
     /// The chain key the engine's telemetry uses for this selection.
-    pub(crate) const fn chain(self) -> AudioChain {
+    ///
+    /// AU6 §6.2: a track is not an [`AudioChain`]. The four call sites handle
+    /// `None`.
+    pub(crate) const fn chain(self) -> Option<AudioChain> {
         match self {
-            Self::Bus(bus) => AudioChain::Bus(bus),
-            Self::Master => AudioChain::Master,
+            Self::Bus(bus) => Some(AudioChain::Bus(bus)),
+            Self::Master => Some(AudioChain::Master),
+            Self::Track(_) => None,
         }
     }
 
@@ -300,6 +306,7 @@ impl MixerSelection {
         match self {
             Self::Bus(bus) => audio_bus_coalesce_key(bus),
             Self::Master => AUDIO_MASTER_COALESCE_KEY.to_owned(),
+            Self::Track(track) => track_mix_coalesce_key(track),
         }
     }
 }
@@ -324,6 +331,7 @@ pub(crate) const AUDIO_MASTER_COALESCE_KEY: &str = "audio_master";
 pub(crate) struct MixerChainEdits {
     buses: BTreeMap<AudioBusId, AudioBus>,
     master: Option<AudioMaster>,
+    tracks: BTreeMap<TrackId, TrackMix>,
     /// The pan law is document-level rather than part of any chain, but its
     /// control lives on the master pane and obeys the same "never push" rule.
     pan_law: Option<PanLaw>,
@@ -342,6 +350,11 @@ impl MixerChainEdits {
     /// The edited copy of the master chain, cloned in on first touch.
     pub(crate) fn master(&mut self, master: &AudioMaster) -> &mut AudioMaster {
         self.master.get_or_insert_with(|| master.clone())
+    }
+
+    /// The edited copy of one track mix, cloned in on first touch (AU6 §6.2).
+    pub(crate) fn track(&mut self, mix: &TrackMix) -> &mut TrackMix {
+        self.tracks.entry(mix.track).or_insert_with(|| mix.clone())
     }
 
     /// Add a bus the document does not have yet (`+ Bus`, AU2 §6.5).
@@ -396,6 +409,45 @@ impl MixerChainEdits {
                 Operation::SetAudioMaster { master },
                 MixerSelection::Master.coalesce_key(),
             );
+        }
+        for (id, mix) in self.tracks {
+            let current = document.audio_mix.track(id);
+            if mix.gain_curve != current.gain_curve {
+                file_chain_edit(
+                    edits,
+                    live,
+                    Operation::SetTrackAutomation {
+                        track: id,
+                        parameter: TRACK_AUTOMATION_PARAMETERS[0].to_owned(),
+                        curve: mix.gain_curve.clone(),
+                    },
+                    track_automation_coalesce_key(id, TRACK_AUTOMATION_PARAMETERS[0]),
+                );
+            }
+            if mix.pan_curve != current.pan_curve {
+                file_chain_edit(
+                    edits,
+                    live,
+                    Operation::SetTrackAutomation {
+                        track: id,
+                        parameter: TRACK_AUTOMATION_PARAMETERS[1].to_owned(),
+                        curve: mix.pan_curve.clone(),
+                    },
+                    track_automation_coalesce_key(id, TRACK_AUTOMATION_PARAMETERS[1]),
+                );
+            }
+            if mix.gain_tenth_db != current.gain_tenth_db
+                || mix.pan_percent != current.pan_percent
+                || mix.mute != current.mute
+                || mix.solo != current.solo
+            {
+                file_chain_edit(
+                    edits,
+                    live,
+                    track_mix_operation(&mix),
+                    track_mix_coalesce_key(id),
+                );
+            }
         }
         if let Some(law) = self.pan_law
             && law != document.audio_mix.pan_law
@@ -507,7 +559,11 @@ impl KinewrightApp {
         if let Some(selection) = self.mixer_selection
             && chain_carries_denoise(&document, selection)
         {
-            telemetry.noise_learn = self.noise_learn_range(selection.chain());
+            telemetry.noise_learn = self.noise_learn_range(
+                selection
+                    .chain()
+                    .expect("a denoise node only lives on a bus or the master"),
+            );
         }
         // The bars measure against the export dialog's current profile target,
         // whatever the dialog's other settings say (AU3 §4.4, F12/F20).
@@ -544,6 +600,7 @@ pub(crate) fn chain_carries_denoise(document: &Document, selection: MixerSelecti
     let effects = match selection {
         MixerSelection::Bus(id) => document.audio_mix.bus(id).map(|bus| &bus.effects),
         MixerSelection::Master => Some(&document.audio_mix.master.effects),
+        MixerSelection::Track(_) => None,
     };
     effects.is_some_and(|effects| effects.iter().any(|effect| effect.name == "audio_denoise"))
 }
@@ -649,7 +706,18 @@ pub(crate) fn mixer_strips(
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 for (index, track) in document.tracks.iter().enumerate() {
-                    track_strip(ui, document, track, index, levels, position, chain, edits);
+                    track_strip(
+                        ui,
+                        document,
+                        track,
+                        index,
+                        selection,
+                        requested,
+                        levels,
+                        position,
+                        chain,
+                        edits,
+                    );
                 }
                 if !document.audio_mix.buses.is_empty() {
                     // One rule per boundary: with no buses the tracks and the
@@ -680,6 +748,8 @@ fn track_strip(
     document: &Document,
     track: &Track,
     index: usize,
+    selection: Option<MixerSelection>,
+    requested: &mut Option<MixerSelection>,
     levels: &MixerMeterLevels,
     position: TimeCode,
     chain: &mut MixerChainEdits,
@@ -755,6 +825,9 @@ fn track_strip(
                 add_bus_button(ui, document, track, index, carries_audio, chain);
             });
         });
+        let selected = selection == Some(MixerSelection::Track(track.id));
+        let toggle = edit_toggle(ui, selected, MixerSelection::Track(track.id), requested);
+        record_keyed_rect("track_edit", track.id.0, toggle);
     });
 }
 
@@ -998,8 +1071,8 @@ pub(crate) const AUTOMATION_CHIP_TOOLTIP: &str = "Automation drives this track's
 /// A const so the sentence is assertable: `on_disabled_hover_text` leaves no
 /// rect to probe.
 pub(crate) const AUTOMATED_FADER_TOOLTIP: &str = "Automation drives this fader. The number is the \
-     parked value and typing sets it; clear the automation in the chain pane to ride the fader \
-     directly.";
+     parked value and typing sets it; clear the curve in the AUTOMATION section of this strip's \
+     chain pane to ride the fader directly.";
 
 /// AU4 §4.5 rule 91: one automated owner's value at the audible frame.
 ///
@@ -1811,6 +1884,7 @@ mod tests {
         let levels = MixerMeterLevels::default();
         let mut chain = MixerChainEdits::default();
         let mut edits = InspectorEdits::default();
+        let mut requested = None;
         let mut size = egui::Vec2::ZERO;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.vertical(|ui| {
@@ -1819,6 +1893,8 @@ mod tests {
                     document,
                     &document.tracks[index],
                     index,
+                    None,
+                    &mut requested,
                     &levels,
                     position,
                     &mut chain,
@@ -4238,9 +4314,10 @@ mod tests {
         );
         assert_eq!(
             MixerSelection::Bus(AudioBusId(2)).chain(),
-            AudioChain::Bus(AudioBusId(2))
+            Some(AudioChain::Bus(AudioBusId(2)))
         );
-        assert_eq!(MixerSelection::Master.chain(), AudioChain::Master);
+        assert_eq!(MixerSelection::Master.chain(), Some(AudioChain::Master));
+        assert_eq!(MixerSelection::Track(TrackId(3)).chain(), None);
     }
 
     /// AU2 §6.5: the strip states the node count and keeps the chain in its
@@ -4281,6 +4358,7 @@ mod tests {
             "One card is expanded at a time",
             "read-only magnitude well on a parametric EQ",
             "in the product that fills from the right",
+            "a track, bus or master ride",
         ] {
             assert!(
                 mixer.contains(expected),
@@ -4720,7 +4798,8 @@ mod tests {
         assert_eq!(
             AUTOMATED_FADER_TOOLTIP,
             "Automation drives this fader. The number is the parked value and typing sets it; \
-             clear the automation in the chain pane to ride the fader directly.",
+             clear the curve in the AUTOMATION section of this strip's chain pane to ride the \
+             fader directly.",
             "the hover text says which half of the control is which"
         );
 
@@ -5202,5 +5281,30 @@ mod tests {
             );
             assert!(edits.operations().is_empty());
         }
+    }
+
+    #[test]
+    fn au6_a_track_chain_offers_both_automation_targets() {
+        assert_eq!(MixerSelection::Track(TrackId(1)).chain(), None);
+        assert_eq!(
+            MixerSelection::Track(TrackId(4)).coalesce_key(),
+            track_mix_coalesce_key(TrackId(4))
+        );
+        assert_ne!(
+            track_automation_coalesce_key(TrackId(4), "gain_tenth_db"),
+            track_mix_coalesce_key(TrackId(4))
+        );
+    }
+
+    #[test]
+    fn au6_the_retired_tooltip_no_longer_points_at_a_dead_end() {
+        assert!(
+            !AUTOMATED_FADER_TOOLTIP.contains("clear the automation in the chain pane"),
+            "the retired sentence is gone"
+        );
+        assert!(
+            AUTOMATED_FADER_TOOLTIP.contains("AUTOMATION"),
+            "the new tooltip names the AUTOMATION section"
+        );
     }
 }

@@ -453,8 +453,12 @@ choosing one parameter at a time — the chain's `Fader` plus every node paramet
 that may carry a curve — over a scrolled list of `{frame} {value}
 {interpolation}` rows, with `+ Key at playhead` and `Clear`. It spends
 116 points of the pane against a 120 point budget, empty or scrolled, because
-the list is allocated at a fixed four rows. Timeline automation lanes are not
-part of this surface; the mixer is where a bus or master ride is edited.
+the list is allocated at a fixed four rows. The section now opens on a track as
+well as a bus or the master: a track offers exactly the two parameters
+`TRACK_AUTOMATION_PARAMETERS` publishes (`gain_tenth_db` and `pan_percent`), and
+the 116-point budget against 120 is unchanged because the list is still four
+fixed rows. Timeline automation lanes are not part of this surface; the mixer is
+where a track, bus or master ride is edited.
 
 ### Transcript and utility panels
 

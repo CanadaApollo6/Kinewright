@@ -16,9 +16,11 @@ use kinewright_core::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AudioBus,
     AudioChain, AudioMaster, AutomationCurve, CHAIN_LOOKAHEAD_MILLISECONDS, Document, Effect,
     EffectId, LoudnessSnapshot, LoudnessTarget, NOISE_PROFILE_BAND_COUNT,
-    NOISE_PROFILE_PARAMETER_NAMES, PROFILE_BAND_NEUTRAL_TENTH_DB, PanLaw, ParamValue, TimeCode,
-    TrackId, chain_lookahead_milliseconds, effect_descriptor, has_gain_computer,
-    is_hold_only_parameter, is_noise_profile_parameter, is_static_audio_parameter,
+    NOISE_PROFILE_PARAMETER_NAMES, PROFILE_BAND_NEUTRAL_TENTH_DB, PanLaw, ParamValue,
+    TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX,
+    TRACK_MIX_PAN_MIN, TimeCode, Track, TrackId, TrackMix, chain_lookahead_milliseconds,
+    effect_descriptor, has_gain_computer, is_hold_only_parameter, is_noise_profile_parameter,
+    is_static_audio_parameter,
 };
 
 use crate::{
@@ -40,6 +42,7 @@ use crate::{
 pub(crate) enum MixerChain<'a> {
     Bus(&'a AudioBus),
     Master(&'a AudioMaster),
+    Track(&'a Track, &'a TrackMix),
 }
 
 impl<'a> MixerChain<'a> {
@@ -47,6 +50,7 @@ impl<'a> MixerChain<'a> {
         match self {
             Self::Bus(bus) => MixerSelection::Bus(bus.id),
             Self::Master(_) => MixerSelection::Master,
+            Self::Track(track, _) => MixerSelection::Track(track.id),
         }
     }
 
@@ -54,6 +58,7 @@ impl<'a> MixerChain<'a> {
         match self {
             Self::Bus(bus) => bus.effects.as_slice(),
             Self::Master(master) => master.effects.as_slice(),
+            Self::Track(_, _) => &[],
         }
     }
 
@@ -62,7 +67,7 @@ impl<'a> MixerChain<'a> {
     const fn sidechain(self) -> &'a [TrackId] {
         match self {
             Self::Bus(bus) => bus.ducking_sidechain_tracks.as_slice(),
-            Self::Master(_) => &[],
+            Self::Master(_) | Self::Track(_, _) => &[],
         }
     }
 
@@ -71,6 +76,7 @@ impl<'a> MixerChain<'a> {
         match self {
             Self::Bus(bus) => bus.gain_curve.as_ref(),
             Self::Master(master) => master.gain_curve.as_ref(),
+            Self::Track(_, mix) => mix.gain_curve.as_ref(),
         }
     }
 
@@ -79,6 +85,7 @@ impl<'a> MixerChain<'a> {
         match self {
             Self::Bus(bus) => bus.gain_tenth_db,
             Self::Master(master) => master.gain_tenth_db,
+            Self::Track(_, mix) => mix.gain_tenth_db,
         }
     }
 
@@ -88,6 +95,7 @@ impl<'a> MixerChain<'a> {
         match self {
             Self::Bus(_) => AUDIO_BUS_GAIN_MIN as i64..=AUDIO_BUS_GAIN_MAX as i64,
             Self::Master(_) => AUDIO_MASTER_GAIN_MIN as i64..=AUDIO_MASTER_GAIN_MAX as i64,
+            Self::Track(_, _) => TRACK_MIX_GAIN_MIN as i64..=TRACK_MIX_GAIN_MAX as i64,
         }
     }
 
@@ -96,6 +104,7 @@ impl<'a> MixerChain<'a> {
         match self {
             Self::Bus(bus) => edits.bus(bus).gain_curve = curve,
             Self::Master(master) => edits.master(master).gain_curve = curve,
+            Self::Track(_, mix) => edits.track(mix).gain_curve = curve,
         }
     }
 
@@ -104,6 +113,9 @@ impl<'a> MixerChain<'a> {
         match self {
             Self::Bus(bus) => &mut edits.bus(bus).effects,
             Self::Master(master) => &mut edits.master(master).effects,
+            Self::Track(_, _) => {
+                unreachable!("a track chain has no effect list (AU6 §6.2)")
+            }
         }
     }
 
@@ -158,6 +170,21 @@ pub(crate) fn chain_pane(
                     MixerSelection::Master => master_pane(
                         ui, document, levels, snapshot, position, target, edits, learn,
                     ),
+                    MixerSelection::Track(id) => {
+                        if let Some(track) = document.tracks.iter().find(|track| track.id == id) {
+                            let mix = document.audio_mix.track(id);
+                            track_pane(
+                                ui,
+                                document,
+                                track,
+                                &mix,
+                                position,
+                                document.duration,
+                                edits,
+                            );
+                        }
+                        false
+                    }
                 }
             });
         // The scroll is the pane's whole answer to a short dock, so its two
@@ -193,6 +220,20 @@ fn bus_pane(
     ui.separator();
     chain_cards(ui, chain, levels, position, edits, learn);
     add_effect_menu(ui, chain, edits);
+}
+
+fn track_pane(
+    ui: &mut egui::Ui,
+    document: &Document,
+    track: &Track,
+    mix: &TrackMix,
+    position: TimeCode,
+    duration: TimeCode,
+    edits: &mut MixerChainEdits,
+) {
+    let chain = MixerChain::Track(track, mix);
+    pane_title(ui, &format!("Track: {}", track_caption(document, track.id)));
+    automation_section(ui, chain, position, duration, edits);
 }
 
 /// The master pane: the `LOUDNESS` section first, then the pan law and the
@@ -679,6 +720,7 @@ fn expanded_memory_id(selection: MixerSelection) -> egui::Id {
     match selection {
         MixerSelection::Bus(bus) => egui::Id::new(("mixer-expanded-card", "bus", bus.0)),
         MixerSelection::Master => egui::Id::new(("mixer-expanded-card", "master", 0_u64)),
+        MixerSelection::Track(track) => egui::Id::new(("mixer-expanded-card", "track", track.0)),
     }
 }
 
@@ -772,7 +814,13 @@ fn card_header(
             }
 
             if has_gain_computer(&effect.name) {
-                let reduction = levels.reduction(chain.selection().chain(), effect.id);
+                let reduction = levels.reduction(
+                    chain
+                        .selection()
+                        .chain()
+                        .expect("gain reduction is painted on a bus or the master"),
+                    effect.id,
+                );
                 ui.label(
                     egui::RichText::new(reduction_readout(reduction))
                         .font(theme::medium(type_size::MICRO))
@@ -847,7 +895,15 @@ fn card_body(
         learn_row(ui, chain, effect, learn);
     }
     if has_gain_computer(&effect.name) {
-        reduction_bar(ui, chain.selection().chain(), effect.id, levels);
+        reduction_bar(
+            ui,
+            chain
+                .selection()
+                .chain()
+                .expect("gain reduction is painted on a bus or the master"),
+            effect.id,
+            levels,
+        );
     }
 }
 
@@ -860,6 +916,7 @@ fn card_body(
 pub(crate) enum AutomationTarget {
     Fader,
     Node(EffectId, &'static str),
+    TrackParameter(&'static str),
 }
 
 /// AU4 §5.4 rule 112: the section's caps label.
@@ -888,6 +945,12 @@ pub(crate) const AUTOMATION_VISIBLE_ROWS: u8 = 4;
 /// name match, which does not know about either rule.
 pub(crate) fn automation_targets(chain: MixerChain) -> Vec<AutomationTarget> {
     let mut targets = vec![AutomationTarget::Fader];
+    if matches!(chain, MixerChain::Track(_, _)) {
+        targets.push(AutomationTarget::TrackParameter(
+            TRACK_AUTOMATION_PARAMETERS[1],
+        ));
+        return targets;
+    }
     for effect in chain.effects() {
         let Some(descriptor) = effect_descriptor(&effect.name) else {
             continue;
@@ -908,6 +971,7 @@ pub(crate) fn automation_targets(chain: MixerChain) -> Vec<AutomationTarget> {
 pub(crate) fn automation_target_label(chain: MixerChain, target: AutomationTarget) -> String {
     match target {
         AutomationTarget::Fader => "Fader".to_owned(),
+        AutomationTarget::TrackParameter(name) => parameter_label(name),
         AutomationTarget::Node(effect, name) => {
             let node = chain
                 .effects()
@@ -933,6 +997,7 @@ pub(crate) fn automation_target_label(chain: MixerChain, target: AutomationTarge
 fn automation_row_key(target: AutomationTarget) -> String {
     match target {
         AutomationTarget::Fader => "automation:fader".to_owned(),
+        AutomationTarget::TrackParameter(parameter) => format!("automation:track:{parameter}"),
         AutomationTarget::Node(effect, parameter) => format!("automation:{}:{parameter}", effect.0),
     }
 }
@@ -941,6 +1006,10 @@ fn automation_row_key(target: AutomationTarget) -> String {
 fn automation_curve(chain: MixerChain<'_>, target: AutomationTarget) -> Option<&AutomationCurve> {
     match target {
         AutomationTarget::Fader => chain.gain_curve(),
+        AutomationTarget::TrackParameter(_) => match chain {
+            MixerChain::Track(_, mix) => mix.pan_curve.as_ref(),
+            _ => None,
+        },
         AutomationTarget::Node(effect, name) => chain
             .effects()
             .iter()
@@ -961,6 +1030,14 @@ fn automation_current_value(
             .gain_curve()
             .and_then(|curve| curve.value_at(position))
             .unwrap_or_else(|| i64::from(chain.gain_tenth_db())),
+        AutomationTarget::TrackParameter(_) => match chain {
+            MixerChain::Track(_, mix) => mix
+                .pan_curve
+                .as_ref()
+                .and_then(|curve| curve.value_at(position))
+                .unwrap_or_else(|| i64::from(mix.pan_percent)),
+            _ => 0,
+        },
         AutomationTarget::Node(effect, name) => chain
             .effects()
             .iter()
@@ -973,6 +1050,7 @@ fn automation_current_value(
 fn automation_range(chain: MixerChain, target: AutomationTarget) -> std::ops::RangeInclusive<i64> {
     match target {
         AutomationTarget::Fader => chain.gain_range(),
+        AutomationTarget::TrackParameter(_) => TRACK_MIX_PAN_MIN as i64..=TRACK_MIX_PAN_MAX as i64,
         AutomationTarget::Node(effect, name) => chain
             .effects()
             .iter()
@@ -992,6 +1070,11 @@ fn set_automation_curve(
 ) {
     match target {
         AutomationTarget::Fader => chain.set_gain_curve(edits, curve),
+        AutomationTarget::TrackParameter(_) => {
+            if let MixerChain::Track(_, mix) = chain {
+                edits.track(mix).pan_curve = curve;
+            }
+        }
         AutomationTarget::Node(effect, name) => {
             if let Some(node) = chain.effect_mut(edits, effect) {
                 match curve {
@@ -1012,6 +1095,9 @@ fn automation_memory_id(selection: MixerSelection) -> egui::Id {
     match selection {
         MixerSelection::Bus(bus) => egui::Id::new(("mixer-automation-target", "bus", bus.0)),
         MixerSelection::Master => egui::Id::new(("mixer-automation-target", "master", 0_u64)),
+        MixerSelection::Track(track) => {
+            egui::Id::new(("mixer-automation-target", "track", track.0))
+        }
     }
 }
 
@@ -1678,7 +1764,13 @@ fn learn_row(ui: &mut egui::Ui, chain: MixerChain, effect: &Effect, learn: &mut 
             None => button,
         };
         if button.clicked() {
-            *learn.requested = Some((chain.selection().chain(), effect.id));
+            *learn.requested = Some((
+                chain
+                    .selection()
+                    .chain()
+                    .expect("Learn profile is offered on a bus or the master"),
+                effect.id,
+            ));
         }
     });
     // The refusal takes its own line and **wraps**: it is a sentence, and a
@@ -2362,6 +2454,7 @@ mod tests {
             .iter()
             .filter_map(|target| match target {
                 AutomationTarget::Fader => None,
+                AutomationTarget::TrackParameter(_) => None,
                 AutomationTarget::Node(_, name) => Some(*name),
             })
             .collect::<Vec<_>>();
