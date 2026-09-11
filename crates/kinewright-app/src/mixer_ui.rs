@@ -790,27 +790,38 @@ fn track_strip(
             ..mix.clone()
         });
 
+        // `Edit` shares the mute/solo row. A sixth row of its own put the
+        // plain strip at 246 px; `Reset` + `+ Bus` + `Edit` overflowed the
+        // 72 px column when `Reset` was showing (AU2 §6.5, AU6 §6.2).
+        let selected = selection == Some(MixerSelection::Track(track.id));
         ui.horizontal(|ui| {
+            // `M` + `S` + micro `Edit` is 76 px with `space::HALF` gutters;
+            // zero gutter keeps the row inside the 72 px column.
+            ui.spacing_mut().item_spacing.x = 0.0;
             for toggle in [MixToggle::Mute, MixToggle::Solo] {
                 if mix_toggle_button(ui, toggle, &mix) {
                     edits.push(track_mix_toggle_operation(&mix, toggle));
                 }
             }
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = size::ICON_SM;
+                ui.spacing_mut().button_padding = egui::vec2(space::HALF, 0.0);
+                ui.style_mut().override_font_id = Some(theme::medium(type_size::MICRO));
+                let toggle = edit_toggle(ui, selected, MixerSelection::Track(track.id), requested);
+                record_keyed_rect("track_edit", track.id.0, toggle);
+            });
         });
 
-        // `Reset`, `+ Bus`, and `Edit` share a row. `Reset` appears only off
-        // neutral; `+ Bus` is disabled rather than hidden. Giving `Reset` and
-        // `+ Bus` their own rows put the tallest track strip 16 px over the
-        // 240 px dock budget (AU2 §6.5). `Edit` on a sixth row put the plain
-        // strip at 246 px; it reuses this row the same way bus and master
-        // strips reuse their last control line (AU6 §6.2).
-        let selected = selection == Some(MixerSelection::Track(track.id));
+        // `Reset` and `+ Bus` share a row. Both are conditional in different
+        // ways — `Reset` appears only off neutral, `+ Bus` is disabled rather
+        // than hidden — and giving each its own row put the tallest track
+        // strip 16 px over the 240 px dock budget (AU2 §6.5).
         ui.scope(|ui| {
-            // Small buttons, not a section: the row does not owe them a
+            // Two small buttons, not a section: the row does not owe them a
             // control's height, and a 26 px row put the `NO AUDIO` strip over
-            // the 240 px dock budget. Set in micro with the strip's own
-            // padding so the trio fits one 72 px line rather than wrapping
-            // (AU2 §6.5).
+            // the 240 px dock budget. Both are set in micro with the strip's
+            // own padding so the pair fits one 72 px line rather than
+            // wrapping to two (AU2 §6.5).
             ui.spacing_mut().interact_size.y = size::ICON_SM;
             ui.spacing_mut().button_padding = egui::vec2(space::HALF, 0.0);
             ui.spacing_mut().item_spacing.x = space::HALF;
@@ -818,8 +829,6 @@ fn track_strip(
             ui.horizontal(|ui| {
                 reset_row(ui, &mix, edits);
                 add_bus_button(ui, document, track, index, carries_audio, chain);
-                let toggle = edit_toggle(ui, selected, MixerSelection::Track(track.id), requested);
-                record_keyed_rect("track_edit", track.id.0, toggle);
             });
         });
     });

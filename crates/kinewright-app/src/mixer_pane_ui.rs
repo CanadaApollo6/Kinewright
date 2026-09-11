@@ -1050,7 +1050,9 @@ fn automation_current_value(
 fn automation_range(chain: MixerChain, target: AutomationTarget) -> std::ops::RangeInclusive<i64> {
     match target {
         AutomationTarget::Fader => chain.gain_range(),
-        AutomationTarget::TrackParameter(_) => TRACK_MIX_PAN_MIN as i64..=TRACK_MIX_PAN_MAX as i64,
+        AutomationTarget::TrackParameter(_) => {
+            i64::from(TRACK_MIX_PAN_MIN)..=i64::from(TRACK_MIX_PAN_MAX)
+        }
         AutomationTarget::Node(effect, name) => chain
             .effects()
             .iter()
@@ -2453,8 +2455,7 @@ mod tests {
         let named = targets
             .iter()
             .filter_map(|target| match target {
-                AutomationTarget::Fader => None,
-                AutomationTarget::TrackParameter(_) => None,
+                AutomationTarget::Fader | AutomationTarget::TrackParameter(_) => None,
                 AutomationTarget::Node(_, name) => Some(*name),
             })
             .collect::<Vec<_>>();

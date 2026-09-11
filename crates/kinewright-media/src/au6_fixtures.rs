@@ -8,7 +8,17 @@
 //! three labelled regression pins (rule 11.0.1). No fixture obtains an
 //! expected value by calling a meter or a planner.
 
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::float_cmp)]
+#![allow(clippy::items_after_statements)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::needless_lifetimes)]
 #![allow(clippy::too_many_lines)]
+#![allow(clippy::used_underscore_binding)]
 
 use std::{
     ops::Range,
