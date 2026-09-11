@@ -1,5 +1,10 @@
 # Product position after M35 - August 2026
 
+> Historical snapshot at M35 (August 2026). Figures such as Windows-only CI
+> and ~56,000 lines of Rust are of that date. Native Linux, CC0–CC7, and
+> AU1–AU5 have landed since. The living plan is
+> [Roadmap and development workflows](ROADMAP-AND-WORKFLOWS.md).
+
 ## Bottom line
 
 Kinewright is a serious technical alpha and a credible agent-native editing
