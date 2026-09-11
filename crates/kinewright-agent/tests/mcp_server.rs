@@ -9331,11 +9331,14 @@ struct Au6AgentScene {
     document: Document,
 }
 
-fn au6_agent_scene(scenario: Au6Scenario) -> Au6AgentScene {
+/// Probe the scenario sources on the **same** engine the MCP server will
+/// use. `FfmpegMediaEngine::probe` allocates `next_asset_id`; a throwaway
+/// engine would leave the server's counter at 1 and `capture_room_tone`'s
+/// `AddAsset` would collide with the dialogue asset.
+fn au6_agent_scene(engine: &FfmpegMediaEngine, scenario: Au6Scenario) -> Au6AgentScene {
     let spec = au6_spec(scenario);
     let generated = au6_scenario_sources(scenario);
     let fps = Rational::new(AU6_SOURCE_FPS, 1).expect("25 fps");
-    let engine = FfmpegMediaEngine::new().expect("the AU6 agent engine starts");
     let media_pool = generated
         .iter()
         .zip(spec.tracks)
@@ -9472,8 +9475,8 @@ fn au6_error_text(result: &CallToolResult) -> String {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn au6_a1_the_interview_ducks_the_bed_and_matches_the_voices() {
-    let scene = au6_agent_scene(Au6Scenario::Interview);
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
     let core = Core::spawn(scene.document.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
@@ -9557,8 +9560,8 @@ async fn au6_a1_the_interview_ducks_the_bed_and_matches_the_voices() {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
-    let scene = au6_agent_scene(Au6Scenario::Podcast);
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Podcast);
     let core = Core::spawn(scene.document.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
@@ -9593,10 +9596,10 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
     }
     assert_eq!(query_document(&core), before);
 
-    let _mix_revision =
-        au6_commit_ops(&client, 0, &au6_mix_and_bus_ops(Au6Scenario::Podcast)).await;
-    let after_mix = query_document(&core);
-
+    // Evidence-only, and *before* the mix/buses commit: after those upserts
+    // the voice tracks already intersect the Voice A / Voice B buses and
+    // `plan_audio_normalization` refuses the intersection. The contract's
+    // "not committed" still holds — neither plan is applied.
     let ebu = invoke_capability(
         &client,
         "plan_audio_normalization",
@@ -9606,7 +9609,13 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
         }),
     )
     .await;
-    assert_eq!(ebu.is_error, Some(false), "{:?}", ebu.structured_content);
+    assert_eq!(
+        ebu.is_error,
+        Some(false),
+        "{:?} {}",
+        ebu.structured_content,
+        au6_error_text(&ebu)
+    );
     if let Some(body) = ebu.structured_content.as_ref() {
         assert_eq!(body["applied"], false);
     }
@@ -9619,8 +9628,16 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
         }),
     )
     .await;
-    assert_eq!(streaming.is_error, Some(false));
-    assert_eq!(query_document(&core), after_mix);
+    assert_eq!(
+        streaming.is_error,
+        Some(false),
+        "{}",
+        au6_error_text(&streaming)
+    );
+    assert_eq!(query_document(&core), before);
+
+    let _mix_revision =
+        au6_commit_ops(&client, 0, &au6_mix_and_bus_ops(Au6Scenario::Podcast)).await;
 
     let fades = au5_invoke_when_silence_is_ready(
         &client,
@@ -9656,8 +9673,8 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
-    let scene = au6_agent_scene(Au6Scenario::LocationDialogue);
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::LocationDialogue);
     let core = Core::spawn(scene.document.clone()).unwrap();
     let project = kinewright_media::test_support::TempDirectory::new("au6-a3");
     let handle = Arc::new(std::sync::RwLock::new(Some(
@@ -9710,8 +9727,9 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
     assert_eq!(
         captured.is_error,
         Some(false),
-        "{:?}",
-        captured.structured_content
+        "{:?} {}",
+        captured.structured_content,
+        au6_error_text(&captured)
     );
     assert_eq!(cc7_revision(&client).await, revision + 1);
 
@@ -9884,8 +9902,8 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn au6_a4_the_multicam_cuts_leave_the_master_audio_untouched() {
-    let scene = au6_agent_scene(Au6Scenario::Multicam);
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Multicam);
     let core = Core::spawn(scene.document.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
@@ -9983,8 +10001,8 @@ async fn au6_queue_and_poll(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn au6_a5a_the_delivery_lands_on_the_ebu_r128_target() {
-    let scene = au6_agent_scene(Au6Scenario::Interview);
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
     let core = Core::spawn(scene.document.clone()).unwrap();
     let server =
         McpServer::start_with_exporter(core.clone(), media.clone(), media.clone(), media.clone())
@@ -10020,8 +10038,8 @@ async fn au6_a5a_the_delivery_lands_on_the_ebu_r128_target() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn au6_a5b_the_streaming_target_is_reachable_by_the_agent() {
-    let scene = au6_agent_scene(Au6Scenario::Interview);
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
     let core = Core::spawn(scene.document.clone()).unwrap();
     let server =
         McpServer::start_with_exporter(core.clone(), media.clone(), media.clone(), media.clone())
@@ -10112,8 +10130,8 @@ async fn au6_a5b_the_streaming_target_is_reachable_by_the_agent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn au6_b_a_clip_whose_head_window_is_silent_gets_no_fade() {
-    let scene = au6_agent_scene(Au6Scenario::Podcast);
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Podcast);
     let core = Core::spawn(scene.document).unwrap();
     let server = McpServer::start(core, media.clone(), media).unwrap();
     let client =
