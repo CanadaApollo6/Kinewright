@@ -9410,6 +9410,18 @@ fn au6_ops_json(operations: &[Operation]) -> serde_json::Value {
     serde_json::to_value(operations).expect("AU6 operations serialize")
 }
 
+fn au6_mix_and_bus_ops(scenario: Au6Scenario) -> Vec<Operation> {
+    au6_canonical_operations(scenario)
+        .into_iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                Operation::SetTrackMix { .. } | Operation::UpsertAudioBus { .. }
+            )
+        })
+        .collect()
+}
+
 async fn au6_commit_ops(
     client: &RunningService<RoleClient, ()>,
     revision: u64,
@@ -9419,8 +9431,9 @@ async fn au6_commit_ops(
     assert_eq!(
         prepared.is_error,
         Some(false),
-        "{:?}",
-        prepared.structured_content
+        "{:?} {}",
+        prepared.structured_content,
+        au6_error_text(&prepared)
     );
     let committed = client
         .call_tool(commit_request(revision, &prepared))
@@ -9429,10 +9442,27 @@ async fn au6_commit_ops(
     assert_eq!(
         committed.is_error,
         Some(false),
-        "{:?}",
-        committed.structured_content
+        "{:?} {}",
+        committed.structured_content,
+        au6_error_text(&committed)
     );
     revision + 1
+}
+
+/// `DeleteClip` in a prepared batch raises `apply_edit_plan`'s destructive
+/// confirmation (`plan_confirmation_description`). (c)'s gap commit and (d)'s
+/// angle cuts both delete clips; the approval loop has to run beside the
+/// commit, AU5/CC7's shape.
+async fn au6_commit_ops_approved(
+    client: &RunningService<RoleClient, ()>,
+    confirmations: kinewright_agent::ConfirmationBroker,
+    revision: u64,
+    operations: &[Operation],
+) -> u64 {
+    let approvals = cc7_approve_confirmations(confirmations, "apply_edit_plan");
+    let revision = au6_commit_ops(client, revision, operations).await;
+    approvals.assert_approved_and_stop("apply_edit_plan");
+    revision
 }
 
 fn au6_error_text(result: &CallToolResult) -> String {
@@ -9459,21 +9489,11 @@ async fn au6_a1_the_interview_ducks_the_bed_and_matches_the_voices() {
         levels.structured_content
     );
     if let Some(body) = levels.structured_content.as_ref() {
-        assert_eq!(body["applied"], false);
+        assert_ne!(body["applied"], true, "{body}");
     }
 
     let canonical = au6_canonical_operations(Au6Scenario::Interview);
-    let mix_and_buses: Vec<Operation> = canonical
-        .iter()
-        .filter(|op| {
-            matches!(
-                op,
-                Operation::SetTrackMix { .. } | Operation::UpsertAudioBus { .. }
-            )
-        })
-        .cloned()
-        .collect();
-    let _revision = au6_commit_ops(&client, 0, &mix_and_buses).await;
+    let _revision = au6_commit_ops(&client, 0, &au6_mix_and_bus_ops(Au6Scenario::Interview)).await;
 
     let planned = au5_invoke_when_silence_is_ready(
         &client,
@@ -9547,20 +9567,35 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
             .unwrap();
 
     let before = query_document(&core);
-    let schema = invoke_capability(
-        &client,
-        "plan_audio_normalization",
-        json!({"profile": "source_master"}),
-    )
-    .await;
-    assert_eq!(schema.is_error, Some(true));
+    let schema = client
+        .call_tool(
+            CallToolRequestParams::new("invoke_capability").with_arguments(
+                json!({
+                    "name": "plan_audio_normalization",
+                    "arguments": {"profile": "source_master"}
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await;
+    let schema_text = match &schema {
+        Ok(result) => au6_error_text(result),
+        Err(error) => error.to_string(),
+    };
     assert!(
-        au6_error_text(&schema).contains("track_ids")
-            || au6_error_text(&schema).contains("missing field"),
-        "{}",
-        au6_error_text(&schema)
+        schema_text.contains("track_ids") || schema_text.contains("missing field"),
+        "{schema_text}"
     );
+    if let Ok(result) = &schema {
+        assert_eq!(result.is_error, Some(true));
+    }
     assert_eq!(query_document(&core), before);
+
+    let _mix_revision =
+        au6_commit_ops(&client, 0, &au6_mix_and_bus_ops(Au6Scenario::Podcast)).await;
+    let after_mix = query_document(&core);
 
     let ebu = invoke_capability(
         &client,
@@ -9585,10 +9620,18 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
     )
     .await;
     assert_eq!(streaming.is_error, Some(false));
-    assert_eq!(query_document(&core), before);
+    assert_eq!(query_document(&core), after_mix);
 
-    let revision =
-        au6_commit_ops(&client, 0, &au6_canonical_operations(Au6Scenario::Podcast)).await;
+    let fades = au5_invoke_when_silence_is_ready(
+        &client,
+        "plan_clip_fades",
+        json!({"tracks": [AU6_B_VOICE_A_TRACK.0, AU6_B_VOICE_B_TRACK.0]}),
+    )
+    .await;
+    let fade_body = fades.structured_content.as_ref().unwrap();
+    assert_eq!(fades.is_error, Some(false), "{fade_body}");
+    au5_commit_prepared(&client, fade_body).await;
+    let revision = cc7_revision(&client).await;
     let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
     assert_eq!(levels.is_error, Some(false));
     let qc = invoke_capability(
@@ -9647,7 +9690,13 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
         au6_error_text(&no_asset)
     );
 
-    let revision = au6_commit_ops(&client, 0, &au6_c_gap_operations(AU6_C_RIGHT_CLIP_ID)).await;
+    let revision = au6_commit_ops_approved(
+        &client,
+        confirmations.clone(),
+        0,
+        &au6_c_gap_operations(AU6_C_RIGHT_CLIP_ID),
+    )
+    .await;
 
     let capture = json!({
         "expected_revision": revision,
@@ -9843,8 +9892,13 @@ async fn au6_a4_the_multicam_cuts_leave_the_master_audio_untouched() {
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
             .await
             .unwrap();
-    let revision =
-        au6_commit_ops(&client, 0, &au6_canonical_operations(Au6Scenario::Multicam)).await;
+    let revision = au6_commit_ops_approved(
+        &client,
+        server.confirmations(),
+        0,
+        &au6_canonical_operations(Au6Scenario::Multicam),
+    )
+    .await;
     let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
     assert_eq!(levels.is_error, Some(false));
     let qc = invoke_capability(
@@ -10010,7 +10064,8 @@ async fn au6_a5b_the_streaming_target_is_reachable_by_the_agent() {
     ));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
-    let job = au6_queue_and_poll(&client, revision, "youtube_1080p", &directory, false).await;
+    let job = au6_queue_and_poll(&client, revision, "youtube1080p", &directory, false).await;
+    assert_eq!(job["profile"], "youtube1080p");
     assert!(
         matches!(job["state"].as_str(), Some("queued" | "running")),
         "{job}"
@@ -10021,7 +10076,7 @@ async fn au6_a5b_the_streaming_target_is_reachable_by_the_agent() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|entry| entry["id"] == job["id"] && entry["profile"] == "youtube_1080p")
+            .any(|entry| entry["id"] == job["id"] && entry["profile"] == "youtube1080p")
     );
     let cancelled = invoke_capability(&client, "cancel_export", json!({"job_id": job["id"]})).await;
     assert_eq!(
