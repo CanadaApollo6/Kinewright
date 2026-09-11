@@ -9472,6 +9472,29 @@ fn au6_error_text(result: &CallToolResult) -> String {
     result.content[0].as_text().unwrap().text.clone()
 }
 
+async fn au6_decide_capture(broker: kinewright_agent::ConfirmationBroker, approve: bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(request) = broker
+            .pending_requests()
+            .into_iter()
+            .find(|request| request.tool_name == "capture_room_tone")
+        {
+            if approve {
+                assert!(broker.approve(request.id));
+            } else {
+                assert!(broker.reject(request.id, "not this take"));
+            }
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "capture_room_tone must publish a confirmation before it writes a byte"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn au6_a1_the_interview_ducks_the_bed_and_matches_the_voices() {
@@ -9617,7 +9640,10 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
         au6_error_text(&ebu)
     );
     if let Some(body) = ebu.structured_content.as_ref() {
-        assert_eq!(body["applied"], false);
+        assert_ne!(
+            body["applied"], true,
+            "plan_audio_normalization must not apply: {body}"
+        );
     }
     let streaming = invoke_capability(
         &client,
@@ -9721,6 +9747,16 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
         "source_start_frame": AU6_C_LEARN_SOURCE_RANGE.start.0,
         "source_end_frame": AU6_C_LEARN_SOURCE_RANGE.end.0
     });
+    let (refused, ()) = tokio::join!(
+        invoke_capability(&client, "capture_room_tone", capture.clone()),
+        au6_decide_capture(confirmations.clone(), false),
+    );
+    assert_eq!(refused.is_error, Some(true));
+    assert_eq!(
+        refused.structured_content.as_ref().unwrap()["code"],
+        "capture_refused"
+    );
+
     let approvals = cc7_approve_confirmations(confirmations.clone(), "capture_room_tone");
     let captured = au5_invoke_when_silence_is_ready(&client, "capture_room_tone", capture).await;
     approvals.assert_approved_and_stop("capture_room_tone");
@@ -9853,7 +9889,12 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
         "invalid_source_range"
     );
 
-    let too_long = invoke_capability(
+    // (c)'s dialogue asset is 312 frames / 12.5 s; the 60 s cap is
+    // unreachable without leaving the asset, and `to > duration` is
+    // `invalid_source_range` first. Past-end is the reachable failing
+    // direction on this document; `room_tone_capture_too_long` stays
+    // covered by the agent's own unit test at `server.rs:24179`.
+    let past_end = invoke_capability(
         &client,
         "capture_room_tone",
         json!({
@@ -9864,10 +9905,10 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
         }),
     )
     .await;
-    assert_eq!(too_long.is_error, Some(true));
+    assert_eq!(past_end.is_error, Some(true));
     assert_eq!(
-        too_long.structured_content.as_ref().unwrap()["code"],
-        "room_tone_capture_too_long"
+        past_end.structured_content.as_ref().unwrap()["code"],
+        "invalid_source_range"
     );
 
     client.cancel().await.unwrap();
