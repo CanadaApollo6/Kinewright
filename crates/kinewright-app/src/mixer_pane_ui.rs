@@ -1064,7 +1064,7 @@ fn automation_range(chain: MixerChain, target: AutomationTarget) -> std::ops::Ra
 }
 
 /// Write one target's curve into the edited chain copy. `None` clears it.
-fn set_automation_curve(
+pub(crate) fn set_automation_curve(
     chain: MixerChain,
     target: AutomationTarget,
     curve: Option<AutomationCurve>,

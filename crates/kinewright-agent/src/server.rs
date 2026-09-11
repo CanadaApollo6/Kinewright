@@ -26647,8 +26647,8 @@ mod tests {
             "registry={registry_metrics:?}"
         );
         // AU2 §6.4/B15, AU3 §4.2/A16, AU3 §6.4/B13, AU4 §4.3/A19,
-        // AU4 §6.3/B13 and AU5 §4.3/A18: the served quad, byte-identical to
-        // CC6's through every part of both programmes.
+        // AU4 §6.3/B13, AU5 §4.3/A18, AU6 §5.4 Part A and Part B: the served
+        // quad, byte-identical to CC6's through every part of both programmes.
         assert_eq!(
             (
                 served_metrics.tool_count,

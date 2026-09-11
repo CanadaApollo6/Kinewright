@@ -77,12 +77,11 @@ use kinewright_core::{
         AU6_TARGET_SEPARATION_TOLERANCE_LU_HUNDREDTHS, AU6_TURNS, AU6_VOICE_A_BAND_INDEX,
         AU6_VOICE_B_BAND_INDEX, AU6_VOICE_BAND_SEPARATION_BANDS, AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS,
         AU6_WINDOW_MILLISECONDS, AU6_WINDOW_PROGRAMME, Au6Scenario, Au6Speaker, Au6TrackRole,
-        au6_a_duck_curve, au6_c_analytic_mean_band_tenth_db,
-        au6_c_canonical_operations_with_room_tone, au6_c_declick_only_operations,
-        au6_c_gap_operations, au6_c_point_mass_band_tenth_db_wrong_model, au6_c_repair_operations,
-        au6_canonical_operations, au6_d_sync_group, au6_duck_gap_window_indices,
-        au6_duck_speech_window_indices, au6_export_settings, au6_profile_export_settings, au6_spec,
-        au6_turns_of,
+        au6_a_duck_curve, au6_c_analytic_mean_band_tenth_db, au6_c_declick_only_operations,
+        au6_c_fill_operations, au6_c_gap_operations, au6_c_point_mass_band_tenth_db_wrong_model,
+        au6_c_repair_operations, au6_canonical_operations, au6_d_sync_group,
+        au6_duck_gap_window_indices, au6_duck_speech_window_indices, au6_export_settings,
+        au6_profile_export_settings, au6_spec, au6_turns_of,
     },
 };
 
@@ -466,14 +465,23 @@ fn location_filled_scene() -> (Au6Scene, Document) {
     );
     scene._room_tone_store = Some(store);
     scene._media.push(media);
-    let document = scene.commit(&au6_c_canonical_operations_with_room_tone(id));
+    // The seam is measured on the fill commit, before the repair bus
+    // processes the track (§4(c)(5) / §5.3 step 3).
+    let mut ops = au6_c_gap_operations(kinewright_core::au6_scenarios::AU6_C_RIGHT_CLIP_ID);
+    ops.extend(au6_c_fill_operations(id));
+    let document = scene.commit(&ops);
     (scene, document)
 }
 
 /// AU6's own seam helper: a `MeasuredZero` claim, not AU5's budgeted ceiling.
 fn assert_au6_seam(document: &Document, join: Range<TimeCode>) {
-    let settings = mix_settings(document);
-    let mixed = crate::export::mix_audio(document, &settings).expect("the filled document mixes");
+    let stems = mix_audio_stems(
+        document,
+        TimeCode::ZERO..document.duration,
+        &mix_settings(document),
+    )
+    .expect("the filled document mixes stems");
+    let mixed = track_stem(&stems, AU6_C_DIALOGUE_TRACK);
     let track = document
         .tracks
         .iter()
@@ -1682,12 +1690,16 @@ fn au6_b_the_makeup_less_chain_exceeds_the_loudness_range() {
 // §11.2 items 31–37 — location dialogue.
 // ===========================================================================
 
-fn repair_at(engine: &FfmpegMediaEngine, document: &Document) -> AudioRepairReport {
-    let point = if document.audio_mix.bus(AU6_C_REPAIR_BUS).is_some() {
+fn repair_point(document: &Document) -> MixSpectrumPoint {
+    if document.audio_mix.bus(AU6_C_REPAIR_BUS).is_some() {
         MixSpectrumPoint::Bus(AU6_C_REPAIR_BUS)
     } else {
         MixSpectrumPoint::Track(AU6_C_DIALOGUE_TRACK)
-    };
+    }
+}
+
+fn repair_at(engine: &FfmpegMediaEngine, document: &Document) -> AudioRepairReport {
+    let point = repair_point(document);
     engine
         .audio_repair(
             document,
@@ -1898,13 +1910,13 @@ fn au6_c_the_dialogue_survives_the_repair() {
         let before = engine
             .mix_window_levels(
                 &before_doc,
-                &window_request(MixSpectrumPoint::Bus(AU6_C_REPAIR_BUS), turn.range()),
+                &window_request(repair_point(&before_doc), turn.range()),
             )
             .expect("speech before");
         let after = engine
             .mix_window_levels(
                 &after_doc,
-                &window_request(MixSpectrumPoint::Bus(AU6_C_REPAIR_BUS), turn.range()),
+                &window_request(repair_point(&after_doc), turn.range()),
             )
             .expect("speech after");
         let before_vals: Vec<i32> = before.windows.iter().flatten().copied().collect();
@@ -1936,13 +1948,13 @@ fn au6_c_an_over_reduced_profile_eats_the_dialogue() {
         let before = engine
             .mix_window_levels(
                 &before_doc,
-                &window_request(MixSpectrumPoint::Bus(AU6_C_REPAIR_BUS), turn.range()),
+                &window_request(repair_point(&before_doc), turn.range()),
             )
             .expect("over-reduced before");
         let after = engine
             .mix_window_levels(
                 &after_doc,
-                &window_request(MixSpectrumPoint::Bus(AU6_C_REPAIR_BUS), turn.range()),
+                &window_request(repair_point(&after_doc), turn.range()),
             )
             .expect("over-reduced after");
         before_levels.extend(before.windows.iter().flatten().copied());
@@ -2001,6 +2013,17 @@ fn au6_c_a_one_frame_slip_breaks_the_seam() {
     assert!(
         !gaps.is_empty(),
         "a one-frame slip must leave a gap, not close the seam"
+    );
+    let settings = mix_settings(&document);
+    let slipped = mix_audio_stems(&document, TimeCode::ZERO..document.duration, &settings)
+        .expect("the slipped document mixes");
+    let filled = location_filled_scene().1;
+    let tight = mix_audio_stems(&filled, TimeCode::ZERO..filled.duration, &settings)
+        .expect("the filled document mixes");
+    assert_ne!(
+        track_stem(&slipped, AU6_C_DIALOGUE_TRACK),
+        track_stem(&tight, AU6_C_DIALOGUE_TRACK),
+        "a one-frame slip must change the dialogue stem"
     );
 }
 
@@ -2321,7 +2344,7 @@ fn run_delivery(
     job: &kinewright_core::Au6ExportJob,
     normalize: bool,
 ) -> (
-    kinewright_core::ExportAudioReport,
+    Option<kinewright_core::ExportAudioReport>,
     kinewright_core::DeliveryAudioVerification,
 ) {
     let directory = TempDirectory::new(&format!("au6-e-{}", job.id));
@@ -2331,7 +2354,7 @@ fn run_delivery(
     }
     let output = directory.path(&format!("{}.mp4", job.id));
     let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();
-    let report = engine
+    let audio = engine
         .export_document_reporting(
             std::sync::Arc::new(document.clone()),
             &output,
@@ -2339,12 +2362,14 @@ fn run_delivery(
             progress_tx,
         )
         .expect("delivery export")
-        .audio
-        .expect("a delivery reports audio");
+        .audio;
+    if normalize {
+        assert!(audio.is_some(), "a normalized delivery reports audio");
+    }
     let verification = engine
         .verify_delivery_audio(&output, Some(job.target))
         .expect("delivery verifies");
-    (report, verification)
+    (audio, verification)
 }
 
 #[test]
@@ -2366,6 +2391,7 @@ fn au6_e_both_deliveries_land_on_their_targets() {
             .true_peak_dbtp_hundredths
             .expect("true peak");
         let peak_margin = job.target.true_peak_ceiling_dbtp_hundredths - peak;
+        let report = report.expect("a normalized delivery reports audio");
         println!(
             "AU6 delivery {} measured={measured} deviation={deviation} peak={peak} peak_margin={peak_margin} limiter={}",
             job.id, report.limiter_passes
@@ -2511,4 +2537,365 @@ fn au6_manifest_declares_every_required_fixture_and_constant() {
     }
     assert_eq!(manifest["contract"], AU6_CONTRACT);
     assert_eq!(manifest["manifest_version"], 1);
+}
+
+const AU6_CORE_TESTS: [&str; 13] = [
+    "au6_scenario_geometry_is_the_contract_table",
+    "au6_every_measured_window_clears_one_gating_block",
+    "au6_the_duck_gap_leaves_exactly_one_unducked_window",
+    "au6_the_learn_gap_clears_the_profile_minimum",
+    "au6_canonical_operations_are_accepted_by_core_in_order",
+    "au6_ascending_splits_are_rejected_by_core",
+    "au6_core_allocates_the_pinned_gap_clip_ids",
+    "au6_the_delivery_scenario_reuses_the_interview_document",
+    "au6_export_jobs_differ_only_in_the_job",
+    "au6_budgets_are_distinct_from_every_neighbouring_constant",
+    "au6_every_budget_carries_the_declared_margin",
+    "au6_the_questions_are_one_clause_each",
+    "au6_the_regression_pins_are_labelled_as_pins",
+];
+
+const AU6_AGENT_TESTS: [&str; 8] = [
+    "au6_a1_the_interview_ducks_the_bed_and_matches_the_voices",
+    "au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride",
+    "au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled",
+    "au6_a4_the_multicam_cuts_leave_the_master_audio_untouched",
+    "au6_a5a_the_delivery_lands_on_the_ebu_r128_target",
+    "au6_a5b_the_streaming_target_is_reachable_by_the_agent",
+    "au6_b_a_clip_whose_head_window_is_silent_gets_no_fade",
+    "au6_the_four_planners_prose_is_pinned_by_exact_string",
+];
+
+const AU6_APP_TESTS: [&str; 14] = [
+    "au6_a_a_person_can_balance_the_interview_and_ride_the_bed",
+    "au6_b_a_person_can_match_the_voices_and_build_the_chain",
+    "au6_c_a_person_can_repair_the_dialogue_and_fill_the_gap",
+    "au6_d_a_person_can_cut_the_angles_and_mute_the_scratch_tracks",
+    "au6_e_the_export_dialog_carries_both_delivery_targets",
+    "au6_a_track_chain_offers_both_automation_targets",
+    "au6_a_track_curve_edit_emits_set_track_automation",
+    "au6_the_retired_tooltip_no_longer_points_at_a_dead_end",
+    "au6_a_track_curve_covers_its_keyframe_span",
+    "au6_a_scalar_mix_edit_covers_the_programme",
+    "au6_a_cleared_curve_covers_the_span_it_held",
+    "au6_the_person_batch_one_code_off_is_not_canonical",
+    "au6_ascending_splits_are_refused_by_the_builder_path",
+    "au6_d_the_person_ripple_gesture_is_not_the_canonical_cut",
+];
+
+const AU6_EVAL_TESTS: [&str; 0] = [];
+const AU6_EXPLICIT_TEST_NAMES: [&str; 0] = [];
+
+const AU6_INVENTORY_TESTS: [&str; 2] = [
+    "au6_manifest_declares_every_required_fixture_and_constant",
+    "au6_declared_test_names_exist_in_their_source_files",
+];
+
+const AU6_MEDIA_TESTS: [&str; 59] = [
+    "au6_every_authored_level_matches_its_analytic_derivation",
+    "au6_the_two_voices_occupy_disjoint_bands",
+    "au6_c_every_authored_gap_is_below_the_silence_threshold",
+    "au6_c_the_brief_levels_never_reach_the_detector",
+    "au6_the_learn_gap_is_the_longest_detected_silence",
+    "au6_c_a_click_in_the_learn_gap_splits_it",
+    "au6_the_scratch_track_is_not_the_master",
+    "au6_wav_round_trip_is_sample_exact",
+    "au6_an_aac_mux_is_not_sample_exact",
+    "au6_the_source_shapes_are_the_contract_table",
+    "au6_an_angle_source_with_audio_probes_as_audiovideo",
+    "au6_c_the_degraded_track_is_the_click_free_track_plus_the_clicks",
+    "au6_restated_constants_agree_with_their_owners",
+    "au6_a_the_interview_clears_the_bed_and_matches_the_voices",
+    "au6_a_the_unducked_document_does_not_clear_the_bed",
+    "au6_a_the_untrimmed_voices_are_not_matched",
+    "au6_a_the_nominal_dbfs_trim_is_worse_than_none",
+    "au6_a_the_duck_reaches_its_depth",
+    "au6_a_the_unducked_bed_has_no_depth",
+    "au6_a_the_duck_depth_is_invisible_at_the_track_point",
+    "au6_the_three_curve_owners_render_identically",
+    "au6_every_scenario_mix_does_not_clip",
+    "au6_a_a_hot_master_clips_and_says_so",
+    "au6_b_the_chain_matches_the_voices_and_reduces_the_spread",
+    "au6_b_the_raw_trims_do_not_match_the_voices",
+    "au6_b_the_bypassed_chain_leaves_the_spread_intact",
+    "au6_b_the_programme_stays_inside_its_loudness_range",
+    "au6_b_the_makeup_less_chain_exceeds_the_loudness_range",
+    "au6_c_the_repair_chain_moves_the_snr_and_the_hum",
+    "au6_c_an_unlearned_profile_moves_no_snr",
+    "au6_c_a_chain_without_the_hum_node_leaves_the_mains_alone",
+    "au6_c_the_declick_node_alone_drops_the_click_error",
+    "au6_c_a_chain_without_the_declick_node_keeps_every_click",
+    "au6_c_the_declick_contribution_in_chain_is_recorded",
+    "au6_c_the_dialogue_survives_the_repair",
+    "au6_c_an_over_reduced_profile_eats_the_dialogue",
+    "au6_c_the_room_tone_fill_closes_the_gap_seamlessly",
+    "au6_c_a_one_frame_slip_breaks_the_seam",
+    "au6_c_the_learned_profile_holds_its_pin_and_its_bound",
+    "au6_c_a_profile_learned_over_speech_is_not_the_noise_profile",
+    "au6_c_a_one_frame_learn_offset_moves_the_profile",
+    "au6_c_the_learned_profile_has_the_authored_shape",
+    "au6_c_the_percentile_floor_lands_on_the_authored_floor",
+    "au6_d_the_master_stem_is_bit_identical_across_the_cuts",
+    "au6_d_a_cut_master_track_is_not_continuous",
+    "au6_d_an_angle_ripple_leaves_the_master_stem_alone",
+    "au6_d_the_scratch_tracks_contribute_nothing",
+    "au6_d_an_unmuted_scratch_track_reaches_the_mix",
+    "au6_d_the_mix_is_the_master",
+    "au6_d_the_unmuted_scratch_moves_the_master",
+    "au6_d_the_cuts_sit_at_the_authored_frames",
+    "au6_e_both_deliveries_land_on_their_targets",
+    "au6_e_an_unnormalized_export_misses_the_target",
+    "au6_e_the_two_deliveries_separate_by_the_target_difference",
+    "au6_e_two_exports_at_one_profile_do_not_separate",
+    "au6_e_the_delivery_settings_carry_the_profile_raster_without_rendering_it",
+    "au6_the_performance_block_matches_its_code_constants",
+    "au6_manifest_declares_every_required_fixture_and_constant",
+    "au6_declared_test_names_exist_in_their_source_files",
+];
+
+const AU6_FORBIDDEN_HELPERS: [&str; 3] = [
+    "fixture_gpu_or_skip",
+    "KINEWRIGHT_GPU_TESTS_MAY_SKIP",
+    "KINEWRIGHT_AUDIO_TEST",
+];
+
+const AU6_TEST_SOURCES: [(&str, &str); 11] = [
+    (
+        "crates/kinewright-media/src/au6_fixtures.rs",
+        include_str!("au6_fixtures.rs"),
+    ),
+    (
+        "crates/kinewright-media/src/au6_sources.rs",
+        include_str!("au6_sources.rs"),
+    ),
+    (
+        "crates/kinewright-core/tests/au6_core.rs",
+        include_str!("../../kinewright-core/tests/au6_core.rs"),
+    ),
+    (
+        "crates/kinewright-agent/tests/mcp_server.rs",
+        include_str!("../../kinewright-agent/tests/mcp_server.rs"),
+    ),
+    (
+        "crates/kinewright-agent/src/eval.rs",
+        include_str!("../../kinewright-agent/src/eval.rs"),
+    ),
+    (
+        "crates/kinewright-agent/src/bin/kinewright-eval.rs",
+        include_str!("../../kinewright-agent/src/bin/kinewright-eval.rs"),
+    ),
+    (
+        "crates/kinewright-app/src/mixer_ui.rs",
+        include_str!("../../kinewright-app/src/mixer_ui.rs"),
+    ),
+    (
+        "crates/kinewright-app/src/mixer_pane_ui.rs",
+        include_str!("../../kinewright-app/src/mixer_pane_ui.rs"),
+    ),
+    (
+        "crates/kinewright-app/src/edit_diff.rs",
+        include_str!("../../kinewright-app/src/edit_diff.rs"),
+    ),
+    (
+        "crates/kinewright-app/src/inspector_ui.rs",
+        include_str!("../../kinewright-app/src/inspector_ui.rs"),
+    ),
+    (
+        "crates/kinewright-app/src/app.rs",
+        include_str!("../../kinewright-app/src/app.rs"),
+    ),
+];
+
+fn au6_test_source(path: &str) -> &'static str {
+    AU6_TEST_SOURCES
+        .iter()
+        .find_map(|(candidate, source)| (*candidate == path).then_some(*source))
+        .unwrap_or_else(|| panic!("AU6 inventory is missing source {path}"))
+}
+
+fn au6_is_test_attribute(line: &str) -> bool {
+    line == "#[test]" || line.starts_with("#[tokio::test")
+}
+
+fn au6_declares_test(source: &str, name: &str) -> bool {
+    let needle = format!("fn {name}(");
+    let lines = source.lines().collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        if !line.contains(&needle) {
+            continue;
+        }
+        for previous in lines[..index].iter().rev() {
+            let previous = previous.trim();
+            if au6_is_test_attribute(previous) {
+                return true;
+            }
+            if previous.is_empty() || previous.starts_with("//") || previous.starts_with("#[") {
+                continue;
+            }
+            break;
+        }
+    }
+    false
+}
+
+fn au6_declared_test_names(source: &str, prefix: &str) -> Vec<String> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut names = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if !au6_is_test_attribute(line.trim()) {
+            continue;
+        }
+        for candidate in &lines[index + 1..] {
+            let candidate = candidate.trim();
+            if candidate.is_empty() || candidate.starts_with("//") || candidate.starts_with("#[") {
+                continue;
+            }
+            let Some(rest) = candidate.split_once("fn ").map(|(_, rest)| rest) else {
+                break;
+            };
+            let Some((name, _)) = rest.split_once('(') else {
+                break;
+            };
+            if name.starts_with(prefix) {
+                names.push(name.to_owned());
+            }
+            break;
+        }
+    }
+    names
+}
+
+fn au6_uses_outside_prose(source: &str, needle: &str) -> bool {
+    let call = format!("{needle}(");
+    let quoted = format!("(\"{needle}\")");
+    source.lines().any(|line| {
+        let code = line.split("//").next().unwrap_or_default();
+        code.contains(&call) || code.contains(&quoted)
+    })
+}
+
+fn au6_sorted(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut names = names.into_iter().collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
+fn au6_inventory_groups() -> [(
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+); 5] {
+    [
+        (
+            "MEDIA",
+            &[
+                "crates/kinewright-media/src/au6_fixtures.rs",
+                "crates/kinewright-media/src/au6_sources.rs",
+            ],
+            &AU6_MEDIA_TESTS,
+        ),
+        (
+            "CORE",
+            &["crates/kinewright-core/tests/au6_core.rs"],
+            &AU6_CORE_TESTS,
+        ),
+        (
+            "AGENT",
+            &["crates/kinewright-agent/tests/mcp_server.rs"],
+            &AU6_AGENT_TESTS,
+        ),
+        (
+            "APP",
+            &[
+                "crates/kinewright-app/src/mixer_ui.rs",
+                "crates/kinewright-app/src/mixer_pane_ui.rs",
+                "crates/kinewright-app/src/edit_diff.rs",
+                "crates/kinewright-app/src/inspector_ui.rs",
+                "crates/kinewright-app/src/app.rs",
+            ],
+            &AU6_APP_TESTS,
+        ),
+        (
+            "EVAL",
+            &[
+                "crates/kinewright-agent/src/eval.rs",
+                "crates/kinewright-agent/src/bin/kinewright-eval.rs",
+            ],
+            &AU6_EVAL_TESTS,
+        ),
+    ]
+}
+
+#[test]
+fn au6_declared_test_names_exist_in_their_source_files() {
+    for (label, sources, expected) in au6_inventory_groups() {
+        for name in expected {
+            assert!(
+                sources
+                    .iter()
+                    .any(|path| au6_declares_test(au6_test_source(path), name)),
+                "no AU6_{label}_TEST_SOURCES file declares a #[test] named {name}"
+            );
+        }
+        let declared = au6_sorted(
+            sources
+                .iter()
+                .flat_map(|path| au6_declared_test_names(au6_test_source(path), "au6_")),
+        );
+        let named = au6_sorted(expected.iter().map(|name| (*name).to_owned()));
+        assert_eq!(
+            declared, named,
+            "AU6_{label}_TESTS and the `au6_*` tests the {label} sources declare disagree"
+        );
+    }
+
+    let mut all = Vec::new();
+    for (_, _, expected) in au6_inventory_groups() {
+        for name in expected {
+            assert!(
+                name.starts_with("au6_") || AU6_EXPLICIT_TEST_NAMES.contains(name),
+                "{name} does not match `cargo test -- au6_` and is not explicit"
+            );
+            all.push((*name).to_owned());
+        }
+    }
+    let total = all.len();
+    all.sort_unstable();
+    all.dedup();
+    assert_eq!(all.len(), total, "an AU6 test name is declared twice");
+    for name in AU6_INVENTORY_TESTS {
+        assert!(
+            au6_declares_test(
+                au6_test_source("crates/kinewright-media/src/au6_fixtures.rs"),
+                name
+            ),
+            "inventory test {name} is missing"
+        );
+        assert!(AU6_MEDIA_TESTS.contains(&name));
+    }
+    assert_eq!(AU6_EVAL_TESTS.len(), 0);
+    assert_eq!(AU6_EXPLICIT_TEST_NAMES.len(), 0);
+
+    for path in [
+        "crates/kinewright-media/src/au6_fixtures.rs",
+        "crates/kinewright-media/src/au6_sources.rs",
+        "crates/kinewright-core/tests/au6_core.rs",
+        "crates/kinewright-app/src/mixer_ui.rs",
+        "crates/kinewright-app/src/mixer_pane_ui.rs",
+        "crates/kinewright-app/src/edit_diff.rs",
+        "crates/kinewright-app/src/inspector_ui.rs",
+        "crates/kinewright-app/src/app.rs",
+    ] {
+        let source = au6_test_source(path);
+        for needle in AU6_FORBIDDEN_HELPERS {
+            assert!(
+                !au6_uses_outside_prose(source, needle),
+                "{path} must never reach for {needle}"
+            );
+        }
+        assert!(
+            !source.contains("cfg(target_os"),
+            "{path} must not contain cfg(target_os"
+        );
+    }
 }
