@@ -5772,28 +5772,27 @@ mod tests {
             let descriptor = kinewright_core::effect_descriptor(&node.name)
                 .expect("every repair node is a registered descriptor");
             for (row, value) in &node.parameters {
-                match planned.parameters.get(row) {
-                    Some(planned_value) => assert_eq!(
+                if let Some(planned_value) = planned.parameters.get(row) {
+                    assert_eq!(
                         value, planned_value,
                         "{}.{row}: the person and the planner disagree on a VALUE",
                         node.name
-                    ),
-                    None => {
-                        let neutral = descriptor
-                            .parameters
-                            .iter()
-                            .find(|parameter| parameter.name == row)
-                            .unwrap_or_else(|| panic!("{}.{row} is not a control", node.name))
-                            .neutral;
-                        assert_eq!(
-                            *value,
-                            ParamValue::Integer(neutral),
-                            "{}.{row}: a row the planner omits must be at its neutral",
-                            node.name
-                        );
-                        extra.push(format!("{}.{row}", node.name));
-                    }
+                    );
+                    continue;
                 }
+                let neutral = descriptor
+                    .parameters
+                    .iter()
+                    .find(|parameter| parameter.name == row)
+                    .unwrap_or_else(|| panic!("{}.{row} is not a control", node.name))
+                    .neutral;
+                assert_eq!(
+                    *value,
+                    ParamValue::Integer(neutral),
+                    "{}.{row}: a row the planner omits must be at its neutral",
+                    node.name
+                );
+                extra.push(format!("{}.{row}", node.name));
             }
             for row in planned.parameters.keys() {
                 assert!(
@@ -5806,7 +5805,52 @@ mod tests {
         extra
     }
 
+    /// (c)'s three repair cards, one `+ Effect` and one control at a time on
+    /// the bus the person has already created.
+    fn au6_c_person_repair_chain(document: &Document) -> Vec<Operation> {
+        let mut edits = MixerChainEdits::default();
+        let denoise = au6_person_insert_node(
+            document,
+            &mut edits,
+            AU6_C_REPAIR_BUS,
+            AU6_DENOISE_EFFECT,
+            &[
+                ("reduction_tenth_db", AU6_C_DENOISE_REDUCTION_TENTH_DB),
+                ("lookahead_milliseconds", AU6_C_DENOISE_LOOKAHEAD_MS),
+            ],
+        );
+        let hum = au6_person_insert_node(
+            document,
+            &mut edits,
+            AU6_C_REPAIR_BUS,
+            AU6_HUM_REMOVAL_EFFECT,
+            &[
+                ("fundamental_hertz", AU6_C_HUM_FUNDAMENTAL_PARAMETER_HERTZ),
+                ("harmonic_count", AU6_C_HUM_HARMONIC_COUNT),
+                ("depth_tenth_db", AU6_C_HUM_DEPTH_TENTH_DB),
+                ("notch_q_hundredths", AU6_C_HUM_NOTCH_Q_HUNDREDTHS),
+            ],
+        );
+        let declick = au6_person_insert_node(
+            document,
+            &mut edits,
+            AU6_C_REPAIR_BUS,
+            AU6_DECLICK_EFFECT,
+            &[
+                ("max_click_milliseconds", AU6_C_DECLICK_MAX_CLICK_MS),
+                (
+                    "detector_threshold_tenth_db",
+                    AU6_C_DECLICK_DETECTOR_THRESHOLD_TENTH_DB,
+                ),
+                ("lookahead_milliseconds", AU6_C_DECLICK_LOOKAHEAD_MS),
+            ],
+        );
+        assert_eq!([denoise, hum, declick], AU6_C_REPAIR_EFFECT_IDS);
+        edits.take_operations(document).operations().to_vec()
+    }
+
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn au6_c_a_person_can_repair_the_dialogue_and_fill_the_gap() {
         let scenario = Au6Scenario::LocationDialogue;
         let mut document = au6_base_document(scenario);
@@ -5869,52 +5913,14 @@ mod tests {
         // `+ Bus` on the dialogue track, then the three repair cards.
         let repair_bus = au6_person_bus_operations(&document, scenario);
         au6_apply_in_order(&mut document, &repair_bus);
-        let mut edits = MixerChainEdits::default();
-        let denoise = au6_person_insert_node(
-            &document,
-            &mut edits,
-            AU6_C_REPAIR_BUS,
-            AU6_DENOISE_EFFECT,
-            &[
-                ("reduction_tenth_db", AU6_C_DENOISE_REDUCTION_TENTH_DB),
-                ("lookahead_milliseconds", AU6_C_DENOISE_LOOKAHEAD_MS),
-            ],
-        );
-        au6_person_insert_node(
-            &document,
-            &mut edits,
-            AU6_C_REPAIR_BUS,
-            AU6_HUM_REMOVAL_EFFECT,
-            &[
-                ("fundamental_hertz", AU6_C_HUM_FUNDAMENTAL_PARAMETER_HERTZ),
-                ("harmonic_count", AU6_C_HUM_HARMONIC_COUNT),
-                ("depth_tenth_db", AU6_C_HUM_DEPTH_TENTH_DB),
-                ("notch_q_hundredths", AU6_C_HUM_NOTCH_Q_HUNDREDTHS),
-            ],
-        );
-        au6_person_insert_node(
-            &document,
-            &mut edits,
-            AU6_C_REPAIR_BUS,
-            AU6_DECLICK_EFFECT,
-            &[
-                ("max_click_milliseconds", AU6_C_DECLICK_MAX_CLICK_MS),
-                (
-                    "detector_threshold_tenth_db",
-                    AU6_C_DECLICK_DETECTOR_THRESHOLD_TENTH_DB,
-                ),
-                ("lookahead_milliseconds", AU6_C_DECLICK_LOOKAHEAD_MS),
-            ],
-        );
-        assert_eq!(denoise, AU6_C_REPAIR_EFFECT_IDS[0]);
-        let chain = edits.take_operations(&document);
-        au6_apply_in_order(&mut document, chain.operations());
+        let chain = au6_c_person_repair_chain(&document);
+        au6_apply_in_order(&mut document, &chain);
 
         // `Learn profile` writes the 31 rows into the denoise node.
         let profile = noise_profile_operation(
             &document,
             AudioChain::Bus(AU6_C_REPAIR_BUS),
-            denoise,
+            AU6_C_REPAIR_EFFECT_IDS[0],
             &AU6_C_LEARNED_PROFILE_TENTH_DB,
         )
         .expect("Learn profile writes the 31 rows");

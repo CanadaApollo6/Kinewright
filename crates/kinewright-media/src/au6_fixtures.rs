@@ -2949,7 +2949,7 @@ fn au6_manifest_declares_every_required_fixture_and_constant() {
     );
     assert_eq!(
         manifest["transcriptions"]["owners"]["LOUDNESS_GATING_BLOCK_FRAMES"].as_u64(),
-        Some(LOUDNESS_GATING_BLOCK_FRAMES as u64)
+        Some(LOUDNESS_GATING_BLOCK_FRAMES)
     );
     assert_eq!(
         manifest["transcriptions"]["owners"]["NOISE_PROFILE_PERCENT"].as_u64(),
@@ -2957,7 +2957,7 @@ fn au6_manifest_declares_every_required_fixture_and_constant() {
     );
     assert_eq!(
         manifest["transcriptions"]["owners"]["PROFILE_BAND_NEUTRAL_TENTH_DB"].as_i64(),
-        Some(i64::from(PROFILE_BAND_NEUTRAL_TENTH_DB))
+        Some(PROFILE_BAND_NEUTRAL_TENTH_DB)
     );
     assert_eq!(
         manifest["multicam"]["cuts"]
