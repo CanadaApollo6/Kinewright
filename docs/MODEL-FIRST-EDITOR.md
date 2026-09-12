@@ -68,6 +68,8 @@ and creator convenience as a coherent machine-facing contract.
 > and audio primitives listed under gap 4. This thesis still describes the
 > architectural target; the living status is in
 > [Roadmap and development workflows](ROADMAP-AND-WORKFLOWS.md).
+> After Effects tooling is recorded there as a later programme, after
+> Premiere-class slice depth holds; it is not a current slice.
 
 ## The largest remaining gaps
 

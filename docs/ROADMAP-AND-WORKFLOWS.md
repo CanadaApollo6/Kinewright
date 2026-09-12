@@ -1,6 +1,6 @@
 # Roadmap and development workflows
 
-Status: active operating plan, August 2026. This is the forward-looking companion
+Status: active operating plan, September 2026. This is the forward-looking companion
 to the numbered milestone documents. Those documents preserve what was attempted
 and verified; this document defines what Kinewright works on next and how a
 capability becomes part of the editor.
@@ -18,6 +18,23 @@ The programme therefore has two equally necessary product outcomes:
    credible edit, explain its choices, and save meaningful setup time.
 2. **A capable editor.** A person can correct, reshape, polish, verify, and deliver
    that edit without leaving Kinewright for routine technical work.
+
+**The long-term goal is a full, open-source, agent-native competitor to Adobe
+Premiere Pro.** Not a lighter tool for a niche and not a demonstration of agent
+editing: an editor a working picture editor can adopt for the whole job, in which
+every capability is equally available to the person and to the agent. That is why
+each programme (editing, colour, audio, and the ones still to come) is built as a
+series of deep vertical slices, each with a written contract, measured exit gates,
+and two review passes, rather than as a wide layer of shallow controls. Depth per
+slice is the strategy, not overhead: a slice that stops at "preview only" or
+"agent only" leaves a gap a Premiere user would hit on day one, and gaps like that
+are what the competitive audit scored against.
+
+**After that Premiere-class depth holds, add After Effects tooling and
+capabilities.** That is a later programme: not a substitute for the Premiere-class
+editor, not a near-term slice, and not a reason to thin colour, audio, editorial,
+or media work that is already on the board. Do not start After Effects contracts
+or implementation now.
 
 We are pursuing workflow parity for valuable editing jobs, not copying another
 editor's feature count. A narrower tool that completes an entire job reliably is
@@ -140,6 +157,10 @@ Colour begins immediately, while non-colour work continues in parallel.
 
 This table is intentionally broader than the current eval programme. A general
 video editor will not reach practical parity by optimizing montage taste alone.
+The Motion, compositing, and retiming track is Premiere-class editorial
+compositing (keyframes, ramps, mattes, adjustment layers). After Effects tooling
+is the later programme named in The outcome; it is not a row in this table and
+is not implied by the next-workflow-goals column.
 
 ## Near-term sequence
 
