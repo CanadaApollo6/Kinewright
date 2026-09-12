@@ -3,11 +3,32 @@
   "contract_token": "au6_workflow_evaluation",
   "manifest_version": 1,
   "scenarios": [
-    { "id": "a", "name": "Interview", "frames": 300 },
-    { "id": "b", "name": "Podcast", "frames": 300 },
-    { "id": "c", "name": "LocationDialogue", "frames": 312 },
-    { "id": "d", "name": "Multicam", "frames": 300 },
-    { "id": "e", "name": "Delivery", "frames": 200, "reuses": "a" }
+    {
+      "id": "a",
+      "name": "Interview",
+      "frames": 300
+    },
+    {
+      "id": "b",
+      "name": "Podcast",
+      "frames": 300
+    },
+    {
+      "id": "c",
+      "name": "LocationDialogue",
+      "frames": 312
+    },
+    {
+      "id": "d",
+      "name": "Multicam",
+      "frames": 300
+    },
+    {
+      "id": "e",
+      "name": "Delivery",
+      "frames": 200,
+      "reuses": "a"
+    }
   ],
   "geometry": {
     "fps": 25,
@@ -38,25 +59,154 @@
       "worst_error_buffer": "c/Dialogue"
     },
     "buffers": [
-      { "scenario": "a", "track": 1, "role": "Picture", "kind": "Video", "authored_level_dbfs_hundredths": null, "frames": 300 },
-      { "scenario": "a", "track": 2, "role": "VoiceA", "kind": "Audio", "authored_level_dbfs_hundredths": -2600, "frames": 300 },
-      { "scenario": "a", "track": 3, "role": "VoiceB", "kind": "Audio", "authored_level_dbfs_hundredths": -3200, "frames": 300 },
-      { "scenario": "a", "track": 4, "role": "MusicBed", "kind": "Audio", "authored_level_dbfs_hundredths": -2000, "frames": 300 },
-      { "scenario": "b", "track": 1, "role": "VoiceA", "kind": "Audio", "authored_level_dbfs_hundredths": -3000, "frames": 300 },
-      { "scenario": "b", "track": 2, "role": "VoiceB", "kind": "Audio", "authored_level_dbfs_hundredths": -1800, "frames": 300 },
-      { "scenario": "c", "track": 1, "role": "Dialogue", "kind": "Audio", "authored_level_dbfs_hundredths": -2400, "frames": 312 },
-      { "scenario": "d", "track": 1, "role": "Angle", "kind": "Video", "authored_level_dbfs_hundredths": null, "frames": 300 },
-      { "scenario": "d", "track": 2, "role": "Angle", "kind": "Video", "authored_level_dbfs_hundredths": null, "frames": 300 },
-      { "scenario": "d", "track": 3, "role": "Scratch", "kind": "Audio", "authored_level_dbfs_hundredths": -3400, "frames": 300 },
-      { "scenario": "d", "track": 4, "role": "Scratch", "kind": "Audio", "authored_level_dbfs_hundredths": -3400, "frames": 300 },
-      { "scenario": "d", "track": 5, "role": "MasterAudio", "kind": "Audio", "authored_level_dbfs_hundredths": -2000, "frames": 300 },
-      { "scenario": "e", "track": 1, "role": "Picture", "kind": "Video", "authored_level_dbfs_hundredths": null, "frames": 300 },
-      { "scenario": "e", "track": 2, "role": "VoiceA", "kind": "Audio", "authored_level_dbfs_hundredths": -2600, "frames": 300 },
-      { "scenario": "e", "track": 3, "role": "VoiceB", "kind": "Audio", "authored_level_dbfs_hundredths": -3200, "frames": 300 },
-      { "scenario": "e", "track": 4, "role": "MusicBed", "kind": "Audio", "authored_level_dbfs_hundredths": -2000, "frames": 300 }
+      {
+        "scenario": "a",
+        "track": 1,
+        "role": "Picture",
+        "kind": "Video",
+        "authored_level_dbfs_hundredths": null,
+        "frames": 300
+      },
+      {
+        "scenario": "a",
+        "track": 2,
+        "role": "VoiceA",
+        "kind": "Audio",
+        "authored_level_dbfs_hundredths": -2600,
+        "frames": 300
+      },
+      {
+        "scenario": "a",
+        "track": 3,
+        "role": "VoiceB",
+        "kind": "Audio",
+        "authored_level_dbfs_hundredths": -3200,
+        "frames": 300
+      },
+      {
+        "scenario": "a",
+        "track": 4,
+        "role": "MusicBed",
+        "kind": "Audio",
+        "authored_level_dbfs_hundredths": -2000,
+        "frames": 300
+      },
+      {
+        "scenario": "b",
+        "track": 1,
+        "role": "VoiceA",
+        "kind": "Audio",
+        "authored_level_dbfs_hundredths": -3000,
+        "frames": 300
+      },
+      {
+        "scenario": "b",
+        "track": 2,
+        "role": "VoiceB",
+        "kind": "Audio",
+        "authored_level_dbfs_hundredths": -1800,
+        "frames": 300
+      },
+      {
+        "scenario": "c",
+        "track": 1,
+        "role": "Dialogue",
+        "kind": "Audio",
+        "authored_level_dbfs_hundredths": -2400,
+        "frames": 312
+      },
+      {
+        "scenario": "d",
+        "track": 1,
+        "role": "Angle",
+        "kind": "Video",
+        "authored_level_dbfs_hundredths": null,
+        "frames": 300
+      },
+      {
+        "scenario": "d",
+        "track": 2,
+        "role": "Angle",
+        "kind": "Video",
+        "authored_level_dbfs_hundredths": null,
+        "frames": 300
+      },
+      {
+        "scenario": "d",
+        "track": 3,
+        "role": "Scratch",
+        "kind": "Audio",
+        "authored_level_dbfs_hundredths": -3400,
+        "frames": 300
+      },
+      {
+        "scenario": "d",
+        "track": 4,
+        "role": "Scratch",
+        "kind": "Audio",
+        "authored_level_dbfs_hundredths": -3400,
+        "frames": 300
+      },
+      {
+        "scenario": "d",
+        "track": 5,
+        "role": "MasterAudio",
+        "kind": "Audio",
+        "authored_level_dbfs_hundredths": -2000,
+        "frames": 300
+      },
+      {
+        "scenario": "e",
+        "track": 1,
+        "role": "Picture",
+        "kind": "Video",
+        "authored_level_dbfs_hundredths": null,
+        "frames": 300
+      },
+      {
+        "scenario": "e",
+        "track": 2,
+        "role": "VoiceA",
+        "kind": "Audio",
+        "authored_level_dbfs_hundredths": -2600,
+        "frames": 300
+      },
+      {
+        "scenario": "e",
+        "track": 3,
+        "role": "VoiceB",
+        "kind": "Audio",
+        "authored_level_dbfs_hundredths": -3200,
+        "frames": 300
+      },
+      {
+        "scenario": "e",
+        "track": 4,
+        "role": "MusicBed",
+        "kind": "Audio",
+        "authored_level_dbfs_hundredths": -2000,
+        "frames": 300
+      }
     ],
     "gaps": {
-      "authored": [[50, 75], [125, 150], [200, 225], [275, 312]],
+      "authored": [
+        [
+          50,
+          75
+        ],
+        [
+          125,
+          150
+        ],
+        [
+          200,
+          225
+        ],
+        [
+          275,
+          312
+        ]
+      ],
       "floor_below_silence_threshold_hundredths": 526,
       "silence_threshold_dbfs_hundredths": -3500,
       "learn_gap_asset_rms_dbfs_hundredths": -4026
@@ -76,65 +226,156 @@
       "video_only_recipe_len": 28,
       "mux_recipe_len": 33,
       "muxed_source_in_document": false,
-      "mux_codecs_that_work": ["pcm_s16le", "pcm_f32le", "pcm_s24le"],
+      "mux_codecs_that_work": [
+        "pcm_s16le",
+        "pcm_f32le",
+        "pcm_s24le"
+      ],
       "canonical_mux_codec": "pcm_s16le"
     },
     "video_only_recipe": [
-      "-f", "rawvideo",
-      "-pix_fmt", "yuv444p",
-      "-s", "320x180",
-      "-r", "25",
-      "-i", "<temp.yuv>",
-      "-vf", "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
-      "-c:v", "ffv1",
-      "-level", "3",
-      "-g", "1",
-      "-pix_fmt", "yuv444p",
-      "-color_primaries", "bt709",
-      "-color_trc", "bt709",
-      "-colorspace", "bt709",
-      "-color_range", "tv"
+      "-f",
+      "rawvideo",
+      "-pix_fmt",
+      "yuv444p",
+      "-s",
+      "320x180",
+      "-r",
+      "25",
+      "-i",
+      "<temp.yuv>",
+      "-vf",
+      "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+      "-c:v",
+      "ffv1",
+      "-level",
+      "3",
+      "-g",
+      "1",
+      "-pix_fmt",
+      "yuv444p",
+      "-color_primaries",
+      "bt709",
+      "-color_trc",
+      "bt709",
+      "-colorspace",
+      "bt709",
+      "-color_range",
+      "tv"
     ],
     "mux_recipe": [
-      "-f", "rawvideo",
-      "-pix_fmt", "yuv444p",
-      "-s", "320x180",
-      "-r", "25",
-      "-i", "<temp.yuv>",
-      "-i", "<temp.wav>",
-      "-vf", "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
-      "-c:v", "ffv1",
-      "-level", "3",
-      "-g", "1",
-      "-pix_fmt", "yuv444p",
-      "-color_primaries", "bt709",
-      "-color_trc", "bt709",
-      "-colorspace", "bt709",
-      "-color_range", "tv",
-      "-c:a", "pcm_s16le",
+      "-f",
+      "rawvideo",
+      "-pix_fmt",
+      "yuv444p",
+      "-s",
+      "320x180",
+      "-r",
+      "25",
+      "-i",
+      "<temp.yuv>",
+      "-i",
+      "<temp.wav>",
+      "-vf",
+      "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+      "-c:v",
+      "ffv1",
+      "-level",
+      "3",
+      "-g",
+      "1",
+      "-pix_fmt",
+      "yuv444p",
+      "-color_primaries",
+      "bt709",
+      "-color_trc",
+      "bt709",
+      "-colorspace",
+      "bt709",
+      "-color_range",
+      "tv",
+      "-c:a",
+      "pcm_s16le",
       "-shortest"
     ]
   },
   "learn": {
-    "authored_range": [275, 312],
-    "project_range": [274, 312],
+    "authored_range": [
+      275,
+      312
+    ],
+    "project_range": [
+      274,
+      312
+    ],
     "minimum_project_frames": 12,
-    "detected_silences": [[60, 76], [124, 140], [210, 226], [274, 312]],
+    "detected_silences": [
+      [
+        60,
+        76
+      ],
+      [
+        124,
+        140
+      ],
+      [
+        210,
+        226
+      ],
+      [
+        274,
+        312
+      ]
+    ],
     "longest_by_frames": 22
   },
   "profile": {
     "learned_tenth_db": [
-      -853, -846, -809, -588, -497, -457, -530, -615, -502, -601, -580,
-      -619, -643, -659, -645, -626, -618, -604, -593, -576, -566, -559,
-      -546, -538, -530, -517, -505, -496, -484, -476, -463
+      -853,
+      -846,
+      -809,
+      -588,
+      -497,
+      -457,
+      -530,
+      -615,
+      -502,
+      -601,
+      -580,
+      -619,
+      -643,
+      -659,
+      -645,
+      -626,
+      -618,
+      -604,
+      -593,
+      -576,
+      -566,
+      -559,
+      -546,
+      -538,
+      -530,
+      -517,
+      -505,
+      -496,
+      -484,
+      -476,
+      -463
     ],
     "worst_band": 5,
     "allowance_tenth_db": 60,
     "monotone_from_band": 13,
     "drift_tenth_db": 0,
     "shape": {
-      "hum_bump_bands": [4, 7],
-      "low_falloff_bands": [1, 4],
+      "hum_bump_bands": [
+        4,
+        7
+      ],
+      "low_falloff_bands": [
+        1,
+        4
+      ],
       "monotone_from_band": 13,
       "one_frame_offset_band0_tenth_db": -882,
       "one_frame_offset_max_delta_tenth_db": 29
@@ -158,10 +399,19 @@
     }
   },
   "declick": {
-    "click_shape": { "samples": 2, "amplitude_hundredths": 50 },
-    "contribution_in_chain": { "whole": 0.5, "pm10ms": 17.2, "pm1ms": 71.6 },
+    "click_shape": {
+      "samples": 2,
+      "amplitude_hundredths": 50
+    },
+    "contribution_in_chain": {
+      "whole": 0.5,
+      "pm10ms": 17.2,
+      "pm1ms": 71.6
+    },
     "row_14": "the de-click node alone against the click-free programme, floor 120 against measured 258 (258.8 on the instrument), drift 0.000 over nine fresh-engine runs",
-    "reported_not_gated": ["contribution_in_chain"]
+    "reported_not_gated": [
+      "contribution_in_chain"
+    ]
   },
   "thresholds": {
     "interview_dialogue_over_bed_min_lu_hundredths": 400,
@@ -231,53 +481,371 @@
     }
   },
   "budgets": {
-    "note": "the measured column was confirmed at §12 step 4; a budget is never widened. Every row is generated from AU6_BUDGETS and AU6_SOURCE_BUDGETS and asserted against them by au6_manifest_declares_every_required_fixture_and_constant.",
+    "note": "the measured column was confirmed at \u00a712 step 4; a budget is never widened. Every row is generated from AU6_BUDGETS and AU6_SOURCE_BUDGETS and asserted against them by au6_manifest_declares_every_required_fixture_and_constant.",
     "row_count": 25,
     "rows": [
-      { "term": "dialogue over bed", "constant": "AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS", "kind": "Floor", "budget": 400, "measured": 812, "margin_hundredths": 203, "margin": "2.03x", "failing_direction": "au6_a_the_unducked_document_does_not_clear_the_bed", "failing_direction_measured": "-388", "reported_not_gated": false },
-      { "term": "duck depth", "constant": "AU6_DUCK_DEPTH_MIN_HUNDREDTHS", "kind": "Floor", "budget": 400, "measured": 1187, "margin_hundredths": 296, "margin": "2.96x", "failing_direction": "au6_a_the_unducked_bed_has_no_depth", "failing_direction_measured": "-14", "reported_not_gated": false },
-      { "term": "voices matched, (a)", "constant": "AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS", "kind": "Ceiling", "budget": 150, "measured": 5, "margin_hundredths": 3000, "margin": "30.00x", "failing_direction": "au6_a_the_untrimmed_voices_are_not_matched", "failing_direction_measured": "365; the wrong model au6_a_the_nominal_dbfs_trim_is_worse_than_none reads 235", "reported_not_gated": false },
-      { "term": "voices matched, (b)", "constant": "AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS", "kind": "Ceiling", "budget": 150, "measured": 50, "margin_hundredths": 300, "margin": "3.00x", "failing_direction": "au6_b_the_raw_trims_do_not_match_the_voices", "failing_direction_measured": "1442", "reported_not_gated": false },
-      { "term": "dynamics reduced", "constant": "AU6_PODCAST_SPREAD_REDUCTION_MIN_HUNDREDTHS", "kind": "Floor", "budget": 450, "measured": 978, "margin_hundredths": 217, "margin": "2.17x", "failing_direction": "au6_b_the_bypassed_chain_leaves_the_spread_intact", "failing_direction_measured": "0", "reported_not_gated": false },
-      { "term": "programme LRA", "constant": "AU6_PODCAST_LRA_MAX_LU_HUNDREDTHS", "kind": "Ceiling", "budget": 300, "measured": 50, "margin_hundredths": 600, "margin": "6.00x", "failing_direction": "au6_b_the_makeup_less_chain_exceeds_the_loudness_range", "failing_direction_measured": "1274 (un-trimmed 1434)", "reported_not_gated": false },
-      { "term": "normalization prediction", "constant": "AU6_NORMALIZATION_PREDICTION_MAX_LU_HUNDREDTHS", "kind": "Ceiling", "budget": 25, "measured": 1, "margin_hundredths": 2500, "margin": "25.00x", "failing_direction": "au6_b_a_clip_whose_head_window_is_silent_gets_no_fade", "failing_direction_measured": "0 proposed fades; that is §4.2's planner non-vacuity row — the prediction term itself carries no separate failing fixture", "reported_not_gated": false },
-      { "term": "clipping, every scenario", "constant": "", "kind": "Exact", "budget": 0, "measured": 0, "margin_hundredths": null, "margin": "infinite (measured exactly zero)", "failing_direction": "au6_a_a_hot_master_clips_and_says_so", "failing_direction_measured": "technical_pass == false", "reported_not_gated": false },
-      { "term": "gap under the detector", "constant": "AU6_LEARN_GAP_BELOW_SILENCE_MIN_HUNDREDTHS", "kind": "Floor", "budget": 250, "measured": 526, "margin_hundredths": 210, "margin": "2.10x", "failing_direction": "au6_c_the_brief_levels_never_reach_the_detector", "failing_direction_measured": "approximately -3400, above the -3500 threshold", "reported_not_gated": false },
-      { "term": "repair SNR gain", "constant": "AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS", "kind": "Floor", "budget": 500, "measured": 1142, "margin_hundredths": 228, "margin": "2.28x", "failing_direction": "au6_c_an_unlearned_profile_moves_no_snr", "failing_direction_measured": "132", "reported_not_gated": false },
-      { "term": "60 Hz drop", "constant": "AU6_HUM_DROP_MIN_DB_HUNDREDTHS", "kind": "Floor", "budget": 2400, "measured": 4970, "margin_hundredths": 207, "margin": "2.07x", "failing_direction": "au6_c_a_chain_without_the_hum_node_leaves_the_mains_alone", "failing_direction_measured": "1 tenth dB", "reported_not_gated": false },
-      { "term": "per-harmonic drop, first three", "constant": "AU6_HUM_HARMONIC_DROP_MIN_DB_HUNDREDTHS", "kind": "Floor", "budget": 500, "measured": 1096, "margin_hundredths": 219, "margin": "2.19x", "failing_direction": "au6_c_a_chain_without_the_hum_node_leaves_the_mains_alone", "failing_direction_measured": "no harmonic clears 500; the fourth harmonic rises 103 on the canonical chain and is recorded, never gated", "reported_not_gated": false },
-      { "term": "clicks after repair", "constant": "", "kind": "Exact", "budget": 0, "measured": 0, "margin_hundredths": null, "margin": "infinite (measured exactly zero)", "failing_direction": "au6_c_a_chain_without_the_declick_node_keeps_every_click", "failing_direction_measured": "12 clicks survive", "reported_not_gated": false },
-      { "term": "de-click error drop, node alone against click-free", "constant": "AU6_DECLICK_ERROR_DROP_MIN_TENTH_DB", "kind": "Floor", "budget": 120, "measured": 258, "margin_hundredths": 215, "margin": "2.15x", "failing_direction": "au6_c_a_chain_without_the_declick_node_keeps_every_click", "failing_direction_measured": "drop 0.0, the bare stem bit-identical to the authored buffer", "reported_not_gated": false },
-      { "term": "speech level retained", "constant": "AU6_REPAIR_SPEECH_LOSS_MAX_DB_HUNDREDTHS", "kind": "Ceiling", "budget": 300, "measured": 101, "margin_hundredths": 297, "margin": "2.97x", "failing_direction": "au6_c_an_over_reduced_profile_eats_the_dialogue", "failing_direction_measured": "over 300", "reported_not_gated": false },
-      { "term": "profile band pin", "constant": "", "kind": "MeasuredZero", "budget": 0, "measured": 0, "margin_hundredths": null, "margin": "infinite (measured exactly zero)", "failing_direction": "au6_c_a_one_frame_learn_offset_moves_the_profile", "failing_direction_measured": "29 tenth dB at band 0", "reported_not_gated": false },
-      { "term": "profile leakage allowance", "constant": "AU6_PROFILE_LEAKAGE_ALLOWANCE_TENTH_DB", "kind": "Ceiling", "budget": 60, "measured": 27, "margin_hundredths": 222, "margin": "2.22x", "failing_direction": "au6_c_a_profile_learned_over_speech_is_not_the_noise_profile", "failing_direction_measured": "over the bound", "reported_not_gated": false },
-      { "term": "room-tone seam", "constant": "", "kind": "MeasuredZero", "budget": 0, "measured": 0, "margin_hundredths": null, "margin": "infinite (measured exactly zero)", "failing_direction": "au6_c_a_one_frame_slip_breaks_the_seam", "failing_direction_measured": "greater than 0.0", "reported_not_gated": false },
-      { "term": "master stem identity", "constant": "", "kind": "MeasuredZero", "budget": 0, "measured": 0, "margin_hundredths": null, "margin": "infinite (measured exactly zero)", "failing_direction": "au6_d_a_cut_master_track_is_not_continuous", "failing_direction_measured": "diverges at interleaved sample 576000", "reported_not_gated": false },
-      { "term": "master passthrough", "constant": "AU6_MASTER_PASSTHROUGH_MAX_LU_HUNDREDTHS", "kind": "MeasuredZero", "budget": 50, "measured": 0, "margin_hundredths": null, "margin": "infinite (measured exactly zero)", "failing_direction": "au6_d_the_unmuted_scratch_moves_the_master", "failing_direction_measured": "600, twelve times the budget", "reported_not_gated": false },
-      { "term": "delivery deviation, both lanes", "constant": "AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS", "kind": "Ceiling", "budget": 25, "measured": 1, "margin_hundredths": 2500, "margin": "25.00x", "failing_direction": "au6_e_an_unnormalized_export_misses_the_target", "failing_direction_measured": "122 (source master) / 778 (streaming)", "reported_not_gated": false },
-      { "term": "true-peak margin, thinnest lane", "constant": "AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS", "kind": "Floor", "budget": 100, "measured": 204, "margin_hundredths": 204, "margin": "2.04x", "failing_direction": "au6_e_an_unnormalized_export_misses_the_target", "failing_direction_measured": "the same un-normalized export; the source-master lane keeps 1104", "reported_not_gated": false },
-      { "term": "target separation", "constant": "AU6_TARGET_SEPARATION_TOLERANCE_LU_HUNDREDTHS", "kind": "Ceiling", "budget": 25, "measured": 1, "margin_hundredths": 2500, "margin": "25.00x", "failing_direction": "au6_e_two_exports_at_one_profile_do_not_separate", "failing_direction_measured": "0 separation", "reported_not_gated": false },
-      { "term": "authored level", "constant": "AU6_AUTHORED_LEVEL_TOLERANCE_HUNDREDTHS", "kind": "Ceiling", "budget": 25, "measured": 10, "margin_hundredths": 250, "margin": "2.50x", "failing_direction": "au6_every_authored_level_matches_its_analytic_derivation", "failing_direction_measured": "no separate fixture in §4.2: a mis-authored level fails the gate itself, buffer by buffer", "reported_not_gated": false },
-      { "term": "voice band separation", "constant": "AU6_VOICE_BAND_SEPARATION_BANDS", "kind": "Floor", "budget": 1, "measured": 3, "margin_hundredths": 300, "margin": "3.00x", "failing_direction": "au6_the_two_voices_occupy_disjoint_bands", "failing_direction_measured": "no separate fixture in §4.2: two voices on one band fail the gate itself", "reported_not_gated": false }
+      {
+        "term": "dialogue over bed",
+        "constant": "AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS",
+        "kind": "Floor",
+        "budget": 400,
+        "measured": 812,
+        "margin_hundredths": 203,
+        "margin": "2.03x",
+        "failing_direction": "au6_a_the_unducked_document_does_not_clear_the_bed",
+        "failing_direction_measured": "-388",
+        "reported_not_gated": false
+      },
+      {
+        "term": "duck depth",
+        "constant": "AU6_DUCK_DEPTH_MIN_HUNDREDTHS",
+        "kind": "Floor",
+        "budget": 400,
+        "measured": 1187,
+        "margin_hundredths": 296,
+        "margin": "2.96x",
+        "failing_direction": "au6_a_the_unducked_bed_has_no_depth",
+        "failing_direction_measured": "-14",
+        "reported_not_gated": false
+      },
+      {
+        "term": "voices matched, (a)",
+        "constant": "AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS",
+        "kind": "Ceiling",
+        "budget": 150,
+        "measured": 5,
+        "margin_hundredths": 3000,
+        "margin": "30.00x",
+        "failing_direction": "au6_a_the_untrimmed_voices_are_not_matched",
+        "failing_direction_measured": "365; the wrong model au6_a_the_nominal_dbfs_trim_is_worse_than_none reads 235",
+        "reported_not_gated": false
+      },
+      {
+        "term": "voices matched, (b)",
+        "constant": "AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS",
+        "kind": "Ceiling",
+        "budget": 150,
+        "measured": 50,
+        "margin_hundredths": 300,
+        "margin": "3.00x",
+        "failing_direction": "au6_b_the_raw_trims_do_not_match_the_voices",
+        "failing_direction_measured": "1442",
+        "reported_not_gated": false
+      },
+      {
+        "term": "dynamics reduced",
+        "constant": "AU6_PODCAST_SPREAD_REDUCTION_MIN_HUNDREDTHS",
+        "kind": "Floor",
+        "budget": 450,
+        "measured": 978,
+        "margin_hundredths": 217,
+        "margin": "2.17x",
+        "failing_direction": "au6_b_the_bypassed_chain_leaves_the_spread_intact",
+        "failing_direction_measured": "0",
+        "reported_not_gated": false
+      },
+      {
+        "term": "programme LRA",
+        "constant": "AU6_PODCAST_LRA_MAX_LU_HUNDREDTHS",
+        "kind": "Ceiling",
+        "budget": 300,
+        "measured": 50,
+        "margin_hundredths": 600,
+        "margin": "6.00x",
+        "failing_direction": "au6_b_the_makeup_less_chain_exceeds_the_loudness_range",
+        "failing_direction_measured": "1274 (un-trimmed 1434)",
+        "reported_not_gated": false
+      },
+      {
+        "term": "normalization prediction",
+        "constant": "AU6_NORMALIZATION_PREDICTION_MAX_LU_HUNDREDTHS",
+        "kind": "Ceiling",
+        "budget": 25,
+        "measured": 1,
+        "margin_hundredths": 2500,
+        "margin": "25.00x",
+        "failing_direction": "au6_b_a_clip_whose_head_window_is_silent_gets_no_fade",
+        "failing_direction_measured": "0 proposed fades; that is \u00a74.2's planner non-vacuity row \u2014 the prediction term itself carries no separate failing fixture",
+        "reported_not_gated": false
+      },
+      {
+        "term": "clipping, every scenario",
+        "constant": "",
+        "kind": "Exact",
+        "budget": 0,
+        "measured": 0,
+        "margin_hundredths": null,
+        "margin": "infinite (measured exactly zero)",
+        "failing_direction": "au6_a_a_hot_master_clips_and_says_so",
+        "failing_direction_measured": "technical_pass == false",
+        "reported_not_gated": false
+      },
+      {
+        "term": "gap under the detector",
+        "constant": "AU6_LEARN_GAP_BELOW_SILENCE_MIN_HUNDREDTHS",
+        "kind": "Floor",
+        "budget": 250,
+        "measured": 526,
+        "margin_hundredths": 210,
+        "margin": "2.10x",
+        "failing_direction": "au6_c_the_brief_levels_never_reach_the_detector",
+        "failing_direction_measured": "approximately -3400, above the -3500 threshold",
+        "reported_not_gated": false
+      },
+      {
+        "term": "repair SNR gain",
+        "constant": "AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS",
+        "kind": "Floor",
+        "budget": 500,
+        "measured": 1142,
+        "margin_hundredths": 228,
+        "margin": "2.28x",
+        "failing_direction": "au6_c_an_unlearned_profile_moves_no_snr",
+        "failing_direction_measured": "132",
+        "reported_not_gated": false
+      },
+      {
+        "term": "60 Hz drop",
+        "constant": "AU6_HUM_DROP_MIN_DB_HUNDREDTHS",
+        "kind": "Floor",
+        "budget": 2400,
+        "measured": 4970,
+        "margin_hundredths": 207,
+        "margin": "2.07x",
+        "failing_direction": "au6_c_a_chain_without_the_hum_node_leaves_the_mains_alone",
+        "failing_direction_measured": "1 tenth dB",
+        "reported_not_gated": false
+      },
+      {
+        "term": "per-harmonic drop, first three",
+        "constant": "AU6_HUM_HARMONIC_DROP_MIN_DB_HUNDREDTHS",
+        "kind": "Floor",
+        "budget": 500,
+        "measured": 1096,
+        "margin_hundredths": 219,
+        "margin": "2.19x",
+        "failing_direction": "au6_c_a_chain_without_the_hum_node_leaves_the_mains_alone",
+        "failing_direction_measured": "no harmonic clears 500; the fourth harmonic rises 103 on the canonical chain and is recorded, never gated",
+        "reported_not_gated": false
+      },
+      {
+        "term": "clicks after repair",
+        "constant": "",
+        "kind": "Exact",
+        "budget": 0,
+        "measured": 0,
+        "margin_hundredths": null,
+        "margin": "infinite (measured exactly zero)",
+        "failing_direction": "au6_c_a_chain_without_the_declick_node_keeps_every_click",
+        "failing_direction_measured": "12 clicks survive",
+        "reported_not_gated": false
+      },
+      {
+        "term": "de-click error drop, node alone against click-free",
+        "constant": "AU6_DECLICK_ERROR_DROP_MIN_TENTH_DB",
+        "kind": "Floor",
+        "budget": 120,
+        "measured": 258,
+        "margin_hundredths": 215,
+        "margin": "2.15x",
+        "failing_direction": "au6_c_a_chain_without_the_declick_node_keeps_every_click",
+        "failing_direction_measured": "drop 0.0, the bare stem bit-identical to the authored buffer",
+        "reported_not_gated": false
+      },
+      {
+        "term": "speech level retained",
+        "constant": "AU6_REPAIR_SPEECH_LOSS_MAX_DB_HUNDREDTHS",
+        "kind": "Ceiling",
+        "budget": 300,
+        "measured": 101,
+        "margin_hundredths": 297,
+        "margin": "2.97x",
+        "failing_direction": "au6_c_an_over_reduced_profile_eats_the_dialogue",
+        "failing_direction_measured": "over 300",
+        "reported_not_gated": false
+      },
+      {
+        "term": "profile band pin",
+        "constant": "",
+        "kind": "MeasuredZero",
+        "budget": 0,
+        "measured": 0,
+        "margin_hundredths": null,
+        "margin": "infinite (measured exactly zero)",
+        "failing_direction": "au6_c_a_one_frame_learn_offset_moves_the_profile",
+        "failing_direction_measured": "29 tenth dB at band 0",
+        "reported_not_gated": false
+      },
+      {
+        "term": "profile leakage allowance",
+        "constant": "AU6_PROFILE_LEAKAGE_ALLOWANCE_TENTH_DB",
+        "kind": "Ceiling",
+        "budget": 60,
+        "measured": 27,
+        "margin_hundredths": 222,
+        "margin": "2.22x",
+        "failing_direction": "au6_c_a_profile_learned_over_speech_is_not_the_noise_profile",
+        "failing_direction_measured": "over the bound",
+        "reported_not_gated": false
+      },
+      {
+        "term": "room-tone seam",
+        "constant": "",
+        "kind": "MeasuredZero",
+        "budget": 0,
+        "measured": 0,
+        "margin_hundredths": null,
+        "margin": "infinite (measured exactly zero)",
+        "failing_direction": "au6_c_a_one_frame_slip_breaks_the_seam",
+        "failing_direction_measured": "greater than 0.0",
+        "reported_not_gated": false
+      },
+      {
+        "term": "master stem identity",
+        "constant": "",
+        "kind": "MeasuredZero",
+        "budget": 0,
+        "measured": 0,
+        "margin_hundredths": null,
+        "margin": "infinite (measured exactly zero)",
+        "failing_direction": "au6_d_a_cut_master_track_is_not_continuous",
+        "failing_direction_measured": "diverges at interleaved sample 576000",
+        "reported_not_gated": false
+      },
+      {
+        "term": "master passthrough",
+        "constant": "AU6_MASTER_PASSTHROUGH_MAX_LU_HUNDREDTHS",
+        "kind": "MeasuredZero",
+        "budget": 50,
+        "measured": 0,
+        "margin_hundredths": null,
+        "margin": "infinite (measured exactly zero)",
+        "failing_direction": "au6_d_the_unmuted_scratch_moves_the_master",
+        "failing_direction_measured": "600, twelve times the budget",
+        "reported_not_gated": false
+      },
+      {
+        "term": "delivery deviation, both lanes",
+        "constant": "AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS",
+        "kind": "Ceiling",
+        "budget": 25,
+        "measured": 1,
+        "margin_hundredths": 2500,
+        "margin": "25.00x",
+        "failing_direction": "au6_e_an_unnormalized_export_misses_the_target",
+        "failing_direction_measured": "122 (source master) / 778 (streaming)",
+        "reported_not_gated": false
+      },
+      {
+        "term": "true-peak margin, thinnest lane",
+        "constant": "AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS",
+        "kind": "Floor",
+        "budget": 100,
+        "measured": 204,
+        "margin_hundredths": 204,
+        "margin": "2.04x",
+        "failing_direction": "au6_e_an_unnormalized_export_misses_the_target",
+        "failing_direction_measured": "the same un-normalized export; the source-master lane keeps 1104",
+        "reported_not_gated": false
+      },
+      {
+        "term": "target separation",
+        "constant": "AU6_TARGET_SEPARATION_TOLERANCE_LU_HUNDREDTHS",
+        "kind": "Ceiling",
+        "budget": 25,
+        "measured": 1,
+        "margin_hundredths": 2500,
+        "margin": "25.00x",
+        "failing_direction": "au6_e_two_exports_at_one_profile_do_not_separate",
+        "failing_direction_measured": "0 separation",
+        "reported_not_gated": false
+      },
+      {
+        "term": "authored level",
+        "constant": "AU6_AUTHORED_LEVEL_TOLERANCE_HUNDREDTHS",
+        "kind": "Ceiling",
+        "budget": 25,
+        "measured": 10,
+        "margin_hundredths": 250,
+        "margin": "2.50x",
+        "failing_direction": "au6_every_authored_level_matches_its_analytic_derivation",
+        "failing_direction_measured": "no separate fixture in \u00a74.2: a mis-authored level fails the gate itself, buffer by buffer",
+        "reported_not_gated": false
+      },
+      {
+        "term": "voice band separation",
+        "constant": "AU6_VOICE_BAND_SEPARATION_BANDS",
+        "kind": "Floor",
+        "budget": 1,
+        "measured": 3,
+        "margin_hundredths": 300,
+        "margin": "3.00x",
+        "failing_direction": "au6_the_two_voices_occupy_disjoint_bands",
+        "failing_direction_measured": "no separate fixture in \u00a74.2: two voices on one band fail the gate itself",
+        "reported_not_gated": false
+      }
     ],
     "fixture_groups": {
-      "interview": ["dialogue over bed", "voices matched, (a)"],
-      "duck": ["duck depth"],
-      "clipping": ["clipping, every scenario"],
-      "podcast": ["voices matched, (b)", "dynamics reduced"],
-      "podcast.lra": ["programme LRA"],
-      "repair": ["repair SNR gain", "60 Hz drop", "per-harmonic drop, first three"],
-      "declick": ["clicks after repair", "de-click error drop, node alone against click-free"],
-      "speech_loss": ["speech level retained"],
-      "seam": ["room-tone seam"],
-      "profile": ["profile band pin", "profile leakage allowance"],
-      "master_stem": ["master stem identity"],
-      "scratch": ["master passthrough"],
-      "master_passthrough": ["master passthrough"],
-      "delivery": ["delivery deviation, both lanes", "true-peak margin, thinnest lane"],
-      "separation": ["target separation"],
-      "sources": ["gap under the detector", "authored level", "voice band separation"],
-      "planners": ["normalization prediction"]
+      "interview": [
+        "dialogue over bed",
+        "voices matched, (a)"
+      ],
+      "duck": [
+        "duck depth"
+      ],
+      "clipping": [
+        "clipping, every scenario"
+      ],
+      "podcast": [
+        "voices matched, (b)",
+        "dynamics reduced"
+      ],
+      "podcast.lra": [
+        "programme LRA"
+      ],
+      "repair": [
+        "repair SNR gain",
+        "60 Hz drop",
+        "per-harmonic drop, first three"
+      ],
+      "declick": [
+        "clicks after repair",
+        "de-click error drop, node alone against click-free"
+      ],
+      "speech_loss": [
+        "speech level retained"
+      ],
+      "seam": [
+        "room-tone seam"
+      ],
+      "profile": [
+        "profile band pin",
+        "profile leakage allowance"
+      ],
+      "master_stem": [
+        "master stem identity"
+      ],
+      "scratch": [
+        "master passthrough"
+      ],
+      "master_passthrough": [
+        "master passthrough"
+      ],
+      "delivery": [
+        "delivery deviation, both lanes",
+        "true-peak margin, thinnest lane"
+      ],
+      "separation": [
+        "target separation"
+      ],
+      "sources": [
+        "gap under the detector",
+        "authored level",
+        "voice band separation"
+      ],
+      "planners": [
+        "normalization prediction"
+      ]
     },
     "cuttable": [
       "au6_b_the_makeup_less_chain_exceeds_the_loudness_range",
@@ -285,27 +853,57 @@
     ],
     "cut": [],
     "reported_not_gated": [
-      "profile.estimator — the 20th-percentile floor against the authored floor",
-      "declick.contribution_in_chain — 0.5 whole / 17.2 at +-10 ms / 71.6 at +-1 ms",
+      "profile.estimator \u2014 the 20th-percentile floor against the authored floor",
+      "declick.contribution_in_chain \u2014 0.5 whole / 17.2 at +-10 ms / 71.6 at +-1 ms",
       "the fourth hum harmonic, which rises 103 on the canonical chain",
-      "multicam.angle_ripple — an angle ripple leaves the master stem bit-identical",
-      "delivery.raster_invariance — the four-raster table",
-      "parity.curve_owners — the three ducking curve owners render identically",
-      "performance.media_lane and performance.agent_lane — recorded, never gated, never widened"
+      "multicam.angle_ripple \u2014 an angle ripple leaves the master stem bit-identical",
+      "delivery.raster_invariance \u2014 the four-raster table",
+      "parity.curve_owners \u2014 the three ducking curve owners render identically",
+      "performance.media_lane and performance.agent_lane \u2014 recorded, never gated, never widened"
     ]
   },
   "export_jobs": [
-    { "id": "e_source_master", "profile": "SourceMaster", "target_lufs_hundredths": -2300, "true_peak_ceiling_dbtp_hundredths": -100, "normalize": true, "depth": "Eight" },
-    { "id": "e_streaming", "profile": "Youtube1080p", "target_lufs_hundredths": -1400, "true_peak_ceiling_dbtp_hundredths": -100, "normalize": true, "depth": "Eight" }
+    {
+      "id": "e_source_master",
+      "profile": "SourceMaster",
+      "target_lufs_hundredths": -2300,
+      "true_peak_ceiling_dbtp_hundredths": -100,
+      "normalize": true,
+      "depth": "Eight"
+    },
+    {
+      "id": "e_streaming",
+      "profile": "Youtube1080p",
+      "target_lufs_hundredths": -1400,
+      "true_peak_ceiling_dbtp_hundredths": -100,
+      "normalize": true,
+      "depth": "Eight"
+    }
   ],
   "canonical_documents": {
-    "items": [5, 6, 7],
+    "items": [
+      5,
+      6,
+      7
+    ],
     "clip_ids": {
       "c_right": 2,
       "c_middle": 3,
       "c_fill": 3,
-      "d_splits": [6, 7, 8, 9, 10, 11],
-      "d_deleted": [8, 6, 2, 10]
+      "d_splits": [
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ],
+      "d_deleted": [
+        8,
+        6,
+        2,
+        10
+      ]
     },
     "delivery": {
       "reuses": "a",
@@ -316,15 +914,60 @@
       "duck_keyframes_e": 10,
       "last_e_keyframe_at": 151
     },
-    "operation_counts": { "a": 5, "b": 6, "c": 4, "d": 12, "e": 5 },
-    "c_ledger": ["gap commit", "capture_room_tone (Action-applied AddAsset)", "fill commit", "repair commit"]
+    "operation_counts": {
+      "a": 5,
+      "b": 6,
+      "c": 4,
+      "d": 12,
+      "e": 5
+    },
+    "c_ledger": [
+      "gap commit",
+      "capture_room_tone (Action-applied AddAsset)",
+      "fill commit",
+      "repair commit"
+    ]
   },
   "pins": {
     "duck_keyframes": {
       "constant": "AU6_A_DUCK_KEYFRAMES",
       "count": 16,
-      "detected_windows": [[1, 54], [77, 129], [151, 204], [227, 279]],
-      "authored_turns": [[0, 50], [75, 125], [150, 200], [225, 275]],
+      "detected_windows": [
+        [
+          1,
+          54
+        ],
+        [
+          77,
+          129
+        ],
+        [
+          151,
+          204
+        ],
+        [
+          227,
+          279
+        ]
+      ],
+      "authored_turns": [
+        [
+          0,
+          50
+        ],
+        [
+          75,
+          125
+        ],
+        [
+          150,
+          200
+        ],
+        [
+          225,
+          275
+        ]
+      ],
       "depth_tenth_db": -120,
       "attack_ms": 150,
       "hold_ms": 200,
@@ -332,9 +975,18 @@
     },
     "learn_project_range": {
       "constant": "AU6_C_LEARN_PROJECT_RANGE",
-      "value": [274, 312],
-      "authored": [275, 312],
-      "source_range": [275, 312]
+      "value": [
+        274,
+        312
+      ],
+      "authored": [
+        275,
+        312
+      ],
+      "source_range": [
+        275,
+        312
+      ]
     },
     "learned_profile_tenth_db": {
       "constant": "AU6_C_LEARNED_PROFILE_TENTH_DB",
@@ -358,7 +1010,11 @@
   },
   "parity": {
     "curve_owners": 27,
-    "owners": ["SetTrackAutomation on the bed track", "the Music bus's own gain_curve", "the bed clip's audio_gain_curve"],
+    "owners": [
+      "SetTrackAutomation on the bed track",
+      "the Music bus's own gain_curve",
+      "the bed clip's audio_gain_curve"
+    ],
     "master_stem_identical": true,
     "bus_stem_identical": true,
     "track_stem_differs_for": "the bus route only",
@@ -366,8 +1022,17 @@
     "reported_not_gated": true
   },
   "multicam": {
-    "cuts": [75, 150, 225],
-    "visible_angle_per_segment": [1, 2, 1, 2],
+    "cuts": [
+      75,
+      150,
+      225
+    ],
+    "visible_angle_per_segment": [
+      1,
+      2,
+      1,
+      2
+    ],
     "splits": 6,
     "deletes": 4,
     "angle_ripple": "evidence_not_gate",
@@ -379,12 +1044,48 @@
     "raster_invariance": "profile.resolution is the profile's; render overrides to document.resolution",
     "target_separation_lu_hundredths": 900,
     "raster_table": [
-      { "profile": "source_master", "raster": "320x180", "integrated": -2300, "deviation": 0, "true_peak": -1204, "lra": 5, "encode_ms": 13667, "verify_ms": 1020 },
-      { "profile": "youtube_1080p", "raster": "1920x1080", "integrated": -1400, "deviation": 0, "true_peak": -304, "lra": 5, "encode_ms": 126387, "verify_ms": 1225 },
-      { "profile": "square_social", "raster": "1080x1080", "integrated": -1400, "deviation": 0, "true_peak": -303, "lra": 5, "encode_ms": 76323, "verify_ms": 1279 },
-      { "profile": "vertical_short", "raster": "1080x1920", "integrated": -1400, "deviation": 0, "true_peak": -303, "lra": 5, "encode_ms": 127538, "verify_ms": 1301 }
+      {
+        "profile": "source_master",
+        "raster": "320x180",
+        "integrated": -2300,
+        "deviation": 0,
+        "true_peak": -1204,
+        "lra": 5,
+        "encode_ms": 13667,
+        "verify_ms": 1020
+      },
+      {
+        "profile": "youtube_1080p",
+        "raster": "1920x1080",
+        "integrated": -1400,
+        "deviation": 0,
+        "true_peak": -304,
+        "lra": 5,
+        "encode_ms": 126387,
+        "verify_ms": 1225
+      },
+      {
+        "profile": "square_social",
+        "raster": "1080x1080",
+        "integrated": -1400,
+        "deviation": 0,
+        "true_peak": -303,
+        "lra": 5,
+        "encode_ms": 76323,
+        "verify_ms": 1279
+      },
+      {
+        "profile": "vertical_short",
+        "raster": "1080x1920",
+        "integrated": -1400,
+        "deviation": 0,
+        "true_peak": -303,
+        "lra": 5,
+        "encode_ms": 127538,
+        "verify_ms": 1301
+      }
     ],
-    "hand_run_lane": "delivery at the profile's own raster (§13, Appendix A)"
+    "hand_run_lane": "delivery at the profile's own raster (\u00a713, Appendix A)"
   },
   "performance": {
     "media_lane": {
@@ -409,7 +1110,10 @@
       "measured_seconds": 131,
       "measured_seconds_at_080243e": 134,
       "budget_seconds": 120,
-      "tests_using_start_with_exporter": ["au6_a5a", "au6_a5b"],
+      "tests_using_start_with_exporter": [
+        "au6_a5a",
+        "au6_a5b"
+      ],
       "encodes": 1,
       "encode_programme_seconds": 12,
       "breakdown_is_probe_projection": true,
@@ -446,7 +1150,14 @@
   "review": {
     "questions": "core item 11",
     "question_count": 6,
-    "task_ids": ["a1", "a2", "a3", "a4", "a5a", "a5b"],
+    "task_ids": [
+      "a1",
+      "a2",
+      "a3",
+      "a4",
+      "a5a",
+      "a5b"
+    ],
     "one_clause_each": true
   },
   "scorecard": {
@@ -457,8 +1168,8 @@
     "agent_tasks": 6,
     "sentence": "5 of 5 scenarios complete by the person through the app's own builders: 4 of 5 to the identical canonical document, and (c) to an equivalent one whose repair nodes carry the app's explicit descriptor neutrals (R61). 6 of 6 tasks by the scripted agent; the model lane is pending the real-harness run.",
     "model_lane": "pending",
-    "linux_workspace_gate": "cargo test --workspace clean at 0b2290b, Linux CI run 34633080767; green under a working gate at 4b5f0a7",
-    "windows_workspace_gate": "every AU6 test passes on windows-latest: 94/94 at 1f09c18, CI run 34661190014 (core 13/13, agent 8/8, app 14/14, media 59/59, zero failures). The job as a whole is still red on seven pre-existing kinewright-media failures, none of them AU6's (§0.3 review finding 5), and the printed AU6_* margin figures are not transcribed yet because a passing test's stdout is captured — so every Windows margin cleared its budget, but the values themselves are unrecorded (§13 item 5, Appendix A row W)",
+    "linux_workspace_gate": "cargo test --workspace clean at 0b2290b, Linux CI run 34633080767; green under a working gate from 4b5f0a7 onwards",
+    "windows_workspace_gate": "every AU6 test passes on windows-latest: 94/94 at 1f09c18, CI run 34661190014 (core 13/13, agent 8/8, app 14/14, media 59/59, zero failures). The whole Windows job is green as of CI run 34695157900 at cb3df47 -- the first run in this repository with both operating systems passing under a gate that fails on a failing test. The printed AU6_* margin figures are still not transcribed, because a passing test's stdout is captured: every Windows margin cleared its budget, but the values themselves are unrecorded (section 13 item 5, Appendix A row W)",
     "windows_au6_tests": 94
   },
   "m36": {
