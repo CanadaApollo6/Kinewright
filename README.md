@@ -13,7 +13,7 @@
 
 Kinewright is a **native desktop** video editor written in Rust — the same fast binary on **Windows and Linux**, not a web wrapper, Electron shell, or VM. At its core it is an **agentic harness for video editing**. Type "cut the first three seconds and tighten the pauses" into the chat panel, and the agent CLI you already pay for — Claude Code, Codex, or Cursor — makes the edits on your timeline, using the exact same operations you'd use by hand. Every agent edit lands on the same undo stack as yours: **Ctrl+Z reverses the robot.**
 
-> Early development. The editor works end to end — import, cut, composite, export, agent editing, transcript editing — but expect rough edges.
+> Early development. The editor works end to end — import, cut, composite, export, agent editing, transcript editing — but expect rough edges. The product goal is an open-source, agent-native Premiere-class editor, built slice by slice. After Effects tooling is a later programme, not current work.
 
 <p align="center">
   <img src="docs/assets/kinewright-editor.png" width="960" alt="Kinewright with an Iceland landscape cut on the timeline, program monitor, and agent chat">

@@ -30,6 +30,12 @@ slice is the strategy, not overhead: a slice that stops at "preview only" or
 "agent only" leaves a gap a Premiere user would hit on day one, and gaps like that
 are what the competitive audit scored against.
 
+**After that Premiere-class depth holds, add After Effects tooling and
+capabilities.** That is a later programme: not a substitute for the Premiere-class
+editor, not a near-term slice, and not a reason to thin colour, audio, editorial,
+or media work that is already on the board. Do not start After Effects contracts
+or implementation now.
+
 We are pursuing workflow parity for valuable editing jobs, not copying another
 editor's feature count. A narrower tool that completes an entire job reliably is
 more useful than a wide collection of controls that stop at preview or cannot be
@@ -151,6 +157,10 @@ Colour begins immediately, while non-colour work continues in parallel.
 
 This table is intentionally broader than the current eval programme. A general
 video editor will not reach practical parity by optimizing montage taste alone.
+The Motion, compositing, and retiming track is Premiere-class editorial
+compositing (keyframes, ramps, mattes, adjustment layers). After Effects tooling
+is the later programme named in The outcome; it is not a row in this table and
+is not implied by the next-workflow-goals column.
 
 ## Near-term sequence
 
