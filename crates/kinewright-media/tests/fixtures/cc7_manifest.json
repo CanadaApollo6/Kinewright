@@ -1063,27 +1063,37 @@
           ],
           "luma_max_code": {
             "budget": 8,
-            "measured": 2,
+            "measured": {
+              "linux": 2
+            },
             "margin": 4.0
           },
           "luma_p99_code_millionths": {
             "budget": 3000000,
-            "measured": 1000000,
+            "measured": {
+              "linux": 1000000
+            },
             "margin": 3.0
           },
           "luma_mean_code_millionths": {
             "budget": 400000,
-            "measured": 18677,
+            "measured": {
+              "linux": 18677
+            },
             "margin": 21.4167
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": 402050,
+            "measured": {
+              "linux": 402050
+            },
             "margin": 4.3527
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4204,
+            "measured": {
+              "linux": 4204
+            },
             "margin": 904
           },
           "reported_not_gated": {
@@ -1106,27 +1116,37 @@
           ],
           "luma_max_code": {
             "budget": 16,
-            "measured": 1,
+            "measured": {
+              "linux": 1
+            },
             "margin": 16.0
           },
           "luma_p99_code_millionths": {
             "budget": 4000000,
-            "measured": 0,
+            "measured": {
+              "linux": 0
+            },
             "margin": "infinite (measured exactly zero)"
           },
           "luma_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 278,
+            "measured": {
+              "linux": 278
+            },
             "margin": 3597.1223
           },
           "rgb_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 233488,
+            "measured": {
+              "linux": 233488
+            },
             "margin": 4.2829
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4239,
+            "measured": {
+              "linux": 4239
+            },
             "margin": 939
           },
           "reported_not_gated": {
@@ -1151,27 +1171,37 @@
           ],
           "luma_max_code": {
             "budget": 8,
-            "measured": 2,
+            "measured": {
+              "linux": 2
+            },
             "margin": 4.0
           },
           "luma_p99_code_millionths": {
             "budget": 3000000,
-            "measured": 1000000,
+            "measured": {
+              "linux": 1000000
+            },
             "margin": 3.0
           },
           "luma_mean_code_millionths": {
             "budget": 400000,
-            "measured": 38177,
+            "measured": {
+              "linux": 38177
+            },
             "margin": 10.4775
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": 458622,
+            "measured": {
+              "linux": 458622
+            },
             "margin": 3.8158
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4129,
+            "measured": {
+              "linux": 4129
+            },
             "margin": 829
           },
           "reported_not_gated": {
@@ -1194,27 +1224,37 @@
           ],
           "luma_max_code": {
             "budget": 16,
-            "measured": 1,
+            "measured": {
+              "linux": 1
+            },
             "margin": 16.0
           },
           "luma_p99_code_millionths": {
             "budget": 4000000,
-            "measured": 0,
+            "measured": {
+              "linux": 0
+            },
             "margin": "infinite (measured exactly zero)"
           },
           "luma_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 278,
+            "measured": {
+              "linux": 278
+            },
             "margin": 3597.1223
           },
           "rgb_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 181593,
+            "measured": {
+              "linux": 181593
+            },
             "margin": 5.5068
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4165,
+            "measured": {
+              "linux": 4165
+            },
             "margin": 865
           },
           "reported_not_gated": {
@@ -1239,27 +1279,37 @@
           ],
           "luma_max_code": {
             "budget": 8,
-            "measured": 1,
+            "measured": {
+              "linux": 1
+            },
             "margin": 8.0
           },
           "luma_p99_code_millionths": {
             "budget": 3000000,
-            "measured": 1000000,
+            "measured": {
+              "linux": 1000000
+            },
             "margin": 3.0
           },
           "luma_mean_code_millionths": {
             "budget": 400000,
-            "measured": 195351,
+            "measured": {
+              "linux": 195351
+            },
             "margin": 2.0476
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": 512581,
+            "measured": {
+              "linux": 512581
+            },
             "margin": 3.4141
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4126,
+            "measured": {
+              "linux": 4126
+            },
             "margin": 826
           },
           "reported_not_gated": {
@@ -1282,27 +1332,37 @@
           ],
           "luma_max_code": {
             "budget": 16,
-            "measured": 0,
+            "measured": {
+              "linux": 0
+            },
             "margin": "infinite (measured exactly zero)"
           },
           "luma_p99_code_millionths": {
             "budget": 4000000,
-            "measured": 0,
+            "measured": {
+              "linux": 0
+            },
             "margin": "infinite (measured exactly zero)"
           },
           "luma_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 0,
+            "measured": {
+              "linux": 0
+            },
             "margin": "infinite (measured exactly zero)"
           },
           "rgb_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 169867,
+            "measured": {
+              "linux": 169867
+            },
             "margin": 5.887
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4172,
+            "measured": {
+              "linux": 4172
+            },
             "margin": 872
           },
           "reported_not_gated": {
@@ -1327,27 +1387,37 @@
           ],
           "luma_max_code": {
             "budget": 8,
-            "measured": 1,
+            "measured": {
+              "linux": 1
+            },
             "margin": 8.0
           },
           "luma_p99_code_millionths": {
             "budget": 3000000,
-            "measured": 0,
+            "measured": {
+              "linux": 0
+            },
             "margin": "infinite (measured exactly zero)"
           },
           "luma_mean_code_millionths": {
             "budget": 400000,
-            "measured": 3108,
+            "measured": {
+              "linux": 3108
+            },
             "margin": 128.7001
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": 349950,
+            "measured": {
+              "linux": 349950
+            },
             "margin": 5.0007
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4103,
+            "measured": {
+              "linux": 4103
+            },
             "margin": 803
           },
           "reported_not_gated": {
@@ -1370,27 +1440,37 @@
           ],
           "luma_max_code": {
             "budget": 16,
-            "measured": 0,
+            "measured": {
+              "linux": 0
+            },
             "margin": "infinite (measured exactly zero)"
           },
           "luma_p99_code_millionths": {
             "budget": 4000000,
-            "measured": 0,
+            "measured": {
+              "linux": 0
+            },
             "margin": "infinite (measured exactly zero)"
           },
           "luma_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 0,
+            "measured": {
+              "linux": 0
+            },
             "margin": "infinite (measured exactly zero)"
           },
           "rgb_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 162161,
+            "measured": {
+              "linux": 162161
+            },
             "margin": 6.1667
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4130,
+            "measured": {
+              "linux": 4130
+            },
             "margin": 830
           },
           "reported_not_gated": {
@@ -1415,27 +1495,37 @@
           ],
           "luma_max_code": {
             "budget": 8,
-            "measured": 2,
+            "measured": {
+              "linux": 2
+            },
             "margin": 4.0
           },
           "luma_p99_code_millionths": {
             "budget": 3000000,
-            "measured": 1000000,
+            "measured": {
+              "linux": 1000000
+            },
             "margin": 3.0
           },
           "luma_mean_code_millionths": {
             "budget": 400000,
-            "measured": 377538,
+            "measured": {
+              "linux": 377538
+            },
             "margin": 1.0595
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": 855810,
+            "measured": {
+              "linux": 855810
+            },
             "margin": 2.0448
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4059,
+            "measured": {
+              "linux": 4059
+            },
             "margin": 759
           },
           "reported_not_gated": {
@@ -1458,27 +1548,37 @@
           ],
           "luma_max_code": {
             "budget": 16,
-            "measured": 1,
+            "measured": {
+              "linux": 1
+            },
             "margin": 16.0
           },
           "luma_p99_code_millionths": {
             "budget": 4000000,
-            "measured": 0,
+            "measured": {
+              "linux": 0
+            },
             "margin": "infinite (measured exactly zero)"
           },
           "luma_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 347,
+            "measured": {
+              "linux": 347
+            },
             "margin": 2881.8444
           },
           "rgb_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 385514,
+            "measured": {
+              "linux": 385514
+            },
             "margin": 2.5939
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4129,
+            "measured": {
+              "linux": 4129
+            },
             "margin": 829
           },
           "reported_not_gated": {
@@ -1503,27 +1603,37 @@
           ],
           "luma_max_code": {
             "budget": 8,
-            "measured": 1,
+            "measured": {
+              "linux": 1
+            },
             "margin": 8.0
           },
           "luma_p99_code_millionths": {
             "budget": 3000000,
-            "measured": 0,
+            "measured": {
+              "linux": 0
+            },
             "margin": "infinite (measured exactly zero)"
           },
           "luma_mean_code_millionths": {
             "budget": 400000,
-            "measured": 1760,
+            "measured": {
+              "linux": 1760
+            },
             "margin": 227.2727
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": 271299,
+            "measured": {
+              "linux": 271299
+            },
             "margin": 6.4504
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4579,
+            "measured": {
+              "linux": 4579
+            },
             "margin": 1279
           },
           "reported_not_gated": {
@@ -1546,27 +1656,37 @@
           ],
           "luma_max_code": {
             "budget": 16,
-            "measured": 1,
+            "measured": {
+              "linux": 1
+            },
             "margin": 16.0
           },
           "luma_p99_code_millionths": {
             "budget": 4000000,
-            "measured": 0,
+            "measured": {
+              "linux": 0
+            },
             "margin": "infinite (measured exactly zero)"
           },
           "luma_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 274,
+            "measured": {
+              "linux": 274
+            },
             "margin": 3649.635
           },
           "rgb_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 77447,
+            "measured": {
+              "linux": 77447
+            },
             "margin": 12.9121
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4674,
+            "measured": {
+              "linux": 4674
+            },
             "margin": 1374
           },
           "reported_not_gated": {
@@ -1678,7 +1798,7 @@
     },
     "reported_not_gated": {
       "c2_residual_spread_code": 19,
-          "c2_over_range_pixels": 672,
+      "c2_over_range_pixels": 672,
       "c2_over_range_basis_points": 116,
       "c2_blue_maximum_over_excursion_millionths": 41538,
       "warm_whole_raster_out_of_gamut_pixels": 1480,
@@ -1694,23 +1814,25 @@
       "rgb_extremes_note": "DELIVERY_RGB_EXTREMES_NOTE covers the 4:2:0 hard-edge terms; they are recorded per scenario in budgets.delivery[*].reported_not_gated"
     },
     "measurement": {
-      "os": "linux",
-      "arch": "x86_64",
-      "kernel": "7.1.9-arch1-2",
-      "lane": "software_fallback",
-      "adapter": "llvmpipe (LLVM 22.1.8, 256 bits)",
-      "backend": "vulkan",
-      "source_generator": "kinewright_media::cc7_sources (idiom A, FFV1 -level 3 -g 1, yuv444p, BT.709 limited, .mkv)",
-      "ffmpeg_build": "n8.0-23-gd1f31a829d-20251022 (third_party/ffmpeg, scripts/setup-ffmpeg.sh)",
-      "libavcodec": "62.11.100",
-      "libswscale": "9.1.100",
-      "libavutil": "60.8.100",
-      "x264_core": "165",
-      "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
-      "commit": "99faee368a9cd292ae1414c3e878792065473102",
-      "date": "2026-08-27",
-      "probe": "CC7 12 step 5, Implementer C, measured live in cc7_fixtures.rs",
-      "accumulation": "row-major from the top-left, sums in f64 (CC7 10.7)"
+      "linux": {
+        "os": "linux",
+        "arch": "x86_64",
+        "kernel": "7.1.9-arch1-2",
+        "lane": "software_fallback",
+        "adapter": "llvmpipe (LLVM 22.1.8, 256 bits)",
+        "backend": "vulkan",
+        "source_generator": "kinewright_media::cc7_sources (idiom A, FFV1 -level 3 -g 1, yuv444p, BT.709 limited, .mkv)",
+        "ffmpeg_build": "n8.0-23-gd1f31a829d-20251022 (third_party/ffmpeg, scripts/setup-ffmpeg.sh)",
+        "libavcodec": "62.11.100",
+        "libswscale": "9.1.100",
+        "libavutil": "60.8.100",
+        "x264_core": "165",
+        "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+        "commit": "99faee368a9cd292ae1414c3e878792065473102",
+        "date": "2026-08-27",
+        "probe": "CC7 12 step 5, Implementer C, measured live in cc7_fixtures.rs",
+        "accumulation": "row-major from the top-left, sums in f64 (CC7 10.7)"
+      }
     }
   },
   "performance": {

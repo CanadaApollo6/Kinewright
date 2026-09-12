@@ -289,9 +289,33 @@ the `pub(crate)` entries are named (§3.9, §5.6, §5.7). No OPEN note remains.
   third export is what stops the first two from being vacuous.
 - **E55. The hot-noise LU margin is the exit gate's thinnest number** (deviation 37 hundredths
   against a 100 budget, ≥ 2× bar = 50), dominated by the limiter's loudness pull rather than the AAC
-  round trip; the budget equals the streaming tolerance, so the bar is stricter than conformance. If
-  the Windows lane reds on this term, the response is a per-OS note on the constant's doc comment
-  in CC6 §6.3's manner, never a `cfg`.
+  round trip; the budget equals the streaming tolerance, so the bar is stricter than conformance.
+  **E59 amends this clause's response.** *Was:* "If the Windows lane reds on this term, the
+  response is a per-OS note on the constant's doc comment in CC6 §6.3's manner, never a `cfg`."
+- **E59. A measured column belongs to the operating system that produced it, and each one is
+  optimized there (Riel, 2026-09-12).** E55's clause above, CC6 §6.3 and AU6 §10.6 all said a
+  Windows figure earns a note on a constant's doc comment and **never** a per-OS constant. With the
+  CI gate finally failing on a failing test, that rule is unworkable and was hiding a real gap:
+  Windows CI provisions **a different FFmpeg package** (`System233/ffmpeg-msvc-prebuilt
+  ffmpeg-8.0.1-r3` against Linux's `mifi/ffmpeg-builds 8.0-1`), so one measured number is not true
+  of both systems, and the only way to keep one was to widen it until it bounded neither tightly —
+  which is precisely the "invented tolerance" §4.1 forbids. **The rule is now: a measured column is
+  per operating system, each value measured on that system and optimized there.** Normative:
+  1. A **budget** stays single and shared. Budgets are the contract; only the *measured* column
+     splits. A budget is never widened to span two systems.
+  2. A **measured** value is either a scalar — measured on every supported system and found equal,
+     so there is nothing to split — or keyed by operating system. A scalar is a claim that both
+     systems produced it, not a default.
+  3. A system with **no** column for a row **fails loudly**; it never passes by omission. The
+     fixture reports what it measured so one run publishes that system's whole column.
+  4. **No number is copied across systems**, and no per-OS value is chosen to make a red build
+     green. Each is measured where it runs and carries its own margin against the shared budget.
+  5. The measurement **provenance** (FFmpeg build, library versions, x264 core, adapter, kernel,
+     toolchain) is recorded per system beside its column, because every field in it is a property
+     of that machine.
+  6. `cfg(target_os)` is now permitted **for a measured constant only**, and only with its own
+     measurement and provenance in the doc comment. It remains forbidden for a budget, a tolerance
+     and an environment gate — AU6 §11.0.6's scan is unchanged.
 - **E56. The corrective gain is not range-checked** against −6000..=3600 (§5.6 step 6 does not ask
   for it); there is no runaway — the pass count is a straight-line `if`, the correction fires only
   in the direction a limiter can produce, and the limiter re-clamps whatever the gain does.

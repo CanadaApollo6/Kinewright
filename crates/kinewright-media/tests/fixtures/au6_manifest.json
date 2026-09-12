@@ -457,8 +457,9 @@
     "agent_tasks": 6,
     "sentence": "5 of 5 scenarios complete by the person through the app's own builders: 4 of 5 to the identical canonical document, and (c) to an equivalent one whose repair nodes carry the app's explicit descriptor neutrals (R61). 6 of 6 tasks by the scripted agent; the model lane is pending the real-harness run.",
     "model_lane": "pending",
-    "linux_workspace_gate": "cargo test --workspace clean at 0b2290b, Linux CI run 34633080767",
-    "windows_workspace_gate": "no AU6 test has ever run on Windows; the job aborted on four pre-existing kinewright-agent failures and reported success because the pwsh step did not check $LASTEXITCODE (§0.3 review finding 2)"
+    "linux_workspace_gate": "cargo test --workspace clean at 0b2290b, Linux CI run 34633080767; green under a working gate at 4b5f0a7",
+    "windows_workspace_gate": "every AU6 test passes on windows-latest: 94/94 at 1f09c18, CI run 34661190014 (core 13/13, agent 8/8, app 14/14, media 59/59, zero failures). The job as a whole is still red on seven pre-existing kinewright-media failures, none of them AU6's (§0.3 review finding 5), and the printed AU6_* margin figures are not transcribed yet because a passing test's stdout is captured — so every Windows margin cleared its budget, but the values themselves are unrecorded (§13 item 5, Appendix A row W)",
+    "windows_au6_tests": 94
   },
   "m36": {
     "registry": 138,

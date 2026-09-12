@@ -1400,29 +1400,44 @@ LUT_3D_SIZE 2
             .into_lut_asset(LutAssetId(id))
     }
 
+    /// A directory that is **already absolute on the running system**, so
+    /// `for_project`'s `std::path::absolute` is the identity on it.
+    ///
+    /// A POSIX literal is not absolute on Windows: `/home/riel/edits` has no
+    /// drive, so `absolute` resolves it against the current one and returns
+    /// `D:\home\riel\edits`. Comparing that to the literal asserted which
+    /// drive the runner happened to check out on, not the derivation.
+    #[cfg(windows)]
+    const FIXTURE_PROJECT_DIRECTORY: &str = r"C:\home\riel\edits";
+    /// See [`FIXTURE_PROJECT_DIRECTORY`].
+    #[cfg(not(windows))]
+    const FIXTURE_PROJECT_DIRECTORY: &str = "/home/riel/edits";
+
     #[test]
     fn store_root_is_the_project_stem_plus_the_asset_suffix() {
-        let unix = LutStore::for_project(Path::new("/home/riel/edits/Demo Project.kinewright"))
-            .expect("a saved unix project path should derive a store");
+        let directory = Path::new(FIXTURE_PROJECT_DIRECTORY);
+        let saved = LutStore::for_project(&directory.join("Demo Project.kinewright"))
+            .expect("a saved project path should derive a store");
         assert_eq!(
-            unix.root(),
-            Path::new("/home/riel/edits/Demo Project.kinewright-assets")
+            saved.root(),
+            directory.join("Demo Project.kinewright-assets")
         );
         assert_eq!(
-            unix.luts_dir(),
-            Path::new("/home/riel/edits/Demo Project.kinewright-assets/luts")
+            saved.luts_dir(),
+            directory
+                .join("Demo Project.kinewright-assets")
+                .join("luts")
         );
 
         // The derivation is a pure string operation on the parent and the
         // stem: "replace the project extension with `.kinewright-assets`",
-        // with the stem surviving verbatim, spaces and punctuation included.
-        let awkward = LutStore::for_project(Path::new(
-            "/mnt/c/Users/riel/Demo Project v2.final.kinewright",
-        ))
-        .expect("an awkward but saved project path should derive a store");
+        // with the stem surviving verbatim, spaces and punctuation included —
+        // including a stem that carries its own dots.
+        let awkward = LutStore::for_project(&directory.join("Demo Project v2.final.kinewright"))
+            .expect("an awkward but saved project path should derive a store");
         assert_eq!(
             awkward.root(),
-            Path::new("/mnt/c/Users/riel/Demo Project v2.final.kinewright-assets")
+            directory.join("Demo Project v2.final.kinewright-assets")
         );
 
         // A Windows path derives the same way on Windows. On a unix host the
