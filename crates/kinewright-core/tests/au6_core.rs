@@ -48,15 +48,16 @@ use kinewright_core::{
         AU6_LOUDNESS_GATING_BLOCK_SAMPLE_FRAMES_RESTATED, AU6_MASTER_PASSTHROUGH_MAX_LU_HUNDREDTHS,
         AU6_MASTER_STEM_SAMPLES, AU6_MEASURED_HUM_HARMONIC_DROPS_DB_HUNDREDTHS,
         AU6_MEASURED_MASTER_CUT_DIVERGENCE_SAMPLE, AU6_MEDIA_LANE_BUDGET_SECONDS,
-        AU6_NOISE_PROFILE_MINIMUM_SAMPLE_FRAMES_RESTATED, AU6_PODCAST_COMPRESSOR_MAKEUP_TENTH_DB,
-        AU6_PODCAST_HIGHPASS_HERTZ, AU6_PROFILE_LEAKAGE_ALLOWANCE_TENTH_DB, AU6_PROGRAMME_FRAMES,
-        AU6_QUESTIONS, AU6_SAMPLE_RATE, AU6_SAMPLES_PER_FRAME, AU6_SCENARIO_SPECS, AU6_SCENARIOS,
+        AU6_NEIGHBOUR_BUDGETS, AU6_NOISE_PROFILE_MINIMUM_SAMPLE_FRAMES_RESTATED,
+        AU6_PODCAST_COMPRESSOR_MAKEUP_TENTH_DB, AU6_PODCAST_HIGHPASS_HERTZ,
+        AU6_PROFILE_LEAKAGE_ALLOWANCE_TENTH_DB, AU6_PROGRAMME_FRAMES, AU6_QUESTIONS,
+        AU6_SAMPLE_RATE, AU6_SAMPLES_PER_FRAME, AU6_SCENARIO_SPECS, AU6_SCENARIOS,
         AU6_SILENCE_THRESHOLD_RESTATED_DBFS_HUNDREDTHS, AU6_SOURCE_BUDGETS, AU6_SOURCE_FPS,
         AU6_SOURCE_HEIGHT, AU6_SOURCE_WIDTH, AU6_STREAMING_PROFILE,
         AU6_TARGET_SEPARATION_LU_HUNDREDTHS, AU6_TASK_IDS, AU6_THRESHOLD_CONSTANTS, AU6_TURNS,
         AU6_WINDOW_A_FIRST_TURN, AU6_WINDOW_A_SECOND_TURN, AU6_WINDOW_B_FIRST_TURN,
         AU6_WINDOW_B_SECOND_TURN, AU6_WINDOW_MILLISECONDS, AU6_WINDOW_PROGRAMME, Au6Budget,
-        Au6BudgetKind, Au6PersonPath, Au6Scenario, Au6Speaker, Au6TrackRole, Au6Unit,
+        Au6BudgetKind, Au6Neighbour, Au6PersonPath, Au6Scenario, Au6Speaker, Au6TrackRole, Au6Unit,
         au6_c_analytic_mean_band_tenth_db, au6_c_canonical_operations_with_room_tone,
         au6_c_declick_only_operations, au6_c_fill_operations, au6_c_gap_operations,
         au6_c_point_mass_band_tenth_db_wrong_model, au6_c_repair_operations,
@@ -81,34 +82,28 @@ fn ratio(numerator: i64, denominator: i64) -> f64 {
 // ---------------------------------------------------------------------------
 // Neighbouring constants AU6 asserts distinctness from (§2.8).
 //
-// Each lives in a crate `kinewright-core` cannot see, so it is restated here
-// with its owner named. A transcription with a named owner is a boundary.
+// Each lives in a crate `kinewright-core` cannot see. **R25:** they used to be
+// twelve `const`s here with their owners named only in a doc comment and
+// nothing comparing them, which meant an AU3 or AU5 budget could move and
+// this file would go on passing while no longer testing what it claimed. The
+// table is now `AU6_NEIGHBOUR_BUDGETS` in `au6_scenarios`, and the media
+// lane — which *can* see `tests/au3_fixtures.rs` and `tests/au5_fixtures.rs` —
+// pins ten of the twelve against the line that declares them.
 // ---------------------------------------------------------------------------
 
-/// `FIXTURE_LOUDNESS_BUDGET_HUNDREDTHS`, `kinewright-media/tests/au3_fixtures.rs:38`, LU.
-const NEIGHBOUR_AU3_FIXTURE_LOUDNESS_BUDGET_HUNDREDTHS: i64 = 100;
-/// `FIXTURE_AAC_OVERSHOOT_BUDGET_HUNDREDTHS`, `au3_fixtures.rs:47`, dBTP.
-const NEIGHBOUR_AU3_FIXTURE_AAC_OVERSHOOT_BUDGET_HUNDREDTHS: i64 = 50;
-/// `VERIFY_TONE_TRUE_PEAK_BUDGET_HUNDREDTHS`, `au3_fixtures.rs:56`, dBTP.
-const NEIGHBOUR_AU3_VERIFY_TONE_TRUE_PEAK_BUDGET_HUNDREDTHS: i64 = 80;
-/// `DENOISE_FLOOR_DROP_BUDGET_TENTH_DB`, `kinewright-media/tests/au5_fixtures.rs:81`.
-const NEIGHBOUR_AU5_DENOISE_FLOOR_DROP_BUDGET_TENTH_DB: i64 = 70;
-/// `DENOISE_TONE_LOSS_BUDGET_TENTH_DB`, `au5_fixtures.rs:87`.
-const NEIGHBOUR_AU5_DENOISE_TONE_LOSS_BUDGET_TENTH_DB: i64 = 10;
-/// `DENOISE_PROFILE_LEARN_BUDGET_TENTH_DB`, `au5_fixtures.rs:90`.
-const NEIGHBOUR_AU5_DENOISE_PROFILE_LEARN_BUDGET_TENTH_DB: i64 = 15;
-/// `DENOISE_PROFILE_NEIGHBOUR_BUDGET_TENTH_DB`, `au5_fixtures.rs:134`.
-const NEIGHBOUR_AU5_DENOISE_PROFILE_NEIGHBOUR_BUDGET_TENTH_DB: i64 = 70;
-/// `HUM_DROP_BUDGET_TENTH_DB`, `au5_fixtures.rs:141`.
-const NEIGHBOUR_AU5_HUM_DROP_BUDGET_TENTH_DB: i64 = 140;
-/// `HUM_TONE_LOSS_BUDGET_TENTH_DB`, `au5_fixtures.rs:152`.
-const NEIGHBOUR_AU5_HUM_TONE_LOSS_BUDGET_TENTH_DB: i64 = 15;
-/// `AUDIO_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS`, `au5_fixtures.rs:176`, dB.
-const NEIGHBOUR_AU5_AUDIO_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS: i64 = 600;
-/// `DECLICK_ERROR_DROP_BUDGET_TENTH_DB`, `kinewright-media/src/audio.rs:11004`.
-const NEIGHBOUR_AU5_DECLICK_ERROR_DROP_BUDGET_TENTH_DB: i64 = 300;
-/// `LoudnessTarget.tolerance_lu_hundredths` on both targets, LU.
-const NEIGHBOUR_TARGET_TOLERANCE_LU_HUNDREDTHS: i64 = 100;
+/// One neighbour's value, by its owner's constant name.
+///
+/// # Panics
+///
+/// Panics when the name is not in `AU6_NEIGHBOUR_BUDGETS`, which is a typo in
+/// this file rather than a condition worth handling.
+fn au6_neighbour(constant: &str) -> i64 {
+    AU6_NEIGHBOUR_BUDGETS
+        .iter()
+        .find(|neighbour| neighbour.constant == constant)
+        .unwrap_or_else(|| panic!("{constant} is not an AU6_NEIGHBOUR_BUDGETS entry"))
+        .value
+}
 
 // ---------------------------------------------------------------------------
 // Base documents, built off `au6_spec` with no §2 literal restated.
@@ -1664,74 +1659,18 @@ fn au6_export_jobs_differ_only_in_the_job() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn au6_budgets_are_distinct_from_every_neighbouring_constant() {
-    let neighbours: [(&str, Au6Unit, i64); 12] = [
-        (
-            "FIXTURE_LOUDNESS_BUDGET_HUNDREDTHS",
-            Au6Unit::LuHundredths,
-            NEIGHBOUR_AU3_FIXTURE_LOUDNESS_BUDGET_HUNDREDTHS,
-        ),
-        (
-            "FIXTURE_AAC_OVERSHOOT_BUDGET_HUNDREDTHS",
-            Au6Unit::DbtpHundredths,
-            NEIGHBOUR_AU3_FIXTURE_AAC_OVERSHOOT_BUDGET_HUNDREDTHS,
-        ),
-        (
-            "VERIFY_TONE_TRUE_PEAK_BUDGET_HUNDREDTHS",
-            Au6Unit::DbtpHundredths,
-            NEIGHBOUR_AU3_VERIFY_TONE_TRUE_PEAK_BUDGET_HUNDREDTHS,
-        ),
-        (
-            "DENOISE_FLOOR_DROP_BUDGET_TENTH_DB",
-            Au6Unit::TenthDb,
-            NEIGHBOUR_AU5_DENOISE_FLOOR_DROP_BUDGET_TENTH_DB,
-        ),
-        (
-            "DENOISE_TONE_LOSS_BUDGET_TENTH_DB",
-            Au6Unit::TenthDb,
-            NEIGHBOUR_AU5_DENOISE_TONE_LOSS_BUDGET_TENTH_DB,
-        ),
-        (
-            "DENOISE_PROFILE_LEARN_BUDGET_TENTH_DB",
-            Au6Unit::TenthDb,
-            NEIGHBOUR_AU5_DENOISE_PROFILE_LEARN_BUDGET_TENTH_DB,
-        ),
-        (
-            "DENOISE_PROFILE_NEIGHBOUR_BUDGET_TENTH_DB",
-            Au6Unit::TenthDb,
-            NEIGHBOUR_AU5_DENOISE_PROFILE_NEIGHBOUR_BUDGET_TENTH_DB,
-        ),
-        (
-            "HUM_DROP_BUDGET_TENTH_DB",
-            Au6Unit::TenthDb,
-            NEIGHBOUR_AU5_HUM_DROP_BUDGET_TENTH_DB,
-        ),
-        (
-            "HUM_TONE_LOSS_BUDGET_TENTH_DB",
-            Au6Unit::TenthDb,
-            NEIGHBOUR_AU5_HUM_TONE_LOSS_BUDGET_TENTH_DB,
-        ),
-        (
-            "AUDIO_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS",
-            Au6Unit::DbHundredths,
-            NEIGHBOUR_AU5_AUDIO_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS,
-        ),
-        (
-            "DECLICK_ERROR_DROP_BUDGET_TENTH_DB",
-            Au6Unit::TenthDb,
-            NEIGHBOUR_AU5_DECLICK_ERROR_DROP_BUDGET_TENTH_DB,
-        ),
-        (
-            "LoudnessTarget.tolerance_lu_hundredths",
-            Au6Unit::LuHundredths,
-            NEIGHBOUR_TARGET_TOLERANCE_LU_HUNDREDTHS,
-        ),
-    ];
+    let neighbours = AU6_NEIGHBOUR_BUDGETS;
+    // R25: the table is the single restatement, and the two owners it can
+    // reach from core are compared by value here. The ten it cannot reach are
+    // pinned against their owning files by
+    // `au6_neighbour_budgets_agree_with_their_owners` in the media lane.
+    let tolerance = au6_neighbour("LoudnessTarget.tolerance_lu_hundredths");
     assert_eq!(
-        NEIGHBOUR_TARGET_TOLERANCE_LU_HUNDREDTHS,
+        tolerance,
         i64::from(EBU_R128_PROGRAMME_TARGET.tolerance_lu_hundredths)
     );
     assert_eq!(
-        NEIGHBOUR_TARGET_TOLERANCE_LU_HUNDREDTHS,
+        tolerance,
         i64::from(STREAMING_PLATFORM_TARGET.tolerance_lu_hundredths)
     );
 
@@ -1742,7 +1681,13 @@ fn au6_budgets_are_distinct_from_every_neighbouring_constant() {
             !name.contains("WINDOWS") && !name.contains("MACOS") && !name.contains("LINUX"),
             "{name}: never a per-OS constant"
         );
-        for (neighbour, neighbour_unit, neighbour_value) in neighbours {
+        for Au6Neighbour {
+            constant: neighbour,
+            unit: neighbour_unit,
+            value: neighbour_value,
+            ..
+        } in neighbours
+        {
             if unit != neighbour_unit {
                 continue;
             }
@@ -1755,7 +1700,7 @@ fn au6_budgets_are_distinct_from_every_neighbouring_constant() {
         // §2.8 / §11.2.9: no LU budget equals a target's own tolerance, which
         // measures nothing (AU3 §0 E55).
         if unit == Au6Unit::LuHundredths {
-            assert_ne!(value, NEIGHBOUR_TARGET_TOLERANCE_LU_HUNDREDTHS, "{name}");
+            assert_ne!(value, tolerance, "{name}");
         }
     }
     assert!(
@@ -1786,11 +1731,11 @@ fn au6_budgets_are_distinct_from_every_neighbouring_constant() {
     // overshoot 50 dBTP. Neither can stand in for the other.
     assert_eq!(
         i64::from(AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS),
-        NEIGHBOUR_TARGET_TOLERANCE_LU_HUNDREDTHS
+        au6_neighbour("LoudnessTarget.tolerance_lu_hundredths")
     );
     assert_eq!(
         i64::from(AU6_MASTER_PASSTHROUGH_MAX_LU_HUNDREDTHS),
-        NEIGHBOUR_AU3_FIXTURE_AAC_OVERSHOOT_BUDGET_HUNDREDTHS
+        au6_neighbour("FIXTURE_AAC_OVERSHOOT_BUDGET_HUNDREDTHS")
     );
     let true_peak_unit = AU6_THRESHOLD_CONSTANTS
         .iter()
@@ -1803,9 +1748,7 @@ fn au6_budgets_are_distinct_from_every_neighbouring_constant() {
     let tripped = equal_pair.iter().any(|(_, unit, value)| {
         neighbours
             .iter()
-            .any(|(_, neighbour_unit, neighbour_value)| {
-                unit == neighbour_unit && value == neighbour_value
-            })
+            .any(|neighbour| *unit == neighbour.unit && *value == neighbour.value)
     });
     assert!(tripped, "a budget of 100 LU would be caught");
 }

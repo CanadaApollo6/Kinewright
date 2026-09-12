@@ -67,9 +67,9 @@ use kinewright_core::{
         AU6_MEASURED_DECLICK_ERROR_DROP_TENTH_DB, AU6_MEASURED_MASTER_CUT_DIVERGENCE_SAMPLE,
         AU6_MEASURED_VOICE_MATCH_NOMINAL_TRIM_LU_HUNDREDTHS,
         AU6_MEASURED_VOICE_MATCH_UNTRIMMED_LU_HUNDREDTHS, AU6_MEDIA_LANE_BUDGET_SECONDS,
-        AU6_NOISE_PROFILE_MINIMUM_SAMPLE_FRAMES_RESTATED, AU6_NOISE_PROFILE_PERCENT_RESTATED,
-        AU6_NOISE_PROFILE_SEGMENT_SAMPLE_FRAMES_RESTATED, AU6_PODCAST_AM_DEPTH_TENTH_DB,
-        AU6_PODCAST_AM_HERTZ, AU6_PODCAST_LRA_MAX_LU_HUNDREDTHS,
+        AU6_NEIGHBOUR_BUDGETS, AU6_NOISE_PROFILE_MINIMUM_SAMPLE_FRAMES_RESTATED,
+        AU6_NOISE_PROFILE_PERCENT_RESTATED, AU6_NOISE_PROFILE_SEGMENT_SAMPLE_FRAMES_RESTATED,
+        AU6_PODCAST_AM_DEPTH_TENTH_DB, AU6_PODCAST_AM_HERTZ, AU6_PODCAST_LRA_MAX_LU_HUNDREDTHS,
         AU6_PODCAST_SPREAD_REDUCTION_MIN_HUNDREDTHS, AU6_PROFILE_LEAKAGE_ALLOWANCE_TENTH_DB,
         AU6_PROGRAMME_FRAMES, AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS,
         AU6_REPAIR_SPEECH_LOSS_MAX_DB_HUNDREDTHS, AU6_SAMPLE_RATE, AU6_SAMPLES_PER_FRAME,
@@ -3063,7 +3063,7 @@ const AU6_INVENTORY_TESTS: [&str; 2] = [
     "au6_declared_test_names_exist_in_their_source_files",
 ];
 
-const AU6_MEDIA_TESTS: [&str; 59] = [
+const AU6_MEDIA_TESTS: [&str; 60] = [
     "au6_every_authored_level_matches_its_analytic_derivation",
     "au6_the_two_voices_occupy_disjoint_bands",
     "au6_c_every_authored_gap_is_below_the_silence_threshold",
@@ -3123,6 +3123,7 @@ const AU6_MEDIA_TESTS: [&str; 59] = [
     "au6_the_performance_block_matches_its_code_constants",
     "au6_manifest_declares_every_required_fixture_and_constant",
     "au6_declared_test_names_exist_in_their_source_files",
+    "au6_neighbour_budgets_agree_with_their_owners",
 ];
 
 const AU6_FORBIDDEN_HELPERS: [&str; 3] = [
@@ -3131,7 +3132,106 @@ const AU6_FORBIDDEN_HELPERS: [&str; 3] = [
     "KINEWRIGHT_AUDIO_TEST",
 ];
 
-const AU6_TEST_SOURCES: [(&str, &str); 11] = [
+/// R25: the two files that own ten of §2.8's twelve neighbour budgets.
+///
+/// `au6_core.rs` restates them because `kinewright-core` cannot see a
+/// `kinewright-media` test file; this lane can, and 823 + 831 lines is a
+/// cheap price for turning a trusted transcription into a checked one — two
+/// orders of magnitude less than the two eval sources R24 removed.
+const AU6_NEIGHBOUR_OWNER_SOURCES: [(&str, &str); 2] = [
+    (
+        "crates/kinewright-media/tests/au3_fixtures.rs",
+        include_str!("../tests/au3_fixtures.rs"),
+    ),
+    (
+        "crates/kinewright-media/tests/au5_fixtures.rs",
+        include_str!("../tests/au5_fixtures.rs"),
+    ),
+];
+
+/// The integer a `const` is declared with in `source`, by name.
+///
+/// Reads the literal rather than the type, so an owner that moves from `i32`
+/// to `f64` (AU5's de-click budget is `300.0`) still matches on its value.
+fn au6_declared_const_value(source: &str, name: &str) -> Option<i64> {
+    let needle = format!("const {name}:");
+    let tail = &source[source.find(&needle)? + needle.len()..];
+    let literal = tail[..tail.find(';')?].split('=').nth(1)?.trim();
+    literal
+        .replace('_', "")
+        .parse::<f64>()
+        .ok()
+        .map(|value| value as i64)
+}
+
+/// AU6 §2.8 (R25): every neighbour budget `au6_core.rs` restates is the value
+/// its owner declares.
+///
+/// The distinctness test asserts no AU6 budget equals one of these in the same
+/// unit — a real gate, and a soft one for as long as the twelve values were
+/// hand copies with nothing comparing them to their owners. Ten of the twelve
+/// are pinned here against the line that declares them; the other two are
+/// compared **by value** in core, where `LoudnessTarget` is reachable, except
+/// `DECLICK_ERROR_DROP_BUDGET_TENTH_DB`, which is a function-local `const` in
+/// an eleven-thousand-line file and is the one restatement this slice still
+/// trusts. This fixture says which is which rather than implying all twelve
+/// are guarded.
+///
+/// *Fails:* a value one code off its owner is asserted not to be found, so the
+/// pin cannot pass by matching nothing.
+#[test]
+fn au6_neighbour_budgets_agree_with_their_owners() {
+    let mut pinned = 0;
+    let mut trusted = Vec::new();
+    for neighbour in AU6_NEIGHBOUR_BUDGETS {
+        if neighbour.owner.is_empty() {
+            trusted.push(neighbour.constant);
+            continue;
+        }
+        let source = AU6_NEIGHBOUR_OWNER_SOURCES
+            .iter()
+            .find_map(|(path, source)| (*path == neighbour.owner).then_some(*source))
+            .unwrap_or_else(|| panic!("{} is not an inventoried owner", neighbour.owner));
+        let declared = au6_declared_const_value(source, neighbour.constant).unwrap_or_else(|| {
+            panic!(
+                "{} declares no `const {}`; AU6 restates it as {}",
+                neighbour.owner, neighbour.constant, neighbour.value
+            )
+        });
+        assert_eq!(
+            declared, neighbour.value,
+            "{} declares {} = {declared}, and AU6 restates it as {}. Re-read the owner rather \
+             than moving AU6's copy: §2.8's distinctness rule is about the owner's value.",
+            neighbour.owner, neighbour.constant, neighbour.value
+        );
+        assert_ne!(
+            declared,
+            neighbour.value + 1,
+            "{}: the pin must not match a value one code off",
+            neighbour.constant
+        );
+        pinned += 1;
+    }
+    assert_eq!(
+        pinned, 10,
+        "ten of the twelve neighbours have an owner file"
+    );
+    assert_eq!(
+        trusted,
+        [
+            "DECLICK_ERROR_DROP_BUDGET_TENTH_DB",
+            "LoudnessTarget.tolerance_lu_hundredths",
+        ],
+        "the two neighbours without an owner file are the two core compares by value"
+    );
+    println!(
+        "AU6_NEIGHBOURS pinned={pinned} trusted={} owners={}",
+        trusted.len(),
+        AU6_NEIGHBOUR_OWNER_SOURCES.len()
+    );
+}
+
+const AU6_TEST_SOURCES: [(&str, &str); 9] = [
     (
         "crates/kinewright-media/src/au6_fixtures.rs",
         include_str!("au6_fixtures.rs"),
@@ -3147,14 +3247,6 @@ const AU6_TEST_SOURCES: [(&str, &str); 11] = [
     (
         "crates/kinewright-agent/tests/mcp_server.rs",
         include_str!("../../kinewright-agent/tests/mcp_server.rs"),
-    ),
-    (
-        "crates/kinewright-agent/src/eval.rs",
-        include_str!("../../kinewright-agent/src/eval.rs"),
-    ),
-    (
-        "crates/kinewright-agent/src/bin/kinewright-eval.rs",
-        include_str!("../../kinewright-agent/src/bin/kinewright-eval.rs"),
     ),
     (
         "crates/kinewright-app/src/mixer_ui.rs",
@@ -3256,7 +3348,7 @@ fn au6_inventory_groups() -> [(
     &'static str,
     &'static [&'static str],
     &'static [&'static str],
-); 5] {
+); 4] {
     [
         (
             "MEDIA",
@@ -3286,14 +3378,6 @@ fn au6_inventory_groups() -> [(
                 "crates/kinewright-app/src/app.rs",
             ],
             &AU6_APP_TESTS,
-        ),
-        (
-            "EVAL",
-            &[
-                "crates/kinewright-agent/src/eval.rs",
-                "crates/kinewright-agent/src/bin/kinewright-eval.rs",
-            ],
-            &AU6_EVAL_TESTS,
         ),
     ]
 }
@@ -3345,7 +3429,22 @@ fn au6_declared_test_names_exist_in_their_source_files() {
         );
         assert!(AU6_MEDIA_TESTS.contains(&name));
     }
-    assert_eq!(AU6_EVAL_TESTS.len(), 0);
+    // R24: Part A declares no eval test, so `AU6_TEST_SOURCES` does not carry
+    // `eval.rs` or `bin/kinewright-eval.rs` and `au6_inventory_groups` has no
+    // EVAL row. Both directions of the scan were vacuous over them — there is
+    // no `au6_` test in either file to find and no name to look for — while
+    // the two `include_str!`s embedded **19 695 lines** of unrelated source
+    // into this test binary and made every edit to them recompile it. This
+    // assertion is the seam: the moment Part B declares an eval test, it fails
+    // and says what to restore, so the saving cannot turn into a missing gate.
+    assert!(
+        AU6_EVAL_TESTS.is_empty(),
+        "Part B declares {} eval test(s): restore `crates/kinewright-agent/src/eval.rs` and \
+         `crates/kinewright-agent/src/bin/kinewright-eval.rs` to AU6_TEST_SOURCES (back to 11) \
+         and the EVAL row to au6_inventory_groups (back to 5) first, or the both-direction scan \
+         cannot see them",
+        AU6_EVAL_TESTS.len()
+    );
     assert_eq!(AU6_EXPLICIT_TEST_NAMES.len(), 0);
 
     for path in [

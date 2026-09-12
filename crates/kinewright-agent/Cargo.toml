@@ -6,13 +6,25 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# R26: the `kinewright-eval` binary imports `kinewright_media::cc7_sources`,
+# `test_support` and `kinewright_core::cc7_scenarios` at module scope, so the
+# harness genuinely needs the fixture gates at build time. It stays a default
+# feature, which keeps `cargo build --workspace`, `cargo test --workspace` and
+# `cargo clippy --all-targets` building, running and linting the binary with no
+# extra flag -- `required-features` would have made all three skip it silently.
+# `kinewright-app` takes this crate with `default-features = false` instead, so
+# the shipping binary links an agent library with no fixture data in it.
+default = ["eval-harness"]
+eval-harness = ["kinewright-core/test-util", "kinewright-media/test-util"]
+
 [dependencies]
 axum.workspace = true
 base64.workspace = true
 crossbeam-channel.workspace = true
 image.workspace = true
 kinewright-core = { path = "../kinewright-core" }
-kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
+kinewright-media = { path = "../kinewright-media" }
 reqwest.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
@@ -20,6 +32,12 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+# `tests/mcp_server.rs` drives the AU6 scenarios and generates their sources,
+# so the gates are on when testing this crate even with default features off.
+kinewright-core = { path = "../kinewright-core", features = ["test-util"] }
+kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
 
 [lints]
 workspace = true

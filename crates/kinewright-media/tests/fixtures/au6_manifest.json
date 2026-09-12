@@ -1188,14 +1188,14 @@
   },
   "required_fixtures": {
     "core": 13,
-    "media": 59,
+    "media": 60,
     "agent": 8,
     "app": 14,
     "eval": 0,
     "inventory": 2,
     "explicit_names": 0,
-    "total": 96,
-    "test_sources": 11,
+    "total": 97,
+    "test_sources": 9,
     "forbidden_helpers": 3,
     "eval_deferred_to_part_b": 12,
     "cuttable_kept": [

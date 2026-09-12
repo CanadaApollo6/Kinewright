@@ -2,11 +2,22 @@
 
 mod actor;
 mod agent;
+/// AU6 §2's scenario authority: the five audio workflows' documents,
+/// operations, budgets and pins.
+///
+/// **R26:** gated behind `test-util`, which no release build enables. This is
+/// evaluation *data* — 2,555 lines of it — and every reader is a test, a
+/// fixture module or the `kinewright-eval` harness. It used to compile into
+/// the shipping binary because there was no gate to put it behind.
+#[cfg(any(test, feature = "test-util"))]
 pub mod au6_scenarios;
 mod audio_qc;
 mod audio_repair;
 mod automation;
 mod captions;
+/// CC7 §2's scenario authority. Gated exactly as [`au6_scenarios`] is and for
+/// the same reason (R26); it set the ungated precedent AU6 followed.
+#[cfg(any(test, feature = "test-util"))]
 pub mod cc7_scenarios;
 mod color;
 mod color_qc;
@@ -31,16 +42,17 @@ pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
 };
+#[cfg(any(test, feature = "test-util"))]
 pub use au6_scenarios::{
     AU6_A_DUCK_KEYFRAMES, AU6_BUDGETS, AU6_C_LEARNED_PROFILE_TENTH_DB, AU6_E_DUCK_KEYFRAMES,
-    AU6_EXPORT_JOBS, AU6_QUESTIONS, AU6_SCENARIO_SPECS, AU6_SCENARIOS, AU6_SOURCE_BUDGETS,
-    AU6_THRESHOLD_CONSTANTS, Au6Budget, Au6BudgetKind, Au6BusSpec, Au6ClipSpec, Au6ExportJob,
-    Au6PersonPath, Au6Scenario, Au6ScenarioSpec, Au6Speaker, Au6TrackRole, Au6TrackSpec, Au6Turn,
-    Au6Unit, au6_b_fade_operations, au6_c_analytic_mean_band_tenth_db,
-    au6_c_canonical_operations_with_room_tone, au6_c_declick_only_operations,
-    au6_c_fill_operations, au6_c_gap_operations, au6_c_repair_operations, au6_canonical_operations,
-    au6_d_angle_cut_operations, au6_d_sync_group, au6_export_settings, au6_profile_export_settings,
-    au6_spec,
+    AU6_EXPORT_JOBS, AU6_NEIGHBOUR_BUDGETS, AU6_QUESTIONS, AU6_SCENARIO_SPECS, AU6_SCENARIOS,
+    AU6_SOURCE_BUDGETS, AU6_THRESHOLD_CONSTANTS, Au6Budget, Au6BudgetKind, Au6BusSpec, Au6ClipSpec,
+    Au6ExportJob, Au6Neighbour, Au6PersonPath, Au6Scenario, Au6ScenarioSpec, Au6Speaker,
+    Au6TrackRole, Au6TrackSpec, Au6Turn, Au6Unit, au6_b_fade_operations,
+    au6_c_analytic_mean_band_tenth_db, au6_c_canonical_operations_with_room_tone,
+    au6_c_declick_only_operations, au6_c_fill_operations, au6_c_gap_operations,
+    au6_c_repair_operations, au6_canonical_operations, au6_d_angle_cut_operations,
+    au6_d_sync_group, au6_export_settings, au6_profile_export_settings, au6_spec,
 };
 pub use audio_qc::{
     AUDIO_QC_CHANNEL_BALANCE_CLAMP_LU_HUNDREDTHS, AUDIO_QC_CHANNEL_IMBALANCE_LU_HUNDREDTHS,
@@ -65,6 +77,7 @@ pub use captions::{
     animated_caption_operations_at, authored_caption_cues, caption_cues, caption_title_operations,
     dedup_timeline_words, srt, vtt,
 };
+#[cfg(any(test, feature = "test-util"))]
 pub use cc7_scenarios::{
     CC7_A_OPERATIONS, CC7_B1_OPERATIONS, CC7_B2_OPERATIONS, CC7_C_OPERATIONS, CC7_D_OPERATIONS,
     CC7_D2_OPERATIONS, CC7_E_OPERATIONS, CC7_F_OPERATIONS, CC7_SCENARIO_SPECS, CC7_SCENARIOS,

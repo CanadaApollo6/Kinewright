@@ -2418,6 +2418,131 @@ pub enum Au6Unit {
     Seconds,
 }
 
+/// One AU3 or AU5 budget an AU6 budget must not be silently substitutable
+/// for (§2.8), restated here with its owner so the restatement can be checked
+/// rather than trusted.
+///
+/// **R25.** These twelve values used to be twelve `const`s inside
+/// `tests/au6_core.rs` with their owners named only in a doc comment, and
+/// nothing compared them to those owners: `kinewright-core` cannot see
+/// `kinewright-media/tests/au3_fixtures.rs`. If AU3 moved
+/// `FIXTURE_LOUDNESS_BUDGET_HUNDREDTHS`, the 147-line distinctness test went
+/// on passing while no longer testing what it said it tested — the one place
+/// in the slice where the evidence could rot in silence. Publishing the table
+/// here gives it two consumers that cannot disagree: the distinctness test in
+/// core, and `au6_neighbour_budgets_agree_with_their_owners` in the media
+/// lane, which **can** see the owning files and pins each value against the
+/// line that declares it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Au6Neighbour {
+    /// The owner's constant name, verbatim, as it is declared.
+    pub constant: &'static str,
+    /// The repo-relative file that declares it, or `""` when the owner is a
+    /// struct field rather than a `const` and is compared by value instead.
+    pub owner: &'static str,
+    /// The unit the value is in; §2.8's distinctness rule is within-unit.
+    pub unit: Au6Unit,
+    pub value: i64,
+}
+
+/// Every neighbour of §2.8, with its owner (R25).
+///
+/// `DECLICK_ERROR_DROP_BUDGET_TENTH_DB` carries no owner **file**: it is a
+/// function-local `const` inside `crates/kinewright-media/src/audio.rs`
+/// (`:11004`), so it is reachable by neither name nor a cheap text pin — the
+/// file is eleven thousand lines and embedding it would cost more than the
+/// check is worth. It is the one entry in this table whose restatement is
+/// trusted, and the media lane says so out loud rather than implying all
+/// twelve are guarded.
+pub const AU6_NEIGHBOUR_BUDGETS: [Au6Neighbour; 12] = [
+    neighbour(
+        "FIXTURE_LOUDNESS_BUDGET_HUNDREDTHS",
+        "crates/kinewright-media/tests/au3_fixtures.rs",
+        Au6Unit::LuHundredths,
+        100,
+    ),
+    neighbour(
+        "FIXTURE_AAC_OVERSHOOT_BUDGET_HUNDREDTHS",
+        "crates/kinewright-media/tests/au3_fixtures.rs",
+        Au6Unit::DbtpHundredths,
+        50,
+    ),
+    neighbour(
+        "VERIFY_TONE_TRUE_PEAK_BUDGET_HUNDREDTHS",
+        "crates/kinewright-media/tests/au3_fixtures.rs",
+        Au6Unit::DbtpHundredths,
+        80,
+    ),
+    neighbour(
+        "DENOISE_FLOOR_DROP_BUDGET_TENTH_DB",
+        "crates/kinewright-media/tests/au5_fixtures.rs",
+        Au6Unit::TenthDb,
+        70,
+    ),
+    neighbour(
+        "DENOISE_TONE_LOSS_BUDGET_TENTH_DB",
+        "crates/kinewright-media/tests/au5_fixtures.rs",
+        Au6Unit::TenthDb,
+        10,
+    ),
+    neighbour(
+        "DENOISE_PROFILE_LEARN_BUDGET_TENTH_DB",
+        "crates/kinewright-media/tests/au5_fixtures.rs",
+        Au6Unit::TenthDb,
+        15,
+    ),
+    neighbour(
+        "DENOISE_PROFILE_NEIGHBOUR_BUDGET_TENTH_DB",
+        "crates/kinewright-media/tests/au5_fixtures.rs",
+        Au6Unit::TenthDb,
+        70,
+    ),
+    neighbour(
+        "HUM_DROP_BUDGET_TENTH_DB",
+        "crates/kinewright-media/tests/au5_fixtures.rs",
+        Au6Unit::TenthDb,
+        140,
+    ),
+    neighbour(
+        "HUM_TONE_LOSS_BUDGET_TENTH_DB",
+        "crates/kinewright-media/tests/au5_fixtures.rs",
+        Au6Unit::TenthDb,
+        15,
+    ),
+    neighbour(
+        "AUDIO_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS",
+        "crates/kinewright-media/tests/au5_fixtures.rs",
+        Au6Unit::DbHundredths,
+        600,
+    ),
+    neighbour(
+        "DECLICK_ERROR_DROP_BUDGET_TENTH_DB",
+        "",
+        Au6Unit::TenthDb,
+        300,
+    ),
+    neighbour(
+        "LoudnessTarget.tolerance_lu_hundredths",
+        "",
+        Au6Unit::LuHundredths,
+        100,
+    ),
+];
+
+const fn neighbour(
+    constant: &'static str,
+    owner: &'static str,
+    unit: Au6Unit,
+    value: i64,
+) -> Au6Neighbour {
+    Au6Neighbour {
+        constant,
+        owner,
+        unit,
+        value,
+    }
+}
+
 /// Every §2.8 threshold constant by name, value and unit — the manifest's
 /// `thresholds` block (§11.3) and the distinctness test's subject (§2.8).
 pub const AU6_THRESHOLD_CONSTANTS: [(&str, i64, Au6Unit); 21] = [

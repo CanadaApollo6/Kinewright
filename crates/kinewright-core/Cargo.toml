@@ -6,6 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# AU6 12.1 item 9(b) / R26: `cc7_scenarios` and `au6_scenarios` are scenario
+# *data* for the workflow-evaluation slices, not product code. Without a gate
+# they compiled into every release build -- 4,717 lines of it. Nothing in a
+# shipping path reads them: every user is a test, a fixture module or the
+# `kinewright-eval` harness binary.
+test-util = []
+
 [dependencies]
 ab_glyph.workspace = true
 crossbeam-channel.workspace = true
@@ -16,6 +24,9 @@ thiserror.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 serde_json.workspace = true
+# core's own `tests/cc7_core.rs` and `tests/au6_core.rs` read the scenario
+# authorities, so the crate enables its own gate when testing itself.
+kinewright-core = { path = ".", features = ["test-util"] }
 
 [lints]
 workspace = true

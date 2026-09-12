@@ -325,6 +325,8 @@ the `pub(crate)` entries are named (§3.9, §5.6, §5.7). No OPEN note remains.
   was reading it. The pin is kept: it is the right setting for a delivery encode and it removed the
   common case. It did **not** remove the failure — see E58.
 - **E58. B6 compares the delivered AUDIO STREAM, not the whole file, and the reason is measured.**
+  **Approved by Riel 2026-09-12: keep the delivered-audio-stream compare; whole-file identity stays
+  ungated.** The narrowing below is the contract's position, not a proposal.
   With E57's pin in place the fixture still failed on Linux CI (run 34650711913) and reproduces
   locally about **one run in three** — but only when several of `tests/au3_fixtures.rs`'s tests
   encode concurrently in one process; **twenty-plus isolated runs across separate processes never
@@ -341,7 +343,10 @@ the `pub(crate)` entries are named (§3.9, §5.6, §5.7). No OPEN note remains.
   stream: the fixture now copies it out with `-map 0:a -c copy` (a stream copy re-frames nothing)
   and compares those bytes for all three exports. E54's "three real exports" is unchanged. The
   video-side nondeterminism is recorded here and owned by no slice; a later slice that needs
-  whole-file reproducibility has to establish it against this build first.
+  whole-file reproducibility has to establish it against this build first. **What B6 no longer
+  claims, stated plainly so nobody reads the narrowing as broader than it is:** two exports of one
+  document are *not* asserted byte-identical as whole files on this FFmpeg build, and AU3 gates no
+  whole-file reproducibility anywhere.
 
 ## 1. Scope
 
