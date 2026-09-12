@@ -178,8 +178,6 @@ fn audio_loudness_keeps_its_pre_au3_wire_shape_and_stays_copy_and_eq() {
         PRE_AU3_LOUDNESS_JSON
     );
 
-    // `Copy`: the same value is used twice after a by-value move; `Eq`: the
-    // two copies compare equal.
     let copied = decoded;
     let again = decoded;
     assert_eq!(copied, again);
@@ -207,9 +205,6 @@ fn audio_loudness_keeps_its_pre_au3_wire_shape_and_stays_copy_and_eq() {
         range: Some(TimeCode(30)..TimeCode(60)),
         profile: Some(DeliveryProfile::Youtube1080p),
     };
-    // `DeliveryProfile` has serialized as `snake_case` of its variant name
-    // since CC6 — `youtube1080p`, not `as_str()`'s `youtube_1080p` — and the
-    // existing wire wins (AU3 §0 erratum).
     let windowed_json = r#"{"range":{"start":30,"end":60},"profile":"youtube1080p"}"#;
     assert_eq!(
         serde_json::from_str::<AudioQcRequest>(windowed_json).unwrap(),
@@ -217,8 +212,6 @@ fn audio_loudness_keeps_its_pre_au3_wire_shape_and_stays_copy_and_eq() {
     );
     assert_eq!(serde_json::to_string(&windowed).unwrap(), windowed_json);
 
-    // The typed short-range refusal renders its message and carries no
-    // recovery code, like its spectrum sibling.
     let refusal = MediaError::MixLoudnessRangeTooShort {
         sample_frames: 8_000,
         required: 19_200,
@@ -384,8 +377,6 @@ fn audio_qc_exceptions_raise_exactly_the_contract_table_in_order() {
     }
     assert!(!audio_qc_technical_pass(&exceptions));
 
-    // The boundaries are inclusive: exactly on tolerance, ceiling, band, and
-    // the 1 000 ms rule raises nothing.
     let mut on_the_line = quiet_measurements(Some(STREAMING_PLATFORM_TARGET));
     on_the_line.master.integrated_lufs_hundredths = Some(-1_500);
     on_the_line.master.true_peak_dbtp_hundredths = Some(-100);
@@ -395,8 +386,6 @@ fn audio_qc_exceptions_raise_exactly_the_contract_table_in_order() {
     assert_eq!(audio_qc_exceptions(&on_the_line), Vec::new());
     assert!(audio_qc_technical_pass(&[]));
 
-    // Silent: one Warning that leaves `technical_pass` true and suppresses
-    // the target, balance, and silence entries.
     let mut silent = quiet_measurements(Some(STREAMING_PLATFORM_TARGET));
     silent.master.integrated_lufs_hundredths = None;
     silent.master.true_peak_dbtp_hundredths = Some(0);
@@ -416,8 +405,6 @@ fn audio_qc_exceptions_raise_exactly_the_contract_table_in_order() {
     assert_eq!(exceptions[0].allowed.as_deref(), Some("> -7000"));
     assert!(audio_qc_technical_pass(&exceptions));
 
-    // Δ `None` with a non-empty gate (integrated `Some`) on a stereo master:
-    // one side is silent, and that is raised.
     let mut one_side = quiet_measurements(None);
     one_side.channel_balance_lu_hundredths = None;
     let exceptions = audio_qc_exceptions(&one_side);
@@ -567,10 +554,6 @@ fn no_audible_media_names_mute_and_solo_and_the_defaults_hold() {
     );
 }
 
-// ===========================================================================
-// Part B — delivery (AU3 §7 items B1 to B3)
-// ===========================================================================
-
 /// The pre-AU3 export settings wire, exactly as `ExportSettings` serialized
 /// before Part B (`Youtube1080p`, the 8-bit lane, 30 fps).
 const PRE_AU3_EXPORT_SETTINGS_JSON: &str = r#"{"fps":{"numerator":30,"denominator":1},"resolution":[1920,1080],"delivery_color":{"primaries":"bt709","transfer":"bt709","matrix":"bt709","range":"limited","white_point":"d65","bit_depth":8,"confidence_basis_points":10000,"provenance":"application_default"},"video_codec":"libx264","audio_codec":"aac","video_bitrate":8000000,"audio_bitrate":384000}"#;
@@ -580,8 +563,6 @@ const PRE_AU3_EXPORT_SETTINGS_JSON: &str = r#"{"fps":{"numerator":30,"denominato
 fn export_settings_normalize_only_when_the_job_asks_and_stay_wire_compatible() {
     let document = empty_timeline(Rational::new(30, 1).unwrap());
 
-    // The job axis is orthogonal to the profile: no profile, on either depth
-    // lane, materialises a normalization request.
     for profile in DeliveryProfile::ALL {
         for depth in DeliveryEncodeDepth::ALL {
             let settings = profile.export_settings(&document, depth, ExportCancellation::default());
@@ -640,8 +621,6 @@ fn export_settings_normalize_only_when_the_job_asks_and_stay_wire_compatible() {
         ),
         "{encoded}"
     );
-    // `ExportCancellation` compares by handle identity (CC6 §9.5), so the
-    // round trip is asserted field by field, as `cc6_core.rs` does.
     let restored: ExportSettings = serde_json::from_str(&encoded).unwrap();
     assert_eq!(
         restored.loudness_normalization,
@@ -749,8 +728,6 @@ fn export_document_reporting_defaults_to_the_plain_export_and_an_empty_report() 
     );
     assert_integer_leaves(&encoded, "export_report");
 
-    // The default delegates to `export_document`, which itself defaults to
-    // `export`: one call, and a report that claims nothing.
     let exporter = CountingExport::default();
     let (progress, _drain) = crossbeam_channel::unbounded();
     let document = Arc::new(empty_timeline(Rational::new(30, 1).unwrap()));
@@ -884,8 +861,6 @@ fn delivery_audio_verification_round_trips_and_judges_only_against_a_target() {
     assert_eq!(exceptions[2].severity, QaSeverity::Warning);
     assert!(!audio_qc_technical_pass(&exceptions));
 
-    // A silent — or sub-block — file reads as one ambiguous Warning, said so
-    // in the message, and never clears the true-peak Error beside it.
     let silent = delivery_audio_exceptions(&loudness(None, 2), Some(target));
     assert_eq!(codes(&silent), ["delivery_audio_silent"]);
     assert_eq!(silent[0].severity, QaSeverity::Warning);
@@ -901,8 +876,6 @@ fn delivery_audio_verification_round_trips_and_judges_only_against_a_target() {
     assert_eq!(silent[0].allowed.as_deref(), Some("> -7000"));
     assert!(audio_qc_technical_pass(&silent));
 
-    // With no target the verification is a measurement: it raises nothing,
-    // whatever it read.
     assert_eq!(delivery_audio_exceptions(&measured, None), Vec::new());
     assert_eq!(
         delivery_audio_exceptions(&loudness(None, 2), None),

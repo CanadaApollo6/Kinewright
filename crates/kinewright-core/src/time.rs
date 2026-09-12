@@ -388,11 +388,6 @@ pub fn map_project_duration_to_source(
             .is_ok_and(|mapped| mapped == project_duration)
     };
 
-    // The estimate is the duration carried into the source time base. The
-    // exact ends are the integers in an interval of width `r` that contains
-    // `source_start + r · project_duration`, which is why `estimate ± 1`
-    // finds one whenever one exists — see the doc comment above, and AU5
-    // §0 R93 for the argument this replaced.
     let estimate = map_frames(project_duration, project_fps, source_fps)?;
     let mut found = None;
     for offset in -1..=1_i64 {
@@ -416,11 +411,6 @@ pub fn map_project_duration_to_source(
         });
     };
 
-    // Bisect down to the first exact end. `map_source_range_to_project` is
-    // monotone non-decreasing in `end`, so the ends mapping to at least
-    // `project_duration` are an upward-closed run and the first of them is the
-    // smallest exact one — `end` itself proves the run is non-empty and caps
-    // the search.
     let mut low = source_start.0.saturating_add(1);
     let mut high = end.0;
     while low < high {
@@ -513,8 +503,6 @@ pub fn covering_source_range_for_project_duration(
 ) -> Result<Range<TimeCode>, TimeMappingError> {
     validate_rate(source_fps)?;
     validate_rate(project_fps)?;
-    // A zero sample rate is an invalid rate, and `Rational::new` already says
-    // so in the words this module uses for one.
     Rational::new(sample_rate, 1)?;
     if project_duration.0 <= 0 {
         return Err(TimeMappingError::InvalidRange {
@@ -531,11 +519,6 @@ pub fn covering_source_range_for_project_duration(
 
     let required = required_sample_frames(project_duration, sample_rate, project_fps);
 
-    // Supply is at most `length × sample_rate × source_den / source_num`, so a
-    // range shorter than this cannot carry the gap at **any** phase. Checking
-    // it before the sweep makes "the asset is too short" a proof rather than
-    // the summary of a failed search, and keeps that answer out of the other
-    // refusal's mouth.
     let minimum_source_frames = i64::try_from(
         required
             .saturating_mul(u128::from(source_fps.numerator()))
@@ -550,32 +533,6 @@ pub fn covering_source_range_for_project_duration(
         });
     }
 
-    // How deep the phase sweep goes: exactly one **period** of the pattern, and
-    // the period is the lcm of two independent ones.
-    //
-    // Write `A = project_num · source_den` and `B = source_num · project_den`,
-    // so `map_frames(e) = ⌊(e·A + ⌊B/2⌋) / B⌋` and `r = B / A`.
-    //
-    // (i) The **map** period. `mapped(e + P) − mapped(s + P) = mapped(e) −
-    //     mapped(s)` for every `e`, `s` exactly when `B | P·A`, so the map
-    //     repeats every `B / gcd(A, B)` source frames — the reduced
-    //     **numerator** of `r`, 1 001 at 30 → 29.97.
-    // (ii) The **sample** period. Supply is `⌊e · rate · source_den /
-    //     source_num⌋ − ⌊s · …⌋`, invariant under the same shift exactly when
-    //     `P · rate · source_den / source_num` is an integer, so it repeats
-    //     every `source_num / gcd(rate · source_den, source_num)` frames — 5,
-    //     not 1, for a 30000/1001 or 60000/1001 source at 48 kHz.
-    //
-    // Both must repeat for the *answer* to repeat, so the period is their lcm.
-    // Sweeping `0..period` is **complete**: a covering range at `s ≥ period`
-    // implies one at `s − period` with a smaller `end`, still inside
-    // `source_duration` and preferred by the (phase, end) ordering. And
-    // no smaller window is *provably* complete from the rate pair alone, since
-    // each half's period is minimal and the lcm is therefore the joint
-    // minimum. A shorter sweep may happen to suffice for a given gap length,
-    // which is how a window of `⌈r⌉` — one phase's *run length*, a different
-    // quantity — passed for two rounds before missing phase 3 at
-    // 29.97 → 29.97 (§0 R96).
     let ratio_numerator =
         i128::from(source_fps.numerator()) * i128::from(project_fps.denominator());
     let ratio_denominator =
@@ -591,10 +548,6 @@ pub fn covering_source_range_for_project_duration(
         .unwrap_or(i64::MAX)
         .clamp(1, MAX_PHASE_CANDIDATES);
 
-    // Whether any phase in the window could express the duration at all. It
-    // decides which refusal the caller gets, and they are different questions:
-    // rule 97's "no exact source range at these rates" against R96's "exact,
-    // but nothing carries enough samples".
     let mut any_exact = false;
 
     for start in 0..phase_candidates {
@@ -602,8 +555,6 @@ pub fn covering_source_range_for_project_duration(
         let Ok(smallest) =
             map_project_duration_to_source(start, project_duration, source_fps, project_fps)
         else {
-            // This phase cannot express the duration at all; another may — a
-            // phase-0 refusal does not generalise (pass-3 finding 2).
             continue;
         };
         any_exact = true;
@@ -615,8 +566,6 @@ pub fn covering_source_range_for_project_duration(
             {
                 return Ok(start..end);
             }
-            // Walk the exact run upward: a longer range still maps to the same
-            // project duration, and supplies more samples.
             let next = TimeCode(end.0.saturating_add(1));
             if next <= end
                 || map_source_range_to_project(start..next, source_fps, project_fps)
@@ -634,10 +583,6 @@ pub fn covering_source_range_for_project_duration(
             source_duration: source_duration.0,
         })
     } else {
-        // Not representable at these rates in any phase **the sweep reached** —
-        // §5.4 arm (iii)'s skip, and the error whose message §5.3 rule 97's
-        // per-gap reason is written from. `source_start` is reported as 0, the
-        // phase rule 97 itself names.
         Err(TimeMappingError::InexactDuration {
             source_start: 0,
             project_duration: project_duration.0,
@@ -733,8 +678,6 @@ pub fn longest_coverable_project_tile(
         });
     }
 
-    // The project span the whole asset is worth, capped by what the caller
-    // asked for.
     let whole =
         map_source_range_to_project(TimeCode::ZERO..source_duration, source_fps, project_fps)?;
     let ceiling = whole.min(max_project_frames);
@@ -759,8 +702,6 @@ pub fn longest_coverable_project_tile(
     }
 
     Err(refusal.unwrap_or_else(|| {
-        // The asset maps to no whole project frame, so the loop never ran.
-        // Ask for one frame purely to borrow the authentic refusal.
         covering_source_range_for_project_duration(
             TimeCode(1),
             source_fps,

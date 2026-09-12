@@ -385,13 +385,6 @@ fn unique_stem(label: &str) -> String {
     format!("kinewright-{label}-{}-{nonce}", std::process::id())
 }
 
-// ---- AU5 §3.11 (R21, R45): the four promoted audio fixture helpers ---------
-//
-// Moved here from `audio.rs`'s `#[cfg(test)]` module **with their signatures
-// unchanged**: changing them would break `pseudo_random` and every existing
-// AU2/AU3 unit test that calls them. `tests/au5_fixtures.rs` reaches them by
-// the same `#[path]` route `tests/au3_fixtures.rs` already uses.
-
 /// A mono tone of `frames` samples. **Mono**, and it returns a bare sample
 /// vector — a stereo fixture sums mono vectors and interleaves itself.
 #[must_use]

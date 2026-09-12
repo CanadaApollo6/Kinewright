@@ -298,8 +298,6 @@ fn persist_results(
     };
     fs::write(&output_path, render_jsonl(environment, results)?)
         .map_err(|error| EvalError::Output(error.to_string()))?;
-    // A filtered or multi-sample run is a measurement exercise, not a new
-    // baseline: docs/EVALS.md only records complete single-pass suites.
     if !packaged_run && options.only.is_none() && options.samples == 1 {
         let docs = render_evals_document(definitions, environment, results, &output_path);
         fs::write("docs/EVALS.md", docs).map_err(|error| EvalError::Output(error.to_string()))?;
@@ -346,9 +344,6 @@ fn write_review_package(
             .map_err(|error| EvalError::Output(error.to_string()))?,
     )
     .map_err(|error| EvalError::Output(error.to_string()))?;
-    // Every packaged run gets a blind package. There is no flag: a review
-    // surface that has to be asked for is one that will not be there when it
-    // matters, and the unblinded files stay exactly where they were.
     let blind_directory =
         write_blind_package(benchmark_id, run_id, run_directory, &review, results)?;
     println!("Review: {}", review_path.display());
@@ -473,9 +468,6 @@ fn write_blind_package(
             artifact_path: packaged.deliverable.output_path.display().to_string(),
         });
     }
-    // The key is NOT deduplicated: two tasks whose artefacts are
-    // byte-identical share one blind identifier, and both mappings must
-    // survive so one viewing scores both rows.
     key_entries.sort_by(|left, right| {
         left.blind_id
             .cmp(&right.blind_id)
@@ -938,9 +930,6 @@ fn load_review_for_scoring(path: &Path) -> Result<(HumanReviewFile, PathBuf), Ev
             path.display()
         ))
     })?;
-    // §9.5 declares both blind files `schema_version: 1`. `summarize_human_review`
-    // checks its own version, and a form or key written by a later CC would
-    // otherwise be read as if it meant what this one means.
     if form.schema_version != BLIND_SCHEMA_VERSION {
         return Err(EvalError::Output(format!(
             "{} carries blind schema_version {}, not {BLIND_SCHEMA_VERSION}",
@@ -2013,20 +2002,6 @@ fn generalization_suite() -> Vec<EvalDefinition> {
     ]
 }
 
-// ===========================================================================
-// CC7 §7 — `color-workflow-v6`, the model path.
-//
-// Six named colour workflows, one model turn each. Every prompt names the
-// clips and the intended outcome and never names a parameter or a value: the
-// point of the suite is to find out whether the model can choose them.
-//
-// Every threshold below is a `kinewright_core::cc7_scenarios` constant, never
-// a literal (R-M18), so a re-baseline moves one constant and not six suite
-// lines. The technical gates that discharge the same claims without a model
-// are ordinary `cargo test` fixtures; this suite adds the model lane on top
-// of them and does not replace them.
-// ===========================================================================
-
 /// The saved project c3 imports its LUT into. The file need not pre-exist for
 /// the store root to resolve, but a fixture that claims "the project is saved"
 /// writes it, so the prompt's first sentence is true.
@@ -2131,8 +2106,6 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
     ];
     let mut c1_color =
         ColorEvalRequest::from_assertions(&c1_assertions).expect("c1 gates colour assertions");
-    // Evidence no variant reads: the chart-band luma mean difference between
-    // the reference clip's frame and the candidate clip's (§4(a)(3)).
     c1_color.chart_luma_roi = Some(CC7_CHART_BAND_ROI);
     c1_color.chart_luma_reference_frame = 0;
     c1_color.chart_luma_candidate_frame = cc7_candidate_project_frame();
@@ -2140,10 +2113,6 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
     let c2_assertions = vec![
         EvalAssertion::SkinHueWithinBand {
             roi: CC7_SKIN_BAND_ROI,
-            // The corrected C2 clip is the one scenario whose skin band is
-            // NOT exactly 10 000 bp: probe-2 measured 9 411, still above
-            // `SKIN_BAND_EXCEPTION_BASIS_POINTS`, and that residual is the
-            // compromise the human is asked about (§4(b)(3)).
             minimum_in_band_basis_points: cc7_basis_points(
                 CC7_C2_SKIN_IN_BAND_REPORTED_BASIS_POINTS,
             ),
@@ -2151,8 +2120,6 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
         EvalAssertion::ColorQcTechnicalPass {
             clip_id: CC7_CANDIDATE_CLIP_ID.0,
             frame: cc7_candidate_project_frame(),
-            // (b2) is the one task that asks for per-node attribution, so the
-            // range Warning can be attributed to the correction node.
             checks: aliases(&["range", "gamut", "tags", "per_node"]),
         },
         EvalAssertion::DeliveryVerificationWithinBudgets {
@@ -2199,9 +2166,6 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
             roi: CC7_PRODUCT_RED_ROI,
             expected_covered_pixel_count: u64::from(CC7_PRODUCT_PATCH_PIXEL_COUNT),
             expected_full_pixel_count: u64::from(CC7_PRODUCT_PATCH_PIXEL_COUNT),
-            // CC7 names its own zero here: `CC7_MATTE_OUTSIDE_CHANGED_PIXELS_MAX`
-            // is the "no tolerance may excuse one pixel" constant of §4(d)(2),
-            // and (d)'s containment is exact for the same reason.
             expected_partial_pixel_count: cc7_pixel_count(CC7_MATTE_OUTSIDE_CHANGED_PIXELS_MAX),
         },
         EvalAssertion::SkinHueWithinBand {
@@ -2225,9 +2189,6 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
         ]),
         EvalAssertion::UndoIntegrity,
     ];
-    // `matte_node` is deliberately left `None`: the runner resolves the one
-    // node whose `matte_enabled` is non-zero, which does not assume an effect
-    // id the model did not choose.
     let c4_color =
         ColorEvalRequest::from_assertions(&c4_assertions).expect("c4 gates colour assertions");
 
@@ -2257,8 +2218,6 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
     ];
     let mut c5_color =
         ColorEvalRequest::from_assertions(&c5_assertions).expect("c5 gates colour assertions");
-    // Evidence no variant reads: the `deep_shadow` patch's out-of-gamut
-    // population, which is exact at 192 px under the `warm` look (§4(e)(2)).
     c5_color.gamut_roi = Some(CC7_DEEP_SHADOW_ROI);
 
     let c6_assertions = vec![
@@ -2362,14 +2321,6 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
     ]
 }
 
-// ---------------------------------------------------------------------------
-// CC7 §7.3 — the prompts, one user turn each.
-//
-// Each names the clips and the intended outcome and never names a parameter
-// or a value: the point of the suite is to find out whether the model can
-// choose them.
-// ---------------------------------------------------------------------------
-
 const CC7_PROMPT_C1: &str = "Clips 1 and 2 are the same interview shot from two cameras. Clip 1 is the reference the colourist approved. Match clip 2 to it so the neutral chart in both reads neutral and the two cut together, leave clip 1 exactly as it is, then show me a proof of the corrected clip and confirm the skin in clip 2 still reads as skin.";
 
 const CC7_PROMPT_C2: &str = "Clip 2 was shot on the wrong white-balance preset and badly underexposed; clip 1 is a correctly balanced take of the same scene. Recover clip 2 as far as the primary controls allow, tell me plainly where you ran out of authority, and check whether the recovered clip now pushes anything outside the delivery range.";
@@ -2381,14 +2332,6 @@ const CC7_PROMPT_C4: &str = "On clip 1, make the red product read richer without
 const CC7_PROMPT_C5: &str = "Give clip 1 a warm evening look using one of the built-in looks. Show me before, after, and the look bypassed at the same frame, and tell me whether the look pushes any pixels out of gamut.";
 
 const CC7_PROMPT_C6: &str = "On clip 1, isolate the moving red product with a tracked secondary and lift its saturation. Something crosses in front of it partway through — do not invent a position you did not measure, and tell me which samples you could not trust.";
-
-// ---------------------------------------------------------------------------
-// CC7 §7.2 — the six fixture builders.
-//
-// Every builder imports its media from `kinewright_media::cc7_sources`, the
-// same generator the technical gates use, so a raster cannot drift between
-// the `cargo test` claim and the model claim made about it.
-// ---------------------------------------------------------------------------
 
 /// A CC7 document: one clip per generated source, in timeline order, at
 /// CC7's own 25 fps and 320 x 180 rather than the synthetic suites' 30 fps.
@@ -2475,8 +2418,6 @@ fn fixture_cc7_mixed_camera() -> Result<PreparedFixture, EvalError> {
 fn fixture_cc7_white_balance() -> Result<PreparedFixture, EvalError> {
     let media = eval_engine();
     let reference = cc7_camera_source(Cc7Camera::A);
-    // Scenario (b)'s committed document is (b2)'s, so the candidate is C2 —
-    // the take that is beyond the planner's authority (§2.5).
     let candidate = cc7_camera_source(Cc7Camera::C2);
     let (document, context) = cc7_fixture_from_sources(
         &media,
@@ -2574,11 +2515,6 @@ fn standard_budget(max_operations: u32, max_undos: u32) -> EvalBudgets {
         max_tool_calls: 16,
         max_operations,
         max_tokens: 30_000,
-        // The first session of any batch pays a ~3x cold-cache billing
-        // premium, and in full-suite runs that lands on whichever eval runs
-        // first. The ceiling catches runaways, not positional billing
-        // variance (observed: a correct $0.40-class e1 billed $1.67 as the
-        // suite opener).
         max_cost_usd: Some(2.00),
         max_wall_time: Duration::from_mins(5),
         max_undos,
@@ -2598,9 +2534,6 @@ fn flagship_budget() -> EvalBudgets {
         max_tool_calls: 36,
         max_operations: 30,
         max_tokens: 70_000,
-        // Calibrated from 20 live samples: correct runs cluster at ~$0.60-0.70
-        // with one ~$2.00 cold-cache-priced outlier per batch. The ceiling
-        // catches runaways, not billing variance.
         max_cost_usd: Some(2.50),
         max_wall_time: Duration::from_mins(40),
         max_undos: 30,
@@ -2612,9 +2545,6 @@ fn finished_cut_budget() -> EvalBudgets {
         max_turns: 1,
         max_tool_calls: 64,
         max_operations: 80,
-        // Codex reports cumulative input across its tool loop. Two calibration
-        // runs used 553,648 and 731,311 tokens, so this is a measured upper
-        // guard rather than a single-response token assumption.
         max_tokens: 750_000,
         // Subscription Codex exposes tokens but no attributable USD cost.
         max_cost_usd: None,
@@ -3737,8 +3667,6 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
             .map_err(|error| EvalError::Fixture(error.to_string()))?;
         let mut asset = probe_named(&media, &path, alias)?;
         if truth.visual_asset_ids.iter().any(|id| id == fixture_id) {
-            // The visual source files may carry an incidental audio stream.
-            // The benchmark deliberately makes the pinned music bed the only program audio.
             asset.kind = kinewright_core::MediaKind::Video;
         }
         aliases_by_fixture_id.insert(fixture_id.clone(), alias.to_owned());
@@ -6330,10 +6258,6 @@ mod tests {
         assert_eq!(baseline["benchmark_status"], "pending_human_review");
     }
 
-    // -----------------------------------------------------------------------
-    // CC7 §8.5 / §11.2.32 — the blind package and its key.
-    // -----------------------------------------------------------------------
-
     /// Everything the reviewer must not be able to read off the package.
     ///
     /// The scenario identity is deliberately absent from this list: it is
@@ -6527,9 +6451,6 @@ mod tests {
     /// produced it. Both surfaces the reviewer touches are scanned — the
     /// `blind/` listing and the form's serialised bytes — and both are proved
     /// able to fail.
-    // Two surfaces scanned, two leak directions, and a per-needle
-    // non-vacuity sweep: the body is long because the check has to be shown
-    // able to fail on each of them, not because it does several things.
     #[test]
     #[allow(clippy::too_many_lines)]
     fn cc7_the_blind_package_discloses_no_machine_provenance() {
@@ -6621,11 +6542,6 @@ mod tests {
             "the byte scan cannot see a leaked task id"
         );
 
-        // Failing direction three: a form entry that carries the run id and
-        // the benchmark id — the two identifier classes §8.5 names beside the
-        // task id. `BlindReviewForm` structurally cannot carry either today,
-        // so this is the direction that would catch a future breadcrumb
-        // field before a reviewer ever saw it.
         for identifier in [run_id, benchmark_id] {
             let leaked_form = serde_json::json!({
                 "schema_version": 1,
@@ -6645,10 +6561,6 @@ mod tests {
             );
         }
 
-        // Both directions, per needle: every needle the scan carries is one
-        // the scan can actually see, and every needle is long enough that
-        // seeing it means something. A needle nothing can trip is a check
-        // that cannot fail (11.0.5).
         let needles = cc7_leak_needles(run_id, benchmark_id);
         assert!(needles.len() > CC7_MACHINE_PROVENANCE_NEEDLES.len());
         assert!(needles.contains(&run_id.to_ascii_lowercase()));
@@ -6724,11 +6636,7 @@ mod tests {
                 .expect("form parses");
         assert_eq!(form.entries.len(), 1);
         assert_eq!(form.entries[0].blind_id, "0f3a1d2e4b5a");
-        // The colour form pre-marks the editorial dimensions not applicable,
-        // so the reviewer rates only the two a chart raster can be rated on.
         assert_eq!(form.entries[0].not_applicable.len(), 4);
-        // The colour form also carries the scenario's matrix question, and an
-        // accepted entry must answer every one of them.
         assert_eq!(form.entries[0].questions.len(), 1);
         form.entries[0].accepted = Some(true);
         form.entries[0].ratings = HumanRatings {
@@ -6745,8 +6653,6 @@ mod tests {
 
         score_review_file(&form_path).expect("a blind form scores through the key");
 
-        // The unblinded review lands in the run root, carrying the task id
-        // the key resolved and the artefact digest the machine reported.
         let unblinded: HumanReviewFile = serde_json::from_slice(
             &fs::read(run_directory.join("human-review.json")).expect("unblinded review"),
         )
@@ -6913,9 +6819,6 @@ mod tests {
         for (name, definitions) in suites {
             assert!(!definitions.is_empty(), "{name} builds no definition");
             for definition in &definitions {
-                // No colour suite has landed yet, so every definition's
-                // colour request is absent and `EvalOutcome::color` stays
-                // `None` for every existing suite.
                 assert!(
                     definition.color.is_none(),
                     "{} carries a colour request",
@@ -6929,10 +6832,6 @@ mod tests {
         }
         assert!(deliverables >= 4, "expected packaged deliverables");
     }
-
-    // -----------------------------------------------------------------------
-    // CC7 §7.7 / §11.2.32 — the published `color-workflow-v6` benchmark.
-    // -----------------------------------------------------------------------
 
     /// The initial document a scenario's canonical batch is applied to.
     ///
@@ -6974,14 +6873,6 @@ mod tests {
     /// published.
     fn cc7_canonical_document(scenario: Cc7Scenario) -> serde_json::Value {
         let mut document = cc7_ground_truth_initial_document(scenario);
-        // (c) and (e) commit a LUT node, and core refuses an `InsertEffect`
-        // whose `lut_asset_id` no `AddLutAsset` has registered
-        // (`operation.rs:2592-2619`), so the published batch is applied behind
-        // the same `AddLutAsset` prefix `cc7_lut_backed_canonical_operations`
-        // puts in front of it. The prefix registers an asset record and adds no
-        // effect, so the projection below is the same either way; the record is
-        // a placeholder because `sha256` and `byte_len` are properties of a
-        // generated file this module never reads.
         let operations = match scenario {
             Cc7Scenario::LogLike | Cc7Scenario::CreativeLook => {
                 cc7_lut_backed_canonical_operations(
@@ -7021,10 +6912,6 @@ mod tests {
         let mut scenarios = Vec::new();
         for (index, scenario) in CC7_SCENARIOS.into_iter().enumerate() {
             let spec = cc7_spec(scenario);
-            // `cc7_canonical_operations` already carries (f)'s two
-            // `SetEffectKeyframes`, so the batch is written once; what is
-            // recorded beside it is only the parameter names those curves are
-            // on, which the (f) assertions read.
             let keyframed_parameters = if scenario == Cc7Scenario::TrackedSecondary {
                 CC7_F_KEYFRAMED_PARAMETERS.to_vec()
             } else {
@@ -7257,12 +7144,7 @@ mod tests {
 
         let generated = cc7_ground_truth_json();
         let checked_in = include_str!("../../../../benchmarks/auto-edit/v6/ground-truth.json");
-        // The file is checked in with LF, but `core.autocrlf` is `true` by
-        // default on a Windows checkout, so `include_str!` sees CRLF there and
-        // the generator always emits LF. Comparing line endings would only
-        // ever assert how the reader's git is configured, and re-baselining
-        // with CRLF would break every other platform, so the compare is on the
-        // content. The generator's own LF output is what gets pasted in.
+        // Windows checkouts may carry CRLF; the pin is the JSON, not the line ending.
         assert_eq!(
             checked_in.replace("\r\n", "\n"),
             generated,
@@ -7321,10 +7203,6 @@ mod tests {
                 "{} asserts nothing",
                 definition.name
             );
-            // The named evidence extras, asserted **positively** per task
-            // before they are copied across: without this the comparison
-            // below only proves "nothing outside those six fields differs",
-            // and c1 could carry a gamut region or c5 a chart band unnoticed.
             let task = definition
                 .name
                 .split_whitespace()
@@ -7349,8 +7227,6 @@ mod tests {
                 },
                 "{task}'s chart band frames"
             );
-            // Neither extra is ever pinned: the QC region is the whole frame
-            // and the matte node is the runner's resolver's (F-E4).
             assert_eq!(request.qc_roi, None, "{task} pins a qc region");
             assert_eq!(request.matte_node, None, "{task} pins a matte node");
             // Derived from the assertions, so a region is written once.
@@ -7402,10 +7278,6 @@ mod tests {
                 match assertion {
                     EvalAssertion::ColorQcTechnicalPass { checks, .. } => {
                         qcs += 1;
-                        // Every token round-trips: `ColorEvalRequest` derives
-                        // its `qc_checks` through a `filter_map`, so a token
-                        // core does not spell drops silently and the technical
-                        // pass would run one check short.
                         let derived =
                             ColorEvalRequest::from_assertions(std::slice::from_ref(assertion))
                                 .expect("a qc assertion derives a request");
@@ -7606,8 +7478,6 @@ mod tests {
                 assert_eq!(clip.id, ClipId(expected.clip_id));
                 assert!(clip.effects.is_empty(), "a CC7 fixture starts ungraded");
             }
-            // c3 is the one task that saves a project, and the LUT its prompt
-            // names has to be on disk beside it or the task is unsatisfiable.
             if scenario == Cc7Scenario::LogLike {
                 let project = fixture
                     .project_path

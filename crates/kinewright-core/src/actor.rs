@@ -279,8 +279,6 @@ impl CoreState {
         apply_batch(&mut after, &operations)?;
         match self.undo.last_mut() {
             Some(entry) if entry.coalesce_key.as_deref() == Some(coalesce_key) => {
-                // Appending keeps a faithful operation replay from the entry's
-                // unchanged pre-gesture document for branch rebases.
                 entry.operations.extend(operations.iter().cloned());
             }
             _ => self.undo.push(HistoryEntry {
@@ -303,10 +301,7 @@ impl CoreState {
                 operations: entry.operations,
                 coalesce_key: None,
             });
-            // The entry the pop re-exposes belongs to an older, already
-            // finished gesture. Leaving its key set would let a later gesture
-            // that reuses the key merge across this undo boundary and swallow
-            // the older entry's undo target.
+            // A reused key must not merge across this undo boundary.
             if let Some(exposed) = self.undo.last_mut() {
                 exposed.coalesce_key = None;
             }
@@ -473,9 +468,6 @@ fn execute_batch_coalesced(
         operation.canonicalize_legacy_effect_names();
     }
     match state.do_batch_coalesced(operations.clone(), coalesce_key) {
-        // The journal keeps the coalesce key: replaying the gesture as a run
-        // of ordinary batches would rebuild it as one undo entry per frame, so
-        // a journaled Undo would unwind one frame instead of the gesture.
         Ok(doc) => Event::DocumentChanged {
             doc,
             revision: state.revision,
@@ -968,15 +960,11 @@ mod tests {
             panic!("expected a post-drag snapshot");
         };
         assert_eq!(exposure(&after_drag), Some(50));
-        // Every coalesced batch still advances the revision so dependent
-        // renders and revision-guarded agent edits observe live state.
         assert_eq!(after_revision.0, before_revision.0 + 50);
 
         // One undo returns to the exact pre-drag document.
         let undone = undo_document(&core);
         assert_eq!(*undone, *before_drag);
-        // The next undo unwinds the edit before the drag, proving the fifty
-        // batches produced exactly one history entry.
         let before_effect = undo_document(&core);
         assert!(
             before_effect
@@ -1034,8 +1022,6 @@ mod tests {
         // Undo drops the second gesture and re-exposes the first one's entry.
         assert_eq!(exposure(&undo_document(&core)), Some(10));
 
-        // A fresh gesture that happens to reuse the first key must not merge
-        // into that re-exposed entry.
         coalesced_param(&core, first_key, 30);
         assert_eq!(exposure(&undo_document(&core)), Some(10));
         assert_eq!(exposure(&undo_document(&core)), None);

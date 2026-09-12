@@ -154,8 +154,6 @@ fn section_omega(hertz: f64, sample_rate: u32) -> f64 {
 /// `A = 10^(dB/40)`, the RBJ shelf and peaking amplitude.
 fn shelf_amplitude(gain_db: f64) -> f64 {
     if gain_db == 0.0 {
-        // Exactly one, so a zero-gain section is `b == a` and therefore an
-        // exact identity in steady state (AU2 §3.2, A26).
         1.0
     } else {
         10.0_f64.powf(gain_db / 40.0)
@@ -184,8 +182,6 @@ impl BiquadSection {
 
     /// `y = b0*x + s1; s1 = b1*x - a1*y + s2; s2 = b2*x - a2*y`, then the
     /// small-value squelch.
-    // The mix runs in `f32`; the section's algebra runs in `f64` and hands one
-    // rounded sample back per channel.
     #[allow(clippy::cast_possible_truncation)]
     pub(crate) fn process(&mut self, frame: &mut [f32]) {
         let coefficients = self.coefficients;

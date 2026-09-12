@@ -311,10 +311,6 @@ fn audio_gain_coalesce_key(clip: ClipId) -> String {
     format!("audio_gain:{}", clip.0)
 }
 
-// ---------------------------------------------------------------------------
-// CC4 §7 look node operations
-// ---------------------------------------------------------------------------
-
 /// The first index in `effects` at which a node of `stage` satisfies the CC4
 /// §3.2 stage-ordering rule.
 ///
@@ -355,9 +351,6 @@ fn next_effect_id(clip: &Clip) -> EffectId {
 const fn lut_kind_for_stage(stage: ColorStage) -> ColorNodeKind {
     match stage {
         ColorStage::Input => ColorNodeKind::TechnicalLut,
-        // A correction stage has no LUT kind; the inspector never offers one,
-        // and treating it as a creative look keeps this total rather than
-        // panicking on an unreachable branch.
         ColorStage::Correction | ColorStage::Look => ColorNodeKind::CreativeLook,
     }
 }
@@ -776,9 +769,6 @@ pub(crate) fn is_live_drag(slider: &egui::Response) -> bool {
 impl KinewrightApp {
     /// Route one inspector frame's edits to the core actor.
     pub(crate) fn submit_inspector_edits(&mut self, edits: InspectorEdits) {
-        // Mirror the A/B hold before the operations go out: the frame loop
-        // needs a record even for the frame the hold opens, because that is
-        // the frame after which the card may stop rendering (CC4 §7).
         if let Some(record) = edits.ab_hold {
             self.look_ab_hold = Some(MirroredAbHold {
                 session: self.focused().id,
@@ -792,25 +782,17 @@ impl KinewrightApp {
         {
             self.look_ab_hold = None;
         }
-        // The overlay's input policy is the inspector's report, one frame old
-        // (CC5 §6). Only an expansion is recorded: this path also carries the
-        // viewer's own overlay drags, which draw no card, and reporting "no
-        // section" from there would retire the report the drag is acting on.
         if let Some(target) = edits.matte_expanded {
             self.matte_overlay.report_expanded(target);
         }
         if let Some((window, window_count)) = edits.matte_selected_window {
             self.matte_overlay.select_window(window, window_count);
         }
-        // Refusals go out before the operations so a card that both refused
-        // one action and produced another still reports the refusal.
         let category = edits.error_category();
         for message in edits.errors {
             self.record_error(category, message);
         }
         if edits.gesture_started {
-            // Open the new gesture even when this frame produced no operation:
-            // a mouse-down without movement still ends the previous gesture.
             self.begin_edit_gesture();
         }
         if !edits.operations.is_empty() {
@@ -822,8 +804,6 @@ impl KinewrightApp {
                 None => self.send_operations(edits.operations),
             }
         }
-        // Look actions run after the edits so a dialog can never block the
-        // frame that produced them (CC4 §7).
         for request in edits.look_requests {
             self.handle_look_request(request);
         }
@@ -856,10 +836,6 @@ impl KinewrightApp {
                 AbHoldState::default(),
             );
         });
-        // The hold belongs to one project, which may no longer be the focused
-        // one — or may be closed. A node the operator deleted while holding
-        // has no bypass left to restore, so the restore is dropped rather than
-        // sent to be rejected.
         let Some(index) = crate::project::session_index_by_id(held.session, &self.projects) else {
             return;
         };
@@ -1039,9 +1015,6 @@ impl KinewrightApp {
                 clip.id,
                 speed_percent,
             ) {
-                // A drag emits one batch per frame so the preview stays live;
-                // the shared key files the whole drag as one undo entry
-                // instead of one per frame.
                 Ok(operations) if is_live_drag(&speed) => {
                     pending.extend_live(operations, speed_coalesce_key(clip.id));
                 }
@@ -1065,8 +1038,6 @@ impl KinewrightApp {
                     .text("Gain")
                     .integer()
                     .custom_formatter(|value, _| format!("{:+.1} dB", value / 10.0))
-                    // AU1: the readout is parsed in the unit it displays, and a
-                    // typed value commits once, on Enter or blur.
                     .custom_parser(crate::mixer_ui::parse_gain_db)
                     .update_while_editing(false),
             );
@@ -1074,11 +1045,6 @@ impl KinewrightApp {
                 pending.begin_gesture();
             }
             if audio_clip.audio_gain_curve.is_some() {
-                // AU4 §5.5 rule 119: the slider follows the existing
-                // `KEYFRAMED` rule and is **not** disabled. Rule 110's
-                // affordance rule is about controls whose position claims to
-                // be what you hear; this slider sits directly above the list
-                // that owns the ride, unlike the mixer rail of rule 109.
                 ui.horizontal(|ui| {
                     ui.colored_label(color::STATUS_WARNING, "KEYFRAMED");
                     ui.colored_label(color::TEXT_MUTED, ENVELOPE_KEYFRAMED_NOTE);
@@ -1125,8 +1091,6 @@ impl KinewrightApp {
                     }
                 });
             }
-            // AU1: a readout that commits on Enter or blur reports one
-            // `changed()` frame with the unchanged value; skip no-op writes.
             let differs = gain_tenth_db != audio_clip.audio_gain_tenth_db
                 || fade_in_frames != audio_clip.audio_fade_in_frames.0
                 || fade_out_frames != audio_clip.audio_fade_out_frames.0;
@@ -1137,9 +1101,6 @@ impl KinewrightApp {
                     fade_in_frames,
                     fade_out_frames,
                 );
-                // Only a live gain drag coalesces. A fade edit or Reset click
-                // cannot happen while the gain slider is dragged, so the gain
-                // response alone decides.
                 if is_live_drag(&gain) {
                     pending.push_live(operation, audio_gain_coalesce_key(audio_clip.id));
                 } else {
@@ -1158,9 +1119,6 @@ impl KinewrightApp {
         }
 
         let document = Arc::clone(&self.focused().document);
-        // Cloned rather than borrowed: the availability map has one entry per
-        // LUT asset, and cloning it keeps `self` free for the dispatch that
-        // follows the frame.
         let availability = self.focused().lut_availability.clone();
         let qc_clipping = self.color_qc.node_clipping();
         let looks = LookInspectorContext {
@@ -1204,9 +1162,6 @@ impl KinewrightApp {
         );
         let mut pending = InspectorEdits::default();
         let document = Arc::clone(&self.focused().document);
-        // Cloned rather than borrowed: the availability map has one entry per
-        // LUT asset, and cloning it keeps `self` free for the dispatch that
-        // follows the frame.
         let availability = self.focused().lut_availability.clone();
         let qc_clipping = self.color_qc.node_clipping();
         let looks = LookInspectorContext {
@@ -1496,10 +1451,6 @@ fn effects_section(
 ) {
     ui.add_space(space::TWO);
     ui.strong("Colour");
-    // The three stage headings render the managed nodes in `clip.effects`
-    // order within each stage, which is also the execution order: the document
-    // invariant forbids a vector order that contradicts the stage order, so
-    // the inspector, the manifest, and the renderer cannot disagree (CC4 §3.2).
     for stage in ColorStage::ALL {
         color_stage_section(ui, clip, stage, looks, pending);
     }
@@ -1572,9 +1523,6 @@ fn effects_section(
                 continue;
             }
             if ui.button(effect_display_name(descriptor.name)).clicked() {
-                // A LUT node cannot be added with descriptor neutrals: an
-                // unbound `lut_asset_id` is rejected by design (CC4 §3.3), so
-                // the menu routes it into the import that binds it.
                 if let Some(kind) =
                     ColorNodeKind::from_effect_name(descriptor.name).filter(|kind| kind.is_lut())
                 {
@@ -1711,10 +1659,6 @@ fn lut_insert_button(
         button.on_hover_text(looks.store_reason().to_owned())
     }
 }
-
-// ---------------------------------------------------------------------------
-// CC4 §7 look card
-// ---------------------------------------------------------------------------
 
 /// One availability state rendered as the media card's warning treatment.
 fn availability_chip(kind: Option<LutAvailabilityKind>) -> (&'static str, egui::Color32) {
@@ -1883,8 +1827,6 @@ fn lut_node_section(
             .filter(|name| !is_matte_parameter(name))
             .collect();
         color_node_keyframe_rows(ui, clip.id, effect, &names, pending);
-        // CC5 §2.1: a technical input transform normalizes the whole source,
-        // so it carries no matte and gets no section.
         if kind == ColorNodeKind::CreativeLook {
             matte_section(ui, clip, effect, pending);
         }
@@ -1974,11 +1916,6 @@ fn look_ab_row(
     params: LutNodeParams,
     pending: &mut InspectorEdits,
 ) {
-    // `LutNodeParams::from_effect` reads the *static* `bypass`. A keyframed
-    // `bypass` is evaluated per frame from the curve, so a hold would write a
-    // static `1` the curve immediately overrides: the comparison would do
-    // nothing visible while still filing an undo entry. CC4 §7 wants the
-    // keyframed state badged, not silently mis-served.
     let keyframed = !ab_hold_is_available(effect);
     let id = ab_hold_id(clip.id, effect.id);
     let previous: AbHoldState = ui.data(|data| data.get_temp(id)).unwrap_or_default();
@@ -2015,8 +1952,6 @@ fn look_ab_row(
         });
         ui.colored_label(color::STATUS_WARNING, "Bypassed while held");
     } else if previous.held {
-        // The card released the hold itself, so the app's mirror retires
-        // without a second restore.
         pending.record_ab_release(clip.id, effect.id);
     }
     if keyframed {
@@ -2154,9 +2089,6 @@ fn legacy_look_conversion_row(
             looks.has_store(),
             egui::Button::new("Convert to managed look").small(),
         );
-        // A legacy stage authored before a managed correction cannot become a
-        // creative look where it stands, so the batch moves it to the first
-        // legal Look position instead of being rejected (CC4 §3.2, §9).
         let reorders = !legacy_conversion_keeps_stage_order(&clip.effects, effect.id);
         let hover = if reorders {
             "Replaces this legacy stage with a managed creative look. It sits before a managed \
@@ -2219,8 +2151,6 @@ fn primary_correction_section(
         });
 
         for parameter in descriptor.parameters {
-            // CC5 §6: the 47 matte integers belong to the matte section, never
-            // to a generic slider loop.
             if !should_render_effect_parameter(descriptor, parameter.name) {
                 continue;
             }
@@ -2253,8 +2183,6 @@ fn primary_correction_section(
                     let operation =
                         effect_param_operation(clip.id, effect.id, parameter.name, value);
                     if is_live_drag(&slider) {
-                        // One batch per frame keeps the preview live; the key
-                        // keeps the whole drag as one undo entry.
                         pending.push_live(
                             operation,
                             primary_coalesce_key(clip.id, effect.id, parameter.name),
@@ -2313,18 +2241,12 @@ fn color_node_reset_operations(
         for curve in ColorCurveChannel::ALL {
             operations.extend(curve_reset_parameter_operations(clip, effect, curve));
         }
-        // `bypass` is node-owned rather than curve-owned; it is written after
-        // every curve is back at the structural identity so the batch never
-        // depends on the order the two halves happen to land in.
         operations.push(effect_param_operation(
             clip,
             effect.id,
             COLOR_NODE_BYPASS_PARAMETER,
             0,
         ));
-        // CC5 §5: resetting a matte-capable node resets its matte too. The
-        // matte parameters are independently bounded, so unlike the curve
-        // points they need no ordering strategy.
         for parameter in descriptor.parameters {
             if is_matte_parameter(parameter.name) && matte_reset_needs_write(effect, parameter) {
                 operations.push(effect_param_operation(
@@ -2343,11 +2265,6 @@ fn color_node_reset_operations(
         return operations;
     }
     for parameter in descriptor.parameters {
-        // CC4 §6: resetting a LUT node would unbind it (`lut_asset_id -> 0`),
-        // which `validate_document` rejects, so the batch excludes that
-        // parameter entirely — both its `SetEffectParam` and its
-        // `ClearEffectKeyframes`, so a `Hold`-automated binding survives a
-        // reset. The inspector labels this "Reset look controls".
         if parameter.name == LUT_ASSET_ID_PARAMETER && is_lut_color_node(descriptor.name) {
             continue;
         }
@@ -2386,10 +2303,6 @@ fn matte_reset_needs_write(
         Some(stored) => *stored != ParamValue::Integer(parameter.neutral),
     }
 }
-
-// ---------------------------------------------------------------------------
-// CC5 §6 matte section
-// ---------------------------------------------------------------------------
 
 /// The `matte_*` node controls the section writes by name.
 ///
@@ -2576,9 +2489,6 @@ fn matte_window_keyframe_shift_operations(
                 name: (*name).to_owned(),
                 curve: curve.clone(),
             }),
-            // Nothing to move: the destination must not keep its own curve, or
-            // the freshly written statics would be overridden by the automation
-            // of a window that no longer exists there.
             None if effect.keyframes.contains_key(*name) => {
                 operations.push(clear_keyframes_operation(clip, effect.id, name));
             }
@@ -2628,9 +2538,6 @@ pub(crate) fn matte_add_window_operations(clip: ClipId, effect: &Effect) -> Vec<
             operations.push(effect_param_operation(clip, effect.id, name, value));
         }
     }
-    // A recycled slot may still carry the automation of the window that used to
-    // live in it, which would animate the "fresh" window off its neutral on the
-    // very first frame (CC5 §5.1).
     operations.extend(matte_window_keyframe_shift_operations(
         clip, effect, index, None,
     ));
@@ -2676,9 +2583,6 @@ pub(crate) fn matte_remove_window_operations(
             Some(slot + 1),
         ));
     }
-    // The slot the shift emptied keeps its stale statics — `Add window` resets
-    // those — but it must not keep automation, or the next Add would resurrect
-    // the removed window's motion under a neutral-looking card.
     operations.extend(matte_window_keyframe_shift_operations(
         clip, effect, vacated, None,
     ));
@@ -2764,9 +2668,6 @@ pub(crate) fn matte_window_drag_operations(
 fn matte_section(ui: &mut egui::Ui, clip: &Clip, effect: &Effect, pending: &mut InspectorEdits) {
     let params = MatteParams::from_effect(effect);
     let id = matte_section_id(clip.id, effect.id);
-    // `CollapsingState` rather than `CollapsingHeader` so the open state has an
-    // id the rest of the app — and a test without a window — can name, and so
-    // the report is the stored state rather than an animation frame.
     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
         .show_header(ui, |ui| {
             ui.label(egui::RichText::new("Matte (this correction)").strong());
@@ -2933,9 +2834,6 @@ fn matte_section_body(
                 pending.push(operation);
             }
         }
-        // The slider is whole percent, as the look mix is (CC4 §7), so the
-        // stored value is shown beside it: an agent may author any basis point
-        // and a 6050 that reads as "60 %" would look like a rounding bug.
         ui.monospace(format!("{} bp", params.mix_bp));
         ui.colored_label(
             color::TEXT_MUTED,
@@ -3089,9 +2987,6 @@ fn matte_parameter_range(effect: &Effect, name: &str, value: i64) -> std::ops::R
     let Some(parameter) = kinewright_core::effect_descriptor(&effect.name)
         .and_then(|descriptor| descriptor.parameter(name))
     else {
-        // A release build keeps the inert control; the test lane fails loudly,
-        // so a control retargeted at a name the node does not register is
-        // caught here rather than shipping as a `DragValue` that cannot move.
         debug_assert!(
             !is_matte_capable_color_node(&effect.name),
             "unregistered matte control {name} on {}",
@@ -3185,8 +3080,6 @@ fn matte_qualifier_rows(
         qualifier.luma_high_bp,
         qualifier.luma_softness_bp,
     ];
-    // No transcribed bounds here: `matte_integer_control` reads each one from
-    // the node's descriptor, which is what core validates the write against.
     for (index, ((name, label), value)) in MATTE_QUALIFIER_PARAMETERS
         .iter()
         .skip(1)
@@ -3256,8 +3149,6 @@ fn color_wheels_section(
             looks,
             pending,
         );
-        // Wrapped so a narrow inspector stacks the balls instead of clipping
-        // the third one out of reach.
         ui.horizontal_wrapped(|ui| {
             for control in ColorWheelControl::ALL {
                 let state = wheel_state(effect, params, control);
@@ -3558,12 +3449,6 @@ fn curve_edit_operations(
         .iter()
         .zip(current)
         .all(|(next, current)| next.0 <= current.0);
-    // The descending branch writes `{curve}_point_count` *first*, so it must
-    // never grow the active prefix: growing it would expose the colliding
-    // `(10000, 10000)` neutrals of the points that are still unwritten, and
-    // core would reject the count. `zip` stops at the shorter list, so the
-    // length guard is not implied by the coordinate comparison and has to be
-    // stated.
     let moves_right = next.len() <= current.len()
         && next
             .iter()
@@ -3655,9 +3540,6 @@ fn curve_reset_parameter_operations(
                 parameter.neutral
             })
     };
-    // Points 2..16 are inactive once the count is back at two, so their
-    // deliberately colliding `(10000, 10000)` neutrals are never examined by
-    // the strict-`x` check (CC3 §2.3).
     for index in COLOR_CURVE_MIN_POINTS..COLOR_CURVE_MAX_POINTS {
         let (Some(x_name), Some(y_name)) = (curve.x_parameter(index), curve.y_parameter(index))
         else {
@@ -3724,10 +3606,6 @@ fn automation_truncated_curves(effect: &Effect) -> Vec<ColorCurveChannel> {
     const SCAN_LIMIT: usize = 64;
     let mut frames = vec![TimeCode::ZERO];
     for (name, curve) in &effect.keyframes {
-        // `bypass` is node-owned rather than curve-owned, but it decides
-        // whether a truncation is visible at all. A node that is bypassed at
-        // frame zero and live from frame ten would otherwise never be scanned
-        // at a frame where its truncation matters.
         if ColorCurveChannel::owning(name).is_none() && *name != COLOR_NODE_BYPASS_PARAMETER {
             continue;
         }
@@ -3806,8 +3684,6 @@ fn keyframe_fingerprint(effect: &Effect) -> u64 {
 
 /// The shared header of a CC3 colour-node card: name, stage index, bypass,
 /// reset, and remove, plus the CC6 §8.3 clipping-contribution line.
-// Every argument is a distinct thing the header draws; bundling them into a
-// struct would only move the same list one line up.
 #[allow(clippy::too_many_arguments)]
 fn color_node_header(
     ui: &mut egui::Ui,
@@ -3973,9 +3849,6 @@ fn envelope_block(
                 if action.gesture_started {
                     pending.begin_gesture();
                 }
-                // The row is pure and domain-free, so the clip's own bound is
-                // applied here rather than inside it: a key past the clip end
-                // is what `SetClipGainEnvelope` rejects.
                 if let Some(edited) = action.edited.as_mut() {
                     edited.at = TimeCode(edited.at.0.clamp(0, last));
                 }
@@ -4019,8 +3892,6 @@ fn envelope_block(
             clip,
             curve: applied.into_curve(),
         };
-        // Rule 120: every edit here is discrete except a drag on an existing
-        // key's value, which shares the rubber band's undo entry.
         if live {
             pending.push_live(operation, envelope_coalesce_key(clip));
         } else {
@@ -4127,8 +3998,6 @@ pub(crate) fn keyframe_row(
             if frame.drag_started() || level.drag_started() {
                 action.gesture_started = true;
             }
-            // Rule 120: every edit here is discrete except a drag on an
-            // existing key's value, which shares the rubber band's key.
             action.live = is_live_drag(&level);
             changed |= frame.changed() || level.changed();
         });
@@ -4139,9 +4008,6 @@ pub(crate) fn keyframe_row(
             value,
             interpolation,
         };
-        // A readout that commits on Enter or blur reports one `changed()`
-        // frame with the unchanged value; a write that changes nothing is not
-        // an edit.
         if edited != *stored {
             action.edited = Some(edited);
         }
@@ -4195,8 +4061,6 @@ pub(crate) fn apply_keyframe_row_action(
     if index >= curve.keyframes.len() {
         return None;
     }
-    // Keys stay strictly increasing, so a frame dragged past a neighbour stops
-    // one frame short of it rather than producing a curve `validate` rejects.
     let low = index
         .checked_sub(1)
         .and_then(|previous| curve.keyframes.get(previous))
@@ -4359,24 +4223,12 @@ fn should_render_effect_parameter(
     descriptor: &kinewright_core::EffectDescriptor,
     parameter_name: &str,
 ) -> bool {
-    // CC5 §6: the matte section owns all 47 matte integers on all four
-    // matte-capable kinds. 47 raw sliders is not a workflow, and the two
-    // parameters a window move writes must land as one gesture rather than as
-    // two unrelated sliders.
     if is_matte_parameter(parameter_name) {
         return false;
     }
-    // CC3 §7: the wheels and curves nodes own dedicated cards. Their 13 and 133
-    // integers must never reach the generic slider loop, and `AddEffect` must
-    // insert them with no parameters at all, because an omitted parameter
-    // resolves to its neutral (CC3 §2.4).
     if matches!(descriptor.name, "color_wheels" | "color_curves") {
         return false;
     }
-    // CC4 §7: the LUT nodes own dedicated cards. `lut_asset_id` is set by the
-    // browser and the import, `input_encoding_token` by the encoding picker,
-    // and `mix_basis_points` is pinned on a `technical_lut` (min = max), so a
-    // generic slider over any of them would be either wrong or inert.
     if is_lut_color_node(descriptor.name) {
         return !matches!(
             (descriptor.name, parameter_name),
@@ -4759,17 +4611,11 @@ mod tests {
             audio_gain_curve: None,
         };
 
-        // A managed colour node is inserted at its stage's first legal index,
-        // never appended (CC4 §3.2).
         let Operation::InsertEffect { effect, index, .. } = add_effect_operation(&clip, descriptor)
         else {
             panic!("primary correction must emit InsertEffect");
         };
         assert_eq!(index, 0);
-        // CC5 §8: the matte parameters are omitted entirely, which is what
-        // makes a node inserted after CC5 render bit-identically to a CC4 one —
-        // an omitted parameter resolves to its neutral and an all-neutral matte
-        // is inactive.
         assert_eq!(
             effect.parameters.len(),
             descriptor.parameters.len() - kinewright_core::MATTE_PARAMETER_COUNT
@@ -4800,9 +4646,6 @@ mod tests {
             )]),
         };
         let reset = color_node_reset_operations(clip.id, &reset_effect, descriptor);
-        // Every non-matte parameter, plus the one keyframe clear. The 47 matte
-        // parameters this node never stored already resolve to their neutrals
-        // (CC5 §2.2), so the reset leaves them unstored instead of writing them.
         let non_matte = descriptor
             .parameters
             .iter()
@@ -4917,8 +4760,6 @@ mod tests {
             primary_coalesce_key(ClipId(3), EffectId(8), "exposure_milli_stops")
         );
 
-        // A speed change is several operations per frame; they still form one
-        // coalesced batch.
         let mut edits = InspectorEdits::default();
         edits.begin_gesture();
         edits.extend_live(
@@ -5008,9 +4849,6 @@ mod tests {
             assert!(is_legacy_display_effect(name));
         }
         assert!(is_effect_insertable("primary_correction"));
-        // CC4 §7 moved `look_lut` into the exclusions: the managed kinds cover
-        // it, so a new project never grows a legacy stage. An existing one
-        // stays visible and offers "Convert to managed look".
         assert!(!is_effect_insertable("look_lut"));
         assert!(!is_effect_insertable("color_grade"));
         assert!(!is_effect_insertable("cube_lut"));
@@ -5234,9 +5072,6 @@ mod tests {
         }
 
         let clip = media_clip(ClipId(10), AssetId(1), None);
-        // CC5 §2.2 grew both descriptors by the 47 matte parameters. The counts
-        // are written as the CC3 control count plus that constant so the
-        // arithmetic, not a transcribed literal, is what this asserts.
         for (name, parameter_count) in [
             ("color_wheels", 13 + kinewright_core::MATTE_PARAMETER_COUNT),
             ("color_curves", 133 + kinewright_core::MATTE_PARAMETER_COUNT),
@@ -5446,8 +5281,6 @@ mod tests {
             vec![(0, 0), (2_000, 6_000), (10_000, 10_000)],
             vec![(0, 0), (7_000, 6_000), (10_000, 10_000)],
             vec![(0, 0), (7_000, 6_000), (8_000, 9_000), (10_000, 10_000)],
-            // Remove one: later coordinates move right, so the count shrinks
-            // first and the writes run descending.
             vec![(0, 0), (8_000, 9_000), (10_000, 10_000)],
             // A mixed edit moves points in both directions at once.
             vec![(0, 0), (3_000, 1_000), (12_000, 12_000)],
@@ -5477,18 +5310,12 @@ mod tests {
             sixteen.push((x, x));
         }
         vec![
-            // The reported repro: both active points sit left of zero, so a
-            // descriptor-ordered `master_x0 = 0` crosses `master_x1 = -1000`.
             ("negative pair", vec![(-2_000, -1_000), (-1_000, 500)]),
-            // Both active points sit right of white, so `master_x1 = 10000`
-            // would cross if it were written first instead.
             ("far right", vec![(9_000, 9_000), (11_000, 11_500)]),
             (
                 "far right, three points",
                 vec![(9_000, 0), (11_000, 5_000), (12_000, 12_000)],
             ),
-            // One point must move right and the other left, so neither the
-            // ascending nor the descending branch applies.
             ("reversed pair", vec![(-2_000, 4_000), (12_000, 1_000)]),
             ("sixteen points", sixteen),
         ]
@@ -5541,8 +5368,6 @@ mod tests {
                 "the {label} reset must restore (0, 0) and (10000, 10000)",
             );
             assert!(!resolved.master.truncated);
-            // Every one of the curve's 33 parameters ends at its neutral,
-            // including the inactive points 2..16.
             for parameter in ColorCurveChannel::Master.parameters() {
                 assert_eq!(
                     effect.parameters.get(parameter.name),
@@ -5611,10 +5436,6 @@ mod tests {
                 "the {label} node reset must clear bypass"
             );
             for parameter in descriptor.parameters {
-                // A matte parameter this node never stored already *resolves*
-                // to its neutral, and the reset deliberately leaves it unstored
-                // rather than adding 47 entries to a CC4-era node (CC5 §2.2);
-                // what must hold either way is the resolved value.
                 assert_eq!(
                     effect
                         .integer_parameter_at(parameter.name, TimeCode::ZERO)
@@ -5722,9 +5543,6 @@ mod tests {
                 }],
             },
         );
-        // Every keyframed control appears exactly once, grouped under the curve
-        // that owns it, in `ColorCurveChannel::ALL` order with the node-owned
-        // `bypass` last. Green carries no automation and is omitted.
         assert_eq!(
             color_curve_keyframe_groups(&effect),
             vec![
@@ -5754,21 +5572,16 @@ mod tests {
             id: EffectId(4),
             name: "color_curves".to_owned(),
             parameters: BTreeMap::new(),
-            keyframes: BTreeMap::from([
-                // A whole-curve step to sixteen points whose coordinates are
-                // omitted: every point past the first resolves to the colliding
-                // `(10000, 10000)` neutral, so the curve truncates to two.
-                (
-                    "master_point_count".to_owned(),
-                    AutomationCurve {
-                        keyframes: vec![Keyframe {
-                            at: TimeCode::ZERO,
-                            value: 16,
-                            interpolation: KeyframeInterpolation::Hold,
-                        }],
-                    },
-                ),
-            ]),
+            keyframes: BTreeMap::from([(
+                "master_point_count".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![Keyframe {
+                        at: TimeCode::ZERO,
+                        value: 16,
+                        interpolation: KeyframeInterpolation::Hold,
+                    }],
+                },
+            )]),
         };
         effect.keyframes.insert(
             COLOR_NODE_BYPASS_PARAMETER.to_owned(),
@@ -6065,10 +5878,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // CC4 §7 look workflow
-    // -----------------------------------------------------------------------
-
     fn colour_effect(id: u64, name: &str) -> Effect {
         Effect {
             id: EffectId(id),
@@ -6110,8 +5919,6 @@ mod tests {
 
     #[test]
     fn the_insert_index_puts_a_technical_lut_before_every_correction() {
-        // Interleaved non-colour effects are unconstrained and are stepped
-        // over without moving the index.
         let effects = vec![
             colour_effect(1, "crop"),
             colour_effect(2, "primary_correction"),
@@ -6121,8 +5928,6 @@ mod tests {
             colour_effect(6, "reframe"),
         ];
         assert_eq!(color_stage_insert_index(&effects, ColorStage::Input), 0);
-        // A creative look lands after the last managed node, which is the
-        // existing look at index 4.
         assert_eq!(color_stage_insert_index(&effects, ColorStage::Look), 5);
         // A correction lands after the last correction, before the look.
         assert_eq!(
@@ -6150,8 +5955,6 @@ mod tests {
 
     #[test]
     fn every_computed_insert_index_is_accepted_by_core() {
-        // The whole point of the computed index: no ordinary path can produce
-        // a `ColorStageOrderViolation`.
         let mut document = look_document(
             vec![
                 colour_effect(1, "crop"),
@@ -6187,9 +5990,6 @@ mod tests {
         assert_eq!(index, 1);
         assert_eq!(effect.id, EffectId(2));
         assert_eq!(effect.name, "creative_look");
-        // CC3 §2.4's convention: only the values the operator touched. The
-        // neutral mix of a creative look is full strength, so a node created
-        // with only a binding shows the look.
         assert_eq!(
             effect.parameters,
             BTreeMap::from([(LUT_ASSET_ID_PARAMETER.to_owned(), ParamValue::Integer(7))])
@@ -6221,8 +6021,6 @@ mod tests {
 
     #[test]
     fn the_release_frame_of_a_mix_drag_stays_in_the_gesture() {
-        // egui reports the release frame as `changed() && !dragged()`, so the
-        // gate that decides whether a frame coalesces has to accept it.
         let mut pending = InspectorEdits::default();
         for value in [10, 40, 55] {
             pending.push_live(
@@ -6316,8 +6114,6 @@ mod tests {
         let descriptor =
             kinewright_core::effect_descriptor("creative_look").expect("the CC4 descriptor exists");
         let mut effect = lut_effect(2, "creative_look", 9, Some(4_000));
-        // Both the binding and the mix carry automation, so the reset has a
-        // `ClearEffectKeyframes` to omit and one to keep.
         effect.keyframes.insert(
             LUT_ASSET_ID_PARAMETER.to_owned(),
             AutomationCurve {
@@ -6712,15 +6508,10 @@ mod tests {
             release.operation.expect("a release restores bypass")
         );
 
-        // The card mirrors the hold out to the app on the frame it opens, so
-        // the record exists before the card can stop rendering.
         let mut pending = InspectorEdits::default();
         pending.record_ab_hold(record);
         assert_eq!(pending.ab_hold(), Some(record));
 
-        // The mirror is bound to the project that owns it: a hold that
-        // survives a project switch must not be restored into whatever
-        // document happens to be focused.
         let mirrored = MirroredAbHold { session: 3, record };
         assert_ne!(mirrored, MirroredAbHold { session: 4, record });
 
@@ -6755,8 +6546,6 @@ mod tests {
             },
         );
         assert!(!ab_hold_is_available(&keyframed));
-        // The badge the card shows comes from the same predicate the keyframe
-        // rows use, so the two can never disagree.
         assert!(parameter_is_keyframed(
             &keyframed,
             COLOR_NODE_BYPASS_PARAMETER
@@ -6810,8 +6599,6 @@ mod tests {
             pending.errors()
         );
 
-        // A legacy `cube_lut` with no stored path has no file to import, which
-        // used to be a silently dead button.
         let mut pending = InspectorEdits::default();
         request_legacy_conversion(
             &document,
@@ -6827,8 +6614,6 @@ mod tests {
             pending.errors()
         );
 
-        // The path that works still routes to the import worker, with nothing
-        // in the error log.
         let mut cube = colour_effect(4, "cube_lut");
         cube.parameters.insert(
             "path".to_owned(),
@@ -6849,9 +6634,6 @@ mod tests {
 
     #[test]
     fn a_look_request_is_collected_without_disturbing_a_live_gesture() {
-        // The card records dialogs and workers separately from operations, so
-        // a request in the same frame as a drag neither breaks the drag's
-        // coalescing nor turns into an edit of its own.
         let mut pending = InspectorEdits::default();
         pending.push_live(
             effect_param_operation(ClipId(10), EffectId(2), LUT_MIX_PARAMETER, 3_000),
@@ -6882,8 +6664,6 @@ mod tests {
 
     #[test]
     fn the_effect_menu_excludes_legacy_looks_and_offers_the_managed_kinds() {
-        // CC4 §7: `look_lut` joins `color_grade` and `cube_lut` in the
-        // exclusions because the managed kinds now cover it.
         assert!(!is_effect_insertable("look_lut"));
         assert!(!is_effect_insertable("cube_lut"));
         assert!(!is_effect_insertable("color_grade"));
@@ -6909,9 +6689,6 @@ mod tests {
                 LUT_INPUT_ENCODING_PARAMETER
             ));
         }
-        // The mix is pinned on a technical LUT (min = max = 10000), so a
-        // slider over it would be inert; it stays visible on a creative look,
-        // which is where the dedicated control writes it.
         assert!(!should_render_effect_parameter(
             &technical,
             LUT_MIX_PARAMETER
@@ -6959,10 +6736,6 @@ mod tests {
         assert_eq!(input_encoding_label(1), "linear");
         assert_eq!(input_encoding_label(2), "grade709");
     }
-
-    // -----------------------------------------------------------------------
-    // CC5 §6 matte section
-    // -----------------------------------------------------------------------
 
     /// The four matte-capable kinds (CC5 §2.1). `technical_lut` is not one.
     const MATTE_CAPABLE_KINDS: [&str; 4] = [
@@ -7037,12 +6810,7 @@ mod tests {
             }
         }
 
-        // A name the node does not register yields an inert control rather than
-        // an invented range that would offer a value core rejects. A
-        // matte-*capable* node asked for an unregistered name is a retargeted
-        // control, and `matte_parameter_range` now trips a `debug_assert` for
-        // that case, so it is pinned by its own `#[should_panic]` test below
-        // rather than here.
+        // A name the node does not register yields an inert control rather than an invented range that would offer a value core rejects.
         assert_eq!(
             matte_parameter_range(&colour_effect(1, "technical_lut"), "matte_invert", 7),
             7..=7,
@@ -7077,9 +6845,6 @@ mod tests {
             assert_eq!(*mix_percent_range(max).end(), mix_percent(max, max));
         }
 
-        // And the widget itself: at a 20000 bp max, 150 % is a legal stored
-        // value and the slider has to keep it — while still clamping at its own
-        // bound.
         let ctx = egui::Context::default();
         let mut inside = 150;
         let mut beyond = 250;
@@ -7104,8 +6869,6 @@ mod tests {
         assert_eq!(mix_percent(12_000, 20_000), 120, "not at somebody else's");
         assert_eq!(mix_percent(-500, 10_000), 0);
 
-        // And the constant the matte card passes is the matte descriptor's own
-        // bound, on every kind that carries a matte.
         for kind in MATTE_CAPABLE_KINDS {
             let descriptor = kinewright_core::effect_descriptor(kind).expect("descriptor");
             assert_eq!(
@@ -7194,9 +6957,6 @@ mod tests {
                 .expect("a stored, keyframed matte is a legal project");
             let reset = color_node_reset_operations(ClipId(10), &effect, &descriptor);
 
-            // Every matte parameter the node actually *stores* off-neutral is
-            // returned to its neutral; the ones it never stored already resolve
-            // to neutral, so writing them would only add entries (CC5 §2.2).
             for stored in [
                 "matte_enabled",
                 "matte_window_count",
@@ -7242,9 +7002,6 @@ mod tests {
                  static value resolves to"
             );
 
-            // And the reset really is a reset: applying it leaves an all-neutral
-            // matte, which is the property the removed "47 sets" count stood in
-            // for.
             apply(&mut document, &reset, "the matte reset");
             let matte = stored_matte(&document);
             assert!(!matte.is_enabled());
@@ -7429,8 +7186,6 @@ mod tests {
             );
         }
 
-        // And it is what renders: the shifted window resolves as the inverted
-        // ellipse it was, not as W0's rect.
         let resolved = MatteParams::from_effect(&effect.evaluated_at(TimeCode::ZERO)).windows[0];
         assert!(
             resolved.is_ellipse() && resolved.is_inverted(),
@@ -7582,8 +7337,6 @@ mod tests {
             "the second window shifts down to index 0"
         );
 
-        // Removing the last window empties the list; removing from an empty
-        // list is a no-op rather than an operation core would reject.
         let effect = document.tracks[0].clips[0].effects[0].clone();
         let removal = matte_remove_window_operations(ClipId(10), &effect, 0);
         apply(&mut document, &removal, "Remove the last window");
@@ -7591,8 +7344,6 @@ mod tests {
         let effect = document.tracks[0].clips[0].effects[0].clone();
         assert!(matte_remove_window_operations(ClipId(10), &effect, 0).is_empty());
 
-        // A fourth window is the limit; a fifth Add is refused by the helper,
-        // not by core.
         for index in 0..MATTE_WINDOW_LIMIT {
             let effect = document.tracks[0].clips[0].effects[0].clone();
             let batch = matte_add_window_operations(ClipId(10), &effect);
@@ -7829,8 +7580,6 @@ mod tests {
         );
         assert!(edits.gesture_started);
 
-        // A mix drag rides its own key, so a matte move and a mix drag never
-        // merge.
         let mut mix = InspectorEdits::default();
         mix.push_live(
             effect_param_operation(ClipId(3), EffectId(8), "matte_mix_basis_points", 6_000),
@@ -7880,8 +7629,6 @@ mod tests {
             invert: 1,
         };
         let names = kinewright_core::matte_window_parameter_names(1).expect("window 1");
-        // Every one of the eight differs from the neutral the slot holds, so
-        // the whole batch is written and the order is observable.
         let operations = matte_window_edit_operations(
             ClipId(10),
             EffectId(1),
@@ -7922,9 +7669,6 @@ mod tests {
             .is_empty()
         );
 
-        // A parameter already at the value being written is not restated: a
-        // slot rewrite that agrees with what is stored writes nothing, and one
-        // that differs in a single control writes exactly that control.
         assert!(
             matte_window_edit_operations(ClipId(10), EffectId(1), 1, &window, &window).is_empty(),
             "an unchanged slot is not rewritten"
@@ -8012,8 +7756,6 @@ mod tests {
     /// already drives it.
     fn matte_expansion_reported_by_card(name: &str) -> Option<MatteTarget> {
         let ctx = egui::Context::default();
-        // The cards ask for the app's own font families, so the theme has to be
-        // installed before one can be laid out.
         crate::theme::install(&ctx);
         let effect = colour_effect(1, name);
         let clip = look_clip(vec![effect.clone()]);
@@ -8045,9 +7787,6 @@ mod tests {
             }
         };
 
-        // The section's id names the node, not the layout, so it can be forced
-        // open from here without the card's cooperation. A card that draws no
-        // matte section simply never reads it.
         let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
             &ctx,
             matte_section_id(clip.id, effect.id),
@@ -8074,8 +7813,6 @@ mod tests {
         qc_clipping: &crate::color_qc_ui::ColorQcNodeClipping,
     ) -> Vec<String> {
         let ctx = egui::Context::default();
-        // The cards ask for the app's own font families, so the theme has to be
-        // installed before one can be laid out.
         crate::theme::install(&ctx);
         let effect = colour_effect(1, name);
         let clip = look_clip(vec![effect.clone()]);
@@ -8138,8 +7875,6 @@ mod tests {
                 "{name}'s card does not draw the clipping line:\n{painted:#?}"
             );
 
-            // And with no measurement, the card is exactly as it was: a report
-            // of nothing is not a line saying zero.
             let quiet =
                 painted_colour_node_card(name, &crate::color_qc_ui::ColorQcNodeClipping::default());
             assert!(
@@ -8175,10 +7910,6 @@ mod tests {
              forcing the id open reports nothing and the viewer stays inert"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // CC7 §6 — the person path, at the operation-builder level
-    // -----------------------------------------------------------------------
 
     use kinewright_core::cc7_scenarios::{
         CC7_A_OPERATIONS, CC7_B1_OPERATIONS, CC7_B2_OPERATIONS, CC7_D_OPERATIONS,
@@ -8529,8 +8260,6 @@ mod tests {
         let canonical = cc7_canonical_operations(scenario);
         let (mut document, clip, effect) = cc7_seeded(scenario, &canonical);
 
-        // The card the person is looking at draws a slider for each of the
-        // three values, and drawing it changes nothing.
         let painted = cc7_painted_primary_card(&document, &clip, &effect);
         cc7_assert_painted(
             &painted,
@@ -8538,9 +8267,6 @@ mod tests {
             "the primary correction card",
         );
 
-        // The proposal `cc7_scenarios` pins and the node it commits are the
-        // same three numbers, so the person is authoring the planner's answer
-        // rather than a second one.
         assert_eq!(
             cc7_expected(&CC7_A_OPERATIONS[0]),
             BTreeMap::from([
@@ -8611,8 +8337,6 @@ mod tests {
         let scenario = Cc7Scenario::WhiteBalance;
         let parameter = cc7_primary_parameter("temperature_percent");
 
-        // The slider's range is the descriptor's, measured by driving the real
-        // widget: the raw delta the planner clamped lands on the same bound.
         let raw = CC7_MATCH_PROPOSAL_C2
             .temperature_unrounded_delta
             .expect("C2's proposal clamped");
@@ -8656,12 +8380,6 @@ mod tests {
         let canonical = cc7_canonical_operations(scenario);
         let (mut document, clip, effect) = cc7_seeded(scenario, &canonical);
 
-        // R2-MAJ-4: the range above is one the test built. This is the range
-        // the **card** passes: seed the node with C2's raw `+248`, draw the
-        // real `primary_correction_section`, and read what its own
-        // `changed()` branch emitted. If the card ever narrowed the bound, or
-        // switched to `SliderClamping::Never`, this stops equalling the value
-        // the planner published while the replica above stays green.
         {
             let (raw_document, raw_clip, mut raw_effect) = cc7_seeded(scenario, &canonical);
             raw_effect
@@ -8687,9 +8405,6 @@ mod tests {
                 "the clamp is what the person is shown, not an edit the card makes: \
                  {written_raw:?}"
             );
-            // And the same card over the in-range seeded node reads out the
-            // neutral, so the clamped readout above came from the bound rather
-            // than from the card always printing its maximum.
             let (painted_neutral, written_neutral) =
                 cc7_painted_card_and_edits(&document, &clip, &effect);
             assert!(
@@ -8742,10 +8457,6 @@ mod tests {
             "(b1) and (b2) are two documents, not one"
         );
 
-        // The failing direction (R2 minor 16): the values above are read out
-        // of the same constants they are compared against, so (b2) is authored
-        // once more with one control a code off and must land neither the
-        // batch nor the document.
         let (mut wrong_document, wrong_clip, wrong_effect) = cc7_seeded(scenario, &canonical);
         let mut wrong = Vec::new();
         for (name, value) in CC7_B2_OPERATIONS[0].parameters {
@@ -8824,8 +8535,6 @@ mod tests {
         cc7_apply_in_order(&mut document, &batch.operations);
         assert_eq!(document, cc7_canonical_document(scenario, &canonical));
 
-        // The bound node stores the binding and nothing else: the input
-        // encoding stays at its neutral, unstored.
         let node = document
             .clip(clip)
             .expect("the log clip")
@@ -8858,8 +8567,6 @@ mod tests {
         needles.extend(MATTE_QUALIFIER_LABELS);
         cc7_assert_painted(&painted, &needles, "the matte section");
 
-        // The ten matte parameters the canonical node carries are exactly the
-        // master switch plus the qualifier leg the card owns.
         let expected = cc7_expected(&CC7_D_OPERATIONS[0]);
         let matte_names: Vec<&str> = expected
             .keys()
@@ -8919,10 +8626,6 @@ mod tests {
             "the typed qualifier lands the canonical (d) document"
         );
 
-        // The failing direction (R2 minor 16): the person mistypes one
-        // qualifier band by a single basis point. Without this the test can
-        // only fail on plumbing, because every value it authors is read out of
-        // the constant it is compared against.
         let mistyped = MATTE_QUALIFIER_PARAMETERS[1];
         let (mut wrong_document, wrong_clip, wrong_effect) = cc7_seeded(scenario, &canonical);
         let mut wrong = Vec::new();
@@ -9006,9 +8709,6 @@ mod tests {
             "the window row",
         );
 
-        // `Add window` on a node with no matte writes the master switch and
-        // the count, and nothing else: a fresh window *is* the descriptor
-        // neutral, so none of its eight values needs writing.
         let mut batch = matte_add_window_operations(clip.id, &effect);
         assert_eq!(
             cc7_written(&batch),
@@ -9019,8 +8719,6 @@ mod tests {
         );
 
         let expected = cc7_expected(&CC7_D2_OPERATIONS[0]);
-        // The three window controls the person leaves alone are exactly the
-        // three the canonical node does not store.
         for index in [0_usize, 5, 7] {
             assert!(
                 !expected.contains_key(names[index]),
@@ -9060,8 +8758,6 @@ mod tests {
             "(d) and (d2) are two nodes and two documents (R-B4)"
         );
 
-        // The resolved window is the `product_red` patch's own rect, and the
-        // shape it resolves to is the rect neutral the card never wrote.
         let node = document
             .clip(cc7_target_clip(scenario))
             .expect("the target clip")
@@ -9114,11 +8810,7 @@ mod tests {
             }
         );
 
-        // The disabled control is still drawn, so the human sees the reason
-        // rather than an absent affordance.
         let scenario = Cc7Scenario::TrackedSecondary;
-        // The node alone: the two `SetEffectKeyframes` curves are the tracker's
-        // answer, and there is no person path that produces them.
         let node: Vec<Operation> = cc7_canonical_operations(scenario)
             .into_iter()
             .filter(|operation| matches!(operation, Operation::InsertEffect { .. }))
@@ -9131,8 +8823,6 @@ mod tests {
             "the matte section of a tracked node",
         );
     }
-
-    // ---- AU4 Part B §5.5: the inspector `ENVELOPE` block ----
 
     fn envelope_fixture() -> AutomationCurve {
         AutomationCurve {
@@ -9203,8 +8893,6 @@ mod tests {
             ENVELOPE_SECTION_LABEL,
             ENVELOPE_ADD_KEY,
             ENVELOPE_CLEAR,
-            // The rows are `{frame} {value} {interpolation}`, in tenth-dB.
-            // A `DragValue`'s suffix is its own text shape.
             "15",
             "29",
             " f",

@@ -40,10 +40,6 @@ use crate::{
     LutAssetId, LutAssetKind, LutAssetSource, NormalizedRoi, Operation, ParamValue, TimeCode,
 };
 
-// ===========================================================================
-// CC7 §2.7: the three transfer transcriptions, and the tolerance they hold to.
-// ===========================================================================
-
 /// CC1's `SPEC_F64_TOLERANCE`, restated here because `cc1_fixtures.rs` lives
 /// in the media crate, is `pub(crate)`, and core cannot see it (R-M2).
 pub const CC7_SPEC_F64_TOLERANCE: f64 = 1e-6;
@@ -158,10 +154,6 @@ pub fn cc7_display_code(display: f64) -> u8 {
 pub fn cc7_millionths(value: f64) -> i64 {
     cc7_round_half_away_from_zero(value * 1_000_000.0)
 }
-
-// ===========================================================================
-// CC7 §2.3: raster geometry.
-// ===========================================================================
 
 /// CC7 §2.3.1's shared raster width, CC6's (`cc6_fixtures.rs:297-302`).
 pub const CC7_SOURCE_WIDTH: u32 = 320;
@@ -319,10 +311,6 @@ pub const CC7_SURROUND_PIXELS: u32 = 47_680;
 pub const fn cc7_ramp_code(x: u32) -> u8 {
     (x * 255 / (CC7_SOURCE_WIDTH - 1)) as u8
 }
-
-// ===========================================================================
-// CC7 §2.3.3 and §2.4.1: the patch tables.
-// ===========================================================================
 
 /// One named patch of the CC7 base scene, with every form CC7 measures it in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,10 +497,6 @@ pub fn cc7_all_patches() -> Vec<Cc7Patch> {
     patches.extend_from_slice(&CC7_ROW_PATCHES);
     patches
 }
-
-// ===========================================================================
-// CC7 §2.4.3: the camera transforms, applied in linear light.
-// ===========================================================================
 
 /// The five source characters CC7 authors (CC7 §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -763,10 +747,6 @@ pub const fn cc7_camera_patch_codes(
     }
 }
 
-// ===========================================================================
-// CC7 §2.4.2: the log-like curve of scenario (c).
-// ===========================================================================
-
 /// `v(x) = clamp((log2(x) + 8) / 12, 0, 1)`: the offset, in stops.
 pub const CC7_LOG_OFFSET_STOPS: i64 = 8;
 /// `v(x) = clamp((log2(x) + 8) / 12, 0, 1)`: the span, in stops.
@@ -854,10 +834,6 @@ pub const CC7_LOG_ROW_CODES: [[u8; 3]; CC7_ROW_PATCH_COUNT] = [
 
 /// The surround through the same curve.
 pub const CC7_LOG_SURROUND_CODE: u8 = 123;
-
-// ===========================================================================
-// CC7 §2.3.6: scenario (f) raster, sampling, and analytic centres.
-// ===========================================================================
 
 /// The tracked square's side, in pixels.
 pub const CC7_TRACK_SQUARE_SIZE: i64 = 24;
@@ -1104,8 +1080,6 @@ pub fn cc7_stabilized_centres(observations: &[i64], maximum_step: i64) -> Vec<i6
         .iter()
         .copied()
         .map(|subject| {
-            // CC5 §5.2's dead zone is deliberately zero, so `desired` is the
-            // clamped subject at every sample.
             let desired = subject.clamp(minimum, maximum);
             focus = focus
                 .saturating_add((desired - focus).clamp(-maximum_step, maximum_step))
@@ -1141,16 +1115,6 @@ pub fn cc7_track_keyframe_centres(axis: usize) -> Vec<i64> {
         .collect::<Vec<_>>();
     cc7_stabilized_centres(&raw, CC7_TRACK_MAX_STEP_BASIS_POINTS_RESTATED)
 }
-
-// ===========================================================================
-// CC7 §2.6: budget constants.
-// ===========================================================================
-//
-// Every threshold CC7 gates on is a `SCREAMING_SNAKE` constant here with its
-// unit in the name. **No CC7 gate uses a literal, and no CC7 constant is a
-// float**: fractional terms are `_MILLIONTHS`, rates are `_BASIS_POINTS`,
-// angles are `_CENTIDEGREES`, counts are plain integers with `_PIXELS` or
-// `_CODE`.
 
 /// (a)(2) / (b1): the post-match achromatic spread budget, in 8-bit
 /// monitoring codes (A8, A15).
@@ -1210,8 +1174,6 @@ pub const CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS: i64 = 8_500;
 /// (f)(2): the observation-accuracy tolerance, CC5's `200`, reused unchanged
 /// against a measured worst clean raw observation error of 49 bp (A14).
 pub const CC7_TRACK_TOLERANCE_BASIS_POINTS: i64 = 200;
-
-// --- Reported, never gated -------------------------------------------------
 
 /// The corrected C2 residual spread — the compromise the human is asked
 /// about, and (a)(2)'s second failing direction (A15; was 17 on the six-patch
@@ -1275,8 +1237,6 @@ pub const CC7_TRACK_CONTAINMENT_WORST_MARGIN_X_PIXELS_HUNDREDTHS: i64 = 323;
 /// (R4-m11).
 pub const CC7_TRACK_CONTAINMENT_WORST_MARGIN_Y_PIXELS_HUNDREDTHS: i64 = 511;
 
-// --- Exact constants, derived rather than measured -------------------------
-
 /// (d2): the feather, in basis points of the window's own half-extents.
 pub const CC7_FEATHER_BASIS_POINTS: i64 = 1_000;
 /// (d), (d2), (f): the secondary's saturation move.
@@ -1302,8 +1262,6 @@ pub const CC7_MATTE_OUTSIDE_CHANGED_PIXELS_MAX: i64 = 0;
 pub const CC7_DELIVERY_ALLOWED_INFO_CODES: [&str; 1] = ["delivery_tag_not_representable"];
 /// (g): the CI delivery leg's Linux budget, in seconds (A10).
 pub const CC7_DELIVERY_LEG_BUDGET_SECONDS_LINUX: i64 = 90;
-
-// --- (d) qualifier and (d2) window, CC7 §2.5 -------------------------------
 
 /// `MATTE_SAMPLE_HUE_WIDTH_CENTIDEGREES`, restated: it is `pub(crate)` in
 /// `crates/kinewright-agent/src/color_status.rs:4390` and core cannot see it.
@@ -1333,10 +1291,6 @@ pub const CC7_D2_WINDOW_HALF_EXTENTS_BASIS_POINTS: [i64; 2] = [187, 444];
 pub const CC7_D2_FEATHER_COUNTS_PIXELS: [i64; 3] = [140, 252, 112];
 /// The wrong model's value, asserted **not** to match (A7).
 pub const CC7_D2_CONTINUOUS_AREA_WRONG_MODEL_PIXELS_TENTHS: i64 = 768;
-
-// ===========================================================================
-// CC7 §2.5: the canonical operations per scenario.
-// ===========================================================================
 
 /// The reference clip of a two-clip (a)/(b) document, always camera A.
 pub const CC7_REFERENCE_CLIP_ID: ClipId = ClipId(1);
@@ -1531,10 +1485,6 @@ pub const CC7_F_KEYFRAMED_PARAMETERS: [&str; 2] = [
     "matte_window0_center_x_basis_points",
     "matte_window0_center_y_basis_points",
 ];
-
-// ===========================================================================
-// CC7 §2.2: the scenario specs.
-// ===========================================================================
 
 /// The six named colour workflows CC7 proves end to end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1762,10 +1712,6 @@ pub const fn cc7_target_clip(scenario: Cc7Scenario) -> ClipId {
     }
 }
 
-// ===========================================================================
-// CC7 §2.2: `cc7_canonical_operations` — the exact core batch.
-// ===========================================================================
-
 fn effect_for(id: EffectId, node: &Cc7Operation) -> Effect {
     Effect {
         id,
@@ -1808,8 +1754,6 @@ pub fn cc7_track_keyframe_operations() -> Vec<Operation> {
                     .map(|(frame, value)| Keyframe {
                         at: TimeCode(*frame),
                         value,
-                        // CC5 §5.2: sustained movement gets continuous
-                        // velocity; M40 rejected eased per-segment curves.
                         interpolation: KeyframeInterpolation::Linear,
                     })
                     .collect(),
@@ -1897,10 +1841,6 @@ pub fn cc7_log_lut_asset(sha256: &str, byte_len: u64, source_path: &str) -> LutA
 /// canonical `.cube` header (`lut.rs:219-240`) is `100 + title.len()` bytes,
 /// and each of the `S³` sample lines is exactly 27.
 pub const CC7_LOG_CUBE_TITLE: &str = "CC7 log inverse";
-
-// ===========================================================================
-// CC7 §4.1: the measured column, and the budget table it is checked against.
-// ===========================================================================
 
 /// `scopes.rs:576-586`: `ChannelStatistics::{first_percentile,
 /// ninety_ninth_percentile}` are **16-bit** codes, produced at `:1330-1339`
@@ -2116,8 +2056,6 @@ pub const CC7_BUDGETS: [Cc7Budget; 17] = [
         constant: "DELIVERY_LUMA_MEAN_CODE_8BIT_MILLIONTHS",
         budget: crate::DELIVERY_LUMA_MEAN_CODE_8BIT_MILLIONTHS,
         measured: CC7_MEASURED_DELIVERY_EIGHT[2],
-        // The worst row in the slice: 377 538 against 400 000 on scenario
-        // (e), a 1.06x margin against a CC6 constant CC7 must not move.
         kind: Cc7BudgetKind::RecordedMargin,
     },
     Cc7Budget {

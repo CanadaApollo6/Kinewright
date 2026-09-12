@@ -281,20 +281,9 @@ impl NormalizedRoi {
         let y = u32::try_from(y).map_err(|_| NormalizedRoiError::Overflow)?;
         let right = u32::try_from(right).map_err(|_| NormalizedRoiError::Overflow)?;
         let bottom = u32::try_from(bottom).map_err(|_| NormalizedRoiError::Overflow)?;
-        // Defence in depth: unreachable given a validated ROI.  `validate`
-        // guarantees `width_basis_points >= 1`, and the ceil applied to the
-        // exclusive end therefore always lands at least one pixel past the
-        // floored start, so `right >= x + 1`.  Retained so a future change to
-        // the rounding rules fails with a typed error instead of allocating a
-        // zero-area measurement.
         if right <= x || bottom <= y {
             return Err(NormalizedRoiError::EmptyAfterPixelConversion);
         }
-        // Defence in depth: unreachable given a validated ROI.  `validate`
-        // guarantees `x + width <= 10_000`, so the ceil of
-        // `(x + width) * source_width / 10_000` is at most `source_width`.
-        // Retained so a rounding or bounds change cannot produce an ROI that
-        // reads outside the source raster.
         if right > source_width || bottom > source_height {
             return Err(NormalizedRoiError::OutsideFrame);
         }
@@ -504,11 +493,6 @@ impl ScopeRequest {
     /// Returns a typed error when the stage is not renderable, the ROI is
     /// invalid, or an output dimension exceeds its bound.
     pub fn validate(&self) -> Result<(), ScopeError> {
-        // Fail closed for every stage this engine cannot measure.  CC6 adds
-        // `working_linear_post_composite`, which is measured by the colour QC
-        // engine from a linear `f32` working proof, so reaching this engine
-        // with it is a caller mistake rather than a fallback to monitoring
-        // evidence, which the CC2 contract forbids.
         if !self.stage.measurable_by_scope_engine() {
             return Err(ScopeError::UnsupportedStage { stage: self.stage });
         }
@@ -755,8 +739,6 @@ impl ScopeEvidence {
             ),
         ];
         for (field, expected, actual) in checks {
-            // A length that cannot be represented as `u64` is by definition
-            // not equal to the declared cell count, so saturating is safe.
             let actual = u64::try_from(actual).unwrap_or(u64::MAX);
             if actual != expected {
                 return Err(ScopeComparisonError::MalformedEvidence {
@@ -955,8 +937,6 @@ pub fn measure_scopes(
         .pixel_count()
         .ok_or(ScopeError::RoiPixelCountOverflow)?;
 
-    // `first` was already validated above so the ROI could be rasterized
-    // against its dimensions; only the remaining frames still need checking.
     for frame in ordered.iter().skip(1) {
         validate_image(frame.image)?;
         if frame.image.width != first.width || frame.image.height != first.height {
@@ -1003,10 +983,6 @@ pub fn measure_scopes(
             .ok_or(ScopeError::RoiPixelCountOverflow)?,
         transparent_pixel_count,
         visible_pixel_count,
-        // The engine measures whatever raster it is handed.  Matte scoping is
-        // applied by the caller through `matte_scoped_frame`, which is what
-        // keeps the CC2 engine unchanged, so the caller also records the
-        // region description on the result.
         matte_region: None,
     }))
 }
@@ -1150,10 +1126,6 @@ impl Accumulator {
                     .ok_or(ScopeError::SampleCountOverflow)?;
                 for (channel, value) in values.into_iter().enumerate() {
                     let scaled = u16::from(value) * 257;
-                    // Defence in depth: unreachable because a `u128` sum of
-                    // 16-bit codes cannot overflow before the visible-sample
-                    // counter (a `u64`) does.  Retained so a narrower
-                    // accumulator type can never wrap a published statistic.
                     self.sums[channel] = self.sums[channel]
                         .checked_add(u128::from(scaled))
                         .ok_or(ScopeError::ChannelSumOverflow)?;
@@ -1327,13 +1299,6 @@ fn percentile_code(histogram: &[u64; 256], count: u64, percentile: u64) -> u16 {
             return u16::try_from(value * 257).unwrap_or(u16::MAX);
         }
     }
-    // Unreachable: `histogram` is built from exactly the `count` visible
-    // samples the caller measured, and `measure_scopes` rejects a measurement
-    // with no visible pixels, so `cumulative` reaches `count` on the final
-    // iteration.  Percentile ranks are `ceil(count * p / 100)` with `p <= 99`,
-    // hence `rank <= count`.  Falling through and returning `u16::MAX` would
-    // manufacture a full-white percentile that no pixel produced, so this
-    // panics rather than publishing a fabricated statistic.
     unreachable!(
         "percentile rank {rank} exceeds the {count} samples used to build the percentile histogram"
     );
@@ -1382,16 +1347,10 @@ fn inverted_code_index(value: u8, rows: u16) -> usize {
 fn signed_chroma_index(value: i32, size: u16) -> usize {
     // `clamped + 255` is always in `0..=510`, so `unsigned_abs` is exact.
     let shifted = (value.clamp(-255, 255) + 255).unsigned_abs();
-    // The quotient is always below `size` (at most 511).  The fallback is
-    // unreachable on any supported target, and an out-of-range index would
-    // still be rejected by `increment_grid` rather than wrapping.
     usize::try_from(shifted * u32::from(size) / 511).unwrap_or(usize::MAX)
 }
 
 fn vectorscope_coordinates(red: u8, green: u8, blue: u8) -> (i32, i32) {
-    // U is blue-minus-red and V is green-minus the red/blue midpoint.  Both
-    // are integer chroma axes centred at zero; the exact mapping is part of
-    // the CC2 brief and intentionally avoids a platform-dependent float.
     let u = i32::from(blue) - i32::from(red);
     let v = 2 * i32::from(green) - i32::from(red) - i32::from(blue);
     (u, v)
@@ -1404,17 +1363,11 @@ fn increment_grid(
     y: usize,
     width: u16,
 ) -> Result<(), ScopeError> {
-    // A failure here is an index computation, not an allocation, so it gets
-    // its own variant rather than borrowing the allocation-sizing wording.
     let index = y
         .checked_mul(usize::from(width))
         .and_then(|row| row.checked_add(x))
         .ok_or(ScopeError::GridIndexOverflow { grid: name })?;
     let length = grid.len();
-    // Defence in depth: unreachable because both coordinates come from the
-    // bounded column/row mappings for this exact grid.  Retained, and reported
-    // as an out-of-range index rather than as arithmetic overflow, so a future
-    // mapping change is diagnosed accurately instead of being mislabelled.
     let cell = grid.get_mut(index).ok_or(ScopeError::GridIndexOutOfRange {
         grid: name,
         index,
@@ -1556,9 +1509,6 @@ pub fn compare_scope_evidence(
     reference: &ScopeEvidence,
     candidate: &ScopeEvidence,
 ) -> Result<ScopeComparison, ScopeComparisonError> {
-    // Compare only self-consistent evidence.  Agreeing on declared dimensions
-    // is not enough: either side may have been deserialized with a grid whose
-    // length contradicts those dimensions.
     reference.validate_shape_as("reference")?;
     candidate.validate_shape_as("candidate")?;
     if reference.metadata.stage != candidate.metadata.stage {
@@ -1570,14 +1520,6 @@ pub fn compare_scope_evidence(
     if reference.metadata.normalized_roi != candidate.metadata.normalized_roi {
         return Err(ScopeComparisonError::RoiMismatch);
     }
-    // A matte-scoped measurement covers a different population than an
-    // unscoped one, exactly as a different ROI does, so the two must not be
-    // differenced.  Both sides must be unscoped or name the same matte.
-    // The matte region is compared on what was *requested* (clip, effect,
-    // threshold), not on the measured covered population: a qualifier matte's
-    // coverage is a function of the colour entering the node, so a before/after
-    // pair legitimately differs in count. The count difference is reported as
-    // a signed delta rather than refusing the comparison.
     let same_region = match (
         &reference.metadata.matte_region,
         &candidate.metadata.matte_region,
@@ -1917,12 +1859,6 @@ mod tests {
         assert_eq!(evidence.statistics.luma.median, 64 * 257);
         assert_eq!(evidence.statistics.luma.ninety_ninth_percentile, 65_535);
         assert_eq!(evidence.histograms.luma, vec![1, 1, 1, 1]);
-        // Hand-built code -> (column, row) table for a 4x4 waveform.  Column
-        // is `floor(x * 4 / 4)`; row is `floor((255 - luma) * 4 / 256)`:
-        //   luma 0   -> row floor(255 * 4 / 256) = 3, column 0
-        //   luma 64  -> row floor(191 * 4 / 256) = 2, column 1
-        //   luma 128 -> row floor(127 * 4 / 256) = 1, column 2
-        //   luma 255 -> row floor(0   * 4 / 256) = 0, column 3
         assert_eq!(
             evidence.waveform.density,
             vec![
@@ -2064,8 +2000,6 @@ mod tests {
         assert_eq!(SCOPE_MAX_VECTORSCOPE_SIZE, 511);
         assert_eq!(SCOPE_MAX_WAVEFORM_COLUMNS, 2_048);
 
-        // A row per code is the finest useful waveform or parade; anything
-        // beyond that would leave permanently dead rows.
         for (rows, accepted) in [(256_u16, true), (257, false), (1_024, false)] {
             let mut resolution = default_resolution();
             resolution.waveform_rows = rows;
@@ -2180,8 +2114,6 @@ mod tests {
 
     #[test]
     fn vectorscope_axis_buckets_every_value_uniformly() {
-        // Hand-computed extremes and neutral cell: floor(510 * size / 511) and
-        // floor(255 * size / 511).
         for (size, top, neutral) in [
             (2_u16, 1_usize, 0_usize),
             (4, 3, 1),
@@ -2218,11 +2150,6 @@ mod tests {
 
     #[test]
     fn parade_places_a_primary_row_in_exact_cells() {
-        // Four opaque red pixels across a 3-column, 2-row parade.
-        //   columns: floor(x * 3 / 4) = 0, 0, 1, 2
-        //   rows:    red   255 -> floor(0   * 2 / 256) = 0
-        //            green   0 -> floor(255 * 2 / 256) = 1
-        //            blue    0 -> floor(255 * 2 / 256) = 1
         let frame = image(4, 1, &[[255, 0, 0, 255]; 4]);
         let probe = request_with(
             NormalizedRoi::full_frame(),
@@ -2236,14 +2163,10 @@ mod tests {
         assert_eq!(evidence.parade.blue.density, vec![0, 0, 0, 2, 1, 1]);
         // luma = floor(54 * 255 / 256) = 53 -> row floor(202 * 2 / 256) = 1.
         assert_eq!(evidence.waveform.density, vec![0, 0, 0, 2, 1, 1]);
-        // Histogram with 4 bins: floor(255 * 4 / 256) = 3, floor(0 * 4 / 256) = 0,
-        // floor(53 * 4 / 256) = 0.
         assert_eq!(evidence.histograms.red, vec![0, 0, 0, 4]);
         assert_eq!(evidence.histograms.green, vec![4, 0, 0, 0]);
         assert_eq!(evidence.histograms.blue, vec![4, 0, 0, 0]);
         assert_eq!(evidence.histograms.luma, vec![4, 0, 0, 0]);
-        // U = 0 - 255 = -255 -> column 0; V = -255, negated -> row
-        // floor(510 * 4 / 511) = 3, so index 3 * 4 + 0 = 12.
         let mut expected_vector = vec![0_u64; 16];
         expected_vector[12] = 4;
         assert_eq!(evidence.vectorscope.density, expected_vector);
@@ -2255,9 +2178,6 @@ mod tests {
 
     #[test]
     fn vectorscope_places_primaries_and_secondaries_in_exact_cells() {
-        // Hand-computed for a 256-cell side: U = B - R, V = 2G - R - B, both
-        // clamped to -255..=255, then index = floor((axis + 255) * 256 / 511)
-        // with V negated so positive V is nearer row zero.
         let frame = image(
             8,
             1,
@@ -2289,8 +2209,6 @@ mod tests {
 
     #[test]
     fn sub_frame_roi_excludes_outside_pixels_from_every_statistic() {
-        // Only the two mid-grey pixels are inside the ROI; the black and white
-        // pixels outside it must not reach any statistic, histogram, or clip.
         let frame = image(
             4,
             1,
@@ -2338,8 +2256,6 @@ mod tests {
         assert_eq!(evidence.statistics.red.first_percentile, 32_896);
         assert_eq!(evidence.statistics.red.median, 32_896);
         assert_eq!(evidence.statistics.red.ninety_ninth_percentile, 32_896);
-        // The excluded pixels are code 0 and code 255, so any leakage would
-        // show up as clipping.
         assert_eq!(evidence.clipping.red.black, 0);
         assert_eq!(evidence.clipping.red.white, 0);
         assert_eq!(evidence.clipping.luma.black, 0);
@@ -2347,9 +2263,6 @@ mod tests {
         // floor(128 * 4 / 256) = 2.
         assert_eq!(evidence.histograms.red, vec![0, 0, 2, 0]);
         assert_eq!(evidence.histograms.luma, vec![0, 0, 2, 0]);
-        // Columns are scaled over the ROI extent of 2, not the 4-pixel source:
-        // floor(0 * 4 / 2) = 0 and floor(1 * 4 / 2) = 2, both on row
-        // floor(127 * 4 / 256) = 1.
         assert_eq!(
             evidence.waveform.density,
             vec![
@@ -2368,9 +2281,6 @@ mod tests {
 
     #[test]
     fn mean_uses_half_up_rounding_of_normalized_millionths() {
-        // Codes 1, 1, 2 are 257, 257 and 514 on the 16-bit scale.  Their mean
-        // is 1_028 / 3 = 342.666..., and 342.666... / 65_535 * 1_000_000 =
-        // 5_228.8..., which rounds half up to 5_229.
         let frame = image(3, 1, &[[1, 1, 1, 255], [1, 1, 1, 255], [2, 2, 2, 255]]);
         let evidence = measure_scope(&frame, 0, &request()).unwrap();
         for channel in [
@@ -2380,14 +2290,10 @@ mod tests {
             evidence.statistics.luma,
         ] {
             assert_eq!(channel.mean, 5_229);
-            // Nearest rank over three samples: ceil(3/100) = 1, ceil(150/100) = 2,
-            // ceil(297/100) = 3.
             assert_eq!(channel.first_percentile, 257);
             assert_eq!(channel.median, 257);
             assert_eq!(channel.ninety_ninth_percentile, 514);
         }
-        // Two of three samples are code 1, which is inside the black clip
-        // band: floor(2 * 10_000 / 3) = 6_666.
         assert_eq!(evidence.clipping.red.black, 6_666);
         assert_eq!(evidence.clipping.red.white, 0);
     }
@@ -2408,11 +2314,6 @@ mod tests {
         assert_eq!(comparison.statistics.red.median.candidate, 8_224);
         assert_eq!(comparison.statistics.red.median.delta, -8_224);
         assert_eq!(comparison.visible_pixel_count.delta, 0);
-
-        // `ScopeComparisonError::StageMismatch` is not constructible here:
-        // `ScopeStage` has exactly one variant, so two measured results can
-        // never carry different stages.  The branch is retained for the day a
-        // second stage is added; see the note on `ScopeRequest::validate`.
 
         let wide = image(4, 1, &[[10, 10, 10, 255]; 4]);
         let half = measure_scope(
@@ -2460,9 +2361,6 @@ mod tests {
         let evidence = measure_scope(&frame, 0, &request()).unwrap();
         assert_eq!(evidence.validate_shape(), Ok(()));
 
-        // A hostile deserialized result that declares a 4x4 waveform but only
-        // carries three cells agrees with a real result on every declared
-        // dimension.
         let mut truncated = evidence.clone();
         truncated.waveform.density.truncate(3);
         assert_eq!(
@@ -2532,8 +2430,6 @@ mod tests {
 
     #[test]
     fn histogram_bins_are_bounded_by_the_eight_bit_code_count() {
-        // 8-bit input can never fill more than 256 bins, and the CC2 contract
-        // requires code 255 to land in the final bin.
         assert_eq!(SCOPE_MAX_HISTOGRAM_BINS, 256);
         let mut resolution = tiny_resolution();
         resolution.histogram_bins = 257;
@@ -2676,8 +2572,6 @@ mod tests {
 
     #[test]
     fn all_transparent_sub_roi_has_no_visible_pixels() {
-        // The opaque pixels sit outside the requested ROI, so the measurement
-        // must fail rather than reporting the visible pixels of the frame.
         let frame = image(
             4,
             1,

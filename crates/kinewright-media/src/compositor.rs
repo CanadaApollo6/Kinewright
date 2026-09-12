@@ -163,8 +163,6 @@ pub fn compositor_required_limits(mut limits: wgpu::Limits) -> wgpu::Limits {
     limits.max_storage_buffer_binding_size = limits
         .max_storage_buffer_binding_size
         .max(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE);
-    // CC4 4.1: the depth-packed LUT atlas needs more 3D depth than the
-    // downlevel profiles advertise.
     limits.max_texture_dimension_3d = limits
         .max_texture_dimension_3d
         .max(COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D);
@@ -196,8 +194,6 @@ impl GpuContext {
                 backend: "unknown".to_owned(),
                 adapter: "unknown".to_owned(),
                 software_fallback: false,
-                // A context built without adapter metadata cannot make a GPU
-                // claim in a proof manifest.
                 gpu_claim: false,
             },
         }
@@ -570,10 +566,6 @@ impl TexturePool {
             self.recency.remove(index);
             self.drop_shape(key);
         }
-        // One shape can exceed the byte budget on its own at a large raster.
-        // Trim idle depth from the least recently used shapes rather than
-        // leaving the budget broken; a trimmed texture is simply recreated on
-        // demand.
         let mut index = 0;
         while self.bytes > TEXTURE_POOL_MAX_BYTES && index < self.recency.len() {
             let key = self.recency[index];
@@ -822,8 +814,6 @@ impl Compositor {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        // See `Compositor::is_pixel_exact_blit` for why a 1:1 layer must not
-        // go through the bilinear sampler.
         let point_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Kinewright compositor 1:1 point sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -1018,8 +1008,6 @@ impl Compositor {
                 .saturating_mul(usize::try_from(height).unwrap_or_default()),
         );
         self.for_each_linear_pixel(width, height, output, encoder, |linear| {
-            // The three colour channels are written identically by the shader;
-            // reading red keeps the quantization single-sourced.
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             coverage.push((linear[0].clamp(0.0, 1.0) * 255.0).round() as u8);
             Ok(())
@@ -1061,8 +1049,6 @@ impl Compositor {
         });
         let mut resources = Vec::with_capacity(layers.len());
         for (index, layer) in layers.iter().enumerate() {
-            // CC5 3.2: the selector lives in this layer's own grade buffer, so
-            // only the targeted layer ever renders coverage.
             let debug_node = matte_debug
                 .filter(|selection| selection.layer_index == index)
                 .map(|selection| selection.active_node);
@@ -1247,8 +1233,6 @@ impl Compositor {
         params.external_domain_max_r = cube_lut.domain_max[0];
         params.external_domain_max_g = cube_lut.domain_max[1];
         params.external_domain_max_b = cube_lut.domain_max[2];
-        // CC4 4.1: the legacy stage addresses its own slot of the shared
-        // atlas; `2 * 65` and `65` are both exact in f32.
         #[allow(clippy::cast_precision_loss)]
         {
             params.external_lut_z_origin = binding.legacy_z_origin as f32;
@@ -1349,9 +1333,6 @@ impl Compositor {
         let legacy_z_origin = slots.iter().map(|slot| slot.lut.size).sum::<u32>();
         let (legacy_lut, legacy_enabled) = self.cube_lut(effects)?;
         if legacy_enabled || slots.is_empty() {
-            // `managed_lut_slots` already capped the managed slots, so the
-            // legacy lattice always lands at slot index
-            // `COMPOSITOR_LEGACY_LUT_SLOT` or earlier.
             debug_assert!(slots.len() <= COMPOSITOR_LEGACY_LUT_SLOT);
             slots.push(LutAtlasSlot {
                 z_origin: legacy_z_origin,
@@ -1362,9 +1343,6 @@ impl Compositor {
         Ok(LayerLutBinding {
             atlas,
             legacy_enabled,
-            // When the legacy stage is inactive these uniforms are never read.
-            // They still point at slot 0, which every atlas has, so a stale
-            // read could not wander outside the texture.
             legacy_z_origin: if legacy_enabled { legacy_z_origin } else { 0 },
             legacy_lut,
         })
@@ -1419,9 +1397,6 @@ impl Compositor {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
-            // CC4 4.1: f32 keeps the texels bit-identical to the parsed
-            // samples the CPU reference reads, so the only CPU/GPU divergence
-            // inside a LUT node is arithmetic order.
             format: wgpu::TextureFormat::Rgba32Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
@@ -1462,8 +1437,6 @@ impl Compositor {
         Ok(LutAtlas {
             texture,
             view,
-            // Retaining the sources is load-bearing, not incidental: it is
-            // what keeps `CachedLutSlot::matches` from being an ABA compare.
             slots: slots
                 .iter()
                 .map(|slot| CachedLutSlot {
@@ -1481,9 +1454,6 @@ impl Compositor {
             .rev()
             .find(|effect| effect.name == "cube_lut")
         else {
-            // The shared identity lattice, not a fresh allocation: the atlas
-            // cache keys on `Arc` identity, so a new `Arc` every frame would
-            // rebuild the atlas on every frame of look-free playback.
             return Ok((Arc::clone(&self.identity_lut), false));
         };
         let Some(ParamValue::Text(path)) = effect.parameters.get("path") else {
@@ -2053,9 +2023,6 @@ struct GradeNodeRecord {
 /// (CC5 2.3).
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn matte_block_words(matte: &MatteParams, raster_aspect: f32) -> [f32; MATTE_BLOCK_WORDS] {
-    // Basis points to a `0..=1` scale. `0..=10000` is exactly representable in
-    // `f32`, so both endpoints are exact; the `f64` divide keeps the single
-    // rounding at the end.
     let basis_points = |value: i64| (value as f64 / 10_000.0) as f32;
     // Hundredths of a degree to degrees.
     let centidegrees = |value: i64| (value as f64 / 100.0) as f32;
@@ -2093,8 +2060,6 @@ fn matte_block_words(matte: &MatteParams, raster_aspect: f32) -> [f32; MATTE_BLO
         words[base + 6] = theta.sin() as f32;
         words[base + 7] = basis_points(window.feather_bp);
         words[base + 8] = if window.is_inverted() { 1.0 } else { 0.0 };
-        // words `+9 .. +11` stay the reserved 0.0; windows at index
-        // `>= window_count` stay entirely zero and are never read.
     }
     words
 }
@@ -2193,8 +2158,6 @@ pub(crate) fn grade_buffer_bytes_with_luts(
                 .to_owned(),
         ));
     }
-    // No matte block is written, so the aspect word is never emitted and the
-    // placeholder cannot reach a shader.
     grade_buffer_bytes_with_matte(effects, library, 1.0, None)
 }
 
@@ -2252,16 +2215,9 @@ pub(crate) fn grade_buffer_bytes_with_matte(
         let Some(kind) = classify_color_node(effect) else {
             continue;
         };
-        // CC3 3.3 / CC4 3.6: an inactive node is the exact identity and must
-        // not reach the GPU buffer or occupy an atlas slot.  Keyframes are
-        // already resolved by the caller.
         if color_node_inactive_reason(effect).is_some() {
             continue;
         }
-        // CC5 2.6 / 3.1: the matte is resolved from the same evaluated
-        // integers the inactivity test above used.  `technical_lut` carries no
-        // `matte_*` parameter, so `MatteParams::from_effect` returns the
-        // neutral for it and no block is ever written.
         let matte = MatteParams::from_effect(effect);
         let matte_block = matte
             .has_matte()
@@ -2288,8 +2244,6 @@ pub(crate) fn grade_buffer_bytes_with_matte(
             ColorNodeKind::TechnicalLut | ColorNodeKind::CreativeLook => {
                 let slot_index = next_lut_slot;
                 next_lut_slot += 1;
-                // `managed_lut_slots` walked the same effects in the same
-                // order under the same activity test, so this index exists.
                 let slot = lut_slots.get(slot_index).ok_or_else(|| {
                     MediaError::Backend(
                         "LUT slot assignment disagreed with the node record order".to_owned(),
@@ -2315,8 +2269,6 @@ pub(crate) fn grade_buffer_bytes_with_matte(
         )));
     }
     let payload_word_offset = count.saturating_mul(GRADE_NODE_WORDS);
-    // A zero-node stack still allocates one record so the runtime-sized
-    // `array<f32>` binding stays valid; the shader skips it on `header.x`.
     let record_words = count.max(1).saturating_mul(GRADE_NODE_WORDS);
     let payload_words: usize = records
         .iter()
@@ -2339,22 +2291,15 @@ pub(crate) fn grade_buffer_bytes_with_matte(
         } else {
             next_payload as f32
         };
-        // Bypassed nodes are filtered out above, so the shader's honoured
-        // bypass word is always inactive in a buffer this function produced.
         words[base + 2] = 0.0;
         words[base + 3] = 0.0;
         let values = base + GRADE_NODE_VALUE_OFFSET;
         words[values..values + GRADE_NODE_VALUE_WORDS].copy_from_slice(&record.values);
         if !record.payload.is_empty() {
-            // `record_words == payload_word_offset` whenever a record exists,
-            // so the stored offset indexes `words` directly.
             let end = next_payload.saturating_add(record.payload.len());
             words[next_payload..end].copy_from_slice(&record.payload);
             next_payload = end;
         }
-        // CC5 3.1: payloads are appended in node order; for one node the curve
-        // payload comes first, then the matte block.  `v11` is the block's own
-        // word index, so the shader needs no per-kind arithmetic to find it.
         if let Some(block) = record.matte.as_ref() {
             let end = next_payload.saturating_add(MATTE_BLOCK_WORDS);
             words[next_payload..end].copy_from_slice(block);
@@ -2368,8 +2313,6 @@ pub(crate) fn grade_buffer_bytes_with_matte(
         u32::try_from(count).unwrap_or(u32::MAX),
         u32::try_from(payload_word_offset).unwrap_or(u32::MAX),
         GRADE_ABI_VERSION,
-        // CC5 3.2: `header.w` is the matte-debug selector. `0` is normal
-        // rendering; `k > 0` returns the coverage of active node `k - 1`.
         matte_debug_node.map_or(0, |node| u32::try_from(node + 1).unwrap_or(u32::MAX)),
     ];
     for value in header {
@@ -2525,10 +2468,7 @@ fn fritsch_carlson_tangents(xs: &[f32], ys: &[f32]) -> Vec<f32> {
     if count < 2 {
         return vec![0.0; count];
     }
-    // Core guarantees strictly increasing `x` (CC3 3.4), so the span is
-    // always positive in production. The guard is defence in depth shared with
-    // the CPU reference: a zero or negative span must never turn into an
-    // infinite or NaN tangent that would poison the storage buffer.
+    // Core guarantees strictly increasing `x` (CC3 3.4), so the span is always positive in production.
     let deltas = (0..count - 1)
         .map(|index| {
             let span = xs[index + 1] - xs[index];
@@ -2542,9 +2482,6 @@ fn fritsch_carlson_tangents(xs: &[f32], ys: &[f32]) -> Vec<f32> {
     let mut tangents = Vec::with_capacity(count);
     tangents.push(deltas[0]);
     for index in 1..count - 1 {
-        // CC3 2.3 step 2 is normative as written.  `f32::midpoint` rounds
-        // differently at the extremes, and the independent CPU reference
-        // transcribes the same literal expression, so the two must not drift.
         #[allow(clippy::manual_midpoint)]
         tangents.push((deltas[index - 1] + deltas[index]) / 2.0);
     }
@@ -2634,17 +2571,9 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                         params.reframe_focus_y = value / 10_000.0;
                     }
                 }
-                // `color_grade` is canonicalised to `primary_correction`
-                // before an effect enters live project state, so these three
-                // display-coded uniforms are unreachable and the shader no
-                // longer reads them. Their uniform slots stay in
-                // `LayerParams` so the 48-float ABI is byte-identical.
                 EffectUniform::Exposure
                 | EffectUniform::Temperature
                 | EffectUniform::Tint
-                // CC1 primary nodes are serialized separately and executed
-                // in order by the shader's storage-buffer loop. They must
-                // never be flattened into the legacy display controls.
                 | EffectUniform::PrimaryExposure
                 | EffectUniform::PrimaryTemperature
                 | EffectUniform::PrimaryTint
@@ -2702,8 +2631,6 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 | EffectUniform::TruePeakLookahead
                 | EffectUniform::TruePeakRelease
                 | EffectUniform::TruePeakDetector
-                // AU5 §2.1: the twelve repair uniforms. Final, not a stub —
-                // every audio uniform is ignored by the compositor.
                 | EffectUniform::DenoiseReduction
                 | EffectUniform::DenoiseFloorOffset
                 | EffectUniform::DenoiseSmoothing
@@ -2754,16 +2681,6 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
     params
 }
 
-// Every uniform-carrying parameter is bounded to a small integer that is
-// exactly representable as f32.
-//
-// CC4 3.3 adds the one exception, and it is deliberately harmless:
-// `lut_asset_id` is bounded to `2^53 - 1`, which is exact in `i64` but not in
-// `f32`. It uses `EffectUniform::ColorNode`, so `params_for`'s match arm
-// discards the value without ever materializing it into `LayerParams`; the
-// asset reference reaches the GPU through the node record's atlas slot index,
-// never as a float. The lossy cast here is therefore computed and thrown away,
-// and no rendered value depends on it.
 #[allow(clippy::cast_precision_loss)]
 fn parameter_value(effect: &Effect, descriptor: &EffectParameterDescriptor) -> f32 {
     match effect.parameters.get(descriptor.name) {
@@ -2818,21 +2735,13 @@ mod tests {
             limits.max_storage_buffers_per_shader_stage,
             COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE
         );
-        // CC3 3.2 keeps exactly one fragment-stage storage binding and raises
-        // the binding size instead, because a second storage binding is not
-        // available on every supported downlevel backend.
         assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, 1);
         assert_eq!(
             limits.max_storage_buffer_binding_size,
             COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE
         );
-        // CC5 3.1: sixteen curve-plus-matte nodes no longer fit 16 KiB, so the
-        // binding SIZE doubles while the binding COUNT stays 1.
         assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE, 32_768);
 
-        // CC4 4.1/10.3.8. The LUT atlas is one depth-packed 3D texture on the
-        // binding that already existed, so the storage constants above are
-        // asserted UNCHANGED and only the 3D dimension is raised.
         assert_eq!(COMPOSITOR_LUT_SLOTS_PER_LAYER, LUT_NODE_LIMIT_PER_LAYER);
         assert_eq!(COMPOSITOR_LEGACY_LUT_SLOT, COMPOSITOR_LUT_SLOTS_PER_LAYER);
         assert_eq!(
@@ -2844,8 +2753,6 @@ mod tests {
         assert_eq!(worst_case_depth, 325);
         assert!(worst_case_depth <= COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D);
         assert_eq!(COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D, 512);
-        // The raise is load-bearing, not decorative: the downlevel profile the
-        // rest of this test negotiates cannot hold the worst-case atlas.
         assert!(
             wgpu::Limits::downlevel_webgl2_defaults().max_texture_dimension_3d < worst_case_depth
         );
@@ -2854,25 +2761,16 @@ mod tests {
             limits.max_texture_dimension_3d,
             COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D
         );
-        // Production negotiates the default profile, which already clears it,
-        // so no production adapter changes behaviour.
         assert!(
             wgpu::Limits::default().max_texture_dimension_3d
                 >= COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D
         );
-        // CC4 4.2 took the ABI to 2 (kinds whose meaning depends on a
-        // companion texture binding); CC5 3.1 takes it to 3, because a CC4
-        // consumer would read `v11` as a reserved zero and silently render an
-        // unmasked correction over the whole raster.
         assert_eq!(GRADE_ABI_VERSION, 3);
     }
 
     #[test]
     fn every_color_node_kind_has_a_shader_branch() {
-        // CC4 4.2: `apply_color_nodes` treats an unrecognized kind as the
-        // identity, so a host that writes a kind the shader does not dispatch
-        // would silently drop the node. Assert the dispatch exists for every
-        // tag, against the very source the pipeline compiles.
+        // CC4 4.2: `apply_color_nodes` treats an unrecognized kind as the identity
         for kind in ColorNodeKind::ALL {
             let tag = kind.storage_buffer_tag();
             assert!(
@@ -2887,9 +2785,6 @@ mod tests {
             assert!(tags.contains(&tag), "storage tag {tag} is unassigned");
         }
         assert!(!COMPOSITOR_SHADER_SOURCE.contains("kind == 6u"));
-        // The atlas is read with `textureLoad` only; hardware filtering is
-        // forbidden (CC4 3.5), and the sampler at binding 1 is never used
-        // for it.
         assert!(!COMPOSITOR_SHADER_SOURCE.contains("textureSample(lut_texture"));
     }
 
@@ -2897,13 +2792,6 @@ mod tests {
     #[allow(clippy::cast_precision_loss)]
     #[allow(clippy::float_cmp)]
     fn grade_buffer_worst_case_fits_the_negotiated_binding_size() {
-        // CC5 3.1's worst case, written out by hand: sixteen curve nodes that
-        // each carry a matte.
-        //   16 header
-        // + 16 * 64                = 1024   node records
-        // + 16 * (4 * 49 * 4)      = 12544  curve payloads
-        // + 16 * (64 * 4)          = 4096   matte blocks
-        //                          = 17680
         assert_eq!(16 + 16 * 64 + 16 * (4 * 49 * 4) + 16 * (64 * 4), 17_680);
         assert_eq!(GRADE_BUFFER_WORST_CASE_BYTES, 17_680);
         assert_eq!(MATTE_BLOCK_WORDS, 64);
@@ -2921,8 +2809,6 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        // CC3's worst case is still exactly what it was: the matte block is
-        // additional, never a widening of the record or of the payload.
         let matte_free_bytes =
             grade_buffer_bytes(&matte_free).expect("sixteen curve nodes fit the buffer");
         assert_eq!(matte_free_bytes.len(), 13_584);
@@ -2939,8 +2825,6 @@ mod tests {
         assert_eq!(grade_header(&bytes, 1), 256);
         assert_eq!(grade_header(&bytes, 2), 3);
         assert_eq!(grade_header(&bytes, 3), 0);
-        // Every node points at its own 196-word curve payload followed by its
-        // own 64-word matte block, and no two regions overlap.
         let mut regions: Vec<(usize, usize)> = Vec::new();
         for index in 0..COLOR_NODE_LIMIT_PER_LAYER {
             let base = index * GRADE_NODE_WORDS;
@@ -2997,8 +2881,6 @@ mod tests {
         );
         assert!(message.contains("17"), "unexpected message: {message}");
         assert!(message.contains("16"), "unexpected message: {message}");
-        // A bypassed node still occupies one of the sixteen slots, so the
-        // count is of managed nodes, not of active ones.
         let mut bypassed = stack.clone();
         for effect in &mut bypassed {
             effect.name = "color_wheels".to_owned();
@@ -3013,8 +2895,6 @@ mod tests {
 
     #[test]
     fn inactive_color_nodes_are_never_written_to_the_grade_buffer() {
-        // CC3 3.3: a neutral node, a structurally identical curve node, and a
-        // bypassed non-neutral node of each kind are all the exact identity.
         let stack = [
             wheels(1, &[]),
             curves(2, "master", &[(0, 0), (10_000, 10_000)]),
@@ -3077,9 +2957,6 @@ mod tests {
         let Some(compositor) = fallback() else {
             return;
         };
-        // CC1: a one-stop exposure with every other control neutral is a pure
-        // linear-light doubling, so the anchor is written out rather than
-        // captured.  `f16` storage makes the input exactly 0.17993164.
         let frame = linear_frame([0.18, 0.18, 0.18]);
         let expected = f32::from(f16::from_f32(0.18)) * 2.0;
         let linear = render_linear(
@@ -3104,10 +2981,6 @@ mod tests {
         let Some(compositor) = fallback() else {
             return;
         };
-        // CC3 2.1: 0.18 linear with `gain_red_thousandths = 1200` and every
-        // other control neutral resolves to 0.250771 on red.  Green and blue
-        // take the identity `slope = 1, offset = 0, power = 1` path, which is
-        // an exact `grade709` round trip.
         let frame = linear_frame([0.18, 0.18, 0.18]);
         let linear = render_linear(
             &compositor,
@@ -3132,10 +3005,6 @@ mod tests {
         let Some(compositor) = fallback() else {
             return;
         };
-        // CC3 2.1: 0.18 linear through the master curve
-        // (0,0) (5000,6000) (10000,10000) resolves to 0.262441 on every
-        // channel, because the master curve is applied identically per
-        // channel and the untouched red/green/blue curves are the identity.
         let frame = linear_frame([0.18, 0.18, 0.18]);
         let linear = render_linear(
             &compositor,
@@ -3159,10 +3028,6 @@ mod tests {
         let Some(compositor) = fallback() else {
             return;
         };
-        // CC3 3.1: there is no fixed inter-kind precedence, so the two orders
-        // are both correct and must differ.  Written out: slope acts on the
-        // `grade709` value, so `curve(1.2 * e)` and `1.2 * curve(e)` differ
-        // wherever the curve is not linear.
         let frame = linear_frame([0.18, 0.18, 0.18]);
         let wheels_node = wheels(1, &[("gain_red_thousandths", 1_200)]);
         let curves_node = curves(2, "master", &[(0, 0), (5_000, 6_000), (10_000, 10_000)]);
@@ -3184,13 +3049,6 @@ mod tests {
 
     #[test]
     fn fritsch_carlson_limits_a_steep_tangent() {
-        // Points (0,0) (1,0.1) (2,10.1): delta = [0.1, 10], so the initial
-        // tangents are m = [0.1, 5.05, 10].  At i = 0, a = 1 and b = 50.5, so
-        // a^2 + b^2 = 2551.25 > 9 and tau = 3 / sqrt(2551.25) = 0.05939417.
-        // m0 becomes 0.3 / sqrt(2551.25) = 0.00593942 and m1 becomes
-        // 15.15 / sqrt(2551.25) = 0.29994086.  At i = 1 the rewritten m1 gives
-        // a = 0.02999409 and b = 1, whose square sum is 1.0009, so nothing
-        // else is limited.
         let tangents = fritsch_carlson_tangents(&[0.0, 1.0, 2.0], &[0.0, 0.1, 10.1]);
         assert!((tangents[0] - 0.005_939_42).abs() < 1e-7, "{tangents:?}");
         assert!((tangents[1] - 0.299_940_86).abs() < 1e-6, "{tangents:?}");
@@ -3199,12 +3057,6 @@ mod tests {
 
     #[test]
     fn fritsch_carlson_flattens_a_plateau_in_forward_order() {
-        // Points (0,0) (1,1) (2,1) (3,2): delta = [1, 0, 1] and the initial
-        // tangents are m = [1, 0.5, 0.5, 1].  i = 0 leaves them alone
-        // (a = 1, b = 0.5).  i = 1 has a zero delta, so m1 and m2 both become
-        // 0.  i = 2 then reads the rewritten m2 = 0, giving a = 0 and b = 1,
-        // which needs no limiting.  Visiting the segments in any other order
-        // would not zero the plateau's shared endpoints the same way.
         let tangents = fritsch_carlson_tangents(&[0.0, 1.0, 2.0, 3.0], &[0.0, 1.0, 1.0, 2.0]);
         assert_eq!(tangents, vec![1.0, 0.0, 0.0, 1.0]);
     }
@@ -3215,9 +3067,6 @@ mod tests {
             fritsch_carlson_tangents(&[0.0, 1.0], &[0.0, 1.0]),
             vec![1.0, 1.0]
         );
-        // A descending y between two ascending segments has its sign-crossing
-        // tangents zeroed, which is what keeps a monotone point sequence
-        // monotone.
         let tangents = fritsch_carlson_tangents(&[0.0, 1.0, 2.0], &[0.0, 1.0, 0.5]);
         assert!((tangents[0] - 1.0).abs() < 1e-6, "{tangents:?}");
         assert!(tangents[1].abs() < 1e-6, "{tangents:?}");
@@ -3500,10 +3349,6 @@ mod tests {
         let width = 1_536_u32;
         let height = 2_u32;
         let block = 8_u32;
-        // Every block is adjacent to a block that differs sharply in all three
-        // channels, so any sub-texel leak has something to leak. The zero
-        // channels are the sensitive detector: `Rgba16Float` resolves a leak
-        // of `3e-5` into an exact zero as a subnormal, not as another zero.
         let texel = |x: u32| -> [f32; 3] {
             if (x / block).is_multiple_of(2) {
                 [0.0, 0.0, 0.0]
@@ -3530,9 +3375,6 @@ mod tests {
             .enumerate()
             .filter(|(_, (rendered, stored))| {
                 (0..3).any(|channel| {
-                    // Bit-exact on purpose: the whole point is that a 1:1
-                    // composite reproduces the source texel, and a tolerance
-                    // here would readmit the sub-texel leak this guards.
                     rendered[channel].to_bits() != stored[channel].to_f32().to_bits()
                 })
             })
@@ -3586,14 +3428,10 @@ mod tests {
 
         assert_eq!(bytes.len(), GRADE_HEADER_BYTES + 2 * GRADE_NODE_BYTES);
         assert_eq!(grade_header(&bytes, 0), 2);
-        // No curve node, so the payload region begins one word past the last
-        // record and is never dereferenced.
         assert_eq!(grade_header(&bytes, 1), 32);
         assert_eq!(grade_header(&bytes, 2), GRADE_ABI_VERSION);
         assert_eq!(grade_header(&bytes, 3), 0);
 
-        // CC1 regression: `v0 .. v9` are byte-for-byte what the pre-CC3
-        // serializer wrote, so a primary-only stack renders unchanged.
         let first_values = [
             1.0, 0.25, -0.1, -0.2, 0.42, 0.3, -0.4, 0.5, -0.6, 0.7, 0.0, 0.0,
         ];
@@ -3632,8 +3470,6 @@ mod tests {
         assert_eq!(grade_header(&bytes, 1), 32);
         assert_eq!(grade_header(&bytes, 2), GRADE_ABI_VERSION);
 
-        // Record 0: wheels.  `gain_red = 1200` with a neutral master is a
-        // slope of 1.2 on red only; offsets are 0 and powers are 1.
         let wheels_words = [
             2.0, 0.0, 0.0, 0.0, // kind, payload offset, bypass, reserved
             1.2, 1.0, 1.0, // slope
@@ -3657,10 +3493,6 @@ mod tests {
             assert!(grade_word(&bytes, word).abs() < 1e-6, "word {word}");
         }
 
-        // Red, green, and blue are the untouched structural identity, whose
-        // tangents are both 1.  Master is (0,0) (0.5,0.6) (1,1), whose
-        // hand-solved tangents are 1.2, 1.0, and 0.8: no delta is zero and
-        // neither `a^2 + b^2` exceeds 9, so the limiter never fires.
         let mut identity = vec![0.0; GRADE_CURVE_SLOT_WORDS];
         identity[0] = 2.0;
         identity[3] = 1.0;
@@ -3712,9 +3544,6 @@ mod tests {
             )
             .expect("primary nodes should render");
 
-        // The second exposure reverses the first.  A wrong 64-byte host
-        // stride makes the shader read padding and half of the second node,
-        // so this catches both the header and array-stride ABI errors.
         assert_pixel_close(&output.rgba[0..4], [64, 128, 192, 255], 3);
     }
 
@@ -3784,8 +3613,6 @@ mod tests {
                 }],
             )
             .unwrap();
-        // Alpha compositing is linear-light; BT.709 monitor encoding maps
-        // 50% red to approximately code value 180.
         assert_pixel_close(&output.rgba[0..4], [180, 0, 0, 255], 3);
 
         let transform = effect(4, "transform", "scale_percent", 50);
@@ -4017,10 +3844,6 @@ mod tests {
 
     #[test]
     fn legacy_color_grade_name_has_no_compositor_branch_of_its_own() {
-        // `Effect` deserialization canonicalises `color_grade` to
-        // `primary_correction`, so the compositor's legacy display-coded
-        // branch must not be reachable for it and its uniforms must stay
-        // neutral.
         let legacy = effect_with(1, "color_grade", &[("exposure_milli_stops", 1_000)]);
         assert!(!legacy_stage_active(std::slice::from_ref(&legacy)));
         let params = params_for(
@@ -4058,8 +3881,6 @@ mod tests {
                 }],
             )
             .unwrap();
-        // +1 stop in linear light, not the old display-coded doubling: the
-        // BT.709 monitor code for 2 * decode_bt709(64/255) is ~97.
         assert_pixel_close(pixel(&output, 0, 0), [97, 97, 97, 255], 3);
 
         let red = solid(4, 4, [255, 0, 0, 255]);
@@ -4134,10 +3955,6 @@ mod tests {
 
         assert_pixel_close(pixel(&output, 0, 0), [0, 0, 255, 255], 3);
     }
-
-    // -----------------------------------------------------------------
-    // CC4 4: LUT atlas, node records, and shader evaluation.
-    // -----------------------------------------------------------------
 
     /// A verified [`LutLibrary`] built the way production builds one: import
     /// real `.cube` bytes into a real project store, then admit them by hash.
@@ -4319,10 +4136,6 @@ mod tests {
 
     #[test]
     fn lut_nodes_lay_out_a_technical_then_creative_stack_word_for_word() {
-        // CC4 4.2: a LUT node owns no payload region, so `payload_word_offset`
-        // stays 0 and the twelve value words carry the slot, the mix, the
-        // encoding, the VERIFIED domain, the edge length, and the atlas depth
-        // origin.  Every word below is written out by hand from the contract.
         let luts = TestLuts::build("cc4-record-layout", &[lut_b_cube(), lut_d_cube()]);
         let stack = [
             lut_node(1, "technical_lut", 1, &[("input_encoding_token", 1)]),
@@ -4332,8 +4145,6 @@ mod tests {
             .expect("a two-node LUT stack serializes");
         assert_eq!(bytes.len(), GRADE_HEADER_BYTES + 2 * GRADE_NODE_BYTES);
         assert_eq!(grade_header(&bytes, 0), 2);
-        // No payload region exists, so the offset is simply the end of the
-        // records, exactly as a payload-free CC3 stack reports it.
         assert_eq!(
             grade_header(&bytes, 1),
             u32::try_from(2 * GRADE_NODE_WORDS).expect("record words fit a u32")
@@ -4343,13 +4154,9 @@ mod tests {
         let expected: [f32; 32] = [
             // technical_lut: kind 4, no payload, not bypassed, reserved
             4.0, 0.0, 0.0, 0.0, //
-            // slot 0, mix pinned at 1.0, linear encoding,
-            // LUT B's domain [0,1], S = 2, z_origin 0, reserved
             0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 0.0, 0.0, //
             // creative_look: kind 5
             5.0, 0.0, 0.0, 0.0, //
-            // slot 1, mix 0.5, linear encoding, LUT D's domain [-0.5, 1.5],
-            // S = 3, z_origin 2 (immediately after LUT B's two slices)
             1.0, 0.5, 1.0, -0.5, -0.5, -0.5, 1.5, 1.5, 1.5, 3.0, 2.0, 0.0,
         ];
         for (word, want) in expected.into_iter().enumerate() {
@@ -4364,9 +4171,6 @@ mod tests {
 
     #[test]
     fn a_mixed_size_lut_stack_packs_one_atlas_and_each_node_reads_its_own_slot() {
-        // CC4 10.3.8: sizes 2, 17, 33, 65 pack to a 65 x 65 x 117 atlas.  Each
-        // node's lattice is a DIFFERENT affine map, and the maps do not
-        // commute, so any slot confusion changes the composed result.
         let Some(compositor) = fallback() else {
             return;
         };
@@ -4389,8 +4193,6 @@ mod tests {
         let binding = compositor
             .lut_binding(&stack, Some(luts.library()))
             .expect("four bound LUT nodes fit the atlas");
-        // Depth is the sum of the BOUND slot sizes, not `5 * Smax`, and the
-        // legacy slot is not allocated because no `cube_lut` is present.
         assert_eq!(binding.atlas.extent(), (65, 65, 2 + 17 + 33 + 65));
         assert_eq!(binding.atlas.extent().2, 117);
         assert_eq!(
@@ -4414,11 +4216,6 @@ mod tests {
             );
         }
 
-        // (0.25, 0.75, 0.5)
-        //   -> x0.5      (0.125, 0.375, 0.25)
-        //   -> swap g,b  (0.125, 0.25,  0.375)
-        //   -> red x4    (0.5,   0.25,  0.375)
-        //   -> blue x0.5 (0.5,   0.25,  0.1875)
         let frame = linear_frame([0.25, 0.75, 0.5]);
         let rendered = render_luts(&compositor, &frame, &stack, &luts);
         assert_solid_linear(&rendered, [0.5, 0.25, 0.1875], LINEAR_CPU_GPU_MAX);
@@ -4434,8 +4231,6 @@ mod tests {
 
     #[test]
     fn the_lut_atlas_is_reused_until_the_slot_signature_changes() {
-        // CC4 4.1: the cache is not optional.  Playback composites the same
-        // stack every frame and must not re-upload up to 21 MiB per frame.
         let Some(compositor) = fallback() else {
             return;
         };
@@ -4463,8 +4258,6 @@ mod tests {
         assert_eq!(first.atlas.slot_layout(), vec![(2, 0)]);
         assert_eq!(rebuilt.atlas.slot_layout(), vec![(2, 0), (3, 2)]);
 
-        // Returning to the first signature hits the cache again rather than
-        // rebuilding, so alternating layers do not thrash.
         let again = compositor
             .lut_binding(&stack, Some(luts.library()))
             .expect("one bound node");
@@ -4473,22 +4266,12 @@ mod tests {
 
     #[test]
     fn the_atlas_cache_byte_budget_keeps_the_head_and_holds_the_bound() {
-        // CC4 4.1: the entry count says nothing about size, so the cache is
-        // trimmed by retained bytes as well. The rule has two halves and both
-        // are asserted here: the budget really bounds the tail, and the head -
-        // the atlas the frame being rendered just built - is never the entry
-        // that gets dropped.
-        //
-        // Real atlases are hundreds of megabytes and need a device to build,
-        // so the decision is exercised on the sizes directly.
         const MIB: u64 = 1024 * 1024;
 
         // Exactly at the budget is kept; one byte over drops the tail.
         assert_eq!(atlas_cache_kept_entries(&[4 * MIB; 4], 16 * MIB), 4);
         assert_eq!(atlas_cache_kept_entries(&[4 * MIB; 4], 16 * MIB - 1), 3);
 
-        // Eight worst-case `65 x 65 x 325` atlases are about 168 MiB; the
-        // 64 MiB budget keeps the three that fit and no more.
         let worst = u64::from(65_u32) * 65 * 325 * 16;
         let kept =
             atlas_cache_kept_entries(&[worst; LUT_ATLAS_CACHE_ENTRIES], LUT_ATLAS_CACHE_MAX_BYTES);
@@ -4498,9 +4281,6 @@ mod tests {
             "the retained bytes must fit the budget"
         );
 
-        // The head survives even when it alone exceeds the budget, because
-        // dropping it would guarantee a rebuild on the very next frame while
-        // freeing nothing the caller is not already holding through its `Arc`.
         assert_eq!(atlas_cache_kept_entries(&[512 * MIB, MIB], 64 * MIB), 1);
         assert_eq!(atlas_cache_kept_entries(&[512 * MIB], 64 * MIB), 1);
 
@@ -4514,19 +4294,9 @@ mod tests {
 
     #[test]
     fn atlas_cache_retains_its_sources_so_no_recycled_address_can_serve_a_stale_look() {
-        // CC4 4.1.  The cache compares lattice identity, and it RETAINS a
-        // strong `Arc` to every bound lattice.  Retention is the whole
-        // soundness argument: comparing a bare `Arc::as_ptr` would be an ABA
-        // compare, because an edited LUT reparsed into a freed allocation's
-        // address would match the old key and render the OLD look.  Because a
-        // cached atlas pins its own sources, those addresses cannot be
-        // recycled while the atlas is servable, so a hit really does mean the
-        // very same verified samples.
         let Some(compositor) = fallback() else {
             return;
         };
-        // Built directly, not through `LutLibrary`, so the process parse cache
-        // holds no reference and every strong count below is ours.
         let first = Arc::new(
             parse_cube_lut(&mapped_cube(2, |[r, g, b]| [r * 0.5, g, b]))
                 .expect("the fixture lattice parses"),
@@ -4554,13 +4324,9 @@ mod tests {
         );
         assert!(Arc::ptr_eq(&first_atlas.retained_slots()[0], &first));
 
-        // Dropping every handle to the atlas leaves it in the cache, and the
-        // retention survives with it.
         drop(first_atlas);
         assert_eq!(Arc::strong_count(&first), 3);
 
-        // A different lattice of the same size misses, however the allocator
-        // happened to place it.
         let second_slots = [LutAtlasSlot {
             z_origin: 0,
             lut: Arc::clone(&second),
@@ -4571,8 +4337,6 @@ mod tests {
         assert!(Arc::ptr_eq(&second_atlas.retained_slots()[0], &second));
         assert_eq!(Arc::strong_count(&second), 3);
 
-        // The first is still cached and still hits, and it still yields ITS
-        // lattice rather than the one uploaded most recently.
         let again = compositor
             .lut_atlas(&first_slots)
             .expect("the cached atlas is served");
@@ -4583,8 +4347,6 @@ mod tests {
             "ours, the slot list, and the one the cached atlas holds"
         );
 
-        // No freshly parsed lattice can land on a retained address, and every
-        // one of them misses and gets an atlas built from its own samples.
         for step in 0..32_u32 {
             #[allow(clippy::cast_precision_loss)]
             let scale = 1.0 / (step as f32 + 2.0);
@@ -4611,9 +4373,6 @@ mod tests {
 
     #[test]
     fn an_edited_lut_of_the_same_size_renders_its_new_samples() {
-        // The end-to-end shape of the ABA hazard: the same asset id, the same
-        // lattice size, edited samples.  The second render must show the new
-        // look, never the atlas uploaded for the first.
         let Some(compositor) = fallback() else {
             return;
         };
@@ -4627,8 +4386,6 @@ mod tests {
         let rendered_before = render_luts(&compositor, &frame, &stack, &before);
         assert_solid_linear(&rendered_before, [0.25, 0.5, 0.5], 2e-3);
 
-        // Drop the first library so its lattice is freed and its address is a
-        // candidate for reuse by the edited parse - the exact ABA setup.
         drop(before);
         let after = TestLuts::build(
             "cc4-atlas-edit-after",
@@ -4640,11 +4397,6 @@ mod tests {
 
     #[test]
     fn lut_b_renders_every_tetrahedral_branch_and_excludes_the_trilinear_value() {
-        // CC4 3.5/10.3.3.  LUT B is `S = 2` over `[0, 1]`, so with
-        // `input_encoding = linear` the lattice fraction IS the input triple
-        // and each row below selects one of the contract's six formulas by
-        // construction.  Every expected value is an exact binary fraction
-        // written out by hand from the branch it exercises.
         let Some(compositor) = fallback() else {
             return;
         };
@@ -4671,10 +4423,6 @@ mod tests {
             }
         }
 
-        // Trilinear interpolation of the SAME lattice at the first anchor.
-        // This is not a tolerance question: the two rules disagree by more
-        // than an order of magnitude above the gate, so the fixture proves
-        // tetrahedral is actually what runs.
         let rendered = render_luts(&compositor, &linear_frame([0.75, 0.5, 0.25]), &node, &luts);
         let trilinear = [0.421_875, 0.296_875, 0.171_875];
         for (channel, (observed, wrong)) in first_rgb(&rendered).iter().zip(&trilinear).enumerate()
@@ -4685,9 +4433,6 @@ mod tests {
             );
         }
 
-        // CC4 3.5 also claims the tie is WELL DEFINED: all six formulas agree
-        // analytically on the shared faces.  Transcribed here in f64,
-        // independently of the shader, over LUT B's lattice at f = (.5,.5,.5).
         let v = |r: usize, g: usize, b: usize| -> [f64; 3] {
             if r == 1 && g == 1 && b == 1 {
                 [1.0, 1.0, 1.0]
@@ -4748,8 +4493,6 @@ mod tests {
                 difference(c111, c110),
             ),
         ];
-        // Exact equality is the point: every operand is an exact binary
-        // fraction, so the six formulas must agree bit-for-bit, not nearly.
         #[allow(clippy::float_cmp)]
         for (index, formula) in formulas.iter().enumerate() {
             assert_eq!(*formula, [0.5, 0.5, 0.5], "tetrahedral formula {index}");
@@ -4758,10 +4501,6 @@ mod tests {
 
     #[test]
     fn lut_input_encodings_apply_enc_dec_and_use_the_signed_display_inverse() {
-        // CC4 3.4.  The lattice halves its input IN THE ENCODED DOMAIN, so a
-        // node that skipped `ENC`/`DEC` would return a visibly different
-        // number, and one that decoded with CC1's SOURCE decode would break on
-        // the negative sample.
         let Some(compositor) = fallback() else {
             return;
         };
@@ -4771,8 +4510,6 @@ mod tests {
         );
         let frame = linear_frame([0.25, 0.25, 0.25]);
 
-        // display709: e = encode_bt709(0.25) = 0.48993948, halved to
-        // 0.24496974, decoded by decode_display709 to 0.07567266.
         let display = render_luts(
             &compositor,
             &frame,
@@ -4780,9 +4517,6 @@ mod tests {
             &luts,
         );
         assert_solid_linear(&display, [0.075_672_66; 3], 1e-4);
-        // linear: the same lattice on the raw value gives 0.125.  The two
-        // results are 0.049 apart, more than thirty times the gate, so "the
-        // encoding is applied" is not a tolerance question.
         let linear = render_luts(
             &compositor,
             &frame,
@@ -4791,10 +4525,6 @@ mod tests {
         );
         assert_solid_linear(&linear, [0.125; 3], LINEAR_CPU_GPU_MAX);
         assert!((first_rgb(&display)[0] - 0.125).abs() > 30.0 * LINEAR_CPU_GPU_MAX);
-        // grade709: CC3's exact analytic pair, 0.07573866.  Tokens 0 and 2
-        // agree to about 7e-5 by design — they are two roundings of the same
-        // curve — so this pins that the token-2 branch encodes at all, not
-        // which of the two near-identical curves ran.
         let grade = render_luts(
             &compositor,
             &frame,
@@ -4803,11 +4533,6 @@ mod tests {
         );
         assert_solid_linear(&grade, [0.075_738_66; 3], 1e-4);
 
-        // The sign-preserving inverse, on a sample below the domain.  With
-        // `e = -0.48993948` the clamp gives `u = 0`, the lookup gives `0`, and
-        // the whole excursion is restored: `z = -0.48993948`.  CC4's
-        // `decode_display709` returns -0.25; CC1's `decode_bt709` would take
-        // its unconditional linear branch and return -0.10887544.
         let negative = linear_frame([-0.25, -0.25, -0.25]);
         let rendered = render_luts(
             &compositor,
@@ -4826,17 +4551,12 @@ mod tests {
 
     #[test]
     fn out_of_domain_excursions_are_restored_additively_not_clamped() {
-        // CC4 10.3.4 with LUT D.  A pure-clamp implementation would return the
-        // boundary lattice value; the additive rule keeps the excursion, which
-        // is what makes an over-range highlight recoverable.
         let Some(compositor) = fallback() else {
             return;
         };
         let luts = TestLuts::build("cc4-out-of-domain", &[lut_d_cube()]);
         let node = [creative_look(1, 1, 1, 10_000)];
 
-        // e = (2, 2, 2) clamps to dmax (1.5), whose lookup is (1, 1, 1); the
-        // 0.5 excursion is restored on top of it.
         let high = render_luts(&compositor, &linear_frame([2.0, 2.0, 2.0]), &node, &luts);
         assert_solid_linear(&high, [1.5, 1.5, 1.5], LINEAR_CPU_GPU_MAX);
         for observed in first_rgb(&high) {
@@ -4860,8 +4580,6 @@ mod tests {
             );
         }
 
-        // The in-domain mapping anchor, so the domain rescale itself is pinned
-        // and not only its saturating ends: CC4 10.3.3's LUT D row.
         let inside = render_luts(&compositor, &linear_frame([0.5, 0.0, 1.0]), &node, &luts);
         assert_solid_linear(&inside, [0.25, 0.125, 0.625], LINEAR_CPU_GPU_MAX);
     }
@@ -4886,8 +4604,6 @@ mod tests {
         let half = render_luts(&compositor, &frame, &[creative_look(1, 1, 1, 5_000)], &luts);
         assert_solid_linear(&half, [0.625, 0.437_5, 0.25], LINEAR_CPU_GPU_MAX);
 
-        // `mix = 0` is inactive (CC4 3.6): the node is not written at all, so
-        // it is bit-identical to removing it, not merely close to it.
         let none = render_luts(&compositor, &frame, &[creative_look(1, 1, 1, 0)], &luts);
         let removed = render_luts(&compositor, &frame, &[], &luts);
         assert_eq!(none.len(), removed.len());
@@ -4898,11 +4614,6 @@ mod tests {
 
     #[test]
     fn a_linear_identity_lattice_is_bit_exact_on_the_gpu() {
-        // CC4 3.5's exactness claim: with `input_encoding = linear`, domain
-        // `[0, 1]`, and `S - 1` a power of two, every lattice coordinate,
-        // fraction, and interpolation weight is an exact binary fraction, so
-        // the identity lattice reproduces the input BIT-exactly.  Asserted
-        // with `to_bits`, never with a tolerance.
         let Some(compositor) = fallback() else {
             return;
         };
@@ -4925,8 +4636,6 @@ mod tests {
 
     #[test]
     fn inactive_lut_nodes_are_never_written_and_take_no_atlas_slot() {
-        // CC4 3.6: bypass and `mix = 0` are LOSSLESSLY identical to removing
-        // the node, on the buffer, in the atlas, and in the rendered pixels.
         let Some(compositor) = fallback() else {
             return;
         };
@@ -4944,8 +4653,6 @@ mod tests {
         assert_eq!(bytes.len(), GRADE_HEADER_BYTES + GRADE_NODE_BYTES);
         assert!(bytes[GRADE_HEADER_BYTES..].iter().all(|byte| *byte == 0));
 
-        // No managed slot is allocated: the atlas is the shared `S = 2`
-        // placeholder that keeps binding 3 valid.
         let binding = compositor
             .lut_binding(&stack, Some(luts.library()))
             .expect("an all-inactive stack binds the placeholder");
@@ -4963,9 +4670,6 @@ mod tests {
 
     #[test]
     fn a_fifth_active_lut_node_is_rejected() {
-        // CC4 3.1/10.3.8: the limit exists because each ACTIVE node needs an
-        // atlas slot, so an inactive fifth node is not a violation here even
-        // though Core counts it against `LUT_NODE_LIMIT_PER_LAYER` on edit.
         let luts = TestLuts::build("cc4-slot-limit", &[lut_b_cube()]);
         let four = (0..4)
             .map(|index| creative_look(index + 1, 1, 1, 10_000))
@@ -4997,9 +4701,6 @@ mod tests {
 
     #[test]
     fn an_unresolvable_lut_asset_fails_the_render_rather_than_dropping_the_look() {
-        // CC4 2.3: a missing asset blocks with a typed error.  It must never
-        // be silently skipped, because a look-free frame is indistinguishable
-        // from a correctly graded one to everything downstream.
         let luts = TestLuts::build("cc4-missing-asset", &[lut_b_cube()]);
         let dangling = [creative_look(1, 99, 1, 10_000)];
         let error = grade_buffer_bytes_with_luts(&dangling, Some(luts.library()))
@@ -5026,8 +4727,6 @@ mod tests {
             "unexpected message: {message}"
         );
 
-        // An INACTIVE node never resolves an asset, so a bypassed node bound
-        // to a missing asset does not block the render.
         let mut bypassed = creative_look(1, 99, 1, 10_000);
         bypassed
             .parameters
@@ -5037,9 +4736,6 @@ mod tests {
 
     #[test]
     fn a_legacy_cube_lut_and_a_managed_look_coexist_with_the_legacy_stage_last() {
-        // CC4 10.3.9: the legacy branch runs after every managed node, in atlas
-        // slot 4, REGARDLESS of the two effects' relative order in
-        // `clip.effects`.
         let Some(compositor) = fallback() else {
             return;
         };
@@ -5091,17 +4787,12 @@ mod tests {
             );
         }
 
-        // The managed node halves the red channel in linear light, then the
-        // legacy stage swaps red and blue in display code and round-trips
-        // through BT.709.  Both stages therefore ran, in that order.
         assert_solid_linear(&managed_first, [0.0, 0.0, 0.125], LINEAR_CPU_GPU_MAX);
         let managed_only = render_luts(&compositor, &frame, std::slice::from_ref(&managed), &luts);
         assert_solid_linear(&managed_only, [0.125, 0.0, 0.0], LINEAR_CPU_GPU_MAX);
         let legacy_only = render_luts(&compositor, &frame, std::slice::from_ref(&legacy), &luts);
         assert_solid_linear(&legacy_only, [0.0, 0.0, 0.25], LINEAR_CPU_GPU_MAX);
 
-        // Slot 4 is the legacy one in both orders: one managed slice first,
-        // then the legacy lattice.
         for order in [
             vec![managed.clone(), legacy.clone()],
             vec![legacy.clone(), managed.clone()],
@@ -5117,8 +4808,6 @@ mod tests {
 
     #[test]
     fn a_look_free_layer_binds_the_identity_placeholder() {
-        // The binding must stay valid with no LUT of any kind, and the atlas
-        // must not be rebuilt on every frame of look-free playback.
         let Some(compositor) = fallback() else {
             return;
         };
@@ -5178,8 +4867,6 @@ mod tests {
 
         let green = solid(8, 8, [0, 255, 0, 255]);
         let key = effect_with(2, "chroma_key", &[("threshold_percent", 15)]);
-        // CC1 2.2.4: keying is coverage, not colour correction, so it must
-        // not put the layer through the legacy display-coded branch.
         assert!(!legacy_stage_active(std::slice::from_ref(&key)));
         let output = compositor
             .render(
@@ -5216,15 +4903,11 @@ mod tests {
 
     #[test]
     fn chroma_key_alone_never_clamps_the_working_colour_it_passes_through() {
-        // This asserts an over-range half-float value survives the actual
-        // render target; either adapter class demonstrates that.
         let Some(gpu) = fixture_gpu_or_skip() else {
             return;
         };
         let compositor = Compositor::new(gpu);
 
-        // Far enough from the default green key colour that alpha stays 1,
-        // and over-range in red so a display-space round trip would clip it.
         let over_range = working(4, 4, [1.5, 0.2, 0.2, 1.0]);
         let key = effect_with(1, "chroma_key", &[("threshold_percent", 15)]);
         assert!(!legacy_stage_active(std::slice::from_ref(&key)));
@@ -5252,8 +4935,6 @@ mod tests {
             .expect("neutral working-surface readback")
             .pixels;
 
-        // CC1 2.2.5: no colour stage clamps RGB, and CC1 2.2.4: keying does
-        // not change the colour of pixels it keeps.
         assert!(
             keyed[0] > 1.4,
             "chroma_key clamped an over-range working value: {:?}",
@@ -5311,8 +4992,6 @@ mod tests {
             return;
         };
 
-        // Display-coded distance from the default green key is about 0.70,
-        // well past the default 0.15/0.10 band, so this pixel is fully kept.
         let negative_green = working(4, 4, [0.3, -0.05, 0.2, 1.0]);
         let key = effect_with(1, "chroma_key", &[("threshold_percent", 15)]);
         assert!(!legacy_stage_active(std::slice::from_ref(&key)));
@@ -5345,9 +5024,6 @@ mod tests {
             "chroma_key crushed a negative working green to {}",
             keyed[1]
         );
-        // A kept pixel is not attenuated by coverage, so the over-range red
-        // survives at full strength. (The composited alpha is always 1: layers
-        // blend over an opaque black clear.)
         assert!(
             keyed[0] > 0.29,
             "the pixel should be fully kept, red was {}",
@@ -5370,34 +5046,16 @@ mod tests {
     /// written out from the display-space formula by hand.
     #[test]
     fn chroma_key_edge_pixel_gets_the_display_coded_spill_amount() {
-        // The layer blends over an opaque black clear with
-        // `src.rgb * srcAlpha`, so the readback is the working colour scaled
-        // by coverage and the readback alpha is always 1.
         const EXPECTED_KEY_ALPHA: f32 = 0.132_483_8;
         const EXPECTED_GREEN_LINEAR: f32 = 0.080_793_0;
         const EXPECTED_RED: f32 = 0.05 * EXPECTED_KEY_ALPHA;
         const EXPECTED_GREEN: f32 = EXPECTED_GREEN_LINEAR * EXPECTED_KEY_ALPHA;
-        // The pre-fix linear-dominance form would have left green at 0.10962
-        // linear, i.e. 0.014523 after coverage.
         const LINEAR_DOMINANCE_GREEN: f32 = 0.109_62 * EXPECTED_KEY_ALPHA;
 
         let Some(compositor) = fallback() else {
             return;
         };
 
-        // Working linear (0.05, 0.5, 0.05).  BT.709 display codes:
-        //   e(0.05) = 1.099 * 0.05^0.45 - 0.099 = 0.1864627
-        //   e(0.50) = 1.099 * 0.50^0.45 - 0.099 = 0.7055147
-        // Distance from the (0, 1, 0) key colour:
-        //   |(0.1864627, -0.2944853, 0.1864627)| / sqrt(3) = 0.2282206
-        // threshold 50% and softness 100% give the band [0.0, 1.0], so
-        //   key_alpha = d * d * (3 - 2 * d) = 0.1324838
-        // Spill at 100%:
-        //   dominance = 0.7055147 - 0.1864627               = 0.5190520
-        //   g_display = 0.7055147 - dominance * (1 - alpha)  = 0.2552297
-        //   g_linear  = ((0.2552297 + 0.099) / 1.099)^(1/0.45) = 0.0807930
-        // The pre-fix linear-dominance form would have produced 0.1096, which
-        // the tolerance below excludes.
         let edge = working(4, 4, [0.05, 0.5, 0.05, 1.0]);
         let key = effect_with(
             1,
@@ -5423,8 +5081,6 @@ mod tests {
         let [red, green, blue, ..] = keyed[0..4] else {
             panic!("four channels");
         };
-        // Coverage is real: the edge pixel is neither fully keyed nor fully
-        // kept, so it is attenuated to about 13% of its working colour.
         assert!(
             (red - EXPECTED_RED).abs() < 2.0e-4,
             "edge red was {red}, expected {EXPECTED_RED}"
@@ -5459,8 +5115,6 @@ mod tests {
             }
         }
         routed.sort_unstable();
-        // Both compatibility stages go through the legacy branch: the
-        // display-coded controls and the post-primary LUTs.
         assert_eq!(
             routed,
             [
@@ -5480,9 +5134,6 @@ mod tests {
         let Some(compositor) = fallback() else {
             return;
         };
-        // Pool accounting is derived entirely from the key, so a 1x1
-        // placeholder can stand in for a 4K texture. That keeps this a test of
-        // the budget policy instead of a several-gigabyte allocation.
         let placeholder = || {
             compositor
                 .gpu
@@ -5502,8 +5153,6 @@ mod tests {
                     view_formats: &[],
                 })
         };
-        // 3840 * 2160 * 8 bytes is about 63 MiB, so exactly four of these fit
-        // in the budget and a fifth does not.
         let shape = |index: u32| TexturePoolKey {
             width: 3_840 - index,
             height: 2_160,
@@ -5527,8 +5176,6 @@ mod tests {
                 key.height
             );
             assert!(pool.shapes.len() <= TEXTURE_POOL_MAX_SHAPES);
-            // Eviction must never take the shape the frame just used: doing so
-            // guarantees a reallocation on the next frame at the same raster.
             assert!(
                 pool.shapes
                     .get(key)
@@ -5538,8 +5185,6 @@ mod tests {
         }
         assert!(pool.take(*shapes.last().expect("six shapes")).is_some());
 
-        // A single shape can bust the budget on its own; it is trimmed rather
-        // than left over budget, and the per-shape depth cap still applies.
         let mut pool = TexturePool::default();
         let key = shape(0);
         for _ in 0..(TEXTURE_POOL_MAX_PER_SHAPE + 3) {
@@ -5621,8 +5266,6 @@ mod tests {
         assert_pixel_close(pixel(&output, 0, 0), [0, 0, 255, 255], 2);
         assert_eq!(pooled(&compositor), 2);
 
-        // A different shape is a different pool key, and the pool stays
-        // bounded by the shape budget.
         for width in 1..=(u32::try_from(TEXTURE_POOL_MAX_SHAPES).unwrap() + 4) {
             let frame = solid(width, 2, [8, 8, 8, 255]);
             compositor
@@ -5655,8 +5298,6 @@ mod tests {
         };
         let blue = solid(8, 8, [0, 0, 255, 255]);
         let green = solid(8, 8, [0, 255, 0, 255]);
-        // A legacy display stage plus a key must still key: the key branch
-        // runs after the legacy branch so the stacked behaviour is preserved.
         let effects = [
             effect(1, "saturation", "percent", 0),
             effect_with(2, "chroma_key", &[("threshold_percent", 15)]),
@@ -5785,8 +5426,6 @@ mod tests {
         );
     }
 
-    // ================= CC5 secondaries: matte block and shader =============
-
     /// CC5 3.1's word map, written out by hand.
     ///
     /// Every word is a literal derived from the stored integer by the unit
@@ -5826,8 +5465,6 @@ mod tests {
         let bytes = grade_buffer_bytes_for(std::slice::from_ref(&node), None, (64, 36), None)
             .expect("a wheels node with a matte serializes");
 
-        // One record, no curve payload, so the block starts at word 16 and
-        // `v11` says so rather than the shader deriving it per kind.
         assert_eq!(grade_header(&bytes, 0), 1);
         assert_eq!(grade_header(&bytes, 1), 16);
         assert_eq!(grade_header(&bytes, 2), 3);
@@ -5838,8 +5475,6 @@ mod tests {
             GRADE_HEADER_BYTES + (16 + MATTE_BLOCK_WORDS) * 4
         );
 
-        // The kind's own value words are untouched: `gain_master 1500` is a
-        // 1.5 slope on all three channels, unit gamma, zero lift.
         for channel in 0..3 {
             assert_eq!(grade_word(&bytes, GRADE_NODE_VALUE_OFFSET + channel), 1.5);
             assert_eq!(
@@ -5878,9 +5513,6 @@ mod tests {
         assert_eq!(word(18), 0.7, "cy");
         assert_eq!(word(19), 0.125, "hw");
         assert_eq!(word(20), 0.2, "hh");
-        // cos 45 = sin 45 = sqrt(2)/2 = 0.70710678118654752440, whose nearest
-        // f32 is 0x3f3504f3. Solved on the host in f64 and rounded once, so
-        // the shader and the CPU reference consume the same constant.
         assert_eq!(word(21).to_bits(), 0x3f35_04f3, "cosT");
         assert_eq!(word(22).to_bits(), 0x3f35_04f3, "sinT");
         assert_eq!(word(21), 0.707_106_77_f32);
@@ -5916,16 +5548,12 @@ mod tests {
                 .expect("a disabled matte serializes");
         assert_eq!(disabled_bytes, bytes, "an inactive matte writes no block");
 
-        // Enabled but selecting everything at full strength is equally
-        // inactive: no window, no qualifier, no invert, full mix.
         let vacuous = with_matte(plain, &[("matte_mix_basis_points", 10_000)]);
         let vacuous_bytes =
             grade_buffer_bytes_for(std::slice::from_ref(&vacuous), None, (64, 36), None)
                 .expect("a vacuous matte serializes");
         assert_eq!(vacuous_bytes, bytes);
 
-        // `technical_lut` carries no `matte_*` parameter, so a hand-edited
-        // file naming one cannot make a source normalization partial.
         let luts = TestLuts::build("cc5-technical-lut-matte", &[lut_b_cube()]);
         let technical = with_matte(
             effect_with(
@@ -5952,8 +5580,6 @@ mod tests {
             0.0,
             "v11 is always zero on a technical_lut record"
         );
-        // The node is not excluded either: a matte parameter on a technical
-        // LUT is inert, not a way to switch the source normalization off.
         assert!(color_node_inactive_reason(&technical).is_none());
     }
 
@@ -6029,10 +5655,6 @@ mod tests {
 
     fn assert_matte_containment(compositor: &Compositor) {
         let frame = cc5_field_raster();
-        // The window is |u.x - 0.5| <= 0.25 and |u.y - 0.5| <= 0.25, which on
-        // a 64 x 36 raster of pixel centres is x in 16..=47 (32 columns) and
-        // y in 9..=26 (18 rows): 576 of 2304 pixels, 2500 basis points. No
-        // pixel centre lies on the boundary.
         let inside = |x: usize, y: usize| (16..=47).contains(&x) && (9..=26).contains(&y);
         let mut expected_inside = 0_usize;
         for y in 0..36 {
@@ -6121,18 +5743,6 @@ mod tests {
     }
 
     fn assert_zero_coverage_identity(compositor: &Compositor) {
-        // Red carries `-0.0`, green carries `4.0`, blue a plain negative. A
-        // wheels node with slope 16 and power 16 drives `4.0` to a non-finite
-        // value through `grade709`, which CC1 2.2.5's no-clamp rule makes
-        // reachable, and `x + (node(x) - x) * 0.0` would map every outside
-        // pixel of that channel to NaN.
-        //
-        // The `-0.0` sample rides along, but the assertion below is
-        // bit-equality against the *no-node* render rather than a sign claim:
-        // the working surface's own upload and sample path normalizes `-0.0`
-        // to `+0.0` before the node stack ever sees it, so the sign gate of
-        // CC5 2.5.5 belongs to the CPU reference. What this fixture proves is
-        // that the matte does not perturb the outside pixel either way.
         let mut pixels = Vec::with_capacity(64 * 36 * 4);
         for _ in 0..(64 * 36) {
             pixels.push(f16::from_f32(-0.0));
@@ -6220,8 +5830,6 @@ mod tests {
 
     fn assert_matte_window_geometry(compositor: &Compositor) {
         let frame = uniform_frame(64, 36, [0.25, 0.5, 0.75]);
-        // hw * a = 0.1125 * 16/9 = 0.2 = hh, so the field is isotropic in
-        // pixels: 0.2 * 36 = 7.2 px in both directions.
         let square = |extra: &[(&str, i64)]| {
             let mut parameters = vec![
                 ("matte_window_count", 1),
@@ -6252,8 +5860,6 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        // Rect, rotation 0: |dx| <= 7.2 and |dy| <= 7.2 with dx = x - 31.5 and
-        // dy = y - 17.5, so 14 columns x 14 rows = 196 pixels.
         let axis_aligned = render_coverage(
             compositor,
             &frame,
@@ -6264,9 +5870,6 @@ mod tests {
         let axis_set = covered(&axis_aligned);
         assert_eq!(axis_set.len(), 196);
 
-        // Rect, rotation 45 degrees: |dx + dy| <= 7.2 * sqrt(2) = 10.18234 and
-        // |dy - dx| <= 10.18234. Both sums are integers, so the condition is
-        // |s| <= 10, |t| <= 10, s + t odd: 11 * 10 + 10 * 11 = 220 pixels.
         let rotated = render_coverage(
             compositor,
             &frame,
@@ -6289,11 +5892,6 @@ mod tests {
             );
         }
 
-        // Ellipse, rotation 0: dx^2 + dy^2 <= 0.04 * 36^2 = 51.84. Counted per
-        // quadrant 7 + 7 + 7 + 6 + 6 + 5 + 3 = 41, so 4 * 41 = 164 pixels.
-        // (2i+1)^2 + (2j+1)^2 = 207.36 has no integer solution, so no pixel
-        // centre lies on the boundary; the smallest interior margin is 1.34
-        // px^2 and the smallest exterior margin 2.66 px^2.
         let ellipse = render_coverage(
             compositor,
             &frame,
@@ -6359,17 +5957,10 @@ mod tests {
             }
             column[0]
         };
-        // f = 0.4, so t = (D - 0.6) / 0.8.
-        // D = 0.8: t = 0.25, smoothstep = 0.0625 * 2.5 = 0.15625,
-        //          w = 0.84375, round(255 * w) = round(215.15625) = 215.
         assert_eq!(code_at(12), 215);
         assert_eq!(code_at(28), 215);
-        // D = 1.0: t = 0.5, smoothstep = 0.25 * 2.0 = 0.5, w = 0.5,
-        //          round(255 * 0.5) = round(127.5) = 128 (half away from zero).
         assert_eq!(code_at(10), 128);
         assert_eq!(code_at(30), 128);
-        // D = 1.2: t = 0.75, smoothstep = 0.5625 * 1.5 = 0.84375,
-        //          w = 0.15625, round(255 * w) = round(39.84375) = 40.
         assert_eq!(code_at(8), 40);
         assert_eq!(code_at(32), 40);
         // The affected set is exactly {D < 1.4}: D = 1.4 gives t = 1 and w = 0.
@@ -6382,8 +5973,6 @@ mod tests {
         for x in 35..40 {
             assert_eq!(code_at(x), 0, "column {x} lies beyond the band");
         }
-        // The interior of the band is saturated and the symmetry
-        // w(1 - d) + w(1 + d) = 1 holds on the sampled pairs.
         assert_eq!(code_at(20), 255, "D = 0 is fully covered");
         assert_eq!(u16::from(code_at(12)) + u16::from(code_at(8)), 255);
 
@@ -6453,10 +6042,6 @@ mod tests {
             }
         };
 
-        // e = (0.8, 0.2, 0.2): M = c.r, C = 0.6, S = C / M = 0.75,
-        // Y = 0.2126*0.8 + 0.7152*0.2 + 0.0722*0.2 = 0.32756, H = 0 degrees.
-        // Hue |0 - 0| = 0 <= 30, S inside 0.70..0.80, Y inside 0.30..0.35, so
-        // q = 1 at every pixel.
         let selected = qualifier(&[]);
         all(
             &render_coverage(
@@ -6482,8 +6067,6 @@ mod tests {
             .expect("qualifier coverage"),
             0,
         );
-        // Hue: e = (0.2, 0.8, 0.2) has M = c.g, so H = 60 * ((b - r)/C + 2)
-        // = 120 degrees, which is 120 away from a 30 degree half-width at 0.
         all(
             &render_coverage(
                 compositor,
@@ -6499,9 +6082,6 @@ mod tests {
             .expect("qualifier coverage"),
             0,
         );
-        // CC5 2.4's achromatic rule, both branches. e = (0.5, 0.5, 0.5) has
-        // C = 0 exactly, so a named hue excludes it and a 180 degree
-        // half-width includes it.
         let achromatic_bands = [
             ("matte_saturation_low_basis_points", 0),
             ("matte_saturation_high_basis_points", 10_000),
@@ -6532,8 +6112,6 @@ mod tests {
             .expect("qualifier coverage"),
             255,
         );
-        // A degenerate resolved band evaluates to 0, with no clamp and no
-        // reordering (CC5 2.6).
         let mut degenerate = achromatic_bands.to_vec();
         degenerate.push(("matte_hue_width_centidegrees", 18_000));
         degenerate.push(("matte_saturation_low_basis_points", 9_000));
@@ -6584,8 +6162,6 @@ mod tests {
         let matte_free = wheels(4, &[("gain_master_thousandths", 1_500)]);
         let stack = vec![neutral, left, right, matte_free];
 
-        // The neutral node is inactive and is not written, so the two matted
-        // nodes are active 0 and 1.
         assert!(color_node_inactive_reason(&stack[0]).is_some());
         assert_eq!(
             matte_debug_active_index(&stack, ClipId(1), EffectId(2)).expect("left is active"),
@@ -6598,8 +6174,6 @@ mod tests {
 
         let frame = uniform_frame(64, 36, [0.25, 0.5, 0.75]);
         let coverage = render_coverage(&compositor, &frame, &stack, 3).expect("right coverage");
-        // |u.x - 0.75| <= 0.25 is x in 32..=63; the left window would have
-        // selected x in 0..=31.
         for y in 0..36_usize {
             for x in 0..64_usize {
                 let expected = u8::from(x >= 32) * 255;
@@ -6838,13 +6412,6 @@ mod tests {
         assert_matte_qualifier_anchors(&compositor);
     }
 
-    // -----------------------------------------------------------------------
-    // CC6 §11.2.6 / §11.2.7 / §11.2.8: the working proof.
-    // -----------------------------------------------------------------------
-
-    // §11.1's QC raster, its populations, and the three CC5-derived patch
-    // tables live in `cc6_fixtures.rs`: three files measure that raster and a
-    // second copy would be a second definition of every population in §11.1.
     use crate::cc6_fixtures::{CC6_QC_RASTER, cc6_qc_raster};
 
     /// A full CC3 + CC4 + CC5 node stack: a primary, wheels, curves, an
@@ -6877,8 +6444,6 @@ mod tests {
                     ("master_y2", 10_000),
                 ],
             ),
-            // Token 2 is `grade709`, the encoding the chart patches are
-            // authored in.
             creative_look(4, lut, 2, 7_000),
             with_matte(
                 wheels(5, &[("gain_red_thousandths", 1_250)]),
@@ -6904,9 +6469,6 @@ mod tests {
             assert_linear_parity, linear_parity_metrics,
         };
 
-        // §11.2.6: no new tolerance is invented. The banded gate is asserted
-        // to *be* the CC1 §6.2 constants before it is applied, so a future
-        // widening of either constant cannot slip through as a CC6 change.
         assert!((LINEAR_CPU_GPU_MAX - 1.5e-3).abs() <= f32::EPSILON);
         assert!((LINEAR_CPU_GPU_P99 - 7.5e-4).abs() <= f32::EPSILON);
         assert!((LINEAR_CPU_GPU_MEAN - 2.5e-4).abs() <= f32::EPSILON);
@@ -6934,8 +6496,6 @@ mod tests {
                 Some(luts.library()),
             )
             .expect("production GPU working-surface readback");
-        // The productionised readback carries its own raster, which is what
-        // makes a `WorkingProof` able to state a raster at all.
         assert_eq!((image.width, image.height), CC6_QC_RASTER);
         assert_eq!(
             image.pixels.len(),
@@ -6960,9 +6520,6 @@ mod tests {
             metrics.above_domain
         );
 
-        // Failing direction (rule 11.0.5): the same comparison against a
-        // reference perturbed by 2 x LINEAR_CPU_GPU_MAX must exceed the gate,
-        // so the gate is known to be able to fail.
         let perturbed = reference
             .as_chunks::<4>()
             .0
@@ -7053,10 +6610,6 @@ mod tests {
             },
         };
 
-        // Both legs of the `full_resolution` conjunction, built through the
-        // production derivation rather than by asserting a flag: a proxy scale
-        // at the document raster, and full scale at a raster that is not the
-        // document's. Either one alone must refuse.
         let proxy_scale =
             gpu.monitor_proof_metadata_for(RenderScale::Proxy { max_width: 4 }, document, document);
         assert!(!proxy_scale.full_resolution);

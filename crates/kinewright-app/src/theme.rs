@@ -113,8 +113,6 @@ pub(crate) mod motion {
     pub const NAVIGATION: f32 = 0.180;
 }
 
-// One step larger across the scale (Riel: everything read a bit small);
-// body lands between Zed's small (12) and default (14).
 pub(crate) mod type_size {
     pub const TITLE: f32 = 19.0;
     pub const HEADING: f32 = 15.0;
@@ -230,8 +228,6 @@ pub(crate) fn paint_raised_lighting(painter: &egui::Painter, rect: egui::Rect, c
     let sheen_height = (rect.height() * 0.5).min(48.0);
     let sheen = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), sheen_height));
     let mut mesh = egui::Mesh::default();
-    // Alphas settled by screenshot review: the spec's 5/14 vanished in a
-    // real capture; these are the collaborating designer's counter-values.
     let top = egui::Color32::from_white_alpha(8);
     let bottom = egui::Color32::TRANSPARENT;
     mesh.colored_vertex(sheen.left_top(), top);
@@ -350,16 +346,12 @@ pub(crate) fn install(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(space::TWO, space::ONE_HALF);
     style.spacing.window_margin = egui::Margin::same(margin(space::THREE));
     style.spacing.menu_margin = egui::Margin::same(margin(space::TWO));
-    // Wider horizontal padding gives borderless buttons their pill
-    // proportions; hierarchy comes from fills, not outlines (M25).
     style.spacing.button_padding = egui::vec2(space::TWO, space::ONE);
     style.spacing.scroll = egui::style::ScrollStyle::thin();
     style.spacing.indent = space::FOUR;
     style.spacing.interact_size = egui::vec2(size::CONTROL_HEIGHT, size::CONTROL_HEIGHT);
     style.spacing.slider_width = 112.0;
     style.spacing.slider_rail_height = 3.0;
-    // Combos size to their content; a wide floor mostly buys dead air and
-    // overflows narrow columns (the composer row wraps, but later).
     style.spacing.combo_width = 76.0;
     style.spacing.text_edit_width = 180.0;
     style.spacing.icon_width = size::ICON_MD;
@@ -469,10 +461,6 @@ fn visuals() -> Visuals {
     visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     visuals.image_loading_spinners = false;
     visuals.disabled_alpha = 0.55;
-    // Border discipline (M25, Zed as the bar): widget hierarchy is carried
-    // by the surface ladder and text weight, never by outlines. Hairlines
-    // stay on noninteractive chrome (separators) and true containers;
-    // interaction states step up the fill ladder instead of growing rings.
     visuals.widgets.noninteractive = widget(
         color::PANEL,
         Color32::TRANSPARENT,

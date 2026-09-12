@@ -136,9 +136,6 @@ fn provider_card(
                     }
                 });
             });
-            // Identity facts only: version above, authentication here. The
-            // executable path is deliberately not shown - filesystem details
-            // are not something to display (or screenshot).
             if let Some(info) = info {
                 let identity = info.subscription_tier.as_ref().map_or_else(
                     || authentication_label(info.authentication).to_owned(),

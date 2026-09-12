@@ -133,16 +133,6 @@ pub fn qa_document(document: &Document) -> QaReport {
     let mut has_audio_bearing_clip = false;
     for track in &document.tracks {
         let track_audible = document.track_audible(track.id);
-        // AU5 §5.2: "what is a gap" has one definition, and it lives on
-        // `Document`. `track_gaps` walks these same clips in this same order,
-        // so its gaps arrive in clip order and each one ends at the
-        // `timeline_start` of the clip that opens it.
-        //
-        // Deliberate cost (AU5 §0 R94): this walks the track's clips a second
-        // time and derives `clip_duration` twice per clip, plus one `Vec` and
-        // one linear `tracks` scan per track. QA is not on a hot path, and
-        // threading the durations back out of the accessor to save it would
-        // trade the single definition for a wider signature.
         let mut gaps = document
             .track_gaps(track.id)
             .unwrap_or_default()
@@ -171,12 +161,6 @@ pub fn qa_document(document: &Document) -> QaReport {
                         None,
                     ));
                 }
-                // CC4 §2.3: whether the bytes are actually *there* is runtime
-                // state the media layer owns. What Core can prove from the
-                // document alone is that every node names an asset the
-                // project owns; a validated document never fails this, so the
-                // check is defence against a hand-edited file reaching a
-                // renderer that would otherwise index nothing.
                 for lut_asset in dangling_lut_asset_references(document, effect) {
                     issues.push(issue(
                         QaSeverity::Error,
@@ -231,8 +215,6 @@ pub fn qa_document(document: &Document) -> QaReport {
                     matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo)
                 });
             has_audio_bearing_clip |= audio_bearing;
-            // AU3 §2.6: a muted or solo-suppressed track contributes nothing
-            // to the master, so its clips do not count as audible.
             has_audible_media |= audio_bearing && track_audible;
             let duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
             let end = TimeCode(clip.timeline_start.0.saturating_add(duration.0));
@@ -635,10 +617,6 @@ fn curve_truncation(effect: &Effect) -> Option<CurveTruncation> {
     }
     let mut frames = vec![TimeCode::ZERO];
     for (name, curve) in &effect.keyframes {
-        // `bypass` is node-owned rather than curve-owned, but it decides
-        // whether a truncation is reportable at all, so a node that is
-        // bypassed at frame zero and live later must still be scanned at the
-        // frame the bypass releases.
         if crate::ColorCurveChannel::owning(name).is_none()
             && name != crate::COLOR_NODE_BYPASS_PARAMETER
         {
@@ -702,9 +680,6 @@ fn matte_band_inversion(effect: &Effect) -> Option<MatteBandInversion> {
     frames.truncate(MATTE_BAND_SCAN_FRAME_LIMIT);
     for at in frames {
         let evaluated = effect.evaluated_at(at);
-        // An inactive node (bypassed, neutral, unbound, or matte-excluded) is
-        // the exact identity at this frame: its matte is never evaluated, so a
-        // crossed band on it is not a rendering concern.
         if crate::color_node_inactive_reason(&evaluated).is_some() {
             continue;
         }

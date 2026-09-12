@@ -433,7 +433,6 @@ mod tests {
             }
         }
 
-
         #[test]
         fn retained_word_integrity_for_index_sets(
             gaps in prop::collection::vec(0_i64..8, 2..12),

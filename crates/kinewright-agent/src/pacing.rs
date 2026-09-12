@@ -133,9 +133,6 @@ fn acoustic_pause_between(
     silences
         .iter()
         .filter(|silence| silence.track == previous.track || silence.track == next.track)
-        // Whisper can extend a word timestamp well into real silence. Search
-        // between word onsets so that energy evidence, not that late endpoint,
-        // owns the measured pause.
         .filter(|silence| {
             silence.start < next.project_start && silence.end > previous.project_start
         })

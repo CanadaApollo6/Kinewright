@@ -18,10 +18,6 @@ use crate::{
     title_parameter_descriptor,
 };
 
-// The project colour context is intentionally kept inline in the operation so
-// the generated schema exposes the complete atomic reset payload directly.
-// Its size is larger than most timeline edits, but boxing it would make the
-// public operation shape less inspectable and needlessly complicate serde.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Operation {
@@ -484,8 +480,6 @@ pub fn apply_batch(doc: &mut Document, operations: &[Operation]) -> Result<(), B
 
 impl ApplyOp for Operation {
     fn apply(&self, doc: &mut Document) -> Result<(), OpError> {
-        // Applying to a clone makes rejection atomic: the caller's document is
-        // unchanged if either the operation or final invariant check fails.
         validate_document(doc)?;
         let mut candidate = doc.clone();
         apply_unchecked(self, &mut candidate)?;
@@ -1372,9 +1366,6 @@ fn set_track_automation(
     if !doc.tracks.iter().any(|track| track.id == track_id) {
         return Err(OpError::MissingTrack(track_id));
     }
-    // Rule 39: an unknown spelling is rejected *before* the curve is
-    // validated, so an agent typo gets the vocabulary back rather than a
-    // structural complaint.
     if !TRACK_AUTOMATION_PARAMETERS.contains(&parameter) {
         return Err(OpError::UnknownTrackAutomationParameter {
             parameter: parameter.to_owned(),
@@ -1613,12 +1604,6 @@ fn relink_asset(
         return Err(OpError::RelinkRequiresExplicitUnverifiedSource { asset: asset_id });
     }
 
-    // AU4 §2.4: a candidate re-derives `clip_duration` through
-    // `clip_effective_fps` and `map_source_range_to_project`, so every clip
-    // bound to the relinked asset whose project duration changed gets
-    // `E(0, new_duration)` plus rule 26.1's fade clamp. The metadata guards
-    // above make that unreachable today (AU4 §0 E4), and the pass is written
-    // anyway so a future relaxation cannot silently drop a ride.
     let before = clip_durations_for_asset(doc, asset_id)?;
     doc.media_pool[index].path.clone_from(&candidate.path);
     doc.media_pool[index]
@@ -2006,19 +1991,8 @@ fn split_clip(doc: &mut Document, clip_id: ClipId, at: TimeCode) -> Result<(), O
         let right_duration = end.checked_sub(at).ok_or(OpError::TimeOverflow)?;
         title.fade_out_frames = title.fade_out_frames.min(right_duration);
     }
-    // AU4 §2.4: the left half keeps the audio fade-in and the right half the
-    // fade-out, each zeroed on the cut side, mirroring what the title arms
-    // above already do. Today both halves keep both fades verbatim, so a split
-    // of a fully-faded clip fails with `AudioFadesTooLong`.
     doc.tracks[track_index].clips[clip_index].audio_fade_out_frames = TimeCode::ZERO;
     right.audio_fade_in_frames = TimeCode::ZERO;
-    // AU4 §2.4: the left half is `E(0, offset)` and the right half
-    // `E(offset, end - at)` — the right half's clip-local frame 0 moves to
-    // `at`, which is the slide this fixes.
-    // The right half's own post-rewrite project duration, read back through
-    // `clip_duration` rather than assumed to be `end - at`, because §2.4's
-    // preamble makes `doc.clip_duration(clip)?` the definition of
-    // `new_duration` on every row.
     let right_duration = doc.clip_duration(&right)?;
     rebase_clip_automation(&mut right, offset, right_duration);
     clamp_clip_audio_fades(&mut right, right_duration);
@@ -2093,13 +2067,6 @@ fn trim_clip(
         title.fade_in_frames = title.fade_in_frames.min(duration);
         title.fade_out_frames = title.fade_out_frames.min(duration);
     }
-    // AU4 §2.4: `E(delta_local, new_duration)` with a **signed** delta — a
-    // left trim that pulls the head out makes it negative — plus rule 26.1's
-    // fade clamp against the new *project* duration, which is deliberately not
-    // the `duration` used by the title clamp above (that one is in source
-    // frames).
-    // Plain subtraction: both operands are validated non-negative frames
-    // bounded by `document.duration`, so this cannot overflow (AU4 §2.4).
     let delta_local = TimeCode(shifted_start.0 - original.timeline_start.0);
     survive_clip_edit(doc, track_index, clip_index, delta_local)?;
     Ok(())
@@ -2554,11 +2521,7 @@ fn roll_edit(
         .source_range
         .start = right_source_in;
     doc.tracks[track_index].clips[right_index].timeline_start = to;
-    // AU4 §2.4: only the right clip's `timeline_start` moves, so only it has a
-    // non-zero — and **signed**, negative on a left roll — `delta_local`.
     survive_clip_edit(doc, track_index, left_index, TimeCode::ZERO)?;
-    // Signed on purpose (AU4 §2.4, F5/F10): negative on a left roll. Both
-    // operands are bounded frames, so the subtraction cannot overflow.
     let right_delta = TimeCode(to.0 - right.timeline_start.0);
     survive_clip_edit(doc, track_index, right_index, right_delta)?;
     Ok(())
@@ -2637,13 +2600,7 @@ fn slide_clip(doc: &mut Document, clip_id: ClipId, to: TimeCode) -> Result<(), O
         .source_range
         .start = right_source_in;
     doc.tracks[track_index].clips[clip_index + 1].timeline_start = new_end;
-    // AU4 §2.4: the middle is untouched — slot and duration both move by the
-    // same amount — the left neighbour is `E(0, d_left)`, and the right
-    // neighbour's delta is `to - middle.timeline_start`, **signed** and
-    // negative on a left slide.
     survive_clip_edit(doc, track_index, clip_index - 1, TimeCode::ZERO)?;
-    // Signed on purpose (AU4 §2.4, F5/F10): negative on a left slide. Both
-    // operands are bounded frames, so the subtraction cannot overflow.
     let right_delta = TimeCode(to.0 - middle.timeline_start.0);
     survive_clip_edit(doc, track_index, clip_index + 1, right_delta)?;
     Ok(())
@@ -2732,9 +2689,6 @@ fn clamp_clip_audio_fades(clip: &mut Clip, new_duration: TimeCode) {
     let mut fade_in = clip.audio_fade_in_frames.0.clamp(0, duration);
     let mut fade_out = clip.audio_fade_out_frames.0.clamp(0, duration);
     if fade_in.saturating_add(fade_out) > duration {
-        // Rule 26.1: reduce the fade-out first. After this line the sum is
-        // exactly `duration` (and `fade_in <= duration` from the clamp
-        // above), so the inner branch is defensive and cannot fire.
         fade_out = duration - fade_in;
         if fade_in.saturating_add(fade_out) > duration {
             fade_in = duration - fade_out;
@@ -2770,9 +2724,6 @@ fn ripple_delete_curve(
 ) -> AutomationCurve {
     let removed = |at: TimeCode| at >= start && at < ripple_point;
     let mut keys: BTreeMap<i64, Keyframe> = BTreeMap::new();
-    // Step 1. Without the boundary key the segment from the last pre-cut key
-    // spans the join and re-shapes the pre-cut interior, changing the audio
-    // *before* the cut.
     if start > TimeCode::ZERO && curve.keyframes.iter().any(|key| removed(key.at)) {
         let at = TimeCode(start.0 - 1);
         if let Some(value) = curve.value_at(at) {
@@ -2786,9 +2737,6 @@ fn ripple_delete_curve(
             );
         }
     }
-    // Steps 2 and 3. No key is inserted at `start`: a key at exactly
-    // `ripple_point` shifts to exactly `start`, and it is that key that
-    // defines the post-cut side.
     for key in &curve.keyframes {
         if removed(key.at) {
             continue;
@@ -2800,12 +2748,6 @@ fn ripple_delete_curve(
         };
         keys.insert(at.0, Keyframe { at, ..*key });
     }
-    // Rule 20: no ripple may fail because of automation, and an empty curve
-    // fails `AutomationCurve::validate`. Every key can only be dropped when
-    // `start == 0` — otherwise step 1 has already inserted the boundary key —
-    // so the survivor is the one constant the cut leaves audible at frame 0,
-    // which is what the material now at `ripple_point` was carrying
-    // (AU4 §0 E3).
     if keys.is_empty()
         && let Some(value) = curve.value_at(ripple_point)
     {
@@ -2964,8 +2906,6 @@ fn ripple_delete_clip(doc: &mut Document, clip_id: ClipId) -> Result<(), OpError
                 .ok_or(OpError::TimeOverflow)?;
         }
     }
-    // AU4 §2.4 rule 22: the same track set the clips rippled over, and only
-    // `TrackMix`'s two curves — no bus or master curve ripples (rule 24).
     let start = removed.timeline_start;
     ripple_track_automation(doc, &rippled, |curve| {
         ripple_delete_curve(curve, start, ripple_point, duration)
@@ -3018,15 +2958,6 @@ fn ripple_insert_gap_for_tracks(
                 .ok_or(OpError::TimeOverflow)?;
         }
     }
-    // AU4 §2.4 rule 23: the operation's own track set — its targets plus every
-    // `sync_lock` track, which is not ripple delete's source-track set — and
-    // the clip predicate exactly, so a key at `at` shifts. The clips have
-    // already moved, so re-deriving the duration here gives the shift the
-    // bound it is clamped into. Precondition: since AU4 R2 this call can
-    // CLAMP project curves when the duration shrinks; it is safe here only
-    // because a ripple insert never shortens the timeline (and the Insert
-    // three-point path runs only `split_clip` before it). A future caller
-    // that ripples after removing clips must not call it mid-operation.
     doc.recompute_duration()?;
     let project_duration = doc.duration;
     ripple_track_automation(doc, &rippled, |curve| {
@@ -3215,8 +3146,6 @@ fn insert_effect(
     let (track_index, clip_index) = find_clip(doc, clip_id)?;
     let clip_duration = doc.clip_duration(&doc.tracks[track_index].clips[clip_index])?;
     validate_effect_automation(clip_id, clip_duration, &effect)?;
-    // CC4 §3.3: a LUT node must resolve to a registered asset before it can be
-    // stored, so `lut_assets` and the node stack can never disagree.
     validate_lut_node_references(doc, clip_id, &effect)?;
     let clip = &doc.tracks[track_index].clips[clip_index];
     if clip.effects.iter().any(|existing| existing.id == effect.id) {
@@ -3238,10 +3167,6 @@ fn insert_effect(
             index
         }
     };
-    // CC3 §3.1: a layer carries at most sixteen managed colour nodes. A
-    // bypassed node keeps its slot, so the count is of stored nodes rather
-    // than of active ones, and the seventeenth is a typed error instead of a
-    // silent truncation.
     if crate::is_managed_color_node(&effect.name) {
         let existing = crate::managed_color_node_count(&clip.effects);
         if existing >= crate::COLOR_NODE_LIMIT_PER_LAYER {
@@ -3252,8 +3177,6 @@ fn insert_effect(
             });
         }
     }
-    // CC4 §3.1: LUT nodes carry a tighter limit than the managed stack,
-    // because each one needs a texture atlas slot.
     if crate::is_lut_color_node(&effect.name) {
         let existing = crate::lut_node_count(&clip.effects);
         if existing >= crate::LUT_NODE_LIMIT_PER_LAYER {
@@ -3264,8 +3187,6 @@ fn insert_effect(
             });
         }
     }
-    // CC4 §3.2: a vector order that contradicts the stage order is rejected,
-    // never silently reordered, so the stored order stays the execution order.
     if let Some(violation) = crate::effect::color_stage_order_violation_over(
         prospective_color_nodes(&clip.effects, position, Some(&effect)),
     ) {
@@ -3374,9 +3295,6 @@ fn add_lut_asset(doc: &mut Document, asset: LutAsset) -> Result<(), OpError> {
 }
 
 fn remove_lut_asset(doc: &mut Document, lut_asset: LutAssetId) -> Result<(), OpError> {
-    // CC4 §2.7: removal never cascades. A bypassed node and a `Hold` keyframe
-    // value both count as references, because both still resolve to the asset
-    // on some frame or after one undo.
     if let Some(&(clip, effect)) = doc.lut_asset_references(lut_asset).first() {
         return Err(OpError::LutAssetInUse {
             lut_asset,
@@ -3442,8 +3360,6 @@ fn convert_legacy_look(
         keyframes: BTreeMap::new(),
     };
     validate_effect(&converted)?;
-    // The legacy stage is not a managed node, so the conversion adds one
-    // managed node and one LUT node to the clip's budgets.
     let managed = crate::managed_color_node_count(&clip.effects);
     if managed >= crate::COLOR_NODE_LIMIT_PER_LAYER {
         return Err(OpError::TooManyColorNodes {
@@ -3519,8 +3435,6 @@ fn set_effect_param(
         })?;
     let effect = &clip.effects[effect_index];
     validate_effect_parameter(&effect.name, name, &value)?;
-    // CC3 §2.3: strict `x` ordering is checked against the parameter map the
-    // change would produce, so a rejected edit leaves the document untouched.
     if crate::classify_color_node(effect) == Some(crate::ColorNodeKind::Curves) {
         let mut prospective = effect.clone();
         prospective
@@ -3528,10 +3442,6 @@ fn set_effect_param(
             .insert(name.to_owned(), value.clone());
         validate_color_curve_points(&prospective)?;
     }
-    // CC4 §6: a `SetEffectParam` that would unbind a node, or retarget it at
-    // an asset the project does not own, is rejected rather than producing a
-    // document that only `validate_document` would catch. This is why a LUT
-    // node's reset batch must exclude `lut_asset_id`.
     if crate::is_lut_color_node(&effect.name) && name == crate::LUT_ASSET_ID_PARAMETER {
         let lut_asset = match value {
             ParamValue::Integer(stored) => LutAssetId(u64::try_from(stored).unwrap_or_default()),
@@ -3583,10 +3493,6 @@ fn set_effect_keyframes(
         name,
         &curve,
     )?;
-    // CC3 §6: the two legal curve keyframing policies are checked against the
-    // automation map the change would produce, so either side of the pair -
-    // an animated `point_count` or an animated coordinate - is rejected
-    // atomically whichever one arrives second.
     if crate::classify_color_node(effect) == Some(crate::ColorNodeKind::Curves) {
         let mut prospective = effect.keyframes.clone();
         prospective.insert(name.to_owned(), curve.clone());
@@ -3736,12 +3642,6 @@ fn set_clip_speed(doc: &mut Document, clip_id: ClipId, speed_percent: u32) -> Re
         return Err(OpError::SpeedOnNonMediaClip(clip_id));
     }
     doc.tracks[track_index].clips[clip_index].speed_percent = speed_percent;
-    // AU4 §2.4 rule 25: keyframe frames are **not** scaled by `100/speed` —
-    // integer division makes the round trip lossy and can collapse two keys
-    // onto one frame. `E(0, new_duration)` clamps instead, which makes a speed
-    // *increase* destructive: the keys past the new, shorter duration are
-    // dropped and only undo restores them. Nothing is audible at the time only
-    // because retimed clips contribute no audio at all.
     survive_clip_edit(doc, track_index, clip_index, TimeCode::ZERO)?;
     Ok(())
 }
@@ -3975,11 +3875,6 @@ fn validate_curve(
             name: name.to_owned(),
             reason: error.to_string(),
         })?;
-    // CC3 §6 policy 1: `{curve}_point_count` switches the whole curve
-    // discontinuously, so only `Hold` keyframes are legal. Any other
-    // interpolation would resolve intermediate point counts that no author
-    // ever authored. CC4 §6 and CC5 §5.1 extend the same rule to LUT and
-    // matte tokens and counts.
     if is_hold_only_parameter(effect_name, name) {
         for keyframe in &curve.keyframes {
             if keyframe.interpolation != KeyframeInterpolation::Hold {
@@ -4032,10 +3927,6 @@ fn validate_curve(
 /// AU4 adds no new entry to it: none of the five curve owners is a switch.
 #[must_use]
 pub fn is_hold_only_parameter(effect_name: &str, name: &str) -> bool {
-    // AU2 §2.2 rule 1: an audio node's `bypass`, detector mode, and true-peak
-    // flag are switches, not scalars — interpolating between two of their
-    // settings would resolve states no author ever authored. AU5 §2.2 rule 12
-    // adds the hum cascade's `harmonic_count` for the same reason.
     if crate::is_audio_effect(effect_name) {
         return matches!(name, "bypass" | "detector" | "true_peak" | "harmonic_count");
     }
@@ -4193,9 +4084,6 @@ fn validate_clip_audio(doc: &Document, clip: &Clip) -> Result<(), OpError> {
         };
     }
     let clip_duration = doc.clip_duration(clip)?;
-    // AU4 §2.6 rule 37: the envelope is checked as a document invariant as
-    // well as in the operation, so a hand-edited project cannot load with a
-    // curve `SetClipGainEnvelope` would have rejected.
     if let Some(curve) = &clip.audio_gain_curve {
         validate_clip_gain_curve(clip.id, curve, clip_duration)?;
     }
@@ -4400,9 +4288,6 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
         validate_asset(asset)?;
     }
 
-    // CC4 §2.7: `lut_assets` ids are unique, and every record satisfies the
-    // §2.1 table. Both are checked here so a hand-edited project cannot load
-    // with a record `AddLutAsset` would have rejected.
     let mut lut_asset_ids = HashSet::new();
     for asset in &doc.lut_assets {
         if !lut_asset_ids.insert(asset.id) {
@@ -4483,24 +4368,10 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                     });
                 }
                 validate_effect(effect)?;
-                // CC4 §2.7: every `lut_asset_id` a node references, static or
-                // `Hold`-keyframed, must name a registered asset. A dangling
-                // reference can only arrive by hand and must not load
-                // silently, because a resolved node would then index an asset
-                // the project does not own.
                 validate_lut_node_references(doc, clip.id, effect)?;
-                // CC3 §2.3: the strictly-increasing-`x` rule is a document
-                // invariant, not just an operation precondition. Without it a
-                // hand-edited project that `AddEffect`/`SetEffectParam` would
-                // reject loads with `Ok` and then locks its own colour node,
-                // because every later `SetEffectParam` re-validates the whole
-                // effect and fails on parameters the user never touched.
                 validate_color_curve_points(effect)?;
                 validate_effect_automation(clip.id, clip_duration, effect)?;
             }
-            // CC3 §3.1: the sixteen-managed-node limit is likewise an
-            // invariant. `AddEffect` enforces it, so a document that exceeds it
-            // can only have arrived by hand and must not load silently.
             let color_nodes = crate::managed_color_node_count(&clip.effects);
             if color_nodes > crate::COLOR_NODE_LIMIT_PER_LAYER {
                 return Err(OpError::TooManyColorNodes {
@@ -4509,8 +4380,6 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                     actual: color_nodes,
                 });
             }
-            // CC4 §3.1: the four-LUT-node atlas budget is an invariant for the
-            // same reason.
             let lut_nodes = crate::lut_node_count(&clip.effects);
             if lut_nodes > crate::LUT_NODE_LIMIT_PER_LAYER {
                 return Err(OpError::TooManyLutNodes {
@@ -4519,9 +4388,6 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                     actual: lut_nodes,
                 });
             }
-            // CC4 §3.2: the managed subsequence must have non-decreasing stage
-            // rank. Every pre-CC4 project satisfies this trivially, because
-            // all of its managed nodes are corrections at rank 1.
             if let Some(violation) = crate::color_stage_order_violation(&clip.effects) {
                 return Err(stage_order_error(clip.id, &violation));
             }
@@ -4636,8 +4502,6 @@ fn validate_audio_master(doc: &Document, master: &AudioMaster) -> Result<(), OpE
             gain_tenth_db: master.gain_tenth_db,
         });
     }
-    // AU4 §2.6 rule 37: the fader's own curve, in the same order as every
-    // other owner — structure, value range, then the relaxed project bound.
     if let Some(curve) = &master.gain_curve {
         validate_audio_fader_curve(
             curve,
@@ -4659,8 +4523,6 @@ fn validate_audio_master(doc: &Document, master: &AudioMaster) -> Result<(), OpE
     }
     let mut effect_ids = HashSet::new();
     for effect in &master.effects {
-        // AU2 §5.4 (N1): uniqueness is scoped to this chain, so a bus may
-        // legally reuse the same effect id.
         if !effect_ids.insert(effect.id) {
             return Err(OpError::DuplicateAudioMasterEffect { effect: effect.id });
         }
@@ -4765,9 +4627,6 @@ fn validate_audio_bus(doc: &Document, bus: &AudioBus) -> Result<(), OpError> {
         }
         validate_audio_chain_automation(doc.duration, AudioChain::Bus(bus.id), effect)?;
     }
-    // AU2 §2.3: the whole chain's declared latency is one figure the mix graph
-    // must pad every other chain to, so it is bounded per chain rather than
-    // per node.
     let lookahead = crate::chain_lookahead_milliseconds(&bus.effects);
     if lookahead > crate::CHAIN_LOOKAHEAD_MILLISECONDS {
         return Err(OpError::AudioBusLookaheadExceeded {
@@ -4824,22 +4683,10 @@ fn validate_audio_chain_automation(
 ) -> Result<(), OpError> {
     let descriptor = crate::effect_descriptor(&effect.name).expect("registered effect");
     for (name, curve) in &effect.keyframes {
-        // AU2 §2.2 rule 2: a parameter read once when the chain runtime is
-        // built takes no curve at all, because the curve would be silently
-        // ignored or re-derived wholesale. Checked before the curve's own
-        // structural validation, because the entry itself is what is rejected.
-        // The two reasons stay distinct: only the lookahead parameters set the
-        // graph's latency; the compressor's RMS window merely sizes a buffer
-        // allocated at construction (AU2 §0 E16) and `audio_denoise`'s 31
-        // profile rows are re-derived on an epoch bump (AU5 §2.2 rule 9).
         if crate::is_static_audio_parameter(&effect.name, name) {
             let reason = if name == crate::effect::AUDIO_LOOKAHEAD_PARAMETER {
                 "sets processing latency and cannot be keyframed"
             } else {
-                // AU5 §2.2 rule 13: "once ... when the chain is built" became
-                // false when AU5 put the 31 profile rows on the re-derive side
-                // of rule 9 — they are re-read on every `parameter_epoch`
-                // bump, which is what makes a `Learn` audible without a re-cue.
                 "is read when the chain is built or retuned and cannot be keyframed"
             };
             return Err(OpError::InvalidEffectAutomation {
@@ -4868,11 +4715,6 @@ fn validate_audio_chain_automation(
             });
         }
         for keyframe in &curve.keyframes {
-            // AU4 §2.3 rule 17: the relaxed bound applies **equally** here.
-            // The pre-AU4 form had no `duration == 0` guard, so at
-            // `duration == 0` every key — including one at frame 0 — was
-            // outside, and deleting the only clip of a project carrying a
-            // master fader ride was rejected.
             if !project_frame_in_range(keyframe.at, duration) {
                 return Err(match chain {
                     AudioChain::Bus(bus) => OpError::AudioBusKeyframeOutsideProject {

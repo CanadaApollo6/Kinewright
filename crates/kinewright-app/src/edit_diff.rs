@@ -37,9 +37,6 @@ pub(crate) fn changed_project_range(old: &Document, new: &Document) -> Option<Ch
     for (id, (old_clip, old_end)) in &old_clips {
         match new_clips.get(id) {
             None => {
-                // Removed: the seam sits where the clip used to start, which
-                // in the new document is the same frame (content before it is
-                // unchanged or handled by its own entry).
                 cover(old_clip.timeline_start.0, old_clip.timeline_start.0);
             }
             Some((new_clip, new_end)) => {
@@ -303,8 +300,6 @@ mod tests {
         Operation::RippleDeleteClip { clip: ClipId(2) }
             .apply(&mut new)
             .unwrap();
-        // Clip 3 shifts 100..200 but is end-aligned identical; the seam is
-        // where clip 2 was removed.
         let range = changed_project_range(&old, &new).unwrap();
         assert_eq!(range.start, TimeCode(100));
         assert_eq!(range.end, TimeCode(100));
@@ -339,8 +334,6 @@ mod tests {
     fn a_middle_trim_covers_from_the_trim_to_the_last_moved_content() {
         let old = fixture();
         let mut new = old.clone();
-        // Trim clip 2's tail by 40 source frames; ripple is not involved so
-        // clip 3 stays put and only clip 2's span changes.
         Operation::TrimClip {
             clip: ClipId(2),
             new_source: TimeCode(100)..TimeCode(160),

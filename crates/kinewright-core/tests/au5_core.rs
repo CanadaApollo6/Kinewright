@@ -19,10 +19,6 @@ use kinewright_core::{
     map_source_range_to_project, qa_document,
 };
 
-// ---------------------------------------------------------------------------
-// builders
-// ---------------------------------------------------------------------------
-
 /// The eleven bus-only audio node names, in `EFFECT_DESCRIPTORS` order.
 const AUDIO_EFFECT_NAMES: [&str; 11] = [
     "audio_gain",
@@ -228,10 +224,6 @@ fn bus_with(effects: Vec<Effect>) -> AudioBus {
     }
 }
 
-// ---------------------------------------------------------------------------
-// A1: the three descriptors
-// ---------------------------------------------------------------------------
-
 /// AU5 §7 item A1.
 #[test]
 fn au5_descriptor_tables_match_the_contract_exactly() {
@@ -253,8 +245,6 @@ fn au5_descriptor_tables_match_the_contract_exactly() {
     assert!(!is_audio_effect("audio_hum"));
     assert!(!is_audio_effect("audio_click"));
 
-    // The registry grew from 25 entries to 28, and the three repair nodes are
-    // appended after `audio_true_peak_limiter`.
     assert_eq!(EFFECT_DESCRIPTORS.len(), 28);
     let tail: Vec<&str> = EFFECT_DESCRIPTORS
         .iter()
@@ -299,13 +289,9 @@ fn au5_descriptor_tables_match_the_contract_exactly() {
         assert_eq!(descriptor.uniform, uniform, "{effect}.{parameter} uniform");
     }
 
-    // The Q row is `notch_q_hundredths` (R17) and nothing else, so the app's
-    // `mixer_unit` cannot read it as a ratio.
     let hum = effect_descriptor("audio_hum_removal").expect("registered");
     assert!(hum.parameter("q_hundredths").is_none());
     assert!(hum.parameter("notch_q_hundredths").is_some());
-    // `audio_hum_removal` carries no `lookahead_milliseconds` row at all, so
-    // it contributes exactly 0 to a chain's declared latency.
     assert!(hum.parameter("lookahead_milliseconds").is_none());
 
     // All three `bypass` rows are the one shared record.
@@ -340,9 +326,6 @@ fn au5_descriptor_tables_match_the_contract_exactly() {
     new_uniforms.dedup();
     assert_eq!(new_uniforms.len(), 12);
 
-    // Read from the descriptors themselves, so reusing a pre-AU5 audio uniform
-    // on a new row would be caught: 45 new rows carry 13 distinct uniforms —
-    // the twelve new ones plus the shared `AudioBypass`.
     let mut live: Vec<String> = ["audio_denoise", "audio_hum_removal", "audio_declick"]
         .into_iter()
         .flat_map(|name| effect_descriptor(name).expect("registered").parameters)
@@ -378,16 +361,12 @@ fn au5_profile_rows_are_thirty_one_neutral_minus_twelve_hundred_rows() {
         assert_eq!(parameter.uniform, EffectUniform::DenoiseProfileBand);
     }
 
-    // The profile block is contiguous and last, so the five controls read
-    // first in every generated prose and every inspector.
     assert!(
         denoise.parameters[..5]
             .iter()
             .all(|parameter| !is_noise_profile_parameter(parameter.name))
     );
 
-    // The predicate is true for exactly the 31 registered names and for no
-    // other parameter in the whole registry.
     let matching: Vec<&str> = EFFECT_DESCRIPTORS
         .iter()
         .flat_map(|descriptor| descriptor.parameters)
@@ -443,8 +422,6 @@ fn an_all_neutral_denoise_node_carries_no_profile_rows_on_the_wire() {
     assert!(encoded.contains("profile_band31_tenth_db"));
     assert_eq!(serde_json::from_str::<Document>(&encoded).unwrap(), doc);
 
-    // A band outside `-1200..=0` is an ordinary descriptor-domain refusal:
-    // AU5 adds no `OpError` variant (rule 14).
     let mut doc = document_with_one_clip();
     let error = Operation::UpsertAudioBus {
         bus: bus_with(vec![effect_with(
@@ -461,15 +438,9 @@ fn an_all_neutral_denoise_node_carries_no_profile_rows_on_the_wire() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// A3: static, hold-only and the two reason strings
-// ---------------------------------------------------------------------------
-
 /// AU5 §7 item A3: `is_static_audio_parameter`'s exact set.
 #[test]
 fn au5_static_audio_parameters_are_the_five_pairs_plus_the_profile_block() {
-    // Every (effect, parameter) pair in the whole registry, partitioned by the
-    // predicate: nothing outside the expected set may creep in.
     let mut accepted: Vec<(&str, &str)> = Vec::new();
     for descriptor in EFFECT_DESCRIPTORS {
         for parameter in descriptor.parameters {
@@ -495,14 +466,10 @@ fn au5_static_audio_parameters_are_the_five_pairs_plus_the_profile_block() {
     assert_eq!(accepted, expected);
     assert_eq!(accepted.len(), 5 + 31);
 
-    // `max_click_milliseconds` is deliberately absent (R6): it is a threshold,
-    // not an allocation.
     assert!(!is_static_audio_parameter(
         "audio_declick",
         "max_click_milliseconds"
     ));
-    // The profile arm is guarded on the effect name, so the same row spelling
-    // on another node is not static.
     assert!(!is_static_audio_parameter(
         "audio_hum_removal",
         "profile_band01_tenth_db"
@@ -512,8 +479,6 @@ fn au5_static_audio_parameters_are_the_five_pairs_plus_the_profile_block() {
         "profile_band01_tenth_db"
     ));
 
-    // The two lookahead arms are load-bearing twice over: they are what
-    // `chain_lookahead_milliseconds` sums.
     for (name, declared) in [
         ("audio_denoise", 12),
         ("audio_declick", 3),
@@ -535,8 +500,6 @@ fn au5_hum_harmonic_count_is_hold_only() {
         "audio_hum_removal",
         "harmonic_count"
     ));
-    // The branch is keyed on `is_audio_effect`, so it reads
-    // `bypass | detector | true_peak | harmonic_count` for every audio node.
     for name in AUDIO_EFFECT_NAMES {
         assert!(is_hold_only_parameter(name, "bypass"));
         assert!(is_hold_only_parameter(name, "harmonic_count"));
@@ -687,10 +650,6 @@ fn au5_static_rejections_carry_the_two_distinct_reasons() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// A14 (core half): the 20 ms table
-// ---------------------------------------------------------------------------
-
 /// AU5 §2.3 rule 16's table, transcribed.
 #[test]
 fn au5_repair_chains_spend_the_twenty_millisecond_budget_exactly() {
@@ -705,14 +664,10 @@ fn au5_repair_chains_spend_the_twenty_millisecond_budget_exactly() {
     // Row 1 of rule 16's table: the repair chain on its own, 12 + 0 + 3.
     let fifteen = repair();
 
-    // Row 2: the same bus after `plan_audio_normalization` adds a
-    // compressor at its neutral 0 and the true-peak limiter at its neutral 5.
     let mut twenty_by_neutral = repair();
     twenty_by_neutral.push(effect_with(4, "audio_compressor", &[]));
     twenty_by_neutral.push(effect_with(5, "audio_true_peak_limiter", &[]));
 
-    // Row 3: repair plus a 5 ms lookahead compressor and **no** bus limiter —
-    // distinct from row 2 because the 5 ms is written, not inherited.
     let mut twenty_by_compressor = repair();
     twenty_by_compressor.push(effect_with(
         4,
@@ -720,9 +675,6 @@ fn au5_repair_chains_spend_the_twenty_millisecond_budget_exactly() {
         &[("lookahead_milliseconds", 5)],
     ));
 
-    // One millisecond over the budget: the sharpest refusal boundary, and the
-    // one A14 names. A regression that compared `> 21` would still pass the
-    // 35 ms arm below.
     let mut twenty_one = repair();
     twenty_one.push(effect_with(
         4,
@@ -751,8 +703,6 @@ fn au5_repair_chains_spend_the_twenty_millisecond_budget_exactly() {
         (twenty_one, 21, false),
         (thirty_five, 35, false),
     ] {
-        // The declared figure is the contract's, transcribed, not the
-        // implementation's read back out of itself.
         assert_eq!(chain_lookahead_milliseconds(&effects), declared);
         let mut doc = base.clone();
         let result = Operation::UpsertAudioBus {
@@ -792,8 +742,6 @@ fn au5_the_master_chain_spends_its_own_twenty_millisecond_budget() {
     let mut doc = base.clone();
     master(delivery).apply(&mut doc).unwrap();
 
-    // A repair prefix on the master is legal at 15, and at 20 with the
-    // limiter, exactly as it is on a bus.
     let repair = vec![
         effect_with(1, "audio_denoise", &[]),
         effect_with(2, "audio_hum_removal", &[]),
@@ -809,8 +757,6 @@ fn au5_the_master_chain_spends_its_own_twenty_millisecond_budget() {
     let mut doc = base.clone();
     master(at_twenty).apply(&mut doc).unwrap();
 
-    // One millisecond over is the master-flavoured refusal, which carries no
-    // bus id.
     let mut over = repair;
     over.push(effect_with(
         4,
@@ -825,10 +771,6 @@ fn au5_the_master_chain_spends_its_own_twenty_millisecond_budget() {
     );
     assert_eq!(doc, base);
 }
-
-// ---------------------------------------------------------------------------
-// A13: `has_gain_computer`
-// ---------------------------------------------------------------------------
 
 /// AU5 §7 item A13, core half.
 #[test]
@@ -855,10 +797,6 @@ fn au5_has_gain_computer_is_five_names_in_core() {
     // Every accepted name is an audio node.
     assert!(accepted.iter().all(|name| is_audio_effect(name)));
 }
-
-// ---------------------------------------------------------------------------
-// A18 (core half): the `noise_profile_missing` warning
-// ---------------------------------------------------------------------------
 
 fn denoise_bus_document(effects: Vec<Effect>) -> Document {
     let mut doc = document_with_one_clip();
@@ -897,9 +835,6 @@ fn au5_noise_profile_missing_is_advice_about_a_wasted_node() {
         issues[0],
         "denoise node 7 on bus 1 has a reduction of 200 tenth dB but no learned profile; learn one or the node does nothing"
     );
-    // It is advice, not a gate: `export_ready` counts `Error` only, so the
-    // warning cannot move it. Compared against the same document with the
-    // node's reduction at 0, which raises no warning at all.
     let quiet = denoise_bus_document(vec![effect_with(
         7,
         "audio_denoise",
@@ -924,16 +859,12 @@ fn au5_noise_profile_missing_is_advice_about_a_wasted_node() {
     let doc = denoise_bus_document(vec![effect_with(7, "audio_denoise", &parameters)]);
     assert_eq!(noise_profile_issues(&doc).len(), 1);
 
-    // One learned band clears it: `Write all 31 or none` is a document rule,
-    // not a QA one.
     let mut parameters = vec![("reduction_tenth_db", 200)];
     parameters.extend(neutral.iter().copied());
     parameters.push(("profile_band17_tenth_db", -650));
     let doc = denoise_bus_document(vec![effect_with(7, "audio_denoise", &parameters)]);
     assert!(noise_profile_issues(&doc).is_empty());
 
-    // `reduction_tenth_db = 0` is an identity, so an unlearned node there is
-    // not a wasted node.
     let doc = denoise_bus_document(vec![effect_with(
         7,
         "audio_denoise",
@@ -944,8 +875,6 @@ fn au5_noise_profile_missing_is_advice_about_a_wasted_node() {
     let doc = denoise_bus_document(vec![effect_with(7, "audio_denoise", &[])]);
     assert!(noise_profile_issues(&doc).is_empty());
 
-    // A curve that rides the reduction up still earns the warning: "resolves
-    // above 0" reads the whole curve.
     let doc = denoise_bus_document(vec![keyed_effect(
         7,
         "audio_denoise",
@@ -981,10 +910,6 @@ fn au5_noise_profile_missing_is_advice_about_a_wasted_node() {
     ]);
     assert!(noise_profile_issues(&doc).is_empty());
 }
-
-// ---------------------------------------------------------------------------
-// A10 (core half): `audio_repair.rs`
-// ---------------------------------------------------------------------------
 
 fn measurements() -> AudioRepairMeasurements {
     AudioRepairMeasurements {
@@ -1062,8 +987,6 @@ fn au5_repair_exceptions_fire_over_each_threshold_and_not_under_it() {
     assert_eq!(codes(&raised), ["click_density_high"]);
     assert_eq!(raised[0].severity, QaSeverity::Warning);
 
-    // `low_window_count` is `Info`, and rule 22 makes it exclusive of the SNR
-    // warning: below the minimum the percentiles are `None`.
     let measured = AudioRepairMeasurements {
         windows: REPAIR_MINIMUM_WINDOWS - 1,
         noise_floor_dbfs_hundredths: None,
@@ -1075,10 +998,6 @@ fn au5_repair_exceptions_fire_over_each_threshold_and_not_under_it() {
     assert_eq!(codes(&raised), ["low_window_count"]);
     assert_eq!(raised[0].severity, QaSeverity::Info);
     assert_eq!(raised[0].observed.as_deref(), Some("9"));
-    // Pinned whole, and with a phrase the pre-AU5-review wording ("Only 9 of
-    // the 10 ms windows carried energy") did not satisfy: a reader must be
-    // able to tell the window *count* from the window *length* when both are
-    // 10.
     assert!(raised[0].message.contains("windows of 10 ms"));
     assert_eq!(
         raised[0].message,
@@ -1129,8 +1048,6 @@ fn au5_repair_exceptions_sort_by_severity_then_code_then_field() {
         ]
     );
 
-    // With every SNR field populated the low-SNR warning joins them in code
-    // order, between the click density and the hum.
     let measured = AudioRepairMeasurements {
         windows: 600,
         noise_floor_dbfs_hundredths: Some(-3_000),
@@ -1249,8 +1166,6 @@ fn au5_repair_types_round_trip_and_deny_unknown_fields() {
     );
     assert!(provenance.signal_to_noise.contains("percentile"));
 
-    // Rule 20: every leaf is an integer, which is what lets every serialized
-    // AU5 type derive `Eq`.
     let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
     assert_integer_leaves(&value, "report");
     let value: serde_json::Value =
@@ -1295,10 +1210,6 @@ fn au5_repair_reuses_the_mix_spectrum_point_spelling() {
         assert_eq!(encoded, spectrum);
     }
 }
-
-// ---------------------------------------------------------------------------
-// B3: `Document::track_gaps` and the `qa_document` refactor (AU5 §5.2)
-// ---------------------------------------------------------------------------
 
 /// AU5 §5.2's corpus, built once and shared by the gap test and the QA
 /// byte-identity pin.
@@ -1413,14 +1324,6 @@ fn gap_corpus_tracks() -> Vec<Track> {
                 media_clip(7, AssetId(2), 20, 0..10),
             ],
         },
-        // Track 5 exercises the `unwrap_or(TimeCode::ZERO)` reading: clip 8
-        // names an asset this document does not carry, so `clip_duration`
-        // fails and the clip contributes **zero** frames — which is why
-        // clip 9 at 10 still opens a gap. Were the failure read as the
-        // clip's source length instead, `previous_end` would reach 10 and
-        // the gap would vanish. `validate_document` rejects a dangling
-        // asset reference, so this only ever arrives from a hand-edited
-        // file, which is the traffic `qa_document` is defensive about.
         Track {
             id: TrackId(5),
             kind: TrackKind::Audio,
@@ -1443,8 +1346,6 @@ fn gap_corpus_tracks() -> Vec<Track> {
 fn au5_track_gaps_are_leading_and_interior_but_never_trailing() {
     let doc = gap_corpus();
 
-    // Track 1 stops at frame 50 while the document runs to 90. The leading gap
-    // and the interior gap are reported; the trailing 50..90 is not a hole.
     assert_eq!(
         doc.track_gaps(TrackId(1)),
         Some(vec![TimeCode(0)..TimeCode(10), TimeCode(30)..TimeCode(40),]),
@@ -1463,8 +1364,6 @@ fn au5_track_gaps_are_leading_and_interior_but_never_trailing() {
     assert_eq!(doc.track_gaps(TrackId(2)), Some(Vec::new()));
     // A track whose only clip starts at 0 has no leading gap.
     assert_eq!(doc.track_gaps(TrackId(3)), Some(Vec::new()));
-    // Content-agnostic: the title clip at 10..20 closes the span between two
-    // media clips exactly as a media clip would.
     assert_eq!(doc.track_gaps(TrackId(4)), Some(Vec::new()));
     assert!(
         doc.tracks[3]
@@ -1474,10 +1373,6 @@ fn au5_track_gaps_are_leading_and_interior_but_never_trailing() {
         "the kind-agnostic arm is only meaningful with a title in it"
     );
 
-    // A clip whose `clip_duration` fails contributes **zero** frames, so the
-    // clip behind it still opens a gap. This is `qa_document`'s long-standing
-    // `unwrap_or(TimeCode::ZERO)` reading, and the golden below confirms the
-    // pre-refactor walk answered the same thing on this same track.
     assert!(
         doc.clip_duration(&doc.tracks[4].clips[0]).is_err(),
         "clip 8 names an asset the document does not carry"
@@ -1491,10 +1386,6 @@ fn au5_track_gaps_are_leading_and_interior_but_never_trailing() {
     // §0 R42: an unknown track is distinguishable from a track with no gaps.
     assert_eq!(doc.track_gaps(TrackId(99)), None);
 
-    // §0 R94: the accessor resolves a track by `find`, which is exact only
-    // because `validate_document` rejects a duplicate `TrackId` — a document
-    // carrying two tracks with one id would otherwise drive the second track's
-    // QA walk from the first track's gap list.
     let ids: Vec<_> = doc.tracks.iter().map(|track| track.id).collect();
     let mut unique = ids.clone();
     unique.sort_unstable();
@@ -1525,8 +1416,6 @@ fn au5_the_qa_report_is_byte_identical_across_the_track_gaps_refactor() {
         "the track_gaps refactor changed qa_document's output"
     );
 
-    // The two findings the refactor could plausibly move, named rather than
-    // left implicit inside the golden.
     let report = qa_document(&gap_corpus());
     let gaps: Vec<_> = report
         .issues
@@ -1566,20 +1455,11 @@ fn au5_the_qa_report_is_byte_identical_across_the_track_gaps_refactor() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// B6: `map_project_duration_to_source` (AU5 §5.3 rule 97)
-// ---------------------------------------------------------------------------
-
 /// AU5 §7 item B6, first clause: the helper round-trips **every** duration in
 /// `1..=120` at 30 → 30, 30 → 25 and 30 → 24, from three different source
 /// starts, and the answer is always the *smallest* exact end.
 #[test]
 fn au5_map_project_duration_to_source_inverts_the_forward_mapping() {
-    // The first three pairs are §5.3's own: an audio-only asset probes at 30/1
-    // and the project is 30, 25 or 24. The last two invert the ratio — the
-    // source running 2.5x the project — because that is where the exact ends
-    // form a *run* rather than a single frame, and where a search window or a
-    // non-minimal answer would show up. §0 R93.
     for (source, project) in [
         ((30, 1), (30, 1)),
         ((30, 1), (25, 1)),
@@ -1613,11 +1493,6 @@ fn au5_map_project_duration_to_source_inverts_the_forward_mapping() {
                     Ok(duration),
                     "{source:?} -> {project:?} start {start} duration {frames} had a shorter exact end"
                 );
-                // And the run's **upper** edge, which is what makes a
-                // multi-member run visible here rather than only in a
-                // reviewer's sweep: the exact ends number `floor(r)` or
-                // `ceil(r)`, because they are the integers in a half-open
-                // interval of width exactly `r` (§0 R93).
                 let mut run = 0_i64;
                 while map_source_range_to_project(
                     source_start..TimeCode(end.0 + run),
@@ -1667,12 +1542,6 @@ fn au5_map_project_duration_to_source_answers_the_smallest_end_of_the_run() {
         "the smallest exact end, not the one the estimate points at"
     );
 
-    // §5.3 rule 98's **own** rate pairs reach the multi-member run too — this
-    // is the arm that would have caught §0 R93's withdrawn "they cannot meet
-    // on the AU5 path". At 30 -> 25 a three-frame gap is satisfied by both
-    // `0..3` and `0..4`; at 30 -> 24 a two-frame gap by both `0..2` and
-    // `0..3`. The helper answers the smaller of each, and R93 records that as
-    // a decision with a measured cost, not as an accident.
     for (project, duration, smallest, largest) in
         [((25_u32, 1_u32), 3_i64, 3_i64, 4_i64), ((24, 1), 2, 2, 3)]
     {
@@ -1697,9 +1566,6 @@ fn au5_map_project_duration_to_source_answers_the_smallest_end_of_the_run() {
         );
     }
 
-    // The whole neighbourhood the reviewer's sweep found, not one case:
-    // `source_start = 0` was always minimal, which is why the 30 fps lanes
-    // never caught this.
     for start in [0_i64, 1, 3, 7, 37, 1_000] {
         for frames in 1..=24_i64 {
             let end = map_project_duration_to_source(
@@ -1740,8 +1606,6 @@ fn au5_map_project_duration_to_source_refuses_a_duration_it_cannot_express() {
         }),
         "an odd project span has no exact 30 fps source range"
     );
-    // Every even span is expressible, and every odd one is not — the whole
-    // class §5.3 rule 98 warns about, not one example of it.
     for frames in 1..=32_i64 {
         let mapped =
             map_project_duration_to_source(TimeCode(4), TimeCode(frames), source_fps, project_fps);
@@ -1762,11 +1626,6 @@ fn au5_map_project_duration_to_source_refuses_a_duration_it_cannot_express() {
         Err(TimeMappingError::NegativeFrames(TimeCode(-4)))
     );
 
-    // §0 R95: a zero-frame span is refused **uniformly**, at every rate pair.
-    // A project slower than its source can map a non-empty source range to
-    // zero project frames — `map_source_range_to_project(4..5, 60/1, 24/1)`
-    // is `Ok(0)` — so answering zero would make the result rate-dependent for
-    // an input no fill can use.
     assert_eq!(
         map_source_range_to_project(
             TimeCode(4)..TimeCode(5),
@@ -1820,8 +1679,6 @@ fn au5_a_fill_built_from_the_inverse_has_the_gaps_exact_duration() {
         resolution: (1_920, 1_080),
         duration: TimeCode::ZERO,
     };
-    // An audio-only asset is probed at `Rational::default()` = 30/1
-    // (§5.3 rule 98), which is why this is not a 30 fps detail.
     assert_eq!(Rational::default(), source_fps);
     Operation::AddAsset {
         asset: MediaAsset {
@@ -1894,10 +1751,6 @@ fn au5_a_fill_built_from_the_inverse_has_the_gaps_exact_duration() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// R96: the covering source range (AU5 §5.3, §5.4 rule 101(ii), §0 R96)
-// ---------------------------------------------------------------------------
-
 /// `kinewright-media`'s `clock::frame_to_samples`, spelled here so the lane
 /// checks core's answer against media's rule rather than against core's own
 /// re-spelling of it (§0 R96).
@@ -1924,8 +1777,6 @@ fn media_frame_to_samples(frame: TimeCode, sample_rate: u32, fps: Rational) -> u
 /// finding 1).
 #[test]
 fn au5_a_covering_fill_exists_at_every_gap_length_the_room_tone_planner_meets() {
-    // A room-tone asset is always `Rational::default()` = 30/1, because that
-    // is what the store writes. The project may be any of the nine.
     let asset_fps = Rational::default();
     assert_eq!(asset_fps, Rational::new(30, 1).unwrap());
     let sample_rate = 48_000_u32;
@@ -1950,11 +1801,6 @@ fn au5_a_covering_fill_exists_at_every_gap_length_the_room_tone_planner_meets() 
                     deepest_phase = deepest_phase.max(range.start.0);
                     covered.push(frames);
                 }
-                // Two legal refusals. `NoCoveringSourceRange` is the
-                // one-for-one mapping's own limit. `InexactDuration` must mean
-                // what it says — so it is checked against an independent scan
-                // far deeper than the helper's own window, which is the claim
-                // pass-3 finding 2 caught the first version getting wrong.
                 Err(TimeMappingError::NoCoveringSourceRange { .. }) => {
                     assert_eq!(
                         first_covering_range(
@@ -1995,10 +1841,6 @@ fn au5_a_covering_fill_exists_at_every_gap_length_the_room_tone_planner_meets() 
                 200 - covered.len()
             );
         }
-        // 59.94 is the documented residue: one source frame supplies 1 600
-        // sample frames against a demand of 1 602, and two source frames map
-        // to two project frames too many, so **every even** span is
-        // uncoverable at any phase and any length while every odd one fills.
         if project == (60_000, 1_001) {
             assert_eq!(
                 covered,
@@ -2009,8 +1851,6 @@ fn au5_a_covering_fill_exists_at_every_gap_length_the_room_tone_planner_meets() 
             );
         }
     }
-    // The NTSC pulldown pairs are the deep ones, and 499 is the floor under
-    // any future cap on the sweep.
     assert_eq!(
         deepest_phase, 499,
         "the deepest phase a room-tone fill needs at a workspace rate"
@@ -2034,12 +1874,6 @@ fn au5_the_covering_fill_agrees_with_an_independent_phase_scan_at_every_workspac
     let sample_rate = 48_000_u32;
     let asset_duration = TimeCode(96_000);
 
-    // The whole 9 x 9 matrix against the formula-free ground truth. An NTSC
-    // **asset** is a legal fill source — `plan_room_tone_fill` takes an
-    // explicit `asset_id` for any non-`Video` pool asset — and these are the
-    // pairs where the window rule was wrong: at 29.97 -> 29.97 the period is
-    // lcm(1, 5) = 5 while the withdrawn rule swept 2, so 40 of 200 gap lengths
-    // were refused with a covering range sitting at phase 3.
     for source in WORKSPACE_RATES {
         let source_fps = Rational::new(source.0, source.1).unwrap();
         for project in WORKSPACE_RATES {
@@ -2057,8 +1891,6 @@ fn au5_the_covering_fill_agrees_with_an_independent_phase_scan_at_every_workspac
                     Ok(range) => {
                         assert_covering(&range, gap, source_fps, project_fps, sample_rate);
                         assert!(range.end <= asset_duration);
-                        // A shallow scan that finds anything must find exactly
-                        // this, which pins the (phase, end) ordering too.
                         if let Some(shallow) = first_covering_range(
                             gap,
                             source_fps,
@@ -2073,11 +1905,6 @@ fn au5_the_covering_fill_agrees_with_an_independent_phase_scan_at_every_workspac
                             );
                         }
                     }
-                    // Every refusal is re-scanned to a depth past the widest
-                    // workspace period (2 500, at 59.94 -> 24), so a window
-                    // short of the true period fails here rather than in the
-                    // field. This is the check pass-4 finding 5 asked for and
-                    // the one that catches finding 1's class of bug.
                     Err(_) => assert_eq!(
                         first_covering_range(
                             gap,
@@ -2222,11 +2049,6 @@ fn au5_a_covering_fill_reaches_the_ntsc_pulldown_phase() {
         assert_covering(&range, gap, asset_fps, project_fps, sample_rate);
     }
 
-    // The trap in detail, because it is subtler than "phase 0 is inexact":
-    // phase 0 **is** exact — `0..1` maps to one 29.97 project frame — it is
-    // just two sample frames short of the 1 602 that frame demands, and every
-    // phase up to 498 is short the same way. The old `⌈r⌉ + 1 = 3` window
-    // could only ever see three of the period's 1 000 phases.
     assert_eq!(
         map_project_duration_to_source(TimeCode::ZERO, TimeCode(1), asset_fps, project_fps),
         Ok(TimeCode(1)),
@@ -2275,9 +2097,6 @@ fn au5_the_covering_fill_separates_an_unrepresentable_gap_from_a_short_asset() {
     let asset_fps = Rational::new(30, 1).unwrap();
     let sample_rate = 48_000_u32;
 
-    // §5.4 arm (iii): a 60 fps project cannot express an odd span from a 30 fps
-    // asset **at any phase**, because `map_frames(e, 30, 60) = 2e` is always
-    // even. That is rule 97's "no exact source range", not a short asset.
     assert_eq!(
         covering_source_range_for_project_duration(
             TimeCode(7),
@@ -2292,12 +2111,6 @@ fn au5_the_covering_fill_separates_an_unrepresentable_gap_from_a_short_asset() {
         })
     );
 
-    // A room-tone asset too short for the gap is a **different** question, and
-    // the only one whose answer is "record more room tone". It is decided
-    // before the sweep runs, from the supply bound alone, so the number in the
-    // message is a proof rather than the summary of a failed search: 59
-    // project frames at 25 fps demand 113 280 sample frames, which no source
-    // range shorter than 71 frames of a 30 fps asset can carry.
     assert_eq!(
         covering_source_range_for_project_duration(
             TimeCode(59),
@@ -2315,13 +2128,6 @@ fn au5_the_covering_fill_separates_an_unrepresentable_gap_from_a_short_asset() {
     assert_eq!((59_u128 * 48_000).div_ceil(25), 113_280);
     assert_eq!((113_280_u128 * 30).div_ceil(48_000), 71);
 
-    // And the third answer: exact ranges exist, the asset is enormous, and
-    // **nothing covers at any phase or any length** — a limit of the
-    // one-for-one sample mapping, not of the recording. At 30 -> 59.94 one
-    // source frame supplies 1 600 sample frames against a demand of 1 602,
-    // while two source frames map to two project frames too many, so every
-    // even span is uncoverable. Blaming the asset here would send an editor
-    // to the wrong fix.
     assert_eq!(
         covering_source_range_for_project_duration(
             TimeCode(2),
@@ -2383,10 +2189,6 @@ fn au5_the_covering_fill_walks_the_run_before_it_moves_the_phase() {
     let sample_rate = 48_000_u32;
     let project_fps = Rational::new(25, 1).unwrap();
 
-    // The media review's table for a seven-frame gap at 30 -> 25: phase 0
-    // admits only `0..8`, which is 640 sample frames short of the gap's
-    // 13 440; phase 1 admits `1..9` (short) and `1..10` (covers); phase 2
-    // admits `2..11` (covers).
     let gap_samples = 7_u128 * 1_920;
     let supplied = |range: std::ops::Range<i64>| {
         media_frame_to_samples(TimeCode(range.end), sample_rate, asset_fps)
@@ -2413,9 +2215,6 @@ fn au5_the_covering_fill_walks_the_run_before_it_moves_the_phase() {
         );
     }
 
-    // The helper takes the first covering range in (phase, end) order, so it
-    // answers `1..10` — one phase earlier than the review's `2..11`, and the
-    // same seam.
     assert_eq!(
         covering_source_range_for_project_duration(
             TimeCode(7),
@@ -2427,17 +2226,6 @@ fn au5_the_covering_fill_walks_the_run_before_it_moves_the_phase() {
         Ok(TimeCode(1)..TimeCode(10))
     );
 
-    // Why the run is walked and not just sampled once per phase. At 23.976 a
-    // four-frame gap demands 8 008 sample frames, and **no** phase's smallest
-    // exact end supplies them — every one lands on 8 000, short by **8**. The
-    // answer is `2..8`: phase 2's run is `{7, 8}`, and its *second* member is
-    // the first thing that covers. A sweep that only ever asked each phase for
-    // its smallest end would refuse a gap that is perfectly fillable.
-    //
-    // The same holds for every `D` divisible by four **in the range this lane
-    // sweeps** — up to 92, measured; from 96 up, phases 2 and 7 do cover with
-    // their smallest end (pass-3 finding 4 scoped this claim, which the first
-    // text stated without a bound).
     let ntsc = Rational::new(24_000, 1_001).unwrap();
     assert_eq!(4 * 2_002, 8_008, "a four-frame 23.976 gap in sample frames");
     for phase in 0..=4_i64 {
@@ -2503,10 +2291,6 @@ fn au5_the_longest_coverable_tile_steps_past_a_four_frame_allowance() {
     let unbounded = TimeCode(1_000_000);
 
     let cases: [TileCase; 6] = [
-        // The covering tile at 30 -> 29.97 is the map period's `0..1001`:
-        // 1 001 source frames worth 1 000 project frames. An asset of 1 200
-        // maps to 1 199, so reaching it costs 199 steps; 1 500 maps to 1 499
-        // and costs 499. Four frames reaches neither.
         TileCase {
             asset: 1_200,
             project: (30_000, 1_001),
@@ -2521,8 +2305,6 @@ fn au5_the_longest_coverable_tile_steps_past_a_four_frame_allowance() {
             range: (0, 1_001),
             step: 499,
         },
-        // A 600-frame asset needs no step at all, which is why the lane that
-        // used one never saw any of this.
         TileCase {
             asset: 600,
             project: (30_000, 1_001),
@@ -2530,8 +2312,6 @@ fn au5_the_longest_coverable_tile_steps_past_a_four_frame_allowance() {
             range: (0, 600),
             step: 0,
         },
-        // The boundary the review found: the first length that needs more
-        // than four.
         TileCase {
             asset: 1_006,
             project: (30_000, 1_001),
@@ -2539,8 +2319,6 @@ fn au5_the_longest_coverable_tile_steps_past_a_four_frame_allowance() {
             range: (0, 1_001),
             step: 5,
         },
-        // A non-NTSC pair still steps: 61 source frames map to 51 project
-        // frames at 25 fps, and 50 is the longest that covers.
         TileCase {
             asset: 61,
             project: (25, 1),
@@ -2588,9 +2366,6 @@ fn au5_the_longest_coverable_tile_steps_past_a_four_frame_allowance() {
             "the tile reads past the asset"
         );
 
-        // The step down really is what the case says, measured against the
-        // asset's own mapped length — this is the number the four-frame
-        // allowance was compared with.
         let whole =
             map_source_range_to_project(TimeCode::ZERO..source_duration, asset_fps, project_fps)
                 .unwrap();
@@ -2599,8 +2374,6 @@ fn au5_the_longest_coverable_tile_steps_past_a_four_frame_allowance() {
             step,
             "asset {asset} at 30 -> {project:?} should step down {step}"
         );
-        // And nothing between the asset's mapped length and the answer covers,
-        // so the answer really is the longest.
         for skipped in (tile.0 + 1)..=whole.0 {
             assert!(
                 covering_source_range_for_project_duration(
@@ -2627,9 +2400,6 @@ fn au5_the_longest_coverable_tile_caps_refuses_and_beats_the_old_constant() {
     let unbounded = TimeCode(1_000_000);
     let ntsc = Rational::new(30_000, 1_001).unwrap();
 
-    // The four-frame allowance, reproduced as insufficient so nobody
-    // reintroduces the constant: at 30 -> 29.97 a 1 200-frame asset's first
-    // covering tile is 199 frames below its mapped length.
     let source_duration = TimeCode(1_200);
     let whole =
         map_source_range_to_project(TimeCode::ZERO..source_duration, asset_fps, ntsc).unwrap();
@@ -2648,17 +2418,11 @@ fn au5_the_longest_coverable_tile_caps_refuses_and_beats_the_old_constant() {
         );
     }
 
-    // `max_project_frames` is the gap the caller wants filled, so the tile
-    // never overshoots it — and a short cap is answered exactly, not by the
-    // asset's own length.
     assert_eq!(
         longest_coverable_project_tile(TimeCode(1_200), asset_fps, ntsc, sample_rate, TimeCode(7)),
         Ok((TimeCode(7), TimeCode(493)..TimeCode(501)))
     );
 
-    // An asset too short to cover anything propagates the covering helper's
-    // own refusal rather than inventing one, so the caller's message names the
-    // real reason. 60, 300 and 500 frames at 29.97 are dead at every step.
     for asset in [60_i64, 300, 500] {
         assert!(
             matches!(

@@ -37,10 +37,6 @@ use crate::{
     NormalizedRoi, PixelRoi, QaSeverity, RgbaImage, SCOPE_BASIS_POINTS, WorkingProof,
 };
 
-// ---------------------------------------------------------------------------
-// §3.0: the delivery transfer core owns.
-// ---------------------------------------------------------------------------
-
 /// The f32 delivery transfer, owned by core.
 ///
 /// Bit-identical to `kinewright_media::color_pipeline::encode_bt709` for every
@@ -69,10 +65,6 @@ pub fn encode_bt709_delivery(linear: f32) -> f32 {
         1.099 * linear.powf(0.45) - 0.099
     }
 }
-
-// ---------------------------------------------------------------------------
-// §3.4: the forward BT.709 limited-range `Y'CbCr` reference.
-// ---------------------------------------------------------------------------
 
 /// BT.709 luma coefficient for red.
 pub const BT709_KR: f64 = 0.2126;
@@ -118,10 +110,6 @@ pub const YCBCR_CHROMA_LEGAL_HIGH: i32 = 240;
 /// and `BT709_RED_FROM_CR`.
 #[must_use]
 pub fn bt709_limited_ycbcr(encoded_rgb: [f64; 3], bits: u8) -> [f64; 3] {
-    // CC6 has exactly two delivery lanes. A third depth would silently produce
-    // a code scale no CC6 budget, legal box, or fixture is written against, so
-    // it is caught in development rather than reported as evidence.
-    // [`DeliveryEncodeDepth::bits`] is the only supported source of `bits`.
     debug_assert!(
         matches!(bits, 8 | 10),
         "bt709_limited_ycbcr takes an 8-bit or 10-bit delivery depth, got {bits}"
@@ -240,8 +228,6 @@ impl PlaneLegalExcursion {
         if sample_count == 0 {
             return 0;
         }
-        // Exact `u128` arithmetic, the same strategy as `basis_points`, so a
-        // saturating multiply can never understate the rate.
         let excursions = self.below_count.saturating_add(self.above_count) as u128;
         let rate = excursions * 10_000 / sample_count as u128;
         if rate > u32::MAX as u128 {
@@ -267,10 +253,6 @@ pub struct YCbCrLegalReport {
     pub cr: PlaneLegalExcursion,
     pub source: YCbCrLegalSource,
 }
-
-// ---------------------------------------------------------------------------
-// §3.2: range.
-// ---------------------------------------------------------------------------
 
 /// Basis-point rate at or above which a range excursion is reported as a
 /// [`QaSeverity::Warning`] rather than merely counted.
@@ -322,10 +304,6 @@ pub struct ColorRangeReport {
     pub predicted_ycbcr: YCbCrLegalReport,
 }
 
-// ---------------------------------------------------------------------------
-// §3.3: gamut.
-// ---------------------------------------------------------------------------
-
 /// The fixed prose [`ColorGamutReport::definition`] carries.
 pub const GAMUT_DEFINITION: &str = "Out of gamut is min(r, g, b) < 0 in linear light: exactly the \
 set of pixels with at least one under-range channel in the range report. The two reports describe \
@@ -369,10 +347,6 @@ pub struct ColorGamutReport {
     /// Always [`GAMUT_DEFINITION`].
     pub definition: String,
 }
-
-// ---------------------------------------------------------------------------
-// §3.5: skin diagnostics.
-// ---------------------------------------------------------------------------
 
 /// The statement every skin diagnostic carries verbatim.
 pub const SKIN_DIAGNOSTIC_BOUNDARY: &str = "This is a diagnostic of a region the user chose. It is \
@@ -459,10 +433,6 @@ pub struct SkinDiagnostics {
     pub boundary: String,
 }
 
-// ---------------------------------------------------------------------------
-// §3.7 report types (the measurement itself lives in `nodes`).
-// ---------------------------------------------------------------------------
-
 /// The maximum number of colour nodes one per-node attribution may report.
 ///
 /// The bound is a cost bound: each reported node costs one full-resolution
@@ -502,10 +472,6 @@ pub struct ColorQcNodeContributions {
     pub attribution: String,
     pub nodes: Vec<ColorNodeQcContribution>,
 }
-
-// ---------------------------------------------------------------------------
-// §3.0: request and region.
-// ---------------------------------------------------------------------------
 
 /// One optional QC measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -591,10 +557,6 @@ pub struct ColorQcRegion {
     /// `ScopeMeasurementMetadata`; it **must not** be used as a check.
     pub transparent_pixel_count: u64,
 }
-
-// ---------------------------------------------------------------------------
-// §3.8: report, exceptions, provenance, refusals.
-// ---------------------------------------------------------------------------
 
 /// How a [`ColorQcReport`] was computed, so the choices are auditable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -860,10 +822,6 @@ impl From<ColorQcError> for MediaError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// §3.0/§3.1: the measurement.
-// ---------------------------------------------------------------------------
-
 /// Measure one working proof.
 ///
 /// Pure: no renderer, no I/O, no clock, no RNG. Iteration is row-major from the
@@ -890,8 +848,6 @@ pub fn measure_color_qc(
     proof: &WorkingProof,
     request: &ColorQcRequest,
 ) -> Result<ColorQcReport, ColorQcError> {
-    // CC6 §2.3: refuse before measuring. A raster that cannot claim the full
-    // document raster cannot be spoken about as if it were the delivery input.
     if !proof.metadata.render.full_resolution {
         return Err(ColorQcError::ProxyProofRefused {
             observed: "false".to_owned(),
@@ -921,11 +877,7 @@ pub fn measure_color_qc(
             allowed: "a region of interest covering at least one source pixel",
         })?;
     if let Some(scope) = &request.matte_region {
-        // Both the dimensions and the buffer they claim: a coverage raster
-        // whose dimensions agree but whose buffer is short would silently
-        // scope the region to the pixels that happen to exist, because the
-        // per-pixel read below falls back to coverage `0`. That is a smaller
-        // region reported as the requested one, so it is refused here.
+        // A short coverage buffer would silently shrink the scoped region.
         if scope.coverage.width != image.width
             || scope.coverage.height != image.height
             || u64::try_from(scope.coverage.pixels.len()).unwrap_or(u64::MAX) != expected_len
@@ -947,11 +899,6 @@ pub fn measure_color_qc(
 
     let bits = request.delivery_bit_depth.bits();
     let measure_skin = request.checks.contains(&ColorQcCheck::Skin);
-    // The region's own upper bound, so the median buffer is allocated once
-    // rather than doubling its way to the raster size. A matte narrows it
-    // further: the coverage count is the most pixels the scope can admit, and
-    // reserving the whole rectangle for a small matte would be the same waste
-    // in the other direction.
     let skin_capacity = if measure_skin {
         let area = u64::from(pixel_roi.width).saturating_mul(u64::from(pixel_roi.height));
         let bound = request.matte_region.as_ref().map_or(area, |scope| {
@@ -965,13 +912,10 @@ pub fn measure_color_qc(
     for y in pixel_roi.y..pixel_roi.bottom() {
         for x in pixel_roi.x..pixel_roi.right() {
             let index = (y as usize * image.width as usize + x as usize) * 4;
-            if let Some(scope) = &request.matte_region {
-                // `MATTE_SCOPE_THRESHOLD`: coverage greater than zero, the set
-                // the correction touched at all. Coverage is grey, so the red
-                // channel is the coverage code.
-                if scope.coverage.pixels.get(index).copied().unwrap_or(0) == 0 {
-                    continue;
-                }
+            if let Some(scope) = &request.matte_region
+                && scope.coverage.pixels.get(index).copied().unwrap_or(0) == 0
+            {
+                continue;
             }
             let Some(pixel) = image.pixels.get(index..index + 4) else {
                 continue;
@@ -1269,10 +1213,6 @@ fn report_exceptions(report: &ColorQcReport) -> Vec<ColorQcException> {
     exceptions
 }
 
-// ---------------------------------------------------------------------------
-// Scalar CPU accumulators. No GPU reduction, CC2's non-goal, unchanged.
-// ---------------------------------------------------------------------------
-
 /// Per-channel delivery-clamp accumulator.
 #[derive(Debug, Clone, Copy, Default)]
 struct ChannelAccumulator {
@@ -1365,9 +1305,6 @@ impl PlaneAccumulator {
     }
 
     fn report(self, visible: u64) -> PlaneLegalExcursion {
-        // The `seen` flag, not the initial `0.0`: a plane that saw no sample
-        // has no extreme to report, and `0` would be a number nothing
-        // measured.
         let (minimum, maximum) = if self.seen {
             (hundredths(self.minimum), hundredths(self.maximum))
         } else {
@@ -1472,9 +1409,7 @@ impl RegionAccumulator {
     /// it feeds no channel, gamut, plane, or skin accumulator.
     fn add(&mut self, linear: [f32; 3], alpha: f32, measure_skin: bool) {
         self.region_pixel_count = self.region_pixel_count.saturating_add(1);
-        // Written as the negation of the visibility test rather than
-        // `alpha <= 0.0`, because a `NaN` alpha is not visible and `NaN <= 0.0`
-        // is false: the two spellings differ exactly on `NaN`.
+        // NaN alpha is not visible; `alpha <= 0.0` is false for NaN.
         #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(alpha > 0.0) {
             self.transparent_pixel_count = self.transparent_pixel_count.saturating_add(1);
@@ -1553,9 +1488,6 @@ impl RegionAccumulator {
         let cb = (encoded[2] - luma) / BT709_CB_DENOMINATOR;
         let cr = (encoded[0] - luma) / BT709_CR_DENOMINATOR;
         let chroma = cb.hypot(cr);
-        // §3.5's test is on the unrounded product, so a pixel one part in a
-        // million below the floor is excluded rather than rounded into the
-        // population.
         #[allow(clippy::cast_precision_loss)]
         let floor = SKIN_MIN_CHROMA_MILLIONTHS as f64;
         if chroma * 1_000_000.0 < floor {
@@ -1614,14 +1546,10 @@ impl RegionAccumulator {
         let (mean_hue, concentration, spread) = if considered == 0 {
             (None, 0, SKIN_MAX_SPREAD_CENTIDEGREES)
         } else {
-            // Computed from f64 sums of cos and sin, not from a running
-            // angular average, so there is no order dependence and no wrap
-            // discontinuity.
             let mean = wrap_degrees(self.skin_sin.atan2(self.skin_cos).to_degrees());
             #[allow(clippy::cast_precision_loss)]
             let count = considered as f64;
-            // Clamped before the logarithm: the unclamped quotient can exceed
-            // 1.0 in f64 for a uniform patch, which would make the spread NaN.
+            // Clamped before the logarithm: the unclamped quotient can exceed 1.0 in f64 for a uniform patch, which would make the spread NaN.
             let resultant = (self.skin_cos.hypot(self.skin_sin) / count).clamp(0.0, 1.0);
             let spread = if resultant <= 0.0 {
                 SKIN_MAX_SPREAD_CENTIDEGREES
@@ -1636,8 +1564,6 @@ impl RegionAccumulator {
         };
         let mut chroma = self.skin_chroma.clone();
         chroma.sort_by(f32::total_cmp);
-        // Lower median: element `floor((n - 1) / 2)`, so it is deterministic
-        // for even `n`. CC2's percentile convention, reused.
         let median = f64::from(
             chroma
                 .get(chroma.len().saturating_sub(1) / 2)
@@ -1700,8 +1626,6 @@ fn scaled_round(value: f64, scale: f64) -> i64 {
     if scaled <= i64::MIN as f64 {
         return i64::MIN;
     }
-    // The two guards above bracket `scaled` inside `i64`, and it is already an
-    // integral `f64`, so this conversion is exact.
     scaled as i64
 }
 

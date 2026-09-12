@@ -216,9 +216,6 @@ pub(crate) const KEYMAP: [KeyBinding; 21] = [
         description: "Open export dialog",
     },
     KeyBinding {
-        // Free: no other binding uses C at all, and no binding in this map
-        // is Ctrl+Shift. Deliberately not Ctrl+Q, which every desktop
-        // environment already spends on Quit.
         key: egui::Key::C,
         ctrl: true,
         shift: true,
@@ -227,8 +224,6 @@ pub(crate) const KEYMAP: [KeyBinding; 21] = [
         description: "Open the Colour QC window (evidence only)",
     },
     KeyBinding {
-        // Ctrl+Shift+M: bare M is Add marker and Ctrl+M is free, so the
-        // mixer takes the modifier pair that no other binding spends on M.
         key: egui::Key::M,
         ctrl: true,
         shift: true,
@@ -248,23 +243,10 @@ pub(crate) const KEYMAP: [KeyBinding; 21] = [
 
 impl KinewrightApp {
     pub(crate) fn keyboard_shortcuts(&mut self, ctx: &egui::Context) {
-        // AU4 §5.1 rule 101 (AU4 §0 E49): the timeline's envelope hover report
-        // is good for exactly one frame, so it is taken here whatever happens
-        // next. The timeline rewrites it at the end of every frame it draws;
-        // taking it means a frame in which it does *not* draw — the Mixer or
-        // Transcript tab is up, or the material strip is hidden — leaves
-        // nothing behind to swallow a later Delete.
         let envelope_hover = self.focused_mut().envelope_hover.take();
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        // Delete or Backspace over an envelope key removes the key, not the
-        // clip. This function runs before `panel_layout` draws the timeline,
-        // so the report it arbitrates on is one frame old — the matte
-        // overlay's `report_expanded` pattern. It comes first because a
-        // pointer parked on the band is the most specific thing on screen; a
-        // report that no longer names a curve answers `Clip` and falls
-        // straight through to the ordinary paths below.
         if envelope_hover.is_some()
             && ctx.input(|input| {
                 !input.modifiers.ctrl
@@ -463,11 +445,6 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(bindings.len(), KEYMAP.len(), "duplicate key binding");
 
-        // AU1 §5.1 added `Mixer`, growing both arrays from 20 to 21. This is
-        // the assertion that keeps them together: an action added to the enum
-        // and to `ALL_ACTIONS` but given no binding fails here, as does a
-        // binding for an action nobody declared. The array lengths are
-        // compile-time constants and assert nothing on their own.
         assert_eq!(KEYMAP.len(), 21);
         let actions = KEYMAP
             .iter()

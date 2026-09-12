@@ -112,12 +112,6 @@ fn set_track_mix_validates_bounds_and_track_existence_atomically() {
             OpError::MissingTrack(TrackId(9)),
         ),
     ];
-    // Every rejection is run twice: once against an empty mix table, and once
-    // against a document that already carries a non-neutral entry, so
-    // `doc == before` means "the surviving entry is untouched" rather than only
-    // "nothing was added". `ApplyOp::apply` gets its atomicity from a
-    // clone-then-swap, and this pins that the guarantee covers a
-    // partially-populated mix table too.
     let mut occupied = base.clone();
     set_mix(1, -60, 25, false, false)
         .apply(&mut occupied)
@@ -254,8 +248,6 @@ fn hand_edited_track_mix_entries_are_rejected_during_document_validation() {
     assert_eq!(loaded.validate(), Ok(()));
     assert_eq!(loaded.audio_mix.tracks, vec![TrackMix::neutral(TrackId(1))]);
 
-    // A pre-AU1 `audio_mix` object carries only `buses`, and a pre-AU1 document
-    // has no `audio_mix` key at all; both load to an empty table.
     let mut value = serde_json::to_value(&valid).unwrap();
     value["audio_mix"] = serde_json::json!({"buses": []});
     let loaded: Document = serde_json::from_value(value).unwrap();

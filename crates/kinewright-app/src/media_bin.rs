@@ -55,8 +55,6 @@ impl KinewrightApp {
                 .collect()
         });
         for path in dropped {
-            // A dropped `.cube` routes through the same look-import path as
-            // the file picker rather than the media probe (CC4 §7).
             if crate::media_workflow::is_cube_lut_path(&path) {
                 let clip = self.selected_media_clip();
                 self.start_lut_import(

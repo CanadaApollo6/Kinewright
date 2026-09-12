@@ -244,9 +244,6 @@ impl CubeLut {
 /// Round one domain bound to the integer millionths CC4 §2.1 stores.
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 fn millionths(value: f32) -> i64 {
-    // `f64::round` rounds half away from zero, which is the documented rule.
-    // The clamp keeps an absurd domain from relying on saturating-cast
-    // behaviour for its result.
     let scaled = (f64::from(value) * 1_000_000.0).round();
     scaled.clamp(i64::MIN as f64, i64::MAX as f64) as i64
 }
@@ -777,11 +774,6 @@ DOMAIN_MAX 1.0 1.0 1.0
             message.starts_with("unsupported_lut_format: "),
             "message should lead with the code: {message}"
         );
-        // CC4 §2.5's wire format is `key=value`, anchored at `"; "`, which is
-        // what the agent's field reader recovers `observed`, `allowed`, and
-        // `line` from. `observed <v>` would parse too, but only because the
-        // reader tolerates both spellings; the rendering is pinned here so it
-        // cannot drift away from the documented one.
         assert!(
             message.contains("; line=1"),
             "message should name the line as an anchored field: {message}"
@@ -798,8 +790,6 @@ DOMAIN_MAX 1.0 1.0 1.0
 
     #[test]
     fn the_rendered_parse_failure_is_the_documented_field_shape() {
-        // The exact string, so a change to the wire format is a test failure
-        // rather than a silently broken agent parser.
         let typed = parse_cube_lut_typed("LUT_3D_SIZE 1\n").unwrap_err();
         assert_eq!(typed.code, LutParseErrorCode::LutSizeOutOfRange);
         assert_eq!(
@@ -871,8 +861,6 @@ DOMAIN_MAX 2 2 2
     #[test]
     fn domain_millionths_round_half_away_from_zero() {
         let mut lut = CubeLut::identity();
-        // 1/128 scales to exactly 7812.5 millionths, so this is a true tie:
-        // half away from zero gives 7813, while half-to-even would give 7812.
         lut.domain_min = [-0.007_812_5, -0.25, 0.0];
         lut.domain_max = [0.007_812_5, 0.25, 1.0];
         let (minimum, maximum) = lut.domain_millionths();

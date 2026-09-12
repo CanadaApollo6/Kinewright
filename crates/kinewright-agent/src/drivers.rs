@@ -197,8 +197,6 @@ impl ClaudeSession {
         }
         if let Some(effort) = &cfg.effort {
             if effort == crate::models::CLAUDE_ULTRACODE {
-                // Ultracode is a session setting, not an --effort value:
-                // xhigh effort plus standing dynamic-workflow orchestration.
                 command.args(["--settings", r#"{"ultracode": true}"#]);
             } else {
                 command.args(["--effort", effort]);
@@ -446,8 +444,6 @@ impl Drop for CodexSession {
     }
 }
 
-// One argument per independent launch input; a grouping struct would only
-// exist for this call and its test.
 #[allow(clippy::too_many_arguments)]
 fn build_codex_command(
     target: &CodexSpawnTarget,

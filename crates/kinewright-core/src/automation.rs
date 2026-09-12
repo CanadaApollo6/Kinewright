@@ -204,8 +204,6 @@ pub fn rebase_clip_curve(
     if curve.keyframes.is_empty() {
         return curve.clone();
     }
-    // A clip never has a non-positive project duration (`ZeroProjectDuration`),
-    // but the reduction is defined anyway so the function is total.
     if new_duration <= TimeCode::ZERO {
         return single_key_at(curve, TimeCode::ZERO, delta_local);
     }
@@ -223,9 +221,6 @@ pub fn rebase_clip_curve(
             );
         }
     }
-    // Step 1: the boundary keys, valued from the *old* curve. Inserted last so
-    // step 4's last-wins dedupe prefers them; rule 14 proves the two agree
-    // whenever they collide, so the order cannot pick a wrong value.
     if curve.keyframes.iter().any(|key| key.at < delta_local) {
         insert_boundary_key(&mut keys, curve, TimeCode::ZERO, delta_local);
     }
@@ -242,11 +237,6 @@ pub fn rebase_clip_curve(
     {
         insert_boundary_key(&mut keys, curve, TimeCode(new_duration.0 - 1), right_source);
     }
-    // Step 5 is defensive: with a non-empty curve and `new_duration > 0`,
-    // every dropped key fires one of the two boundary inserts above, so the
-    // all-dropped case is already a single boundary key and this arm is
-    // unreachable. It stays so the "never falls back to the static scalar"
-    // rule is enforced here too, not only implied by the arms above.
     debug_assert!(
         !keys.is_empty(),
         "a dropped key always inserts a boundary key"
@@ -310,8 +300,6 @@ fn insert_boundary_key(
 fn boundary_key(curve: &AutomationCurve, at: TimeCode, source: TimeCode) -> Keyframe {
     Keyframe {
         at,
-        // `value_at` is `None` only on i64 overflow, which falls back to the
-        // first key rather than inventing a bound the editor never wrote.
         value: curve
             .value_at(source)
             .unwrap_or_else(|| curve.keyframes.first().map_or(0, |key| key.value)),
@@ -417,9 +405,6 @@ mod tests {
             );
             assert_eq!(held.value_at(TimeCode(at)), Some(-100));
         }
-        // Rule 41.4 is what makes the segment flat: `holds_at` stays true at
-        // the segment's last frame, so the value steps at the *next* key's
-        // first sample rather than ramping through frame 19.
         assert!(held.holds_at(TimeCode(19)));
         assert_eq!(held.value_at(TimeCode(20)), Some(100));
         // An empty curve has no value to change.

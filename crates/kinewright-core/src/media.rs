@@ -832,9 +832,6 @@ fn scan_coverage(coverage: &RgbaImage) -> Result<CoverageScan, MatteCoverageErro
     let mut samples = pixels.iter();
     for y in 0..coverage.height {
         for x in 0..coverage.width {
-            // The caller validated the buffer length against the dimensions,
-            // so the iterator cannot run out; a defensive error keeps that
-            // from becoming a panic if the check ever changes.
             let &[code, green, blue, alpha] =
                 samples
                     .next()
@@ -859,8 +856,6 @@ fn scan_coverage(coverage: &RgbaImage) -> Result<CoverageScan, MatteCoverageErro
                     allowed: "red, green, and blue must be equal",
                 });
             }
-            // `code / 16` is `min(15, floor(code * 16 / 256))` for every 8-bit
-            // code, computed without a division that could round differently.
             scan.coverage_histogram[usize::from(code >> 4)] += 1;
             if code == 0 {
                 continue;
@@ -2846,8 +2841,6 @@ mod tests {
         ] {
             let carried = MediaError::ColorQc(expected.clone());
             assert_eq!(carried.recovery_code(), Some(expected.code()));
-            // `#[error(transparent)]`: the rendered message is the refusal's
-            // own, with no wrapper label to strip back off.
             assert_eq!(carried.to_string(), expected.to_string());
             assert_eq!(carried, MediaError::ColorQc(expected));
         }

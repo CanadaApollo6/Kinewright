@@ -298,8 +298,6 @@ impl WorkerCompletion {
         if self.is_retired() {
             return;
         }
-        // The channel is unbounded, so this only fails once the panel that
-        // owns the receiver is gone and nothing could display the result.
         let _ = self.response_tx.send(ScopeResponse {
             generation: self.generation,
             key: self.key,
@@ -310,8 +308,6 @@ impl WorkerCompletion {
 
 impl Drop for WorkerCompletion {
     fn drop(&mut self) {
-        // A panic or an early return must not strand the panel on
-        // "Rendering full-resolution proof…" forever.
         self.deliver(Err(
             "the full-resolution scope worker stopped before it delivered a proof".to_owned(),
         ));
@@ -352,9 +348,6 @@ pub(crate) struct ColorScopesState {
 
 impl Default for ColorScopesState {
     fn default() -> Self {
-        // Unbounded: a superseded worker is retired by its cancel flag and
-        // filtered by generation, so a full queue must never be able to drop
-        // the response the panel is actually waiting for.
         let (response_tx, response_rx) = mpsc::channel();
         Self {
             kind: ScopeKind::default(),
@@ -490,9 +483,6 @@ impl ColorScopesState {
                 || previous.frame != context.frame
                 || previous.roi != context.roi)
         {
-            // A reference is a deliberate shot choice and survives a seek or
-            // revision within one project, but it must never leak across
-            // independently editable project sessions.
             self.invalidate(previous.session_id == context.session_id);
         }
         self.current_context = Some(context);
@@ -563,9 +553,6 @@ impl ColorScopesState {
             matte,
         };
         if self.worker_is_running() {
-            // The running worker's result belongs to an older generation and is
-            // filtered out on arrival; retiring it also stops it delivering at
-            // all. It still has to finish before the next render may start.
             self.retire_active_worker();
             self.queued = Some(sample);
             return;
@@ -607,9 +594,6 @@ impl ColorScopesState {
                 let result = source
                     .monitor_proof(Arc::clone(&document), frame)
                     .and_then(|proof| {
-                        // CC5 §4.3: the coverage is rendered for the same
-                        // document, frame, and raster, and only the measured
-                        // region changes. The CC2 engine is untouched.
                         let coverage = matte
                             .as_ref()
                             .map(|matte| {
@@ -730,9 +714,6 @@ impl ColorScopesState {
     pub(crate) fn delta(&self) -> Option<ScopeComparison> {
         let current = self.current.as_ref()?;
         let reference = self.reference()?;
-        // CC2 allows the two source rasters to differ; `compare_scope_evidence`
-        // still requires the same stage, normalized ROI, and output grids. The
-        // dimensions are reported as metadata beside the delta.
         compare_scope_evidence(&reference.evidence, &current.evidence).ok()
     }
 
@@ -766,9 +747,6 @@ impl ColorScopesState {
 
     fn invalidate(&mut self, retain_reference: bool) {
         self.generation = self.generation.wrapping_add(1);
-        // The in-flight worker is retired here, not merely forgotten: an
-        // abandoned worker must never resolve a later request's pending state.
-        // Its handle is kept so `poll` can still reap it.
         self.retire_active_worker();
         // A parked request describes the context that just went stale.
         self.queued = None;
@@ -889,8 +867,6 @@ impl KinewrightApp {
                         .font(theme::semibold(type_size::CAPTION)),
                 );
                 if let Some((reference, current)) = comparison_dimensions {
-                    // CC2 compares stage/ROI/grid, not source raster size. The
-                    // two rasters are provenance metadata, not a gate.
                     ui.colored_label(
                         color::TEXT_MUTED,
                         format!(
@@ -916,12 +892,6 @@ impl KinewrightApp {
                 });
             });
         } else if self.color_scopes.has_reference() && self.color_scopes.current.is_some() {
-            // Defensive. `set_roi` drops the reference whenever the ROI moves
-            // and both measurements come from the same monitoring stage and
-            // grid defaults, so `compare_scope_evidence` is not expected to
-            // refuse here. If a future stage or grid option makes two retained
-            // measurements incomparable, this says so instead of silently
-            // showing no delta.
             ui.colored_label(
                 color::STATUS_WARNING,
                 "Reference retained, but its stage, ROI, or scope grid contract differs; capture a compatible reference to compare.",
@@ -940,10 +910,7 @@ impl KinewrightApp {
     /// the measured set is their intersection.
     fn scope_matte_controls(&mut self, ui: &mut egui::Ui) {
         let target = self.matte_overlay.expanded();
-        // What the *toggle* holds, not what it currently achieves: with no
-        // section expanded the control is disabled, and drawing it unchecked
-        // would say the user turned it off when nobody did — and would silently
-        // reappear checked the moment a section opened again.
+        // What the *toggle* holds, not what it currently achieves
         let mut scoped = self.color_scopes.matte_scope_requested();
         ui.horizontal_wrapped(|ui| {
             let toggle = ui
@@ -961,8 +928,6 @@ impl KinewrightApp {
             if toggle.changed() {
                 self.color_scopes.set_matte_scope(scoped, target);
             } else if self.color_scopes.matte_target() != target {
-                // The expanded node changed under a live toggle: rescope rather
-                // than keep measuring a node nobody is looking at.
                 let requested = self.color_scopes.matte_scope_requested();
                 self.color_scopes.set_matte_scope(requested, target);
             }
@@ -973,9 +938,6 @@ impl KinewrightApp {
                 ),
                 None => ui.colored_label(color::TEXT_MUTED, "no matte section expanded"),
             };
-            // The checkbox now keeps the state the user set it to even while it
-            // is disabled, so a toggle that is on but cannot bite has to say so
-            // rather than look like a measurement nobody is getting.
             if self.color_scopes.matte_scope_requested() && !self.color_scopes.is_matte_scoped() {
                 ui.colored_label(
                     color::STATUS_WARNING,
@@ -999,15 +961,6 @@ impl KinewrightApp {
                 ui.add(
                     egui::DragValue::new(value)
                         .range(0..=ROI_MAX)
-                        // `range` alone also rewrites the value the panel
-                        // supplied, before any interaction, which would make
-                        // the widget rather than `apply_roi_controls` the
-                        // authority on what region is measured. Only the
-                        // panel's own normalization may change the ROI, so the
-                        // note below describes the clamp that actually applied.
-                        // (egui still clamps a drag or a typed edit to the
-                        // range; the panel's clamp is what covers everything
-                        // else.)
                         .clamp_existing_to_range(false),
                 );
             }
@@ -1115,10 +1068,6 @@ fn scope_measurement_from_proof(
         resolution: ScopeResolution::default(),
     };
     let (image, region) = match matte {
-        // CC5 §4.3: `A = 255 if m > 0 else 0` on an analysis-only copy, handed
-        // to the unchanged CC2 engine, which already excludes alpha-zero
-        // pixels from every statistic. The document, the render, and the
-        // layer's own alpha are never touched.
         Some((target, coverage)) => {
             let statistics =
                 matte_coverage_statistics(&coverage).map_err(|error| error.to_string())?;
@@ -1882,9 +1831,6 @@ mod tests {
         state.generation = 1;
         state.pending = Some(PendingScope { generation: 1, key });
 
-        // Invalidation must retire the worker, not merely forget it. The
-        // handle is retained on purpose: the thread is what the next request
-        // has to wait behind, so it is reaped rather than dropped.
         state.invalidate(true);
         assert!(cancelled.load(Ordering::Acquire));
         assert!(
@@ -2004,8 +1950,6 @@ mod tests {
     #[test]
     fn measurement_capture_has_no_operation_side_effect() {
         let mut state = ColorScopesState::default();
-        // A fresh panel holds no evidence, so there is nothing to capture and
-        // no reference to compare against.
         assert!(
             !state.capture_reference(),
             "capturing without a measurement must refuse rather than invent one"
@@ -2039,8 +1983,6 @@ mod tests {
         assert!(state.capture_reference());
         assert!(state.has_reference());
 
-        // Capturing changes nothing outside the panel's evidence fields: the
-        // grade-facing context, ROI, and request generation are untouched.
         assert_eq!(state.generation, 1);
         assert_eq!(state.roi, ScopeRoi::full_frame());
         assert_eq!(state.current_context, Some(key));
@@ -2150,8 +2092,6 @@ mod tests {
         assert_eq!(region.threshold, kinewright_core::MATTE_SCOPE_THRESHOLD);
         assert_eq!(region.covered_pixel_count, 4);
 
-        // An unscoped measurement of the same frame measures everything, and
-        // core refuses to difference the two populations.
         let unscoped = scope_measurement_from_proof(
             test_proof(4, 2, true),
             key,
@@ -2274,8 +2214,6 @@ mod tests {
         );
         assert!(state.current.is_none(), "nor is the current measurement");
 
-        // Restating the same target measures the same pixels, so the shot
-        // stands.
         state.current = Some(test_measurement(key, [20, 20, 20]));
         assert!(state.capture_reference());
         state.set_matte_scope(true, Some(second));
@@ -2332,8 +2270,6 @@ mod tests {
             );
         }
 
-        // Turning the toggle on with a target does change the population, and
-        // that still invalidates.
         state.set_matte_scope(true, Some(first));
         assert!(state.is_matte_scoped());
         assert!(!state.has_reference(), "a real rescope still invalidates");
@@ -2350,10 +2286,6 @@ mod tests {
             "a panel that has measured nothing renders no clipping rows"
         );
 
-        // Four pixels: one pure black (every channel clipped low, luma low),
-        // one pure white (every channel clipped high, luma high), and two mid
-        // greys that clip nothing. Codes 0 and 255 are inside
-        // SCOPE_LOW_CLIP_CODE = 1 / SCOPE_HIGH_CLIP_CODE = 254.
         let key = ScopeRequestKey {
             session_id: 1,
             revision: 0,
@@ -2404,8 +2336,6 @@ mod tests {
             assert_eq!(row.text(), "black 2500 bp · white 2500 bp");
         }
 
-        // The note and the tooltip both keep a monitor-stage display-code
-        // count from being read as a CC6 delivery excursion.
         assert!(SCOPE_CLIPPING_TOOLTIP.contains("SCOPE_LOW_CLIP_CODE = 1"));
         assert!(SCOPE_CLIPPING_TOOLTIP.contains("SCOPE_HIGH_CLIP_CODE = 254"));
         assert!(SCOPE_CLIPPING_NOTE.contains("working_linear_post_composite"));
@@ -2416,8 +2346,6 @@ mod tests {
         );
         assert_eq!(u32::from(kinewright_core::SCOPE_HIGH_CLIP_CODE), 254);
 
-        // And it lays out: the table is drawn through a headless context so a
-        // grid or tooltip mistake is a failing test, not a runtime panic.
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {

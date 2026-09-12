@@ -16,10 +16,6 @@ use kinewright_core::{
     rebase_clip_curve, track_automation_coalesce_key,
 };
 
-// ---------------------------------------------------------------------------
-// builders
-// ---------------------------------------------------------------------------
-
 fn fps() -> Rational {
     Rational::new(30, 1).unwrap()
 }
@@ -180,10 +176,6 @@ fn keyed_effect(id: u64, name: &str, curve: &AutomationCurve) -> Effect {
     }
 }
 
-// ---------------------------------------------------------------------------
-// A1 — serde shape
-// ---------------------------------------------------------------------------
-
 /// AU4 §7 item A1.
 #[test]
 fn the_five_curve_fields_are_absent_by_default_and_round_trip_when_present() {
@@ -209,8 +201,6 @@ fn the_five_curve_fields_are_absent_by_default_and_round_trip_when_present() {
     doc.audio_mix.master.gain_tenth_db = -10;
     doc.validate().unwrap();
 
-    // Every new field is `Option::is_none`-skipped, so a curve-free document
-    // carries none of the five keys and every pre-AU4 golden is byte-unchanged.
     let json = serde_json::to_string(&doc).unwrap();
     for key in ["audio_gain_curve", "gain_curve", "pan_curve"] {
         assert!(
@@ -240,10 +230,6 @@ fn the_five_curve_fields_are_absent_by_default_and_round_trip_when_present() {
     let json = serde_json::to_string(&curved).unwrap();
     assert_eq!(serde_json::from_str::<Document>(&json).unwrap(), curved);
 }
-
-// ---------------------------------------------------------------------------
-// A2 — the `Copy` loss and the widened neutrality
-// ---------------------------------------------------------------------------
 
 struct CopyProbe<T>(std::marker::PhantomData<T>);
 
@@ -282,9 +268,6 @@ const fn probe_mix_is_empty(mix: &AudioMix) -> bool {
 /// AU4 §7 item A2.
 #[test]
 fn track_mix_is_clone_not_copy_and_a_curve_defeats_neutrality() {
-    // Rule 5: `Clone + PartialEq + Eq`, and **not** `Copy`. The inherent
-    // method wins whenever the `Copy` bound holds, so the probe reports the
-    // real answer rather than a compile error either way.
     fn assert_clone_eq<T: Clone + PartialEq + Eq>() {}
     assert_clone_eq::<TrackMix>();
     assert!(
@@ -303,8 +286,6 @@ fn track_mix_is_clone_not_copy_and_a_curve_defeats_neutrality() {
     assert!(probe_master_is_neutral(&AudioMaster::default()));
     assert!(probe_mix_is_empty(&AudioMix::default()));
 
-    // Rule 11: a neutral-scalar entry carrying a curve is *not* neutral, so it
-    // is never elided off the wire and never removed by the `retain` arm.
     let mut doc = document_with_one_clip();
     set_track_curve(&mut doc, TrackId(1), "pan_percent", &linear(&[(0, 40)]));
     let entry = track_entry(&doc, TrackId(1)).expect("the entry survives");
@@ -317,15 +298,9 @@ fn track_mix_is_clone_not_copy_and_a_curve_defeats_neutrality() {
     assert_eq!(serde_json::from_str::<Document>(&json).unwrap(), doc);
 }
 
-// ---------------------------------------------------------------------------
-// A3 — resolution, the two constants, the coalesce keys, the two predicates
-// ---------------------------------------------------------------------------
-
 /// AU4 §7 item A3.
 #[test]
 fn resolution_the_display_bound_and_the_two_coalesce_keys_are_exact() {
-    // Rule 9: a curve replaces its scalar; the scalar is the parked value and
-    // is left exactly where it was.
     let mut doc = document_with_one_clip();
     Operation::SetClipAudio {
         clip: ClipId(1),
@@ -341,8 +316,6 @@ fn resolution_the_display_bound_and_the_two_coalesce_keys_are_exact() {
     assert_eq!(envelope_at(&doc, ClipId(1), 15), -150);
     assert_eq!(envelope_at(&doc, ClipId(1), 45), -300);
 
-    // Rule 12: `value_at` returning `None` falls back to the static scalar and
-    // never panics.
     let empty = AutomationCurve {
         keyframes: Vec::new(),
     };
@@ -367,17 +340,12 @@ fn resolution_the_display_bound_and_the_two_coalesce_keys_are_exact() {
         "track_automation:2:gain_tenth_db"
     );
 
-    // Rule 38: `is_hold_only_parameter` is `pub`, is re-exported, and AU4 adds
-    // no entry to it — none of the five owners is a switch, so all five
-    // interpolations stay legal on every one of them.
     for switch in ["bypass", "detector", "true_peak"] {
         assert!(is_hold_only_parameter("audio_compressor", switch));
     }
     for ride in TRACK_AUTOMATION_PARAMETERS {
         assert!(!is_hold_only_parameter("audio_compressor", ride));
         assert!(!is_hold_only_parameter("audio_eq", ride));
-        // None of the five owners is latency-bearing either, so
-        // `is_static_audio_parameter` gains no entry.
         assert!(!kinewright_core::is_static_audio_parameter(
             "audio_compressor",
             ride
@@ -404,9 +372,6 @@ fn resolution_the_display_bound_and_the_two_coalesce_keys_are_exact() {
 /// AU4 §7 item A3: the display bound is a *display* bound.
 #[test]
 fn no_validation_path_reads_the_envelope_display_minimum() {
-    // A key below `ENVELOPE_DISPLAY_MIN_TENTH_DB` but inside the validated
-    // domain is legal everywhere: in the two operations, in `Document::validate`
-    // and in the document invariant reached through a hand edit.
     let below = i64::from(ENVELOPE_DISPLAY_MIN_TENTH_DB) - 100;
     let curve = linear(&[(0, below), (30, -600)]);
 
@@ -425,8 +390,6 @@ fn no_validation_path_reads_the_envelope_display_minimum() {
     });
     doc.validate().unwrap();
 
-    // And a value one tenth-dB past the *validated* floor is rejected, so the
-    // test is not passing for want of any check at all.
     let outside = linear(&[(0, -601)]);
     assert!(matches!(
         Operation::SetClipGainEnvelope {
@@ -437,10 +400,6 @@ fn no_validation_path_reads_the_envelope_display_minimum() {
         Err(OpError::ClipGainEnvelopeOutOfRange { value: -601, .. })
     ));
 }
-
-// ---------------------------------------------------------------------------
-// A5 — the merge and the entry lifecycle
-// ---------------------------------------------------------------------------
 
 /// AU4 §7 item A5.
 #[test]
@@ -466,8 +425,6 @@ fn set_track_mix_merges_the_stored_curves_and_never_drops_a_ride() {
     assert_eq!(entry.gain_curve.as_ref(), Some(&gain));
     assert_eq!(entry.pan_curve.as_ref(), Some(&pan));
 
-    // Rule 33: the strip's `Reset` is a neutral `SetTrackMix`, and it keeps the
-    // rides rather than deleting them through the `retain` arm.
     Operation::SetTrackMix {
         track: TrackId(1),
         gain_tenth_db: 0,
@@ -519,14 +476,10 @@ fn set_track_automation_shares_the_track_mix_entry_lifecycle() {
         "the vector stays sorted by track"
     );
 
-    // Rule 27: setting a curve equal to the stored one is accepted and
-    // produces an identical document.
     let before = doc.clone();
     set_track_curve(&mut doc, TrackId(4), "gain_tenth_db", &curve);
     assert_eq!(doc, before);
 
-    // Rule 32a: clearing the last curve on an otherwise neutral track removes
-    // the entry, leaving the document byte-identical to one that never had it.
     for (track, parameter) in [(TrackId(4), "gain_tenth_db"), (TrackId(1), "pan_percent")] {
         Operation::SetTrackAutomation {
             track,
@@ -542,8 +495,6 @@ fn set_track_automation_shares_the_track_mix_entry_lifecycle() {
         .unwrap();
     assert_eq!(serde_json::to_string(&doc).unwrap(), pristine_json);
 
-    // A track carrying an off-neutral scalar keeps its entry when the last
-    // curve goes: only a fully neutral entry is elided.
     Operation::SetTrackMix {
         track: TrackId(1),
         gain_tenth_db: -55,
@@ -589,8 +540,6 @@ fn hand_edited_track_automation_is_rejected_during_document_validation() {
         })
     ));
 
-    // Rule 39: an unknown parameter is rejected before the curve is validated,
-    // so a typo gets the vocabulary back rather than a structural complaint.
     let mut doc = document_with_one_clip();
     assert_eq!(
         Operation::SetTrackAutomation {
@@ -607,15 +556,9 @@ fn hand_edited_track_automation_is_rejected_during_document_validation() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// A6 — `rebase_clip_curve`
-// ---------------------------------------------------------------------------
-
 /// AU4 §7 item A6.
 #[test]
 fn rebase_preserves_both_boundary_values_exactly_and_holds_exactly() {
-    // Both formulas, and they are not the same expression: the left value is
-    // `value_at(delta_local)` and the right `value_at(delta_local + n - 1)`.
     let curve = linear(&[(0, 0), (100, 1_000)]);
     let rebased = rebase_clip_curve(&curve, TimeCode(20), TimeCode(50));
     assert_eq!(rebased.value_at(TimeCode(0)), curve.value_at(TimeCode(20)));
@@ -637,8 +580,6 @@ fn rebase_preserves_both_boundary_values_exactly_and_holds_exactly() {
         );
     }
 
-    // A `Linear` segment is within one tenth-dB, which is `rounded_div`'s own
-    // resolution.
     let rebased = rebase_clip_curve(&curve, TimeCode(0), TimeCode(50));
     for local in 0..50 {
         let before = curve.value_at(TimeCode(local)).unwrap();
@@ -679,22 +620,15 @@ fn a_truncated_eased_segment_is_reshaped_and_the_move_is_printed() {
 fn rebase_inserts_nothing_when_lengthening_and_keeps_one_key_when_all_are_dropped() {
     let curve = linear(&[(10, -100), (20, -200)]);
 
-    // Rule 15: a lengthening trim inserts nothing on the right, because
-    // `value_at` already clamps past the last key.
     let longer = rebase_clip_curve(&curve, TimeCode::ZERO, TimeCode(400));
     assert_eq!(longer, curve);
 
-    // Rule 13 step 5: an all-dropped curve keeps its single boundary key, so
-    // the envelope becomes a constant equal to what was audible at that edge
-    // and never falls back to the static scalar.
     let after = rebase_clip_curve(&curve, TimeCode(100), TimeCode(30));
     assert_eq!(after.keyframes.len(), 1);
     assert_eq!(after.keyframes[0].at, TimeCode::ZERO);
     assert_eq!(after.keyframes[0].value, -200);
     after.validate().unwrap();
 
-    // Rule 13's negative branch: nothing is inserted on the left and the newly
-    // exposed head is flat at the first key's value.
     let pulled_out = rebase_clip_curve(&curve, TimeCode(-15), TimeCode(60));
     assert_eq!(
         pulled_out
@@ -708,9 +642,6 @@ fn rebase_inserts_nothing_when_lengthening_and_keeps_one_key_when_all_are_droppe
         assert_eq!(pulled_out.value_at(TimeCode(local)), Some(-100));
     }
 
-    // Rule 14: the dedupe never picks a wrong value. A survivor at local 0
-    // means `delta_local` is exactly that key's frame, so the boundary key
-    // carries the same value and the same forward interpolation.
     let colliding = shaped(&[
         (10, -100, KeyframeInterpolation::EaseIn),
         (20, -200, KeyframeInterpolation::Linear),
@@ -724,10 +655,6 @@ fn rebase_inserts_nothing_when_lengthening_and_keeps_one_key_when_all_are_droppe
     );
     rebased.validate().unwrap();
 }
-
-// ---------------------------------------------------------------------------
-// A7 — `clamp_project_curve` and `recompute_duration`
-// ---------------------------------------------------------------------------
 
 /// A project with two 60-frame clips, a track ride, a bus fader ride, a master
 /// fader ride and a master `Effect.keyframes` curve, all keyed to frame 90.
@@ -743,8 +670,6 @@ fn automated_project() -> Document {
         .apply(&mut doc)
         .unwrap();
     }
-    // A clip envelope beside the four project-frame curves, so every
-    // shortening operation below crosses both time bases in one apply.
     set_envelope(&mut doc, ClipId(2), &linear(&[(0, 0), (59, -590)]));
     let ride = linear(&[(0, 0), (90, -240)]);
     set_track_curve(&mut doc, TrackId(1), "gain_tenth_db", &ride);
@@ -805,9 +730,6 @@ fn project_curves(doc: &Document) -> Vec<AutomationCurve> {
 /// AU4 §7 item A7.
 #[test]
 fn shortening_the_project_clamps_every_project_frame_curve_instead_of_failing() {
-    // Rule 19's four shortening operations, each on its own copy of the same
-    // automated project. Every one of them keys past the new duration, and
-    // every one of them previously failed.
     let shortenings: Vec<(&str, Operation, i64)> = vec![
         ("DeleteClip", Operation::DeleteClip { clip: ClipId(2) }, 60),
         (
@@ -926,8 +848,6 @@ fn deleting_the_only_clip_of_an_automated_project_succeeds_with_one_key_at_frame
 fn a_write_that_over_runs_an_unchanged_duration_is_still_rejected() {
     let base = automated_project();
 
-    // An operation that does not shorten the project leaves every curve
-    // byte-identical.
     let mut doc = base.clone();
     Operation::MoveClip {
         clip: ClipId(1),
@@ -1039,10 +959,6 @@ fn clamp_project_curve_is_identity_inside_and_one_key_at_zero_on_an_empty_projec
     );
 }
 
-// ---------------------------------------------------------------------------
-// A8 — one test per §2.4 row
-// ---------------------------------------------------------------------------
-
 /// A ramp keyed across a whole 60-frame clip, plus the same ramp on a colour
 /// node so the two clip-local time bases are proven to move together.
 fn clip_with_envelope_and_colour_curve() -> Document {
@@ -1101,8 +1017,6 @@ fn a_move_a_slip_and_a_replace_leave_the_clip_local_curves_verbatim() {
         envelope_at(&base, ClipId(1), 30)
     );
 
-    // `SlipClip`: the slot and the duration are unchanged, so the curve is
-    // untouched — and the material has slid out from under it (rule 21).
     let mut doc = base.clone();
     Operation::SlipClip {
         clip: ClipId(1),
@@ -1116,8 +1030,6 @@ fn a_move_a_slip_and_a_replace_leave_the_clip_local_curves_verbatim() {
         colour_curve(&base, ClipId(1))
     );
 
-    // `ReplaceClip`: verbatim onto different media, because the slot is
-    // unchanged.
     let mut doc = base.clone();
     Operation::AddAsset {
         asset: asset(2, "asset-2", 300, fps()),
@@ -1152,8 +1064,6 @@ fn a_split_no_longer_slides_the_right_halfs_clip_local_curves() {
     let right = ClipId(2);
     assert_eq!(clip(&doc, right).timeline_start, TimeCode(20));
 
-    // Both halves evaluate to the same values at the same **project** frames
-    // as the original did — for the envelope *and* for the colour curve.
     for project_frame in 0..60 {
         let id = if project_frame < 20 { ClipId(1) } else { right };
         assert_eq!(
@@ -1177,8 +1087,6 @@ fn a_split_no_longer_slides_the_right_halfs_clip_local_curves() {
 fn both_trim_edges_preserve_the_boundary_value_and_no_longer_fail() {
     let base = clip_with_envelope_and_colour_curve();
 
-    // A right trim that shortens past a keyframe **succeeds** where it
-    // previously returned `EffectKeyframeOutsideClip`.
     let mut doc = base.clone();
     Operation::TrimClip {
         clip: ClipId(1),
@@ -1242,10 +1150,6 @@ fn a_slide_and_a_roll_rebase_only_the_neighbour_whose_slot_moved() {
         set_envelope(&mut base, id, &ramp);
     }
 
-    // A **left** slide: the middle is untouched, the left neighbour shortens
-    // on its own right edge, and the right neighbour's `delta_local` is
-    // negative — nothing is inserted on its left and the exposed head is flat
-    // at the first key's value.
     let mut doc = base.clone();
     Operation::SlideClip {
         clip: ClipId(2),
@@ -1329,8 +1233,6 @@ fn a_speed_increase_drops_the_keys_past_the_new_duration_and_only_undo_restores_
     );
     assert_eq!(halved.value_at(TimeCode(29)), ramp.value_at(TimeCode(29)));
 
-    // Returning to 100 % lengthens the clip; rule 15 correctly inserts nothing
-    // and the dropped keys are gone.
     Operation::SetClipSpeed {
         clip: ClipId(1),
         speed_percent: 100,
@@ -1409,8 +1311,6 @@ fn ripple_delete_and_ripple_insert_shift_track_automation_and_never_a_bus_curve(
         base.audio_mix.master.gain_curve
     );
 
-    // Ripple insert at exactly a key's frame: it shifts, and nothing is
-    // inserted.
     let mut doc = base.clone();
     Operation::RippleInsertGap {
         track: TrackId(1),
@@ -1444,8 +1344,6 @@ fn ripple_delete_and_ripple_insert_shift_track_automation_and_never_a_bus_curve(
 #[test]
 fn a_ripple_delete_that_removes_every_key_keeps_one_constant() {
     let mut doc = document_with_three_clips();
-    // Every key sits inside the first clip, which is what the ripple removes,
-    // and `start` is 0 so no boundary key is inserted at `start - 1`.
     set_track_curve(
         &mut doc,
         TrackId(1),
@@ -1474,8 +1372,6 @@ fn a_ripple_delete_that_removes_every_key_keeps_one_constant() {
 #[test]
 fn a_ripple_insert_that_does_not_lengthen_the_project_clamps_rather_than_failing() {
     let mut doc = document_with_three_clips();
-    // A second track whose only clip ends early, so rippling it moves no
-    // project boundary. It does not sync-lock, so the ripple set is just it.
     Operation::AddTrack {
         track: Track {
             id: TrackId(2),
@@ -1585,8 +1481,6 @@ fn deleting_an_owner_takes_its_curve_with_it() {
 #[test]
 fn a_split_divides_the_audio_fades_and_a_short_trim_clamps_them() {
     let mut doc = document_with_one_clip();
-    // A fully-faded clip: 30 + 30 over a 60-frame clip. Today both halves keep
-    // both fades and the split fails with `AudioFadesTooLong`.
     Operation::SetClipAudio {
         clip: ClipId(1),
         gain_tenth_db: 0,
@@ -1619,8 +1513,6 @@ fn a_split_divides_the_audio_fades_and_a_short_trim_clamps_them() {
     assert_eq!(right.audio_fade_out_frames, TimeCode(30));
     split.validate().unwrap();
 
-    // A trim shorter than `fade_in + fade_out` clamps instead of raising
-    // `AudioFadesTooLong`; the fade-out is reduced first.
     let mut trimmed = doc.clone();
     Operation::TrimClip {
         clip: ClipId(1),
@@ -1674,9 +1566,6 @@ fn relinking_an_asset_keeps_every_bound_clips_curve_inside_its_duration() {
         doc.asset(AssetId(1)).unwrap().path,
         std::path::PathBuf::from("relinked.mp4")
     );
-    // `relink_asset` rejects an fps, duration or resolution mismatch outright
-    // (`RelinkMetadataMismatch`), so no bound clip's project duration can
-    // change and every curve is left verbatim (AU4 §0 E4).
     assert_eq!(envelope(&doc, ClipId(1)), envelope(&before, ClipId(1)));
     assert_eq!(
         colour_curve(&doc, ClipId(1)),
@@ -1684,10 +1573,6 @@ fn relinking_an_asset_keeps_every_bound_clips_curve_inside_its_duration() {
     );
     doc.validate().unwrap();
 }
-
-// ---------------------------------------------------------------------------
-// A13, A16, A20 — the core halves
-// ---------------------------------------------------------------------------
 
 /// AU4 §7 item A13: every new serialized default is omitted, so a curve-free
 /// document is byte-identical to a pre-AU4 one.
@@ -1770,8 +1655,6 @@ fn a_curve_bearing_document_produces_the_same_qa_issue_set_as_one_without() {
     };
     assert_eq!(codes(&curved), codes(&plain));
 
-    // Including on a retimed clip, whose envelope rule 25 deliberately leaves
-    // in place: `retimed_audio_muted` keeps its meaning.
     let mut retimed = plain.clone();
     Operation::SetClipSpeed {
         clip: ClipId(2),
@@ -1845,8 +1728,6 @@ fn each_new_field_sits_at_its_declared_wire_position() {
     doc.audio_mix.master.gain_curve = Some(curve);
     doc.validate().unwrap();
 
-    // Each owner is checked on its own serialization, because the document's
-    // own field order interleaves the four.
     assert_wire_order(
         clip(&doc, ClipId(1)),
         &[

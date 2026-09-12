@@ -182,8 +182,6 @@ fn document_and_every_operation_variant_round_trip_through_json() {
     let decoded: Document = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, doc);
 
-    // AU2 §5.1 to §5.4: a document carrying every Part B addition — a bus
-    // fader, a master chain, and a non-default pan law — round trips too.
     let mut part_b = doc.clone();
     Operation::UpsertAudioBus {
         bus: AudioBus {
@@ -314,8 +312,6 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                         )]),
                         keyframes: BTreeMap::new(),
                     },
-                    // AU2 §2.1: the three new nodes are ordinary `Effect`
-                    // records, so they ride the existing wire shape.
                     Effect {
                         id: EffectId(2),
                         name: "audio_parametric_eq".to_owned(),
@@ -1173,8 +1169,6 @@ fn coalesced_gesture_replays_to_the_same_document_and_history_depth() {
     initial.validate().unwrap();
 
     let key = "drag:clip:1";
-    // One edit before the gesture, a five-frame drag under one key, then the
-    // undo and redo the user performed while the journal was still recording.
     let mut script = vec![Command::Do(Operation::AddMarker {
         marker: Marker {
             id: MarkerId(1),
@@ -1209,8 +1203,6 @@ fn coalesced_gesture_replays_to_the_same_document_and_history_depth() {
             panic!("every scripted command should be accepted and journaled");
         };
         live_documents.push((*doc).clone());
-        // The journal must survive a JSON round trip, and the coalesced frames
-        // must keep their key rather than degrading to plain batches.
         let encoded = serde_json::to_string(&journaled).unwrap();
         journal.push(serde_json::from_str::<JournalCommand>(&encoded).unwrap());
     }
@@ -1236,8 +1228,6 @@ fn coalesced_gesture_replays_to_the_same_document_and_history_depth() {
         );
     }
 
-    // The drag plus the marker is two undo steps on both sides; the scripted
-    // undo and redo cancel out.
     let live_depth = drained_history_depth(&live);
     let replayed_depth = drained_history_depth(&replayed);
     assert_eq!(live_depth, 2);
@@ -2525,8 +2515,6 @@ fn primary_correction_descriptor_matches_cc1_contract() {
         ("saturation_percent", -100, 100, 0),
     ];
 
-    // CC5 §2.2 appends 47 matte parameters after the CC1 controls; they are
-    // pinned in `cc5_core.rs`.
     assert_eq!(
         descriptor.parameters.len(),
         expected.len() + kinewright_core::MATTE_PARAMETER_COUNT
@@ -2654,11 +2642,6 @@ fn compatibility_stage_classification_matches_the_published_effect_name_lists() 
         "an effect must occupy at most one compatibility stage"
     );
 
-    // Every other built-in effect must be unclassified, so the lists stay the
-    // single source of truth for QA, delivery, the inspector, and the
-    // compositor. `chroma_key` is an alpha/keying operation: it produces
-    // coverage rather than a display-coded colour transform, so it is
-    // deliberately outside colour compatibility staging.
     for descriptor in EFFECT_DESCRIPTORS {
         let published = LEGACY_DISPLAY_EFFECT_NAMES.contains(&descriptor.name)
             || POST_PRIMARY_LUT_EFFECT_NAMES.contains(&descriptor.name);
@@ -3293,8 +3276,6 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             ducking_sidechain_tracks: Vec::new(),
             gain_curve: None,
         },
-        // AU2 §0 E16: the RMS detector window is sized once when the chain is
-        // built, so a curve on it would be silently ignored.
         AudioBus {
             id: AudioBusId(1),
             name: "Keyed RMS window".to_owned(),
@@ -3318,8 +3299,6 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             ducking_sidechain_tracks: Vec::new(),
             gain_curve: None,
         },
-        // AU2 §2.2 rule 2: a latency-bearing parameter takes no curve at all,
-        // not even a `Hold` one.
         AudioBus {
             id: AudioBusId(1),
             name: "Keyed lookahead".to_owned(),
@@ -3625,9 +3604,6 @@ fn transition_descriptors_validate_all_registered_names_and_document_loads() {
 /// AU4 §7 item A1: the two variants' wire shape.
 #[test]
 fn the_two_automation_operations_require_their_curve_field_on_the_wire() {
-    // serde's derive does NOT reject an omitted bare `Option<T>` (it reads
-    // `missing_field` as `None`), so `deserialize_required_curve` (AU4 §0 E1)
-    // is what makes an omission an error and never a silent clear.
     let omitted = serde_json::json!({ "SetClipGainEnvelope": { "clip": 1 } });
     let error = serde_json::from_value::<Operation>(omitted).unwrap_err();
     assert!(
@@ -3663,10 +3639,6 @@ fn the_two_automation_operations_require_their_curve_field_on_the_wire() {
         }
     );
 
-    // `#[schemars(required, with = "RequiredNullableCurve")]` publishes `curve`
-    // as required AND nullable (AU4 §0 E21; a bare `required` strips the null
-    // branch) — the workspace's first use of the attribute — and `parameter`
-    // carries the closed vocabulary inline, with no `$defs` entry at all.
     let schema = serde_json::to_value(schemars::schema_for!(Operation)).unwrap();
     let variants = schema["oneOf"].as_array().expect("a oneOf of variants");
     let variant = |name: &str| -> &serde_json::Value {
@@ -3735,8 +3707,6 @@ fn clip_gain_envelope_validates_bounds_titles_and_freezes_atomically() {
         Some(&accepted)
     );
 
-    // Rule 27: setting a curve equal to the stored one is accepted and
-    // produces a byte-identical document.
     let before = document.clone();
     Operation::SetClipGainEnvelope {
         clip: ClipId(1),
@@ -3820,9 +3790,6 @@ fn clip_gain_envelope_validates_bounds_titles_and_freezes_atomically() {
     .unwrap();
     assert!(document.clip(ClipId(1)).unwrap().audio_gain_curve.is_none());
 
-    // Rule 31: a title and a freeze are rejected with the existing two errors,
-    // matching `SetClipAudio` arm for arm — including through the document
-    // invariant a hand edit reaches.
     let mut titled = document_with_one_clip();
     Operation::AddTitle {
         track: TrackId(1),
@@ -3975,8 +3942,6 @@ fn track_automation_validates_its_vocabulary_ranges_and_project_bound_atomically
         assert_eq!(document, before, "a rejection must not mutate");
     }
 
-    // Rule 39: the vocabulary check runs *before* the curve is validated, so
-    // an empty curve under a misspelled parameter still reports the spelling.
     assert_eq!(
         Operation::SetTrackAutomation {
             track: TrackId(1),
@@ -5612,9 +5577,6 @@ fn split_preserves_project_adjacency_and_total_duration_at_any_speed() {
             "speed {speed} produced a degenerate clip"
         );
 
-        // Not every project frame maps to an exact source boundary at odd
-        // speeds; scan outward from the midpoint for a representable split,
-        // mirroring how interactive splitting snaps.
         let mid = total.0 / 2;
         let mut split_at = None;
         for offset in 0..total.0 / 2 {
@@ -5895,9 +5857,6 @@ fn au3_export_settings_and_delivery_audio_wire_shapes_are_additive() {
 /// pre-AU5 row carries one.
 #[test]
 fn au5_repair_descriptors_are_additive_in_the_registry() {
-    // Every descriptor in the registry still has a neutral inside its own
-    // domain, minimum below maximum, and a unique parameter name per effect —
-    // the three AU5 entries included.
     for descriptor in EFFECT_DESCRIPTORS {
         let mut names: Vec<&str> = descriptor
             .parameters
@@ -5924,8 +5883,6 @@ fn au5_repair_descriptors_are_additive_in_the_registry() {
         }
     }
 
-    // The twelve AU5 uniforms are new: no pre-AU5 row carries one, and the
-    // three `bypass` rows carry the pre-AU5 shared one.
     let repair = ["audio_denoise", "audio_hum_removal", "audio_declick"];
     let new_uniforms: std::collections::BTreeSet<String> = EFFECT_DESCRIPTORS
         .iter()

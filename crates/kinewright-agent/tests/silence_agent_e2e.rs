@@ -101,12 +101,6 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
         }
     }
 
-    // The agent's plan shape is nondeterministic: it may remove silence via
-    // delete_clip (destructive -> exactly one summarized confirmation) or via
-    // trim/add operations (non-destructive -> none). Either is correct; the
-    // deterministic approve/reject broker behavior is covered by the MCP
-    // integration tests. What must never happen is more than one prompt per
-    // plan.
     assert!(
         approved <= 1,
         "a single edit plan must never ask for confirmation more than once (asked {approved} times)"
@@ -169,10 +163,6 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
     let normalized = normalized_words(&final_transcript);
     println!("FINAL TRANSCRIPT: {final_transcript}");
     println!("FINAL CLIPS: {:?}", edited.tracks[0].clips);
-    // Retention is asserted RELATIVE to the pre-edit transcript: every word
-    // Whisper heard before the edit must survive it. Hardcoding the intended
-    // script would couple the test to ASR accuracy (Whisper has rendered this
-    // fixture's "Alpha." as "Al").
     let original_words = normalized_words(&transcript_text);
     assert!(
         !original_words.is_empty(),

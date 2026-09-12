@@ -257,10 +257,6 @@ pub fn plan_speaker_multicam(
     }
 
     let requested = settings.group_start..settings.group_end;
-    // Build turns per angle first. Real diarization contains short backchannels
-    // and overlapping acknowledgements; merging globally would make one brief
-    // interjection split an otherwise continuous primary-speaker turn before
-    // the minimum-shot policy gets a chance to suppress it.
     let mut words_by_angle: BTreeMap<String, Vec<RawTurn>> = BTreeMap::new();
     for (index, word) in transcript.words.iter().enumerate() {
         if word.source_start < TimeCode::ZERO
@@ -339,9 +335,6 @@ pub fn plan_speaker_multicam(
         return Err(SpeakerMulticamError::AllShotsSuppressed);
     }
 
-    // Once short backchannels are gone, retained cross-angle overlap is a real
-    // ambiguity and remains an explicit error. Adjacent retained turns on the
-    // same angle can safely absorb their intervening silence as one shot.
     let mut retained: Vec<RawTurn> = Vec::with_capacity(turns.len());
     for turn in turns {
         if let Some(previous) = retained.last_mut() {
@@ -361,9 +354,6 @@ pub fn plan_speaker_multicam(
         retained.push(turn);
     }
 
-    // Cover the complete requested range. Cuts land halfway through silence
-    // between speakers, so the plan never flashes back to the placeholder
-    // angle during ordinary conversational gaps.
     let mut coverage_start = settings.group_start;
     for index in 0..retained.len() {
         let coverage_end = retained.get(index + 1).map_or(settings.group_end, |next| {

@@ -458,9 +458,6 @@ impl LutStore {
                 return unreadable(Some(self.luts_dir()), None, &error.to_string());
             }
         };
-        // `symlink_metadata` does not follow a link, so a symlinked store entry
-        // is reported as `missing` instead of being read from outside the
-        // project directory.
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -754,8 +751,6 @@ fn read_regular_file(path: &Path) -> Result<Vec<u8>, MediaError> {
         .with_allowed("a readable regular .cube file")
         .into());
     }
-    // The length is checked from the metadata, so an oversized file is never
-    // read into memory at all.
     if metadata.len() > LUT_MAX_FILE_BYTES {
         return Err(LutStoreError::new(
             LutStoreErrorCode::LutFileTooLarge,
@@ -989,8 +984,6 @@ impl ParseCache {
         }
         self.bytes = self.bytes.saturating_add(Self::entry_bytes(lut));
         self.entries.insert(0, (sha256.to_owned(), Arc::clone(lut)));
-        // The head is never evicted, so the lattice just parsed stays resident
-        // even when it alone exceeds the budget.
         while self.entries.len() > 1
             && (self.bytes > self.max_bytes || self.entries.len() > self.max_entries)
             && let Some((_, evicted)) = self.entries.pop()
@@ -1429,10 +1422,6 @@ LUT_3D_SIZE 2
                 .join("luts")
         );
 
-        // The derivation is a pure string operation on the parent and the
-        // stem: "replace the project extension with `.kinewright-assets`",
-        // with the stem surviving verbatim, spaces and punctuation included —
-        // including a stem that carries its own dots.
         let awkward = LutStore::for_project(&directory.join("Demo Project v2.final.kinewright"))
             .expect("an awkward but saved project path should derive a store");
         assert_eq!(
@@ -1440,10 +1429,6 @@ LUT_3D_SIZE 2
             directory.join("Demo Project v2.final.kinewright-assets")
         );
 
-        // A Windows path derives the same way on Windows. On a unix host the
-        // very same string is a single bare file name - backslash is not a
-        // separator - so it absolutizes against the working directory like
-        // any other relative name, keeping its backslashes in the stem.
         let windows = LutStore::for_project(Path::new(r"C:\Users\riel\Demo Project.kinewright"))
             .expect("a windows-shaped project path derives a store on either host")
             .root()
@@ -1463,8 +1448,6 @@ LUT_3D_SIZE 2
 
     #[test]
     fn store_root_rejects_a_path_with_no_project_file() {
-        // The root directory names no project file: it has neither a parent
-        // nor a stem, and no amount of absolutizing invents one.
         let error = LutStore::for_project(Path::new("/")).unwrap_err();
         let MediaError::Backend(message) = error else {
             panic!("store failures cross as MediaError::Backend");
@@ -1477,12 +1460,6 @@ LUT_3D_SIZE 2
 
     #[test]
     fn a_relative_project_name_derives_the_same_store_however_it_is_spelled() {
-        // CC4 §2.2 forbids the store depending on the working directory, and
-        // the way to honour that is to absolutize once, here - not to refuse
-        // one spelling of a path the operating system already resolved. The
-        // app passes `argv[1]` through untouched, so `kinewright edit.kinewright`
-        // and `kinewright ./edit.kinewright` name one file and must derive one
-        // store.
         let working = std::env::current_dir().expect("the test process has a working directory");
         for (bare, dotted) in [
             ("edit.kinewright", "./edit.kinewright"),
@@ -1506,8 +1483,6 @@ LUT_3D_SIZE 2
             );
         }
 
-        // A nested relative path absolutizes against the same working
-        // directory rather than being refused.
         let nested = LutStore::for_project(Path::new("edits/demo.kinewright"))
             .expect("a nested relative project path derives a store");
         assert_eq!(
@@ -1688,8 +1663,6 @@ LUT_3D_SIZE 2
         assert_eq!(verified.reason, None);
         assert_eq!(verified.path, Some(stored.clone()));
 
-        // Corrupt exactly one byte: the file is still a valid `.cube`, so only
-        // the hash can catch it.
         let mut bytes = fs::read(&stored).unwrap();
         let last = bytes.len() - 2;
         bytes[last] = b'0';
@@ -1728,8 +1701,6 @@ LUT_3D_SIZE 2
         let stored = store.path_for(&asset.sha256).unwrap();
         fs::remove_file(&stored).unwrap();
         fs::create_dir(&stored).unwrap();
-        // CC4 §2.3: `missing` covers "absent or is not a regular file";
-        // `unreadable` is reserved for bytes or metadata that cannot be read.
         let status = store.availability(&asset);
         assert_eq!(status.kind, LutAvailabilityKind::Missing);
         assert!(
@@ -1770,9 +1741,6 @@ LUT_3D_SIZE 2
         let stored = store.path_for(&asset.sha256).unwrap();
         fs::set_permissions(&stored, fs::Permissions::from_mode(0o000)).unwrap();
         if fs::File::open(&stored).is_ok() {
-            // Running as a user that bypasses the permission bits, so this
-            // fixture cannot construct an unreadable file. The malformed-hash
-            // fixture still covers the `unreadable` branch.
             return;
         }
         let status = store.availability(&asset);
@@ -1789,8 +1757,6 @@ LUT_3D_SIZE 2
         let asset = imported_asset(&store, &source, 1);
         let builtin = BuiltinLook::Warm.to_lut_asset(LutAssetId(2));
         {
-            // The resolver is the probe `export_lut_preflight_with` takes, so
-            // it must observe exactly what `availability` observes.
             let resolver = store.availability_resolver();
             assert_eq!(resolver(&asset), store.availability(&asset));
             assert_eq!(resolver(&builtin), store.availability(&builtin));
@@ -1906,8 +1872,6 @@ LUT_3D_SIZE 2
             LutAvailabilityKind::Verified
         );
 
-        // An asset whose bytes are gone is reported per asset; the project is
-        // still saved and the asset is simply missing at the new root.
         fs::remove_file(store.path_for(&imported.sha256).unwrap()).unwrap();
         let second = TempDirectory::new("lut-store-copy-second");
         let third = store_for(&second, "third.kinewright");
@@ -1951,8 +1915,6 @@ LUT_3D_SIZE 2
         assert_eq!(statuses[1].1.kind, LutAvailabilityKind::Verified);
         assert_eq!(statuses[2].1.kind, LutAvailabilityKind::Missing);
 
-        // The parse cache is keyed by content hash, so a second build serves
-        // the same lattice allocation instead of re-parsing.
         let (again, _) = LutLibrary::build(&[imported], Some(&store));
         assert!(Arc::ptr_eq(
             library.get(LutAssetId(1)).unwrap(),
@@ -2007,8 +1969,6 @@ LUT_3D_SIZE 2
 
     #[test]
     fn parse_cache_bounds_match_the_documented_budget() {
-        // The process cache is what the constants describe; the tests below
-        // exercise the same code with small bounds so they stay cheap.
         assert_eq!(LUT_PARSE_CACHE_MAX_BYTES, 128 * 1024 * 1024);
         assert_eq!(LUT_PARSE_CACHE_MAX_ENTRIES, 256);
         let cache = PARSE_CACHE.lock().expect("the parse cache lock is healthy");
@@ -2050,8 +2010,6 @@ LUT_3D_SIZE 2
         cache.insert(&fixture_hash(3), &weighted_lut(3, weight));
         assert_eq!(cache.bytes, before);
 
-        // A single lattice larger than the whole budget is still served: the
-        // head is never evicted, so a miss can never become permanent.
         let mut solo = ParseCache::new(64, 64);
         solo.insert(&fixture_hash(9), &weighted_lut(9, 4_096));
         assert_eq!(solo.entries.len(), 1);
@@ -2080,11 +2038,6 @@ LUT_3D_SIZE 2
 
     #[test]
     fn parse_cache_eviction_is_not_a_correctness_question() {
-        // Evicting an entry only costs a re-parse of the same verified bytes.
-        //
-        // The fixture text is unique to this test: the parse cache is
-        // process-wide, and dropping a hash another test relies on would make
-        // the suite order-dependent.
         const EVICTION_CUBE: &str = "\
 TITLE \"Eviction Probe\"
 LUT_3D_SIZE 2
@@ -2143,8 +2096,6 @@ DOMAIN_MAX 1 1 1
         let source = write_source(&temporary, "sample.cube", SAMPLE_CUBE);
         let asset = imported_asset(&store, &source, 1);
         let stored = store.path_for(&asset.sha256).expect("a canonical digest");
-        // Sparse: the point is that the cap is read from the metadata, so the
-        // bytes are never faulted in.
         fs::OpenOptions::new()
             .write(true)
             .open(&stored)
@@ -2177,8 +2128,6 @@ DOMAIN_MAX 1 1 1
 
         let (library, statuses) = LutLibrary::build(std::slice::from_ref(&asset), Some(&store));
         assert!(library.get(LutAssetId(1)).is_none());
-        // CC4 2.3's `changed` (metadata) row: the bytes were read and they
-        // hash to the recorded content, so this is not `unreadable`.
         assert_eq!(statuses[0].1.kind, LutAvailabilityKind::Changed);
         assert_eq!(
             statuses[0].1.observed_sha256.as_deref(),
@@ -2269,16 +2218,8 @@ DOMAIN_MAX 1 1 1
 
     #[test]
     fn availability_reports_a_metadata_mismatch_instead_of_deferring_it_to_the_render() {
-        // CC4 §2.3: `verified` has to mean "this is what the render will
-        // use". The library build has always refused a record that disagrees
-        // with its hash-verified bytes; observing only the hash here made
-        // every preflight - the export gate, the agent's status surface, the
-        // inspector chip - report `verified` for a hand-edited `size` that
-        // then failed at render time.
         let temporary = TempDirectory::new("lut-availability-mismatch");
         let store = store_for(&temporary, "project.kinewright");
-        // A lattice unique to this test, so the first observation below is a
-        // genuine cold parse rather than a process-parse-cache hit.
         let unique = SAMPLE_CUBE.replace("Sample Look", "Availability Mismatch Fixture");
         let source = write_source(&temporary, "unique.cube", &unique);
         let honest = imported_asset(&store, &source, 1);
@@ -2288,8 +2229,6 @@ DOMAIN_MAX 1 1 1
 
         let cold = store.availability(&edited);
         assert_eq!(cold.kind, LutAvailabilityKind::Changed);
-        // Not `unreadable`: the bytes were read and they hash correctly. The
-        // project record is what disagrees.
         assert_eq!(
             cold.observed_sha256.as_deref(),
             Some(edited.sha256.as_str())
@@ -2305,9 +2244,6 @@ DOMAIN_MAX 1 1 1
         assert!(reason.contains("at size"), "{reason}");
         assert!(reason.contains("observed=33"), "{reason}");
         assert!(reason.contains("allowed=2"), "{reason}");
-        // The recovery has to be honest: `restore` only accepts a candidate
-        // that hashes to the recorded content, and this file already does, so
-        // restoring it would change nothing.
         assert!(reason.contains("re-import"), "{reason}");
         assert!(!reason.contains("restore the"), "{reason}");
 
@@ -2319,9 +2255,6 @@ DOMAIN_MAX 1 1 1
             LutAvailabilityKind::Verified
         );
 
-        // A hand-edited domain is caught the same way, and so is a built-in:
-        // the bake is generated in this binary, but the record still has to
-        // agree with it.
         let mut domain = honest.clone();
         domain.domain_max_millionths = [2_000_000; 3];
         assert_eq!(
@@ -2364,8 +2297,6 @@ DOMAIN_MAX 1 1 1
                 "{issue:?}"
             );
         }
-        // The library build and the preflight now agree about the same
-        // record, which is the whole point.
         let (library, statuses) = LutLibrary::build(std::slice::from_ref(&edited), Some(&store));
         assert!(library.get(LutAssetId(1)).is_none());
         assert_eq!(statuses[0].1.kind, LutAvailabilityKind::Changed);
@@ -2373,34 +2304,23 @@ DOMAIN_MAX 1 1 1
 
     #[test]
     fn the_dedup_compare_never_reads_an_oversized_store_entry() {
-        // The dedup read is a plain `fs::read` of a file in a directory the
-        // user can write to, so it takes the same [`LUT_MAX_FILE_BYTES`] cap
-        // every other store read takes. An entry past the cap is simply not a
-        // dedup candidate: it cannot be the content its own name claims, and
-        // the incoming bytes have already been hashed.
         let temporary = TempDirectory::new("lut-store-dedup-cap");
         let store = store_for(&temporary, "project.kinewright");
         let source = write_source(&temporary, "sample.cube", SAMPLE_CUBE);
         let asset = imported_asset(&store, &source, 1);
         let stored = store.path_for(&asset.sha256).expect("a canonical digest");
 
-        // Sparse, so the test costs no disk: the cap is read from the
-        // metadata and the bytes are never faulted in.
         fs::OpenOptions::new()
             .write(true)
             .open(&stored)
             .expect("the store file should open")
             .set_len(LUT_MAX_FILE_BYTES + 1)
             .expect("the store file should extend");
-        // Hashing streams, so the oversized entry is observed as `changed`:
-        // it no longer carries the bytes its content-addressed name claims.
         assert_eq!(
             store.availability(&asset).kind,
             LutAvailabilityKind::Changed
         );
 
-        // Restore writes through `write_store_file`, so this is the dedup
-        // comparison being asked about an oversized entry.
         let restored = store
             .restore(&asset, &source)
             .expect("an oversized entry is replaced, not compared");
@@ -2463,9 +2383,6 @@ DOMAIN_MAX 1 1 1
             return;
         }
 
-        // The link target carries exactly the right bytes, and the asset is
-        // still not verified: the store owns its files, it does not follow
-        // links out of the project directory.
         let status = store.availability(&asset);
         assert_eq!(status.kind, LutAvailabilityKind::Missing);
         assert!(
@@ -2559,8 +2476,6 @@ DOMAIN_MAX 1 1 1
         let source = write_source(&temporary, "sample.cube", SAMPLE_CUBE);
         let asset = imported_asset(&store, &source, 1);
 
-        // A sparse file: the metadata length is checked before any read, so
-        // the rejection cannot be a parse failure in disguise.
         let huge = temporary.path("huge.cube");
         fs::File::create(&huge)
             .unwrap()

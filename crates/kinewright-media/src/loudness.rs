@@ -225,8 +225,6 @@ pub(crate) fn nearest_rank_index(count: usize, percent: usize) -> usize {
     rank.max(1).min(count) - 1
 }
 
-// ---- True peak -------------------------------------------------------------
-
 /// The prototype and its per-phase normalisation (§3.6): a 4-term
 /// Blackman-Harris windowed sinc on `x_n = (n − 128) / 8`, each phase scaled
 /// so its 32 taps sum to one. Returned phase-major and time-reversed so a
@@ -364,8 +362,6 @@ impl TruePeakMeter {
         self.peak = 0.0;
     }
 }
-
-// ---- The meter -------------------------------------------------------------
 
 /// AU3 §3.1: the streaming loudness meter.
 ///
@@ -832,8 +828,6 @@ pub fn measure_loudness(
     LoudnessMeter::measure(samples, sample_rate, channels)
 }
 
-// ---- The live meter --------------------------------------------------------
-
 /// AU3 §3.9: the worker's device-rate meter with its 16-entry snapshot ring.
 ///
 /// `fill_ring` pushes every post-clamp chunk it takes from the mixer — up to
@@ -1053,8 +1047,6 @@ mod tests {
         );
     }
 
-    // ---- A5 --------------------------------------------------------------
-
     /// AU3 §7 item A5: one push, 1 024-frame pushes, and 7-frame pushes of the
     /// same programme produce bit-identical `finish()` output.
     #[test]
@@ -1133,8 +1125,6 @@ mod tests {
         assert!((600..=605).contains(&peak_delta));
         assert!((600..=605).contains(&true_peak_delta));
     }
-
-    // ---- A6 --------------------------------------------------------------
 
     fn assert_coefficients(label: &str, observed: [f64; 3], expected: [f64; 3]) {
         for (index, (observed, expected)) in observed.iter().zip(expected).enumerate() {
@@ -1238,8 +1228,6 @@ mod tests {
         );
     }
 
-    // ---- A7 --------------------------------------------------------------
-
     /// AU3 §7 item A7, per EBU Tech 3341 v3: integrated loudness cases 1–5 at
     /// 1 kHz stereo read −2300 / −3300 / −2300 / −2300 / −2300 ±10.
     #[test]
@@ -1292,8 +1280,6 @@ mod tests {
         assert_eq!(block.sample_peak_dbfs_hundredths, Some(-602));
         assert!(block.true_peak_dbtp_hundredths.is_some());
     }
-
-    // ---- A8 --------------------------------------------------------------
 
     /// AU3 §7 item A8, per EBU Tech 3341 v3: case 12 (momentary, alternating
     /// −20 dBFS 0.18 s / −30 dBFS 0.22 s) reads −2300 ±10 on every complete
@@ -1378,8 +1364,6 @@ mod tests {
         );
     }
 
-    // ---- A9 --------------------------------------------------------------
-
     /// AU3 §7 item A9, per EBU Tech 3342 v3: loudness range cases 1–4 read
     /// 1 000 / 500 / 2 000 / 1 500 ±10 (case 4 ungated 3 000).
     #[test]
@@ -1447,8 +1431,6 @@ mod tests {
         assert!(one_window.short_term_max_lufs_hundredths.is_some());
         assert_eq!(one_window.loudness_range_lu_hundredths, None);
     }
-
-    // ---- A10 -------------------------------------------------------------
 
     /// A 16× / 512-tap reference interpolator written here so the meter is
     /// never verified with its own taps (the audio.rs `reference_true_peak`
@@ -1643,8 +1625,6 @@ mod tests {
         assert!(meter.peak >= 0.25 - 1.0e-12);
     }
 
-    // ---- The live shape --------------------------------------------------
-
     /// §3.1 / §3.9: `truncate_to` keeps the blocks ending at or before the
     /// position, discards the open sub-block, keeps the peaks, and keys new
     /// sub-blocks from the truncation point; `reset` forgets everything.
@@ -1662,11 +1642,6 @@ mod tests {
         let snapshot = meter.snapshot();
         assert_eq!(snapshot.true_peak_dbtp_hundredths, Some(-602));
         assert!(snapshot.integrated_lufs_hundredths.is_some());
-        // §3.9: the 100 open frames of the −6 dBFS tone were discarded, not
-        // carried into the next sub-block. One block of a 20 dB quieter tone
-        // must therefore read exactly what a fresh meter reads for it; a
-        // leaked open sum would inflate the first sub-block by 3× (+1.76 dB
-        // on the block mean).
         let quiet = tone(1_000.0, 0.05, 4_800 * 4, RATE, 2);
         assert_eq!(meter.push(&quiet).unwrap(), 4);
         assert_eq!(meter.last_block_end(), Some(4_800 * 10 + 100));
@@ -1838,8 +1813,6 @@ mod tests {
             RATE,
         );
         let mut meter = LoudnessMeter::new(RATE, 2).unwrap();
-        // Chunk sizes (in frames) that land short of, exactly on, and well
-        // past a 4 800-frame sub-block boundary.
         let sizes = [1_usize, 7, 4_800, 4_799, 9_601, 13, 2, 19_200, 331];
         let mut sizes = sizes.iter().copied().cycle();
         let mut offset = 0_usize;
@@ -1889,8 +1862,6 @@ mod tests {
     /// sums actually apply — unity for the two channels this meter measures,
     /// so mono and stereo are bit-identical to the unweighted sum.
     #[test]
-    // The weights are exact constants and the point of the test is that the
-    // measured channels multiply by exactly one, bit for bit.
     #[allow(clippy::float_cmp)]
     fn the_channel_weights_are_unity_over_the_measured_channels() {
         assert_eq!(BS1770_CHANNEL_WEIGHTS, [1.0, 1.0, 1.0, 1.41, 1.41]);
@@ -1932,11 +1903,7 @@ mod tests {
     /// media's, and this is it.
     #[test]
     fn the_true_peak_detector_note_names_the_au3_meter() {
-        // Unwrap the doc comment so the pin is on the sentence, not the line
-        // breaks. `core.autocrlf` is `true` by default on a Windows checkout,
-        // so normalize the line ending first: without it the unwrap matches
-        // nothing there and the pin asserts how the reader's git is
-        // configured rather than what `dsp.rs` says.
+        // Windows checkouts may carry CRLF; the pin is the sentence, not the line ending.
         let dsp = include_str!("dsp.rs")
             .replace("\r\n", "\n")
             .replace("\n/// ", " ");

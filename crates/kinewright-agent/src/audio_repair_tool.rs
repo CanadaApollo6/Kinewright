@@ -115,9 +115,6 @@ pub(crate) fn get_audio_repair(
             expected, revision,
         )));
     }
-    // AU5 §4.1 rule 77: the point rule is `get_audio_spectrum`'s, spelled the
-    // same way, because a third spelling of "where in the graph" would be a
-    // third thing to learn.
     let point = match (args.track, args.bus) {
         (Some(_), Some(_)) => {
             return Err(AudioRepairRefusal::Text(
@@ -128,8 +125,6 @@ pub(crate) fn get_audio_repair(
         (None, Some(bus)) => MixSpectrumPoint::Bus(bus),
         (None, None) => MixSpectrumPoint::Master,
     };
-    // AU1 §6.2's range rule: both bounds omitted measures the whole timeline,
-    // and either bound alone fills the other.
     let range = match (args.start_frame, args.end_frame) {
         (None, None) => None,
         (start, end) => {
@@ -258,9 +253,6 @@ mod tests {
             "{} bytes",
             AUDIO_REPAIR_DESCRIPTION.len()
         );
-        // The runtime's own rule, not a second spelling of it: an "e.g." or a
-        // "48 kHz." added to sentence one would truncate what `get_capability`
-        // publishes, and a `". "` split here would not notice.
         let first = crate::runtime::first_sentence(AUDIO_REPAIR_DESCRIPTION);
         let first = first.as_str();
         assert!(first.contains("percentile"), "{first}");

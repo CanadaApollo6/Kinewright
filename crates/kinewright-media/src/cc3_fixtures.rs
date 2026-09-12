@@ -156,10 +156,6 @@ const CC3_EVIDENCE_FIXTURES: [&str; 14] = [
     "cc3_proof_parity",
 ];
 
-// ---------------------------------------------------------------------------
-// The §10.2 raster.
-// ---------------------------------------------------------------------------
-
 fn pattern_sample(pattern: usize, level: f32) -> [f32; 3] {
     match pattern {
         0 => [level, level, level],
@@ -223,10 +219,6 @@ fn raster_channel_values() -> Vec<f32> {
     values.dedup();
     values
 }
-
-// ---------------------------------------------------------------------------
-// Effect construction.
-// ---------------------------------------------------------------------------
 
 fn color_node_effect(id: u64, name: &str, parameters: BTreeMap<String, ParamValue>) -> Effect {
     Effect {
@@ -344,10 +336,6 @@ pub(crate) fn primary_effect(id: u64) -> Effect {
         .collect(),
     )
 }
-
-// ---------------------------------------------------------------------------
-// CPU reference and GPU rendering.
-// ---------------------------------------------------------------------------
 
 fn cpu_nodes(effects: &[Effect]) -> Vec<ColorNode> {
     resolve_color_nodes(effects).expect("CC3 fixture node stack must resolve")
@@ -536,10 +524,6 @@ fn assert_gpu_case(
     (monitor, linear, actual_monitor)
 }
 
-// ---------------------------------------------------------------------------
-// Evidence.
-// ---------------------------------------------------------------------------
-
 fn emit_cc3_evidence(
     fixture: &str,
     backend: &str,
@@ -585,15 +569,6 @@ pub(crate) fn json_hash(value: &Value) -> String {
             .as_bytes(),
     )
 }
-
-// ---------------------------------------------------------------------------
-// The independent f64 transcription of CC3 §2 (fixture-quality rule 10.1.1).
-//
-// Nothing below calls the production crate. The constants are the §2.1 digits
-// and the algorithms are the §2.2/§2.3 pseudocode, transcribed by hand, so a
-// parity or boundary assertion compares two implementations of the written
-// contract rather than one implementation with itself.
-// ---------------------------------------------------------------------------
 
 const SPEC_ALPHA: f64 = 1.099_296_8;
 const SPEC_BETA: f64 = 0.018_053_969;
@@ -683,9 +658,6 @@ impl SpecCurve {
         let mut tangents = vec![0.0_f64; count];
         tangents[0] = deltas[0];
         tangents[count - 1] = deltas[count - 2];
-        // The contract writes the interior tangent as a literal average.
-        // `f64::midpoint` takes a different branch for huge magnitudes, and a
-        // transcription of the contract must not carry a second rounding rule.
         #[allow(clippy::manual_midpoint)]
         for i in 1..count - 1 {
             tangents[i] = (deltas[i - 1] + deltas[i]) / 2.0;
@@ -789,10 +761,6 @@ fn assert_close(actual: f32, expected: f32, tolerance: f32, label: &str) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §10.2 / §10.3.1: the raster and its coverage, and the identity gate.
-// ---------------------------------------------------------------------------
-
 /// CC3 §10.2. The raster asserts its own coverage; a raster that fails
 /// coverage fails the suite.
 ///
@@ -806,8 +774,6 @@ fn assert_close(actual: f32, expected: f32, tolerance: f32, label: &str) {
 /// seven rather than claiming coverage the raster does not have.
 #[test]
 fn cc3_parity_raster_asserts_its_own_documented_coverage() {
-    // Transcribed a second time from §10.2 so a typo in CC3_RASTER_LEVELS
-    // cannot silently redefine the contract raster.
     const DOCUMENTED_LEVELS: [f32; 24] = [
         -0.50,
         -0.25,
@@ -874,8 +840,6 @@ fn cc3_parity_raster_asserts_its_own_documented_coverage() {
         "raster has only {upper_mid_open} distinct levels in (0.5, 1.0]"
     );
 
-    // §10.1.3: the CC1 raster's failure mode was that no sample exceeded 0.2
-    // linear. Assert the span explicitly rather than trusting the level list.
     assert!(
         values.iter().any(|value| *value >= 4.0),
         "raster must reach 4.0 linear"
@@ -999,8 +963,6 @@ fn cc3_inactive_nodes_are_bit_identical_to_the_stack_without_them() {
         ),
     ];
 
-    // Two carriers: the node alone, and the node behind an active primary so a
-    // non-empty buffer cannot hide a mis-serialized inactive record.
     let primary = primary_effect(90);
     let carriers: [(&str, Vec<Effect>); 2] = [
         ("alone", Vec::new()),
@@ -1079,10 +1041,6 @@ fn cc3_inactive_nodes_are_bit_identical_to_the_stack_without_them() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §10.3.2: the encoding bijection.
-// ---------------------------------------------------------------------------
-
 /// CC3 §10.3.2. `D(E(x)) == x` within `LINEAR_CPU_GPU_MAX` over the raster,
 /// `E` is strictly increasing, and the four §2.1 anchors hold to ±2e-5.
 #[test]
@@ -1107,8 +1065,6 @@ fn cc3_grade709_is_a_bijection_and_matches_the_documented_anchors() {
         worst_round_trip = worst_round_trip.max(round_trip);
     }
 
-    // CC3 §2.1 worked anchors, written as literals. The contract states them
-    // as normative to ±2e-5.
     assert_close(
         grade709_encode(0.18),
         0.408_848,
@@ -1152,15 +1108,11 @@ fn cc3_grade709_is_a_bijection_and_matches_the_documented_anchors() {
         "curves master (0,0) (5000,6000) (10000,10000) at 0.18",
     );
 
-    // E(0) = 0 and D(0) = 0 exactly: `sgn(0) = 0`, which is what makes the
-    // §10.3.1 identity gate bit-identical rather than tolerance-bounded.
     assert_eq!(grade709_encode(0.0).to_bits(), 0.0_f32.to_bits());
     assert_eq!(grade709_decode(0.0).to_bits(), 0.0_f32.to_bits());
     assert_close(grade709_encode(1.0), 1.0, ANCHOR_TOLERANCE, "E(1)");
     assert_close(grade709_decode(1.0), 1.0, ANCHOR_TOLERANCE, "D(1)");
 
-    // The independent f64 transcription must agree with the production f32
-    // pair over the whole raster, or one of the two is wrong.
     let mut worst_spec = 0.0_f64;
     for value in &values {
         let expected = spec_grade709_encode_f64(f64::from(*value));
@@ -1192,10 +1144,6 @@ fn cc3_grade709_is_a_bijection_and_matches_the_documented_anchors() {
         metrics,
     );
 }
-
-// ---------------------------------------------------------------------------
-// §10.3.3: monotonicity.
-// ---------------------------------------------------------------------------
 
 /// A neutral BT.709 ramp of `2^depth_bits` codes, decoded to scene-linear.
 pub(crate) fn neutral_ramp(depth_bits: u32) -> (u32, u32, WorkingFrame) {
@@ -1258,9 +1206,6 @@ const PLATEAU_CURVE: [(i64, i64); 4] = [(0, 0), (2_500, 3_000), (5_000, 3_000), 
 /// 10-bit neutral ramps after final monitor encoding.
 #[test]
 fn cc3_monotone_nodes_never_descend_on_the_neutral_ramps() {
-    // `gain = 0` is excluded here by construction: §2.2 makes a zero slope a
-    // legal constant channel, which is monotone non-decreasing but is covered
-    // by the §10.3.4 boundary fixture instead.
     const LIFT_VALUES: [i64; 3] = [-2_000, 0, 2_000];
     const GAMMA_VALUES: [i64; 3] = [100, 1_000, 4_000];
     const GAIN_VALUES: [i64; 3] = [1, 1_000, 4_000];
@@ -1348,8 +1293,6 @@ fn cc3_monotone_nodes_never_descend_on_the_neutral_ramps() {
         "every boundary combination with slope > 0 must be covered"
     );
 
-    // A representative extreme subset also runs through the production shader
-    // so the GPU dispatch is held to the same gate.
     let gpu_case_names = [
         "monotone_master_curve",
         "zero_slope_plateau",
@@ -1410,10 +1353,6 @@ fn cc3_monotone_nodes_never_descend_on_the_neutral_ramps() {
         metrics,
     );
 }
-
-// ---------------------------------------------------------------------------
-// §10.3.4: boundaries.
-// ---------------------------------------------------------------------------
 
 /// The §4.1 control table: name, minimum, maximum, neutral, interior probe.
 ///
@@ -1624,9 +1563,6 @@ fn cc3_every_control_bound_matches_a_hand_derived_expected_value() {
         }));
     }
 
-    // Per-channel curve composed with the master curve, so the §2.3 evaluation
-    // order (channel first, then master) is itself covered by a written-out
-    // expected value rather than only by the ordering fixture.
     let red_points = [(0, -500), (4_000, 5_500), (10_000, 10_000)];
     let master_points = [(0, 0), (5_000, 6_000), (10_000, 10_000)];
     let composed: [(ColorCurveChannel, &[(i64, i64)]); 2] = [
@@ -1677,8 +1613,6 @@ fn cc3_every_control_bound_matches_a_hand_derived_expected_value() {
 fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_infinity() {
     let raster = cc3_parity_raster();
 
-    // §4.1: finite output for every raster sample when at most one of slope or
-    // power sits at its maximum, i.e. for each control at its bound alone.
     let mut finite_checks = 0_usize;
     for (name, minimum, maximum, _, interior) in WHEEL_CONTROLS {
         for value in [minimum, maximum, interior] {
@@ -1711,9 +1645,6 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
         }
     }
 
-    // The documented simultaneous extreme. §4.1 states the linear-4.0 result is
-    // mathematically ~1.1e53 and overflows f32 to +inf; it is asserted as
-    // +inf, never excused, and never NaN.
     let extreme_parameters = [
         ("gain_master_thousandths", 4_000_i64),
         ("gain_red_thousandths", 4_000),
@@ -1756,24 +1687,6 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
         "the simultaneous extreme must actually reach the f32 overflow the contract documents"
     );
 
-    // The final monitor clamp resolves the overflow, and no early clamp is
-    // applied anywhere. On the CPU reference that means the +inf red channel
-    // encodes to 255.
-    //
-    // The production GPU path cannot reproduce that code, and the fixture says
-    // so rather than asserting an agreement that does not exist. The working
-    // surface is `Rgba16Float`: `half::f16::from_f32` rounds an out-of-range
-    // f32 to +/-inf per IEEE-754, while this adapter's f32->f16 image store
-    // saturates to +/-65504 and turns a true f32 infinity into NaN, which the
-    // monitor encode maps to 0. Both are legal resolutions of a documented
-    // overflow and neither invents a mid-range colour, so the fixture asserts
-    // that (a) the GPU working value is still at or beyond the half-float
-    // limit, proving no early clamp, and (b) the monitor code sits at a clamp
-    // extreme. The observed code is recorded in the evidence.
-    //
-    // This divergence is exactly why the simultaneous extreme is not part of
-    // the §10.3.9 parity raster: there it would trip the `non_finite` counter,
-    // which must stay zero for every case the gate does cover.
     let gpu = fallback_gpu();
     let compositor = Compositor::new(gpu.context());
     let (width, height, frame) = boundary_frame();
@@ -1818,9 +1731,6 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
         );
     }
 
-    // A curve whose points sit at -2000 and 12000 on the diagonal is identity
-    // within LINEAR_CPU_GPU_MAX, and it is *not* structurally identity, so it
-    // is really evaluated rather than short-circuited.
     let diagonal_points = [
         (COLOR_CURVE_COORDINATE_MIN, COLOR_CURVE_COORDINATE_MIN),
         (COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MAX),
@@ -1914,10 +1824,6 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
         metrics,
     );
 }
-
-// ---------------------------------------------------------------------------
-// §10.3.5 / §10.3.6: per-channel independence and collinear identity.
-// ---------------------------------------------------------------------------
 
 /// CC3 §10.3.5. Changing only the red controls, or only the red curve, leaves
 /// green and blue bit-identical on the CPU reference and on the GPU.
@@ -2017,8 +1923,6 @@ fn cc3_red_only_changes_leave_green_and_blue_bit_identical() {
             }
         }
 
-        // The monitor path must agree too: an 8-bit encode that coupled
-        // channels would be invisible in the linear comparison alone.
         let baseline_monitor = gpu_monitor(&compositor, resolution, &frame, &baseline_stack);
         let variant_monitor = gpu_monitor(&compositor, resolution, &frame, &variant_stack);
         for (baseline_pixel, variant_pixel) in baseline_monitor
@@ -2171,10 +2075,6 @@ fn cc3_collinear_sixteen_point_curve_is_identity_without_the_short_circuit() {
         metrics,
     );
 }
-
-// ---------------------------------------------------------------------------
-// §10.3.7 / §10.3.8: ordering and degenerate automation.
-// ---------------------------------------------------------------------------
 
 fn cc3_asset() -> kinewright_core::MediaAsset {
     kinewright_core::MediaAsset {
@@ -2333,9 +2233,6 @@ fn cc3_node_order_changes_the_result_and_each_order_matches_the_cpu_reference() 
 fn cc3_degenerate_automation_truncates_on_cpu_and_gpu() {
     const CROSSING_FRAME: i64 = 20;
 
-    // Built through the ordinary edit path, so the document is provably legal:
-    // §6 policy 2 allows keyframed coordinates while `point_count` carries at
-    // most one keyframe, and that keyframe must be `Hold`.
     let mut document = cc3_document();
     let base = curves_effect(
         11,
@@ -2430,8 +2327,6 @@ fn cc3_degenerate_automation_truncates_on_cpu_and_gpu() {
         "degenerate_automation_truncated",
     );
 
-    // The truncated curve must not be the same node as the untruncated one, or
-    // "both paths agree" would be trivially true.
     let settled_linear = cpu_reference_linear(&frame, &cpu_nodes(&[settled]));
     let crossed_linear = cpu_reference_linear(&frame, &cpu_nodes(&stack));
     assert_ne!(
@@ -2463,10 +2358,6 @@ fn cc3_degenerate_automation_truncates_on_cpu_and_gpu() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §10.3.9: CPU/GPU parity.
-// ---------------------------------------------------------------------------
-
 fn assert_cc3_gpu_parity(gpu: &FixtureGpu) {
     let backend = gpu.backend().to_owned();
     let compositor = Compositor::new(gpu.context());
@@ -2478,8 +2369,6 @@ fn assert_cc3_gpu_parity(gpu: &FixtureGpu) {
     let mut above_domain_total = 0_usize;
     let mut non_finite_total = 0_usize;
 
-    // The §6.2 neutral-identity numbers, reused verbatim: an empty node stack
-    // must reproduce the CPU reference within one monitor code.
     let neutral_expected = cpu_reference_monitor(&frame, &[]);
     let neutral_actual = gpu_monitor(&compositor, resolution, &frame, &[]);
     let neutral_metric = abs_code_diff_rgb(&neutral_actual, &neutral_expected);
@@ -2641,10 +2530,6 @@ fn cc3_gpu_compositor_matches_the_cpu_reference_on_software_fallback() {
 fn cc3_gpu_compositor_matches_the_cpu_reference_on_hardware() {
     assert_cc3_gpu_parity(&hardware_gpu());
 }
-
-// ---------------------------------------------------------------------------
-// §10.3.10: serialization, history, and typed rejections.
-// ---------------------------------------------------------------------------
 
 /// A 16-point curve with strictly increasing `x` and the given `y` offset.
 fn sixteen_point_curve(offset: i64) -> Vec<(i64, i64)> {
@@ -3148,10 +3033,6 @@ fn cc3_illegal_edits_are_rejected_atomically_with_field_observed_and_allowed() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §10.3.12: proof parity.
-// ---------------------------------------------------------------------------
-
 /// CC3 §10.3.12. A clip carrying all three node kinds renders identically
 /// through the full-raster monitor proof and the production preview renderer,
 /// and the ordered stage list matches `clip.effects`.
@@ -3266,8 +3147,6 @@ fn cc3_proof_parity_renders_all_three_node_kinds_identically() {
     ));
     gpu.assert_proof_provenance(&proof.metadata);
 
-    // The nodes must actually change the proof, or "renders identically"
-    // would be a statement about a neutral pipeline.
     let neutral_reference = cpu_reference_monitor(&working, &[]);
     assert_ne!(
         cpu_reference, neutral_reference,
@@ -3302,10 +3181,6 @@ fn cc3_proof_parity_renders_all_three_node_kinds_identically() {
     );
     println!("CC3_EVIDENCE_SOURCE {}", file_hash(&path));
 }
-
-// ---------------------------------------------------------------------------
-// The fixture manifest.
-// ---------------------------------------------------------------------------
 
 /// CC3 §10.1.4. Every declared tolerance equals the code constant the fixtures
 /// actually gate with, and every required fixture is declared.
@@ -3414,8 +3289,6 @@ fn cc3_manifest_declares_every_required_fixture_and_tolerance() {
         MIN_CHANGED_LINEAR_BASIS_POINTS as f64,
     );
 
-    // Every required fixture is declared, and nothing is declared that the
-    // suite does not actually emit.
     assert_eq!(
         manifest["required_evidence"],
         json!(CC3_EVIDENCE_FIXTURES),

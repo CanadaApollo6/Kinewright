@@ -116,10 +116,6 @@ const AU6_MANIFEST: &str = include_str!("../tests/fixtures/au6_manifest.json");
 /// module) so item 20 can still name its owner.
 const OWNER_HANN_MAIN_LOBE_BINS: u32 = 4;
 
-// ===========================================================================
-// S16: two margin helpers, one per direction.
-// ===========================================================================
-
 /// Ceiling margin: `allowed / observed`. Zero observed is infinite.
 fn ceiling_margin(observed: i64, allowed: i64) -> f64 {
     if observed == 0 {
@@ -171,10 +167,6 @@ fn print_ceiling(term: &str, observed: i64, allowed: i64) {
         render_margin(margin)
     );
 }
-
-// ===========================================================================
-// Shared engine and mix settings.
-// ===========================================================================
 
 fn engine() -> MutexGuard<'static, FfmpegMediaEngine> {
     static ENGINE: OnceLock<Mutex<FfmpegMediaEngine>> = OnceLock::new();
@@ -436,9 +428,6 @@ fn room_tone_asset(label: &str) -> (TempDirectory, GeneratedMedia, MediaAsset) {
         .write_capture(&click_free[start..end])
         .expect("the learn-gap capture is a legal room-tone write");
     let probed = probe_path(&capture.path, AssetId(2)).expect("the capture probes");
-    // R3: 37 project frames at 48 kHz map to 44 source frames at 30 fps;
-    // FFmpeg's probe can report the truncated-up neighbour, so the asset is
-    // stamped to the pinned length rather than trusted as-probed.
     assert!(
         (probed.duration.0 - AU6_C_ROOM_TONE_ASSET_FRAMES).abs() <= 1,
         "room-tone capture duration {} is not the pinned 44 ± 1",
@@ -467,8 +456,6 @@ fn location_filled_scene() -> (Au6Scene, Document) {
     );
     scene._room_tone_store = Some(store);
     scene._media.push(media);
-    // The seam is measured on the fill commit, before the repair bus
-    // processes the track (§4(c)(5) / §5.3 step 3).
     let mut ops = au6_c_gap_operations(kinewright_core::au6_scenarios::AU6_C_RIGHT_CLIP_ID);
     ops.extend(au6_c_fill_operations(id));
     let document = scene.commit(&ops);
@@ -763,10 +750,6 @@ fn declick_effect() -> kinewright_core::Effect {
         _ => panic!("declick-only operations write one bus"),
     }
 }
-
-// ===========================================================================
-// §11.2 items 13–19b — source non-vacuity.
-// ===========================================================================
 
 #[test]
 fn au6_every_authored_level_matches_its_analytic_derivation() {
@@ -1080,8 +1063,6 @@ fn au6_the_scratch_track_is_not_the_master() {
     assert_ne!(scratch, master);
     assert!(scratch.iter().any(|sample| *sample != 0.0));
     let identity = au6_scratch_pcm(&master, 0, AU6_D_SCRATCH_NOISE_LEVEL_DBFS_HUNDREDTHS);
-    // A zero offset still adds noise, but the delay identity is the failing
-    // construction the contract names: the delayed scratch must differ.
     assert_ne!(identity, scratch);
 }
 
@@ -1241,10 +1222,6 @@ fn au6_restated_constants_agree_with_their_owners() {
     let stale = AU6_LOUDNESS_GATING_BLOCK_SAMPLE_FRAMES_RESTATED + 1;
     assert_ne!(u64::from(stale), LOUDNESS_GATING_BLOCK_FRAMES);
 }
-
-// ===========================================================================
-// §11.2 items 21–28 — interview gates.
-// ===========================================================================
 
 fn interview_turn_bus_levels(engine: &FfmpegMediaEngine, document: &Document, bus: &str) -> i32 {
     let mut readings = Vec::new();
@@ -1547,10 +1524,6 @@ fn au6_a_a_hot_master_clips_and_says_so() {
     );
 }
 
-// ===========================================================================
-// §11.2 items 29–30 — podcast.
-// ===========================================================================
-
 fn voice_b_spread(engine: &FfmpegMediaEngine, document: &Document) -> i32 {
     let windows = engine
         .mix_window_levels(
@@ -1687,10 +1660,6 @@ fn au6_b_the_makeup_less_chain_exceeds_the_loudness_range() {
     println!("AU6 makeup-less LRA={lra}");
     assert!(lra > AU6_PODCAST_LRA_MAX_LU_HUNDREDTHS);
 }
-
-// ===========================================================================
-// §11.2 items 31–37 — location dialogue.
-// ===========================================================================
 
 fn repair_point(document: &Document) -> MixSpectrumPoint {
     if document.audio_mix.bus(AU6_C_REPAIR_BUS).is_some() {
@@ -1864,8 +1833,6 @@ fn au6_c_a_chain_without_the_declick_node_keeps_every_click() {
     ops.extend(repair_without_declick());
     let document = scene.commit(&ops);
     let engine = engine();
-    // Denoise on the bus can swallow a few clicks; the failing direction is
-    // that the *track* still carries every authored click when declick is off.
     let report = engine
         .audio_repair(
             &document,
@@ -1933,8 +1900,6 @@ fn au6_c_the_dialogue_survives_the_repair() {
             .expect("speech after");
         let before_vals: Vec<i32> = before.windows.iter().flatten().copied().collect();
         let after_vals: Vec<i32> = after.windows.iter().flatten().copied().collect();
-        // Speech retention is the peak window on each turn, not the mean:
-        // averaging in the noise floor makes denoise look like a 4 dB loss.
         before_levels.push(*before_vals.iter().max().expect("a turn has a window"));
         after_levels.push(*after_vals.iter().max().expect("a turn has a window"));
     }
@@ -2020,9 +1985,6 @@ fn au6_c_a_one_frame_slip_breaks_the_seam() {
             track: AU6_C_DIALOGUE_TRACK,
             asset: room.id,
             at: TimeCode(AU6_C_GAP_RANGE.start.0 + 1),
-            // The authored tile is 18 source frames → 15 project frames. At
-            // start+1 that overlaps the right clip; two source frames shorter
-            // leaves a hole without overlapping.
             source: TimeCode(0)
                 ..TimeCode(
                     kinewright_core::au6_scenarios::AU6_C_FILL_TILE_SOURCE_RANGE
@@ -2556,9 +2518,6 @@ const AU6_MANIFEST_PLACEHOLDER_NEEDLES: [&str; 6] =
 fn au6_manifest_declares_every_required_fixture_and_constant() {
     let manifest: serde_json::Value = serde_json::from_str(AU6_MANIFEST).expect("manifest parses");
     let object = manifest.as_object().expect("object");
-    // R21: §11.3's prose names twenty-six keys and then asserts "twenty-four".
-    // The two the count dropped are `required_fixtures` and `manifest_self_test`,
-    // both of which the same sentence requires; the count follows the list.
     const KEYS: [&str; 26] = [
         "contract",
         "contract_token",
@@ -3429,14 +3388,6 @@ fn au6_declared_test_names_exist_in_their_source_files() {
         );
         assert!(AU6_MEDIA_TESTS.contains(&name));
     }
-    // R24: Part A declares no eval test, so `AU6_TEST_SOURCES` does not carry
-    // `eval.rs` or `bin/kinewright-eval.rs` and `au6_inventory_groups` has no
-    // EVAL row. Both directions of the scan were vacuous over them — there is
-    // no `au6_` test in either file to find and no name to look for — while
-    // the two `include_str!`s embedded **19 695 lines** of unrelated source
-    // into this test binary and made every edit to them recompile it. This
-    // assertion is the seam: the moment Part B declares an eval test, it fails
-    // and says what to restore, so the saving cannot turn into a missing gate.
     assert!(
         AU6_EVAL_TESTS.is_empty(),
         "Part B declares {} eval test(s): restore `crates/kinewright-agent/src/eval.rs` and \

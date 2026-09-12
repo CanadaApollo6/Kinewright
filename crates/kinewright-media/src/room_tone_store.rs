@@ -432,10 +432,6 @@ impl RoomToneStore {
         let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         let sha256 = sha256_bytes(&bytes);
         let destination = self.path_for(&sha256)?;
-        // AU5 §0 R107: `already_present` comes back from the write, not from a
-        // second `availability` pass. The dedup compare has already read and
-        // hashed the existing file; asking twice cost two full reads and two
-        // digest passes of a file that can be 23 MB.
         let already_present = self.write_store_file(&destination, &bytes, &sha256)?;
         Ok(RoomToneCapture {
             sha256,
@@ -776,8 +772,6 @@ fn read_store_file(path: &Path) -> Result<Vec<u8>, MediaError> {
         .with_allowed("a readable regular room-tone .wav file")
         .into());
     }
-    // The length is checked from the metadata, so an oversized file is never
-    // read into memory at all.
     if metadata.len() > ROOM_TONE_MAX_FILE_BYTES {
         return Err(MediaError::Backend(too_large(metadata.len())));
     }
@@ -951,12 +945,6 @@ mod tests {
     #[test]
     fn the_capture_constants_are_their_own_arithmetic() {
         assert_eq!(SAMPLE_RATE, u64::from(ROOM_TONE_SAMPLE_RATE));
-        // AU5 §0 R108: not a tautology against `asset_fps()`, which *returns*
-        // `Rational::default()`. This ties the constant every other figure in
-        // the file is derived from to the rate `probe_path` actually gives an
-        // audio-only asset (decode.rs:105-112). If `Rational::default()` ever
-        // moved off 30/1, 1 600 would be silently wrong and every other lane
-        // here would stay green.
         assert_eq!(
             Rational::default(),
             Rational::new(ROOM_TONE_ASSET_FRAMES_PER_SECOND, 1).unwrap(),
@@ -973,8 +961,6 @@ mod tests {
             MAXIMUM_CAPTURE_SAMPLE_FRAMES,
             ROOM_TONE_MAX_CAPTURE_MILLISECONDS * SAMPLE_RATE / 1_000,
         );
-        // Both caps are whole asset frames, which is what makes the truncation
-        // in `write_capture` unable to cross the floor.
         assert_eq!(
             MINIMUM_CAPTURE_SAMPLE_FRAMES % ROOM_TONE_SAMPLE_FRAMES_PER_ASSET_FRAME,
             0,
@@ -1106,9 +1092,6 @@ mod tests {
             "{message}",
         );
 
-        // The refusal is on the sample-frame count, not on the derived
-        // milliseconds: one sample frame past the cap still floors to 60 000 ms,
-        // so a millisecond comparison would have let it through.
         assert_eq!(milliseconds_of(MAXIMUM_CAPTURE_SAMPLE_FRAMES + 1), 60_000);
 
         let capture = store
@@ -1126,8 +1109,6 @@ mod tests {
         let temporary = TempDirectory::new("room-tone-truncate");
         let store = store_for(&temporary, "project.kinewright");
 
-        // 15 asset frames plus 1 599 sample frames: the largest truncation
-        // `write_capture` can make, and it still lands on the floor.
         let requested = MINIMUM_CAPTURE_SAMPLE_FRAMES + ROOM_TONE_SAMPLE_FRAMES_PER_ASSET_FRAME - 1;
         let capture = store.write_capture(&capture_samples(requested)).unwrap();
         assert_eq!(capture.sample_frames, MINIMUM_CAPTURE_SAMPLE_FRAMES);
@@ -1148,8 +1129,6 @@ mod tests {
                 + u64::try_from(WAV_HEADER_BYTES).unwrap(),
         );
 
-        // The truncated buffer is a prefix: the store never resamples, pads or
-        // reorders, so the fill replays exactly what was captured.
         let samples = capture_samples(requested);
         let kept = usize::try_from(MINIMUM_CAPTURE_SAMPLE_FRAMES).unwrap() * 2;
         assert_eq!(
@@ -1325,8 +1304,6 @@ mod tests {
         fs::create_dir_all(store.room_tone_dir()).unwrap();
         let path = store.path_for(ABSENT_DIGEST).unwrap();
 
-        // Sparse files: the length is read from the metadata before a byte is
-        // touched, so the refusal cannot be a parse failure in disguise.
         fs::File::create(&path)
             .unwrap()
             .set_len(ROOM_TONE_MAX_FILE_BYTES + 1)
@@ -1397,8 +1374,6 @@ mod tests {
         assert_eq!(capture.milliseconds, 2_000);
         assert!(!capture.already_present);
 
-        // The **raw clip source**, sample for sample (AU5 §5.1 rule 91): a
-        // capture that had gone through the mix path would not match this.
         let channels = usize::from(ROOM_TONE_CHANNELS);
         let expected = room_tone_wav_bytes(&samples[48_000 * channels..144_000 * channels]);
         assert_eq!(fs::read(&capture.path).unwrap(), expected);
@@ -1445,18 +1420,6 @@ mod tests {
             .expect("exactly the floor is a legal capture");
         assert_eq!(capture.milliseconds, ROOM_TONE_MINIMUM_CAPTURE_MILLISECONDS);
 
-        // AU5 §0 R105's own argument, pinned: a range far longer than the cap
-        // is refused **before** a byte is decoded.
-        //
-        // The discriminator is the **path, which does not exist**. Pointing the
-        // over-long asset at the real three-second file would prove nothing:
-        // `decode_audio_range` treats EOF as zero padding
-        // (`samples.resize(expected, 0.0)`, audio.rs), so a decode-first
-        // implementation would hand `write_capture` 288 000 000 samples and its
-        // own `check_capture_span` would answer the identical
-        // `room_tone_capture_too_long` message. With nothing at the path, a
-        // decode-first order fails with the decoder's own open error instead,
-        // so only a guard-first order can produce the refusal asserted below.
         let long_asset = MediaAsset {
             duration: TimeCode(90_000),
             path: temporary.path("no-such-room-tone.wav"),

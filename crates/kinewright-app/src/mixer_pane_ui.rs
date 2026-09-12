@@ -158,11 +158,6 @@ pub(crate) fn chain_pane(
     edits: &mut MixerChainEdits,
     learn: &mut NoiseLearn<'_>,
 ) -> bool {
-    // The pane owns exactly one column. `set_max_width` alone does not hold a
-    // `ScrollArea`, which sizes its viewport from the room it is offered, so
-    // the column is allocated at the token's width and the scroll area is
-    // given that and no more; without this the cards' wrapped control rows
-    // stretch to the far edge of the window.
     let column = egui::vec2(size::MIXER_CHAIN_PANE_WIDTH, ui.available_height());
     ui.allocate_ui_with_layout(column, egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.set_min_width(size::MIXER_CHAIN_PANE_WIDTH);
@@ -199,9 +194,6 @@ pub(crate) fn chain_pane(
                     }
                 }
             });
-        // The scroll is the pane's whole answer to a short dock, so its two
-        // measurements are recorded for the test that proves the content
-        // really does overflow a 260 px viewport instead of stretching it.
         record_strip_rect("chain_pane_viewport", scrolled.inner_rect);
         record_strip_rect(
             "chain_pane_content",
@@ -224,8 +216,6 @@ fn bus_pane(
 ) {
     let chain = MixerChain::Bus(bus);
     pane_title(ui, &format!("Bus: {}", bus.name));
-    // AU4 §5.4 rule 112: at the top of a bus pane, below `LOUDNESS` on the
-    // master pane.
     automation_section(ui, chain, position, document.duration, edits);
     routing_rows(ui, document, bus, edits);
     sidechain_rows(ui, document, bus, edits);
@@ -362,8 +352,6 @@ fn routing_checkbox(
         .bus_for_track(track)
         .is_some_and(|id| id != bus.id);
     let reason = routing_block(document, bus, track);
-    // A track claimed by another bus is shown checked and disabled with that
-    // bus's name: it is routed, just not here.
     let mut checked = on_this_bus || elsewhere;
     let response = ui.add_enabled(
         reason.is_none(),
@@ -459,10 +447,6 @@ fn pan_law_rows(ui: &mut egui::Ui, law: PanLaw, edits: &mut MixerChainEdits) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Loudness (AU3 §4.4)
-// ---------------------------------------------------------------------------
-
 /// The lower edge of the momentary and short-term bars, in LUFS hundredths.
 /// The bars run −40…0 LUFS; anything quieter reads as empty.
 const LOUDNESS_BAR_FLOOR_HUNDREDTHS: i32 = -4_000;
@@ -495,10 +479,6 @@ pub(crate) fn loudness_section(
     target: LoudnessTarget,
 ) -> bool {
     ui.scope(|ui| {
-        // The section is one readout, not a stack of controls: its rows sit
-        // as close as a strip's do, and the readout row is as tall as its
-        // small button rather than a full control height. This is what keeps
-        // the section inside its 80 px budget (AU3 §4.4).
         ui.spacing_mut().item_spacing.y = space::HALF;
         ui.spacing_mut().interact_size.y = size::ICON_SM;
         ui.label(theme::caps_label("LOUDNESS", color::TEXT_MUTED));
@@ -561,8 +541,6 @@ fn loudness_bar_row(ui: &mut egui::Ui, label: &str, lufs: Option<i32>, target: L
             ),
         );
         if fill.width() > 0.0 {
-            // A status colour against the target, never the accent
-            // (DESIGN.md): quiet is `text-secondary`, not a failure.
             painter.rect_filled(fill, 1.0, fill_color);
         }
     }
@@ -694,10 +672,6 @@ pub(crate) fn programme_clock(seconds: u32) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
-// ---------------------------------------------------------------------------
-// Cards
-// ---------------------------------------------------------------------------
-
 /// The chain's cards, one expanded at a time (AU2 §6.7).
 fn chain_cards(
     ui: &mut egui::Ui,
@@ -795,14 +769,10 @@ fn card_header(
     let effect = &effects[index];
     let last = effects.len().saturating_sub(1);
     ui.scope(|ui| {
-        // The header is one row of a stack of cards, not a section: it does
-        // not owe its buttons a control's worth of padding.
         ui.spacing_mut().interact_size.y = size::ICON_SM;
         ui.spacing_mut().button_padding.y = 0.0;
         ui.spacing_mut().item_spacing.x = space::ONE;
         ui.horizontal(|ui| {
-            // The tooltip says what the label cannot: the registered node
-            // name and the id every operation and error message uses.
             let name = ui
                 .selectable_label(expanded, effect_display_name(&effect.name))
                 .on_hover_text(format!("{} · node {}", effect.name, effect.id.0));
@@ -811,8 +781,6 @@ fn card_header(
                 expand_card(ui, chain.selection(), effect.id);
             }
 
-            // `bypass` is hold-only, so the static read and the resolved
-            // read are the same value; the static one says so.
             let mut bypassed = parameter_value(effect, "bypass", TimeCode::ZERO) == 1;
             let bypass = ui.checkbox(&mut bypassed, "Bypass");
             record_keyed_rect("bypass", effect.id.0, bypass.rect);
@@ -881,9 +849,6 @@ fn card_body(
     };
     ui.horizontal_wrapped(|ui| {
         for parameter in descriptor.parameters {
-            // AU5 §6.1 rule 120: the 31 profile rows are read from the noise
-            // well, never dragged — skipped by the one core predicate,
-            // exactly as `bypass` is skipped by exact name.
             if parameter.name == "bypass" || is_noise_profile_parameter(parameter.name) {
                 continue;
             }
@@ -1134,8 +1099,6 @@ pub(crate) fn automation_section(
     duration: TimeCode,
     edits: &mut MixerChainEdits,
 ) {
-    // Bus and master curves are keyed in PROJECT frames, so `duration` is the
-    // bound `validate_document` checks them against.
     let last = duration.0.saturating_sub(1).max(0);
     let targets = automation_targets(chain);
     let stored: Option<AutomationTarget> =
@@ -1144,9 +1107,6 @@ pub(crate) fn automation_section(
         .filter(|target| targets.contains(target))
         .unwrap_or(AutomationTarget::Fader);
     ui.scope(|ui| {
-        // The section is a list, not a stack of sections: its rows sit as
-        // close as a strip's do and are one `ICON_SM` control tall. This is
-        // what keeps it inside its 120 px budget (rule 116).
         ui.spacing_mut().item_spacing.y = space::HALF;
         ui.spacing_mut().interact_size.y = size::ICON_SM;
         ui.spacing_mut().button_padding = egui::vec2(space::HALF, 0.0);
@@ -1169,8 +1129,6 @@ pub(crate) fn automation_section(
 
         let curve = automation_curve(chain, target).cloned();
         let range = automation_range(chain, target);
-        // A fixed-height list so the section measures the same with an empty
-        // curve and with a scrolled ten-key one (rule 116).
         let list_size = egui::vec2(
             ui.available_width(),
             f32::from(AUTOMATION_VISIBLE_ROWS) * (size::ICON_SM + space::HALF),
@@ -1195,8 +1153,6 @@ pub(crate) fn automation_section(
                         for index in 0..curve.keyframes.len() {
                             let mut action = keyframe_row(ui, &row_key, curve, index);
                             gesture_started |= action.gesture_started;
-                            // The row is pure and domain-free, so the
-                            // project's own bound is applied here.
                             if let Some(edited) = action.edited.as_mut() {
                                 edited.at = TimeCode(edited.at.0.clamp(0, last));
                             }
@@ -1298,10 +1254,6 @@ pub(crate) fn mixer_parameter_control(
     value: i64,
     edits: &mut MixerChainEdits,
 ) {
-    // The cell is allocated at a known size so `horizontal_wrapped` can wrap
-    // between controls: a nested `Ui` of unknown width takes the whole row and
-    // the wrap never fires, which ran a parametric EQ's eighteen controls off
-    // the edge of the pane.
     let cells = if unit == MixerUnit::Flag { 2.0 } else { 1.0 };
     let cell = egui::vec2(cells * control_cell_width(), size::ICON_BUTTON);
     ui.allocate_ui(cell, |ui| {
@@ -1381,10 +1333,6 @@ const fn flag_labels(name: &str) -> [(i64, &'static str); 2] {
 pub(crate) fn reduction_readout(reduction_db: f32) -> String {
     format!("-{reduction_db:.1} dB")
 }
-
-// ---------------------------------------------------------------------------
-// Units
-// ---------------------------------------------------------------------------
 
 /// The unit one chain control reads and writes in (AU2 §6.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1561,9 +1509,6 @@ pub(crate) fn parameter_label(name: &str) -> String {
         "output_gain_tenth_db" => "Output",
         "range_tenth_db" => "Range",
         "hold_milliseconds" => "Hold",
-        // AU5 §6.1 rule 120. `reduction_tenth_db` and `lookahead_milliseconds`
-        // already have their arms above and are shared with AU2's limiter and
-        // compressor.
         "floor_offset_tenth_db" => "Floor offset",
         "smoothing_milliseconds" => "Smoothing",
         "fundamental_hertz" => "Mains",
@@ -1575,10 +1520,6 @@ pub(crate) fn parameter_label(name: &str) -> String {
     }
     .to_owned()
 }
-
-// ---------------------------------------------------------------------------
-// The EQ magnitude well and the gain-reduction bar
-// ---------------------------------------------------------------------------
 
 /// Sampled points across the EQ well, the `CURVE_SAMPLES` figure the curve
 /// editor uses (AU2 §6.7).
@@ -1709,10 +1650,6 @@ fn eq_well(ui: &mut egui::Ui, effect: &Effect, at: TimeCode, magnitude: Magnitud
     response.on_hover_text(EQ_WELL_TOOLTIP);
 }
 
-// ---------------------------------------------------------------------------
-// The `Learn` gesture
-// ---------------------------------------------------------------------------
-
 /// The button that teaches a denoise node its floor (AU5 §6.3 rule 126).
 pub(crate) const LEARN_PROFILE_BUTTON: &str = "Learn profile";
 /// AU5 §6.3 rule 128, first refusal: the analysis has not finished.
@@ -1768,8 +1705,6 @@ fn learn_row(ui: &mut egui::Ui, chain: MixerChain, effect: &Effect, learn: &mut 
         let button = ui.add_enabled(span.is_some(), egui::Button::new(LEARN_PROFILE_BUTTON));
         record_keyed_rect("learn", effect.id.0, button.rect);
         let button = match span {
-            // Hover names the span that will be used, so the measurement is
-            // never taken from a range the editor cannot see.
             Some((start, end)) => button.on_hover_text(format!(
                 "Learn the floor from frames {}\u{2013}{} \u{2014} the longest silence on the \
                  tracks feeding this chain.",
@@ -1787,9 +1722,6 @@ fn learn_row(ui: &mut egui::Ui, chain: MixerChain, effect: &Effect, learn: &mut 
             ));
         }
     });
-    // The refusal takes its own line and **wraps**: it is a sentence, and a
-    // sentence beside the button pushes the 400 px column wider than the
-    // pane's own token, which the dock pin catches.
     let refusal = match learn.range {
         NoiseLearnRange::Analysing => Some(LEARN_ANALYSIS_RUNNING),
         NoiseLearnRange::NoSilence => Some(LEARN_NO_SILENCE),
@@ -1806,10 +1738,6 @@ fn learn_row(ui: &mut egui::Ui, chain: MixerChain, effect: &Effect, learn: &mut 
         );
     }
 }
-
-// ---------------------------------------------------------------------------
-// The learned-noise-floor well
-// ---------------------------------------------------------------------------
 
 /// The bottom of the noise well's scale, in decibels (AU5 §6.2 rule 125).
 ///
@@ -1949,10 +1877,6 @@ fn reduction_bar(
     response.on_hover_text(reduction_readout(reduction));
 }
 
-// ---------------------------------------------------------------------------
-// Insertion
-// ---------------------------------------------------------------------------
-
 /// The nine nodes the mixer's `+ Effect` menu offers, in menu order (AU2 §6.8,
 /// AU5 §6.1 rule 118).
 ///
@@ -2083,12 +2007,6 @@ pub(crate) fn insert_audio_effect(effects: &mut Vec<Effect>, name: &str) {
         parameters: descriptor
             .parameters
             .iter()
-            // AU5 §2.1 rule 6: the 31 profile rows are a write-all-or-none
-            // block whose absence *is* the neutral, so an inserted denoise
-            // node carries none of them. Writing 31 `-1200` entries into
-            // every document that inserts the node would also keep §4.2's
-            // compact-render omission arm from ever firing in the app's own
-            // projects.
             .filter(|parameter| !is_noise_profile_parameter(parameter.name))
             .map(|parameter| {
                 (
@@ -2357,8 +2275,6 @@ mod tests {
             );
         }
     }
-
-    // ---- AU4 Part B §5.4: the chain pane's `AUTOMATION` section ----
 
     fn automation_effects(names: &[&str]) -> Vec<Effect> {
         let mut effects = Vec::new();
@@ -2742,11 +2658,6 @@ mod tests {
             pane.contains("has_gain_computer,"),
             "and this file reads the core predicate through its `kinewright_core` import"
         );
-        // Rule 84's second half — "both callers read the core one" — pinned in
-        // the same test, and the reason the truncation above cannot make this
-        // pin vacuous: the two call sites sit at the middle of the production
-        // half, so a `#[cfg(test)]` item landing earlier in the file would
-        // shorten `pane` past them and fail here rather than pass silently.
         assert_eq!(
             pane.matches("has_gain_computer(&effect.name)").count(),
             2,
@@ -2758,10 +2669,6 @@ mod tests {
             "which is the one that knows about the denoiser, so `reduction_bar` gets a bar"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // AU5 §6.1-§6.5: the three repair cards, the two wells and the four pins
-    // -----------------------------------------------------------------------
 
     /// A bus carrying the three repair nodes, in chain order.
     fn repair_bus(names: &[&str]) -> AudioBus {
@@ -2822,14 +2729,8 @@ mod tests {
             insertable_menu_defect("audio_nonesuch").is_some(),
             "a name with no descriptor is caught"
         );
-        // The allow-list is exactly the two rows that are legitimately
-        // unitless, and `harmonic_count` really does reach `Plain`.
         assert_eq!(mixer_unit("harmonic_count"), MixerUnit::Plain);
         assert_eq!(mixer_unit("notch_q_hundredths"), MixerUnit::Q);
-        // `bypass` is drawn as the header's checkbox, never as a numbered
-        // control, so it never reaches `mixer_unit`'s flag arm — which is why
-        // it is on the allow-list rather than in the `detector | true_peak`
-        // match.
         assert_eq!(mixer_unit("bypass"), MixerUnit::Plain);
         assert_eq!(mixer_unit("detector"), MixerUnit::Flag);
         assert_eq!(PLAIN_UNIT_ALLOW_LIST, ["bypass", "harmonic_count"]);
@@ -2857,8 +2758,6 @@ mod tests {
             "and it carries all five of the controls: {:?}",
             denoise.parameters.keys().collect::<Vec<_>>()
         );
-        // The card draws a control for every row it does not skip, so the
-        // count of drawn controls is the count of non-profile, non-bypass rows.
         let descriptor = effect_descriptor("audio_denoise").expect("registered");
         let drawn = descriptor
             .parameters
@@ -3082,8 +2981,6 @@ mod tests {
         let mut measured = egui::Vec2::ZERO;
         let bus = &document.audio_mix.buses[0];
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            // Which card is expanded is egui memory, so it is set here rather
-            // than clicked: the pane is being measured, not driven.
             expand_card(ui, MixerSelection::Bus(bus.id), expanded);
             ui.vertical(|ui| {
                 ui.set_max_width(size::MIXER_CHAIN_PANE_WIDTH);

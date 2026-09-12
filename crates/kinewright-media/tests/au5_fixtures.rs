@@ -30,10 +30,6 @@ use kinewright_media::{FfmpegMediaEngine, hum_removal_magnitude_db};
 pub mod test_support;
 use test_support::{GeneratedMedia, pseudo_random_amplitude, tone, wav_f32};
 
-// ---------------------------------------------------------------------------
-// Budgets
-// ---------------------------------------------------------------------------
-
 /// CC6 rule 11.0.5: a budget no measurement approaches proves nothing.
 const FIXTURE_MINIMUM_MARGIN: f64 = 2.0;
 
@@ -175,10 +171,6 @@ const HUM_ANALYTIC_BUDGET_DB: f64 = 0.1;
 /// That they land 0.20 dB apart is corroboration, not a shared measurement.
 const AUDIO_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS: f64 = 600.0;
 
-// ---------------------------------------------------------------------------
-// Fixture construction
-// ---------------------------------------------------------------------------
-
 const RATE: u32 = 48_000;
 
 /// The fixture raster: 30 fps, which is what `probe_path` gives an audio-only
@@ -301,10 +293,6 @@ fn engine() -> FfmpegMediaEngine {
     test_support::test_engine("KINEWRIGHT_AU5_DATA_DIR")
 }
 
-// ---------------------------------------------------------------------------
-// Measurement helpers, all through the public `Analysis` surface
-// ---------------------------------------------------------------------------
-
 /// The mean RMS level of one mix point over one project range, in dB.
 ///
 /// Read through `Analysis::mix_window_levels` — AU5 §3.8's own accessor — as
@@ -353,9 +341,6 @@ fn band_level_db(
             },
         )
         .expect("the spectrum measures");
-    // A band under `SILENCE_POWER` reports `None`; a neighbour of a
-    // band-limited fixture legitimately does, so it reads as the -120 dBFS
-    // floor `SILENCE_POWER` itself is, never as a panic.
     report.bands[band]
         .level_dbfs_hundredths
         .map_or(SILENCE_FLOOR_DB, |level| f64::from(level) / 100.0)
@@ -381,10 +366,6 @@ fn learn_profile(
         .bands
 }
 
-// ---------------------------------------------------------------------------
-// (a) Broadband noise
-// ---------------------------------------------------------------------------
-
 /// §3.11(a): 3 s — `[0, 1 s)` noise only, `[1, 2.5 s)` tone + noise,
 /// `[2.5, 3 s)` noise only.
 fn broadband_fixture() -> Vec<f32> {
@@ -404,16 +385,9 @@ fn au5_the_broadband_lane_drops_its_floor_and_keeps_its_tone() {
     let asset = engine.probe(media.path()).expect("the fixture probes");
 
     let bare = fixture_document(asset.clone(), Vec::new());
-    // The learn range is `[0, 1 s)` = 48 000 sample frames, over
-    // `NOISE_PROFILE_MINIMUM_FRAMES` (22 528).
     let profile = learn_profile(&engine, &bare, secs(0.0..1.0));
     let treated = fixture_document(asset, vec![denoise_with_profile(1, 200, &profile)]);
 
-    // The tail is measured from **2.6 s**, not 2.5 (AU5 §0 R67). `[2.5, 3.0)`
-    // begins on the exact sample the 1 kHz tone ends, so its first ~110 ms is
-    // the 50 ms smoother releasing from the tone — 7.15 dB over that stretch
-    // against 15.98 dB over the last 250 ms — and the lane was pinning the
-    // smoother's recovery rather than the gate.
     let before_floor = mean_level_db(&engine, &bare, secs(2.6..3.0));
     let after_floor = mean_level_db(&engine, &treated, secs(2.6..3.0));
     let drop_tenth_db = (before_floor - after_floor) * 10.0;
@@ -448,10 +422,6 @@ fn au5_the_broadband_lane_drops_its_floor_and_keeps_its_tone() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// (a′) The unit pin
-// ---------------------------------------------------------------------------
-
 /// §3.11(a′): 64 phase-randomised sinusoids inside the 1 kHz third-octave band,
 /// so the band's level `L` is **analytic**, not measured.
 ///
@@ -470,14 +440,6 @@ fn band_limited_fixture() -> (Vec<f32>, f64) {
         #[allow(clippy::cast_precision_loss)]
         let position = (partial as f64 + 0.5) / PARTIALS as f64;
         let hertz = low + (high - low) * position;
-        // **Schroeder phases**, `phi_p = pi p^2 / P`, not a linear ramp: a
-        // linear phase ramp across equally spaced partials is a pure *delay*,
-        // so the 64 partials realign into a pulse train every `1/3.6 Hz` =
-        // 278 ms and a 4 096-frame window either catches a burst or misses it
-        // — the per-window band level swung 25 dB and the 20th percentile read
-        // 22 dB under the analytic level. A quadratic ramp makes the sum a
-        // constant-envelope chirp across the band, so every window carries the
-        // same power and `L` is what the fixture says it is.
         #[allow(clippy::cast_precision_loss)]
         let phase_offset = ((partial * partial) as f64 / (2 * PARTIALS) as f64).fract();
         let samples = tone(hertz, AMPLITUDE, RATE, frames + RATE as usize);
@@ -513,9 +475,6 @@ fn au5_the_profile_unit_pin_learns_and_gates_a_known_band() {
     let after = band_level_db(&engine, &treated, secs(0.0..2.0), 17);
     let gated_tenth_db = (after - before) * 10.0;
 
-    // The lane's `margin` is the **learn** margin: that is the term with an
-    // analytic centre and a two-sided budget. The gate term is a derived
-    // bracket, so its evidence is the two clearances, printed beside it.
     let margin = DENOISE_PROFILE_LEARN_BUDGET_TENTH_DB / learn_error.max(f64::EPSILON);
     let deep_clearance = gated_tenth_db - DENOISE_PROFILE_GATE_BOUND_TENTH_DB;
     let shallow_clearance = DENOISE_PROFILE_GATE_FLOOR_TENTH_DB - gated_tenth_db;
@@ -546,11 +505,6 @@ fn au5_the_profile_unit_pin_learns_and_gates_a_known_band() {
          {DENOISE_PROFILE_GATE_FLOOR_TENTH_DB}: it is not gating"
     );
 
-    // Every neighbouring band that carries anything at all moves under 3.0 dB:
-    // the gate is a band gate, not a broadband one. A band reading the
-    // `SILENCE_POWER` floor is excluded, because "nothing" cannot move by a
-    // ratio — two bands out from a band-limited chirp there is only window
-    // leakage, and both readings are the floor.
     let mut checked = 0_usize;
     for band in [15_usize, 16, 18, 19] {
         let before = band_level_db(&engine, &bare, secs(0.0..2.0), band);
@@ -576,10 +530,6 @@ fn au5_the_profile_unit_pin_learns_and_gates_a_known_band() {
         "only {checked} neighbouring bands carried anything"
     );
 }
-
-// ---------------------------------------------------------------------------
-// (b) Hum
-// ---------------------------------------------------------------------------
 
 /// §3.11(b): 2 s of 300 Hz at 0.200 with 50 / 100 / 150 Hz harmonics at −6 dB
 /// each. Hum RMS `= sqrt((0.05² + 0.025² + 0.0125²)/2) = 0.04051` = −27.85 dBFS.
@@ -661,10 +611,6 @@ fn au5_the_hum_lane_notches_its_harmonics_and_matches_the_design() {
         "the hum tone margin is only {margin_tone:.2}x"
     );
 }
-
-// ---------------------------------------------------------------------------
-// (d) The Part A SNR-gain lane
-// ---------------------------------------------------------------------------
 
 /// AU5 §7 A11 / §3.11(d): what makes Part A a complete exit gate on clause 1.
 ///
@@ -783,8 +729,6 @@ fn au5_the_repair_inspector_refuses_to_invent_a_percentile() {
     let asset = engine.probe(media.path()).expect("the fixture probes");
     let document = fixture_document(asset, Vec::new());
 
-    // Two project frames at 30 fps is 66.7 ms — six whole 10 ms windows, under
-    // `REPAIR_MINIMUM_WINDOWS`.
     let report = engine
         .audio_repair(
             &document,

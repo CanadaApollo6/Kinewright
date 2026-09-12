@@ -269,10 +269,6 @@ fn expected_matte_parameters() -> Vec<(String, i64, i64, i64)> {
     expected
 }
 
-// ---------------------------------------------------------------------------
-// §2.1 / §2.2 descriptors
-// ---------------------------------------------------------------------------
-
 /// CC5 §2.2: 47 parameters generated from two patterns, identical on all four
 /// matte-capable kinds and appended after each kind's own controls.
 #[test]
@@ -446,16 +442,10 @@ fn technical_lut_carries_no_matte_parameter() {
     );
     assert_eq!(document, before, "a rejected SetEffectParam must be atomic");
 
-    // The same name on a matte-capable kind is accepted, so the rejection is
-    // about the kind and not about the name.
     let mut document = document_with_asset();
     add(&mut document, neutral_node(1, "creative_look")).expect("a look node is legal");
     set_param(&mut document, 1, "matte_enabled", 1).expect("creative_look carries a matte");
 }
-
-// ---------------------------------------------------------------------------
-// §2.2 bounds and typed resolution
-// ---------------------------------------------------------------------------
 
 /// CC5 §2.2: every bound accepts its extremes and rejects one step beyond, on
 /// every matte-capable kind.
@@ -485,8 +475,6 @@ fn matte_bounds_accept_the_extremes_and_reject_one_step_beyond() {
                 );
                 assert_eq!(document, before, "a rejected edit must be atomic");
             }
-            // Leave the parameter at its maximum, which is where the document
-            // invariant is exercised below.
             set_param(&mut document, 1, &name, max).expect("the maximum is legal");
         }
         document
@@ -494,8 +482,6 @@ fn matte_bounds_accept_the_extremes_and_reject_one_step_beyond() {
             .expect("every matte parameter at its maximum is a valid document");
     }
 
-    // The minima are equally valid, including `matte_window_count = 0` with
-    // four fully populated windows behind it.
     for kind in MATTE_CAPABLE {
         let mut node = neutral_node(1, kind);
         for (name, min, _, _) in expected_matte_parameters() {
@@ -609,9 +595,6 @@ fn matte_params_resolve_omitted_parameters_to_their_neutrals() {
         vec![-10_000, 7_500]
     );
 
-    // A hostile stored value is clamped defensively rather than failing a
-    // render, and a kind that carries no matte resolves to the neutral matte
-    // whatever its file says.
     let hostile = effect(
         3,
         "color_wheels",
@@ -630,10 +613,6 @@ fn matte_params_resolve_omitted_parameters_to_their_neutrals() {
     let unmanaged = effect(5, "mask", &[("matte_enabled", 1)]);
     assert_eq!(MatteParams::from_effect(&unmanaged), MatteParams::NEUTRAL);
 }
-
-// ---------------------------------------------------------------------------
-// §5.1 keyframe policy
-// ---------------------------------------------------------------------------
 
 /// CC5 §5.1: matte tokens and counts accept only `Hold` keyframes.
 #[test]
@@ -697,8 +676,6 @@ fn matte_tokens_and_counts_accept_only_hold_keyframes() {
             assert_eq!(document, before, "a rejected keyframe edit must be atomic");
         }
 
-        // The mix, the window geometry, and every qualifier scalar keep every
-        // interpolation.
         for name in [
             "matte_mix_basis_points",
             "matte_window0_center_x_basis_points",
@@ -761,8 +738,6 @@ fn keyframed_window_motion_resolves_per_frame() {
     .expect("a window centre is fully keyframable");
 
     let stored = document.clip(ClipId(1)).expect("clip").effects[0].clone();
-    // 2500 -> 7500 over twenty frames: a quarter of the way is 3750, half is
-    // 5000, and the value holds at each end.
     for (frame, expected) in [
         (0, 2_500),
         (5, 3_750),
@@ -779,10 +754,6 @@ fn keyframed_window_motion_resolves_per_frame() {
         assert!(resolved.has_matte());
     }
 }
-
-// ---------------------------------------------------------------------------
-// §2.6 inactive mattes and inactive nodes
-// ---------------------------------------------------------------------------
 
 /// CC5 §2.6: the inactivity truth table, read off the stored integers.
 #[test]
@@ -886,8 +857,6 @@ fn a_matte_excluded_node_reports_the_new_inactive_reason() {
     assert_eq!(ColorNodeInactiveReason::Neutral.as_str(), "neutral");
     assert_eq!(ColorNodeInactiveReason::Unbound.as_str(), "unbound");
 
-    // A graded node with a zero-mix matte is excluded on every matte-capable
-    // kind, `primary_correction` included.
     let cases: [(&str, Effect); 4] = [
         (
             "primary_correction",
@@ -947,8 +916,6 @@ fn a_matte_excluded_node_reports_the_new_inactive_reason() {
         );
     }
 
-    // Bypass wins over the matte rule, so an already-identity node keeps
-    // reporting the cause it had before CC5.
     let bypassed = effect(
         5,
         "color_wheels",
@@ -984,8 +951,6 @@ fn a_matte_excluded_node_reports_the_new_inactive_reason() {
         Some(ColorNodeInactiveReason::Unbound)
     );
 
-    // A matte-capable node with a live matte stays active, and an excluded
-    // node drops out of the renderer's list while keeping its slot.
     let active = effect(
         8,
         "color_wheels",
@@ -1017,8 +982,6 @@ fn a_matte_excluded_node_reports_the_new_inactive_reason() {
         "an excluded node still occupies one of the sixteen slots"
     );
 
-    // `matte_enabled = 0` with `matte_mix = 0` renders unmasked at full
-    // strength: every other matte control is ignored when the switch is off.
     let switched_off = effect(
         10,
         "color_wheels",
@@ -1088,10 +1051,6 @@ fn degenerate_bands_are_reported_without_clamping() {
             .is_empty()
     );
 }
-
-// ---------------------------------------------------------------------------
-// QA
-// ---------------------------------------------------------------------------
 
 /// CC5 §2.6: QA reports an inverted band as a non-blocking warning, at frame
 /// zero or at any keyframe frame of the band parameters.
@@ -1225,10 +1184,6 @@ fn qa_stays_silent_for_inactive_mattes_and_ordered_bands() {
         );
     }
 }
-
-// ---------------------------------------------------------------------------
-// §9.2.14 serialization and history
-// ---------------------------------------------------------------------------
 
 /// CC5 §9.2.14: a two-window matte with a qualifier survives save, reopen,
 /// journal replay, undo, and redo byte-for-byte.
@@ -1402,10 +1357,6 @@ fn a_two_window_matte_survives_save_reopen_replay_and_undo() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §5.2 tracker smoothing
-// ---------------------------------------------------------------------------
-
 /// CC5 §5.2: the promoted smoothing primitive is the M40 algorithm unchanged.
 ///
 /// The expectations are computed by hand from the two published stages: a
@@ -1414,19 +1365,7 @@ fn a_two_window_matte_survives_save_reopen_replay_and_undo() {
 /// at most `maximum_step` toward the filtered observation.
 #[test]
 fn stabilize_tracked_centres_matches_the_m40_algorithm() {
-    // Raw observations with a one-sample spike at index 2 and a sustained move
-    // afterwards.
     let observations = [1_000, 1_000, 9_000, 1_000, 5_000, 5_200, 5_400];
-    // Median filter, by hand:
-    //   [0] untouched                                       -> 1000
-    //   [1] median(1000, 1000, 9000)                        -> 1000
-    //   [2] median(1000, 9000, 1000)                        -> 1000  (spike gone)
-    //   [3] median(9000, 1000, 5000)                        -> 5000
-    //   [4] median(1000, 5000, 5200)                        -> 5000
-    //   [5] median(5000, 5200, 5400)                        -> 5200
-    //   [6] median(o[4], o[5], o[6]) = median(5000, 5200, 5400) -> 5200
-    // Reactive controller from focus = 1000, dead_zone = 0, max_step = 800:
-    //   1000, 1000, 1000, 1800, 2600, 3400, 4200
     let smoothed = stabilize_tracked_centres_basis_points(&observations, -10_000, 20_000, 0, 800);
     assert_eq!(
         smoothed,
@@ -1449,9 +1388,6 @@ fn stabilize_tracked_centres_matches_the_m40_algorithm() {
         vec![1_000, 1_000, 1_000, 1_800, 2_000, 2_000, 2_000]
     );
 
-    // The multicam call, with M40's dead zone, is byte-identical across the
-    // rename: this is the existing `subject_reframe_rejects_a_last_frame_
-    // tracking_outlier` expectation, now asserted through the public name.
     assert_eq!(
         stabilize_tracked_centres_basis_points(&[50, 50, 34, 35, 80], 25, 75, 6, 25),
         vec![50, 50, 41, 41, 41]

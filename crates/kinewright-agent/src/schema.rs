@@ -31,15 +31,9 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 84] = [
     "import_lut_asset",
     "convert_legacy_look",
     "render_color_proof",
-    // CC5 §7: the three matte surfaces. `inspect_grade_matte` needs a
-    // `CAPABILITY_KIND_OVERRIDES` entry because `inspect_` matches no
-    // name-prefix inference rule.
     "inspect_grade_matte",
     "track_matte_window",
     "plan_secondary_correction",
-    // CC6 §7: the working-stage QC surface. `get_` already infers
-    // `CapabilityKind::Inspector`, so no `CAPABILITY_KIND_OVERRIDES` entry is
-    // needed; that omission is a decision, not an oversight.
     "get_color_qc",
     "get_media_status",
     "get_cache_status",
@@ -71,40 +65,17 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 84] = [
     "get_beats",
     "get_timeline_beats",
     "get_music_structure",
-    // AU1 §6.2: the read-only mix measurement surface, beside the other audio
-    // inspectors. `get_` already infers `CapabilityKind::Inspector`, so no
-    // `CAPABILITY_KIND_OVERRIDES` entry is needed; that omission is a
-    // decision, not an oversight, exactly as for `get_color_qc` above.
     "get_audio_levels",
-    // AU2 §6.2: the third-octave evidence surface, beside the levels
-    // measurement it mirrors. `get_` infers `CapabilityKind::Inspector`, so
-    // no `CAPABILITY_KIND_OVERRIDES` entry is needed here either.
     "get_audio_spectrum",
-    // AU3 §4.1: the evidence-only audio QC surface, beside the two
-    // measurements it extends. `get_` infers `CapabilityKind::Inspector`, so
-    // no `CAPABILITY_KIND_OVERRIDES` entry is needed here either.
     "get_audio_qc",
-    // AU5 §4.3 rule 81: the repair-measurement surface, beside the three
-    // measurements it joins. `get_` infers `CapabilityKind::Inspector`, so no
-    // `CAPABILITY_KIND_OVERRIDES` entry is needed here either.
     "get_audio_repair",
     "plan_dialogue_assembly",
     "plan_beat_pacing",
     "plan_beat_montage",
     "plan_music_fit",
-    // AU4 §6.3 rule 134: the two Part B planners sit in the audio family's
-    // alphabetical position beside `plan_audio_normalization`. `plan_` infers
-    // `CapabilityKind::Planner` at runtime.rs:175-177, so neither needs a
-    // `CAPABILITY_KIND_OVERRIDES` entry.
     "plan_audio_ducking",
     "plan_audio_normalization",
     "plan_clip_fades",
-    // AU5 §5.9 rule 117: Part B's three capabilities keep the same family
-    // ordering. `plan_` infers `CapabilityKind::Planner` and `capture_` infers
-    // nothing at all, so `capture_room_tone` falls through to
-    // `CapabilityKind::Action` (runtime.rs:165-181) — which is what it is, and
-    // which is why it needs no `CAPABILITY_KIND_OVERRIDES` entry either. The
-    // capture sits directly before the planner that consumes what it writes.
     "plan_dialogue_repair",
     "capture_room_tone",
     "plan_room_tone_fill",
@@ -203,19 +174,6 @@ pub fn operation_tools() -> Result<Vec<OperationToolDefinition>, SchemaError> {
 
     variants
         .iter()
-        // Relinking and LUT-asset registration are intentionally omitted from
-        // generated mutator tools.
-        //
-        // A raw Operation::RelinkAsset cannot prove that the replacement path
-        // was probed and hashed by the filesystem-owning media layer, and a
-        // raw Operation::AddLutAsset cannot prove that the recorded sha256
-        // names bytes that actually exist in the project LUT store (CC4 §8).
-        // The explicit `relink_media` and `import_lut_asset` capabilities
-        // perform that filesystem work before entering Core; keeping the enum
-        // variants in the core schema preserves journal/serde compatibility
-        // without exposing an unsafe shortcut. `ConvertLegacyLook` joins them
-        // because the CC4 §9 conversion is a batch whose first half is
-        // `AddLutAsset`; see UNGENERATED_OPERATION_VARIANTS.
         .filter(|variant_schema| {
             variant_schema
                 .get("properties")
@@ -281,8 +239,6 @@ pub fn capability_tool_names() -> Result<Vec<String>, SchemaError> {
 pub fn operation_tool_name(operation: &Operation) -> &'static str {
     match operation {
         Operation::AddAsset { .. } => "add_asset",
-        // This name remains stable for journal/plan diagnostics, but the
-        // generated operation tool is deliberately not emitted (see above).
         Operation::RelinkAsset { .. } => "relink_asset",
         Operation::SetAssetColorDescription { .. } => "set_asset_color_description",
         Operation::SetColorContext { .. } => "set_color_context",
@@ -328,14 +284,7 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::SetEffectParam { .. } => "set_effect_param",
         Operation::SetEffectKeyframes { .. } => "set_effect_keyframes",
         Operation::ClearEffectKeyframes { .. } => "clear_effect_keyframes",
-        // Owned by the hand-written `convert_legacy_look` capability, which
-        // registers the asset and converts in one batch (CC4 §9). The name is
-        // stable for journal and plan diagnostics.
         Operation::ConvertLegacyLook { .. } => "convert_legacy_look",
-        // This name remains stable for journal/plan diagnostics, but the
-        // generated operation tool is deliberately not emitted (see above):
-        // only `import_lut_asset` can create a `LutAsset` record, because only
-        // it can write the hashed bytes into the project store (CC4 §8).
         Operation::AddLutAsset { .. } => "add_lut_asset",
         Operation::RemoveLutAsset { .. } => "remove_lut_asset",
         Operation::SetTitleParam { .. } => "set_title_param",
@@ -411,12 +360,6 @@ fn operation_tool(
             name.as_str(),
             "delete_clip" | "ripple_delete_clip" | "remove_track"
         ))
-        // AU4 §4.3 rule 84: the two new curve tools replace one owner's whole
-        // curve, so re-sending the same arguments cannot compound — the same
-        // reason `set_clip_audio` and `set_track_mix` are annotated. F23:
-        // `set_effect_keyframes` joins them in the same edit; it is the
-        // whole-curve-replace precedent the two new tools copy, and its
-        // absence here was an inherited oversight rather than a decision.
         .idempotent(matches!(
             name.as_str(),
             "set_clip_audio"
@@ -429,12 +372,6 @@ fn operation_tool(
                 | "set_pan_law"
         ))
         .open_world(false);
-    // AU4 §4.3 / F2: `get_capability` and `search_capabilities` publish only
-    // `first_sentence(description)`, so anything an agent must know *before*
-    // it writes has to live inside the opening sentence — AU3 Part B's idiom
-    // (`au3_part_b_tool_descriptions_name_the_lookahead_and_the_audio_report`).
-    // These clauses are spliced into the opening sentence ahead of its full
-    // stop and must therefore contain no `.` of their own.
     let opening_clause = match variant.as_str() {
         "SetTrackAutomation" => format!(
             ", where parameter is exactly one of {} or {} and the required curve replaces the track's whole ride in project frames: null is the only clear, and an omitted curve is an error, never a silent clear",
@@ -499,13 +436,6 @@ fn operation_tool(
         "SetTrackMix" => description.push_str(
             " gain_tenth_db is an integer number of tenths of a decibel in -600..=120; pan_percent is an integer in -100..=100; -100 is hard left and 100 is hard right. How a position becomes per-channel gains is a document-level setting, set_pan_law: under the default balance law 0 is an exact identity, and under constant_power 0 is -3.01 dB on both channels. mute silences the track everywhere including ducking sidechains; any solo silences every non-solo track. The operation replaces all four values; sending neutral values removes the track's entry.",
         ),
-        // AU4 §4.3: the two curve tools' prose. The essentials — the closed
-        // parameter vocabulary, that `null` is the clear, and that the field
-        // is required — live in `opening_clause` above, inside the *first*
-        // sentence, because that is the only part `get_capability` and
-        // `search_capabilities` publish. Everything appended here is
-        // refinement that reaches an agent only through `tools/list` on the
-        // internal registry or `get_capability`'s input schema.
         "SetTrackAutomation" => {
             write!(
                 description,
@@ -593,28 +523,11 @@ fn effect_documentation() -> String {
         }
         write!(documentation, "{}(", effect.name)
             .expect("writing effect documentation to a String cannot fail");
-        // CC3 §2.4: `color_curves` owns 133 generated parameters. Enumerating
-        // them adds several kilobytes to every AddEffect/SetEffectParam tool
-        // description and measurably degrades M36 runtime efficiency, so the
-        // three generating patterns are described instead. Every bound below
-        // is read from the Core descriptor, so the summary cannot drift.
         if effect.name == COLOR_CURVES_EFFECT_NAME {
             documentation.push_str(&color_curves_pattern_documentation());
         } else if is_lut_color_node(effect.name) {
-            // CC4 §8/M36: `lut_asset_id` spans 0..=2^53-1. Printing that range
-            // on every AddEffect/SetEffectParam description is pure noise — the
-            // only usable ids come from the project, so the description names
-            // the tool that lists them instead.
             documentation.push_str(&lut_node_pattern_documentation(effect.parameters));
         } else {
-            // CC5 §2.2/M36: the 47 matte parameters are emitted once as a
-            // shared legend below, never enumerated per kind. AU2 §4.1/M36:
-            // the twelve `audio_parametric_eq` band rows are emitted once as
-            // one generating pattern below, for the same reason. AU5
-            // §4.2/M36: `audio_denoise`'s 31 profile rows likewise — and
-            // there the hatch is mandatory rather than economical, because
-            // 31 rows x 48 B x 5 spliced tools is kilobytes on every effect
-            // tool's description (§0 R82, measured).
             let parametric_eq = effect.name == PARAMETRIC_EQ_EFFECT_NAME;
             for (parameter_index, parameter) in effect
                 .parameters
@@ -643,27 +556,17 @@ fn effect_documentation() -> String {
             documentation.push_str("; ");
             documentation.push_str(&matte_pattern_documentation());
         }
-        // AU2 §4.1, normative: one generating pattern for the four peaking
-        // bands, never twelve enumerated rows.
         if effect.name == PARAMETRIC_EQ_EFFECT_NAME {
             documentation.push_str("; ");
             documentation.push_str(&audio_parametric_eq_pattern_documentation(
                 effect.parameters,
             ));
         }
-        // AU5 §4.2 rule 78, normative: one generating pattern for the 31
-        // profile bands, never 31 enumerated rows.
         if effect.name == DENOISE_EFFECT_NAME {
             documentation.push_str("; ");
             documentation.push_str(&noise_profile_pattern_documentation(effect.parameters));
         }
         documentation.push(')');
-        // Legacy compatibility stages remain loadable but are outside the CC1
-        // managed conformance claim; advertising them as ordinary effects
-        // invites an agent to reach for them instead of primary_correction.
-        // `color_grade` is a wire alias Core canonicalises to
-        // `primary_correction` on load, so it is labelled as such rather than
-        // as a separate effect.
         if effect.name == "color_grade" {
             documentation.push_str(" [alias of primary_correction]");
         } else if kinewright_core::effect_compatibility_stage(effect.name).is_some() {
@@ -730,8 +633,6 @@ fn matte_pattern_documentation() -> String {
                 |parameter| format!("{}..={}", parameter.min, parameter.max),
             )
     };
-    // Window 0's descriptors carry the bounds every window shares; the table is
-    // generated from one macro, so reading window 0 reads all four.
     let window = |suffix: &str| {
         matte_window_parameters(0)
             .and_then(|table| {
@@ -878,8 +779,6 @@ fn noise_profile_pattern_documentation(parameters: &[EffectParameterDescriptor])
             )
         },
     );
-    // The first and last row's own spelling, so the `{01..31}` range cannot
-    // disagree with the names Core validates.
     let first = bands.first().map_or("?", |parameter| parameter.name);
     let last = bands.last().map_or("?", |parameter| parameter.name);
     let index = |name: &str| {
@@ -970,16 +869,12 @@ mod tests {
                 "remove_sync_group",
                 "upsert_audio_bus",
                 "remove_audio_bus",
-                // AU2 §5.4/§6.4: declared immediately after `RemoveAudioBus`
-                // and before `AddTrack`, in `Operation` declaration order.
                 "set_audio_master",
                 "set_pan_law",
                 "add_track",
                 "remove_track",
                 "set_track_sync_lock",
                 "set_track_mix",
-                // AU4 §4.3: declared immediately after `SetTrackMix`, in
-                // `Operation` declaration order.
                 "set_track_automation",
                 "add_clip",
                 "add_title",
@@ -1207,9 +1102,6 @@ mod tests {
                 required.iter().any(|entry| entry == "curve"),
                 "{name} must publish curve as required: {schema}"
             );
-            // F1/F3: `#[schemars(required)]` alone strips the null branch,
-            // which would make E1's one documented clear schema-invalid. The
-            // published field must be an `anyOf` that still admits `null`.
             let curve = &schema["properties"]["curve"];
             assert!(
                 curve["anyOf"]
@@ -1308,9 +1200,6 @@ mod tests {
             );
         }
 
-        // F2: `get_capability` and `search_capabilities` publish only
-        // `first_sentence(description)`, so the essentials have to survive the
-        // cut. `crate::runtime::capabilities` is what both project through.
         let published = tools
             .iter()
             .map(|definition| definition.tool.clone())
@@ -1505,9 +1394,6 @@ mod tests {
             .iter()
             .find(|effect| effect.name == "color_curves")
             .expect("Core must register color_curves");
-        // CC5 §2.2 appended the 47 matte parameters to every matte-capable
-        // descriptor, so `color_curves` now owns 133 CC3 curve controls plus
-        // 47: two generated families, both summarised rather than listed.
         assert_eq!(
             descriptor.parameters.len(),
             kinewright_core::COLOR_CURVES_DESCRIPTOR_PARAMETER_COUNT
@@ -1533,10 +1419,6 @@ mod tests {
         );
 
         let curves = entry("color_curves");
-        // `color_curves` is the one kind carrying *two* generated families: the
-        // 133 CC3 curve parameters and the 47 CC5 matte parameters. Each is
-        // summarised by its own pattern, and the budget is stated per family so
-        // a future family cannot be smuggled in under one loose total.
         let curve_pattern = color_curves_pattern_documentation();
         let matte_legend = matte_pattern_documentation();
         for (family, summary) in [("curves", &curve_pattern), ("matte", &matte_legend)] {
@@ -1551,8 +1433,6 @@ mod tests {
             "the color_curves entry is its two pattern summaries and nothing else, was {} bytes: {curves}",
             curves.len()
         );
-        // The compact form still states every bound an author needs, and
-        // reads them from the Core descriptor rather than restating literals.
         assert!(curves.contains("{curve}_point_count=2..=16"));
         assert!(curves.contains("master|red|green|blue"));
         assert!(curves.contains("{curve}_x{j}/{curve}_y{j}"));
@@ -1597,9 +1477,6 @@ mod tests {
         for tool in ["upsert_audio_bus", "remove_audio_bus"] {
             let description = description_of(tool);
             for phrase in [
-                // The closed set Core enforces (`VisualEffectOnAudioBus`).
-                // `upsert_audio_bus` carries no `effect_documentation()`, so
-                // this arm is the only place an agent can read the legal names.
                 "Bus effects must use one of audio_gain, audio_eq, audio_compressor, \
 audio_ducking, audio_limiter, audio_parametric_eq, audio_gate, or \
 audio_true_peak_limiter.",
@@ -1619,8 +1496,6 @@ audio_true_peak_limiter.",
                     "{tool} description omitted {phrase}: {description}"
                 );
             }
-            // Every name Core accepts on a bus is named in the arm, so the
-            // sentence cannot fall behind `is_audio_effect`.
             for name in [
                 "audio_gain",
                 "audio_eq",
@@ -1640,9 +1515,6 @@ audio_true_peak_limiter.",
                     "{tool} description omitted the legal bus effect {name}: {description}"
                 );
             }
-            // AU2 OPEN-4: the detector has the structure of BS.1770-4 Annex 2
-            // with this contract's own coefficients, so the prose must never
-            // advertise ITU conformance.
             assert!(
                 !description.contains("ITU"),
                 "{tool} description must not claim the ITU detector: {description}"
@@ -1671,8 +1543,6 @@ audio_true_peak_limiter.",
             add_effect[start..close].to_owned()
         };
 
-        // The twelve generated band rows are never enumerated, in any of the
-        // five effect tools that carry `effect_documentation()`.
         for tool in [
             "add_effect",
             "insert_effect",
@@ -1704,8 +1574,6 @@ audio_true_peak_limiter.",
             parametric_eq.contains(&pattern),
             "the audio_parametric_eq entry must carry the band pattern: {parametric_eq}"
         );
-        // Asserted on the generated description, not on the helper's own
-        // output, so these are not a self-test of the helper.
         assert!(
             parametric_eq
                 .contains("band{i}_hertz/band{i}_gain_tenth_db/band{i}_q_hundredths for i=1..=4")
@@ -1715,10 +1583,6 @@ audio_true_peak_limiter.",
         assert!(parametric_eq.contains("gain_tenth_db=-240..=240, neutral 0"));
         assert!(parametric_eq.contains("q_hundredths=10..=1800 hundredths of Q, neutral 71"));
 
-        // The sentence states one set of bounds for all four bands, so the four
-        // bands must actually agree. Unlike the CC5 matte windows, the twelve
-        // rows are hand-written per band in Core, so a per-band edit could
-        // otherwise make the summary a lie the agent cannot see through.
         let band_parameters = EFFECT_DESCRIPTORS
             .iter()
             .find(|effect| effect.name == "audio_parametric_eq")
@@ -1900,8 +1764,6 @@ audio_true_peak_limiter.",
             );
         }
 
-        // §6.1: the bus arm gains the fader sentence, and both bus tools share
-        // the arm.
         for name in ["upsert_audio_bus", "remove_audio_bus"] {
             let description = description_of(name);
             assert!(
@@ -1929,8 +1791,6 @@ audio_true_peak_limiter.",
                 "{name} must not be annotated destructive"
             );
         }
-        // `remove_audio_bus` is neither: it is not a full set, and the
-        // destructive list is unchanged by AU2.
         let remove = tools
             .iter()
             .find(|definition| definition.tool.name == "remove_audio_bus")
@@ -1974,8 +1834,6 @@ audio_true_peak_limiter.",
             legend.len()
         );
 
-        // Every bound is read from the Core descriptors, so the legend cannot
-        // drift from the values Core actually validates.
         assert!(legend.contains("matte_window{j}_*"));
         assert!(legend.contains("j=0..=3"));
         assert!(legend.contains("shape_token=1..=2"));
@@ -1999,9 +1857,6 @@ audio_true_peak_limiter.",
             }
         }
 
-        // Exactly the four matte-capable kinds carry it, and `technical_lut`
-        // does not: a partially applied source normalization is not a
-        // meaningful state (CC5 §2.1).
         let documentation = effect_documentation();
         let carriers = EFFECT_DESCRIPTORS
             .iter()
@@ -2067,8 +1922,6 @@ audio_true_peak_limiter.",
         const LEGACY_LABEL: &str =
             " [legacy - outside CC1 managed conformance; prefer primary_correction]";
         let documentation = effect_documentation();
-        // The label itself contains a semicolon, so locate each entry by its
-        // name and closing parenthesis rather than by splitting on separators.
         let suffix_after = |name: &str| {
             let start = documentation
                 .find(&format!("{name}("))

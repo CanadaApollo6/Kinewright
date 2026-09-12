@@ -19,8 +19,6 @@ fn main() {
     let compiled_resource = out_dir.join("Kinewright.res");
     let version = env::var("CARGO_PKG_VERSION").expect("Cargo must set CARGO_PKG_VERSION");
 
-    // The committed icon asset is the single source of truth; packaging finds
-    // the OUT_DIR copy, so the copy also keeps the installer contract intact.
     fs::copy("assets/kinewright.ico", &icon_path)
         .expect("failed to copy assets/kinewright.ico to OUT_DIR");
     write_resource_script(&resource_script, &icon_path, &version)

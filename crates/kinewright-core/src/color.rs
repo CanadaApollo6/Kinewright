@@ -667,12 +667,6 @@ pub fn classify_source_with_assumption(
     assumption: Option<ColorSourceProfileAssumption>,
 ) -> Result<ColorSourceProfile, ColorSourceError> {
     if let Err(error) = validate_source_fields(description, assumption) {
-        // An unknown white point must not conceal an independently invalid
-        // primaries/transfer/matrix/range tuple. Diagnose the combination
-        // with the profile's normative D65 value, but retain the raw unknown
-        // error whenever the remaining tuple is otherwise supported. This is
-        // diagnostic only and never rewrites source metadata or broadens the
-        // explicit BT.709 D65-assumption policy.
         if error == ColorSourceError::UnknownWhitePoint {
             let mut diagnostic = description.clone();
             diagnostic.white_point = ColorWhitePoint::D65;
@@ -764,8 +758,6 @@ fn validate_source_fields(
 
     match &description.bit_depth {
         ColorBitDepth::Unknown => Err(ColorSourceError::UnknownBitDepth),
-        // CC1 §2.1: named and numeric integer depths are equivalent, and only
-        // 8..=16 integer samples enter the managed path.
         value => match value.integer_bits() {
             Some(bits) if (8..=16).contains(&bits) => Ok(()),
             _ => Err(ColorSourceError::UnsupportedBitDepth(value.clone())),
@@ -827,12 +819,6 @@ impl<'de> Deserialize<'de> for ColorContext {
                 pipeline_state,
                 ..legacy
             },
-            // CC0's working description was a storage placeholder rather than
-            // an executed transform.  Migrate that stage independently so a
-            // project-custom monitoring or delivery target is not allowed to
-            // strand the project on the old 8-bit working contract.  The
-            // other stages are upgraded only when they are still the exact
-            // application defaults; genuinely custom values remain intact.
             None if legacy.working_matches_cc0_placeholder() => {
                 let current = Self::sdr_rec709();
                 let monitoring_matches_default = legacy.monitoring_matches_cc0_default();
@@ -851,13 +837,6 @@ impl<'de> Deserialize<'de> for ColorContext {
                         legacy.delivery.clone()
                     },
                 };
-                // CC1 §4: `managed_sdr_v1` is a claim about the whole
-                // pipeline, so it is only stamped when working, monitoring,
-                // and delivery all match the managed SDR targets after the
-                // migration. A project-custom monitoring or delivery target
-                // keeps the migrated working description but stays `legacy`
-                // so conformance blocks it with the exact incompatible field
-                // instead of silently claiming the managed contract.
                 let managed = migrated.working_matches_managed_sdr()
                     && migrated.monitoring_matches_managed_sdr()
                     && migrated.delivery_matches_managed_sdr();

@@ -316,19 +316,12 @@ impl ProjectSession {
         } else {
             AgentHarnessChoice::Codex
         };
-        // Session 1 is the process-startup owner of the scanned pending list;
-        // later sessions only attach their own recorder.
         let recovery = if id == 1 {
             Recovery::start(&core, project_path.as_deref())
         } else {
             Recovery::start_attached(&core, project_path.as_deref())
         };
         let document = Arc::new(document);
-        // A store-root refusal on open is reported by the caller through the
-        // ordinary error log; the session still opens, with imported looks
-        // reporting `missing` until the root is usable. The reason is kept on
-        // the session so every disabled look control can name it instead of
-        // claiming the project was never saved (CC4 §2.2).
         let (lut_store, lut_store_error) = match derive_lut_store(project_path.as_deref()) {
             Ok(store) => (store, None),
             Err(reason) => (None, Some(reason)),
@@ -933,10 +926,6 @@ mod tests {
         assert_eq!(reconciled.source_audio_target, None);
     }
 
-    // -----------------------------------------------------------------------
-    // CC4 §2.2 store derivation, §10.3.11 relocatable project proof
-    // -----------------------------------------------------------------------
-
     /// A hand-made `S = 2`, `[0, 1]` identity `.cube` with non-trivial
     /// samples, written out literally rather than produced by the code under
     /// test, per the CC4 §10.1 fixture-quality rule.
@@ -1113,9 +1102,6 @@ mod tests {
             "a saved project must never be told to save itself: {message}"
         );
 
-        // The same invariant at the export gate: a refused root blocks with
-        // the typed refusal and the recovery that can clear it, never with the
-        // save recovery (CC4 §2.2, §2.3).
         let gate = crate::export_ui::export_store_refusal_reason(&refusal);
         assert!(gate.contains("lut_store_root_invalid: "), "{gate}");
         assert!(
@@ -1196,9 +1182,6 @@ mod tests {
             "a branch server must be started with the session's own handle, not a copy"
         );
 
-        // Because it is the same handle, the branch already carries the path
-        // the session was opened on: no window in which its look tools would
-        // report `project_not_saved` on a saved project.
         assert_eq!(
             served.read().expect("readable").clone(),
             Some(project.clone())
@@ -1213,8 +1196,6 @@ mod tests {
             .expect("the branch resolves the same root");
         assert_eq!(session_root.root(), branch_root.root());
 
-        // A Save As writes the session's handle once; the branch sees it with
-        // no republishing.
         let moved = temporary.path("renamed.kinewright");
         *handle.write().expect("writable") = Some(moved.clone());
         assert_eq!(served.read().expect("readable").clone(), Some(moved));
@@ -1298,8 +1279,6 @@ mod tests {
         assert_eq!(origin_library.len(), 1);
         assert_eq!(origin_statuses[0].1.kind, LutAvailabilityKind::Verified);
 
-        // Copy the project file *and* the store into a fresh directory whose
-        // parent has a different name.
         let moved = TempDirectory::new("cc4-relocate-moved");
         let moved_project = moved.path("edit.kinewright");
         fs::copy(&project, &moved_project).expect("the project file copies");
@@ -1311,8 +1290,6 @@ mod tests {
         )
         .expect("the store file copies");
 
-        // The open-equivalent load: read the document, derive the store from
-        // the *new* path, and build the library.
         let json = fs::read_to_string(&moved_project).expect("the copied project reads");
         let moved_document: Document = serde_json::from_str(&json).expect("valid project JSON");
         moved_document
@@ -1325,26 +1302,16 @@ mod tests {
         let (moved_library, moved_statuses) =
             LutLibrary::build(&moved_document.lut_assets, Some(&moved_store));
 
-        // The relocated project reproduces the look bit-identically. The two
-        // handles may legitimately be the same `Arc`: CC4 §2.4 mandates a
-        // parse cache keyed by `sha256`, so identical bytes resolve to one
-        // in-process lattice no matter which store they were read through.
-        // Independence from the *origin store* is proven by the bare case
-        // below, which resolves nothing.
         assert_eq!(moved_library.len(), origin_library.len());
         let origin_lut = origin_library.get(LutAssetId(1)).expect("origin lattice");
         let moved_lut = moved_library.get(LutAssetId(1)).expect("moved lattice");
         assert_eq!(origin_lut.size, moved_lut.size);
-        // Bit-identity, not tolerance: CC4 §2.2's relocatability rule is that
-        // the look reproduces *bit-identically*, so no epsilon is admitted.
         assert_eq!(bits(&origin_lut.domain_min), bits(&moved_lut.domain_min));
         assert_eq!(bits(&origin_lut.domain_max), bits(&moved_lut.domain_max));
         assert_eq!(bits(&origin_lut.rgba), bits(&moved_lut.rgba));
         assert_eq!(moved_document.lut_assets[0].sha256, sha256);
         assert_eq!(moved_statuses[0].1.kind, LutAvailabilityKind::Verified);
 
-        // Copy the project *without* the store: the asset is `missing` and the
-        // status names the store path it was looked for at.
         let bare = TempDirectory::new("cc4-relocate-bare");
         let bare_project = bare.path("edit.kinewright");
         fs::copy(&project, &bare_project).expect("the project file copies");
@@ -1495,8 +1462,6 @@ mod tests {
             .import_lut_asset(&write_source_cube(&temporary, "look.cube"))
             .expect("import");
         let mut document = look_document(import.clone().into_lut_asset(LutAssetId(1)));
-        // A second import of the same bytes is the same store file and a
-        // second record, which Core accepts under a fresh id.
         let second = import.into_lut_asset(document.next_lut_asset_id().expect("id space"));
         apply_batch(&mut document, &[Operation::AddLutAsset { asset: second }])
             .expect("AddLutAsset is accepted");

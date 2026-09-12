@@ -246,8 +246,6 @@ mod tests {
                 .map(|model| model.efforts.clone())
                 .unwrap()
         };
-        // Per the CLI's own capability checks: the 4.7+ generation takes the
-        // full ladder, 4.6 lacks xhigh, Haiku 4.5 stops at high.
         assert_eq!(efforts_of("claude-fable-5"), CLAUDE_EFFORTS_FULL);
         assert_eq!(efforts_of("claude-opus-4-8"), CLAUDE_EFFORTS_FULL);
         assert_eq!(efforts_of("claude-sonnet-4-6"), CLAUDE_EFFORTS_NO_XHIGH);
@@ -310,8 +308,6 @@ mod tests {
             parse_codex_default_model(config),
             Some("gpt-5.6-sol".to_owned())
         );
-        // `model` keys inside sections do not count, and prefixed keys like
-        // model_reasoning_effort never match.
         let sectioned = "model_reasoning_effort = \"xhigh\"\n[profile]\nmodel = \"gpt-5.5\"\n";
         assert_eq!(parse_codex_default_model(sectioned), None);
         assert_eq!(parse_codex_default_model(""), None);

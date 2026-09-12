@@ -122,11 +122,7 @@ impl WorkingProofCache {
     pub(crate) fn retain_context(&self, live: WorkingProofKey) {
         let mut entry = match self.entry.try_lock() {
             Ok(entry) => entry,
-            // A worker panicked mid-render; the entry is still readable and
-            // still worth dropping.
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            // A render is in flight right now. Whatever it stores is tested
-            // against the live context on the next frame.
             Err(std::sync::TryLockError::WouldBlock) => return,
         };
         if entry.as_ref().is_some_and(|(stored, _)| *stored != live) {
@@ -140,9 +136,6 @@ impl WorkingProofCache {
         key: WorkingProofKey,
         render: impl FnOnce() -> Result<WorkingProof, String>,
     ) -> Result<Arc<WorkingProof>, String> {
-        // A poisoned lock means a worker panicked mid-render. This is a cache:
-        // the next reader re-renders rather than propagating that panic into a
-        // second thread and wedging every QC surface.
         let mut entry = self.entry.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some((stored, proof)) = entry.as_ref()
             && *stored == key
@@ -218,9 +211,6 @@ impl ColorQcSource for AnalysisColorQcSource {
         key: WorkingProofKey,
         request: &ColorQcRequest,
     ) -> Result<(ColorQcReport, WorkingProofMetadata), String> {
-        // `measure_color_qc_with_nodes` renders the baseline itself and hands
-        // back only the report, so the provenance of that render is observed
-        // where it happens rather than reproduced by rendering again.
         let analysis = BaselineProofAnalysis {
             inner: Arc::clone(&self.analysis),
             cache: Arc::clone(&self.cache),
@@ -287,15 +277,8 @@ impl Analysis for BaselineProofAnalysis {
                 .map_err(MediaError::Backend)?;
             (*shared).clone()
         } else {
-            // A scratch clone with one node removed: never storable under the
-            // baseline's key.
             self.inner.working_proof_for_document(document, at)?
         };
-        // The **first** render of the pass is the baseline: CC6 §3.7 renders
-        // and measures it before it removes anything. Recorded from the call
-        // order rather than from the sharing test above, so a baseline that
-        // arrives under a rebuilt `Arc` still yields the right provenance
-        // instead of failing the whole measurement.
         let mut baseline = self.baseline.lock().unwrap_or_else(PoisonError::into_inner);
         if baseline.is_none() {
             *baseline = Some(proof.metadata.clone());
@@ -740,9 +723,6 @@ impl std::fmt::Debug for ColorQcState {
 
 impl Default for ColorQcState {
     fn default() -> Self {
-        // Unbounded: a superseded worker is retired by its flag and filtered
-        // by generation, so a full queue must never be able to drop the
-        // response the window is waiting for.
         let (response_tx, response_rx) = mpsc::channel();
         Self {
             open: false,
@@ -893,9 +873,6 @@ impl ColorQcState {
             .as_ref()
             .is_some_and(|worker| !worker.is_finished())
         {
-            // The running worker's result belongs to an older generation and
-            // is filtered on arrival; retiring it also stops it delivering at
-            // all. It still has to finish before the next render may start.
             if let Some(worker) = self.active.as_ref() {
                 worker.retire();
             }
@@ -1128,10 +1105,6 @@ impl ColorQcNodeClipping {
         if *range <= 0 && *gamut <= 0 {
             return None;
         }
-        // `{:+}` renders the contract's `+{n}` for a positive delta and the
-        // honest `-{n}` for a negative one. Clamping to zero would print `+0`
-        // for a node whose removal made the frame *worse*, which is a
-        // different fact than "contributed nothing".
         Some(format!(
             "Clipping contribution: {range:+} bp range · {gamut:+} bp gamut (frame {})",
             self.frame
@@ -1185,9 +1158,6 @@ impl KinewrightApp {
     /// CC6 §8.1: the read-only Colour QC window.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn show_color_qc_window(&mut self, ctx: &egui::Context) {
-        // `poll_background` has already observed the context and drained the
-        // worker this frame, so the inspector and this window read the same
-        // measurement rather than two frames of it.
         if !self.color_qc.open {
             return;
         }
@@ -1199,8 +1169,6 @@ impl KinewrightApp {
         let mut measure = false;
         let mut per_node = self.color_qc.per_node();
         let mut depth = self.color_qc.depth();
-        // A cloned snapshot: nothing the window draws can reach the live
-        // document, and nothing it draws is allowed to change it.
         let measurement = self.color_qc.current().cloned();
         let pending = self.color_qc.is_pending();
         let error = self.color_qc.error().map(str::to_owned);
@@ -1299,9 +1267,6 @@ impl KinewrightApp {
             matte_region: None,
             checks,
             delivery_bit_depth: key.depth,
-            // Pre-export mode (CC6 §3.6): the tags the document *would* be
-            // delivered with at this lane, materialised the one way
-            // `delivery_color_for_depth` names.
             expected_delivery: Some(delivery_color_for_depth(&document, key.depth)),
             observed_delivery: None,
             max_nodes: u8::try_from(kinewright_core::MAX_QC_NODE_CONTRIBUTIONS).unwrap_or(16),
@@ -1332,10 +1297,6 @@ pub(crate) fn color_qc_sections(ui: &mut egui::Ui, measurement: &ColorQcMeasurem
     region_line(ui, report);
     range_section(ui, report);
     gamut_section(ui, report);
-    // The region the *measurement* was scoped to, not whatever the scopes
-    // panel is set to now: a report taken with no region must keep saying so
-    // after an ROI is typed, or the prompt describes a measurement nobody has
-    // taken yet.
     skin_section(
         ui,
         report,
@@ -1428,8 +1389,6 @@ fn gamut_section(ui: &mut egui::Ui, report: &ColorQcReport) {
             format!("· below black {} px", report.gamut.below_black_pixel_count),
         );
     });
-    // CC6 §14: the relation is a line, not a tooltip. Two named reports over
-    // one pixel set invite double-counting in any summary written from them.
     ui.add(
         egui::Label::new(
             egui::RichText::new(report.gamut.definition.as_str()).color(color::TEXT_MUTED),
@@ -1501,10 +1460,6 @@ fn tags_section(ui: &mut egui::Ui, report: &ColorQcReport) {
         );
     });
     if tags.tag_source == kinewright_core::DeliveryTagSource::MaterialisedExportSettings.as_str() {
-        // Stated rather than left to be inferred from two identical columns:
-        // CC6 §3.6's pre-export mode has no independent observation, so
-        // "observed" is the materialised value and the check answers "would
-        // these tags be accepted at this depth?" — not "does the file match?".
         ui.add(
             egui::Label::new(egui::RichText::new(PRE_EXPORT_TAG_NOTE).color(color::TEXT_MUTED))
                 .wrap(),
@@ -1584,9 +1539,7 @@ pub(crate) fn tag_field_rows(
             format!("{:?}", observed.provenance),
         ),
         (
-            // The wire name `delivery_color_mismatches` emits, not a prettier
-            // one: `tag_field_color` matches on it, so a shortened label would
-            // silently draw a real mismatch as an agreeing row.
+            // The wire name `delivery_color_mismatches` emits, not a prettier one
             "confidence_basis_points",
             expected.confidence_basis_points.to_string(),
             observed.confidence_basis_points.to_string(),
@@ -1898,8 +1851,6 @@ mod tests {
             request: &ColorQcRequest,
         ) -> Result<(ColorQcReport, WorkingProofMetadata), String> {
             self.calls.lock().unwrap().push("measure_with_nodes");
-            // The shape of CC6 §3.7's pass: one baseline render, then one
-            // render per candidate, every one of them counted.
             let baseline = self.render();
             let mut report =
                 measure_color_qc(&baseline, request).map_err(|error| error.to_string())?;
@@ -2005,8 +1956,6 @@ mod tests {
             vec!["working_proof"],
             "measuring asks for a proof and nothing else: no render, no apply, no operation"
         );
-        // The state type has no operation channel at all, so the strongest
-        // observable claim is that the document it was handed is untouched.
         assert_eq!(
             *document, before,
             "the snapshot the worker measured is unchanged afterwards"
@@ -2322,8 +2271,6 @@ mod tests {
             );
         }
 
-        // The same cache, now poisoned by the panic that unwound through its
-        // lock, still serves the next measurement.
         let calls = Arc::new(Mutex::new(Vec::new()));
         let source = Arc::new(RecordingSource::new(&calls));
         let mut state = ColorQcState::default();
@@ -2492,8 +2439,6 @@ mod tests {
             "no report means no line"
         );
 
-        // One positive and one negative: the line appears, and the negative
-        // delta is shown as the negative it is rather than clamped to `+0`.
         let mixed = ColorQcNodeClipping {
             frame: 12,
             entries: vec![(ClipId(2), EffectId(1), 5, -3)],
@@ -2551,8 +2496,6 @@ mod tests {
         assert_ne!(agreeing, mismatch);
         assert_ne!(agreeing, not_representable);
 
-        // `provenance` legitimately differs on a probed description and is
-        // deliberately excluded from the mismatch list (CC6 §3.6).
         assert_eq!(
             tag_field_color(&tags, "provenance"),
             color::TEXT_SECONDARY,
@@ -2599,8 +2542,6 @@ mod tests {
             "the fixture trips every check, so nothing in the grid is untested"
         );
 
-        // Pre-export mode: `expected` and `observed` are the same materialised
-        // value, exactly as `measure_color_qc` builds it.
         let tags = kinewright_core::delivery_tag_check(
             &broken,
             &broken,
@@ -2892,10 +2833,6 @@ mod tests {
             "the proxy forwards audio_qc with its request intact; it answered {forwarded:?}"
         );
 
-        // AU3 §7 B14: and `verify_delivery_audio` the same way. The export
-        // worker measures the written file through whatever `Analysis` the app
-        // holds, so an arm missing here would answer `NotImplemented` while
-        // the engine behind it can decode the file.
         let forwarded = proxy.verify_delivery_audio(
             std::path::Path::new("/tmp/export.mp4"),
             Some(kinewright_core::STREAMING_PLATFORM_TARGET),

@@ -82,10 +82,6 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
             .decoder()
             .video()
             .map_err(|error| media_error(path, "could not open the video decoder", error))?;
-        // FFmpeg may leave the opened decoder's pixel format unresolved until
-        // it sees a packet. Decode one frame through the safe ffmpeg-next API
-        // on a short-lived second input so probing can still report the source
-        // component depth without consuming the input used for duration data.
         let negotiated_pixel_format = negotiated_pixel_format(path, stream.index());
         let color_description = color_description_from_decoder(&decoder, negotiated_pixel_format);
         let stream_duration = timestamp_to_grid_ceil(stream.duration(), stream.time_base(), rate);
@@ -155,9 +151,6 @@ fn color_description_from_decoder(
         transfer,
         matrix,
         range,
-        // FFmpeg exposes primaries, transfer, matrix, and range here, but not
-        // a white point. Keep this unknown rather than mixing an inferred
-        // value into a description whose provenance is stream metadata.
         white_point: ColorWhitePoint::Unknown,
         bit_depth,
         confidence_basis_points,
@@ -357,10 +350,6 @@ fn bit_depth_from_pixel(pixel: ffmpeg::format::Pixel) -> ColorBitDepth {
             | "0bgr"
             | "rgb24"
             | "bgr24"
-            // FFmpeg names AV_PIX_FMT_GRAY8 `gray` (not `gray8`). Keep the
-            // descriptor names explicit: this is intentionally not a broad
-            // string parser, since packed and float formats must not be
-            // mistaken for integer component depths.
             | "gray"
             | "ya8"
     ) {
@@ -1116,9 +1105,6 @@ impl VideoDecoder {
         )
     }
 
-    // Decoder setup owns the single managed/legacy converter decision and the
-    // associated path/format diagnostics; keeping it together avoids losing
-    // the typed managed-depth error at an intermediate helper boundary.
     #[allow(clippy::too_many_lines)]
     fn open_scaled_internal(
         path: &Path,

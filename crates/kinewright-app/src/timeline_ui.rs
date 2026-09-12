@@ -313,8 +313,6 @@ fn paint_clip_envelope(
         painter.circle_filled(*point, ENVELOPE_POINT_RADIUS, tint);
         let value = key.value as i32;
         if !(ENVELOPE_DISPLAY_MIN_TENTH_DB..=ENVELOPE_DISPLAY_MAX_TENTH_DB).contains(&value) {
-            // Rule 95: a value outside the display range clamps to the edge
-            // and paints a 2 px marker there rather than being hidden.
             painter.line_segment(
                 [
                     egui::pos2(point.x - ENVELOPE_POINT_RADIUS, point.y),
@@ -387,8 +385,6 @@ fn envelope_insert_key(curve: &AutomationCurve, at: TimeCode) -> Vec<Keyframe> {
         return keys;
     }
     let value = curve.value_at(at).unwrap_or(0);
-    // The segment the click landed on decides the new key's shape, so
-    // inserting on a `Hold` run does not silently turn it into a ramp.
     let interpolation = index
         .checked_sub(1)
         .and_then(|previous| keys.get(previous))
@@ -430,8 +426,6 @@ fn envelope_move_key(
     };
     let low = low.clamp(0, last);
     let high = high.clamp(0, last);
-    // Unreachable on a valid curve: two neighbours of a key are always at
-    // least two frames apart.
     key.at = TimeCode(if low > high {
         low
     } else {
@@ -803,8 +797,6 @@ impl KinewrightApp {
                 if self.ripple_mode {
                     ui.label(theme::caps_label("RIPPLE", color::ACCENT));
                 }
-                // AU4 §5.1 rule 100: session state, not document state. Off
-                // hides the overlay and with it all envelope hit-testing.
                 let envelopes = ui
                     .add(
                         egui::Button::new("Envelopes")
@@ -818,8 +810,6 @@ impl KinewrightApp {
                 if envelopes.clicked() {
                     show_envelopes = !show_envelopes;
                 }
-                // AU5 §6.4 rule 129: beside `Envelopes`, and grey until there
-                // is both a selected clip and a gap on its track to fill.
                 let room_tone_block = self.room_tone_block();
                 let room_tone = ui
                     .add_enabled(
@@ -910,12 +900,6 @@ impl KinewrightApp {
             return;
         }
         let track_count = document.tracks.len().max(1) as f32;
-        // Spare vertical space belongs to the editing surface: lanes stretch
-        // (within bounds) so filmstrips and waveforms get taller, instead of
-        // slack pooling at the bottom of the window.
-        // Compact filmstrip lanes (M24): the timeline verifies and orients;
-        // it no longer earns workbench height by default. Dragging the dock
-        // taller grows lanes up to the classic height.
         let track_height = ((ui.available_height() - size::RULER_HEIGHT - size::CONTROL_HEIGHT)
             / track_count)
             .clamp(44.0, size::TRACK_HEIGHT);
@@ -939,26 +923,15 @@ impl KinewrightApp {
         let (major_tick, minor_tick) = tick_density(pixels_per_frame, document.fps);
         let clip_bounds = collect_clip_bounds(&document);
         let mut pending_operations = None;
-        // AU4 §5.2 rule 104: the timeline's first coalescing path, used by the
-        // envelope and nothing else. Clip move, trim, marker and playhead
-        // drags keep their `drag_stopped`-only `pending_operations` batch
-        // (rule 105); the two paths coexist.
         let mut envelope_edits = InspectorEdits::default();
         let mut envelope_drag = ui
             .data_mut(|data| data.get_temp::<EnvelopeDrag>(egui::Id::new(ENVELOPE_DRAG_MEMORY_ID)));
-        // AU4 §5.1 rule 101 (AU4 §0 E49): the key the pointer is over this
-        // frame, reported to the session so the *next* frame's
-        // `keyboard_shortcuts` can answer Delete with it.
         let mut envelope_hover: Option<EnvelopeHover> = None;
         let mut seek = None;
         let mut scrub_started = false;
         let mut scrub_stopped = false;
         let mut snap_guide = None;
         let snapping_disabled = ui.input(|input| input.modifiers.alt);
-        // Read once for the whole frame rather than once per audio clip: the
-        // envelope's allocation predicate (rule 99) asks for it on every clip
-        // that carries a curve, and the answer is the same screen position for
-        // all of them.
         let envelope_pointer = ui.input(|input| input.pointer.hover_pos());
 
         ui.horizontal_top(|ui| {
@@ -1080,23 +1053,10 @@ impl KinewrightApp {
                                 )
                                 .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
 
-                            // AU4 §5.1 rule 98: the envelope's interact is
-                            // allocated AFTER `body`, `left` and `right`,
-                            // because egui 0.35.0 resolves overlapping
-                            // interactive rects by last-registered-wins
-                            // (`hit_test.rs:429-433`) — an interact allocated
-                            // before the body would lose every tie. Rule 99:
-                            // and only when a drag is in flight or the pointer
-                            // is within 9 px of the line, so body drags and
-                            // the two 6 px trim handles are untouched
-                            // everywhere else.
                             let envelope_kind = match &clip.content {
                                 ClipContent::Media => asset.map(|asset| asset.kind),
                                 ClipContent::Title(_) | ClipContent::Freeze(_) => None,
                             };
-                            // Rule 97: no band and no hit-testing under 24 px
-                            // of clip width, so the coarse gesture is never
-                            // offered where it cannot land.
                             let envelope_shown =
                                 envelope_is_offered(duration, pixels_per_frame, show_envelopes);
                             let envelope_curve =
@@ -1108,12 +1068,6 @@ impl KinewrightApp {
                                 let keys: &[Keyframe] =
                                     envelope_curve.map_or(&[], |curve| &curve.keyframes);
                                 let points = envelope_points(band, duration, keys);
-                                // AU4 §0 E53: a clip with no curve still shows
-                                // a flat line at its parked
-                                // `audio_gain_tenth_db`, so rule 101's "a
-                                // click on the line inserts a key" reaches the
-                                // *first* key too and the band is
-                                // discoverable on an untouched audio clip.
                                 let drawn = if keys.is_empty() {
                                     envelope_parked_polyline(band, clip.audio_gain_tenth_db)
                                 } else {
@@ -1122,21 +1076,10 @@ impl KinewrightApp {
                                 let interact_rect = envelope_interact_rect(band, body_rect);
                                 let dragging =
                                     envelope_drag.is_some_and(|drag| drag.clip == clip.id);
-                                // The allocation predicate tests the rect the
-                                // interact actually takes, not the whole band:
-                                // a pointer over a 6 px trim handle within
-                                // 9 px of the line would otherwise allocate an
-                                // interact whose rect cannot contain it.
                                 let near = envelope_pointer.is_some_and(|pointer| {
                                     envelope_near_curve(&drawn, interact_rect, pointer)
                                 });
                                 if dragging || near {
-                                    // AU4 §0 E53: the parked line's offer is
-                                    // click-only, so a clip drag that starts
-                                    // on it still drags the clip — egui
-                                    // hit-tests click and drag separately, and
-                                    // a click-only widget over `body` yields
-                                    // click: envelope, drag: body.
                                     let sense = if keys.is_empty() {
                                         egui::Sense::click()
                                     } else {
@@ -1149,14 +1092,6 @@ impl KinewrightApp {
                                     );
                                     clip_pointer_interaction |=
                                         envelope.hovered() || envelope.dragged();
-                                    // AU4 §5.1 rule 101 (AU4 §0 E49): the
-                                    // pointer's key is reported to the session
-                                    // at the end of the frame, because
-                                    // `keyboard_shortcuts` runs before the
-                                    // timeline paints and has to answer Delete
-                                    // from the report, one frame old — the
-                                    // matte overlay's `matte_expanded` →
-                                    // `report_expanded` pattern.
                                     if envelope.hovered()
                                         && let Some(pointer) = envelope_pointer
                                         && let Some(index) = envelope_hit(&points, band, pointer)
@@ -1166,11 +1101,6 @@ impl KinewrightApp {
                                             index,
                                         });
                                     }
-                                    // The snap table is O(clips + markers) and
-                                    // allocates, so it is built only on the
-                                    // frames a gesture actually consumes it —
-                                    // the same shape the clip body's own
-                                    // `interacting` guard uses below.
                                     let interacting = envelope.drag_started()
                                         || is_live_drag(&envelope)
                                         || envelope.clicked();
@@ -1224,9 +1154,6 @@ impl KinewrightApp {
                                             envelope_grab_value(band, pointer.y, stored.value),
                                             duration,
                                         );
-                                        // A frame that asks for the values the
-                                        // document already holds is not an
-                                        // edit (AU4 §5.2 rule 104).
                                         if moved != keys {
                                             envelope_edits.extend_live(
                                                 vec![envelope_operation(clip.id, moved)],
@@ -1253,12 +1180,6 @@ impl KinewrightApp {
                                         );
                                         let inserted = match envelope_curve {
                                             Some(curve) => envelope_insert_key(curve, at),
-                                            // AU4 §0 E53: the first key lands
-                                            // at the value the flat line was
-                                            // drawn at, through the same
-                                            // `upsert_keyframe` the
-                                            // inspector's `+ Key at playhead`
-                                            // writes.
                                             None => {
                                                 crate::inspector_ui::upsert_keyframe(
                                                     None,
@@ -1273,12 +1194,6 @@ impl KinewrightApp {
                                                 .push(envelope_operation(clip.id, inserted));
                                         }
                                     }
-                                    // Removal is the secondary click or the
-                                    // Delete/Backspace the session report
-                                    // above arms: `KeyAction::Delete` runs
-                                    // before the timeline paints, so the
-                                    // keyboard half is answered in `keys.rs`
-                                    // from that report (AU4 §0 E49).
                                     if envelope.secondary_clicked()
                                         && let Some(pointer) = envelope.interact_pointer_pos()
                                         && let Some(index) = envelope_hit(&points, band, pointer)
@@ -1494,8 +1409,6 @@ impl KinewrightApp {
                             if clip.content.is_media() && clip.speed_percent != 100 {
                                 paint_speed_badge(&painter, draw_rect, clip.speed_percent);
                             }
-                            // AU4 §5.1 rule 102: the rubber band paints last,
-                            // over the waveform it shares a rect with.
                             if let Some(band) = envelope_kind
                                 .filter(|_| envelope_shown)
                                 .and_then(|kind| envelope_band_rect(draw_rect, kind))
@@ -1687,14 +1600,9 @@ impl KinewrightApp {
         if let Some(operations) = pending_operations {
             self.send_operations(operations);
         }
-        // AU4 §5.2 rule 104: one `submit_inspector_edits` at the end of the
-        // function, exactly as the CC5 matte overlay does it.
         self.submit_inspector_edits(envelope_edits);
         if scrub_started {
             self.resume_after_scrub = self.playing;
-            // CC6 §8.2: the drag pauses the transport, so `playing` stops
-            // describing a moving playhead the instant the scrub begins. The
-            // QC mask is told directly.
             self.qc_mask.set_scrubbing(true);
             if self.playing {
                 self.playback.pause();
@@ -1723,9 +1631,6 @@ impl KinewrightApp {
         session.selected_asset = selected_asset;
         if previous_selected_asset != selected_asset {
             if let Some(asset_id) = selected_asset {
-                // The local selection is assigned above so the timeline can
-                // report it immediately; clear it for cue_source_asset to
-                // establish fresh marks, cursor, and visible route defaults.
                 session.selected_asset = None;
                 session.cue_source_asset(asset_id);
             } else {
@@ -1774,8 +1679,6 @@ fn paint_track_labels(
             [lane.left_bottom(), lane.right_bottom()],
             egui::Stroke::new(1.0, color::BORDER_SUBTLE),
         );
-        // The mixer names the same track the same way; one function owns the
-        // spelling so the two surfaces cannot drift (AU1 §5.1).
         let (label, icon) = track_caption_and_icon(track.kind, index);
         painter.text(
             egui::pos2(lane.left() + space::TWO, lane.center().y - 8.0),
@@ -1792,9 +1695,6 @@ fn paint_track_labels(
             .tint(color::TEXT_MUTED)
             .paint_at(ui, icon_rect);
 
-        // One operation per frame leaves this column: the header sends its
-        // edits as a single non-coalesced batch, so a second click in the same
-        // frame would open a second undo entry for a gesture nobody made.
         if let Some(operation) = paint_mix_toggles(ui, &painter, lane, document, track) {
             pending_operation = Some(operation);
         }
@@ -1991,9 +1891,6 @@ fn paint_project_marker(
     pixels_per_frame: f32,
 ) {
     let x = timeline_rect.left() + position as f32 * pixels_per_frame;
-    // Markers exist to draw the eye to moments; their tokens are the chromatic
-    // status palette, never the greyscale text ramp (which camouflages against
-    // the ruler).
     let token_color = match color_token {
         1 => color::STATUS_SUCCESS,
         2 => color::STATUS_WARNING,
@@ -2056,11 +1953,6 @@ fn paint_clip(
             rect,
         );
     }
-    // AU4 §5.1 rule 95a: the band comes from `envelope_band_rect`, the one
-    // pure helper the envelope's paint, hit and interact all take, so the ride
-    // and the waveform cannot drift apart by the 2 px in x and 4 px in y the
-    // shrink costs. The scrim fills the same band before that shrink, taken
-    // from the same expression rather than rebuilt here.
     if rect.intersects(clip_bounds)
         && let Some(band) = envelope_band_unshrunk(rect, asset.kind)
         && let Some(waveform_rect) = envelope_band_rect(rect, asset.kind)
@@ -2226,8 +2118,6 @@ fn paint_title_clip(
     transition_duration: Option<TimeCode>,
     pixels_per_frame: f32,
 ) {
-    // Unselected titles are a raised surface with a wash badge; selection
-    // adds ACCENT_WASH + dim border and never outranks the playhead.
     let fill = if dragging || hovered {
         color::SURFACE_ACTIVE
     } else {
@@ -2742,8 +2632,6 @@ fn paint_speed_badge(painter: &egui::Painter, rect: egui::Rect, speed_percent: u
     if rect.width() < 64.0 {
         return;
     }
-    // Below the label strip: the strip's right side belongs to the duration
-    // timecode, and the badge must never collide with it.
     painter.text(
         egui::pos2(rect.right() - space::ONE, rect.top() + 21.0),
         egui::Align2::RIGHT_TOP,
@@ -2811,9 +2699,6 @@ pub(super) fn clip_speed_operations(
             });
         }
     }
-    // Linked members share source geometry, so they take the same speed in
-    // the same batch - otherwise the pair desynchronizes structurally. The
-    // gap decision above covers them: sync-locked tracks shift together.
     for (_, member) in linked_members(document, clip_id) {
         if member.content.is_media() {
             operations.push(Operation::SetClipSpeed {
@@ -3012,10 +2897,6 @@ fn project_delta_to_source(project_delta: i64, project_fps: Rational, source_fps
         .map_or(0, |frames| frames.0.saturating_mul(sign))
 }
 
-// ---------------------------------------------------------------------------
-// AU5 §6.4: the `Room tone` button
-// ---------------------------------------------------------------------------
-
 /// AU5 §6.4 rule 129: the toolbar button that fills a gap with room tone.
 pub(crate) const ROOM_TONE_BUTTON: &str = "Room tone";
 /// Where a refused fill lands in the error log (AU5 §0 R134).
@@ -3192,12 +3073,6 @@ pub(crate) fn room_tone_fill_operations(
             remaining,
         )
         .map_err(|error| {
-            // The headline names the GAP, which is what an editor can see,
-            // while core's refusal is about whatever is left of it. When those
-            // differ — the tiler covered part of the gap and then ran out of
-            // representable spans — the residue is named too, so a reader is
-            // not told "gap of 1 project frames" about a seven-frame hole.
-            // Word for word `plan_room_tone_fill`'s annotation.
             let reason = room_tone_skip_reason(length, asset.fps, project_fps, &error);
             if remaining == length {
                 reason
@@ -3257,8 +3132,6 @@ impl KinewrightApp {
         // A refused fill is a timeline refusal, not a look one (AU5 §0 R134).
         edits.set_error_category(ROOM_TONE_ERROR_CATEGORY);
         let capture = self.plan_room_tone_fill(&mut edits);
-        // One submit, at the end, exactly as `timeline()`'s own is: every
-        // refusal above reached `edits.errors` rather than the log directly.
         self.submit_inspector_edits(edits);
         if let Some(job) = capture {
             self.spawn_room_tone_capture(job);
@@ -3296,9 +3169,6 @@ impl KinewrightApp {
             }
             return None;
         }
-        // Nothing captured yet: take the track's own longest silence, which
-        // is the only range in the project known to be room tone rather than
-        // material.
         let Some((asset, source)) = self.longest_silence_on_track(track) else {
             edits.push_error(ROOM_TONE_CAPTURE_NEEDS_SILENCE);
             return None;
@@ -3361,9 +3231,6 @@ impl KinewrightApp {
         let (session_id, revision) = (session.id, session.revision);
         let analysis = Arc::clone(&self.analysis);
         let result_tx = self.room_tone_tx.clone();
-        // The capture is capped at the store's own writer cap rather than at
-        // the whole silence: 60 s of room tone tiles any gap the ceiling
-        // allows, and a longer decode buys nothing.
         let capped = capped_capture_range(&source, asset.fps);
         let spawned = std::thread::Builder::new()
             .name("kinewright-room-tone".to_owned())
@@ -3379,9 +3246,6 @@ impl KinewrightApp {
                                 format!("Could not probe the captured room tone: {error}")
                             })
                             .map(|probed| MediaAsset {
-                                // `probe_path` names a store file by its own
-                                // digest; the capture names it after what it
-                                // was taken from (AU5 §5.8 rule 115, R46).
                                 name: format!("Room tone \u{2014} {}", asset.name),
                                 ..probed
                             })
@@ -3428,12 +3292,6 @@ impl KinewrightApp {
         let asset = response.result.as_ref().map_err(Clone::clone)?;
         let session = self.focused();
         if session.id != response.session_id || session.revision != response.revision {
-            // Landing it against a document that has moved would fill a gap
-            // that is no longer there. The retry is not free: this refusal
-            // lands no `AddAsset`, so `existing_room_tone_asset` still finds
-            // nothing and the next press decodes again — the store's content
-            // addressing de-duplicates the *write*, never the decode
-            // (AU5 §0 R129).
             return Err(ROOM_TONE_DOCUMENT_MOVED.to_owned());
         }
         let mut operations = vec![Operation::AddAsset {
@@ -3528,8 +3386,6 @@ mod tests {
     #[test]
     fn track_labels_paint_the_mix_toggles_and_write_nothing() {
         let ctx = egui::Context::default();
-        // The header asks for the app's own font families, so the theme has to
-        // be installed before a label can be laid out.
         crate::theme::install(&ctx);
         let document = linked_fixture();
         let mut operation = None;
@@ -3554,8 +3410,6 @@ mod tests {
     #[test]
     fn the_mix_toggle_column_fits_between_the_caption_and_the_sync_lock() {
         assert!((TRACK_LABEL_WIDTH - 96.0).abs() < f32::EPSILON);
-        // Fixed numbers, not the formula again: the point of the test is that
-        // the code the header runs still lands on §5.2's x = 40..54.
         let lane = egui::Rect::from_min_size(
             egui::pos2(0.0, 0.0),
             egui::vec2(TRACK_LABEL_WIDTH, size::TRACK_HEIGHT),
@@ -3959,16 +3813,12 @@ mod tests {
         );
     }
 
-    // ---- AU4 Part B §5.1-§5.2: the timeline rubber band ----
-
     /// A band of the exact geometry §5.1's cases produce, at a clip width that
     /// makes the mapping rect 240 px wide.
     fn envelope_test_band(track_height: f32, kind: MediaKind) -> egui::Rect {
         let lane = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, track_height));
         let clip_rect = egui::Rect::from_min_size(
             egui::pos2(lane.left(), lane.top() + space::ONE),
-            // `space::HALF` a side comes off in the shrink, so 244 px of clip
-            // is 240 px of band.
             egui::vec2(244.0, lane.height() - space::TWO),
         );
         envelope_band_rect(clip_rect, kind).expect("an audio clip has a band")
@@ -4144,8 +3994,6 @@ mod tests {
             interact.left() >= body_rect.left() && interact.right() <= body_rect.right(),
             "the envelope interact never overlaps either 6 px trim handle in x: {interact:?}"
         );
-        // A pointer 3 px from the line, inside the left handle's x band,
-        // still reaches the handle.
         let probe = egui::pos2(clip_rect.left() + 2.0, band.center().y + 3.0);
         let left_handle = egui::Rect::from_min_max(
             clip_rect.min,
@@ -4178,8 +4026,6 @@ mod tests {
             "a frame that already carries a key is left alone"
         );
 
-        // A dragged key is constrained between its neighbours ± 1 frame and
-        // clamped in both axes.
         let far = envelope_move_key(&curve.keyframes, 1, TimeCode(500), 999, duration);
         assert_eq!(
             far[1].at,
@@ -4341,18 +4187,10 @@ mod tests {
     #[test]
     fn the_timeline_has_exactly_one_coalescing_path_and_the_envelope_owns_it() {
         const FILE: &str = include_str!("timeline_ui.rs");
-        // The test module quotes every one of these names, so the pin reads
-        // the production half of the file only.
         let source = FILE
             .split_once("\n#[cfg(test)]")
             .expect("timeline_ui.rs has a test module")
             .0;
-        // AU5 §6.4 rule 129 adds two more, both **discrete**: the `Room
-        // tone` button's own, submitted once at the end of
-        // `fill_room_tone_at_selection`, and the one `poll_room_tone` lands a
-        // finished capture through. The claim the pin defends is unchanged
-        // and is the `extend_live` / `push_live` scan below: no path in this
-        // file may file a per-frame coalesced batch but the envelope's.
         assert_eq!(
             source.matches("InspectorEdits::default()").count(),
             3,
@@ -4559,8 +4397,6 @@ mod tests {
             "and exactly the hovered key is gone"
         );
 
-        // Rule 101's last-key refusal: clearing an envelope is the inspector's
-        // `Clear`, so Delete on the only key deletes neither key nor clip.
         let mut single = document.clone();
         single.tracks[1].clips[0].audio_gain_curve = Some(envelope_curve(&[(0, 0)]));
         assert_eq!(
@@ -4569,8 +4405,6 @@ mod tests {
             "the last key stays"
         );
 
-        // A stale report — the curve has since been cleared — falls back to the
-        // clip delete rather than doing nothing.
         let mut cleared = document.clone();
         cleared.tracks[1].clips[0].audio_gain_curve = None;
         assert_eq!(
@@ -4579,9 +4413,6 @@ mod tests {
             "a report whose curve is gone is not a veto"
         );
 
-        // The arbitration has to happen before any `delete_selected` call, and
-        // `keyboard_shortcuts` is the only place it can: it runs before the
-        // timeline paints, so this is the pin that the branch stays first.
         let keys = include_str!("keys.rs");
         let envelope = keys
             .find("remove_hovered_envelope_key")
@@ -4606,8 +4437,6 @@ mod tests {
             keys.find("egui_wants_keyboard_input") < keys.find("remove_hovered_envelope_key"),
             "a Delete typed into a text field is still swallowed by the guard"
         );
-        // AU4 §0 E53: the parked (curve-free) band is click-only, so a clip
-        // drag that starts on it falls through to `body`.
         let timeline = include_str!("timeline_ui.rs");
         let sense = timeline
             .find("let sense = if keys.is_empty() {")
@@ -4627,8 +4456,6 @@ mod tests {
         let band = envelope_test_band(size::TRACK_HEIGHT, MediaKind::Audio);
         let parked_y = envelope_value_to_y(band, PARKED);
 
-        // It paints: one line, no key dots, at the parked value, in the muted
-        // tint that says "not an envelope yet".
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -4672,8 +4499,6 @@ mod tests {
             "there is no key to grab, so the click is an insertion"
         );
 
-        // And the click inserts the first key at the snapped frame, carrying
-        // the parked value, through the inspector's own `upsert_keyframe`.
         let at = envelope_x_to_local_frame(band, TimeCode(30), on_line.x);
         let seeded = crate::inspector_ui::upsert_keyframe(None, at, i64::from(PARKED)).keyframes;
         assert_eq!(seeded.len(), 1, "one key: {seeded:?}");
@@ -4702,8 +4527,6 @@ mod tests {
             envelope_y_to_value(band, band.bottom()),
             ENVELOPE_DISPLAY_MIN_TENTH_DB
         );
-        // … so a key stored at −500 would be raised to −400 by a purely
-        // horizontal grab. It is not.
         assert_eq!(
             envelope_grab_value(band, band.bottom(), -500),
             -500,
@@ -4783,10 +4606,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // AU5 §6.4: the `Room tone` button
-    // -----------------------------------------------------------------------
-
     /// One audio track with a leading gap and an interior gap, plus a
     /// room-tone asset in the pool.
     ///
@@ -4831,8 +4650,6 @@ mod tests {
             speed_percent: 100,
             audio_gain_curve: None,
         };
-        // The clips are written in the source domain so their project
-        // durations are 30 frames at 30 fps and scale with the project rate.
         let second =
             map_project_duration_to_source(TimeCode::ZERO, TimeCode(30), asset_fps, project_fps)
                 .unwrap_or(TimeCode(30));
@@ -4874,8 +4691,6 @@ mod tests {
     fn au5_the_room_tone_button_targets_the_gap_nearest_the_playhead() {
         let fps = Rational::new(30, 1).unwrap();
         let document = gapped_fixture(fps);
-        // Leading gap `0..40`, interior gap `70..100`; the tail after 130 is
-        // not a gap and never appears.
         assert_eq!(
             document.track_gaps(TrackId(2)),
             Some(vec![TimeCode(0)..TimeCode(40), TimeCode(70)..TimeCode(100),])
@@ -4892,8 +4707,6 @@ mod tests {
             assert_eq!(gap, expected, "with the playhead at {}", playhead.0);
         }
 
-        // A clip on a track with no gap, and a clip that is not in the
-        // document at all, both disable the button.
         assert!(room_tone_target(&document, ClipId(99), TimeCode::ZERO).is_none());
         let mut gapless = document.clone();
         gapless.tracks[1].clips[0].timeline_start = TimeCode::ZERO;
@@ -4932,8 +4745,6 @@ mod tests {
         assert_eq!(*at, TimeCode::ZERO);
         assert_eq!(*source, TimeCode::ZERO..TimeCode(40));
 
-        // A gap longer than the capture tiles forward, butt-joined, with the
-        // last tile short — and the tiles cover the gap exactly.
         let long = TimeCode(0)..TimeCode(150);
         let operations = room_tone_fill_operations(&document, TrackId(2), &long, tone)
             .expect("a 150-frame gap tiles from a 60-frame capture");
@@ -4973,8 +4784,6 @@ mod tests {
     /// refused **by name** rather than filled one frame short.
     #[test]
     fn au5_a_gap_with_no_exact_source_range_is_refused_with_its_reason() {
-        // A 60 fps project reading a 30 fps room-tone asset can only express
-        // even-frame spans, so an odd gap has no exact source range at all.
         let document = gapped_fixture(Rational::new(60, 1).unwrap());
         let tone = document
             .asset(AssetId(2))
@@ -5159,8 +4968,6 @@ mod tests {
             fps: project_fps,
             resolution: (1_920, 1_080),
             lut_assets: Vec::new(),
-            // The project is exactly its content: 7 frames of gap plus the
-            // dialogue clip's ten, so `apply` accepts the fill.
             duration: TimeCode(17),
         }
     }
@@ -5191,8 +4998,6 @@ mod tests {
             .asset(AssetId(2))
             .expect("the pool holds room tone");
 
-        // The premise: the whole asset's own mapped length has no covering
-        // range, so a tiler that asks for it refuses everything.
         let whole =
             map_source_range_to_project(TimeCode::ZERO..tone.duration, asset_fps, project_fps)
                 .expect("the asset maps");
@@ -5327,9 +5132,6 @@ mod tests {
             "and never wears `InexactDuration`'s sentence: {too_short}"
         );
 
-        // No `_ =>` over the three named variants: the wildcard exists, but it
-        // catches only what core adds later, and it says so rather than
-        // borrowing one of these sentences.
         let other = reason(&TimeMappingError::NegativeFrames(TimeCode(-1)));
         assert!(
             other.contains("has no usable source range at 30/1 / 25/1"),
@@ -5373,8 +5175,6 @@ mod tests {
         let gap = TimeCode(0)..TimeCode(1_001);
         assert_eq!(document.track_gaps(TrackId(2)), Some(vec![gap.clone()]));
 
-        // The premise: the whole gap's tile leaves a residue of 2, and 2 is
-        // not coverable at this rate pair while 1 is.
         assert_eq!(tile_for(&document, tone, gap.end), Ok(TimeCode(999)));
         assert!(
             covering_source_range_for_project_duration(
@@ -5426,9 +5226,6 @@ mod tests {
     /// annotation is `plan_room_tone_fill`'s, word for word.
     #[test]
     fn au5_a_refused_tile_names_both_the_gap_and_the_residue() {
-        // 30 → 60 can only express even spans. A two-second tone tiles 120
-        // project frames at a time, so a 241-frame gap lays two full tiles and
-        // then has a **one**-frame residue that no source range can express.
         let project_fps = Rational::new(60, 1).unwrap();
         let asset_fps = Rational::new(30, 1).unwrap();
         let mut document = seven_frame_gap_fixture(project_fps, asset_fps);
@@ -5455,8 +5252,6 @@ mod tests {
             "and the annotation names how far it got and what is left: {refusal}"
         );
 
-        // A gap that fails on its very first pass carries no annotation: there
-        // is no residue distinct from the gap to name.
         let mut odd = document.clone();
         odd.tracks[1].clips[0].timeline_start = TimeCode(1);
         odd.duration = TimeCode(25);
@@ -5502,8 +5297,6 @@ mod tests {
             refusal.contains("also carries its sample frames"),
             "and says coverage, not representability, is what failed: {refusal}"
         );
-        // One frame over the floor and the same gap fills, which is what makes
-        // the sentence above actionable rather than fatalistic.
         let mut longer = document.clone();
         longer
             .media_pool
@@ -5604,8 +5397,6 @@ mod tests {
             "the button is a timeline gesture; a `Room tone` refusal under `Look` \
              sends the editor to a surface that had nothing to do with it"
         );
-        // Both submitting paths set it: the production sources are read here
-        // because neither path can be driven without a `KinewrightApp`.
         let source = include_str!("timeline_ui.rs")
             .split_once("\n#[cfg(test)]")
             .expect("timeline_ui.rs has a test module")

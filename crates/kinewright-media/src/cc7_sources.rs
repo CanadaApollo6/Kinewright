@@ -50,10 +50,6 @@ pub use kinewright_core::cc7_scenarios::CC7_LOG_CUBE_TITLE;
 
 use crate::test_support::GeneratedMedia;
 
-// ===========================================================================
-// CC7 §2.3.3 and §2.3.6: the rasters, authored pixel by pixel.
-// ===========================================================================
-
 /// Which CC7 raster a generator writes.
 ///
 /// `Cc7Camera::LogLike` is **not** a camera here: it has no linear-light
@@ -269,9 +265,6 @@ pub fn cc7_camera_scene_rgb(camera: Cc7Camera, x: u32, y: u32) -> [u8; 3] {
     if matches!(camera, Cc7Camera::LogLike) {
         return cc7_log_scene_rgb(x, y);
     }
-    // §2.4.3's `code_out(c)` takes the **display code**, not the analytic
-    // linear the log curve is fed; the asymmetry with `cc7_log_scene_rgb` is
-    // the contract's.
     cc7_camera_code(camera, cc7_base_scene_rgb(x, y))
 }
 
@@ -349,16 +342,10 @@ pub fn cc7_tracked_scene_rgb(x: u32, y: u32, frame: u32) -> [u8; 3] {
 pub fn cc7_source_rgb(kind: Cc7SourceKind, x: u32, y: u32, frame: u32) -> [u8; 3] {
     match kind.normalized() {
         Cc7SourceKind::Log => cc7_log_scene_rgb(x, y),
-        // `normalized` has folded `Camera(LogLike)` into `Log`, and
-        // `cc7_camera_scene_rgb` routes it to the same raster in any case.
         Cc7SourceKind::Camera(camera) => cc7_camera_scene_rgb(camera, x, y),
         Cc7SourceKind::Tracked => cc7_tracked_scene_rgb(x, y, frame),
     }
 }
-
-// ===========================================================================
-// CC7 §3.2: the mux recipe, normative.
-// ===========================================================================
 
 /// The §3.2 forward BT.709 limited-range matrix, **independently transcribed**
 /// in `f64` from the contract's equations.
@@ -540,8 +527,6 @@ pub fn cc7_source(kind: Cc7SourceKind) -> GeneratedMedia {
         "tv",
     ];
     GeneratedMedia::ffmpeg(kind.label(), &arguments, "mkv")
-    // `frames` drops here, removing the `.yuv` — and it drops on a
-    // `run_ffmpeg` panic too, which the old explicit `remove_file` did not.
 }
 
 /// CC7 §3.1's `cc7_camera_source`: the 60-frame base scene as one camera.
@@ -619,10 +604,6 @@ pub fn cc7_scenario_sources(scenario: Cc7Scenario) -> Vec<GeneratedMedia> {
         .map(cc7_source)
         .collect()
 }
-
-// ===========================================================================
-// CC7 §3.4: the log-like inverse `.cube`.
-// ===========================================================================
 
 /// The `.cube` header, in CC4 §2.6's pinned canonical form.
 ///
@@ -742,13 +723,6 @@ pub fn write_identity_cube(directory: &Path, size: u32) -> PathBuf {
 /// that only sees the generator does not have to reach into core for it.
 pub const CC7_CANONICAL_CUBE_SIZE: u32 = CC7_LOG_CUBE_SIZE;
 
-// ===========================================================================
-// CC7 §3.5: the non-vacuity fixtures.
-//
-// A source that fails one of these makes every claim measured on it
-// meaningless, so they run before the gates that consume them.
-// ===========================================================================
-
 #[cfg(test)]
 mod tests {
     use std::process::Command as ProcessCommand;
@@ -853,10 +827,6 @@ mod tests {
         output.stdout
     }
 
-    // -----------------------------------------------------------------------
-    // §3.5(6) / §11.2.12 — key `raster.populations`.
-    // -----------------------------------------------------------------------
-
     /// The patch table entry whose `rect` covers `(x, y)`, if any.
     ///
     /// The classification is the **patch tables'** own geometry, so a band the
@@ -932,11 +902,6 @@ mod tests {
     /// equality inside the loop both catch.
     #[test]
     fn cc7_base_scene_populations_are_the_contract_table() {
-        // Failing direction, the `y` edges: the primaries band's first and
-        // last authored rows and the surround rows either side of them, so a
-        // one-pixel shift **either way** fires one of these four by name (a
-        // shift does *not* move the surround count — it trades 40 pixels for
-        // 40 — which is why a count alone cannot see it).
         assert_eq!(
             cc7_base_scene_rgb(0, 55),
             [CC7_SURROUND_CODE; 3],
@@ -958,9 +923,6 @@ mod tests {
             "the primaries band ends at y 72"
         );
 
-        // Failing direction, the `x` edges: the last authored column of each
-        // band and the first surround column past it, so a band narrowed or
-        // widened by even one column fires here as well as in the loop.
         for (name, last_x, first_surround_x, y, code) in [
             (
                 "achromatic_chart_band",
@@ -1008,10 +970,6 @@ mod tests {
         assert_eq!(row, 7 * CC7_ROW_PATCH_PIXELS);
     }
 
-    // -----------------------------------------------------------------------
-    // §3.5(7) / §11.2.13 — key `raster.a1_guard`.
-    // -----------------------------------------------------------------------
-
     /// **This is the fixture that stops a later tidy-up from putting the red
     /// primary back and silently breaking (d).**
     #[test]
@@ -1030,10 +988,6 @@ mod tests {
         }
 
         assert_eq!(CC7_PRIMARY_PATCHES.len(), 5);
-        // …and the primaries band is probed on the raster, not only in the
-        // table, so a wrong x-origin, a wrong patch order or a wrong index
-        // inside the band is visible here rather than only in the population
-        // fixture (m5).
         for patch in &CC7_PRIMARY_PATCHES {
             assert_eq!(
                 cc7_base_scene_rgb(patch.rect.x + 4, patch.rect.y + 8),
@@ -1052,8 +1006,6 @@ mod tests {
             }
         }
 
-        // The derived `product_red` qualifier's hue centre is more than
-        // `hue_width + softness` from every primary's hue …
         let threshold = CC7_MATTE_SAMPLE_HUE_WIDTH_CENTIDEGREES + CC7_MATTE_SAMPLE_SOFTNESS;
         for patch in &CC7_PRIMARY_PATCHES {
             let hue = primary_hue_centidegrees(patch.display_code_cam_a);
@@ -1064,17 +1016,11 @@ mod tests {
                 patch.name
             );
         }
-        // … and the pure red the band no longer carries would have been
-        // captured, which is why it is absent rather than merely unused.
         assert!(
             hue_distance(0, CC7_PRODUCT_SAMPLE_HUE_MEDIAN_CENTIDEGREES) < threshold,
             "the red primary's hue 0 cd is inside the qualifier, which is the reason A1 removed it"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // §3.5(1) / §11.2.14 — key `sources.non_vacuity`.
-    // -----------------------------------------------------------------------
 
     /// Each candidate camera differs from the reference at every achromatic
     /// chart patch that carries any light, and over the raster as a whole.
@@ -1139,10 +1085,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // §3.5(2) / §11.2.15 — key `sources.log_signature`.
-    // -----------------------------------------------------------------------
-
     /// The carrier's chart codes are §2.4.2's stored log codes exactly, and its
     /// luma signature separates it from cam A in the **16-bit** unit
     /// `analyze_color_shot` publishes (A21).
@@ -1159,8 +1101,6 @@ mod tests {
     /// every pixel of the chart band.
     #[test]
     fn cc7_log_source_is_not_the_base_scene() {
-        // `LogLike` is the carrier on every path, and `Camera(LogLike)` is not
-        // a second, `PartialEq`-distinct name for the log source.
         assert_eq!(
             Cc7SourceKind::camera(Cc7Camera::LogLike),
             Cc7SourceKind::Log
@@ -1246,10 +1186,6 @@ mod tests {
         assert!(carrier_first >= CC7_LOG_FIRST_PERCENTILE_MIN_CODE16);
         assert!(carrier_p99 <= CC7_LOG_P99_MAX_CODE16);
 
-        // Failing direction: cam A fails both bounds. Its authored-raster p1
-        // is **11** (16-bit 2 827) rather than the 10 (2 570) probe-3 measured
-        // through the managed decode — the one-code decode round trip §2.4.1
-        // records — and it fails the floor either way.
         let reference = luma_histogram(cc7_base_scene_rgb);
         let reference_first = percentile_code16(&reference, 1);
         let reference_p99 = percentile_code16(&reference, 99);
@@ -1263,10 +1199,6 @@ mod tests {
             "cam A must fail the 99th-percentile ceiling"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // §3.5(3) / §11.2.16 — key `sources.tracking`.
-    // -----------------------------------------------------------------------
 
     /// At each of the eleven sampled frames the pixel at the analytic centre
     /// is the `product_red` code, except at frame **47**, where it is the
@@ -1313,8 +1245,6 @@ mod tests {
             );
         }
 
-        // Every occluded frame is surround at the centre; every other frame is
-        // the square.
         for frame in 0..CC7_TRACK_FRAMES {
             let frame_index = i64::from(frame);
             let (left, top) = cc7_analytic_square_top_left(frame_index);
@@ -1335,11 +1265,6 @@ mod tests {
             assert!(top >= 0 && top + CC7_TRACK_SQUARE_SIZE <= i64::from(CC7_SOURCE_HEIGHT));
         }
 
-        // Failing direction, §11.2.16's own words: **a source with the square
-        // drawn on every frame reports `product_red` at 47**. The raster
-        // function is pure, so the alternative source is one line — the same
-        // geometry with the occlusion suppressed — and it is measured at the
-        // frame-47 centre rather than argued about.
         let always_drawn = |x: u32, y: u32, frame: u32| -> [u8; 3] {
             let (left, top) = cc7_analytic_square_top_left(i64::from(frame));
             let inside_x = i64::from(x) >= left && i64::from(x) < left + CC7_TRACK_SQUARE_SIZE;
@@ -1372,10 +1297,6 @@ mod tests {
         assert_eq!(occluded_frames, vec![43, 44, 45, 46, 47]);
     }
 
-    // -----------------------------------------------------------------------
-    // §3.5(4) / §11.2.17 — key `sources.tracking`.
-    // -----------------------------------------------------------------------
-
     /// §2.3.6's generator bounds over all 100 frames: the square never covers
     /// the four static skin patches at `y 4..20`.
     #[test]
@@ -1404,15 +1325,9 @@ mod tests {
                 );
             }
         }
-        // The tracked raster carries the four skin patches and nothing else
-        // from the base scene's bands.
         assert_eq!(cc7_tracked_scene_rgb(60, 12, 0), [CC7_SURROUND_CODE; 3]);
         assert_eq!(cc7_tracked_scene_rgb(4, 40, 0), [CC7_SURROUND_CODE; 3]);
     }
-
-    // -----------------------------------------------------------------------
-    // §3.5(5) / §11.2.18 — key `sources.lossless`.
-    // -----------------------------------------------------------------------
 
     /// One generated `.mkv` per generator, re-decoded and compared byte-exact
     /// against the authored `yuv444p` planes, in `verify_native_ramp`'s shape.
@@ -1456,8 +1371,6 @@ mod tests {
         // Failing direction: the same planes through `libx264 -crf 23`.
         let kind = Cc7SourceKind::Camera(Cc7Camera::B);
         let expected = cc7_source_frame_planes(kind, 0);
-        // The same uniquely named, `Drop`-removed temp file the generator
-        // uses, so a panic here leaks nothing either.
         let raw = super::RawFrames::write("cc7-lossy-control", &expected);
         let size = format!("{CC7_SOURCE_WIDTH}x{CC7_SOURCE_HEIGHT}");
         let input = raw.input();
@@ -1493,10 +1406,6 @@ mod tests {
             "a lossy encode must not round-trip byte-exact, or the FFV1 claim measures nothing"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // §3.4 — the authored `.cube`, and the byte count the manifest records.
-    // -----------------------------------------------------------------------
 
     /// The canonical `.cube` is well-formed, parses, carries the pinned size,
     /// and measures `CC7_LOG_CUBE_BYTES_REPORTED` bytes.
@@ -1540,8 +1449,6 @@ mod tests {
             }
         }
 
-        // The identity twin is the same shape, so the (c) failing direction
-        // differs only in its transfer.
         let identity = identity_cube(33);
         assert_eq!(identity.len(), 970_414);
         assert_ne!(identity, log_like_inverse_cube(33));

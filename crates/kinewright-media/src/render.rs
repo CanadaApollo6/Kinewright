@@ -26,9 +26,6 @@ use crate::{
 /// Preview decode and compositor output are capped at 720p for 16:9 media.
 pub(crate) const PREVIEW_MAX_WIDTH: u32 = 1280;
 
-// 32 entries retain two 15-frame prefetch windows for small/proxy
-// sources. The aggregate byte budget, not this per-source count, is the hard
-// memory bound for large frames.
 const FRAME_CACHE_CAPACITY: usize = 32;
 const PREFETCH_FRAMES: i64 = 15;
 const FRAME_CACHE_BYTE_BUDGET: usize = 224 * 1024 * 1024;
@@ -177,8 +174,6 @@ struct VideoSource {
 
 /// The single frame-rendering path used by both playback preview and export.
 pub(crate) struct FrameRenderer {
-    // Scale is part of the key so changing preview size can never reuse frames
-    // decoded for a different proxy width.
     video_sources: HashMap<VideoSourceKey, VideoSource>,
     source_order: VecDeque<VideoSourceKey>,
     compositor: Compositor,
@@ -388,11 +383,6 @@ impl FrameRenderer {
     ) -> Result<MatteCoverage, MediaError> {
         let decoded_layers =
             self.decoded_layers(document, project_at, resolution, scale, strategy)?;
-        // Not `EffectNotFound`: the effect id was never inspected here, and a
-        // clip that is simply off screen at this frame is a different failure
-        // with a different recovery than a node id that does not exist. CC5
-        // §4.1 requires a typed refusal rather than a blank frame; it does not
-        // require the refusal to misdescribe itself.
         let layer_index = decoded_layers
             .iter()
             .position(|layer| layer.clip == clip)
@@ -536,8 +526,6 @@ impl FrameRenderer {
                 .map(|resolution| bounded_resolution(resolution, key.max_width))
                 .map_or(0, working_bytes);
             let prefetch = match strategy {
-                // Scrub requests are coalesced and should return the selected
-                // frame without decoding work the next mouse move may discard.
                 DecodeStrategy::Seek => 0,
                 DecodeStrategy::Sequential => prefetch_frames(frame_bytes),
             };
@@ -618,8 +606,6 @@ impl FrameRenderer {
     fn cache_title_frame(&mut self, key: TitleCacheKey, frame: WorkingFrame) -> bool {
         let incoming = frame.byte_len();
         if incoming > self.cache_budget {
-            // A single title larger than the aggregate budget is still
-            // rendered for the current request, but is never retained.
             return false;
         }
         if self.title_cache.remove(&key).is_some() {
@@ -863,10 +849,6 @@ mod tests {
 
     #[test]
     fn a_published_lut_library_reaches_the_compositor_through_the_frame_renderer() {
-        // CC4 2.4: the renderer resolves LUT nodes against a library the
-        // owning layer publishes; it never opens a LUT file for a managed
-        // node.  Until one is published, an active LUT node BLOCKS the render
-        // instead of quietly producing a look-free frame.
         let Some(mut renderer) = test_renderer() else {
             return;
         };
@@ -934,8 +916,6 @@ mod tests {
             .expect("a published library resolves the node");
         assert_eq!((frame.width, frame.height), document.resolution);
 
-        // The delivery path takes the same library, so export cannot render a
-        // look the preview refused.
         renderer
             .render_delivery(
                 &document,
@@ -966,11 +946,6 @@ mod tests {
 
     #[test]
     fn two_documents_sharing_one_asset_id_render_to_their_own_lattices() {
-        // CC4 2.4.  `LutAssetId(1)` names a different look in every project,
-        // so a shared render path must resolve looks by content hash and bind
-        // the result per document.  Both looks are published into one table;
-        // each document then renders through the library IT binds, and the two
-        // frames must not agree.
         let Some(mut renderer) = test_renderer() else {
             return;
         };
@@ -984,8 +959,6 @@ mod tests {
             store
                 .import_lut_asset(&source)
                 .expect("the fixture LUT imports")
-                // Both projects allocated id 1 for their own look, which is
-                // the collision the content hash has to survive.
                 .into_lut_asset(LutAssetId(1))
         };
         let identity = import("identity.cube", &corner_cube(|rgb| rgb));
@@ -996,8 +969,6 @@ mod tests {
         assert_eq!(identity.id, inverted.id, "the ids collide on purpose");
         assert_ne!(identity.sha256, inverted.sha256, "the looks differ");
 
-        // Publication is what the engine's `set_lut_library` does: merge each
-        // project's verified library into one content-addressed table.
         let mut published = std::collections::HashMap::new();
         for asset in [&identity, &inverted] {
             let (library, _) = LutLibrary::build(std::slice::from_ref(asset), Some(&store));
@@ -1042,8 +1013,6 @@ mod tests {
             "two documents that both call their look asset 1 must not render the same frame"
         );
 
-        // Re-binding the first document after the second has rendered gives
-        // the first frame back, so nothing about render order aliases either.
         let again = render_with(&identity);
         assert_eq!(*again.rgba, *first.rgba);
     }
@@ -1057,9 +1026,6 @@ mod tests {
         assert!(renderer.cache_title_frame(title_key(1), working_frame_with_bytes(80)));
         assert_eq!(renderer.cache_stats().bytes, 80);
 
-        // This is the reservation made before a video decode window.  The
-        // title must be evicted rather than allowing aggregate residency to
-        // exceed the bound reported by cache_stats().
         renderer.reserve_cache_bytes(30);
         assert!(renderer.title_cache.is_empty());
         assert!(renderer.total_cache_bytes().saturating_add(30) <= renderer.cache_budget);
@@ -1361,8 +1327,6 @@ mod tests {
 
     #[test]
     fn managed_decode_error_names_asset_field_observed_allowed_and_recovery() {
-        // CC1 2.1: the error must name the asset, the unsupported field, the
-        // observed value, and the allowed values, plus a recovery action.
         let error = contextual_managed_decode_error(
             AssetId(7),
             Path::new("/media/hdr-master.mov"),

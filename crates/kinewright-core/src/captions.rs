@@ -192,8 +192,6 @@ fn caption_motion_effects(
     duration: TimeCode,
     motion: CaptionMotion,
 ) -> Vec<Operation> {
-    // A one-frame cue has no temporal room to animate. Leaving it at the
-    // title's native opacity is both readable and deterministic.
     if motion == CaptionMotion::None || duration <= TimeCode(1) {
         return Vec::new();
     }

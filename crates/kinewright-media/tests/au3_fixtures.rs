@@ -73,10 +73,6 @@ fn fixture_video() -> String {
 /// standard; 997 Hz in this contract's calibration pins".
 const CALIBRATION_HERTZ: u32 = 997;
 
-// ---------------------------------------------------------------------------
-// Fixture generation
-// ---------------------------------------------------------------------------
-
 /// One generated programme: `FIXTURE_SECONDS` of `testsrc2` beside `audio`,
 /// with the audio written as **PCM**.
 ///
@@ -232,10 +228,6 @@ fn lane_settings(profile: DeliveryProfile, document: &Document, normalize: bool)
     settings.loudness_normalization = normalize.then(|| profile.loudness_target());
     settings
 }
-
-// ---------------------------------------------------------------------------
-// Measurement and budget arithmetic
-// ---------------------------------------------------------------------------
 
 /// The measured margin of one budget: `allowed / observed`, with an exactly
 /// zero measurement reported as infinite rather than as a division (CC6's
@@ -429,10 +421,6 @@ fn assert_hot_lane(lane: &Lane) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// AU3 §7 B12 — exit-gate clause 1
-// ---------------------------------------------------------------------------
-
 /// AU3 §7 B12: the four §5.8 lanes, exported and decoded end to end.
 ///
 /// The lanes share one engine and one temporary directory because each is a
@@ -471,9 +459,6 @@ fn au3_encoded_fixtures_land_within_the_loudness_and_true_peak_budgets() {
     assert_hot_lane(&hot_noise);
     assert_hot_lane(&hot_impulse);
 
-    // The "no limiting needed" lane is labelled, and its label is asserted:
-    // it must NOT have engaged the ceiling, which is what makes it evidence
-    // about loudness alone.
     assert_eq!(
         no_limiting.report.peak_reduction_hundredths, 0,
         "the no-limiting lane must not touch the ceiling: {:?}",
@@ -481,8 +466,6 @@ fn au3_encoded_fixtures_land_within_the_loudness_and_true_peak_budgets() {
     );
     assert_eq!(no_limiting.report.limiter_passes, 1);
 
-    // The failing direction: the same programme with the setting off, verified
-    // against the target it was never brought to.
     let media = lane_media("failing-direction", &no_limiting_audio());
     let document = lane_document(&engine, &media);
     let settings = lane_settings(DeliveryProfile::Youtube1080p, &document, false);
@@ -531,10 +514,6 @@ fn au3_encoded_fixtures_land_within_the_loudness_and_true_peak_budgets() {
         verification.exceptions
     );
 }
-
-// ---------------------------------------------------------------------------
-// AU3 §7 B6 — off is byte-identical
-// ---------------------------------------------------------------------------
 
 /// The delivered **AAC elementary stream**, copied out of a written `.mp4`
 /// without re-encoding it (`-c copy` into ADTS).
@@ -654,8 +633,6 @@ fn au3_an_export_that_does_not_normalize_is_byte_identical() {
          meaningful",
     );
 
-    // A target this programme cannot be moved to: +46 dB is outside the
-    // guard, so the step skips and the master is untouched.
     let unreachable = LoudnessTarget {
         integrated_lufs_hundredths: 3_000,
         ..STREAMING_PLATFORM_TARGET
@@ -675,10 +652,6 @@ fn au3_an_export_that_does_not_normalize_is_byte_identical() {
          two comparisons above prove nothing"
     );
 }
-
-// ---------------------------------------------------------------------------
-// AU3 §7 B8 — decoded verification of the written file
-// ---------------------------------------------------------------------------
 
 /// A bare AAC programme with no video, for the verification's own tests.
 ///
@@ -701,8 +674,6 @@ fn aac_programme(label: &str, audio: &str) -> GeneratedMedia {
 fn au3_delivery_audio_verification_measures_the_written_file() {
     let engine = FfmpegMediaEngine::new().expect("the production media engine should start");
 
-    // A −20 dBFS calibration tone: a stereo sine of amplitude A reads
-    // 20·log10(A) LUFS (AU3 §3.2/N1), so this programme is −20 LUFS.
     let tone = aac_programme("au3-verify-tone", &calibration_tone("0.1"));
     let measured = engine
         .verify_delivery_audio(tone.path(), None)
@@ -748,8 +719,6 @@ fn au3_delivery_audio_verification_measures_the_written_file() {
     );
     assert!(measured.technical_pass);
 
-    // A file that sits over the ceiling is an Error, not a warning: an
-    // almost-full-scale tone against the −1 dBTP ceiling.
     let hot = aac_programme("au3-verify-hot", &calibration_tone("0.955"));
     let over = engine
         .verify_delivery_audio(hot.path(), Some(STREAMING_PLATFORM_TARGET))
@@ -773,8 +742,6 @@ fn au3_delivery_audio_verification_measures_the_written_file() {
     );
     assert!(!over.technical_pass, "{:?}", over.exceptions);
 
-    // A file with no audio stream is a typed refusal naming the path, which is
-    // what the queue records as "unavailable" rather than as a failed job.
     let silent_video = GeneratedMedia::ffmpeg(
         "au3-verify-video-only",
         &[

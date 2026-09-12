@@ -454,14 +454,6 @@ pub enum EvalAssertion {
     },
     QaExportReady,
     UndoIntegrity,
-    // -----------------------------------------------------------------------
-    // Colour workflow (CC7 §7.5). Every variant below reads only
-    // `EvalOutcome::color`, `EvalOutcome::original_document` and
-    // `EvalOutcome::final_document`: none needs a per-call tool log, because
-    // `SessionMetrics` has none and CC7 adds none. Thresholds are variant
-    // fields exactly as every existing variant carries them; a colour suite
-    // passes a `cc7_scenarios` constant into each one instead of a literal.
-    // -----------------------------------------------------------------------
     /// The scenario's colour QC measurement reports `technical_pass`.
     ColorQcTechnicalPass {
         clip_id: u64,
@@ -516,17 +508,6 @@ pub enum EvalAssertion {
         frame: i64,
     },
 }
-
-// ---------------------------------------------------------------------------
-// Colour evidence (CC7 §7.5).
-//
-// `evaluate_assertion` sees only an `EvalDefinition` and an `EvalOutcome`: it
-// holds no `Analysis`, no `Core` and no exporter, and the fixture's handles
-// are dropped before it runs. Every colour quantity is therefore measured
-// once, inside `run_eval_with_artifacts`, where those handles are still alive,
-// and carried on the outcome as one typed block. The assertion arms read the
-// block and the two documents and nothing else.
-// ---------------------------------------------------------------------------
 
 /// The two-pixel inset every patch statistic is taken on, so that a patch's
 /// own edge pixels never enter its measurement (CC7 §4).
@@ -1454,10 +1435,6 @@ pub fn run_eval_with_artifacts(
             },
         )
     });
-    // Measure colour HERE, before the fixture's handles go out of scope and
-    // before the timeline is restored: this is the last point at which the
-    // `Analysis`, the written deliverable and the edited document are all
-    // alive at once, and no later stage of the pipeline sees any of them.
     let color = measure_color_block(
         definition,
         fixture.analysis.as_ref(),
@@ -1680,9 +1657,6 @@ pub fn measure_color_evidence(
     if !request.neutral_patch_rois.is_empty() {
         match analysis.monitor_proof_for_document(Arc::clone(final_document), at) {
             Ok(proof) => {
-                // CC6's rule for a QC consumer: a raster that does not claim
-                // to be full resolution is refused rather than measured, and
-                // a refusal here is an error on the record, not a pass.
                 if !proof.metadata.full_resolution {
                     evidence.record(
                         ColorEvidenceQuantity::NeutralSpread,
@@ -1696,11 +1670,6 @@ pub fn measure_color_evidence(
                         Ok(Some(spread)) => {
                             worst = Some(worst.map_or(spread, |current| current.max(spread)));
                         }
-                        // A patch that resolved to no pixel was requested and
-                        // not measured. Recording it keeps the detail's
-                        // "over N patch(es)" honest: N is the requested
-                        // count, and a shortfall now fails rather than
-                        // silently reporting the worst of the rest.
                         Ok(None) => evidence.record(
                             ColorEvidenceQuantity::NeutralSpread,
                             format!("the neutral patch {roi:?} resolved to no pixel"),
@@ -1812,8 +1781,6 @@ pub fn measure_color_evidence(
                 }
             }
             Err(error) => {
-                // One proof feeds three quantities, so one failure to render
-                // it is recorded against each of the three that asked for it.
                 let message = format!("working proof failed: {error}");
                 if !request.qc_checks.is_empty() {
                     evidence.record(ColorEvidenceQuantity::Qc, message.clone());
@@ -1840,9 +1807,6 @@ pub fn measure_color_evidence(
                     clip,
                     effect,
                 ) {
-                    // `matte_coverage_statistics` takes one argument, measures
-                    // the whole raster it is given, and has no ROI parameter,
-                    // so a region measurement crops the coverage raster first.
                     Ok(proof) => {
                         if !proof.metadata.render.full_resolution {
                             evidence.record(
@@ -2922,9 +2886,6 @@ pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSum
                         task.task_id, missing
                     )));
                 }
-                // Schema version 2: an acceptance decision that leaves the
-                // scenario question unanswered is not a review, because the
-                // question is the only thing the machine could not decide.
                 if let Some(unanswered) = task
                     .questions
                     .iter()
@@ -4436,9 +4397,6 @@ fn color_assertion_outcome(
                 || color_outcome(name, false, color_not_measured(name, "basis_points", evidence, ColorEvidenceQuantity::Skin), -1, budget, "basis_points"),
                 |skin| {
                     let observed = i64::from(skin.in_band_basis_points);
-                    // A `None` mean hue is a failure, not a pass by default:
-                    // a region with no chromatic pixel has no hue to be in or
-                    // out of the band.
                     let passed = skin.mean_hue_centidegrees.is_some() && observed >= budget;
                     color_outcome(
                         name,
@@ -5473,8 +5431,6 @@ fn evaluate_source_ranges_avoid(
             .iter()
             .filter(|exclusion| exclusion.asset == clip.asset)
         {
-            // Source ranges are half-open. Touching at an endpoint is valid;
-            // only a positive-width intersection is prohibited.
             if clip.source_range.start < exclusion.source_range.end
                 && exclusion.source_range.start < clip.source_range.end
             {
@@ -5652,9 +5608,6 @@ fn evaluate_no_alternating_shot_pattern(
     let mut longest_run = 0_usize;
     let mut violation = None;
     for start in 0..durations.len().saturating_sub(3) {
-        // A constant run is period one, not the alternating pattern this
-        // predicate is intended to reject. ShotCadenceVariation owns that
-        // separate case.
         if durations[start].abs_diff(durations[start + 1]) <= tolerance {
             continue;
         }
@@ -6621,17 +6574,6 @@ fn valid_reframe_subject_provenances(document: &Document) -> Vec<ReframeSubjectP
     reframe_subject_provenances(document).0
 }
 
-// Template matching follows a supplied search box, not a segmented face edge.
-//
-// `track_reframe_subject` builds each provenance box in *layer* uv: the tracked
-// composite centre pulled back through the layer transform resolved at that
-// observation's own frame, bracketed by the declared `subject_width_percent` /
-// `subject_height_percent` (half extent = percent * 50 basis points), with the
-// left/top edge floored, the right/bottom edge ceiled, and both clamped to
-// 0..=10000. It is never routed through the composite template's own bounds,
-// whose size is pinned to the seed frame's scale. Provenance bounds therefore
-// round outward, and crop bounds round outward, so strict containment is both
-// deterministic and conservative.
 const SUBJECT_CONTAINMENT_TOLERANCE_BASIS_POINTS: i64 = 0;
 const SUBJECT_CONTAINMENT_ENDPOINT_WINDOW_FRAMES: i64 = 25;
 
@@ -7898,10 +7840,6 @@ fn evaluate_styled_captions(
 }
 
 fn evaluate_caption_safe_area(profile: DeliveryProfile, outcome: &EvalOutcome) -> AssertionResult {
-    // The third hard-coded depth in this file, and deliberately the one that
-    // stays: this assertion has no `EvalDeliverableSpec` in scope, and a
-    // caption safe area is not a colour deliverable. Plumbing a depth through
-    // the caption path is explicitly out of scope.
     match delivery_conformance(
         &outcome.final_document,
         profile,
@@ -9082,8 +9020,6 @@ mod tests {
 
         let mut wide_document = exact_document.clone();
         wide_document.tracks[0].clips[0].source_range = TimeCode::ZERO..TimeCode(800);
-        // Keep the declared duration at the requested range to prove the
-        // hard gate inspects mapped final clip ranges, not only the field.
         wide_document.duration = TimeCode(600);
         let wide = outcome_for(wide_document, context.clone());
         let duration_failure = evaluate_exact_project_duration(TimeCode(600), &wide);
@@ -9527,8 +9463,6 @@ mod tests {
     }
 
     #[test]
-    // Two more fields on `EvalOutcome` pushed this existing case one line over
-    // the pedantic limit; the case itself is unchanged.
     #[allow(clippy::too_many_lines)]
     fn fake_driver_eval_accepts_the_transcript_clamped_bound_and_rounding_allowance() {
         let silences = AssetSilences {
@@ -10891,10 +10825,6 @@ mod tests {
         assert_eq!(uniform_sample_frames(TimeCode(10), 1), vec![TimeCode(4)]);
     }
 
-    // -----------------------------------------------------------------------
-    // CC7 §11.2.32 — the shared-runner half of the eval inventory.
-    // -----------------------------------------------------------------------
-
     fn cc7_result_without_measurements() -> EvalResult {
         EvalResult {
             name: "g3 mixed footage".to_owned(),
@@ -10937,9 +10867,6 @@ mod tests {
             "an empty measurement list must not reach the wire: {json}"
         );
 
-        // The same record, with a measurement, does carry the key — so the
-        // absence above is `skip_serializing_if` doing its job rather than a
-        // field that never serialises at all.
         let mut measured = cc7_result_without_measurements();
         measured.measurements.push(EvalMeasurement {
             name: "neutral patch spread".to_owned(),
@@ -10952,8 +10879,6 @@ mod tests {
         assert!(measured_json.contains("\"measurements\""));
         assert!(measured_json.contains("\"monitoring_code\""));
 
-        // And every other key is untouched: removing the measurements
-        // recovers the original bytes exactly.
         measured.measurements.clear();
         assert_eq!(
             serde_json::to_string(&measured).expect("cleared result serialises"),
@@ -11013,8 +10938,6 @@ mod tests {
         assert_eq!(landed.measurement.unit, "keyframes");
         assert!(landed.measurement.passed);
 
-        // A document that also keyframed the occluded sample fails, so the
-        // absent list is load-bearing rather than decorative.
         let mut with_occluded = surviving.to_vec();
         with_occluded.push(47);
         let leaked = outcome_for(
@@ -11079,10 +11002,6 @@ mod tests {
             assert!(color_measurement(&assertion, &outcome).is_some());
         }
 
-        // A partially measured quantity is not a measurement (R1-M3): nine of
-        // twelve patches measuring 2 codes against a budget of 5 is a pass
-        // until the three that did not resolve are on the record, at which
-        // point the claim fails with the reason it could not be made.
         let spread = EvalAssertion::NeutralPatchSpreadAtMost {
             patch_rois: vec![NormalizedRoi::new(0, 2_000, 3_000, 888)],
             maximum_code: 5,
@@ -11507,11 +11426,6 @@ mod tests {
         }
     }
 
-    // `PreparedFixture::new` takes one media handle that plays, analyses and
-    // exports, so the analysis double carries the other two surfaces. Neither
-    // is exercised by the project-path plumbing; they exist so the fixture
-    // the runner builds can be built here without a real media engine, whose
-    // process-exit teardown would make this lane flaky (F-E6).
     impl kinewright_core::Playback for Cc7StubAnalysis {
         fn set_document(&self, _document: Arc<Document>) {}
         fn request_frame(&self, _at: TimeCode) {}
@@ -11635,15 +11549,9 @@ mod tests {
                 .expect("a typed refusal")["code"],
             "project_not_saved"
         );
-        // `tests/mcp_server.rs`'s teardown order: cancel the client before the
-        // server goes away, or the transport's stream is left waiting on a
-        // server that will never answer.
         client.cancel().await.expect("the client cancels");
         server.shutdown();
 
-        // Direction two: the same fixture, saved. The confirmation is
-        // approved beside the awaited call, because `import_lut_asset` blocks
-        // on the broker before it reads a byte.
         let saved = PreparedFixture::new(
             document(),
             Arc::new(cc7_stub_media()),
@@ -11739,8 +11647,6 @@ mod tests {
             Some(10_000_000)
         );
 
-        // A rectangle too small to inset is measured whole rather than
-        // silently emptied.
         let tiny = NormalizedRoi::new(0, 0, 1_250, 2_500);
         assert_eq!(tiny.to_pixels(16, 8).unwrap().width, 2);
         assert_eq!(patch_spread_max_code(&raster, tiny).unwrap(), Some(0));
@@ -11785,8 +11691,6 @@ mod tests {
                 ]),
                 keyframes: BTreeMap::new(),
             });
-        // `bypass` is a colour-node control that `primary_correction` does
-        // not declare, so the look leg uses a node that does.
         document.tracks[0].clips[0]
             .effects
             .push(kinewright_core::Effect {
@@ -11806,9 +11710,6 @@ mod tests {
     /// `measure_color_block` — the named function `run_eval_with_artifacts`
     /// calls — rather than a copy of it, and asserts the `None` direction a
     /// v1-v5 definition takes through the same call.
-    // One measurement, both plumbing directions and the two ungated rows: the
-    // body is long because each is a separate claim about the same call, not
-    // because the test does several things.
     #[test]
     #[allow(clippy::too_many_lines)]
     fn cc7_color_evidence_is_computed_where_the_analysis_is_alive() {
@@ -11848,8 +11749,6 @@ mod tests {
             ..ColorEvalRequest::default()
         };
 
-        // The runner's own expression, not a copy of it: a definition that
-        // carries a request measures one.
         let colored = EvalDefinition {
             name: "c1 Mixed-camera interview match",
             rationale: "exercise the colour plumbing",
@@ -11864,9 +11763,6 @@ mod tests {
             .expect("a definition carrying a colour request measures one");
         assert!(evidence.errors.is_empty(), "{:?}", evidence.errors);
         assert_eq!(evidence.neutral_spread_max_code, Some(6));
-        // Right half luma 0.2126·20 + 0.7152·16 + 0.0722·10 = 16.4172,
-        // against a flat 10.0 at the reference frame. The tolerance absorbs
-        // the last bit of an `f64` accumulation, not a measurement error.
         let delta = evidence
             .chart_luma_mean_delta_millionths
             .expect("the chart luma delta is measured");
@@ -11883,8 +11779,6 @@ mod tests {
                 .expect("colour qc is measured")
                 .technical_pass
         );
-        // The stub renders the same raster with and without the node, which
-        // is exactly what a lossless bypass looks like.
         assert_eq!(evidence.look_bypass_matches_absent, Some(true));
         assert_eq!(evidence.final_effects.len(), 2);
         assert_eq!(evidence.final_effects[0].effect, EffectId(3));
@@ -11894,17 +11788,12 @@ mod tests {
         assert_eq!(evidence.skin, None);
         assert_eq!(evidence.verification, None);
 
-        // It lands on `EvalOutcome::color`, which is what every assertion
-        // arm reads.
         let outcome = EvalOutcome {
             color: Some(evidence),
             ..outcome_for((*document).clone(), FixtureContext::default())
         };
         assert!(outcome.color.is_some());
 
-        // R1-M2: the two quantities no variant gates still reach
-        // `results.jsonl`, as `budget: 0, passed: true` rows. `colored` gates
-        // nothing, so these are the only measurements it can produce.
         let measurements = evaluate(&colored, &outcome).measurements;
         let ungated = measurements
             .iter()
@@ -11926,9 +11815,6 @@ mod tests {
         assert_eq!(measurements[0].observed, delta);
         assert_eq!(measurements[1].observed, 0);
 
-        // The other direction, through the same call: a v1-v5 definition
-        // carries no request, so no proof is rendered and the block stays
-        // `None` — the other five suites are untouched.
         let uncolored = EvalDefinition {
             name: "v5 generalization",
             rationale: "a suite that is not a colour suite",
@@ -12045,8 +11931,6 @@ mod tests {
         assert_eq!(review.tasks[0].questions.len(), 1);
         assert_eq!(review.tasks[0].questions[0].id, "a");
 
-        // The form the reviewer opens carries the question and the blind id
-        // and nothing that names the task.
         let form = blind_review_form(&review);
         assert_eq!(form.entries.len(), 1);
         assert_eq!(form.entries[0].blind_id, "0f3a1c2d4e5b");

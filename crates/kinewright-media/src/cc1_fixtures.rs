@@ -417,8 +417,6 @@ fn evidence_directory() -> PathBuf {
     if let Some(target) = std::env::var_os("CARGO_TARGET_DIR") {
         return PathBuf::from(target).join("color-evidence");
     }
-    // `CARGO_MANIFEST_DIR` is `crates/kinewright-media`; the workspace target
-    // directory is two levels up.
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/color-evidence")
 }
 
@@ -460,10 +458,6 @@ fn ramp_native_code(spec: &RampSpec, position: u32) -> u32 {
     let max = (1_u32 << spec.depth) - 1;
     match &spec.range {
         ColorRange::Limited => {
-            // Keep a limited-range fixture inside the legal luma interval.
-            // Feeding 0..max while tagging the stream as TV range creates
-            // intentionally out-of-range RGB clipping and makes neutrality
-            // depend on swscale's negative-value rounding.
             let low = 1_u32 << (spec.depth - 4);
             let high = 235_u32 << (spec.depth - 8);
             low + ((high - low) * position + max / 2) / max
@@ -495,8 +489,6 @@ fn raw_ramp_bytes(spec: &RampSpec) -> (u32, Vec<u8>) {
             }
         }
         RampEncoding::Srgb => {
-            // `gbrp` is planar. A gray ramp is deliberately used so channel
-            // order cannot mask a source/profile or transfer error.
             for _plane in 0..3 {
                 for code in 0..=max {
                     bytes.push(u8::try_from(code).expect("8-bit sRGB ramp code"));
@@ -545,9 +537,6 @@ fn verify_native_ramp(path: &Path, spec: &RampSpec, width: u32, expected: &[u8])
 
 fn generate_ramp_media(directory: &TempDirectory, spec: &RampSpec) -> (PathBuf, u32, Vec<u8>) {
     let (width, input) = raw_ramp_bytes(spec);
-    // FFmpeg selects the muxer from the output suffix.  Keep these as real
-    // Matroska fixtures so the generated media is decoded through the same
-    // probe/managed-decoder path as project sources.
     let path = directory.path(&format!("{}.mkv", spec.name));
     let size = format!("{width}x1");
     let color_range = match &spec.range {
@@ -893,8 +882,6 @@ pub(crate) fn linear_parity_metrics(actual: &[f32], expected: &[f32]) -> LinearP
 /// Apply the §6.2 linear gate, band by band.
 pub(crate) fn assert_linear_parity(metrics: &LinearParityMetrics, label: &str) {
     // The CC1 doc claims the managed path never emits a non-finite sample.
-    // Excluding one from the gate instead of failing would let a NaN-producing
-    // GPU report parity, so this is a hard failure rather than a band.
     assert_eq!(
         metrics.non_finite, 0,
         "non-finite linear sample for {label}: {metrics:?}"
@@ -1026,8 +1013,6 @@ fn spec_smoothstep_f64(start: f64, end: f64, value: f64) -> f64 {
 /// balance, exposure, tonal balance, contrast around the pivot, saturation
 /// around Rec.709 luma.
 fn spec_apply_primary_f64(correction: PrimaryCorrection, rgb: [f64; 3]) -> [f64; 3] {
-    // 1. White balance: equal and opposite 10% red/blue gains for temperature,
-    //    an opposite 10% green gain for tint, applied around unity.
     let temperature = f64::from(correction.temperature_percent) / 100.0;
     let tint = f64::from(correction.tint_percent) / 100.0;
     let gains = [
@@ -1035,15 +1020,12 @@ fn spec_apply_primary_f64(correction: PrimaryCorrection, rgb: [f64; 3]) -> [f64;
         1.0 - 0.1 * tint,
         1.0 - 0.1 * temperature,
     ];
-    // 2. Exposure: multiply linear RGB by 2^(value/1000).
     let exposure = 2.0_f64.powf(f64::from(correction.exposure_milli_stops) / 1_000.0);
     let mut value = [
         rgb[0] * gains[0] * exposure,
         rgb[1] * gains[1] * exposure,
         rgb[2] * gains[2] * exposure,
     ];
-    // 3. Blacks/shadows/highlights/whites. The smoothstep weights use the
-    //    clamped u, but x itself is never clamped.
     for channel in &mut value {
         let u = channel.clamp(0.0, 1.0);
         let black = 1.0 - spec_smoothstep_f64(0.00, 0.25, u);
@@ -1055,13 +1037,11 @@ fn spec_apply_primary_f64(correction: PrimaryCorrection, rgb: [f64; 3]) -> [f64;
         *channel += 0.20 * f64::from(correction.highlights_percent) / 100.0 * highlight;
         *channel += 0.25 * f64::from(correction.whites_percent) / 100.0 * white;
     }
-    // 4. Contrast around contrast_pivot_basis_points.
     let pivot = f64::from(correction.contrast_pivot_basis_points) / 10_000.0;
     let contrast = 1.0 + f64::from(correction.contrast_percent) / 100.0;
     for channel in &mut value {
         *channel = pivot + (*channel - pivot) * contrast;
     }
-    // 5. Saturation around Rec.709 luma.
     let luma = spec_luma_f64(value);
     let saturation = 1.0 + f64::from(correction.saturation_percent) / 100.0;
     value.map(|channel| luma + (channel - luma) * saturation)
@@ -1155,19 +1135,6 @@ fn chart_frame() -> (u32, u32, WorkingFrame) {
 }
 
 fn representative_frame() -> (u32, u32, WorkingFrame) {
-    // Use wide low-frequency colour bars so the production linear sampler is
-    // measured on stable texel interiors. The separate 12-patch fixture owns
-    // high-frequency chart boundaries; keeping those boundaries out of this
-    // parity raster prevents interpolation edge pixels from dominating a
-    // half-float P99 gate while retaining varied RGB/control coverage.
-    //
-    // The bars must span the whole working domain, not just the bottom fifth
-    // of it. Without a bar at or above 0.9 the smoothstep highlight/white
-    // weights of §3.2 are identically zero, which silently turns every
-    // `highlights_percent`/`whites_percent` parity case into a proven no-op.
-    // Likewise a bar above 1.0 exercises the contrast pivot and the
-    // no-intermediate-clamp requirement, and a bar containing a negative
-    // channel exercises the sign-preserving §3.1 monitor encoding.
     let width = 512;
     let height = 4;
     let bars = [
@@ -1431,10 +1398,6 @@ impl FixtureGpu {
             metadata.gpu_claim,
             lane.id(),
         );
-        // Two adapters can be installed at once (lavapipe next to a physical
-        // GPU). Printing the acquired adapter for every lane is what makes
-        // "this lane ran where it claims to have run" checkable from a test
-        // log instead of inferred from the test name.
         println!("CC_GPU_LANE lane={} {info}", lane.id());
         Self {
             context,
@@ -1496,10 +1459,6 @@ pub(crate) fn fallback_gpu() -> FixtureGpu {
         Ok(context) => context,
         Err(error) => return hardware_opt_in_gpu(&error.to_string()),
     };
-    // The opt-in is a remedy for a machine with *no* software rasterizer, not
-    // a lane switch. A machine that has both adapters must keep running this
-    // lane on the software one, and must say so rather than ignore the
-    // operator's environment silently.
     if std::env::var(HARDWARE_GPU_OPT_IN_ENV).ok().as_deref() == Some("1") {
         println!(
             "CC_GPU_LANE {HARDWARE_GPU_OPT_IN_ENV}=1 ignored: a software fallback adapter exists, so the default lane stays on it. Use the --ignored hardware lane for physical-adapter evidence."
@@ -1559,9 +1518,6 @@ pub(crate) fn hardware_gpu() -> FixtureGpu {
 }
 
 fn backend_name(info: &str) -> &str {
-    // Preserve the exact production provenance string, including backend,
-    // adapter/device name, fallback status, and GPU claim.  Collapsing this to
-    // a generic "wgpu_fallback" label makes a parity result unauditable.
     info
 }
 
@@ -1623,8 +1579,6 @@ fn cc1_manifest_declares_every_required_evidence_fixture() {
     let manifest: Value = serde_json::from_str(include_str!("../tests/fixtures/cc1_manifest.json"))
         .expect("CC1 fixture manifest must be valid JSON");
     assert_eq!(manifest["manifest_version"], 1);
-    // The manifest describes the same profile and control tables the code
-    // validates against, not just the right number of entries.
     assert_eq!(
         manifest["profiles"],
         json!([
@@ -1643,26 +1597,18 @@ fn cc1_manifest_declares_every_required_evidence_fixture() {
     );
     assert_eq!(manifest["source_depths_bits"], json!([8, 10]));
 
-    // Working, monitoring, and delivery are project state (§2). The manifest
-    // must record the same descriptions the renderer selects from.
     let context = ColorContext::sdr_rec709();
     assert_manifest_description(&manifest["working"], &context.working, "working");
     assert_manifest_description(&manifest["monitoring"], &context.monitoring, "monitoring");
     assert_manifest_description(&manifest["delivery"], &context.delivery, "delivery");
     assert_eq!(manifest["delivery"]["codec"], "h264");
     assert_eq!(manifest["delivery"]["pixel_format"], "yuv420p");
-    // The 16-bit intermediate that carries the compositor's single
-    // quantization into the export filter graph. `libswscale` reads 16-bit RGB
-    // on the `255 << 8` scale, so the manifest records the exact code the
-    // encoder emits for nominal white; 65_535 would encode to luma 236.
     assert_eq!(
         manifest["delivery"]["intermediate_white"],
         json!(DELIVERY_INTERMEDIATE_WHITE),
         "manifest delivery.intermediate_white does not match DELIVERY_INTERMEDIATE_WHITE"
     );
 
-    // Every declared tolerance must be the constant the fixtures actually
-    // assert with, so the manifest cannot advertise a gate nothing enforces.
     let tolerances = &manifest["tolerances"];
     assert_manifest_f64(
         tolerances,
@@ -1705,8 +1651,6 @@ fn cc1_manifest_declares_every_required_evidence_fixture() {
     assert_eq!(ramp_gate["alpha"], "exact");
     assert_eq!(ramp_gate["native_plane_round_trip"], "exact");
 
-    // The GPU lane descriptions must name the lanes the fixtures can actually
-    // take, including the hardware opt-in for machines with no rasterizer.
     let gpu_contexts = &manifest["gpu_contexts"];
     let software = gpu_contexts["software"]
         .as_str()
@@ -1826,8 +1770,6 @@ fn cc1_core_migration_fixture_preserves_effect_order_and_parameters() {
             .collect::<Vec<_>>(),
         vec!["brightness", "primary_correction", "saturation"]
     );
-    // Exercise both the pre-CC0 omission and the exact CC0 placeholder at
-    // the Core serde boundary.
     let mut pre_cc0 = serde_json::to_value(Document::default()).expect("pre-CC0 document");
     pre_cc0
         .as_object_mut()
@@ -1857,8 +1799,6 @@ fn cc1_core_migration_fixture_preserves_effect_order_and_parameters() {
     let saved = serde_json::to_vec(&decoded).expect("save migrated document");
     let reopened: Document = serde_json::from_slice(&saved).expect("reopen migrated document");
     assert_eq!(reopened, decoded);
-    // Journal replay and history use the same public Core actor boundary as
-    // the application, including undo and redo events.
     let migration_asset = MediaAsset {
         id: AssetId(22),
         path: PathBuf::from("cc1-migration-fixture.mp4"),
@@ -2062,9 +2002,6 @@ fn cc1_identity_ramps_decode_actual_sources_to_working_and_monitor() {
             })
             .collect::<Vec<_>>();
         let float_metric = abs_float_diff(&working_values, &expected_working);
-        // The swscale RGBA64 boundary is compared against the §3.1 native-code
-        // reference equations, so all three named moments are asserted rather
-        // than one loose maximum borrowed from the CPU/GPU gate.
         assert!(
             float_metric.max <= IDENTITY_RAMP_SWSCALE_MAX,
             "{} working ramp max differs from the source reference by {:?}",
@@ -2163,7 +2100,6 @@ fn chart_patch_codes(output: &[u8], index: usize) -> [u8; 3] {
 #[test]
 fn cc1_neutral_chart_matches_analytic_spec_codes_for_twelve_reference_patches() {
     let patches = chart_patches();
-    // 1. The analytic table and the hand-computed literals must agree.
     for (index, (name, input)) in patches.into_iter().enumerate() {
         let analytic = input.map(|value| spec_monitor_code_f64(f64::from(value)));
         assert_eq!(
@@ -2171,7 +2107,6 @@ fn cc1_neutral_chart_matches_analytic_spec_codes_for_twelve_reference_patches() 
             "{name} analytic §3.1 monitor code drifted from the recorded expectation"
         );
     }
-    // 2. The production encoder must produce exactly those codes.
     let output = chart_monitor(PrimaryCorrection::default());
     assert_eq!(output.len(), 12 * 3);
     for (index, (name, _)) in patches.into_iter().enumerate() {
@@ -2181,7 +2116,6 @@ fn cc1_neutral_chart_matches_analytic_spec_codes_for_twelve_reference_patches() 
             "{name} monitor code does not match the §3.1 expectation"
         );
     }
-    // 3. §6.2 channel neutrality and the range endpoints.
     let neutral_spread = chart_neutral_spread(&output);
     assert!(
         neutral_spread <= 1,
@@ -2212,8 +2146,6 @@ fn cc1_neutral_chart_white_balance_and_saturation_move_in_the_documented_directi
     let patches = chart_patches();
     let neutral = chart_monitor(PrimaryCorrection::default());
 
-    // Temperature: positive is warmer, so red gains 10% and blue loses 10%.
-    // Green is a temperature identity in linear light, before any encoding.
     let mut temperature_moves = 0_u32;
     for signed in [100_i64, -100] {
         let correction = chart_correction(PrimaryParameter::TemperaturePercent, signed);
@@ -2267,8 +2199,6 @@ fn cc1_neutral_chart_white_balance_and_saturation_move_in_the_documented_directi
         "temperature +/-100 barely moved the chart: {temperature_moves} patch moves"
     );
 
-    // Tint: positive is magenta, which is green *down*. Red and blue are tint
-    // identities in linear light.
     let mut tint_moves = 0_u32;
     for signed in [100_i64, -100] {
         let correction = chart_correction(PrimaryParameter::TintPercent, signed);
@@ -2333,8 +2263,6 @@ fn cc1_neutral_chart_white_balance_and_saturation_move_in_the_documented_directi
         );
     }
 
-    // Saturation +100 must push every chroma patch away from its luma and
-    // leave neutral patches alone.
     let saturated = chart_correction(PrimaryParameter::SaturationPercent, 100);
     let saturated_output = chart_monitor(saturated);
     let mut widened = 0_u32;
@@ -2403,9 +2331,6 @@ fn assert_chart_gpu_case(
 
 #[test]
 fn cc1_neutral_chart_matches_the_production_compositor_under_the_cpu_gpu_gate() {
-    // Unlike the representative bar fixture, every patch of the 12-patch chart
-    // is in gamut, so the over-range band exists here only where a control
-    // lifts a patch above 1.0. Each case states which it is.
     const CHART_IS_IN_GAMUT: &str = "every patch of the 12-patch chart is in gamut and this control does not lift one above 1.0";
     let gpu = fallback_gpu();
     let compositor = Compositor::new(gpu.context());
@@ -2499,8 +2424,6 @@ fn control_fixture_values(parameter: PrimaryParameter) -> Vec<i64> {
 
 #[test]
 fn cc1_primary_controls_match_the_spec_equations_at_neutral_bounds_and_interiors() {
-    // §6.1.3 low/high tonal patch and a general chroma patch. Both are
-    // evaluated against the §3.2 equations written out in f64 above.
     const TONAL_INPUT: [f32; 3] = [0.04, 0.5, 0.96];
     const CHROMA_INPUT: [f32; 3] = [0.23, 0.47, 0.81];
 
@@ -2510,14 +2433,9 @@ fn cc1_primary_controls_match_the_spec_equations_at_neutral_bounds_and_interiors
         let mut outputs = Vec::new();
         let mut expectations = Vec::new();
         for &value in &values {
-            // Use the same case construction as the GPU parity sweep: sweeping
-            // `contrast_pivot_basis_points` at `contrast_percent = 0` measures
-            // an identity and proves nothing about the pivot.
             let case_parameters = control_case_parameters(parameter, value);
             let effect = effect_with_parameters(100 + index as u64, case_parameters.clone());
             let correction = PrimaryCorrection::from_effect(&effect).expect("control fixture");
-            // Every control is evaluated on both patches so a tonal weight and
-            // a chroma response are covered for each one.
             let mut case_output = Vec::new();
             let mut case_neutral = Vec::new();
             for input in [TONAL_INPUT, CHROMA_INPUT] {
@@ -2530,8 +2448,6 @@ fn cc1_primary_controls_match_the_spec_equations_at_neutral_bounds_and_interiors
                         &format!("{case_parameters:?} on {input:?} channel {channel}"),
                     );
                 }
-                // Alpha is carried only so the shared vacuous-case guard can
-                // read these as RGBA chunks; it is never compared.
                 case_output.extend(output);
                 case_output.push(1.0);
                 case_neutral.extend(input);
@@ -2539,9 +2455,6 @@ fn cc1_primary_controls_match_the_spec_equations_at_neutral_bounds_and_interiors
                 outputs.extend(output);
                 expectations.extend(expected);
             }
-            // The CPU lane needs the same guard as the GPU lane: a case whose
-            // output is indistinguishable from its input reports a flattering
-            // zero spec error while proving nothing about the control.
             assert_case_is_not_vacuous(&case_output, &case_neutral, correction);
         }
         // Neutral values are exact identities, including a neutral 0.5 pivot.
@@ -2565,9 +2478,6 @@ fn cc1_primary_controls_match_the_spec_equations_at_neutral_bounds_and_interiors
     }
     assert_eq!(evidence.len(), 10);
 
-    // Replace self-referential evidence flags with assertions on outputs.
-    //
-    // Exposure: +1000 milli-stops is exactly one stop, so linear light doubles.
     let plus_one_stop = PrimaryCorrection {
         exposure_milli_stops: 1_000,
         ..PrimaryCorrection::default()
@@ -2595,8 +2505,6 @@ fn cc1_primary_controls_match_the_spec_equations_at_neutral_bounds_and_interiors
         );
     }
 
-    // Saturation: -100 is monochrome, and the monochrome value is the Rec.709
-    // luma of the input.
     let monochrome = PrimaryCorrection {
         saturation_percent: -100,
         ..PrimaryCorrection::default()
@@ -2628,8 +2536,6 @@ fn cc1_primary_controls_match_the_spec_equations_at_neutral_bounds_and_interiors
         );
     }
 
-    // Contrast: the pivot value is preserved for every contrast and every
-    // pivot, which is the property that makes the pivot meaningful.
     for pivot_basis_points in [0_i32, 2_500, 4_200, 5_000, 10_000] {
         for contrast_percent in [-100_i32, -35, 35, 100] {
             let correction = PrimaryCorrection {
@@ -2650,8 +2556,6 @@ fn cc1_primary_controls_match_the_spec_equations_at_neutral_bounds_and_interiors
             }
         }
     }
-    // A non-pivot value must actually move, otherwise "pivot preserved" is a
-    // statement about an identity transform.
     let contrast = PrimaryCorrection {
         contrast_percent: 100,
         contrast_pivot_basis_points: 5_000,
@@ -2699,8 +2603,6 @@ fn cc1_primary_controls_match_the_spec_equations_at_neutral_bounds_and_interiors
         1.20,
         "highlights +100 lifts a saturated channel by the documented 0.20 linear units",
     );
-    // The weights are computed from the clamped u but applied to the unclamped
-    // x, so an over-range channel keeps its over-range value plus the lift.
     assert_matches_spec_f64(
         highlights
             .apply_checked([2.5; 3])
@@ -2709,8 +2611,6 @@ fn cc1_primary_controls_match_the_spec_equations_at_neutral_bounds_and_interiors
         "tonal weights use clamped u but must not clamp x",
     );
 
-    // White balance: the documented 10% diagonal gains, non-negative at the
-    // bounds.
     for signed in [100_i64, -100] {
         let temperature = chart_correction(PrimaryParameter::TemperaturePercent, signed);
         let output = temperature.apply_checked([0.5; 3]).expect("temperature");
@@ -2867,9 +2767,6 @@ fn cc1_no_intermediate_clamp_preserves_recoverable_over_range_values() {
     for (actual, expected) in recovered.iter().copied().zip(input) {
         assert!((actual - expected).abs() <= 1.0e-6);
     }
-    // The negative control: what a display-range clamp *between* the two nodes
-    // would produce. This must be materially different from the managed
-    // result, otherwise the fixture is comparing the pipeline with itself.
     let clamped_between_nodes = negative
         .apply_checked(over_range.map(|value| value.clamp(0.0, 1.0)))
         .expect("clamped recovery");
@@ -2914,8 +2811,6 @@ fn cc1_no_intermediate_clamp_preserves_recoverable_over_range_values() {
         );
     }
 
-    // §6.1.4 asks for an over-range *ramp*, not one pixel: a single texel can
-    // pass by accident, and a clamp at any stage shows up as a plateau.
     let ramp_width = 64_u32;
     let ramp_height = 4_u32;
     let ramp_top = 4.0_f32;
@@ -2958,8 +2853,6 @@ fn cc1_no_intermediate_clamp_preserves_recoverable_over_range_values() {
         .collect::<Vec<_>>();
     let ramp_metric = linear_parity_metrics(&ramp_working, &expected_ramp);
     assert_linear_parity(&ramp_metric, "over-range ramp at -2 stops");
-    // A clamp anywhere before the exposure node would cap every over-range
-    // input at 1.0, so every sample above 1.0 would collapse onto 0.25.
     let mut over_range_samples = 0_u32;
     for (index, pixel) in ramp_working.as_chunks::<4>().0.iter().enumerate() {
         let source = ramp_rgb[index][0];
@@ -3050,8 +2943,6 @@ fn assert_typed_source_error(
 
 #[test]
 fn cc1_source_profile_classification_is_typed_and_actionable() {
-    // §2.1 allowed-value strings, asserted verbatim so a silently widened
-    // profile table fails here rather than in production.
     const PRIMARIES_ALLOWED: &str = "bt709 or srgb in a supported CC1 profile";
     const TRANSFER_ALLOWED: &str = "bt709, bt1886, or srgb in a matching profile";
     const MATRIX_ALLOWED: &str = "bt709/rgb or rgb/identity in a matching profile";
@@ -3067,8 +2958,6 @@ fn cc1_source_profile_classification_is_typed_and_actionable() {
         Ok(ColorSourceProfile::Rec709Video)
     );
 
-    // §2.1: `ColorBitDepth::Integer(n)` and the named variants are equivalent,
-    // so a 10-bit source must classify identically either way.
     let mut named_ten = rec709_description(8, ColorRange::Limited, ColorTransfer::Bt709);
     named_ten.bit_depth = ColorBitDepth::Ten;
     let mut numeric_ten = named_ten.clone();
@@ -3215,8 +3104,6 @@ fn cc1_source_profile_classification_is_typed_and_actionable() {
     );
     assert_eq!(typed_cases.len(), 16);
 
-    // An explicit D65 assumption is the documented recovery for an unknown
-    // BT.709 white point, and it must not rewrite the raw metadata.
     let mut unknown_white_point = rec709_description(8, ColorRange::Limited, ColorTransfer::Bt709);
     unknown_white_point.white_point = ColorWhitePoint::Unknown;
     assert_eq!(
@@ -3228,8 +3115,6 @@ fn cc1_source_profile_classification_is_typed_and_actionable() {
     );
     assert_eq!(unknown_white_point.white_point, ColorWhitePoint::Unknown);
 
-    // Entirely unknown and partial metadata block the managed decoder, not
-    // just the classifier.
     let unknown_description = ColorDescription::unknown();
     let unknown_error = classify_source(&unknown_description)
         .expect_err("unknown source metadata must block managed classification");
@@ -3424,9 +3309,6 @@ fn cc1_unsupported_source_blocks_managed_proof_and_export() {
     };
     assert!(!blocked_export_path.exists());
 
-    // §2.1: a *user override* that still does not match a supported profile is
-    // an explicit failure too, and it must travel through the ordinary Core
-    // operation path rather than a fixture-local mutation.
     let mut override_document = simple_document(
         probe_path(&actual_path, AssetId(9)).expect("override source probe"),
         (32, 16),
@@ -3660,9 +3542,6 @@ fn cc1_full_raster_monitor_proof_has_same_render_semantics_as_monitor_preview() 
         "monitor proof and full preview pixels diverged"
     );
 
-    // Comparing the proof only against another GPU raster proves the two GPU
-    // paths agree, not that either matches the CC1 contract. Gate the proof
-    // against the independent CPU reference on the same decoded frame.
     let working = decode_managed_working_frame(&path, &raw_description);
     assert_eq!((working.width, working.height), (width, height));
     let cpu_reference = cpu_reference_monitor(&working, &[]);
@@ -3743,8 +3622,6 @@ pub(crate) fn generate_delivery_source(
     let mut y_plane = Vec::with_capacity(usize::try_from(width * height).expect("Y plane"));
     for _y in 0..height {
         for x in 0..width {
-            // Wide gray bars keep chroma neutral and avoid using codec loss as
-            // a substitute for compositor parity.
             let bar = (x * 5 / width).min(4);
             y_plane.push(DELIVERY_SOURCE_BAR_CODES[usize::try_from(bar).expect("bar")]);
         }
@@ -3874,9 +3751,6 @@ fn cc1_h264_yuv420p_delivery_is_measured_separately_from_gpu_gate() {
         ColorBitDepth::Eight
     );
     let mut document = simple_document(source_asset, (width, height));
-    // Keep the source spatially low-frequency/neutral for YUV420 parity, but
-    // make the export exercise the managed primary node rather than a
-    // neutral pass-through.
     document.tracks[0].clips[0].effects = vec![correction_effect(
         90,
         PrimaryCorrection {
@@ -3911,8 +3785,6 @@ fn cc1_h264_yuv420p_delivery_is_measured_separately_from_gpu_gate() {
         "monitor proof and direct FrameRenderer delivery raster must be identical"
     );
 
-    // The delivery contract reference: the same production renderer, encoded
-    // through the *delivery* description and quantized once at 16 bits.
     let delivery = direct_renderer
         .render_delivery(
             &document,
@@ -3962,8 +3834,6 @@ fn cc1_h264_yuv420p_delivery_is_measured_separately_from_gpu_gate() {
     let decoded = ffmpeg_cli_decode_rgba(&output_path, width, height);
     let metric = abs_code_diff_rgb(&decoded, &delivery_reference);
 
-    // §6.2: the codec tolerances measure codec loss only and must never be
-    // reused for the compositor or CPU/GPU gate.
     let compositor_gate_reused = DELIVERY_CODEC_MAX == MONITOR_CPU_GPU_MAX
         || DELIVERY_CODEC_P99 == MONITOR_CPU_GPU_P99
         || DELIVERY_CODEC_MEAN == MONITOR_CPU_GPU_MEAN;
@@ -4136,10 +4006,6 @@ fn cc1_managed_cache_memory_bound_is_measured_in_working_bytes() {
         let previous_evictions = eviction_count;
         last = renderer.cache_stats();
         eviction_count = renderer.cache_eviction_count();
-        // The cache is intentionally bounded in terms of working-surface
-        // bytes. Observe an actual eviction counter transition (or a
-        // resident-entry reduction); do not infer eviction from a hard-coded
-        // evidence flag.
         if frame > 0
             && (last.file_count < previous.file_count || eviction_count > previous_evictions)
         {
