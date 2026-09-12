@@ -2644,7 +2644,7 @@ fn assets_on_tracks(document: &Document, tracks: &[TrackId]) -> Vec<MediaAsset> 
 /// Written as a whole-chain set, because `UpsertAudioBus` and `SetAudioMaster`
 /// are the only shapes a chain edit has: there is no per-parameter operation,
 /// which is exactly why one `Learn` is one undo entry.
-fn noise_profile_operation(
+pub(crate) fn noise_profile_operation(
     document: &Document,
     chain: AudioChain,
     effect: EffectId,

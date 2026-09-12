@@ -7,7 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-test-util = []
+# Enabling media's generators requires core's scenario data: `cc7_sources` and
+# `au6_sources` author every buffer from a `cc7_scenarios` / `au6_scenarios`
+# constant.
+test-util = ["kinewright-core/test-util"]
 
 [dependencies]
 ab_glyph.workspace = true
@@ -26,6 +29,11 @@ whisper-rs.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+# The `cfg(test)` fixture modules (`cc7_fixtures`, `au6_fixtures`, ...) read
+# both, so testing this crate turns both gates on without a release build
+# seeing either.
+kinewright-core = { path = "../kinewright-core", features = ["test-util"] }
+kinewright-media = { path = ".", features = ["test-util"] }
 
 [lints]
 workspace = true

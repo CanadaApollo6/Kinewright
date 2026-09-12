@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use kinewright_core::{Clip, ClipId, Document, TimeCode};
+use kinewright_core::{AutomationCurve, Clip, ClipId, Document, TimeCode};
 
 /// The project-frame span in the NEW document that a change affects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +62,8 @@ pub(crate) fn changed_project_range(old: &Document, new: &Document) -> Option<Ch
         }
     }
 
+    cover_mix_edits(old, new, &mut cover);
+
     let (start, end) = (start?, end?);
     let maximum = new.duration.0.max(0);
     Some(ChangedRange {
@@ -94,6 +96,125 @@ fn clip_content_equal(left: &Clip, right: &Clip) -> bool {
         && left.audio_gain_tenth_db == right.audio_gain_tenth_db
         && left.audio_fade_in_frames == right.audio_fade_in_frames
         && left.audio_fade_out_frames == right.audio_fade_out_frames
+        && left.audio_gain_curve == right.audio_gain_curve
+}
+
+fn curve_span(curve: &AutomationCurve, duration: i64) -> (i64, i64) {
+    let start = curve
+        .keyframes
+        .iter()
+        .map(|key| key.at.0)
+        .min()
+        .unwrap_or(0);
+    let end = curve
+        .keyframes
+        .iter()
+        .map(|key| key.at.0)
+        .max()
+        .unwrap_or(0);
+    (
+        start.clamp(0, duration),
+        end.clamp(0, duration).max(start.clamp(0, duration)),
+    )
+}
+
+fn cover_curve_change(
+    old: Option<&AutomationCurve>,
+    new: Option<&AutomationCurve>,
+    duration: i64,
+    cover: &mut impl FnMut(i64, i64),
+) {
+    match (old, new) {
+        (None, None) => {}
+        (Some(old), None) => {
+            let (start, end) = curve_span(old, duration);
+            cover(start, end);
+        }
+        (_, Some(new)) => {
+            let (start, end) = curve_span(new, duration);
+            cover(start, end);
+        }
+    }
+}
+
+fn cover_mix_edits(old: &Document, new: &Document, cover: &mut impl FnMut(i64, i64)) {
+    let duration = new.duration.0.max(0);
+
+    if old.audio_mix.pan_law != new.audio_mix.pan_law {
+        cover(0, duration);
+    }
+    if old.audio_mix.master.gain_tenth_db != new.audio_mix.master.gain_tenth_db
+        || old.audio_mix.master.effects != new.audio_mix.master.effects
+    {
+        cover(0, duration);
+    }
+    cover_curve_change(
+        old.audio_mix.master.gain_curve.as_ref(),
+        new.audio_mix.master.gain_curve.as_ref(),
+        duration,
+        cover,
+    );
+
+    let track_ids: std::collections::BTreeSet<_> = old
+        .tracks
+        .iter()
+        .chain(new.tracks.iter())
+        .map(|track| track.id)
+        .collect();
+    for id in track_ids {
+        let before = old.audio_mix.track(id);
+        let after = new.audio_mix.track(id);
+        if before.gain_tenth_db != after.gain_tenth_db
+            || before.pan_percent != after.pan_percent
+            || before.mute != after.mute
+            || before.solo != after.solo
+        {
+            cover(0, duration);
+        }
+        cover_curve_change(
+            before.gain_curve.as_ref(),
+            after.gain_curve.as_ref(),
+            duration,
+            cover,
+        );
+        cover_curve_change(
+            before.pan_curve.as_ref(),
+            after.pan_curve.as_ref(),
+            duration,
+            cover,
+        );
+    }
+
+    let bus_ids: std::collections::BTreeSet<_> = old
+        .audio_mix
+        .buses
+        .iter()
+        .chain(new.audio_mix.buses.iter())
+        .map(|bus| bus.id)
+        .collect();
+    for id in bus_ids {
+        let before = old.audio_mix.bus(id);
+        let after = new.audio_mix.bus(id);
+        match (before, after) {
+            (None, None) => {}
+            (Some(before), Some(after)) => {
+                if before.gain_tenth_db != after.gain_tenth_db
+                    || before.tracks != after.tracks
+                    || before.effects != after.effects
+                    || before.name != after.name
+                {
+                    cover(0, duration);
+                }
+                cover_curve_change(
+                    before.gain_curve.as_ref(),
+                    after.gain_curve.as_ref(),
+                    duration,
+                    cover,
+                );
+            }
+            _ => cover(0, duration),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -229,5 +350,90 @@ mod tests {
         let range = changed_project_range(&old, &new).unwrap();
         assert_eq!(range.start, TimeCode(100));
         assert_eq!(range.end, TimeCode(160));
+    }
+
+    #[test]
+    fn au6_a_track_curve_covers_its_keyframe_span() {
+        let old = fixture();
+        let mut new = old.clone();
+        Operation::SetTrackAutomation {
+            track: TrackId(1),
+            parameter: "gain_tenth_db".to_owned(),
+            curve: Some(AutomationCurve {
+                keyframes: vec![
+                    kinewright_core::Keyframe {
+                        at: TimeCode(40),
+                        value: -120,
+                        interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    },
+                    kinewright_core::Keyframe {
+                        at: TimeCode(80),
+                        value: 0,
+                        interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    },
+                ],
+            }),
+        }
+        .apply(&mut new)
+        .unwrap();
+        let range = changed_project_range(&old, &new).unwrap();
+        assert_eq!(range.start, TimeCode(40));
+        assert_eq!(range.end, TimeCode(80));
+        assert_eq!(changed_project_range(&old, &old.clone()), None);
+    }
+
+    #[test]
+    fn au6_a_scalar_mix_edit_covers_the_programme() {
+        let old = fixture();
+        let mut new = old.clone();
+        Operation::SetTrackMix {
+            track: TrackId(1),
+            gain_tenth_db: -60,
+            pan_percent: 0,
+            mute: false,
+            solo: false,
+        }
+        .apply(&mut new)
+        .unwrap();
+        let range = changed_project_range(&old, &new).unwrap();
+        assert_eq!(range.start, TimeCode(0));
+        assert_eq!(range.end, TimeCode(300));
+        assert_ne!(range.end, TimeCode(80));
+    }
+
+    #[test]
+    fn au6_a_cleared_curve_covers_the_span_it_held() {
+        let mut old = fixture();
+        Operation::SetTrackAutomation {
+            track: TrackId(1),
+            parameter: "gain_tenth_db".to_owned(),
+            curve: Some(AutomationCurve {
+                keyframes: vec![
+                    kinewright_core::Keyframe {
+                        at: TimeCode(10),
+                        value: -60,
+                        interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    },
+                    kinewright_core::Keyframe {
+                        at: TimeCode(90),
+                        value: 0,
+                        interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    },
+                ],
+            }),
+        }
+        .apply(&mut old)
+        .unwrap();
+        let mut new = old.clone();
+        Operation::SetTrackAutomation {
+            track: TrackId(1),
+            parameter: "gain_tenth_db".to_owned(),
+            curve: None,
+        }
+        .apply(&mut new)
+        .unwrap();
+        let range = changed_project_range(&old, &new).unwrap();
+        assert_eq!(range.start, TimeCode(10));
+        assert_eq!(range.end, TimeCode(90));
     }
 }

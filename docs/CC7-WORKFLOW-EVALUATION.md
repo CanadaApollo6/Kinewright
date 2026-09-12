@@ -218,6 +218,12 @@ Every BLOCKER and MAJOR is fixed with the reviewer's smallest fix unless the rul
 
 The inventory G measured with step 9b's own both-direction test, rather than transcribing it from the implementer lists, is: `CC7_MEDIA_TESTS` **41** (`cc7_fixtures.rs` 33 + `cc7_sources.rs` 8), `CC7_CORE_TESTS` **12**, `CC7_AGENT_TESTS` **8**, `CC7_APP_TESTS` **7** (`inspector_ui.rs` 6 + `look_browser_ui.rs` 1) and `CC7_EVAL_TESTS` **27** (`eval.rs` 14 + `bin/kinewright-eval.rs` 13) — **95** deduplicated, with `CC7_INVENTORY_TESTS` 2 (both also `CC7_MEDIA_TESTS` members, CC6's overlap), `CC7_EXTERNAL_OWNERS` 9 and `CC7_TEST_SOURCES` 8. The manifest's `required_fixtures` holds **95** entries, one per declared test and asserted exactly equal to that inventory, and its threshold-key count is **84**. Fixer Y added, renamed and deleted no test name (Y-E6), so the R2 fixes leave every count above unchanged. These counts still move with any fixture the remaining fixers add — R1-B1's `cc7_a_fixture_project_path_reaches_the_server` at minimum, plus R1-M1's and R1-M3's failing directions — and are recorded here **(as of G; reconciled at commit)**.
 
+**Pointer errata recorded by AU6 (2026-09-10, `docs/AU6-WORKFLOW-EVALUATION.md` §12.1 item 8).** Three one-line pointers; nothing in CC7 is re-baselined.
+
+- **H-E1.** `CC7_FORBIDDEN_HELPERS` is `[&str; 3]` in code (`crates/kinewright-media/src/cc7_fixtures.rs:4298-4302`, the third needle `"std::env::var"`); G-E4 above records the change, but §11.3's normative sentence still reads `[&str; 2]` and is read through G-E4.
+- **H-E2.** G-E6 and the inventory paragraph above say **95** declared tests; `cc7_fixtures.rs:4562` asserts **96** (`total, 96`). The tree is authoritative; the two prose figures are read as 96.
+- **H-E3.** §6 cites `KinewrightApp::new` at `app.rs:180` with its call site at `:1858`; at `11a6098` the fn is `crates/kinewright-app/src/app.rs:206` and the call site `:2175`.
+
 ---
 
 ## 1. In scope and out of scope

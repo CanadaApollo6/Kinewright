@@ -289,12 +289,64 @@ the `pub(crate)` entries are named (§3.9, §5.6, §5.7). No OPEN note remains.
   third export is what stops the first two from being vacuous.
 - **E55. The hot-noise LU margin is the exit gate's thinnest number** (deviation 37 hundredths
   against a 100 budget, ≥ 2× bar = 50), dominated by the limiter's loudness pull rather than the AAC
-  round trip; the budget equals the streaming tolerance, so the bar is stricter than conformance. If
-  the Windows lane reds on this term, the response is a per-OS note on the constant's doc comment
-  in CC6 §6.3's manner, never a `cfg`.
+  round trip; the budget equals the streaming tolerance, so the bar is stricter than conformance.
+  **E59 amends this clause's response.** *Was:* "If the Windows lane reds on this term, the
+  response is a per-OS note on the constant's doc comment in CC6 §6.3's manner, never a `cfg`."
+- **E59. A measured column belongs to the operating system that produced it, and each one is
+  optimized there (Riel, 2026-09-12).** E55's clause above, CC6 §6.3 and AU6 §10.6 all said a
+  Windows figure earns a note on a constant's doc comment and **never** a per-OS constant. With the
+  CI gate finally failing on a failing test, that rule is unworkable and was hiding a real gap:
+  Windows CI provisions **a different FFmpeg package** (`System233/ffmpeg-msvc-prebuilt
+  ffmpeg-8.0.1-r3` against Linux's `mifi/ffmpeg-builds 8.0-1`), so one measured number is not true
+  of both systems, and the only way to keep one was to widen it until it bounded neither tightly —
+  which is precisely the "invented tolerance" §4.1 forbids. **The rule is now: a measured column is
+  per operating system, each value measured on that system and optimized there.** Normative:
+  1. A **budget** stays single and shared. Budgets are the contract; only the *measured* column
+     splits. A budget is never widened to span two systems.
+  2. A **measured** value is either a scalar — measured on every supported system and found equal,
+     so there is nothing to split — or keyed by operating system. A scalar is a claim that both
+     systems produced it, not a default.
+  3. A system with **no** column for a row **fails loudly**; it never passes by omission. The
+     fixture reports what it measured so one run publishes that system's whole column.
+  4. **No number is copied across systems**, and no per-OS value is chosen to make a red build
+     green. Each is measured where it runs and carries its own margin against the shared budget.
+  5. The measurement **provenance** (FFmpeg build, library versions, x264 core, adapter, kernel,
+     toolchain) is recorded per system beside its column, because every field in it is a property
+     of that machine.
+  6. `cfg(target_os)` is now permitted **for a measured constant only**, and only with its own
+     measurement and provenance in the doc comment. It remains forbidden for a budget, a tolerance
+     and an environment gate — AU6 §11.0.6's scan is unchanged.
 - **E56. The corrective gain is not range-checked** against −6000..=3600 (§5.6 step 6 does not ask
   for it); there is no runaway — the pass count is a straight-line `if`, the correction fires only
   in the direction a limiter can produce, and the limiter re-clamps whatever the gain does.
+- **E57. The delivery libx264 encode is pinned to one thread** (`video_options.set("threads", "1")`,
+  `crates/kinewright-media/src/export.rs:464`, landed as `07dd22b`). x264 core 165's ABR frame-thread
+  pool is not run-to-run deterministic on the pinned Linux FFmpeg 8 build, and B6's first comparison
+  was reading it. The pin is kept: it is the right setting for a delivery encode and it removed the
+  common case. It did **not** remove the failure — see E58.
+- **E58. B6 compares the delivered AUDIO STREAM, not the whole file, and the reason is measured.**
+  **Approved by Riel 2026-09-12: keep the delivered-audio-stream compare; whole-file identity stays
+  ungated.** The narrowing below is the contract's position, not a proposal.
+  With E57's pin in place the fixture still failed on Linux CI (run 34650711913) and reproduces
+  locally about **one run in three** — but only when several of `tests/au3_fixtures.rs`'s tests
+  encode concurrently in one process; **twenty-plus isolated runs across separate processes never
+  failed**, and every one produced the same bytes. Measured on a reproduced failure: the two files
+  are 1 550 211 and 1 550 293 bytes, the difference is entirely in the **H.264** stream (1 211 586
+  against 1 211 668) and begins at about frame 13, while the **AAC stream is byte-identical at
+  332 005 bytes**; all 120 composited RGBA frames *and* all 120 YUV frames handed to the encoder
+  hash identically across the two exports; the encoder reports `thread_count == 1` at runtime; and
+  the same libx264 build driven by the ffmpeg CLI under full CPU load is byte-deterministic both
+  with and without `-threads 1` (6/6 and 8/8). The residue is therefore the encoder's own
+  in-process behaviour under concurrent instances, which the loudness step neither owns nor can
+  gate — a whole-file comparison was asserting how busy the machine was. B6's claim is that a
+  disabled or skipped normalization hands `encode_audio` the untouched mix, and that is the audio
+  stream: the fixture now copies it out with `-map 0:a -c copy` (a stream copy re-frames nothing)
+  and compares those bytes for all three exports. E54's "three real exports" is unchanged. The
+  video-side nondeterminism is recorded here and owned by no slice; a later slice that needs
+  whole-file reproducibility has to establish it against this build first. **What B6 no longer
+  claims, stated plainly so nobody reads the narrowing as broader than it is:** two exports of one
+  document are *not* asserted byte-identical as whole files on this FFmpeg build, and AU3 gates no
+  whole-file reproducibility anywhere.
 
 ## 1. Scope
 

@@ -20,7 +20,18 @@ if [[ "${BASH_SOURCE[0]:-}" != "$0" ]]; then
     sourced=1
 fi
 if [[ "$sourced" -eq 1 ]]; then
-    _kinewright_setup_shopts="$(set +o)"
+    # `$(set +o)` runs in a command-substitution subshell, and bash clears
+    # `errexit` there, so the snapshot always read `set +o errexit` and
+    # restoring it at the end silently turned `-e` OFF in the caller's shell.
+    # That is how both CI jobs reported success while `cargo test --workspace`
+    # failed: GitHub runs a `run:` block as `bash -e`, this script switched it
+    # off, and the step's status became the last command's. `$-` is expanded by
+    # the current shell, so it is an accurate snapshot.
+    _kinewright_setup_flags="$-"
+    _kinewright_setup_pipefail=off
+    if [[ -o pipefail ]]; then
+        _kinewright_setup_pipefail=on
+    fi
 fi
 set -euo pipefail
 
@@ -150,8 +161,20 @@ echo "libavcodec: $codec_version"
 echo "$ffmpeg_version"
 if [[ "$sourced" -eq 1 ]]; then
     echo 'FFmpeg build environment is active in this shell.'
-    eval "${_kinewright_setup_shopts}"
-    unset _kinewright_setup_shopts
+    case "$_kinewright_setup_flags" in
+        *e*) set -e ;;
+        *) set +e ;;
+    esac
+    case "$_kinewright_setup_flags" in
+        *u*) set -u ;;
+        *) set +u ;;
+    esac
+    if [[ "$_kinewright_setup_pipefail" == on ]]; then
+        set -o pipefail
+    else
+        set +o pipefail
+    fi
+    unset _kinewright_setup_flags _kinewright_setup_pipefail
 else
     echo 'FFmpeg is provisioned. Source this script so cargo sees the environment:'
     echo "  source $script_path"

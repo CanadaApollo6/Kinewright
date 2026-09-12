@@ -81,6 +81,22 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- AU6 Part A, audio workflow gates: five named audio workflows — an interview
+  ducked under a music bed, a two-voice podcast matched and normalized, a
+  location dialogue clip repaired with its gap filled from captured room tone,
+  a multicam cut whose master audio stays bit-identical, and delivery to the
+  EBU R128 and streaming targets — are proven end to end over the AU1–AU5
+  surface by ordinary `cargo test`, by a scripted agent and at the person's
+  operation-builder level, with every objective claim printed as
+  budget | measured | margin and every budget cleared by at least 2× on the
+  synthetic fixtures. The scenario authority lives in core
+  (`au6_scenarios`), the generators and fixtures in media (`au6_sources`,
+  `au6_fixtures`), the six agent scripts in the MCP test suite and the five
+  person-path tests in the app. No MCP tool, operation or effect is added;
+  the served surface is unchanged. One person-path gap the evaluation found
+  is closed: the Mixer's AUTOMATION section now targets a selected track's
+  fader and pan as well as a bus or the master, and the timeline change
+  range follows mix edits. See docs/AU6-WORKFLOW-EVALUATION.md.
 - AU5 Part B, the repair surfaces: the Mixer's `+ Effect` menu offers the three
   repair nodes, each with its own card — denoise over a 31-bar learned-floor
   well on a −120…0 dB scale that says `No profile learned.` until it is taught,

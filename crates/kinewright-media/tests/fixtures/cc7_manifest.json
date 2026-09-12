@@ -1013,15 +1013,27 @@
       "delivery, 8-bit RGB mean": {
         "constant": "DELIVERY_RGB_MEAN_CODE_8BIT_MILLIONTHS",
         "budget": 1750000,
-        "measured": 855810,
-        "margin": 2.0448,
+        "measured": {
+          "linux": 855810,
+          "windows": 787598
+        },
+        "margin": {
+          "linux": 2.0448,
+          "windows": 2.2219
+        },
         "note": "re-pinned from probe-1's pre-A1 499 781 to the worst per-scenario amended-scene measurement, 855 810 on (e). It still clears the 2x bar, by 2.2 percent of the budget, so it stays a ratio row (R4-M2)."
       },
       "delivery, 8-bit PSNR": {
         "constant": "DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_8BIT",
         "budget": 3300,
-        "measured": 4059,
-        "margin": 759,
+        "measured": {
+          "linux": 4059,
+          "windows": 4070
+        },
+        "margin": {
+          "linux": 759,
+          "windows": 770
+        },
         "note": "re-pinned from probe-1's pre-A1 4 148 to the worst per-scenario amended-scene measurement, 4 059 on (e). A floor row: the margin is a code distance, never a ratio (R4-M2)."
       },
       "delivery, 10-bit luma max": {
@@ -1073,18 +1085,36 @@
           },
           "luma_mean_code_millionths": {
             "budget": 400000,
-            "measured": 18677,
-            "margin": 21.4167
+            "measured": {
+              "linux": 18677,
+              "windows": 18688
+            },
+            "margin": {
+              "linux": 21.4167,
+              "windows": 21.4041
+            }
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": 402050,
-            "margin": 4.3527
+            "measured": {
+              "linux": 402050,
+              "windows": 296109
+            },
+            "margin": {
+              "linux": 4.3527,
+              "windows": 5.91
+            }
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4204,
-            "margin": 904
+            "measured": {
+              "linux": 4204,
+              "windows": 4225
+            },
+            "margin": {
+              "linux": 904,
+              "windows": 925
+            }
           },
           "reported_not_gated": {
             "rgb_max_code": 62,
@@ -1161,18 +1191,36 @@
           },
           "luma_mean_code_millionths": {
             "budget": 400000,
-            "measured": 38177,
-            "margin": 10.4775
+            "measured": {
+              "linux": 38177,
+              "windows": 38160
+            },
+            "margin": {
+              "linux": 10.4775,
+              "windows": 10.4822
+            }
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": 458622,
-            "margin": 3.8158
+            "measured": {
+              "linux": 458622,
+              "windows": 402744
+            },
+            "margin": {
+              "linux": 3.8158,
+              "windows": 4.3452
+            }
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4129,
-            "margin": 829
+            "measured": {
+              "linux": 4129,
+              "windows": 4142
+            },
+            "margin": {
+              "linux": 829,
+              "windows": 842
+            }
           },
           "reported_not_gated": {
             "rgb_max_code": 62,
@@ -1209,8 +1257,14 @@
           },
           "rgb_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 181593,
-            "margin": 5.5068
+            "measured": {
+              "linux": 181593,
+              "windows": 181569
+            },
+            "margin": {
+              "linux": 5.5068,
+              "windows": 5.5075
+            }
           },
           "psnr_db_hundredths": {
             "budget": 3300,
@@ -1249,18 +1303,36 @@
           },
           "luma_mean_code_millionths": {
             "budget": 400000,
-            "measured": 195351,
-            "margin": 2.0476
+            "measured": {
+              "linux": 195351,
+              "windows": 195326
+            },
+            "margin": {
+              "linux": 2.0476,
+              "windows": 2.0479
+            }
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": 512581,
-            "margin": 3.4141
+            "measured": {
+              "linux": 512581,
+              "windows": 388796
+            },
+            "margin": {
+              "linux": 3.4141,
+              "windows": 4.5011
+            }
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4126,
-            "margin": 826
+            "measured": {
+              "linux": 4126,
+              "windows": 4148
+            },
+            "margin": {
+              "linux": 826,
+              "windows": 848
+            }
           },
           "reported_not_gated": {
             "rgb_max_code": 61,
@@ -1342,13 +1414,25 @@
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": 349950,
-            "margin": 5.0007
+            "measured": {
+              "linux": 349950,
+              "windows": 162581
+            },
+            "margin": {
+              "linux": 5.0007,
+              "windows": 10.7639
+            }
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4103,
-            "margin": 803
+            "measured": {
+              "linux": 4103,
+              "windows": 4132
+            },
+            "margin": {
+              "linux": 803,
+              "windows": 832
+            }
           },
           "reported_not_gated": {
             "rgb_max_code": 62,
@@ -1430,13 +1514,25 @@
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": 855810,
-            "margin": 2.0448
+            "measured": {
+              "linux": 855810,
+              "windows": 787598
+            },
+            "margin": {
+              "linux": 2.0448,
+              "windows": 2.2219
+            }
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4059,
-            "margin": 759
+            "measured": {
+              "linux": 4059,
+              "windows": 4070
+            },
+            "margin": {
+              "linux": 759,
+              "windows": 770
+            }
           },
           "reported_not_gated": {
             "rgb_max_code": 64,
@@ -1518,13 +1614,25 @@
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": 271299,
-            "margin": 6.4504
+            "measured": {
+              "linux": 271299,
+              "windows": 78742
+            },
+            "margin": {
+              "linux": 6.4504,
+              "windows": 22.2245
+            }
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": 4579,
-            "margin": 1279
+            "measured": {
+              "linux": 4579,
+              "windows": 4668
+            },
+            "margin": {
+              "linux": 1279,
+              "windows": 1368
+            }
           },
           "reported_not_gated": {
             "rgb_max_code": 64,
@@ -1556,13 +1664,13 @@
           },
           "luma_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 281,
-            "margin": 3558.7189
+            "measured": 274,
+            "margin": 3649.635
           },
           "rgb_mean_code_millionths": {
             "budget": 1000000,
-            "measured": 77446,
-            "margin": 12.9122
+            "measured": 77447,
+            "margin": 12.9121
           },
           "psnr_db_hundredths": {
             "budget": 3300,
@@ -1678,7 +1786,7 @@
     },
     "reported_not_gated": {
       "c2_residual_spread_code": 19,
-          "c2_over_range_pixels": 672,
+      "c2_over_range_pixels": 672,
       "c2_over_range_basis_points": 116,
       "c2_blue_maximum_over_excursion_millionths": 41538,
       "warm_whole_raster_out_of_gamut_pixels": 1480,
@@ -1694,23 +1802,44 @@
       "rgb_extremes_note": "DELIVERY_RGB_EXTREMES_NOTE covers the 4:2:0 hard-edge terms; they are recorded per scenario in budgets.delivery[*].reported_not_gated"
     },
     "measurement": {
-      "os": "linux",
-      "arch": "x86_64",
-      "kernel": "7.1.9-arch1-2",
-      "lane": "software_fallback",
-      "adapter": "llvmpipe (LLVM 22.1.8, 256 bits)",
-      "backend": "vulkan",
-      "source_generator": "kinewright_media::cc7_sources (idiom A, FFV1 -level 3 -g 1, yuv444p, BT.709 limited, .mkv)",
-      "ffmpeg_build": "n8.0-23-gd1f31a829d-20251022 (third_party/ffmpeg, scripts/setup-ffmpeg.sh)",
-      "libavcodec": "62.11.100",
-      "libswscale": "9.1.100",
-      "libavutil": "60.8.100",
-      "x264_core": "165",
-      "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
-      "commit": "99faee368a9cd292ae1414c3e878792065473102",
-      "date": "2026-08-27",
-      "probe": "CC7 12 step 5, Implementer C, measured live in cc7_fixtures.rs",
-      "accumulation": "row-major from the top-left, sums in f64 (CC7 10.7)"
+      "linux": {
+        "os": "linux",
+        "arch": "x86_64",
+        "kernel": "7.1.9-arch1-2",
+        "lane": "software_fallback",
+        "adapter": "llvmpipe (LLVM 22.1.8, 256 bits)",
+        "backend": "vulkan",
+        "source_generator": "kinewright_media::cc7_sources (idiom A, FFV1 -level 3 -g 1, yuv444p, BT.709 limited, .mkv)",
+        "ffmpeg_build": "n8.0-23-gd1f31a829d-20251022 (third_party/ffmpeg, scripts/setup-ffmpeg.sh)",
+        "libavcodec": "62.11.100",
+        "libswscale": "9.1.100",
+        "libavutil": "60.8.100",
+        "x264_core": "165",
+        "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+        "commit": "99faee368a9cd292ae1414c3e878792065473102",
+        "date": "2026-08-27",
+        "probe": "CC7 12 step 5, Implementer C, measured live in cc7_fixtures.rs",
+        "accumulation": "row-major from the top-left, sums in f64 (CC7 10.7)"
+      },
+      "windows": {
+        "os": "windows",
+        "arch": "x86_64",
+        "kernel": "windows-latest GitHub runner image",
+        "lane": "software_fallback",
+        "adapter": "Microsoft Basic Render Driver",
+        "backend": "dx12",
+        "source_generator": "kinewright_media::cc7_sources (idiom A, FFV1 -level 3 -g 1, yuv444p, BT.709 limited, .mkv)",
+        "ffmpeg_build": "8.0.1 (System233/ffmpeg-msvc-prebuilt ffmpeg-8.0.1-r3, sha256 3399afab045f6bc64301001d4f5ca1aba3d6df96948cc1799028cf2f24ede433, scripts/setup-ffmpeg.ps1)",
+        "libavcodec": "62.11.100",
+        "libswscale": "not printed by this lane; fixed by the ffmpeg-8.0.1-r3 package pin above",
+        "libavutil": "not printed by this lane; fixed by the ffmpeg-8.0.1-r3 package pin above",
+        "x264_core": "not printed by this lane; fixed by the ffmpeg-8.0.1-r3 package pin above",
+        "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+        "commit": "8c1fa9293d6a18c1e0ba4a1b9b8ea4ad13dcb8a5",
+        "date": "2026-09-12",
+        "probe": "CC7 12 step 5 re-run on windows-latest, CI run 34693346093, harvested from the delivery gate's own report",
+        "accumulation": "row-major from the top-left, sums in f64 (CC7 10.7)"
+      }
     }
   },
   "performance": {

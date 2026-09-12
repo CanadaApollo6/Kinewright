@@ -457,7 +457,12 @@ mod tests {
         // Keep both metadata fields identical so a size+mtime memoization scheme
         // would incorrectly return `first`.
         fs::write(&path, b"other").unwrap();
-        fs::File::open(&path)
+        // `set_modified` needs write access to the handle: Windows refuses it
+        // on a read-only `File::open` with `PermissionDenied`, where unix
+        // happens to allow it.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
             .unwrap()
             .set_modified(original_modified)
             .unwrap();

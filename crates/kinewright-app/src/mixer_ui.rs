@@ -24,8 +24,9 @@ use eframe::egui;
 use kinewright_core::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AudioBus,
     AudioBusId, AudioChain, AudioMaster, Document, EffectId, LoudnessSnapshot, LoudnessTarget,
-    MixPeaks, Operation, PanLaw, Playback, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
-    TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, TimeCode, Track, TrackId, TrackKind, TrackMix,
+    MixPeaks, Operation, PanLaw, Playback, TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX,
+    TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, TimeCode, Track, TrackId, TrackKind,
+    TrackMix, track_automation_coalesce_key,
 };
 
 use crate::{
@@ -279,14 +280,19 @@ fn decayed_level(previous: f32, peak: f32, elapsed: f32) -> f32 {
 pub(crate) enum MixerSelection {
     Bus(AudioBusId),
     Master,
+    Track(TrackId),
 }
 
 impl MixerSelection {
     /// The chain key the engine's telemetry uses for this selection.
-    pub(crate) const fn chain(self) -> AudioChain {
+    ///
+    /// AU6 §6.2: a track is not an [`AudioChain`]. The four call sites handle
+    /// `None`.
+    pub(crate) const fn chain(self) -> Option<AudioChain> {
         match self {
-            Self::Bus(bus) => AudioChain::Bus(bus),
-            Self::Master => AudioChain::Master,
+            Self::Bus(bus) => Some(AudioChain::Bus(bus)),
+            Self::Master => Some(AudioChain::Master),
+            Self::Track(_) => None,
         }
     }
 
@@ -300,6 +306,7 @@ impl MixerSelection {
         match self {
             Self::Bus(bus) => audio_bus_coalesce_key(bus),
             Self::Master => AUDIO_MASTER_COALESCE_KEY.to_owned(),
+            Self::Track(track) => track_mix_coalesce_key(track),
         }
     }
 }
@@ -324,6 +331,7 @@ pub(crate) const AUDIO_MASTER_COALESCE_KEY: &str = "audio_master";
 pub(crate) struct MixerChainEdits {
     buses: BTreeMap<AudioBusId, AudioBus>,
     master: Option<AudioMaster>,
+    tracks: BTreeMap<TrackId, TrackMix>,
     /// The pan law is document-level rather than part of any chain, but its
     /// control lives on the master pane and obeys the same "never push" rule.
     pan_law: Option<PanLaw>,
@@ -342,6 +350,11 @@ impl MixerChainEdits {
     /// The edited copy of the master chain, cloned in on first touch.
     pub(crate) fn master(&mut self, master: &AudioMaster) -> &mut AudioMaster {
         self.master.get_or_insert_with(|| master.clone())
+    }
+
+    /// The edited copy of one track mix, cloned in on first touch (AU6 §6.2).
+    pub(crate) fn track(&mut self, mix: &TrackMix) -> &mut TrackMix {
+        self.tracks.entry(mix.track).or_insert_with(|| mix.clone())
     }
 
     /// Add a bus the document does not have yet (`+ Bus`, AU2 §6.5).
@@ -397,6 +410,45 @@ impl MixerChainEdits {
                 MixerSelection::Master.coalesce_key(),
             );
         }
+        for (id, mix) in self.tracks {
+            let current = document.audio_mix.track(id);
+            if mix.gain_curve != current.gain_curve {
+                file_chain_edit(
+                    edits,
+                    live,
+                    Operation::SetTrackAutomation {
+                        track: id,
+                        parameter: TRACK_AUTOMATION_PARAMETERS[0].to_owned(),
+                        curve: mix.gain_curve.clone(),
+                    },
+                    track_automation_coalesce_key(id, TRACK_AUTOMATION_PARAMETERS[0]),
+                );
+            }
+            if mix.pan_curve != current.pan_curve {
+                file_chain_edit(
+                    edits,
+                    live,
+                    Operation::SetTrackAutomation {
+                        track: id,
+                        parameter: TRACK_AUTOMATION_PARAMETERS[1].to_owned(),
+                        curve: mix.pan_curve.clone(),
+                    },
+                    track_automation_coalesce_key(id, TRACK_AUTOMATION_PARAMETERS[1]),
+                );
+            }
+            if mix.gain_tenth_db != current.gain_tenth_db
+                || mix.pan_percent != current.pan_percent
+                || mix.mute != current.mute
+                || mix.solo != current.solo
+            {
+                file_chain_edit(
+                    edits,
+                    live,
+                    track_mix_operation(&mix),
+                    track_mix_coalesce_key(id),
+                );
+            }
+        }
         if let Some(law) = self.pan_law
             && law != document.audio_mix.pan_law
         {
@@ -410,6 +462,14 @@ impl MixerChainEdits {
                 MixerSelection::Master.coalesce_key(),
             );
         }
+    }
+
+    /// Fold this frame's chain edits into operations, for AU6 §6.1 / §6.2 tests.
+    #[cfg(test)]
+    pub(crate) fn take_operations(self, document: &Document) -> InspectorEdits {
+        let mut edits = InspectorEdits::default();
+        self.drain_into(document, &mut edits);
+        edits
     }
 }
 
@@ -507,7 +567,11 @@ impl KinewrightApp {
         if let Some(selection) = self.mixer_selection
             && chain_carries_denoise(&document, selection)
         {
-            telemetry.noise_learn = self.noise_learn_range(selection.chain());
+            telemetry.noise_learn = self.noise_learn_range(
+                selection
+                    .chain()
+                    .expect("a denoise node only lives on a bus or the master"),
+            );
         }
         // The bars measure against the export dialog's current profile target,
         // whatever the dialog's other settings say (AU3 §4.4, F12/F20).
@@ -544,6 +608,7 @@ pub(crate) fn chain_carries_denoise(document: &Document, selection: MixerSelecti
     let effects = match selection {
         MixerSelection::Bus(id) => document.audio_mix.bus(id).map(|bus| &bus.effects),
         MixerSelection::Master => Some(&document.audio_mix.master.effects),
+        MixerSelection::Track(_) => None,
     };
     effects.is_some_and(|effects| effects.iter().any(|effect| effect.name == "audio_denoise"))
 }
@@ -649,7 +714,10 @@ pub(crate) fn mixer_strips(
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 for (index, track) in document.tracks.iter().enumerate() {
-                    track_strip(ui, document, track, index, levels, position, chain, edits);
+                    track_strip(
+                        ui, document, track, index, selection, requested, levels, position, chain,
+                        edits,
+                    );
                 }
                 if !document.audio_mix.buses.is_empty() {
                     // One rule per boundary: with no buses the tracks and the
@@ -680,6 +748,8 @@ fn track_strip(
     document: &Document,
     track: &Track,
     index: usize,
+    selection: Option<MixerSelection>,
+    requested: &mut Option<MixerSelection>,
     levels: &MixerMeterLevels,
     position: TimeCode,
     chain: &mut MixerChainEdits,
@@ -728,12 +798,26 @@ fn track_strip(
             ..mix.clone()
         });
 
+        // `Edit` shares the mute/solo row. A sixth row of its own put the
+        // plain strip at 246 px; `Reset` + `+ Bus` + `Edit` overflowed the
+        // 72 px column when `Reset` was showing (AU2 §6.5, AU6 §6.2).
+        let selected = selection == Some(MixerSelection::Track(track.id));
         ui.horizontal(|ui| {
+            // `M` + `S` + micro `Edit` is 76 px with `space::HALF` gutters;
+            // zero gutter keeps the row inside the 72 px column.
+            ui.spacing_mut().item_spacing.x = 0.0;
             for toggle in [MixToggle::Mute, MixToggle::Solo] {
                 if mix_toggle_button(ui, toggle, &mix) {
                     edits.push(track_mix_toggle_operation(&mix, toggle));
                 }
             }
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = size::ICON_SM;
+                ui.spacing_mut().button_padding = egui::vec2(space::HALF, 0.0);
+                ui.style_mut().override_font_id = Some(theme::medium(type_size::MICRO));
+                let toggle = edit_toggle(ui, selected, MixerSelection::Track(track.id), requested);
+                record_keyed_rect("track_edit", track.id.0, toggle);
+            });
         });
 
         // `Reset` and `+ Bus` share a row. Both are conditional in different
@@ -998,8 +1082,8 @@ pub(crate) const AUTOMATION_CHIP_TOOLTIP: &str = "Automation drives this track's
 /// A const so the sentence is assertable: `on_disabled_hover_text` leaves no
 /// rect to probe.
 pub(crate) const AUTOMATED_FADER_TOOLTIP: &str = "Automation drives this fader. The number is the \
-     parked value and typing sets it; clear the automation in the chain pane to ride the fader \
-     directly.";
+     parked value and typing sets it; clear the curve in the AUTOMATION section of this strip's \
+     chain pane to ride the fader directly.";
 
 /// AU4 §4.5 rule 91: one automated owner's value at the audible frame.
 ///
@@ -1505,12 +1589,45 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use kinewright_core::{
-        AssetId, AudioMix, Clip, ClipContent, ClipId, DeliveryAspect, EBU_R128_PROGRAMME_TARGET,
-        Effect, MediaAsset, MediaKind, ParamValue, Rational, STREAMING_PLATFORM_TARGET, TimeCode,
+        AssetId, AudioMix, BatchError, Clip, ClipContent, ClipId, ColorDescription, DeliveryAspect,
+        DeliveryProfile, EBU_R128_PROGRAMME_TARGET, Effect, MediaAsset, MediaKind,
+        MediaSourceFingerprint, OpError, ParamValue, Rational, STREAMING_PLATFORM_TARGET, TimeCode,
+        apply_batch,
+        au6_scenarios::{
+            AU6_A_BED_TRACK, AU6_A_VOICE_A_TRACK, AU6_A_VOICE_B_TRACK, AU6_B_FADE_FRAMES,
+            AU6_B_GATED_CLIP_IDS, AU6_B_VOICE_A_TRACK, AU6_B_VOICE_B_BUS, AU6_B_VOICE_B_TRACK,
+            AU6_C_BASE_CLIP_ID, AU6_C_DECLICK_DETECTOR_THRESHOLD_TENTH_DB,
+            AU6_C_DECLICK_LOOKAHEAD_MS, AU6_C_DECLICK_MAX_CLICK_MS, AU6_C_DENOISE_LOOKAHEAD_MS,
+            AU6_C_DENOISE_REDUCTION_TENTH_DB, AU6_C_DIALOGUE_TRACK, AU6_C_GAP_RANGE,
+            AU6_C_HUM_DEPTH_TENTH_DB, AU6_C_HUM_FUNDAMENTAL_PARAMETER_HERTZ,
+            AU6_C_HUM_HARMONIC_COUNT, AU6_C_HUM_NOTCH_Q_HUNDREDTHS, AU6_C_LEARNED_PROFILE_TENTH_DB,
+            AU6_C_REPAIR_BUS, AU6_C_REPAIR_EFFECT_IDS, AU6_C_ROOM_TONE_ASSET_FRAMES,
+            AU6_C_ROOM_TONE_FPS, AU6_COMPRESSOR_EFFECT, AU6_D_ANGLE_1_TRACK, AU6_D_ANGLE_2_TRACK,
+            AU6_D_ANGLE_CLIP_IDS, AU6_D_CUT_FRAMES, AU6_D_DELETED_CLIP_IDS, AU6_D_SCRATCH_1_TRACK,
+            AU6_D_SCRATCH_2_TRACK, AU6_DECLICK_EFFECT, AU6_DENOISE_EFFECT, AU6_HUM_REMOVAL_EFFECT,
+            AU6_INTERVIEW_A2_TRIM_TENTH_DB, AU6_PARAMETRIC_EQ_EFFECT, AU6_PODCAST_A_TRIM_TENTH_DB,
+            AU6_PODCAST_B_TRIM_TENTH_DB, AU6_PODCAST_COMPRESSOR_ATTACK_MS,
+            AU6_PODCAST_COMPRESSOR_DETECTOR, AU6_PODCAST_COMPRESSOR_EFFECT_ID,
+            AU6_PODCAST_COMPRESSOR_KNEE_TENTH_DB, AU6_PODCAST_COMPRESSOR_MAKEUP_TENTH_DB,
+            AU6_PODCAST_COMPRESSOR_RATIO_HUNDREDTHS, AU6_PODCAST_COMPRESSOR_RELEASE_MS,
+            AU6_PODCAST_COMPRESSOR_RMS_WINDOW_MS, AU6_PODCAST_COMPRESSOR_THRESHOLD_TENTH_DB,
+            AU6_PODCAST_EQ_EFFECT_ID, AU6_PODCAST_HIGHPASS_HERTZ, AU6_SOURCE_HEIGHT,
+            AU6_SOURCE_WIDTH, Au6Scenario, au6_a_canonical_operations, au6_a_duck_curve,
+            au6_b_canonical_operations, au6_c_canonical_operations_with_room_tone,
+            au6_c_fill_operations, au6_c_gap_operations, au6_canonical_operations,
+            au6_d_angle_cut_operations, au6_d_sync_group, au6_spec,
+        },
     };
 
     use super::*;
-    use crate::mixer_pane_ui::{self, LOUDNESS_MONITORING_NOTE, MixerChain, MixerUnit};
+    use crate::app::noise_profile_operation;
+    use crate::export_ui::export_loudness_target;
+    use crate::inspector_ui::clip_audio_operation;
+    use crate::mixer_pane_ui::{
+        self, AutomationTarget, LOUDNESS_MONITORING_NOTE, MixerChain, MixerUnit,
+        insert_audio_effect, set_automation_curve,
+    };
+    use crate::timeline_ui::{linked_delete_operations, room_tone_fill_operations};
 
     fn asset() -> MediaAsset {
         MediaAsset {
@@ -1811,6 +1928,7 @@ mod tests {
         let levels = MixerMeterLevels::default();
         let mut chain = MixerChainEdits::default();
         let mut edits = InspectorEdits::default();
+        let mut requested = None;
         let mut size = egui::Vec2::ZERO;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.vertical(|ui| {
@@ -1819,6 +1937,8 @@ mod tests {
                     document,
                     &document.tracks[index],
                     index,
+                    None,
+                    &mut requested,
                     &levels,
                     position,
                     &mut chain,
@@ -4238,9 +4358,10 @@ mod tests {
         );
         assert_eq!(
             MixerSelection::Bus(AudioBusId(2)).chain(),
-            AudioChain::Bus(AudioBusId(2))
+            Some(AudioChain::Bus(AudioBusId(2)))
         );
-        assert_eq!(MixerSelection::Master.chain(), AudioChain::Master);
+        assert_eq!(MixerSelection::Master.chain(), Some(AudioChain::Master));
+        assert_eq!(MixerSelection::Track(TrackId(3)).chain(), None);
     }
 
     /// AU2 §6.5: the strip states the node count and keeps the chain in its
@@ -4281,6 +4402,7 @@ mod tests {
             "One card is expanded at a time",
             "read-only magnitude well on a parametric EQ",
             "in the product that fills from the right",
+            "a track, bus or master ride",
         ] {
             assert!(
                 mixer.contains(expected),
@@ -4720,7 +4842,8 @@ mod tests {
         assert_eq!(
             AUTOMATED_FADER_TOOLTIP,
             "Automation drives this fader. The number is the parked value and typing sets it; \
-             clear the automation in the chain pane to ride the fader directly.",
+             clear the curve in the AUTOMATION section of this strip's chain pane to ride the \
+             fader directly.",
             "the hover text says which half of the control is which"
         );
 
@@ -5202,5 +5325,828 @@ mod tests {
             );
             assert!(edits.operations().is_empty());
         }
+    }
+
+    #[test]
+    fn au6_a_track_chain_offers_both_automation_targets() {
+        assert_eq!(MixerSelection::Track(TrackId(1)).chain(), None);
+        assert_eq!(
+            MixerSelection::Track(TrackId(4)).coalesce_key(),
+            track_mix_coalesce_key(TrackId(4))
+        );
+        assert_ne!(
+            track_automation_coalesce_key(TrackId(4), "gain_tenth_db"),
+            track_mix_coalesce_key(TrackId(4))
+        );
+        let track = Track {
+            id: AU6_A_BED_TRACK,
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: Vec::new(),
+        };
+        let mix = TrackMix {
+            track: AU6_A_BED_TRACK,
+            gain_tenth_db: 0,
+            pan_percent: 0,
+            mute: false,
+            solo: false,
+            gain_curve: None,
+            pan_curve: None,
+        };
+        assert_eq!(
+            mixer_pane_ui::automation_targets(MixerChain::Track(&track, &mix)),
+            vec![
+                AutomationTarget::Fader,
+                AutomationTarget::TrackParameter("pan_percent"),
+            ]
+        );
+    }
+
+    #[test]
+    fn au6_the_retired_tooltip_no_longer_points_at_a_dead_end() {
+        assert!(
+            !AUTOMATED_FADER_TOOLTIP.contains("clear the automation in the chain pane"),
+            "the retired sentence is gone"
+        );
+        assert!(
+            AUTOMATED_FADER_TOOLTIP.contains("AUTOMATION"),
+            "the new tooltip names the AUTOMATION section"
+        );
+    }
+
+    fn au6_base_document(scenario: Au6Scenario) -> Document {
+        let spec = au6_spec(scenario);
+        let fps = Rational::new(spec.fps, 1).expect("the AU6 rate is valid");
+        let media_pool = spec
+            .tracks
+            .iter()
+            .map(|track| MediaAsset {
+                id: AssetId(track.track.0),
+                path: PathBuf::from(format!("au6-{}-{}.bin", spec.id, track.track.0)),
+                name: format!("{} {}", spec.id, track.track.0),
+                duration: TimeCode(i64::from(spec.asset_frames)),
+                fps,
+                kind: match track.kind {
+                    TrackKind::Video => MediaKind::Video,
+                    TrackKind::Audio => MediaKind::Audio,
+                },
+                resolution: Some((AU6_SOURCE_WIDTH, AU6_SOURCE_HEIGHT)),
+                source_fingerprint: MediaSourceFingerprint::unknown(),
+                color_description: ColorDescription::default(),
+            })
+            .collect();
+        let tracks = spec
+            .tracks
+            .iter()
+            .map(|track| Track {
+                id: track.track,
+                kind: track.kind,
+                sync_lock: track.sync_lock,
+                clips: spec
+                    .clips
+                    .iter()
+                    .filter(|clip| clip.track == track.track)
+                    .map(|clip| Clip {
+                        id: clip.clip,
+                        asset: clip.asset,
+                        source_range: clip.range(),
+                        content: ClipContent::Media,
+                        timeline_start: clip.start,
+                        effects: Vec::new(),
+                        transition_in: None,
+                        link: None,
+                        audio_gain_tenth_db: 0,
+                        audio_fade_in_frames: TimeCode::ZERO,
+                        audio_fade_out_frames: TimeCode::ZERO,
+                        speed_percent: 100,
+                        audio_gain_curve: None,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let mut document = Document {
+            tracks,
+            media_pool,
+            fps,
+            resolution: (AU6_SOURCE_WIDTH, AU6_SOURCE_HEIGHT),
+            duration: TimeCode(i64::from(spec.frames)),
+            ..Document::default()
+        };
+        if scenario == Au6Scenario::Multicam {
+            document.catalog.sync_groups.push(au6_d_sync_group(
+                kinewright_core::au6_scenarios::AU6_D_ANGLE_ASSETS,
+            ));
+        }
+        document
+            .validate()
+            .unwrap_or_else(|error| panic!("{scenario:?}: base document: {error}"));
+        document
+    }
+
+    fn au6_apply_in_order(document: &mut Document, operations: &[Operation]) {
+        for operation in operations {
+            apply_batch(document, std::slice::from_ref(operation))
+                .unwrap_or_else(|error| panic!("core rejected {operation:?}: {error}"));
+            document
+                .validate()
+                .expect("the document a person authored is valid");
+        }
+    }
+
+    fn au6_off_by_one(value: i32) -> i32 {
+        value + 1
+    }
+
+    /// AU6 §6.1's "one value one code off", for **every** scenario: the first
+    /// operation of the batch that owns a neighbouring value inside its
+    /// control's range is moved by one code. (c) carries no `SetTrackMix`, so
+    /// a loop that only knew that variant could not cover it.
+    fn au6_one_code_off(batch: &mut [Operation]) -> String {
+        for operation in batch.iter_mut() {
+            match operation {
+                Operation::SetTrackMix {
+                    track,
+                    gain_tenth_db,
+                    mute,
+                    ..
+                } => {
+                    if *mute {
+                        *mute = false;
+                    } else {
+                        *gain_tenth_db = au6_off_by_one(*gain_tenth_db);
+                    }
+                    return format!("SetTrackMix on track {}", track.0);
+                }
+                Operation::UpsertAudioBus { bus } => {
+                    bus.gain_tenth_db = au6_off_by_one(bus.gain_tenth_db);
+                    return format!("UpsertAudioBus on bus {}", bus.id.0);
+                }
+                _ => {}
+            }
+        }
+        panic!("no operation of this batch carries a value a person could mis-set");
+    }
+
+    /// The person's blade at `at` on `track`: `split_at_playhead`'s body with
+    /// the clip resolved from the document rather than restated, so the batch
+    /// proves for itself that the splits must run late-to-early.
+    fn au6_blade(document: &Document, track: TrackId, at: TimeCode) -> Operation {
+        let clip = document
+            .tracks
+            .iter()
+            .find(|candidate| candidate.id == track)
+            .expect("the track the person selected")
+            .clips
+            .iter()
+            .find(|clip| {
+                let length = clip.source_range.end.0 - clip.source_range.start.0;
+                clip.timeline_start.0 < at.0 && at.0 < clip.timeline_start.0 + length
+            })
+            .unwrap_or_else(|| panic!("no clip of track {} straddles frame {}", track.0, at.0))
+            .id;
+        Operation::SplitClip { clip, at }
+    }
+
+    fn au6_track_mix(track: TrackId, gain_tenth_db: i32) -> TrackMix {
+        TrackMix {
+            track,
+            gain_tenth_db,
+            pan_percent: 0,
+            mute: false,
+            solo: false,
+            gain_curve: None,
+            pan_curve: None,
+        }
+    }
+
+    fn au6_paint_mixer_writes_nothing(document: &Document, selection: MixerSelection) {
+        let mut harness = MixerHarness::new(document.clone()).editing(selection);
+        let edits = harness.frame(vec![]);
+        assert!(
+            edits.operations().is_empty(),
+            "drawing the mixer writes nothing"
+        );
+    }
+
+    /// AU6 §6.1 step 4: the `+ Bus` gesture for one scenario's buses, folded
+    /// through `MixerChainEdits` exactly as `add_bus_button` drives it.
+    ///
+    /// **R62.** The button itself names the bus after its track's caption
+    /// (`add_bus_button`, `mixer_ui.rs:863-871`) and the app has no rename
+    /// control (§6.5, §13), so the canonical name is the one value of the
+    /// person path no gesture types. The caller supplies it; the assertion
+    /// below records the gap rather than hiding it.
+    fn au6_person_bus_operations(document: &Document, scenario: Au6Scenario) -> Vec<Operation> {
+        let spec = au6_spec(scenario);
+        let mut operations = Vec::with_capacity(spec.buses.len());
+        for bus in spec.buses {
+            let track = document
+                .tracks
+                .iter()
+                .position(|candidate| candidate.id == bus.tracks[0])
+                .expect("every AU6 bus carries a track of its own document");
+            let kind = document.tracks[track].kind;
+            assert_ne!(
+                track_caption_and_icon(kind, track).0,
+                bus.name,
+                "R62: `+ Bus` would name this bus after its track's caption, \
+                 and nothing in the app renames it to {}",
+                bus.name
+            );
+            let mut edits = MixerChainEdits::default();
+            edits.create_bus(AudioBus {
+                id: bus.bus,
+                name: bus.name.to_owned(),
+                tracks: bus.tracks.to_vec(),
+                gain_tenth_db: 0,
+                effects: Vec::new(),
+                ducking_sidechain_tracks: Vec::new(),
+                gain_curve: None,
+            });
+            operations.extend(edits.take_operations(document).operations().iter().cloned());
+        }
+        operations
+    }
+
+    /// AU6 §6.1 step 4: one `+ Effect` insert on `chain`, then the listed
+    /// controls set one at a time — the card's own write
+    /// (`card_header`, `mixer_pane_ui.rs:809-813`).
+    fn au6_person_insert_node(
+        document: &Document,
+        edits: &mut MixerChainEdits,
+        bus: AudioBusId,
+        name: &str,
+        controls: &[(&str, i64)],
+    ) -> EffectId {
+        let stored = document
+            .audio_mix
+            .bus(bus)
+            .expect("the person created this bus in an earlier frame")
+            .clone();
+        let chain = MixerChain::Bus(&stored);
+        insert_audio_effect(chain.effects_mut(edits), name);
+        let id = chain
+            .effects_mut(edits)
+            .last()
+            .expect("`+ Effect` appended a node")
+            .id;
+        for (control, value) in controls {
+            let node = chain
+                .effect_mut(edits, id)
+                .expect("the node the insert just appended");
+            assert!(
+                node.parameters.contains_key(*control),
+                "{name} has no `{control}` control to turn"
+            );
+            node.parameters
+                .insert((*control).to_owned(), ParamValue::Integer(*value));
+        }
+        id
+    }
+
+    #[test]
+    fn au6_a_a_person_can_balance_the_interview_and_ride_the_bed() {
+        let scenario = Au6Scenario::Interview;
+        let mut document = au6_base_document(scenario);
+        au6_paint_mixer_writes_nothing(&document, MixerSelection::Track(AU6_A_BED_TRACK));
+
+        let mut batch = vec![
+            track_mix_operation(&au6_track_mix(AU6_A_VOICE_A_TRACK, 0)),
+            track_mix_operation(&au6_track_mix(
+                AU6_A_VOICE_B_TRACK,
+                AU6_INTERVIEW_A2_TRIM_TENTH_DB,
+            )),
+        ];
+        batch.extend(au6_person_bus_operations(&document, scenario));
+        let bed = document
+            .tracks
+            .iter()
+            .find(|track| track.id == AU6_A_BED_TRACK)
+            .expect("the bed track")
+            .clone();
+        let mix = document.track_mix(AU6_A_BED_TRACK);
+        let mut edits = MixerChainEdits::default();
+        set_automation_curve(
+            MixerChain::Track(&bed, &mix),
+            AutomationTarget::Fader,
+            Some(au6_a_duck_curve()),
+            &mut edits,
+        );
+        batch.extend(
+            edits
+                .take_operations(&document)
+                .operations()
+                .iter()
+                .cloned(),
+        );
+        au6_apply_in_order(&mut document, &batch);
+        let mut expected = au6_base_document(scenario);
+        au6_apply_in_order(&mut expected, &au6_a_canonical_operations());
+        assert_eq!(document, expected);
+    }
+
+    #[test]
+    fn au6_b_a_person_can_match_the_voices_and_build_the_chain() {
+        let scenario = Au6Scenario::Podcast;
+        let mut document = au6_base_document(scenario);
+        au6_paint_mixer_writes_nothing(&document, MixerSelection::Track(AU6_B_VOICE_B_TRACK));
+
+        // The two strip faders, one drag each.
+        au6_apply_in_order(
+            &mut document,
+            &[
+                track_mix_operation(&au6_track_mix(
+                    AU6_B_VOICE_A_TRACK,
+                    AU6_PODCAST_A_TRIM_TENTH_DB,
+                )),
+                track_mix_operation(&au6_track_mix(
+                    AU6_B_VOICE_B_TRACK,
+                    AU6_PODCAST_B_TRIM_TENTH_DB,
+                )),
+            ],
+        );
+
+        // `+ Bus` on each voice track.
+        let buses = au6_person_bus_operations(&document, scenario);
+        assert_eq!(buses.len(), 2);
+        au6_apply_in_order(&mut document, &buses);
+
+        // Chain c1m on Voice B's bus: `+ Effect`, then one control at a time.
+        let mut edits = MixerChainEdits::default();
+        let eq = au6_person_insert_node(
+            &document,
+            &mut edits,
+            AU6_B_VOICE_B_BUS,
+            AU6_PARAMETRIC_EQ_EFFECT,
+            &[("high_pass_hertz", AU6_PODCAST_HIGHPASS_HERTZ)],
+        );
+        let compressor = au6_person_insert_node(
+            &document,
+            &mut edits,
+            AU6_B_VOICE_B_BUS,
+            AU6_COMPRESSOR_EFFECT,
+            &[
+                (
+                    "threshold_tenth_db",
+                    AU6_PODCAST_COMPRESSOR_THRESHOLD_TENTH_DB,
+                ),
+                ("ratio_hundredths", AU6_PODCAST_COMPRESSOR_RATIO_HUNDREDTHS),
+                ("attack_milliseconds", AU6_PODCAST_COMPRESSOR_ATTACK_MS),
+                ("release_milliseconds", AU6_PODCAST_COMPRESSOR_RELEASE_MS),
+                ("knee_tenth_db", AU6_PODCAST_COMPRESSOR_KNEE_TENTH_DB),
+                (
+                    "makeup_gain_tenth_db",
+                    AU6_PODCAST_COMPRESSOR_MAKEUP_TENTH_DB,
+                ),
+                ("detector", AU6_PODCAST_COMPRESSOR_DETECTOR),
+                (
+                    "rms_window_milliseconds",
+                    AU6_PODCAST_COMPRESSOR_RMS_WINDOW_MS,
+                ),
+            ],
+        );
+        assert_eq!(eq, AU6_PODCAST_EQ_EFFECT_ID);
+        assert_eq!(compressor, AU6_PODCAST_COMPRESSOR_EFFECT_ID);
+        let chain = edits.take_operations(&document);
+        assert!(
+            matches!(
+                chain.operations(),
+                [Operation::UpsertAudioBus { bus }] if bus.id == AU6_B_VOICE_B_BUS
+            ),
+            "one frame, one bus, one whole-chain set: {:?}",
+            chain.operations()
+        );
+        assert_eq!(
+            chain.coalesce_key(),
+            None,
+            "`+ Effect` is a click, not a drag, so the frame carries no live key"
+        );
+        au6_apply_in_order(&mut document, chain.operations());
+
+        // The two fades the person drags on the gated clips.
+        let fades = AU6_B_GATED_CLIP_IDS
+            .map(|clip| clip_audio_operation(clip, 0, AU6_B_FADE_FRAMES.0, AU6_B_FADE_FRAMES.0));
+        au6_apply_in_order(&mut document, &fades);
+
+        let mut expected = au6_base_document(scenario);
+        au6_apply_in_order(&mut expected, &au6_canonical_operations(scenario));
+        assert_eq!(document, expected);
+
+        // Both directions: one control one code off is a different document.
+        let mut off = au6_b_canonical_operations();
+        let moved = au6_one_code_off(&mut off);
+        assert_ne!(off, au6_b_canonical_operations(), "{moved}");
+        let mut wrong = au6_base_document(scenario);
+        au6_apply_in_order(&mut wrong, &off);
+        assert_ne!(wrong, expected, "{moved}");
+    }
+
+    /// R61: the person's repair nodes and the planner's are the **same nodes
+    /// in the same order with the same values**, and differ only in the rows
+    /// the app writes explicitly at their descriptor neutral and the planner
+    /// omits (§0.3 R7's unreconciled shape, reconciled here). The assertion
+    /// names every extra row, so a value divergence can never hide inside it.
+    fn au6_c_reconcile_repair_bus(person: &Document, planner: &Document) -> Vec<String> {
+        let mine = person
+            .audio_mix
+            .bus(AU6_C_REPAIR_BUS)
+            .expect("the person built the repair bus");
+        let theirs = planner
+            .audio_mix
+            .bus(AU6_C_REPAIR_BUS)
+            .expect("the planner committed the repair bus");
+        assert_eq!(mine.name, theirs.name);
+        assert_eq!(mine.tracks, theirs.tracks);
+        assert_eq!(mine.gain_tenth_db, theirs.gain_tenth_db);
+        assert_eq!(mine.gain_curve, theirs.gain_curve);
+        assert_eq!(
+            mine.effects.len(),
+            theirs.effects.len(),
+            "the two shapes carry the same nodes"
+        );
+        let mut extra = Vec::new();
+        for (node, planned) in mine.effects.iter().zip(theirs.effects.iter()) {
+            assert_eq!(node.id, planned.id);
+            assert_eq!(node.name, planned.name);
+            assert_eq!(node.keyframes, planned.keyframes);
+            let descriptor = kinewright_core::effect_descriptor(&node.name)
+                .expect("every repair node is a registered descriptor");
+            for (row, value) in &node.parameters {
+                if let Some(planned_value) = planned.parameters.get(row) {
+                    assert_eq!(
+                        value, planned_value,
+                        "{}.{row}: the person and the planner disagree on a VALUE",
+                        node.name
+                    );
+                    continue;
+                }
+                let neutral = descriptor
+                    .parameters
+                    .iter()
+                    .find(|parameter| parameter.name == row)
+                    .unwrap_or_else(|| panic!("{}.{row} is not a control", node.name))
+                    .neutral;
+                assert_eq!(
+                    *value,
+                    ParamValue::Integer(neutral),
+                    "{}.{row}: a row the planner omits must be at its neutral",
+                    node.name
+                );
+                extra.push(format!("{}.{row}", node.name));
+            }
+            for row in planned.parameters.keys() {
+                assert!(
+                    node.parameters.contains_key(row),
+                    "{}.{row}: the planner writes a row the person cannot",
+                    node.name
+                );
+            }
+        }
+        extra
+    }
+
+    /// (c)'s three repair cards, one `+ Effect` and one control at a time on
+    /// the bus the person has already created.
+    fn au6_c_person_repair_chain(document: &Document) -> Vec<Operation> {
+        let mut edits = MixerChainEdits::default();
+        let denoise = au6_person_insert_node(
+            document,
+            &mut edits,
+            AU6_C_REPAIR_BUS,
+            AU6_DENOISE_EFFECT,
+            &[
+                ("reduction_tenth_db", AU6_C_DENOISE_REDUCTION_TENTH_DB),
+                ("lookahead_milliseconds", AU6_C_DENOISE_LOOKAHEAD_MS),
+            ],
+        );
+        let hum = au6_person_insert_node(
+            document,
+            &mut edits,
+            AU6_C_REPAIR_BUS,
+            AU6_HUM_REMOVAL_EFFECT,
+            &[
+                ("fundamental_hertz", AU6_C_HUM_FUNDAMENTAL_PARAMETER_HERTZ),
+                ("harmonic_count", AU6_C_HUM_HARMONIC_COUNT),
+                ("depth_tenth_db", AU6_C_HUM_DEPTH_TENTH_DB),
+                ("notch_q_hundredths", AU6_C_HUM_NOTCH_Q_HUNDREDTHS),
+            ],
+        );
+        let declick = au6_person_insert_node(
+            document,
+            &mut edits,
+            AU6_C_REPAIR_BUS,
+            AU6_DECLICK_EFFECT,
+            &[
+                ("max_click_milliseconds", AU6_C_DECLICK_MAX_CLICK_MS),
+                (
+                    "detector_threshold_tenth_db",
+                    AU6_C_DECLICK_DETECTOR_THRESHOLD_TENTH_DB,
+                ),
+                ("lookahead_milliseconds", AU6_C_DECLICK_LOOKAHEAD_MS),
+            ],
+        );
+        assert_eq!([denoise, hum, declick], AU6_C_REPAIR_EFFECT_IDS);
+        edits.take_operations(document).operations().to_vec()
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn au6_c_a_person_can_repair_the_dialogue_and_fill_the_gap() {
+        let scenario = Au6Scenario::LocationDialogue;
+        let mut document = au6_base_document(scenario);
+
+        // The timeline blade, late-to-early, with each clip resolved from the
+        // document the earlier blade left behind, then the interior piece
+        // deleted through the blade's own delete builder.
+        let blades = [
+            au6_blade(&document, AU6_C_DIALOGUE_TRACK, AU6_C_GAP_RANGE.end),
+            au6_blade(&document, AU6_C_DIALOGUE_TRACK, AU6_C_GAP_RANGE.start),
+        ];
+        au6_apply_in_order(&mut document, &blades);
+        let middle = document
+            .tracks
+            .iter()
+            .find(|track| track.id == AU6_C_DIALOGUE_TRACK)
+            .expect("the dialogue track")
+            .clips
+            .iter()
+            .find(|clip| clip.timeline_start == AU6_C_GAP_RANGE.start)
+            .expect("the piece the two blades cut out")
+            .id;
+        let deletes = linked_delete_operations(&document, middle, false);
+        let mut gap = blades.to_vec();
+        gap.extend(deletes.iter().cloned());
+        assert_eq!(
+            gap,
+            au6_c_gap_operations(kinewright_core::au6_scenarios::AU6_C_RIGHT_CLIP_ID),
+            "the person's blades are the canonical gap commit"
+        );
+        au6_apply_in_order(&mut document, &deletes);
+
+        // `capture_room_tone`'s own `AddAsset`: an Action, not a builder.
+        let room = MediaAsset {
+            id: AssetId(2),
+            path: PathBuf::from("au6-c-room.wav"),
+            name: "room".to_owned(),
+            duration: TimeCode(AU6_C_ROOM_TONE_ASSET_FRAMES),
+            fps: Rational::new(AU6_C_ROOM_TONE_FPS, 1).expect("30 fps"),
+            kind: MediaKind::Audio,
+            resolution: None,
+            source_fingerprint: MediaSourceFingerprint::unknown(),
+            color_description: ColorDescription::default(),
+        };
+        apply_batch(
+            &mut document,
+            std::slice::from_ref(&Operation::AddAsset {
+                asset: room.clone(),
+            }),
+        )
+        .expect("the room-tone asset registers");
+
+        // The `Room tone` button.
+        let fill =
+            room_tone_fill_operations(&document, AU6_C_DIALOGUE_TRACK, &AU6_C_GAP_RANGE, &room)
+                .expect("the Room tone button proposes a tile");
+        assert_eq!(fill, au6_c_fill_operations(room.id));
+        au6_apply_in_order(&mut document, &fill);
+
+        // `+ Bus` on the dialogue track, then the three repair cards.
+        let repair_bus = au6_person_bus_operations(&document, scenario);
+        au6_apply_in_order(&mut document, &repair_bus);
+        let chain = au6_c_person_repair_chain(&document);
+        au6_apply_in_order(&mut document, &chain);
+
+        // `Learn profile` writes the 31 rows into the denoise node.
+        let profile = noise_profile_operation(
+            &document,
+            AudioChain::Bus(AU6_C_REPAIR_BUS),
+            AU6_C_REPAIR_EFFECT_IDS[0],
+            &AU6_C_LEARNED_PROFILE_TENTH_DB,
+        )
+        .expect("Learn profile writes the 31 rows");
+        au6_apply_in_order(&mut document, std::slice::from_ref(&profile));
+        assert_eq!(document.track_gaps(AU6_C_DIALOGUE_TRACK), Some(Vec::new()));
+
+        // §6.1 step 6, with R61's one reconciliation: the planner's ledger.
+        let mut expected = au6_base_document(scenario);
+        apply_batch(
+            &mut expected,
+            std::slice::from_ref(&Operation::AddAsset {
+                asset: room.clone(),
+            }),
+        )
+        .expect("the capture's own AddAsset");
+        au6_apply_in_order(
+            &mut expected,
+            &au6_c_canonical_operations_with_room_tone(room.id),
+        );
+        let extra = au6_c_reconcile_repair_bus(&document, &expected);
+        assert!(
+            !extra.is_empty(),
+            "R61 exists because the app writes rows the planner omits; if that \
+             stopped being true the erratum must go"
+        );
+        let planner_bus = expected
+            .audio_mix
+            .bus(AU6_C_REPAIR_BUS)
+            .expect("the planner's repair bus")
+            .clone();
+        let mut reconciled = document.clone();
+        apply_batch(
+            &mut reconciled,
+            &[Operation::UpsertAudioBus { bus: planner_bus }],
+        )
+        .expect("the planner's own bus, upserted over the person's");
+        assert_eq!(
+            reconciled, expected,
+            "outside the repair nodes' neutral rows the two documents are identical"
+        );
+        assert_ne!(
+            document, expected,
+            "R61 records a real difference, so the two documents must not be equal"
+        );
+
+        // Both directions.
+        let mut off = au6_canonical_operations(scenario);
+        let moved = au6_one_code_off(&mut off);
+        let mut wrong = au6_base_document(scenario);
+        au6_apply_in_order(&mut wrong, &off);
+        let mut right = au6_base_document(scenario);
+        au6_apply_in_order(&mut right, &au6_canonical_operations(scenario));
+        assert_ne!(wrong, right, "{moved}");
+    }
+
+    #[test]
+    fn au6_d_a_person_can_cut_the_angles_and_mute_the_scratch_tracks() {
+        let scenario = Au6Scenario::Multicam;
+        let mut document = au6_base_document(scenario);
+        au6_paint_mixer_writes_nothing(&document, MixerSelection::Track(AU6_D_SCRATCH_1_TRACK));
+
+        // Six blades, each on the clip the document holds at that frame after
+        // the previous blade, and four deletes through the blade's builder.
+        let mut batch = Vec::with_capacity(12);
+        for track in [AU6_D_ANGLE_1_TRACK, AU6_D_ANGLE_2_TRACK] {
+            for at in AU6_D_CUT_FRAMES.iter().rev() {
+                let blade = au6_blade(&document, track, TimeCode(*at));
+                au6_apply_in_order(&mut document, std::slice::from_ref(&blade));
+                batch.push(blade);
+            }
+        }
+        for clip in AU6_D_DELETED_CLIP_IDS {
+            let deletes = linked_delete_operations(&document, clip, false);
+            assert_eq!(deletes, vec![Operation::DeleteClip { clip }]);
+            au6_apply_in_order(&mut document, &deletes);
+            batch.extend(deletes);
+        }
+
+        // The two scratch mutes.
+        let mutes = [AU6_D_SCRATCH_1_TRACK, AU6_D_SCRATCH_2_TRACK]
+            .map(|track| track_mix_toggle_operation(&au6_track_mix(track, 0), MixToggle::Mute));
+        au6_apply_in_order(&mut document, &mutes);
+        batch.extend(mutes);
+
+        assert_eq!(
+            batch,
+            au6_d_angle_cut_operations(),
+            "the person's twelve gestures are the canonical batch, in order"
+        );
+        let mut expected = au6_base_document(scenario);
+        au6_apply_in_order(&mut expected, &au6_canonical_operations(scenario));
+        assert_eq!(document, expected);
+
+        // Both directions.
+        let mut off = au6_d_angle_cut_operations();
+        let moved = au6_one_code_off(&mut off);
+        let mut wrong = au6_base_document(scenario);
+        au6_apply_in_order(&mut wrong, &off);
+        assert_ne!(wrong, expected, "{moved}");
+    }
+
+    #[test]
+    fn au6_e_the_export_dialog_carries_both_delivery_targets() {
+        assert_eq!(
+            export_loudness_target(true, None),
+            Some(DeliveryProfile::SourceMaster.loudness_target())
+        );
+        assert_eq!(
+            export_loudness_target(true, Some(DeliveryAspect::Widescreen)),
+            Some(DeliveryProfile::Youtube1080p.loudness_target())
+        );
+        assert_eq!(export_loudness_target(false, None), None);
+    }
+
+    #[test]
+    fn au6_a_track_curve_edit_emits_set_track_automation() {
+        let document = au6_base_document(Au6Scenario::Interview);
+        let bed = document
+            .tracks
+            .iter()
+            .find(|track| track.id == AU6_A_BED_TRACK)
+            .expect("the bed track")
+            .clone();
+        let mix = document.track_mix(AU6_A_BED_TRACK);
+        let mut edits = MixerChainEdits::default();
+        edits.begin_gesture();
+        edits.mark_live(true);
+        set_automation_curve(
+            MixerChain::Track(&bed, &mix),
+            AutomationTarget::Fader,
+            Some(au6_a_duck_curve()),
+            &mut edits,
+        );
+        let written = edits.take_operations(&document);
+        assert_eq!(
+            written.coalesce_key(),
+            Some(track_automation_coalesce_key(AU6_A_BED_TRACK, "gain_tenth_db").as_str())
+        );
+        assert!(matches!(
+            written.operations(),
+            [Operation::SetTrackAutomation {
+                track,
+                parameter,
+                ..
+            }] if *track == AU6_A_BED_TRACK && parameter == "gain_tenth_db"
+        ));
+        let scalar = track_mix_operation(&au6_track_mix(
+            AU6_A_VOICE_B_TRACK,
+            AU6_INTERVIEW_A2_TRIM_TENTH_DB,
+        ));
+        assert!(matches!(scalar, Operation::SetTrackMix { .. }));
+        assert_eq!(
+            track_mix_coalesce_key(AU6_A_VOICE_B_TRACK),
+            MixerSelection::Track(AU6_A_VOICE_B_TRACK).coalesce_key()
+        );
+    }
+
+    #[test]
+    fn au6_the_person_batch_one_code_off_is_not_canonical() {
+        // All five, not the three that happen to carry a `SetTrackMix`.
+        for scenario in kinewright_core::au6_scenarios::AU6_SCENARIOS {
+            let canonical = au6_canonical_operations(scenario);
+            let mut wrong = au6_base_document(scenario);
+            let mut off = canonical.clone();
+            let moved = au6_one_code_off(&mut off);
+            assert_ne!(off, canonical, "{scenario:?}: {moved}");
+            au6_apply_in_order(&mut wrong, &off);
+            let mut expected = au6_base_document(scenario);
+            au6_apply_in_order(&mut expected, &canonical);
+            assert_ne!(wrong, expected, "{scenario:?}: {moved}");
+        }
+    }
+
+    #[test]
+    fn au6_ascending_splits_are_refused_by_the_builder_path() {
+        let mut document = au6_base_document(Au6Scenario::LocationDialogue);
+        let error = apply_batch(
+            &mut document,
+            &[
+                Operation::SplitClip {
+                    clip: AU6_C_BASE_CLIP_ID,
+                    at: AU6_C_GAP_RANGE.start,
+                },
+                Operation::SplitClip {
+                    clip: AU6_C_BASE_CLIP_ID,
+                    at: AU6_C_GAP_RANGE.end,
+                },
+            ],
+        )
+        .expect_err("ascending splits are refused");
+        assert_eq!(
+            error,
+            BatchError::OperationFailed {
+                op_number: 2,
+                error: OpError::SplitOutsideClip {
+                    clip: AU6_C_BASE_CLIP_ID,
+                    at: AU6_C_GAP_RANGE.end,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn au6_d_the_person_ripple_gesture_is_not_the_canonical_cut() {
+        let canonical = au6_d_angle_cut_operations();
+        assert!(
+            canonical
+                .iter()
+                .all(|op| !matches!(op, Operation::RippleDeleteClip { .. })),
+            "the person's blade emits SplitClip + DeleteClip"
+        );
+        let mut person = au6_base_document(Au6Scenario::Multicam);
+        au6_apply_in_order(&mut person, &canonical);
+        let mut rippled = au6_base_document(Au6Scenario::Multicam);
+        au6_apply_in_order(
+            &mut rippled,
+            &[
+                Operation::SplitClip {
+                    clip: AU6_D_ANGLE_CLIP_IDS[0],
+                    at: TimeCode(AU6_D_CUT_FRAMES[1]),
+                },
+                Operation::RippleDeleteClip {
+                    clip: ClipId(AU6_D_ANGLE_CLIP_IDS[0].0 + 5),
+                },
+            ],
+        );
+        assert_ne!(person, rippled);
     }
 }

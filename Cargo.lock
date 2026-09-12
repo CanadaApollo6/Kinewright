@@ -2293,6 +2293,7 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "crossbeam-channel",
+ "kinewright-core",
  "proptest",
  "schemars",
  "serde",
@@ -2310,6 +2311,7 @@ dependencies = [
  "ffmpeg-next",
  "half",
  "kinewright-core",
+ "kinewright-media",
  "pollster",
  "reqwest",
  "rtrb",

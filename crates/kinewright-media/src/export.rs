@@ -3152,23 +3152,65 @@ mod tests {
         );
 
         // Neutral gray and neutral white are both exactly 128.0 in chroma, so
-        // the *only* reason a neighbouring code appears is swscale's
-        // deterministic ordered dither, which straddles the exact value: Cb
-        // rounds up on part of the plane, Cr rounds down. Nothing may reach
-        // 126 or 130.
+        // the *only* reason a neighbouring code can appear is the scaler's
+        // deterministic ordered dither straddling the exact value — and the
+        // two FFmpeg packages CI provisions do not dither chroma identically.
+        // Each system therefore carries the codes measured on it (CC6 §6.3 as
+        // amended); neither set may be widened to cover the other. What holds
+        // on both is the bound: nothing may reach 126 or 130.
         for frame in [&filtered_white, &filtered_gray] {
+            let observed_blue = chroma_codes(frame, 1);
+            let observed_red = chroma_codes(frame, 2);
+            for (plane, codes) in [("Cb", &observed_blue), ("Cr", &observed_red)] {
+                assert!(
+                    codes.iter().all(|code| (127..=129).contains(code)),
+                    "neutral input must stay neutral in {plane}, was {codes:?}"
+                );
+            }
+            let Some((neutral_blue, neutral_red)) = NEUTRAL_CHROMA_CODES else {
+                panic!(
+                    "`{}` has no measured neutral-chroma codes for the 8-bit lane. This system \
+                     measured Cb {observed_blue:?} and Cr {observed_red:?}; record those in \
+                     `NEUTRAL_CHROMA_CODES` for it, measured here rather than copied from \
+                     another system.",
+                    std::env::consts::OS
+                );
+            };
+            let system = std::env::consts::OS;
             assert_eq!(
-                chroma_codes(frame, 1),
-                BTreeSet::from([128, 129]),
-                "neutral input must stay neutral in Cb"
+                observed_blue,
+                neutral_blue.iter().copied().collect::<BTreeSet<u8>>(),
+                "neutral input must stay neutral in Cb on {system}"
             );
             assert_eq!(
-                chroma_codes(frame, 2),
-                BTreeSet::from([127, 128]),
-                "neutral input must stay neutral in Cr"
+                observed_red,
+                neutral_red.iter().copied().collect::<BTreeSet<u8>>(),
+                "neutral input must stay neutral in Cr on {system}"
             );
         }
     }
+
+    /// The neutral Cb and Cr codes of the 8-bit delivery lane, per operating
+    /// system, as `(Cb, Cr)`.
+    ///
+    /// A dither pattern is a property of the scaler that produced it. Linux's
+    /// `mifi/ffmpeg-builds` splits a flat neutral plane across the two codes
+    /// straddling the exact value — Cb up, Cr down — and Windows'
+    /// `System233/ffmpeg-msvc-prebuilt` returns the exact code. Both are
+    /// correct for their build and a single expectation covering both would
+    /// assert nothing, so each system declares what it measures. `None` means
+    /// this system has not been measured yet, and the fixture says so loudly
+    /// instead of passing.
+    #[cfg(not(target_os = "windows"))]
+    const NEUTRAL_CHROMA_CODES: Option<(&[u8], &[u8])> = Some((&[128, 129], &[127, 128]));
+    /// See [`NEUTRAL_CHROMA_CODES`]. Measured on `windows-latest` in CI run
+    /// 34693346093 against the `System233/ffmpeg-msvc-prebuilt
+    /// ffmpeg-8.0.1-r3` package: **Cb is the exact code alone** where Linux's
+    /// build splits it up, and **Cr is the same pair** on both. Nothing here
+    /// is copied from Linux — the Cr entry agrees because it was measured to
+    /// agree, and the Cb entry is the one that actually differs.
+    #[cfg(target_os = "windows")]
+    const NEUTRAL_CHROMA_CODES: Option<(&[u8], &[u8])> = Some((&[128], &[127, 128]));
 
     /// The same conversion on the 10-bit lane (CC6 4.3/5.4).
     ///

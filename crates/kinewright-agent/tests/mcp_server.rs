@@ -2512,6 +2512,20 @@ async fn cc7_prepare_commit_and_compare(
 /// sentence naming `plan_dialogue_repair` — shipped in Part A, three commits
 /// before the planner existed — is deliberately left exactly as it was. The
 /// served quad does not move for the twelfth consecutive measurement.
+///
+/// AU6 §5.4 Part A adds **no** capability at all — it is an evaluation slice —
+/// so the registry holds at 54 + 84 = 138 and the generated count cannot move:
+/// AU6 adds no `Operation` variant, no tool and no effect descriptor. The one
+/// product change Part A ships is an app-side `MixerChain` arm that emits the
+/// **existing** `SetTrackAutomation`, which reaches no schema, and which does
+/// not touch core's `AudioChain`. The served quad does not move for the
+/// thirteenth consecutive measurement.
+///
+/// AU6 §7 Part B adds none either: the seventh eval suite, its assertion
+/// variants and its audio evidence block all live in
+/// `crates/kinewright-agent/src/eval.rs` and `src/bin/kinewright-eval.rs`,
+/// neither of which is a capability. The served quad does not move for the
+/// fourteenth consecutive measurement.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
@@ -2528,7 +2542,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     assert_eq!(
         tools.len(),
         7,
-        "no part of AU1, AU2, AU3, AU4, or AU5 adds a served tool"
+        "no part of AU1, AU2, AU3, AU4, AU5, or AU6 adds a served tool"
     );
     assert_eq!(
         tools
@@ -2550,7 +2564,8 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          AU4 Part A adds set_clip_gain_envelope and set_track_automation; \
          AU4 Part B adds plan_audio_ducking and plan_clip_fades; \
          AU5 Part A adds get_audio_repair; \
-         AU5 Part B adds plan_dialogue_repair, capture_room_tone and plan_room_tone_fill"
+         AU5 Part B adds plan_dialogue_repair, capture_room_tone and plan_room_tone_fill; \
+         AU6 §5.4 Part A adds no capability at all"
     );
     assert_eq!(
         operations.len(),
@@ -2558,7 +2573,8 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         "AU2 Part B generates two more mutators; neither part of AU3 generates one; \
          AU4 Part A generates two more; AU4 Part B generates none; \
          AU5 Part A generates none, because it adds no Operation variant; \
-         AU5 Part B generates none either, because capture_room_tone submits an ordinary AddAsset"
+         AU5 Part B generates none either, because capture_room_tone submits an ordinary AddAsset; \
+         AU6 adds no Operation variant"
     );
     for name in [
         "set_track_mix",
@@ -2584,7 +2600,8 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector; \
          AU4 Part A adds no inspector; AU4 Part B adds the two planners; \
-         AU5 Part A adds get_audio_repair; AU5 Part B adds all three of its capabilities"
+         AU5 Part A adds get_audio_repair; AU5 Part B adds all three of its capabilities; \
+         AU6 §5.4 Part A and Part B add none"
     );
     let spectrum = registry
         .iter()
@@ -9288,4 +9305,946 @@ async fn au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps() {
     );
     client.cancel().await.unwrap();
     server.shutdown();
+}
+
+// ===========================================================================
+// AU6 §5 — the six scripted agent end-to-end tests.
+// ===========================================================================
+
+use kinewright_core::au6_scenarios::{
+    AU6_A_BED_TRACK, AU6_A_DUCK_ATTACK_MS, AU6_A_DUCK_DEPTH_TENTH_DB, AU6_A_DUCK_HOLD_MS,
+    AU6_A_DUCK_RELEASE_MS, AU6_A_VOICE_A_TRACK, AU6_A_VOICE_B_TRACK, AU6_B_VOICE_A_TRACK,
+    AU6_B_VOICE_B_TRACK, AU6_C_DIALOGUE_ASSET, AU6_C_DIALOGUE_TRACK, AU6_C_LEARN_SOURCE_RANGE,
+    AU6_C_RIGHT_CLIP_ID, AU6_SOURCE_FPS, Au6Scenario, au6_c_canonical_operations_with_room_tone,
+    au6_c_gap_operations, au6_canonical_operations, au6_spec,
+};
+use kinewright_media::au6_sources::{au6_scenario_sources, au6_stamp_on_project_grid};
+
+const AU6_DUCKING_ALREADY_RIDDEN_REFUSAL: &str =
+    "already carries a gain curve; clear it or pass replace: true";
+const AU6_CLIP_FADES_NOTHING_TO_PROPOSE: &str = "nothing to propose";
+const AU6_ROOM_TONE_NO_ASSET_REFUSAL: &str =
+    "the project has no registered room-tone asset; capture one with capture_room_tone first";
+const AU6_REPAIR_ALREADY_REPAIRED_REFUSAL: &str = "already carries an AU5 repair prefix";
+
+struct Au6AgentScene {
+    _media: Vec<GeneratedMedia>,
+    document: Document,
+}
+
+/// Probe the scenario sources on the **same** engine the MCP server will
+/// use. `FfmpegMediaEngine::probe` allocates `next_asset_id`; a throwaway
+/// engine would leave the server's counter at 1 and `capture_room_tone`'s
+/// `AddAsset` would collide with the dialogue asset.
+fn au6_agent_scene(engine: &FfmpegMediaEngine, scenario: Au6Scenario) -> Au6AgentScene {
+    let spec = au6_spec(scenario);
+    let generated = au6_scenario_sources(scenario);
+    let fps = Rational::new(AU6_SOURCE_FPS, 1).expect("25 fps");
+    let media_pool = generated
+        .iter()
+        .zip(spec.tracks)
+        .map(|(generated, track)| {
+            let probed = engine
+                .probe(generated.path())
+                .unwrap_or_else(|error| panic!("probe {}: {error}", generated.path().display()));
+            let mut stamped =
+                au6_stamp_on_project_grid(probed, fps, TimeCode(i64::from(spec.asset_frames)));
+            stamped.id = kinewright_core::AssetId(track.track.0);
+            stamped
+        })
+        .collect::<Vec<_>>();
+    let tracks = spec
+        .tracks
+        .iter()
+        .map(|track| Track {
+            id: track.track,
+            kind: track.kind,
+            sync_lock: track.sync_lock,
+            clips: spec
+                .clips
+                .iter()
+                .filter(|clip| clip.track == track.track)
+                .map(|clip| Clip {
+                    id: clip.clip,
+                    asset: clip.asset,
+                    source_range: clip.range(),
+                    content: kinewright_core::ClipContent::Media,
+                    timeline_start: clip.start,
+                    effects: Vec::new(),
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                    audio_gain_curve: None,
+                })
+                .collect(),
+        })
+        .collect();
+    let mut document = Document {
+        tracks,
+        media_pool,
+        fps,
+        resolution: (
+            kinewright_core::au6_scenarios::AU6_SOURCE_WIDTH,
+            kinewright_core::au6_scenarios::AU6_SOURCE_HEIGHT,
+        ),
+        duration: TimeCode(i64::from(spec.frames)),
+        ..Document::default()
+    };
+    if scenario == Au6Scenario::Multicam {
+        document
+            .catalog
+            .sync_groups
+            .push(kinewright_core::au6_scenarios::au6_d_sync_group(
+                kinewright_core::au6_scenarios::AU6_D_ANGLE_ASSETS,
+            ));
+    }
+    document
+        .validate()
+        .unwrap_or_else(|error| panic!("{scenario:?}: {error}"));
+    Au6AgentScene {
+        _media: generated,
+        document,
+    }
+}
+
+fn au6_ops_json(operations: &[Operation]) -> serde_json::Value {
+    serde_json::to_value(operations).expect("AU6 operations serialize")
+}
+
+fn au6_mix_and_bus_ops(scenario: Au6Scenario) -> Vec<Operation> {
+    au6_canonical_operations(scenario)
+        .into_iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                Operation::SetTrackMix { .. } | Operation::UpsertAudioBus { .. }
+            )
+        })
+        .collect()
+}
+
+async fn au6_commit_ops(
+    client: &RunningService<RoleClient, ()>,
+    revision: u64,
+    operations: &[Operation],
+) -> u64 {
+    let prepared = prepare_plan(client, revision, au6_ops_json(operations)).await;
+    assert_eq!(
+        prepared.is_error,
+        Some(false),
+        "{:?} {}",
+        prepared.structured_content,
+        au6_error_text(&prepared)
+    );
+    let committed = client
+        .call_tool(commit_request(revision, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(
+        committed.is_error,
+        Some(false),
+        "{:?} {}",
+        committed.structured_content,
+        au6_error_text(&committed)
+    );
+    revision + 1
+}
+
+/// `DeleteClip` in a prepared batch raises `apply_edit_plan`'s destructive
+/// confirmation (`plan_confirmation_description`). (c)'s gap commit and (d)'s
+/// angle cuts both delete clips; the approval loop has to run beside the
+/// commit, AU5/CC7's shape.
+async fn au6_commit_ops_approved(
+    client: &RunningService<RoleClient, ()>,
+    confirmations: kinewright_agent::ConfirmationBroker,
+    revision: u64,
+    operations: &[Operation],
+) -> u64 {
+    let approvals = cc7_approve_confirmations(confirmations, "apply_edit_plan");
+    let revision = au6_commit_ops(client, revision, operations).await;
+    approvals.assert_approved_and_stop("apply_edit_plan");
+    revision
+}
+
+fn au6_error_text(result: &CallToolResult) -> String {
+    result.content[0].as_text().unwrap().text.clone()
+}
+
+async fn au6_decide_capture(broker: kinewright_agent::ConfirmationBroker, approve: bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(request) = broker
+            .pending_requests()
+            .into_iter()
+            .find(|request| request.tool_name == "capture_room_tone")
+        {
+            if approve {
+                assert!(broker.approve(request.id));
+            } else {
+                assert!(broker.reject(request.id, "not this take"));
+            }
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "capture_room_tone must publish a confirmation before it writes a byte"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au6_a1_the_interview_ducks_the_bed_and_matches_the_voices() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
+    let core = Core::spawn(scene.document.clone()).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(
+        levels.is_error,
+        Some(false),
+        "{:?}",
+        levels.structured_content
+    );
+    if let Some(body) = levels.structured_content.as_ref() {
+        assert_ne!(body["applied"], true, "{body}");
+    }
+
+    let canonical = au6_canonical_operations(Au6Scenario::Interview);
+    let _revision = au6_commit_ops(&client, 0, &au6_mix_and_bus_ops(Au6Scenario::Interview)).await;
+
+    let planned = au5_invoke_when_silence_is_ready(
+        &client,
+        "plan_audio_ducking",
+        json!({
+            "music_track": AU6_A_BED_TRACK.0,
+            "dialogue_tracks": [AU6_A_VOICE_A_TRACK.0, AU6_A_VOICE_B_TRACK.0],
+            "depth_tenth_db": AU6_A_DUCK_DEPTH_TENTH_DB,
+            "attack_milliseconds": AU6_A_DUCK_ATTACK_MS,
+            "hold_milliseconds": AU6_A_DUCK_HOLD_MS,
+            "release_milliseconds": AU6_A_DUCK_RELEASE_MS,
+        }),
+    )
+    .await;
+    let body = planned.structured_content.as_ref().unwrap();
+    assert_eq!(planned.is_error, Some(false), "{body}");
+    au5_commit_prepared(&client, body).await;
+
+    let after = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(after.is_error, Some(false));
+    let qc = invoke_capability(
+        &client,
+        "get_audio_qc",
+        json!({"expected_revision": cc7_revision(&client).await}),
+    )
+    .await;
+    assert_eq!(qc.is_error, Some(false), "{:?}", qc.structured_content);
+    let revision = cc7_revision(&client).await;
+    cc7_assert_stale_revision(
+        &client,
+        "get_audio_qc",
+        json!({"expected_revision": revision + 3}),
+        revision,
+        revision + 3,
+    )
+    .await;
+
+    let refused = au5_invoke_when_silence_is_ready(
+        &client,
+        "plan_audio_ducking",
+        json!({
+            "music_track": AU6_A_BED_TRACK.0,
+            "dialogue_tracks": [AU6_A_VOICE_A_TRACK.0, AU6_A_VOICE_B_TRACK.0],
+        }),
+    )
+    .await;
+    assert_eq!(refused.is_error, Some(true));
+    assert!(
+        au6_error_text(&refused).contains(AU6_DUCKING_ALREADY_RIDDEN_REFUSAL),
+        "{}",
+        au6_error_text(&refused)
+    );
+
+    let mut expected = scene.document.clone();
+    apply_batch(&mut expected, &canonical).expect("canonical (a)");
+    assert_eq!(query_document(&core), expected);
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Podcast);
+    let core = Core::spawn(scene.document.clone()).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let before = query_document(&core);
+    let schema = client
+        .call_tool(
+            CallToolRequestParams::new("invoke_capability").with_arguments(
+                json!({
+                    "name": "plan_audio_normalization",
+                    "arguments": {"profile": "source_master"}
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await;
+    let schema_text = match &schema {
+        Ok(result) => au6_error_text(result),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        schema_text.contains("track_ids") || schema_text.contains("missing field"),
+        "{schema_text}"
+    );
+    if let Ok(result) = &schema {
+        assert_eq!(result.is_error, Some(true));
+    }
+    assert_eq!(query_document(&core), before);
+
+    // Evidence-only, and *before* the mix/buses commit: after those upserts
+    // the voice tracks already intersect the Voice A / Voice B buses and
+    // `plan_audio_normalization` refuses the intersection. The contract's
+    // "not committed" still holds — neither plan is applied.
+    let ebu = invoke_capability(
+        &client,
+        "plan_audio_normalization",
+        json!({
+            "track_ids": [AU6_B_VOICE_A_TRACK.0, AU6_B_VOICE_B_TRACK.0],
+            "target_lufs_hundredths": -2300
+        }),
+    )
+    .await;
+    assert_eq!(
+        ebu.is_error,
+        Some(false),
+        "{:?} {}",
+        ebu.structured_content,
+        au6_error_text(&ebu)
+    );
+    if let Some(body) = ebu.structured_content.as_ref() {
+        assert_ne!(
+            body["applied"], true,
+            "plan_audio_normalization must not apply: {body}"
+        );
+    }
+    let streaming = invoke_capability(
+        &client,
+        "plan_audio_normalization",
+        json!({
+            "track_ids": [AU6_B_VOICE_A_TRACK.0, AU6_B_VOICE_B_TRACK.0],
+            "target_lufs_hundredths": -1400
+        }),
+    )
+    .await;
+    assert_eq!(
+        streaming.is_error,
+        Some(false),
+        "{}",
+        au6_error_text(&streaming)
+    );
+    assert_eq!(query_document(&core), before);
+
+    let _mix_revision =
+        au6_commit_ops(&client, 0, &au6_mix_and_bus_ops(Au6Scenario::Podcast)).await;
+
+    let fades = au5_invoke_when_silence_is_ready(
+        &client,
+        "plan_clip_fades",
+        json!({"tracks": [AU6_B_VOICE_A_TRACK.0, AU6_B_VOICE_B_TRACK.0]}),
+    )
+    .await;
+    let fade_body = fades.structured_content.as_ref().unwrap();
+    assert_eq!(fades.is_error, Some(false), "{fade_body}");
+    au5_commit_prepared(&client, fade_body).await;
+    let revision = cc7_revision(&client).await;
+    let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(levels.is_error, Some(false));
+    let qc = invoke_capability(
+        &client,
+        "get_audio_qc",
+        json!({"expected_revision": revision}),
+    )
+    .await;
+    assert_eq!(qc.is_error, Some(false), "{:?}", qc.structured_content);
+    cc7_assert_stale_revision(
+        &client,
+        "get_audio_qc",
+        json!({"expected_revision": revision + 5}),
+        revision,
+        revision + 5,
+    )
+    .await;
+
+    // §5.1(4): the committed document is the canonical one. The two
+    // `plan_audio_normalization` calls were evidence only, so the bus each
+    // would have built is asserted absent by the same equality.
+    let mut expected = scene.document.clone();
+    apply_batch(
+        &mut expected,
+        &au6_canonical_operations(Au6Scenario::Podcast),
+    )
+    .expect("canonical (b)");
+    assert_eq!(query_document(&core), expected);
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::LocationDialogue);
+    let core = Core::spawn(scene.document.clone()).unwrap();
+    let project = kinewright_media::test_support::TempDirectory::new("au6-a3");
+    let handle = Arc::new(std::sync::RwLock::new(Some(
+        project.path("show.kinewright"),
+    )));
+    let server = McpServer::start_isolated_with_exporter_and_project_path(
+        core.clone(),
+        media.clone(),
+        media.clone(),
+        media.clone(),
+        Arc::clone(&handle),
+    )
+    .unwrap();
+    let confirmations = server.confirmations();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let no_asset = invoke_capability(
+        &client,
+        "plan_room_tone_fill",
+        json!({"track": AU6_C_DIALOGUE_TRACK.0}),
+    )
+    .await;
+    assert_eq!(no_asset.is_error, Some(true));
+    assert!(
+        au6_error_text(&no_asset).contains(AU6_ROOM_TONE_NO_ASSET_REFUSAL),
+        "{}",
+        au6_error_text(&no_asset)
+    );
+
+    let revision = au6_commit_ops_approved(
+        &client,
+        confirmations.clone(),
+        0,
+        &au6_c_gap_operations(AU6_C_RIGHT_CLIP_ID),
+    )
+    .await;
+
+    let capture = json!({
+        "expected_revision": revision,
+        "asset_id": 1,
+        "source_start_frame": AU6_C_LEARN_SOURCE_RANGE.start.0,
+        "source_end_frame": AU6_C_LEARN_SOURCE_RANGE.end.0
+    });
+    let (refused, ()) = tokio::join!(
+        invoke_capability(&client, "capture_room_tone", capture.clone()),
+        au6_decide_capture(confirmations.clone(), false),
+    );
+    assert_eq!(refused.is_error, Some(true));
+    assert_eq!(
+        refused.structured_content.as_ref().unwrap()["code"],
+        "capture_refused"
+    );
+
+    let approvals = cc7_approve_confirmations(confirmations.clone(), "capture_room_tone");
+    let captured = au5_invoke_when_silence_is_ready(&client, "capture_room_tone", capture).await;
+    approvals.assert_approved_and_stop("capture_room_tone");
+    assert_eq!(
+        captured.is_error,
+        Some(false),
+        "{:?} {}",
+        captured.structured_content,
+        au6_error_text(&captured)
+    );
+    assert_eq!(cc7_revision(&client).await, revision + 1);
+
+    let fill = au5_invoke_when_silence_is_ready(
+        &client,
+        "plan_room_tone_fill",
+        json!({"track": AU6_C_DIALOGUE_TRACK.0}),
+    )
+    .await;
+    let fill_body = fill.structured_content.as_ref().unwrap();
+    assert_eq!(fill.is_error, Some(false), "{fill_body}");
+    au5_commit_prepared(&client, fill_body).await;
+
+    let before = invoke_capability(
+        &client,
+        "get_audio_repair",
+        json!({"expected_revision": cc7_revision(&client).await}),
+    )
+    .await;
+    assert_eq!(
+        before.is_error,
+        Some(false),
+        "{:?}",
+        before.structured_content
+    );
+
+    let planned = au5_invoke_when_silence_is_ready(
+        &client,
+        "plan_dialogue_repair",
+        json!({"tracks": [AU6_C_DIALOGUE_TRACK.0]}),
+    )
+    .await;
+    let repair_body = planned.structured_content.as_ref().unwrap();
+    assert_eq!(planned.is_error, Some(false), "{repair_body}");
+    au5_commit_prepared(&client, repair_body).await;
+
+    let after = invoke_capability(
+        &client,
+        "get_audio_repair",
+        json!({"expected_revision": cc7_revision(&client).await}),
+    )
+    .await;
+    assert_eq!(
+        after.is_error,
+        Some(false),
+        "{:?}",
+        after.structured_content
+    );
+
+    let revision = cc7_revision(&client).await;
+    cc7_assert_stale_revision(
+        &client,
+        "get_audio_repair",
+        json!({"expected_revision": revision + 7}),
+        revision,
+        revision + 7,
+    )
+    .await;
+
+    let already = au5_invoke_when_silence_is_ready(
+        &client,
+        "plan_dialogue_repair",
+        json!({"tracks": [AU6_C_DIALOGUE_TRACK.0]}),
+    )
+    .await;
+    assert_eq!(already.is_error, Some(true));
+    assert!(
+        au6_error_text(&already).contains(AU6_REPAIR_ALREADY_REPAIRED_REFUSAL),
+        "{}",
+        au6_error_text(&already)
+    );
+
+    let conflict = invoke_capability(
+        &client,
+        "capture_room_tone",
+        json!({
+            "expected_revision": 999,
+            "asset_id": 1,
+            "source_start_frame": AU6_C_LEARN_SOURCE_RANGE.start.0,
+            "source_end_frame": AU6_C_LEARN_SOURCE_RANGE.end.0
+        }),
+    )
+    .await;
+    assert_eq!(conflict.is_error, Some(true));
+    assert_eq!(
+        conflict.structured_content.as_ref().unwrap()["code"],
+        "revision_conflict"
+    );
+
+    let unknown = invoke_capability(
+        &client,
+        "capture_room_tone",
+        json!({
+            "expected_revision": cc7_revision(&client).await,
+            "asset_id": 99,
+            "source_start_frame": 0,
+            "source_end_frame": 10
+        }),
+    )
+    .await;
+    assert_eq!(unknown.is_error, Some(true));
+    assert_eq!(
+        unknown.structured_content.as_ref().unwrap()["code"],
+        "unknown_asset"
+    );
+
+    let inverted = invoke_capability(
+        &client,
+        "capture_room_tone",
+        json!({
+            "expected_revision": cc7_revision(&client).await,
+            "asset_id": 1,
+            "source_start_frame": 10,
+            "source_end_frame": 10
+        }),
+    )
+    .await;
+    assert_eq!(inverted.is_error, Some(true));
+    assert_eq!(
+        inverted.structured_content.as_ref().unwrap()["code"],
+        "invalid_source_range"
+    );
+
+    // (c)'s dialogue asset is 312 frames / 12.5 s; the 60 s cap is
+    // unreachable without leaving the asset, and `to > duration` is
+    // `invalid_source_range` first. Past-end is the reachable failing
+    // direction on this document; `room_tone_capture_too_long` stays
+    // covered by the agent's own unit test at `server.rs:24179`.
+    let past_end = invoke_capability(
+        &client,
+        "capture_room_tone",
+        json!({
+            "expected_revision": cc7_revision(&client).await,
+            "asset_id": 1,
+            "source_start_frame": 0,
+            "source_end_frame": 2000
+        }),
+    )
+    .await;
+    assert_eq!(past_end.is_error, Some(true));
+    assert_eq!(
+        past_end.structured_content.as_ref().unwrap()["code"],
+        "invalid_source_range"
+    );
+
+    // §5.1(4): the committed document is (c)'s three-commit ledger — gap,
+    // fill, repair — on top of the capture's own `AddAsset`. That asset's
+    // record is written from a file `au6_scenarios` cannot read (R6), so it
+    // is lifted from the document the server committed and **everything
+    // else** is asserted, including the 31 profile rows the planner learned.
+    // The refusals above are evidence-only, and the same equality proves it.
+    let committed = query_document(&core);
+    let room_tone = committed
+        .media_pool
+        .iter()
+        .find(|asset| asset.id != AU6_C_DIALOGUE_ASSET)
+        .expect("capture_room_tone registered exactly one new asset")
+        .clone();
+    let mut expected = scene.document.clone();
+    apply_batch(
+        &mut expected,
+        &[Operation::AddAsset {
+            asset: room_tone.clone(),
+        }],
+    )
+    .expect("the capture's own AddAsset");
+    apply_batch(
+        &mut expected,
+        &au6_c_canonical_operations_with_room_tone(room_tone.id),
+    )
+    .expect("canonical (c)");
+    assert_eq!(committed, expected);
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+
+    let unsaved = Core::spawn(scene.document.clone()).unwrap();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let server = McpServer::start(unsaved, media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let unsaved_capture = invoke_capability(
+        &client,
+        "capture_room_tone",
+        json!({
+            "expected_revision": 0,
+            "asset_id": 1,
+            "source_start_frame": AU6_C_LEARN_SOURCE_RANGE.start.0,
+            "source_end_frame": AU6_C_LEARN_SOURCE_RANGE.end.0
+        }),
+    )
+    .await;
+    assert_eq!(unsaved_capture.is_error, Some(true));
+    assert_eq!(
+        unsaved_capture.structured_content.as_ref().unwrap()["code"],
+        "project_not_saved"
+    );
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn au6_a4_the_multicam_cuts_leave_the_master_audio_untouched() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Multicam);
+    let core = Core::spawn(scene.document.clone()).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let revision = au6_commit_ops_approved(
+        &client,
+        server.confirmations(),
+        0,
+        &au6_canonical_operations(Au6Scenario::Multicam),
+    )
+    .await;
+    let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
+    assert_eq!(levels.is_error, Some(false));
+    let qc = invoke_capability(
+        &client,
+        "get_audio_qc",
+        json!({"expected_revision": revision}),
+    )
+    .await;
+    assert_eq!(qc.is_error, Some(false), "{:?}", qc.structured_content);
+    cc7_assert_stale_revision(
+        &client,
+        "get_audio_qc",
+        json!({"expected_revision": revision + 3}),
+        revision,
+        revision + 3,
+    )
+    .await;
+    let mut expected = scene.document.clone();
+    apply_batch(
+        &mut expected,
+        &au6_canonical_operations(Au6Scenario::Multicam),
+    )
+    .expect("canonical (d)");
+    assert_eq!(query_document(&core), expected);
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+async fn au6_queue_and_poll(
+    client: &RunningService<RoleClient, ()>,
+    revision: u64,
+    profile: &str,
+    directory: &std::path::Path,
+    await_complete: bool,
+) -> serde_json::Value {
+    let output = directory.join(format!("{profile}.mp4"));
+    let queued = invoke_capability(
+        client,
+        "queue_export",
+        json!({
+            "expected_revision": revision,
+            "output_path": output,
+            "profile": profile,
+            "normalize_loudness": true
+        }),
+    )
+    .await;
+    assert_eq!(
+        queued.is_error,
+        Some(false),
+        "{:?}",
+        queued.structured_content
+    );
+    let job = queued.structured_content.as_ref().unwrap()["job"].clone();
+    assert_eq!(job["profile"], profile);
+    if !await_complete {
+        return job;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let jobs = invoke_capability(client, "get_export_jobs", json!({})).await;
+        let record = jobs.structured_content.as_ref().unwrap()["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == job["id"])
+            .cloned()
+            .expect("the queued job is listed");
+        if matches!(
+            record["state"].as_str(),
+            Some("completed" | "failed" | "cancelled")
+        ) {
+            return record;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the export never settled: {record}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn au6_a5a_the_delivery_lands_on_the_ebu_r128_target() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
+    let core = Core::spawn(scene.document.clone()).unwrap();
+    let server =
+        McpServer::start_with_exporter(core.clone(), media.clone(), media.clone(), media.clone())
+            .unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let revision = au6_commit_ops(
+        &client,
+        0,
+        &au6_canonical_operations(Au6Scenario::Interview),
+    )
+    .await;
+    let directory = std::env::temp_dir().join(format!(
+        "kinewright-au6-a5a-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let record = au6_queue_and_poll(&client, revision, "source_master", &directory, true).await;
+    assert_eq!(record["state"], "completed", "{record}");
+    assert_eq!(record["audio_report"]["limiter_passes"], 1, "{record}");
+    assert_eq!(
+        record["audio_verification"]["technical_pass"], true,
+        "{record}"
+    );
+    client.cancel().await.unwrap();
+    server.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn au6_a5b_the_streaming_target_is_reachable_by_the_agent() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
+    let core = Core::spawn(scene.document.clone()).unwrap();
+    let server =
+        McpServer::start_with_exporter(core.clone(), media.clone(), media.clone(), media.clone())
+            .unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let revision = au6_commit_ops(
+        &client,
+        0,
+        &au6_canonical_operations(Au6Scenario::Interview),
+    )
+    .await;
+    let profiles = invoke_capability(&client, "get_delivery_profiles", json!({})).await;
+    let youtube = profiles.structured_content.as_ref().unwrap()["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|profile| profile["id"] == "youtube_1080p")
+        .cloned()
+        .expect("youtube_1080p is published");
+    assert_eq!(
+        youtube["loudness_target"]["integrated_lufs_hundredths"],
+        -1400
+    );
+    assert_eq!(
+        youtube["loudness_target"]["true_peak_ceiling_dbtp_hundredths"],
+        -100
+    );
+    assert_eq!(
+        youtube["resolution"],
+        json!({"width": 1920, "height": 1080})
+    );
+
+    let directory = std::env::temp_dir().join(format!(
+        "kinewright-au6-a5b-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let job = au6_queue_and_poll(&client, revision, "youtube1080p", &directory, false).await;
+    assert_eq!(job["profile"], "youtube1080p");
+    assert!(
+        matches!(job["state"].as_str(), Some("queued" | "running")),
+        "{job}"
+    );
+    let listed = invoke_capability(&client, "get_export_jobs", json!({})).await;
+    assert!(
+        listed.structured_content.as_ref().unwrap()["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == job["id"] && entry["profile"] == "youtube1080p")
+    );
+    let cancelled = invoke_capability(&client, "cancel_export", json!({"job_id": job["id"]})).await;
+    assert_eq!(
+        cancelled.is_error,
+        Some(false),
+        "{:?}",
+        cancelled.structured_content
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let jobs = invoke_capability(&client, "get_export_jobs", json!({})).await;
+        let record = jobs.structured_content.as_ref().unwrap()["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == job["id"])
+            .cloned()
+            .unwrap();
+        if matches!(
+            record["state"].as_str(),
+            Some("cancelled" | "completed" | "failed")
+        ) {
+            assert_ne!(record["state"], "failed", "{record}");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{record}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    client.cancel().await.unwrap();
+    server.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn au6_b_a_clip_whose_head_window_is_silent_gets_no_fade() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Podcast);
+    let core = Core::spawn(scene.document).unwrap();
+    let server = McpServer::start(core, media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let planned = au5_invoke_when_silence_is_ready(
+        &client,
+        "plan_clip_fades",
+        json!({"tracks": [AU6_B_VOICE_A_TRACK.0]}),
+    )
+    .await;
+    let text = au6_error_text(&planned);
+    assert_eq!(planned.is_error, Some(false), "{text}");
+    let body = planned.structured_content.as_ref().unwrap();
+    assert!(
+        text.contains(AU6_CLIP_FADES_NOTHING_TO_PROPOSE)
+            || body["operations"].as_array().is_some_and(Vec::is_empty)
+            || body["prepared_edit_plan"]["operations"]
+                .as_array()
+                .is_some_and(Vec::is_empty),
+        "a silent head window must propose no fades: {body} {text}"
+    );
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn au6_the_four_planners_prose_is_pinned_by_exact_string() {
+    assert!(AU6_DUCKING_ALREADY_RIDDEN_REFUSAL.contains("replace: true"));
+    assert_eq!(AU6_CLIP_FADES_NOTHING_TO_PROPOSE, "nothing to propose");
+    assert!(AU6_ROOM_TONE_NO_ASSET_REFUSAL.contains("capture_room_tone"));
+    assert!(AU6_REPAIR_ALREADY_REPAIRED_REFUSAL.contains("AU5 repair prefix"));
 }

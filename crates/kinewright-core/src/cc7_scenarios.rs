@@ -1973,9 +1973,31 @@ pub const CC7_MEASURED_DEEP_SHADOW_OUT_OF_GAMUT_PIXELS: i64 = 192;
 /// 377 538 against CC6's 400 000, a **1.06x** margin, which is why its
 /// `CC7_BUDGETS` row is a [`Cc7BudgetKind::RecordedMargin`]. CC7 never
 /// re-baselines a CC6 constant (§4.1 note 2, §4(g)(1)).
+/// **Per operating system** (AU3 §0 E59): the worst row of a column is a
+/// property of the column, and the two systems' columns differ in 16 of 60
+/// rows. Linux — `mifi/ffmpeg-builds 8.0-1`, measured at `99faee36`.
+#[cfg(not(target_os = "windows"))]
 pub const CC7_MEASURED_DELIVERY_EIGHT: [i64; 5] = [2, 1_000_000, 377_538, 855_810, 4_059];
+/// See the Linux arm above. Windows — `System233/ffmpeg-msvc-prebuilt
+/// ffmpeg-8.0.1-r3`, taken from the per-scenario column harvested on
+/// `windows-latest` in CI run 34693346093. Two of the five terms differ from
+/// Linux's and both differ in Windows' favour: the RGB mean is **787 598**
+/// against 855 810 and the PSNR floor **4 070** against 4 059. The other
+/// three were measured here and found equal, not copied.
+///
+/// The luma mean is the worst row on this system too, and it is the **same**
+/// number: scenario (e) measures 377 538 against CC6's 400 000 on both
+/// builds, a 1.06x margin, which is why its `CC7_BUDGETS` row is a
+/// [`Cc7BudgetKind::RecordedMargin`] regardless of platform.
+#[cfg(target_os = "windows")]
+pub const CC7_MEASURED_DELIVERY_EIGHT: [i64; 5] = [2, 1_000_000, 377_538, 787_598, 4_070];
 /// The same at Ten, worst per term over the six scenarios (C-E8). The luma
 /// P99 measured **exactly zero** on every scenario.
+///
+/// **Not split**, and that is a measurement rather than an omission: the
+/// ten-bit column's worst row per term is identical on both systems — only
+/// scenario (b)'s RGB mean differs at all between the builds (181 593 against
+/// 181 569) and it is not the worst. Measured on both, found equal.
 pub const CC7_MEASURED_DELIVERY_TEN: [i64; 5] = [1, 0, 347, 385_514, 4_129];
 
 /// How CC7 §4.1 checks one budget row.

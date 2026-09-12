@@ -1932,9 +1932,14 @@ mod tests {
     /// media's, and this is it.
     #[test]
     fn the_true_peak_detector_note_names_the_au3_meter() {
-        // Unwrap the doc comment so the pin is on the sentence, not the
-        // line breaks.
-        let dsp = include_str!("dsp.rs").replace("\n/// ", " ");
+        // Unwrap the doc comment so the pin is on the sentence, not the line
+        // breaks. `core.autocrlf` is `true` by default on a Windows checkout,
+        // so normalize the line ending first: without it the unwrap matches
+        // nothing there and the pin asserts how the reader's git is
+        // configured rather than what `dsp.rs` says.
+        let dsp = include_str!("dsp.rs")
+            .replace("\r\n", "\n")
+            .replace("\n/// ", " ");
         assert!(
             dsp.contains(
                 "It is the limiter's detector only: the measurement path in \

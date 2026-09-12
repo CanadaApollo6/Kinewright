@@ -2628,7 +2628,15 @@ fn cc7_export_and_verify(
 }
 
 /// §4(g)(1)'s three conditions, plus the probed tags and the sampling rule.
-fn assert_cc7_delivery_lane(measurement: &Cc7DeliveryMeasurement, output: &Path) -> Value {
+///
+/// `harvest` collects the measured terms this system has no manifest column
+/// for, so one run publishes the whole platform's column rather than one
+/// number at a time.
+fn assert_cc7_delivery_lane(
+    measurement: &Cc7DeliveryMeasurement,
+    output: &Path,
+    harvest: &mut Vec<String>,
+) -> Value {
     let verification = &measurement.verification;
     let comparison = &verification.comparison;
     let depth = measurement.depth;
@@ -2757,7 +2765,13 @@ fn assert_cc7_delivery_lane(measurement: &Cc7DeliveryMeasurement, output: &Path)
         ),
         ("psnr_db_hundredths", i64::from(psnr)),
     ] {
-        assert_manifest_i64(&declared[term], "measured", measured);
+        check_cc7_measurement(
+            &declared[term],
+            "measured",
+            measured,
+            &format!("budgets.delivery.{spec_id}.{depth_key}.{term}"),
+            harvest,
+        );
     }
 
     json!({
@@ -2791,6 +2805,7 @@ fn assert_cc7_delivery_lane(measurement: &Cc7DeliveryMeasurement, output: &Path)
 fn assert_cc7_every_scenario_verifies(depth: DeliveryEncodeDepth, fixture: &str) {
     let gpu = fallback_gpu();
     let mut lanes = Vec::new();
+    let mut harvest = Vec::new();
     for scenario in CC7_SCENARIOS {
         let plan = cc7_canonical_plan(&gpu, scenario, "g");
         let expected_frames = cc7_expected_sample_frames(plan.document.duration.0);
@@ -2800,9 +2815,23 @@ fn assert_cc7_every_scenario_verifies(depth: DeliveryEncodeDepth, fixture: &str)
             measurement.verification.comparison.frames, expected_frames,
             "{scenario:?}: §6.2's closed form on this document's frame count"
         );
-        lanes.push(assert_cc7_delivery_lane(&measurement, &output));
+        lanes.push(assert_cc7_delivery_lane(
+            &measurement,
+            &output,
+            &mut harvest,
+        ));
         drop(directory);
     }
+    assert!(
+        harvest.is_empty(),
+        "`{}` has no measured column in `cc7_manifest.json` for these terms. Record them \
+         under the `\"{}\"` key of each row's `measured` object, measured on this system and \
+         optimized there — never by copying another system's number and never by widening a \
+         shared one:\n{}",
+        cc7_os(),
+        cc7_os(),
+        harvest.join("\n")
+    );
     assert_eq!(lanes.len(), CC7_SCENARIOS.len());
     emit_cc7_evidence(
         fixture,
@@ -3274,14 +3303,66 @@ fn cc7_manifest() -> Value {
 }
 
 fn assert_manifest_i64(parent: &Value, key: &str, expected: i64) {
-    let declared = parent
-        .get(key)
-        .and_then(Value::as_i64)
-        .unwrap_or_else(|| panic!("manifest must declare an integer {key}"));
+    let declared = cc7_declared_i64(parent, key)
+        .unwrap_or_else(|| panic!("manifest must declare an integer {key} for {}", cc7_os()));
     assert_eq!(
-        declared, expected,
-        "manifest {key} does not match the code constant"
+        declared,
+        expected,
+        "manifest {key} does not match the code constant on {}",
+        cc7_os()
     );
+}
+
+/// The operating system a measured column belongs to.
+///
+/// **A measured number belongs to the machine that produced it.** CC7's
+/// encoded lanes run a *different `FFmpeg` package* per operating system —
+/// `System233/ffmpeg-msvc-prebuilt` on Windows against `mifi/ffmpeg-builds`
+/// on Linux — so one number cannot be true of both, and a budget widened
+/// until it spanned both would gate neither. AU3 §0 E55, CC6 §6.3 and AU6
+/// §10.6 as amended: **each operating system carries its own individually
+/// measured column, optimized on that system; never one loosened constant.**
+fn cc7_os() -> &'static str {
+    std::env::consts::OS
+}
+
+/// One declared integer, which is either a **scalar** — measured on every
+/// supported system and found equal, so there is nothing to split — or an
+/// **object keyed by operating system**, measured separately on each.
+///
+/// Returns `None` when the value is an object with no entry for the running
+/// system, which is what makes an unmeasured platform loud rather than green.
+fn cc7_declared_i64(parent: &Value, key: &str) -> Option<i64> {
+    match parent.get(key) {
+        Some(Value::Object(per_os)) => per_os.get(cc7_os()).and_then(Value::as_i64),
+        other => other.and_then(Value::as_i64),
+    }
+}
+
+/// Check one measured term against the manifest, **collecting** rather than
+/// panicking when the running system has no column yet.
+///
+/// The delivery table is 5 terms x 6 scenarios per depth. Panicking on the
+/// first missing entry would surrender one number per CI run on a platform
+/// that has never been measured; collecting them lets one run publish the
+/// whole column, which is then pasted in and asserted from that point on.
+fn check_cc7_measurement(
+    parent: &Value,
+    key: &str,
+    measured: i64,
+    path: &str,
+    harvest: &mut Vec<String>,
+) {
+    match cc7_declared_i64(parent, key) {
+        Some(declared) => assert_eq!(
+            declared,
+            measured,
+            "manifest {path}.{key} declares {declared} but {} measured {measured}; \
+             re-measure on this system rather than widening the value",
+            cc7_os()
+        ),
+        None => harvest.push(format!("  {path}.{key} = {measured}")),
+    }
 }
 
 /// Every `cc7_scenarios` constant the manifest must declare, paired with the
@@ -3847,13 +3928,52 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
                 "rgb_mean_code_millionths",
                 "psnr_db_hundredths",
             ] {
+                // A measured value is a scalar when every supported system
+                // produced it — 44 of these 60 rows did — and an object keyed
+                // by operating system when they disagree. What proves this
+                // system was measured at all is the provenance block below,
+                // which must carry an entry for it; that is the gate a third
+                // operating system would trip, not the scalar rows.
+                match &lane[term]["measured"] {
+                    Value::Number(_) => {}
+                    Value::Object(per_os) => assert!(
+                        per_os.contains_key(cc7_os()) && per_os.values().all(Value::is_number),
+                        "{}/{depth}: {term} splits its measured column by operating system but \
+                         records no integer for {}; run the delivery gate here and record what \
+                         it measures",
+                        spec.id,
+                        cc7_os()
+                    ),
+                    other => panic!(
+                        "{}/{depth}: {term} must record a measurement, either a scalar both \
+                         systems produced or one integer per system, not {other}",
+                        spec.id
+                    ),
+                }
+                assert!(lane[term]["budget"].is_number());
+                // The margin follows the measurement it is derived from: one
+                // value where both systems measured the same, one per system
+                // where they did not.
+                let margin = &lane[term]["margin"];
+                let margins: Vec<&Value> = match margin {
+                    Value::Object(per_os) => {
+                        assert!(
+                            per_os.contains_key(cc7_os()),
+                            "{}/{depth}: {term} records no margin for {}",
+                            spec.id,
+                            cc7_os()
+                        );
+                        per_os.values().collect()
+                    }
+                    other => vec![other],
+                };
                 assert!(
-                    lane[term]["measured"].is_number(),
-                    "{}/{depth}: {term} must record a measurement",
+                    margins
+                        .iter()
+                        .all(|margin| margin.is_string() || margin.is_number()),
+                    "{}/{depth}: {term}'s margin is a ratio or the zero sentence",
                     spec.id
                 );
-                assert!(lane[term]["budget"].is_number());
-                assert!(lane[term]["margin"].is_string() || lane[term]["margin"].is_number());
             }
         }
     }
@@ -3897,7 +4017,17 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
     assert!(failing.len() >= 12, "§4.2 lists at least twelve rows");
 
     // --- §11.3 measurement provenance --------------------------------------
-    let measurement = &budgets["measurement"];
+    // The provenance block is per operating system, because every field in it
+    // — the FFmpeg build, the library versions, the x264 core, the adapter —
+    // is a property of the machine that produced that system's measured
+    // column. A single block could only ever describe one of them.
+    let measurement = &budgets["measurement"][cc7_os()];
+    assert!(
+        measurement.is_object(),
+        "`cc7_manifest.json` records no measurement provenance for {}; a measured column and \
+         the machine that produced it are recorded together",
+        cc7_os()
+    );
     for key in [
         "os",
         "arch",
