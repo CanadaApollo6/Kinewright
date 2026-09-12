@@ -912,10 +912,10 @@ pub fn measure_color_qc(
     for y in pixel_roi.y..pixel_roi.bottom() {
         for x in pixel_roi.x..pixel_roi.right() {
             let index = (y as usize * image.width as usize + x as usize) * 4;
-            if let Some(scope) = &request.matte_region {
-                if scope.coverage.pixels.get(index).copied().unwrap_or(0) == 0 {
-                    continue;
-                }
+            if let Some(scope) = &request.matte_region
+                && scope.coverage.pixels.get(index).copied().unwrap_or(0) == 0
+            {
+                continue;
             }
             let Some(pixel) = image.pixels.get(index..index + 4) else {
                 continue;

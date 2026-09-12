@@ -1347,12 +1347,11 @@ impl KinewrightMcp {
             allow_unverified_source: args.allow_unverified_source,
         };
         let result = self.apply_operation("relink_media", args.expected_revision, operation);
-        if result.is_error != Some(true) {
-            if let Ok((_, updated)) = self.snapshot()
-                && let Some(updated_asset) = updated.asset(current.id)
-            {
-                self.request_asset_analysis(updated_asset.clone());
-            }
+        if result.is_error != Some(true)
+            && let Ok((_, updated)) = self.snapshot()
+            && let Some(updated_asset) = updated.asset(current.id)
+        {
+            self.request_asset_analysis(updated_asset.clone());
         }
         Ok(result)
     }
