@@ -152,9 +152,6 @@ impl WorkingFrame {
     }
 
     pub(crate) fn upload_bytes(&self) -> Vec<u8> {
-        // This runs once per layer per rendered frame, so the exact upload
-        // size is reserved up front instead of letting the iterator's size
-        // hint drive repeated reallocation.
         let mut bytes = Vec::with_capacity(self.pixels.len().saturating_mul(2));
         for value in self.pixels.iter() {
             bytes.extend_from_slice(&value.to_le_bytes());
@@ -342,10 +339,6 @@ mod tests {
         assert_close(full_10.pixels[4].to_f32(), 1.0, 1.0e-3);
         assert_close(full_10.pixels[7].to_f32(), 1.0, 0.0);
 
-        // FFmpeg's direct limited YUV -> RGBA64 path emits the legal-white
-        // endpoint as 65283 after fixed-point matrix/range rounding.  The
-        // declared 10-bit source still uses the path's 8-bit nominal scale,
-        // 65280, rather than the full-range 10-bit left-shift maximum 65472.
         let limited_10 = WorkingFrame::from_rgba64_le(
             3,
             1,
@@ -377,10 +370,6 @@ mod tests {
 
     #[test]
     fn rec709_rgb_limited_range_is_expanded_after_swscale_rgb_packing() {
-        // The configured swscale RGB path does not apply in_range=mpeg to
-        // planar RGB. These are the observed RGBA64 values for source codes
-        // 16, 128, and 235; the working-frame boundary must expand them once
-        // using the declared source depth before BT.709 transfer decoding.
         let rgb8 = WorkingFrame::from_rgba64_le(
             3,
             1,

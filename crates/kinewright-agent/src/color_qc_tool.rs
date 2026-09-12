@@ -170,11 +170,6 @@ pub(crate) fn get_color_qc(
         matte_region,
         checks: checks.clone(),
         delivery_bit_depth: depth,
-        // CC6 §3.6 pre-export mode: the expected description is
-        // `ExportSettings.delivery_color` materialised from this document at
-        // the requested depth, and `observed` is the same value. A post-export
-        // check needs a written file and is only available through
-        // `verify_delivery_output` and `get_export_jobs`.
         expected_delivery: Some(delivery_color_for_depth(document, depth)),
         observed_delivery: None,
         max_nodes,
@@ -207,10 +202,6 @@ fn response(
         "evidence_only": true,
         "applied": false,
         "stage": WORKING_PROOF_STAGE,
-        // Echoed from the measurement rather than restated as a constant, so
-        // the envelope cannot disagree with the report it carries. In practice
-        // always true: a proof that is not full-resolution is refused with
-        // color_qc_proxy_proof_refused before it can be measured.
         "full_resolution": report.full_resolution,
         "report": report,
         "assumptions": assumptions(checks, depth, per_node),
@@ -276,8 +267,6 @@ fn resolve_frame(document: &Document, args: &ColorQcArgs) -> Result<TimeCode, Sc
             ),
         )
         .with_details(json!({
-            // The first offending selector in the fixed order above, so the
-            // named field is one the caller actually sent.
             "field": first,
             "observed": selected,
             "allowed": "at most one of timecode, frame, clip_id",
@@ -576,8 +565,6 @@ mod tests {
             ..ColorQcArgs::default()
         };
         assert_eq!(resolve_frame(&document, &last).unwrap(), TimeCode(59));
-        // An empty project has no frame 0 to measure, so the default selector
-        // is refused too rather than silently proofing nothing.
         let empty = Document::default();
         assert_eq!(
             resolve_frame(&empty, &ColorQcArgs::default())
@@ -614,9 +601,6 @@ mod tests {
                 observed: "160 x 90".to_owned(),
                 allowed: "320 x 180".to_owned(),
             },
-            // The per-node scratch removal is a document-model rejection, and
-            // it reports as one: never as `working_proof_unavailable`, which
-            // would describe a render that in fact succeeded.
             ColorQcError::NodeRemovalRejected {
                 clip: ClipId(1),
                 effect: EffectId(2),

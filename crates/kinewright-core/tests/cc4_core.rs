@@ -198,10 +198,6 @@ fn effect_ids(document: &Document) -> Vec<u64> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// §5 control tables
-// ---------------------------------------------------------------------------
-
 /// CC4 §5.1: the `technical_lut` table, transcribed by hand.
 #[test]
 fn technical_lut_descriptor_matches_the_contract_table() {
@@ -234,8 +230,6 @@ fn creative_look_descriptor_matches_the_contract_table() {
         ("input_encoding_token", 0, 2, 0),
         ("bypass", 0, 1, 0),
     ];
-    // CC5 §2.1 gives `creative_look` a matte and `technical_lut` none, so only
-    // this table grows; the 47 matte parameters are pinned in `cc5_core.rs`.
     assert_eq!(
         descriptor.parameters.len(),
         expected.len() + kinewright_core::MATTE_PARAMETER_COUNT
@@ -305,10 +299,6 @@ fn the_two_new_kinds_are_managed_stage_ordered_nodes() {
         assert!(!is_lut_color_node(name));
     }
 }
-
-// ---------------------------------------------------------------------------
-// §2.1 asset record
-// ---------------------------------------------------------------------------
 
 /// CC4 §2.1: the serialized record has exactly the documented shape.
 #[test]
@@ -392,10 +382,6 @@ fn pre_cc4_projects_round_trip_without_a_lut_assets_key() {
         "an empty asset list must not appear in the saved project"
     );
 }
-
-// ---------------------------------------------------------------------------
-// §2.7 AddLutAsset / RemoveLutAsset
-// ---------------------------------------------------------------------------
 
 /// CC4 §2.7: `AddLutAsset` rejects every malformed record by field.
 #[test]
@@ -663,10 +649,6 @@ fn lut_asset_references_finds_static_and_hold_values() {
     assert_eq!(document.lut_asset_references(LutAssetId(3)), Vec::new());
 }
 
-// ---------------------------------------------------------------------------
-// §2.7 InsertEffect
-// ---------------------------------------------------------------------------
-
 /// CC4 §2.7 and §10.3.6: an insertion is positional and order-preserving.
 #[test]
 fn insert_effect_places_a_node_at_an_exact_index() {
@@ -747,10 +729,6 @@ fn insert_effect_rejects_what_add_effect_rejects() {
         }
     );
 }
-
-// ---------------------------------------------------------------------------
-// §3.2 stage ordering
-// ---------------------------------------------------------------------------
 
 /// CC4 §3.2 and §10.3.6: the legal five-kind stack is accepted in stage order.
 #[test]
@@ -923,10 +901,6 @@ fn a_fifth_lut_node_is_rejected() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §3.3 and §6 asset reference and keyframing
-// ---------------------------------------------------------------------------
-
 /// CC4 §6: a `SetEffectParam` may never unbind or dangle a LUT node.
 #[test]
 fn set_effect_param_cannot_unbind_or_dangle_a_lut_node() {
@@ -1085,10 +1059,6 @@ fn a_hold_keyframe_cannot_name_an_unregistered_asset() {
     assert_eq!(document, before);
 }
 
-// ---------------------------------------------------------------------------
-// §3.6 inactivity
-// ---------------------------------------------------------------------------
-
 /// CC4 §3.6: inactivity is decided on the stored integers, with three reasons.
 #[test]
 fn lut_node_inactivity_is_decided_on_the_stored_integers() {
@@ -1194,10 +1164,6 @@ fn keyframes_resolve_before_inactivity_is_tested() {
         Vec::new()
     );
 }
-
-// ---------------------------------------------------------------------------
-// §9 migration
-// ---------------------------------------------------------------------------
 
 /// CC4 §9.3: conversion replaces the legacy stage at its exact position and
 /// keeps the effect id.
@@ -1351,10 +1317,6 @@ fn convert_legacy_look_rejects_a_non_legacy_effect_and_a_missing_asset() {
     assert_eq!(document, before, "every rejection is atomic");
 }
 
-// ---------------------------------------------------------------------------
-// QA and delivery
-// ---------------------------------------------------------------------------
-
 /// CC4 §2.3 and §9.2: managed LUT nodes never report `legacy_lut_stage`, and a
 /// dangling reference is a blocking QA error.
 #[test]
@@ -1378,8 +1340,6 @@ fn qa_reports_a_dangling_reference_and_never_a_legacy_stage() {
         "every reference resolves"
     );
 
-    // A hand-edited project that drops the record still loads into QA, and QA
-    // names it rather than rendering a look-free frame.
     document
         .lut_assets
         .retain(|asset| asset.id != LutAssetId(2));
@@ -1430,10 +1390,6 @@ fn a_legacy_stage_beside_a_managed_look_still_reports_once() {
         1
     );
 }
-
-// ---------------------------------------------------------------------------
-// §10.3.13 serialization and history
-// ---------------------------------------------------------------------------
 
 /// CC4 §10.3.13: every new operation saves, reopens, replays, undoes, and
 /// redoes with values and vector positions preserved exactly.
@@ -1553,8 +1509,6 @@ fn the_new_operations_survive_save_reopen_replay_and_undo() {
         "replay is byte-for-byte identical"
     );
 
-    // Undo every applied step, then redo every one of them. Eight operations
-    // reached the core: the seven above plus the bypass.
     let applied = operations.len() + 1;
     let mut undone = None;
     for _ in 0..applied {
@@ -1605,10 +1559,6 @@ fn removing_and_undoing_an_asset_restores_the_record() {
         serde_json::to_string(&document).unwrap()
     );
 }
-
-// ---------------------------------------------------------------------------
-// §2.3 availability preflight
-// ---------------------------------------------------------------------------
 
 fn verified() -> LutAvailabilityStatus {
     LutAvailabilityStatus {
@@ -1754,10 +1704,6 @@ fn only_lut_nodes_can_be_lut_active() {
         "an unbound node evaluates nothing"
     );
 }
-
-// ---------------------------------------------------------------------------
-// §3.3 unbound rejection at the edit boundary
-// ---------------------------------------------------------------------------
 
 /// CC4 §3.3 and §6: a node with no asset reference never reaches the document,
 /// through either placement operation.

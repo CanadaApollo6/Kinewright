@@ -170,16 +170,6 @@ const CC5_EVIDENCE_FIXTURES: [&str; 17] = [
     "cc5_skin_and_product",
 ];
 
-// ---------------------------------------------------------------------------
-// The independent transcription of CC5 §2.3, §2.4, and §2.5.
-//
-// Nothing below calls `MatteWindow`, `MatteQualifier`, `Matte`, the compositor,
-// or the shader. The algorithms are the contract's pseudocode, transcribed by
-// hand, so every geometry, feather, and qualifier expectation compares two
-// implementations of the written contract rather than one implementation with
-// itself.
-// ---------------------------------------------------------------------------
-
 /// The exact `smoothstep(A, B, x) = t·t·(3 − 2t)` of CC5 §2.3, in f64.
 fn spec_smoothstep_f64(start: f64, end: f64, value: f64) -> f64 {
     let t = ((value - start) / (end - start)).clamp(0.0, 1.0);
@@ -198,9 +188,6 @@ fn spec_window_distance_f64(window: &WindowSpec, uv: [f64; 2], aspect: f64) -> f
         return f64::INFINITY;
     }
     let theta = (window.rotation as f64 / 100.0).to_radians();
-    // The host solves `(cosT, sinT)` in f64 and rounds once to f32; the
-    // reference and the shader consume that rounded pair, so this
-    // transcription rounds at the same place.
     let cos_t = f64::from(theta.cos() as f32);
     let sin_t = f64::from(theta.sin() as f32);
     let dx = (uv[0] - window.cx as f64 / 10_000.0) * aspect;
@@ -267,8 +254,6 @@ fn spec_pixel_centre_uv_f64(index: usize) -> [f64; 2] {
 
 /// The §9.1 raster aspect `a = W / H`, in f64.
 const SPEC_RASTER_ASPECT_F64: f64 = CC5_RASTER_WIDTH as f64 / CC5_RASTER_HEIGHT as f64;
-
-// --- the CC3 §2.1 `grade709` transfer pair, transcribed for CC5 §2.4 -------
 
 const SPEC_GRADE709_ALPHA: f64 = 1.099_296_8;
 const SPEC_GRADE709_BETA: f64 = 0.018_053_969;
@@ -446,15 +431,6 @@ fn spec_coverage_f64(matte: &MatteSpec, uv: [f64; 2], aspect: f64, rgb_in: [f32;
     inverted * (matte.mix as f64 / 10_000.0)
 }
 
-// ---------------------------------------------------------------------------
-// Matte specifications: the stored integers, in one place.
-//
-// A spec is *data*, not behaviour: it is both the source of the `matte_*`
-// parameters written onto an effect and the input to the `spec_*` reference
-// above, so a fixture states one window once and the two implementations it
-// compares can never be handed different windows.
-// ---------------------------------------------------------------------------
-
 /// `matte_window{j}_shape_token` for a rectangle (CC5 §2.2).
 const SHAPE_RECT: i64 = 1;
 /// `matte_window{j}_shape_token` for an ellipse (CC5 §2.2).
@@ -538,8 +514,6 @@ impl WindowSpec {
             self.feather,
             self.invert,
         ];
-        // The descriptor order is normative; assert it rather than trust it,
-        // because these two lists are zipped positionally.
         const SUFFIXES: [&str; 8] = [
             "shape_token",
             "center_x_basis_points",
@@ -749,10 +723,6 @@ impl MatteSpec {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CC5 §9.1: the two rasters.
-// ---------------------------------------------------------------------------
-
 /// The §9.1 containment raster: every channel in `[0.05, 0.95]`, strictly
 /// varying in `x`, in `y`, and in both.
 ///
@@ -824,10 +794,6 @@ fn frame_of(raster: &[[f32; 3]]) -> WorkingFrame {
 }
 
 const CC5_RESOLUTION: (u32, u32) = (CC5_RASTER_WIDTH, CC5_RASTER_HEIGHT);
-
-// ---------------------------------------------------------------------------
-// Effects.
-// ---------------------------------------------------------------------------
 
 /// A two-entry LUT library: asset 1 is an identity lattice for the technical
 /// input transform, asset 2 a mild non-identity look.
@@ -934,10 +900,6 @@ fn overflow_wheels(id: u64, matte: Option<&MatteSpec>) -> Effect {
     }
     color_node_effect(id, "color_wheels", parameters)
 }
-
-// ---------------------------------------------------------------------------
-// CPU reference and GPU rendering.
-// ---------------------------------------------------------------------------
 
 fn cpu_nodes(effects: &[Effect]) -> Vec<ColorNode> {
     crate::color_pipeline::resolve_color_nodes(effects).expect("CC5 fixture stack must resolve")
@@ -1075,10 +1037,6 @@ fn gpu_coverage(
         .expect("production GPU matte coverage readback")
 }
 
-// ---------------------------------------------------------------------------
-// CC5 §9.0 rule 7: the two-sided containment gate.
-// ---------------------------------------------------------------------------
-
 /// Counts of changed RGB samples on either side of a matte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ContainmentCounts {
@@ -1194,10 +1152,6 @@ fn assert_monitor_containment(actual: &[u8], baseline: &[u8], inside: &[bool], l
     }
 }
 
-// ---------------------------------------------------------------------------
-// Evidence.
-// ---------------------------------------------------------------------------
-
 fn emit_cc5_evidence(
     fixture: &str,
     backend: &str,
@@ -1235,10 +1189,6 @@ fn emit_cc5_evidence(
     println!("CC5_EVIDENCE {payload}");
     write_evidence_artefact(fixture, &payload);
 }
-
-// ---------------------------------------------------------------------------
-// §9.1: the rasters.
-// ---------------------------------------------------------------------------
 
 /// CC5 §9.1. Both rasters exercise what they claim to, the CPU reference's uv
 /// at `(x, y)` is the pixel centre, and the GPU's `@builtin(position)` maps to
@@ -1283,7 +1233,6 @@ fn cc5_rasters_cover_their_controls_and_land_on_pixel_centres() {
         }
     }
 
-    // --- the parity raster inherits CC3's value coverage ------------------
     let parity = cc5_parity_raster();
     assert_eq!(parity.len(), CC5_RASTER_PIXELS);
     let samples = cc3_parity_raster();
@@ -1323,7 +1272,6 @@ fn cc5_rasters_cover_their_controls_and_land_on_pixel_centres() {
         "the parity raster must vary along y"
     );
 
-    // --- the §9.2 window's edges cross block boundaries in both axes ------
     let matte = MatteSpec::window(WindowSpec::CENTRED);
     let covered = matte.covered_pixels(&parity);
     let mut inside_blocks = 0_u32;
@@ -1360,9 +1308,6 @@ fn cc5_rasters_cover_their_controls_and_land_on_pixel_centres() {
             split_columns += 1;
         }
     }
-    // The window's x edges fall at block columns 4 and 12 and its y edges at
-    // block rows 3 and 9 — interior in both axes, so both fully covered and
-    // fully uncovered blocks exist and no block straddles an edge.
     assert_eq!(
         inside_blocks,
         8 * 6,
@@ -1375,7 +1320,6 @@ fn cc5_rasters_cover_their_controls_and_land_on_pixel_centres() {
     );
     assert_eq!(split_columns, 0);
 
-    // --- the pixel-centre correspondence, on both implementations ---------
     let frame = frame_of(&field);
     for index in [0_usize, 1, 64, 1_234, CC5_RASTER_PIXELS - 1] {
         let actual = pixel_centre_uv(&frame, index);
@@ -1383,9 +1327,6 @@ fn cc5_rasters_cover_their_controls_and_land_on_pixel_centres() {
         assert_eq!(f64::from(actual[0]), f64::from(expected[0] as f32));
         assert_eq!(f64::from(actual[1]), f64::from(expected[1] as f32));
     }
-    // The GPU's `@builtin(position)` must land on the same centres: a
-    // half-pixel offset would shift the hard-edged covered set by a column and
-    // a row, so a byte-exact coverage comparison is the assertion.
     let gpu = fallback_gpu();
     let compositor = Compositor::new(gpu.context());
     let effects = [gain_wheels(1, 1_500, Some(&matte))];
@@ -1420,10 +1361,6 @@ fn cc5_rasters_cover_their_controls_and_land_on_pixel_centres() {
         }),
     );
 }
-
-// ---------------------------------------------------------------------------
-// §9.2.1: affected-pixel containment, the central gate.
-// ---------------------------------------------------------------------------
 
 /// The hand-derived covered set of the §9.2.1 centred window: columns
 /// `x ∈ 16..=47` crossed with rows `y ∈ 9..=26`.
@@ -1468,7 +1405,6 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
     let frame = frame_of(&raster);
     let matte = MatteSpec::window(WindowSpec::CENTRED);
 
-    // --- the covered set is hand-derived, twice --------------------------
     let expected = hand_derived_centred_window();
     let covered = matte.covered_pixels(&raster);
     assert_eq!(
@@ -1496,7 +1432,6 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
     let inverted_matte = MatteSpec::window(WindowSpec::CENTRED).inverted();
     let inverted = gain_wheels(1, 1_500, Some(&inverted_matte));
 
-    // --- CPU reference ----------------------------------------------------
     let baseline_linear = cpu_reference_linear(&frame, &[]);
     let baseline_monitor = cpu_reference_monitor(&frame, &[]);
     let cpu_linear = cpu_reference_linear(&frame, &cpu_nodes(std::slice::from_ref(&graded)));
@@ -1520,7 +1455,6 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
         );
     }
 
-    // --- the invert swaps the two sets exactly ---------------------------
     let complement = covered.iter().map(|covered| !covered).collect::<Vec<_>>();
     let cpu_inverted = cpu_reference_linear(&frame, &cpu_nodes(std::slice::from_ref(&inverted)));
     let inverted_counts =
@@ -1531,7 +1465,6 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
     );
     assert_eq!(inverted_counts.outside_pixels, CENTRED_WINDOW_PIXELS);
 
-    // --- the production GPU ----------------------------------------------
     let gpu = fallback_gpu();
     let compositor = Compositor::new(gpu.context());
     let gpu_baseline_linear = gpu_linear(&compositor, &frame, &[], None);
@@ -1564,7 +1497,6 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
         CENTRED_WINDOW_OUTSIDE_PIXELS
     );
 
-    // --- §2.5.5: −0.0 and a non-finite node output outside the matte ------
     let over_range = cc5_over_range_raster();
     let over_range_frame = frame_of(&over_range);
     let overflow_matte = MatteSpec::window(WindowSpec::CENTRED);
@@ -1579,9 +1511,6 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
             "the §2.5.5 samples must sit OUTSIDE the matte, or the clause is not exercised"
         );
     }
-    // The premise, from the independent f32 transcription of CC3 §2.2: with
-    // `slope = power = 16` the node output at the over-range sample really is
-    // non-finite, so `x + (node(x) − x)·0.0` would be NaN rather than `x`.
     let overflow_output = spec_wheels_apply_f32(16.0, 0.0, 16.0, 4.0);
     assert!(
         !overflow_output.is_finite(),
@@ -1617,10 +1546,6 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
         "a genuine negative outside the matte must stay negative"
     );
 
-    // The GPU half: `−0.0` cannot be asserted, because the working-surface
-    // upload normalises it to `+0.0` before the node stack runs (the no-node
-    // baseline already carries `+0.0`), so the gate is bit-equality against
-    // that baseline plus a genuine negative surviving.
     let gpu_over_range_baseline = gpu_linear(&compositor, &over_range_frame, &[], None);
     assert_eq!(
         gpu_over_range_baseline[negative_zero * 4].to_bits(),
@@ -1643,9 +1568,6 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
         gpu_over_range[negative_index * 4] < 0.0,
         "a genuine negative outside the matte must survive the GPU node stack"
     );
-    // And the un-matted stack really does reach the non-finite state on the
-    // GPU too, so the bit-identical outside pixel is a preserved input rather
-    // than a coincidence.
     let gpu_over_range_unmatted = gpu_linear(
         &compositor,
         &over_range_frame,
@@ -1681,10 +1603,6 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
         }),
     );
 }
-
-// ---------------------------------------------------------------------------
-// §9.2.2: window geometry anchors.
-// ---------------------------------------------------------------------------
 
 /// Compare a GPU coverage raster against the independent transcription's
 /// `round(255 · m)`.
@@ -1813,7 +1731,6 @@ fn cc5_window_geometry_anchors_are_hand_derived_on_cpu_and_gpu() {
     let gpu = fallback_gpu();
     let compositor = Compositor::new(gpu.context());
 
-    // --- the four anchors -------------------------------------------------
     let centred = assert_window_case(
         &compositor,
         &frame,
@@ -1832,8 +1749,6 @@ fn cc5_window_geometry_anchors_are_hand_derived_on_cpu_and_gpu() {
         196,
         "pixel_square_rect_rotation_0",
     );
-    // `hw·a = hh = 0.2` is 7.2 px each way, and the pixel offsets from the
-    // centre are half-integers, so `|d| ≤ 7.2` selects 14 columns × 14 rows.
     assert_eq!(covered_bounding_box(&square), Some((25, 38, 11, 24)));
 
     let rotated = assert_window_case(
@@ -1844,11 +1759,6 @@ fn cc5_window_geometry_anchors_are_hand_derived_on_cpu_and_gpu() {
         220,
         "pixel_square_rect_rotation_4500",
     );
-    // The aspect gate: at 45° the covered set is symmetric under
-    // `(dx, dy) → (dy, dx)` only if the aspect correction is applied, because
-    // without it the rotation shears the window into a parallelogram.
-    // `dx = x + 0.5 − 32`, `dy = y + 0.5 − 18`, so the partner of `(x, y)` is
-    // `(y + 14, x − 14)`.
     let mut transposed_pairs = 0_usize;
     for (index, is_covered) in rotated.iter().enumerate() {
         let x = index as u32 % CC5_RASTER_WIDTH;
@@ -1881,8 +1791,6 @@ fn cc5_window_geometry_anchors_are_hand_derived_on_cpu_and_gpu() {
         transposed_pairs, 220,
         "every covered pixel must have been checked against its transposed partner"
     );
-    // `|dx ± dy| ≤ 7.2√2 = 10.18234` with `dx ± dy` integers of odd sum, which
-    // counts 11·10 + 10·11 = 220 pixels.
     let mut hand_rotated = 0_usize;
     for index in 0..CC5_RASTER_PIXELS {
         let dx = (index as i64 % i64::from(CC5_RASTER_WIDTH)) * 2 + 1 - 64;
@@ -1919,8 +1827,6 @@ fn cc5_window_geometry_anchors_are_hand_derived_on_cpu_and_gpu() {
     }
     assert_eq!(quadrant, [7, 7, 7, 6, 6, 5, 3]);
     assert_eq!(quadrant.iter().sum::<usize>() * 4, 164);
-    // The margins: `(2i+1)² + (2j+1)² = 207.36` has no integer solution, so no
-    // pixel centre is on the boundary.
     let mut interior_margin = f64::INFINITY;
     let mut exterior_margin = f64::INFINITY;
     for (index, covered) in ellipse.iter().enumerate() {
@@ -1942,7 +1848,6 @@ fn cc5_window_geometry_anchors_are_hand_derived_on_cpu_and_gpu() {
         "smallest exterior margin is {exterior_margin} px², the contract derives 2.66"
     );
 
-    // --- the ellipse is circular in pixels -------------------------------
     let hw = f64::from(WindowSpec::PIXEL_SQUARE.hw as f32) / 10_000.0;
     let hh = f64::from(WindowSpec::PIXEL_SQUARE.hh as f32) / 10_000.0;
     let product = hw * SPEC_RASTER_ASPECT_F64;
@@ -1964,8 +1869,6 @@ fn cc5_window_geometry_anchors_are_hand_derived_on_cpu_and_gpu() {
             "the shader-consumed constants must be the same f32 bit pattern at aspect {aspect}"
         );
     }
-    // And the production resolver agrees on those constants, which is what the
-    // shader and the reference actually consume.
     let window = MatteWindow::from_params(
         MatteParams::from_effect(&gain_wheels(
             1,
@@ -2008,26 +1911,6 @@ fn cc5_window_geometry_anchors_are_hand_derived_on_cpu_and_gpu() {
         }),
     );
 }
-
-// ---------------------------------------------------------------------------
-// §9.0.2: every control at minimum, maximum, and an interior value has a
-// numeric expected value.
-//
-// Two legs, because the rule has two halves:
-//
-// 1. the **sweep** puts each of the 47 `matte_*` controls at its descriptor
-//    minimum, an interior value, and its descriptor maximum, and compares the
-//    production `Matte::coverage` against `spec_coverage_f64` — the
-//    independent f64 transcription of §2.3/§2.4/§2.5 — at nine probe pixels.
-//    Each control is *isolated*: the windows that are not under test are
-//    full-frame (weight `1` everywhere) and combined by intersection, so a
-//    `min` cannot mask the window being swept, and the qualifier legs are
-//    swept with no geometric restriction at all;
-// 2. the **anchors** state a hand-derived literal for the non-trivial bounds,
-//    with the derivation written out beside each one.
-//
-// Neither leg's expected value comes from the production code (§9.0 rule 1).
-// ---------------------------------------------------------------------------
 
 /// The nine probe pixels the §9.0.2 sweep compares at: the four corners, the
 /// four pixels straddling the raster centre, and one interior pixel that is
@@ -2110,8 +1993,6 @@ fn matte_level_base() -> MatteSpec {
 /// One swept control's resolved matte, or `None` when that value resolves the
 /// matte inactive (`matte_enabled = 0`, CC5 §2.6 rule 1).
 fn control_sweep_spec(name: &str, value: i64) -> Option<MatteSpec> {
-    // `matte_window{j}_*`, isolated: windows `0..j` are full-frame and the
-    // combine is `min`, so the resolved coverage is exactly window `j`.
     if let Some((index, suffix)) = swept_window_control(name) {
         let mut window = SWEPT_WINDOW;
         match suffix {
@@ -2130,9 +2011,6 @@ fn control_sweep_spec(name: &str, value: i64) -> Option<MatteSpec> {
         return Some(MatteSpec::window(window).with_windows(windows, COMBINE_INTERSECTION));
     }
 
-    // The nine qualifier scalars, isolated: one full-frame window so the
-    // matte stays active when the qualifier itself is switched off, and no
-    // other geometry, so the coverage is exactly the qualifier weight.
     let mut qualifier = SWEPT_QUALIFIER;
     let qualifier_only = |qualifier: Option<QualifierSpec>| {
         let mut spec = MatteSpec::window(FULL_FRAME_WINDOW);
@@ -2185,9 +2063,6 @@ fn control_sweep_spec(name: &str, value: i64) -> Option<MatteSpec> {
     // The five matte-level controls.
     let mut spec = matte_level_base();
     match name {
-        // `matte_enabled = 0` is the one value that makes the whole matte
-        // inactive: the node must then be byte-identical to its CC4 self, so
-        // there is no coverage function to compare (CC5 §2.6 rule 1).
         "matte_enabled" => {
             if value == 0 {
                 return None;
@@ -2249,7 +2124,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
     assert_eq!(names.len(), MATTE_PARAMETER_COUNT);
     assert_eq!(MATTE_PARAMETER_COUNT, 47);
 
-    // --- leg 1: the sweep -------------------------------------------------
     let mut worst_divergence = 0.0_f64;
     let mut worst_label = String::new();
     let mut swept_values = 0_usize;
@@ -2265,9 +2139,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
             swept_values += 1;
             let label = format!("{name}={value}");
             let Some(spec) = control_sweep_spec(name, value) else {
-                // The only inactive bound: the master switch off. Assert the
-                // production resolution agrees, because §2.6 rule 1 is what
-                // makes a pre-CC5 project render bit-identically.
                 let mut disabled = gain_wheels(1, 1_500, Some(&matte_level_base()));
                 disabled.parameters.insert(
                     "matte_enabled".to_owned(),
@@ -2320,57 +2191,28 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
         vec!["matte_enabled=0".to_owned()],
         "exactly one control bound may resolve the matte inactive"
     );
-    // 47 controls × 3 bounds is 141, less the 12 two-valued tokens whose
-    // interior `(min + max) / 2` collapses onto their minimum: `matte_enabled`,
-    // `matte_combine_token`, `matte_invert`, `matte_qualifier_enabled`, and
-    // `shape_token` plus `invert` on each of the four windows. 141 − 12 = 129.
-    // Asserted rather than described, so a widened bound is visible here.
     assert_eq!(swept_values, 129);
 
-    // --- leg 2: hand-derived literal anchors ------------------------------
-    //
-    // Every expectation below is derived from §2.3/§2.4 by hand, in the
-    // comment beside it, and is a literal rather than a call.
-
-    // (a) `center_x = -10000`, the minimum. The window spans
-    //     `u.x ∈ [cx - hw, cx + hw] = [-2.0, 0.0]` at the maximum half-width,
-    //     so its right edge is *exactly* the frame's left edge. Every pixel
-    //     centre is `(x + 0.5)/64 > 0`, so `|n.x| = |u.x + 1.0| / 1.0 > 1` and
-    //     `D > 1`: coverage is exactly 0 at all 2304 pixels.
     let off_frame_left = WindowSpec {
         cx: -10_000,
         hw: 10_000,
         hh: 10_000,
         ..WindowSpec::CENTRED
     };
-    // (b) `center_x = 20000`, the maximum. Mirror image: the window spans
-    //     `u.x ∈ [1.0, 3.0]`, its left edge is exactly the frame's right edge,
-    //     and `|n.x| = |u.x - 2.0| = 2.0 - u.x > 1` for every `u.x < 1`.
     let off_frame_right = WindowSpec {
         cx: 20_000,
         hw: 10_000,
         hh: 10_000,
         ..WindowSpec::CENTRED
     };
-    // (c) `half_width = 1`, the minimum: `hw = 0.0001`, i.e. 0.0064 px wide.
-    //     Pixel centres in x are `(2x + 1)/128`, so the closest approach to
-    //     `cx = 0.5` is `|63/128 - 64/128| = 1/128 = 0.0078125`, giving
-    //     `|n.x| = 0.0078125 / 0.0001 = 78.125 > 1`. Coverage is exactly 0.
     let hair_width = WindowSpec {
         hw: 1,
         ..WindowSpec::CENTRED
     };
-    // (d) `half_height = 1`, the minimum: pixel centres in y are
-    //     `(2y + 1)/72`, closest approach to `cy = 0.5` is
-    //     `|35/72 - 36/72| = 1/72 = 0.0138888…`, so
-    //     `|n.y| = 138.888… > 1`. Coverage is exactly 0.
     let hair_height = WindowSpec {
         hh: 1,
         ..WindowSpec::CENTRED
     };
-    // (e) `half_width = half_height = 10000`, the maximum: `hw = hh = 1.0`,
-    //     so `D = max(|Δx|, |Δy|) ≤ 0.5 < 1` everywhere. Coverage is exactly
-    //     1 at all 2304 pixels.
     for (label, window, expected, expected_covered) in [
         ("center_x_min_off_frame", off_frame_left, 0.0_f64, 0_usize),
         ("center_x_max_off_frame", off_frame_right, 0.0, 0),
@@ -2399,8 +2241,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
             }
         }
         assert_eq!(covered, expected_covered, "{label} covered count");
-        // And the independent transcription derives the same thing, so the
-        // literal is not merely what this build happens to compute.
         assert_eq!(
             spec.covered_pixels(&raster)
                 .iter()
@@ -2421,12 +2261,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
         "the closest y pixel centre is 138.889 basis points from the raster centre"
     );
 
-    // (f) `rotation = ±18000`, the two bounds: exactly ±180°. A rect and an
-    //     ellipse are both symmetric under a half turn — `d → −d` leaves
-    //     `max(|n.x|, |n.y|)` and `n.x² + n.y²` unchanged — which is the
-    //     contract's stated reason the range stops at ±180. So the covered
-    //     set at ±18000 must be *identical* to the set at 0, i.e. the §9.2.2
-    //     pixel-square anchor of 196 pixels.
     let upright = MatteSpec::window(WindowSpec::PIXEL_SQUARE).covered_pixels(&raster);
     assert_eq!(upright.iter().filter(|covered| **covered).count(), 196);
     for rotation in [18_000_i64, -18_000] {
@@ -2447,16 +2281,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
         }
     }
 
-    // (g) `feather = 10000`, the maximum: `f = 1.0`, so
-    //     `w = 1 - smoothstep(0, 2, D)` and the band spans `D ∈ [0, 2]`.
-    //     On the centred 2500/2500 window, `D = max(|Δx|, |Δy|) / 0.25 < 2`
-    //     for every `u ∈ (0, 1)²`, so every pixel is inside the band.
-    //     At pixel (0, 0): `u = (0.5/64, 0.5/36)`, `Δx = -0.4921875`,
-    //     `Δy = -0.4861111…`, so `n = (-1.96875, -1.9444…)` and
-    //     `D = 1.96875` exactly (dyadic). Then `t = D/2 = 63/64`,
-    //     `t² = 3969/4096`, `3 - 2t = 33/32`, and
-    //     `smoothstep = 3969·33 / (4096·32) = 130977/131072`, so
-    //     `w = 95/131072 = 0.00072479248046875` — exact in f32.
     let feathered = MatteSpec::window(WindowSpec::CENTRED.with_feather(10_000));
     let resolved = production_matte(&feathered).expect("an active matte");
     let corner = resolved.coverage(pixel_centre_uv(&frame, 0), aspect, raster[0]);
@@ -2474,9 +2298,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
         CC5_RASTER_PIXELS,
         "with f = 1.0 the affected set is every pixel with D < 2, which is the whole raster"
     );
-    //     At `D = 1` exactly the band is symmetric, so `w = 0.5`; at `D = 0`,
-    //     `w = 1`. `D = 1` is not a pixel centre on this raster, so both are
-    //     asserted on the resolved window at a synthetic uv.
     let wide_feather = feather_window(10_000);
     for (distance, expected) in [(0.0_f64, 1.0_f32), (1.0, 0.5)] {
         let weight = wide_feather.weight(feather_uv(distance), aspect);
@@ -2487,26 +2308,8 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
         );
     }
 
-    // (h) `hue_center = 35999`, the maximum: 359.99°. The §9.2.5 red anchor
-    //     `e = (0.8, 0.2, 0.2)` has `M = r`, `C = 0.6`, `H = 0°`, so
-    //     `dh = |0 - 359.99| = 359.99`, folded to `min(359.99, 0.01) = 0.01`.
-    //     With `hue_width = 0` (its minimum): `0.01 > 0`, so `h = 0`.
-    //     With `hue_width = 100` (1.00°): `0.01 ≤ 1`, so `h = 1`.
-    //     This is the seam: a hue leg that could not wrap would report 359.99.
     const RED_ANCHOR: [f32; 3] = [0.8, 0.2, 0.2];
-    // (i) `hue_softness = 18000`, the maximum: 180°. With `hue_center = 0`
-    //     and `hue_width = 0`, `h = 1 - smoothstep(0, 180, dh)`. The anchor
-    //     `e = (0.6, 0.8, 0.4)` has `M = g = 0.8`, `mn = 0.4`, `C = 0.4`, and
-    //     `(b - r)/C = -0.5`, so `H = 60·(-0.5 + 2) = 90°` exactly. Then
-    //     `t = 90/180 = 0.5`, `smoothstep = 0.25·(3 - 1) = 0.5`, and
-    //     `h = 0.5` exactly.
     const GREEN_ANCHOR: [f32; 3] = [0.6, 0.8, 0.4];
-    // (j) and (k), the saturation and luma band extremes.
-    //     `e = (0.5, 0.5, 0.5)`: `C = 0`, so `S = 0`, and
-    //     `Y = 0.5·(0.2126 + 0.7152 + 0.0722) = 0.5`.
-    //     `e = (0.8, 0.0, 0.0)`: `mn = 0`, so `S = C/M = 1`.
-    //     `e = (0.0, 0.0, 0.0)`: `M = 0`, so `S = 0` by the explicit zero
-    //     rule, and `Y = 0`.
     const GREY_ANCHOR: [f32; 3] = [0.5, 0.5, 0.5];
     const PURE_RED_ANCHOR: [f32; 3] = [0.8, 0.0, 0.0];
     const BLACK_ANCHOR: [f32; 3] = [0.0, 0.0, 0.0];
@@ -2546,9 +2349,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
             GREEN_ANCHOR,
             0.5,
         ),
-        // (j) the saturation band at both extremes, hard and soft.
-        //     `band(0, 0, 0, 0) = 1` — the low and high edges coincide at the
-        //     minimum and the grey anchor sits exactly on them.
         (
             "saturation_band_pinned_at_min_selects_grey",
             QualifierSpec {
@@ -2570,8 +2370,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
             RED_ANCHOR,
             0.0,
         ),
-        //     `band(1, 1, 1, 0) = 1`: both edges at the maximum, and
-        //     `e = (0.8, 0, 0)` has `S` exactly 1.
         (
             "saturation_band_pinned_at_max_selects_full_saturation",
             QualifierSpec {
@@ -2582,10 +2380,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
             PURE_RED_ANCHOR,
             1.0,
         ),
-        //     Both edges at the maximum with softness at *its* maximum:
-        //     `band(v, 1, 1, 1) = min(smoothstep(0, 1, v), 1 - smoothstep(1, 2, v))`.
-        //     At `S = 0.75` the right factor is 1 and the left is
-        //     `0.75²·(3 - 1.5) = 0.5625·1.5 = 0.84375` — exact in f32.
         (
             "saturation_softness_max_shoulder",
             QualifierSpec {
@@ -2608,8 +2402,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
             RED_ANCHOR,
             0.0,
         ),
-        // (k) the luma band at both extremes.
-        //     `band(0, 0, 0, 0) = 1` on the black anchor, `Y = 0`.
         (
             "luma_band_pinned_at_min_selects_black",
             QualifierSpec {
@@ -2631,8 +2423,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
             GREY_ANCHOR,
             0.0,
         ),
-        //     Both edges at the maximum with softness at its maximum:
-        //     `band(0.5, 1, 1, 1) = min(smoothstep(0, 1, 0.5), 1) = 0.25·2 = 0.5`.
         (
             "luma_softness_max_shoulder",
             QualifierSpec {
@@ -2673,8 +2463,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
             (f64::from(first) - f64::from(expected)).abs() <= f64::from(QUALIFIER_ANCHOR_TOLERANCE),
             "{label}: the production coverage is {first} and the hand derivation gives {expected}"
         );
-        // The independent transcription must land on the same literal, so the
-        // derivation is checked twice rather than trusted once.
         let transcribed = spec_qualifier_weight_f64(&qualifier, linear);
         assert!(
             (transcribed - f64::from(expected)).abs() <= f64::from(QUALIFIER_ANCHOR_TOLERANCE),
@@ -2689,8 +2477,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
             "transcription": transcribed,
         }));
     }
-    // The two selector premises the (h)–(k) derivations rest on, asserted from
-    // the transcription rather than assumed.
     let (red_saturation, _, red_hue) = spec_selectors_f64(qualifier_input(RED_ANCHOR));
     assert!((red_saturation - 0.75).abs() <= 1e-6, "{red_saturation}");
     assert!(
@@ -2706,27 +2492,17 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
         "the green anchor's hue is 90°, not {green_hue:?}"
     );
 
-    // --- leg 3: the GPU agrees at an off-frame centre and at half_width = 1 -
-    //
-    // Both cases pair the extreme window with an ordinary one under a union,
-    // so the expected raster is non-uniform and a degenerate window that
-    // returned `NaN` — which `max` would propagate — could not pass.
     let gpu = fallback_gpu();
     let compositor = Compositor::new(gpu.context());
     let right_half = WindowSpec::CENTRED.with_centre(7_500, 5_000);
     let gpu_cases = [
         (
-            // The off-frame window contributes exactly 0 at every pixel, so
-            // `max` leaves the right-hand window alone: columns 32..=63 by
-            // rows 9..=26, 32 × 18 = 576 pixels.
             "off_frame_centre_union",
             MatteSpec::window(off_frame_left)
                 .with_windows(vec![off_frame_left, right_half], COMBINE_UNION),
             (32_u32, 63_u32, 9_u32, 26_u32),
         ),
         (
-            // The 1-basis-point window contributes exactly 0, so `max` leaves
-            // the centred window alone: columns 16..=47 by rows 9..=26.
             "hair_half_width_union",
             MatteSpec::window(hair_width)
                 .with_windows(vec![hair_width, WindowSpec::CENTRED], COMBINE_UNION),
@@ -2810,8 +2586,6 @@ fn cc5_every_matte_control_bound_matches_a_hand_derived_expected_value() {
 /// which would clamp them back into range before the window ever resolved.
 #[test]
 fn cc5_degenerate_window_half_extents_weigh_exactly_zero() {
-    // Reachable-through-operations premise, stated so the direct construction
-    // below is justified rather than convenient.
     let descriptor = effect_descriptor("color_wheels").expect("the descriptor exists");
     for suffix in ["half_width_basis_points", "half_height_basis_points"] {
         let name = format!("matte_window0_{suffix}");
@@ -2866,9 +2640,6 @@ fn cc5_degenerate_window_half_extents_weigh_exactly_zero() {
                         feather_bp: feather,
                         invert,
                     });
-                    // The invert is a true complement, so a degenerate window
-                    // is exactly 0 and its complement exactly 1 — no epsilon,
-                    // no NaN, and no `-0.0`, which `to_bits` would catch.
                     let expected: f32 = if invert == 1 { 1.0 } else { 0.0 };
                     for uv in probes {
                         let weight = window.weight(uv, SPEC_RASTER_ASPECT_F64 as f32);
@@ -2886,9 +2657,6 @@ fn cc5_degenerate_window_half_extents_weigh_exactly_zero() {
     }
     assert_eq!(cases, 6 * 2 * 3 * 2);
 
-    // And a degenerate window cannot poison a combine: `max` with an exact 0
-    // and `min` with an exact 1 are both the identity, which is only true
-    // because the weights above are exact.
     let degenerate = MatteWindow::from_params(&kinewright_core::MatteWindowParams {
         half_width_bp: 0,
         ..kinewright_core::MatteWindowParams::NEUTRAL
@@ -2902,10 +2670,6 @@ fn cc5_degenerate_window_half_extents_weigh_exactly_zero() {
         assert_eq!(a.min(b).to_bits(), a.to_bits(), "intersection at {uv:?}");
     }
 }
-
-// ---------------------------------------------------------------------------
-// §9.2.3: feather.
-// ---------------------------------------------------------------------------
 
 /// A window whose half-height is a dyadic `0.3125`, so a dyadic uv offset
 /// produces an **exactly representable** distance `D = dy / 0.3125`.
@@ -2956,7 +2720,6 @@ fn feather_window(feather: i64) -> MatteWindow {
 fn cc5_feather_anchors_and_symmetry_match_the_contract() {
     let aspect = CC5_RASTER_WIDTH as f32 / CC5_RASTER_HEIGHT as f32;
 
-    // --- the non-dyadic feather = 4000 case -------------------------------
     let soft = feather_window(4_000);
     let w_08 = soft.weight(feather_uv(0.8), aspect);
     let w_10 = soft.weight(feather_uv(1.0), aspect);
@@ -2979,7 +2742,6 @@ fn cc5_feather_anchors_and_symmetry_match_the_contract() {
          would be measuring the same thing twice"
     );
 
-    // --- the dyadic feather = 2500 control case ---------------------------
     let dyadic = feather_window(2_500);
     assert_eq!(
         dyadic.weight(feather_uv(0.875), aspect).to_bits(),
@@ -2994,7 +2756,6 @@ fn cc5_feather_anchors_and_symmetry_match_the_contract() {
         0.156_25_f32.to_bits()
     );
 
-    // --- the complement symmetry `w(1 − δ) + w(1 + δ) = 1` ----------------
     let mut symmetry = Vec::new();
     for (label, window) in [("feather_4000", &soft), ("feather_2500", &dyadic)] {
         for delta in [0.1_f64, 0.2, 0.4] {
@@ -3010,18 +2771,13 @@ fn cc5_feather_anchors_and_symmetry_match_the_contract() {
         }
     }
 
-    // --- the `f == 0` hard branch -----------------------------------------
     let hard = feather_window(0);
     assert_eq!(hard.weight(feather_uv(0.9375), aspect), 1.0);
     assert_eq!(hard.weight(feather_uv(1.0), aspect), 1.0);
     assert_eq!(hard.weight(feather_uv(1.0625), aspect), 0.0);
 
-    // --- the affected set is exactly `{D < 1.4}` --------------------------
     let raster = cc5_field_raster();
     let frame = frame_of(&raster);
-    // Quarter-frame extents put the whole `f = 0.4` band on the raster, so
-    // the affected set really is bounded by `D < 1.4` rather than by the
-    // raster edge.
     let feathered = WindowSpec::CENTRED.with_feather(4_000);
     let matte = MatteSpec::window(feathered);
     let covered = matte.covered_pixels(&raster);
@@ -3078,10 +2834,6 @@ fn cc5_feather_anchors_and_symmetry_match_the_contract() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §9.2.4: combine.
-// ---------------------------------------------------------------------------
-
 /// CC5 §9.2.4. Union and intersection are hand-derived by inclusion–exclusion
 /// and asserted on the CPU reference and on the GPU, and a per-window invert
 /// inside a union is asserted separately.
@@ -3092,9 +2844,6 @@ fn cc5_window_combine_is_hand_derived_on_cpu_and_gpu() {
     let gpu = fallback_gpu();
     let compositor = Compositor::new(gpu.context());
 
-    // Window A covers columns 16..=47; window B, centred at 7500, covers
-    // columns 32..=63. Both cover rows 9..=26, so the overlap is columns
-    // 32..=47 — 16 columns × 18 rows = 288 pixels.
     let a = WindowSpec::CENTRED;
     let b = WindowSpec::CENTRED.with_centre(7_500, 5_000);
     let union = MatteSpec::window(a).with_windows(vec![a, b], COMBINE_UNION);
@@ -3125,8 +2874,6 @@ fn cc5_window_combine_is_hand_derived_on_cpu_and_gpu() {
         }
     }
 
-    // --- a per-window invert inside a union -------------------------------
-    // `A ∪ ¬B` is everything except `B \ A`: 2304 − (576 − 288) = 2016.
     let inverted = MatteSpec::window(a).with_windows(vec![a, b.inverted()], COMBINE_UNION);
     let inverted_covered = assert_matte_case(
         &compositor,
@@ -3168,10 +2915,6 @@ fn cc5_window_combine_is_hand_derived_on_cpu_and_gpu() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §9.2.5: the qualifier.
-// ---------------------------------------------------------------------------
-
 /// The linear triple whose `grade709` encoding is `e`, fed to the qualifier
 /// exactly as CC5 §9.2.5 specifies.
 fn qualifier_input(e: [f32; 3]) -> [f32; 3] {
@@ -3190,7 +2933,6 @@ fn resolved_qualifier(spec: QualifierSpec) -> crate::color_pipeline::MatteQualif
 /// degenerate band — has a hand-derived numeric expected value.
 #[test]
 fn cc5_qualifier_anchors_match_the_hand_derived_values() {
-    // --- the selectors of the contract's two chromatic anchors ------------
     const RED_ANCHOR: [f32; 3] = [0.8, 0.2, 0.2];
     const WRAP_ANCHOR: [f32; 3] = [0.8, 0.2, 0.35];
     const GREY_ANCHOR: [f32; 3] = [0.5, 0.5, 0.5];
@@ -3213,7 +2955,6 @@ fn cc5_qualifier_anchors_match_the_hand_derived_values() {
     assert!((grey_luma - 0.5).abs() < 1.0e-6);
     assert_eq!(grey_hue, None, "C == 0 leaves the hue undefined");
 
-    // --- the anchor table --------------------------------------------------
     struct Anchor {
         label: &'static str,
         input: [f32; 3],
@@ -3242,8 +2983,6 @@ fn cc5_qualifier_anchors_match_the_hand_derived_values() {
             expected: 1.0,
         },
         Anchor {
-            // dh = min(343, 17) = 17; t = (17 − 10)/10 = 0.7;
-            // smoothstep = 0.49·1.6 = 0.784; h = 1 − 0.784 = 0.216.
             label: "hue_wraparound_shoulder",
             input: wrap,
             qualifier: QualifierSpec {
@@ -3271,8 +3010,6 @@ fn cc5_qualifier_anchors_match_the_hand_derived_values() {
             expected: 1.0,
         },
         Anchor {
-            // S = 0.75 against band 0.8..1.0 with softness 0.1:
-            // min(smoothstep(0.7, 0.8, 0.75), 1) = min(0.5, 1) = 0.5.
             label: "saturation_shoulder",
             input: red,
             qualifier: QualifierSpec {
@@ -3303,8 +3040,6 @@ fn cc5_qualifier_anchors_match_the_hand_derived_values() {
             anchor.label,
             anchor.expected
         );
-        // And the independent f64 transcription reproduces the same anchor,
-        // so the number above is the contract's rather than the code's.
         let spec = spec_qualifier_weight_f64(&anchor.qualifier, anchor.input);
         assert!(
             (spec - f64::from(anchor.expected)).abs() <= f64::from(QUALIFIER_ANCHOR_TOLERANCE),
@@ -3319,7 +3054,6 @@ fn cc5_qualifier_anchors_match_the_hand_derived_values() {
         }));
     }
 
-    // --- the degenerate band is reported, not clamped ---------------------
     let degenerate = gain_wheels(
         1,
         1_500,
@@ -3362,10 +3096,6 @@ fn cc5_qualifier_anchors_match_the_hand_derived_values() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §9.2.6: mix and invert.
-// ---------------------------------------------------------------------------
-
 fn resolved_matte(matte: &MatteSpec) -> Option<Matte> {
     Matte::from_params(&MatteParams::from_effect(&gain_wheels(
         1,
@@ -3381,7 +3111,6 @@ fn resolved_matte(matte: &MatteSpec) -> Option<Matte> {
 fn cc5_mix_and_invert_scale_the_coverage_exactly() {
     let aspect = CC5_RASTER_WIDTH as f32 / CC5_RASTER_HEIGHT as f32;
 
-    // --- m_raw = 0.5 at D = 1, scaled by mix = 6000 -----------------------
     let feathered = FEATHER_WINDOW.with_feather(2_500);
     let scaled = MatteSpec::window(feathered).with_mix(6_000);
     let matte = resolved_matte(&scaled).expect("an enabled, non-neutral matte resolves");
@@ -3393,9 +3122,6 @@ fn cc5_mix_and_invert_scale_the_coverage_exactly() {
         "m_raw = 0.5 at mix 6000 must resolve to m = 0.3, measured {coverage}"
     );
 
-    // --- `out = x + (node(x) − x)·m` on three raster samples --------------
-    // The node output is the independent f32 transcription of CC3 §2.2 with
-    // `slope = 1.5`, `offset = 0`, `power = 1`, not a call into the pipeline.
     let graded = gain_wheels(1, 1_500, Some(&scaled));
     let nodes = cpu_nodes(std::slice::from_ref(&graded));
     let mut blended = Vec::new();
@@ -3413,7 +3139,6 @@ fn cc5_mix_and_invert_scale_the_coverage_exactly() {
         blended.push(json!({"input": sample, "output": actual}));
     }
 
-    // --- invert on m_raw = 0.15625 ----------------------------------------
     let inverted = MatteSpec::window(feathered).inverted();
     let inverted_matte = resolved_matte(&inverted).expect("an inverted matte resolves");
     let inverted_coverage = inverted_matte.coverage(feather_uv(1.125), aspect, sample);
@@ -3423,7 +3148,6 @@ fn cc5_mix_and_invert_scale_the_coverage_exactly() {
         "matte_invert on m_raw = 0.15625 must be exactly 0.84375"
     );
 
-    // --- mix = 0 makes the node inactive ----------------------------------
     let excluded = gain_wheels(
         1,
         1_500,
@@ -3474,10 +3198,6 @@ fn cc5_mix_and_invert_scale_the_coverage_exactly() {
         }),
     );
 }
-
-// ---------------------------------------------------------------------------
-// §9.2.7: keyframed window motion.
-// ---------------------------------------------------------------------------
 
 /// The clip-local frame the §9.2.7 motion ends on.
 const KEYFRAME_LAST_FRAME: i64 = 99;
@@ -3564,8 +3284,6 @@ fn cc5_keyframed_window_motion_moves_the_covered_set() {
         }
     }
 
-    // At frame 0 the centre is 2500, so `u.x ∈ [0, 0.5]` selects columns
-    // 0..=31; at the last frame the centre is 7500 and it selects 32..=63.
     assert_eq!(covered_bounding_box(&first), Some((0, 31, 9, 26)));
     assert_eq!(covered_bounding_box(&last), Some((32, 63, 9, 26)));
     assert_eq!(first.iter().filter(|covered| **covered).count(), 576);
@@ -3594,7 +3312,6 @@ fn cc5_keyframed_window_motion_moves_the_covered_set() {
         assert_coverage_matches(&coverage, &expected, true, &format!("gpu_frame_{local}"));
     }
 
-    // --- a token accepts `Hold` keyframes only ----------------------------
     let mut rejected = document.clone();
     let error = kinewright_core::Operation::SetEffectKeyframes {
         clip: ClipId(1),
@@ -3654,10 +3371,6 @@ fn cc5_keyframed_window_motion_moves_the_covered_set() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §9.2.13: buffer layout, limits, and the ABI.
-// ---------------------------------------------------------------------------
-
 const GRADE_HEADER_BYTES: usize = 16;
 const GRADE_NODE_WORDS: usize = 16;
 /// CC5 §3.1: `v11` is the matte payload word offset, record word 15.
@@ -3713,7 +3426,6 @@ fn curves_effect(id: u64, points: &[(i64, i64)], matte: Option<&MatteSpec>) -> E
 /// aspect at every scale.
 #[test]
 fn cc5_buffer_layout_limits_and_abi_constants_hold() {
-    // --- the constants ----------------------------------------------------
     assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE, 32_768);
     assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, 1);
     assert_eq!(
@@ -3726,7 +3438,6 @@ fn cc5_buffer_layout_limits_and_abi_constants_hold() {
         "the negotiated binding must hold the worst case"
     );
 
-    // --- sixteen curve-plus-matte nodes -----------------------------------
     let matte = MatteSpec::window(WindowSpec::CENTRED);
     let stack = (0..kinewright_core::COLOR_NODE_LIMIT_PER_LAYER)
         .map(|index| {
@@ -3784,7 +3495,6 @@ fn cc5_buffer_layout_limits_and_abi_constants_hold() {
         "matte block word 5 is the host-supplied raster aspect a = W/H"
     );
 
-    // --- `technical_lut` never carries a matte ----------------------------
     let store = TempDirectory::new("cc5-limits");
     let luts = fixture_luts(&store);
     let lut_stack = vec![
@@ -3811,8 +3521,6 @@ fn cc5_buffer_layout_limits_and_abi_constants_hold() {
         0.0,
         "the matte-carrying node beside it still points at its block"
     );
-    // A matte parameter is not even in the technical_lut descriptor, so
-    // naming one there is the ordinary unknown-parameter rejection.
     let descriptor = effect_descriptor("technical_lut").expect("the descriptor exists");
     assert!(
         !descriptor
@@ -3822,9 +3530,6 @@ fn cc5_buffer_layout_limits_and_abi_constants_hold() {
         "technical_lut must carry no matte parameter"
     );
 
-    // --- the layer quad's pixel aspect is the output raster aspect --------
-    // The quad is scaled uniformly in NDC, so a window that is circular in
-    // pixels stays circular at every scale and its covered set simply scales.
     let raster = cc5_field_raster();
     let frame = frame_of(&raster);
     let gpu = fallback_gpu();
@@ -3881,10 +3586,6 @@ fn cc5_buffer_layout_limits_and_abi_constants_hold() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §9.2.8: CPU/GPU parity.
-// ---------------------------------------------------------------------------
-
 /// The §9.2.8 stack of a parity case, plus the baseline the containment gate
 /// measures against.
 struct ParityCase {
@@ -3902,8 +3603,6 @@ struct ParityCase {
 fn parity_cases() -> Vec<ParityCase> {
     let window = MatteSpec::window(WindowSpec::CENTRED);
     let qualifier = MatteSpec::qualifier(QualifierSpec {
-        // A wide luma band with soft shoulders, so the parity raster's 24
-        // levels straddle both shoulders rather than sitting in the interior.
         luma_low: 2_000,
         luma_high: 7_000,
         luma_softness: 1_500,
@@ -3976,8 +3675,6 @@ fn parity_cases() -> Vec<ParityCase> {
                     parameters
                 }),
             ],
-            // Outside the matte only the technical input transform runs, so
-            // that is the baseline the containment gate must compare against.
             baseline: vec![color_node_effect(
                 1,
                 "technical_lut",
@@ -4046,8 +3743,6 @@ fn assert_cc5_gpu_parity(gpu: &FixtureGpu) {
             case.label
         );
         assert_linear_parity(&linear, case.label);
-        // And the GPU obeys containment against its own baseline, so a
-        // shader-side leak cannot hide behind the CPU/GPU tolerance.
         let gpu_baseline = gpu_linear(&compositor, &frame, &case.baseline, library);
         assert_matte_containment(
             &actual_linear,
@@ -4056,10 +3751,6 @@ fn assert_cc5_gpu_parity(gpu: &FixtureGpu) {
             &format!("{}_gpu", case.label),
         );
 
-        // CC5 §12: the hue-sector-boundary divergence is recorded, not
-        // assumed. Patterns 4, 5, and 6 (cyan, magenta, yellow) attain their
-        // maximum in two channels at once, which is exactly the tie the
-        // written branch order resolves.
         let mut sector_divergence = 0.0_f32;
         for index in 0..CC5_RASTER_PIXELS {
             let block_x = (index as u32 % CC5_RASTER_WIDTH) / CC5_PARITY_BLOCK_WIDTH;
@@ -4114,10 +3805,6 @@ fn cc5_gpu_compositor_matches_the_cpu_reference_on_hardware() {
     assert_cc5_gpu_parity(&hardware_gpu());
 }
 
-// ---------------------------------------------------------------------------
-// §9.2.12: migration and the `mask` regression.
-// ---------------------------------------------------------------------------
-
 /// Every one of the 47 `matte_*` parameters at its descriptor neutral.
 ///
 /// This is what a CC5 inspector writes when it resets a matte, and what a
@@ -4149,7 +3836,6 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
     let gpu = fallback_gpu();
     let compositor = Compositor::new(gpu.context());
 
-    // --- migration --------------------------------------------------------
     let cc4_era = gain_wheels(1, 1_500, None);
     assert_eq!(
         MATTE_PARAMETER_COUNT, 47,
@@ -4158,8 +3844,6 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
     let mut stored_neutral = vec![("gain_master_thousandths".to_owned(), 1_500_i64)];
     stored_neutral.extend(neutral_matte_parameters("color_wheels"));
     let migrated = color_node_effect(1, "color_wheels", stored_neutral);
-    // The neutral matte has the master switch off, so it is inactive; so is an
-    // *enabled* matte that selects everything at full strength (CC5 §2.6).
     let mut enabled_but_neutral = neutral_matte_parameters("color_wheels");
     for entry in &mut enabled_but_neutral {
         if entry.0 == "matte_enabled" {
@@ -4228,8 +3912,6 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
             "{label}: the GPU working surface must be to_bits-identical"
         );
     }
-    // A matte-free node is position-independent, which is the other half of
-    // §2.5.4: the reference must not take the blend path at all.
     let nodes = cpu_nodes(std::slice::from_ref(&cc4_era));
     let sample = [0.25_f32, 0.5, 0.75];
     let aspect = CC5_RASTER_WIDTH as f32 / CC5_RASTER_HEIGHT as f32;
@@ -4242,14 +3924,10 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
         );
     }
 
-    // --- the `mask` regression -------------------------------------------
     let mask = color_node_effect(
         9,
         "mask",
         vec![
-            // A rect offset to the left, so its edge at u.x = 0.6 falls
-            // *inside* the matte window's 0.25..=0.75: all four
-            // mask × matte quadrants are then non-empty.
             ("shape_token".to_owned(), 1),
             ("center_x_percent".to_owned(), 30),
             ("center_y_percent".to_owned(), 50),
@@ -4265,10 +3943,6 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
     let matte_only = gpu_linear(&compositor, &frame, std::slice::from_ref(&matted), None);
     let both = gpu_linear(&compositor, &frame, &[mask.clone(), matted.clone()], None);
     let covered = matte.covered_pixels(&raster);
-    // `render_working` composites the layer over the cleared, opaque target,
-    // so the layer's own alpha is observed as its premultiplied contribution:
-    // a masked-out pixel contributes exactly nothing. The §9.1 raster has no
-    // zero channel, so "contributed" and "did not contribute" are decidable.
     let mut quadrants = [0_usize; 4];
     for index in 0..CC5_RASTER_PIXELS {
         let inside_mask = mask_only[index * 4] != 0.0;
@@ -4299,8 +3973,6 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
             "the mask and the matte must overlap partially; quadrant {index} is empty"
         );
     }
-    // And no alpha byte moved anywhere: the composite alpha is opaque in every
-    // one of the three renders, mask or no mask, matte or no matte.
     for index in 0..CC5_RASTER_PIXELS {
         for render in [&mask_only, &matte_only, &both] {
             assert_eq!(
@@ -4331,10 +4003,6 @@ fn cc5_migration_is_bit_identical_and_the_mask_never_interacts() {
         }),
     );
 }
-
-// ---------------------------------------------------------------------------
-// §9.2.9: matte proof fidelity.
-// ---------------------------------------------------------------------------
 
 /// The raster as the working surface actually stores it.
 ///
@@ -4460,7 +4128,6 @@ fn cc5_matte_proof_matches_the_cpu_reference_coverage() {
         }));
     }
 
-    // --- typed refusals ---------------------------------------------------
     let matte_free = gain_wheels(1, 1_500, None);
     let excluded = gain_wheels(
         2,
@@ -4510,10 +4177,6 @@ fn cc5_matte_proof_matches_the_cpu_reference_coverage() {
         "the refusal must name the effect that was asked for: {missing}"
     );
 
-    // --- the production `Analysis` proof ----------------------------------
-    // CC5 §4.1's proof is rendered by the production compositor through
-    // `engine.rs`, so the fixture asserts the whole path, including the
-    // transfer-free readback and the opaque alpha.
     crate::initialize_ffmpeg().expect("FFmpeg must initialize for the CC5 proof fixture");
     let media = cc5_matte_source("cc5-matte-proof");
     let matte = MatteSpec::window(WindowSpec::CENTRED);
@@ -4588,10 +4251,6 @@ fn cc5_matte_proof_matches_the_cpu_reference_coverage() {
         }),
     );
 }
-
-// ---------------------------------------------------------------------------
-// §9.2.17: skin and product qualifier fixtures.
-// ---------------------------------------------------------------------------
 
 /// The §9.2.17 chart, in `grade709` encoding: four skin patches from light to
 /// deep, then a saturated red and a saturated cyan product patch.
@@ -4680,7 +4339,6 @@ fn cc5_skin_and_product_qualifiers_select_only_their_patch() {
     let gpu = fallback_gpu();
     let compositor = Compositor::new(gpu.context());
 
-    // --- the chart's selectors are the hand-derived arithmetic ------------
     let mut selectors = Vec::new();
     for (patch, (label, encoded, saturation, luma, hue)) in CHART_PATCHES.iter().enumerate() {
         let index = (0..CC5_RASTER_PIXELS)
@@ -4722,15 +4380,11 @@ fn cc5_skin_and_product_qualifiers_select_only_their_patch() {
     assert_eq!(surround_saturation, 0.0);
     assert_eq!(surround_hue, None, "the surround is achromatic");
 
-    // --- one skin band and one product hue --------------------------------
     let cases = [
         (
             "skin_tan",
             2_usize,
             QualifierSpec {
-                // 19.2° ± 5°, saturation 0.30..0.70, luma 0.38..0.44 — the
-                // band that separates `skin_tan` (Y = 0.4104) from
-                // `skin_medium` (0.5639) and `skin_deep` (0.2219).
                 hue_center: 1_920,
                 hue_width: 500,
                 sat_low: 3_000,
@@ -4744,8 +4398,6 @@ fn cc5_skin_and_product_qualifiers_select_only_their_patch() {
             "product_red",
             4_usize,
             QualifierSpec {
-                // 358° ± 3°, saturation 0.80..1.00: the red product only —
-                // the cyan is 189° and every skin patch is under 0.54.
                 hue_center: 35_800,
                 hue_width: 300,
                 sat_low: 8_000,
@@ -4819,10 +4471,6 @@ fn cc5_skin_and_product_qualifiers_select_only_their_patch() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §9.2.10: matte-scoped scopes.
-// ---------------------------------------------------------------------------
-
 /// CC5 §9.2.10, media half. The measured population of a matte-scoped scope is
 /// exactly the affected set, an ROI intersects it, and `compare_scope_evidence`
 /// refuses to difference a scoped result against an unscoped one.
@@ -4859,8 +4507,6 @@ fn cc5_matte_scoped_scopes_measure_exactly_the_affected_set() {
         "a matte-scoped scope requires both rasters to be the same size"
     );
 
-    // CC5 §4.3: the analysis-only copy sets `A = 255 if m > 0 else 0`. The
-    // document, the render, and the layer alpha are never touched.
     let scoped = kinewright_core::matte_scoped_frame(&monitor.image, &coverage.coverage)
         .expect("the coverage raster scopes the monitor frame");
     for (index, pixel) in scoped.pixels.as_chunks::<4>().0.iter().enumerate() {
@@ -4886,9 +4532,6 @@ fn cc5_matte_scoped_scopes_measure_exactly_the_affected_set() {
     );
     assert_eq!(evidence.metadata.roi_pixel_count, CC5_RASTER_PIXELS as u64);
 
-    // --- ROI ∩ matte ------------------------------------------------------
-    // The left half is columns 0..=31; the window covers 16..=47, so the
-    // intersection is columns 16..=31 across rows 9..=26: 16 × 18 = 288.
     let half = kinewright_core::ScopeRequest {
         roi: kinewright_core::NormalizedRoi::new(0, 0, 5_000, 10_000),
         ..kinewright_core::ScopeRequest::default()
@@ -4899,7 +4542,6 @@ fn cc5_matte_scoped_scopes_measure_exactly_the_affected_set() {
     assert_eq!(intersected.metadata.visible_pixel_count, 288);
     assert_eq!(intersected.metadata.transparent_pixel_count, 32 * 36 - 288);
 
-    // --- a scoped result is not comparable against an unscoped one --------
     let unscoped = kinewright_core::measure_scope(&monitor.image, 0, &request)
         .expect("the unscoped frame measures");
     let mut declared = evidence.clone();
@@ -4948,10 +4590,6 @@ fn cc5_matte_scoped_scopes_measure_exactly_the_affected_set() {
         }),
     );
 }
-
-// ---------------------------------------------------------------------------
-// §9.2.16: performance evidence.
-// ---------------------------------------------------------------------------
 
 /// The §9.2.16 raster: a full 1920 × 1080 frame, so the recorded time is the
 /// per-frame cost a colourist would actually pay.
@@ -5045,10 +4683,6 @@ fn record_cc5_performance(gpu: &FixtureGpu) {
         // Consume the output so the render cannot be optimized away.
         assert_eq!(output.rgba.len(), (width * height * 4) as usize);
     }
-    // An empty stack at the same resolution, so the readback and mapping cost
-    // the timing unavoidably includes can be subtracted rather than mistaken
-    // for shader time. A GPU timestamp query is not available through this
-    // path, so the difference is the honest statement of node-stack cost.
     let _ = render(&[]);
     let mut empty_samples = Vec::with_capacity(PERFORMANCE_SAMPLES);
     for _ in 0..PERFORMANCE_SAMPLES {
@@ -5058,8 +4692,6 @@ fn record_cc5_performance(gpu: &FixtureGpu) {
         assert_eq!(output.rgba.len(), (width * height * 4) as usize);
     }
     let empty_milliseconds = empty_samples.iter().copied().fold(f64::INFINITY, f64::min);
-    // The matte-free cost of the same sixteen nodes, so the matte's share of
-    // the frame is visible rather than inferred.
     let matte_free = (0..kinewright_core::COLOR_NODE_LIMIT_PER_LAYER)
         .map(|index| {
             curves_effect(
@@ -5098,9 +4730,6 @@ fn record_cc5_performance(gpu: &FixtureGpu) {
             "gate": "recorded evidence only; CC5 §9.2.16 states a soft budget on the hardware lane",
         "note": "the two node timings are not ordered a priori: CC5 §2.5.5's exact-zero early-out skips a matte-carrying node entirely wherever the coverage is 0, so the matte stack can cost less than the same nodes without mattes",
     });
-    // §9.2.16 is recorded evidence, so the field names are part of the
-    // contract: a renamed key breaks whatever reads the artefact to see a
-    // regression, silently. The manifest declares the same list.
     assert_eq!(
         measurements
             .as_object()
@@ -5141,16 +4770,6 @@ fn cc5_performance_evidence_is_recorded_on_software_fallback() {
 fn cc5_performance_evidence_is_recorded_on_hardware() {
     record_cc5_performance(&hardware_gpu());
 }
-
-// ---------------------------------------------------------------------------
-// §9.2.11: the tracked shot.
-//
-// CC5 §9.2.11 is split by crate. Media owns the generated clip, the analytic
-// box, the keyframed window, and the CPU/GPU containment of that window at
-// every frame; the `track_matte_window` tool — its observations, its smoothed
-// curves, its tolerances, and its prepared plan — is the agent crate's half,
-// and the manifest records that owner explicitly.
-// ---------------------------------------------------------------------------
 
 const TRACK_WIDTH: u32 = 640;
 const TRACK_HEIGHT: u32 = 360;
@@ -5385,9 +5004,6 @@ pub(crate) fn assert_tracked_window_contains_the_subject(
             .integer_parameter_at("matte_window0_center_y_basis_points", TimeCode(frame))
             .expect("a keyframed centre");
         let (left, top) = analytic_box_corner(frame);
-        // Every pixel of the box, not only its corners: the window is convex
-        // and axis aligned, but the fixture asserts the set rather than the
-        // argument.
         for y in top..top + TRACK_BOX {
             for x in left..left + TRACK_BOX {
                 let uv = [
@@ -5479,8 +5095,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
     let mut asset = crate::decode::probe_path(media.path(), kinewright_core::AssetId(1))
         .expect("the tracked shot should probe");
     assert_eq!(asset.resolution, Some((TRACK_WIDTH, TRACK_HEIGHT)));
-    // CC1 rejects an untagged source; the mux states BT.709 / limited
-    // explicitly, and the probe must report it rather than assume it.
     assert_eq!(
         asset.color_description.primaries,
         kinewright_core::ColorPrimaries::Bt709
@@ -5502,7 +5116,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
     let frames = decode_tracking_frames(media.path(), &description);
     assert_eq!(frames.len() as i64, TRACK_FRAMES);
 
-    // --- the realised box is the even-snapped analytic box ----------------
     let samples = tracking_sample_frames();
     assert_eq!(samples.len(), 21);
     assert_eq!(samples[0], 0);
@@ -5532,7 +5145,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
         }));
     }
 
-    // --- the keyframed window ---------------------------------------------
     let window = WindowSpec {
         shape: SHAPE_RECT,
         cx: 5_000,
@@ -5571,11 +5183,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
         .expect("the tracked centres are ordinary linear keyframes");
     }
 
-    // --- containment at every frame, on the CPU reference ------------------
-    //
-    // Run twice, against two different curves, because the margins §9.2.11
-    // budgets are budgets for *tracker lag* and a run against ground truth
-    // never spends any of them.
     let analytic_centres = samples
         .iter()
         .map(|frame| {
@@ -5597,9 +5204,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
         (TRACK_FRAMES * TRACK_BOX * TRACK_BOX) as u64
     );
     assert_eq!(analytic.worst_frame, 50);
-    // The *measured* worst margin, against a literal. The previous form of
-    // this assertion compared `1300 − 625` with `675`, which is constant
-    // arithmetic that cannot fail.
     assert!(
         (analytic.worst_margin_x_basis_points - TRACK_ANALYTIC_WORST_MARGIN_X_BASIS_POINTS).abs()
             <= 1.0e-6,
@@ -5615,18 +5219,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
         TRACK_ANALYTIC_WORST_MARGIN_Y_BASIS_POINTS
     );
 
-    // --- the simulated lagged curve ---------------------------------------
-    //
-    // The tracker does not observe ground truth. CC5 §9.2.11 budgets
-    // `1300 − 625 = 675` bp and `1800 − 1111 = 689` bp of margin against
-    // tracker error, and §5.2 states a *known systematic lag*: the median
-    // filter replaces the final sample with `median(o[n−3], o[n−2], o[n−1])`,
-    // so the last smoothed value lags a moving subject. This leg reproduces
-    // both: the analytic centres are perturbed by the contract's own raw
-    // tolerance (±200 bp) and put through core's
-    // `stabilize_tracked_centres_basis_points` with the tool's pinned
-    // constants — the same call `track_matte_window` makes — and the
-    // containment gate is run against the result.
     const MATTE_TRACK_DEAD_ZONE_BASIS_POINTS: i64 = 0;
     const MATTE_TRACK_MAX_STEP_BASIS_POINTS: i64 = 800;
     let raw_centres = analytic_centres
@@ -5668,9 +5260,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
     let smoothed_centres = (0..samples.len())
         .map(|index| [smoothed_axes[0][index], smoothed_axes[1][index]])
         .collect::<Vec<_>>();
-    // The lag the smoother costs, measured at the sample frames. §5.2 says the
-    // last sample is the worst case, and it is: both axes peak at sample 20,
-    // the median substitution at the end of the run.
     let mut lag = [0_i64, 0];
     let mut worst_lag_sample = [0_usize, 0];
     for (index, (smoothed, truth)) in smoothed_centres.iter().zip(&analytic_centres).enumerate() {
@@ -5722,12 +5311,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
         lagged.worst_margin_y_basis_points,
         TRACK_LAGGED_WORST_MARGIN_Y_BASIS_POINTS
     );
-    // The contract's budget is `half_extent − worst_case_offset`: 675 bp in x
-    // and 689 bp in y. Both measured curves must fit inside it — an assertion
-    // about a measurement, not about arithmetic — and the lagged run shows how
-    // much of it a legally noisy tracker actually spends: 192 bp of the 675 bp
-    // x budget survives, so the budget is consumed by the raw tolerance and
-    // the smoother lag together rather than by interpolation alone.
     for (label, margin, budget) in [
         (
             "analytic_x",
@@ -5756,7 +5339,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
         );
     }
 
-    // --- the GPU agrees, at both layer scales -----------------------------
     let aspect = TRACK_WIDTH as f32 / TRACK_HEIGHT as f32;
     let gpu = fallback_gpu();
     let compositor = Compositor::new(gpu.context());
@@ -5801,10 +5383,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
         );
     }
 
-    // CC5 §5.2's coordinate space: the matte is evaluated at the *layer* uv,
-    // so a scaled layer moves the coverage in the composite by
-    // `u_composite = 0.5 + (u_layer − 0.5)·scale`. The tool must convert; the
-    // fixture asserts the conversion the tool has to make.
     let probe = document.tracks[0].clips[0].effects[0].evaluated_at(TimeCode(50));
     let full = compositor
         .render_matte(
@@ -5879,25 +5457,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
         );
     }
 
-    // --- §5.2's offset leg -------------------------------------------------
-    //
-    // The scale case above cannot see a sign error on the offset, because a
-    // pure scale has no offset term. The forward map is
-    //
-    //     u_composite = scale·(u_layer − 0.5) + (offset_x, offset_y)/2 + 0.5
-    //
-    // and the compositor accumulates `params.offset_{x,y} += percent / 50`, so
-    // `y_percent = +20` gives `offset_y = 0.4` and moves the picture DOWN by
-    // `0.4/2 = 0.2` of the frame height: `0.2 · 360 = 72` px exactly. Likewise
-    // `x_percent = +20` moves it RIGHT by `0.2 · 640 = 128` px exactly. The
-    // vertex shader's `−offset_y` in NDC is already absorbed by the
-    // `uv.y = (1 − ndc.y)/2` flip, so there is **no** extra sign on
-    // `offset_y` — which is exactly what this leg exists to pin.
-    //
-    // Frame 0 is used rather than frame 50 because the analytic centre is
-    // `(5000, 5000)` there, so the shifted boxes stay well inside the raster
-    // and the expectation is an integer pixel translation rather than a
-    // clipped one.
     let at_zero = document.tracks[0].clips[0].effects[0].evaluated_at(TimeCode::ZERO);
     let transformed_bounds = |parameters: &[(&str, i64)]| {
         let mut effects = Vec::new();
@@ -5931,11 +5490,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
         bounds(&coverage)
     };
     let identity = transformed_bounds(&[]);
-    // The window at frame 0 is centred with `hw = 1300`, `hh = 1800`, so it
-    // spans `u.x ∈ [0.37, 0.63]` and `u.y ∈ [0.32, 0.68]`. In pixels that is
-    // `x ∈ [236.8, 403.2]` and `y ∈ [115.2, 244.8]`, and a pixel centre
-    // `(p + 0.5)` is inside exactly when `p ∈ 237..=402` and `p ∈ 115..=244`
-    // — hand-derived from §2.3.
     assert_eq!(
         identity,
         (237.0, 402.0, 115.0, 244.0),
@@ -5982,8 +5536,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
         ),
         "y_percent = -20 is the exact mirror of +20"
     );
-    // The combined case, asserted against the forward map itself rather than
-    // against a shift, so scale and offset cannot cancel each other's sign.
     let forward = |layer_pixel: f64, extent: f64, scale: f64, offset: f64| {
         let u_layer = (layer_pixel + 0.5) / extent;
         let u_composite = scale * (u_layer - 0.5) + offset / 2.0 + 0.5;
@@ -6019,10 +5571,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
              forward map predicts {expected}"
         );
     }
-    // …and against the hand-derived pixel box, so a fixture that reproduced
-    // the shader's sign error in its own formula could not pass either.
-    // `u.x ∈ [0.37, 0.63]` maps to `[0.635, 0.765]` → `x ∈ 406..=489`;
-    // `u.y ∈ [0.32, 0.68]` maps to `[0.61, 0.79]` → `y ∈ 220..=283`.
     assert_eq!(
         combined,
         (406.0, 489.0, 220.0, 283.0),
@@ -6075,10 +5623,6 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
         }),
     );
 }
-
-// ---------------------------------------------------------------------------
-// §9.0.4: the manifest.
-// ---------------------------------------------------------------------------
 
 /// Every CC5 test this file owns. The manifest is asserted to claim all of
 /// them, so a fixture cannot be orphaned or a manifest entry invented.
@@ -6282,7 +5826,6 @@ fn cc5_declared_test_names_exist_in_their_source_files() {
     let fixtures = cc5_test_source("crates/kinewright-media/src/cc5_fixtures.rs");
     let engine = cc5_test_source("crates/kinewright-media/src/engine.rs");
 
-    // --- both directions, for the two media sources -----------------------
     let declared_here = declared_test_names(fixtures, "cc5_");
     let mut expected_here = CC5_MEDIA_TESTS.map(str::to_owned).to_vec();
     expected_here.sort_unstable();
@@ -6301,9 +5844,6 @@ fn cc5_declared_test_names_exist_in_their_source_files() {
         actual_in_engine, expected_in_engine,
         "CC5_ENGINE_TESTS and the `cc5_*` tests engine.rs actually declares disagree"
     );
-    // The engine tests must match the `cc5` filter and must not be silently
-    // skippable: they take the panicking `fallback_gpu()` convention, not
-    // `fixture_gpu_or_skip()`, which passes when the skip opt-in is set.
     assert!(
         !engine.contains("fixture_gpu_or_skip"),
         "engine.rs must not use the silently-skipping GPU helper; the CC5 proofs use \
@@ -6316,7 +5856,6 @@ fn cc5_declared_test_names_exist_in_their_source_files() {
         );
     }
 
-    // --- every name the manifest claims exists in the source it names -----
     let manifest: Value = serde_json::from_str(include_str!("../tests/fixtures/cc5_manifest.json"))
         .expect("CC5 fixture manifest must be valid JSON");
     let mut verified = 0_usize;
@@ -6354,8 +5893,6 @@ fn cc5_declared_test_names_exist_in_their_source_files() {
             }
         }
     }
-    // The two §9.0.4 inventory tests are claimed by `manifest_self_test`
-    // rather than by a numbered item, so they are checked separately.
     for name in CC5_INVENTORY_TESTS {
         assert!(
             declares_test(fixtures, name),
@@ -6371,8 +5908,6 @@ fn cc5_declared_test_names_exist_in_their_source_files() {
         manifest["manifest_self_test"]["inventory_test"], CC5_INVENTORY_TESTS[1],
         "the manifest must name the test that ties its declared test names to their sources"
     );
-    // A count, so a manifest that quietly emptied its `tests` arrays cannot
-    // pass this test vacuously.
     assert!(
         verified >= 50,
         "only {verified} declared test names were verified; the manifest has lost entries"
@@ -6394,7 +5929,6 @@ fn cc5_manifest_declares_every_required_fixture_and_constant() {
         json!(kinewright_core::MANAGED_COLOR_NODE_NAMES)
     );
 
-    // --- §2.1 which kinds may carry a matte -------------------------------
     for name in kinewright_core::MANAGED_COLOR_NODE_NAMES {
         let declared = manifest["matte_capable_nodes"][name]
             .as_bool()
@@ -6422,7 +5956,6 @@ fn cc5_manifest_declares_every_required_fixture_and_constant() {
         );
     }
 
-    // --- §2.2 the generated control tables --------------------------------
     assert_eq!(manifest["matte_parameter_count"], MATTE_PARAMETER_COUNT);
     assert_eq!(manifest["matte_window_limit"], MATTE_WINDOW_LIMIT);
     let descriptor = effect_descriptor("color_wheels").expect("the descriptor exists");
@@ -6457,7 +5990,6 @@ fn cc5_manifest_declares_every_required_fixture_and_constant() {
         }
     }
 
-    // --- §9.1 rasters ------------------------------------------------------
     let rasters = &manifest["rasters"];
     assert_eq!(rasters["width"], CC5_RASTER_WIDTH);
     assert_eq!(rasters["height"], CC5_RASTER_HEIGHT);
@@ -6473,7 +6005,6 @@ fn cc5_manifest_declares_every_required_fixture_and_constant() {
         CENTRED_WINDOW_BASIS_POINTS
     );
 
-    // --- §9.2.2 and §9.2.4 anchors, recomputed from the transcription -----
     let raster = cc5_field_raster();
     let anchors = &manifest["window_anchors"];
     let count = |matte: &MatteSpec| {
@@ -6519,7 +6050,6 @@ fn cc5_manifest_declares_every_required_fixture_and_constant() {
         );
     }
 
-    // --- §3.1 buffer and ABI ----------------------------------------------
     let buffer = &manifest["buffer"];
     assert_eq!(
         buffer["compositor_required_storage_buffer_binding_size"],
@@ -6539,9 +6069,6 @@ fn cc5_manifest_declares_every_required_fixture_and_constant() {
         buffer["matte_payload_offset_word"],
         GRADE_NODE_MATTE_OFFSET_WORD
     );
-    // `GRADE_ABI_VERSION` is private to the compositor, so the manifest is
-    // asserted against the version the production serializer actually writes
-    // into `header.z` rather than against a restated literal.
     let empty = crate::compositor::grade_buffer_bytes_for(&[], None, CC5_RESOLUTION, None)
         .expect("an empty stack serializes");
     assert_eq!(
@@ -6556,7 +6083,6 @@ fn cc5_manifest_declares_every_required_fixture_and_constant() {
             <= COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE
     );
 
-    // --- §9.0.4 tolerances are the code constants -------------------------
     let tolerances = &manifest["tolerances"];
     assert_manifest_f64(
         tolerances,
@@ -6598,7 +6124,6 @@ fn cc5_manifest_declares_every_required_fixture_and_constant() {
         "the manifest must state that no tolerance excuses a changed pixel outside a matte"
     );
 
-    // --- §9.2.11 tracking, whose constants the agent crate owns -----------
     let tracking = &manifest["tracking"];
     assert_eq!(tracking["owner"], "kinewright-agent");
     assert_eq!(tracking["sample_frames"], json!(tracking_sample_frames()));
@@ -6627,7 +6152,6 @@ fn cc5_manifest_declares_every_required_fixture_and_constant() {
          must say so rather than restate them as media constants"
     );
 
-    // --- §9.2.16 performance ----------------------------------------------
     let performance = &manifest["performance"];
     assert_eq!(
         performance["resolution"],
@@ -6644,18 +6168,12 @@ fn cc5_manifest_declares_every_required_fixture_and_constant() {
             .is_some_and(|gate| gate.contains("recorded evidence only")),
         "§9.2.16 is recorded evidence, never a hard gate"
     );
-    // §9.2.16 is *recorded evidence*, so the field names the evidence payload
-    // uses are part of the contract: a renamed field silently breaks whatever
-    // reads the artefact to see a regression. The manifest declares them and
-    // `record_cc5_performance` asserts the payload it emits carries exactly
-    // these keys.
     assert_eq!(
         performance["evidence_fields"],
         json!(PERFORMANCE_EVIDENCE_FIELDS),
         "the manifest and the emitted §9.2.16 evidence disagree about the measurement field names"
     );
 
-    // --- the fixture inventory --------------------------------------------
     assert_eq!(
         manifest["required_evidence"],
         json!(CC5_EVIDENCE_FIXTURES),
@@ -6717,9 +6235,6 @@ fn cc5_manifest_declares_every_required_fixture_and_constant() {
             }
         }
     }
-    // The manifest must account for every media test, not merely a subset.
-    // The two inventory tests are §9.0.4 rather than §9.2 items, so they are
-    // claimed by `manifest_self_test` and declared here.
     for name in CC5_INVENTORY_TESTS {
         declared_media_tests.push(name.to_owned());
     }

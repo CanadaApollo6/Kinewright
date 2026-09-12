@@ -836,8 +836,6 @@ impl KinewrightApp {
             if self.record_dialog.microphone.is_none() {
                 self.record_dialog.microphone = devices.audio.first().cloned();
             }
-            // With several displays, default to the primary - recording
-            // every screen at once is the surprise, not the expectation.
             if self.record_dialog.monitor.is_none() && devices.monitors.len() > 1 {
                 self.record_dialog.monitor = devices
                     .monitors
@@ -1203,8 +1201,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_chosen_monitor_becomes_a_gdigrab_region_negative_offsets_included() {
-        // Real geometry: a display left of the primary sits at x = -2560,
-        // and gdigrab takes virtual-desktop coordinates raw (live-verified).
         let monitor = MonitorInfo {
             label: "Display 2 · 2560×1440".to_owned(),
             x: -2560,
@@ -1288,8 +1284,6 @@ HDMI-2 disconnected (normal left inverted right x axis y axis)\n";
             microphone: Some("Mic".to_owned()),
         });
         assert!(both.contains("-f dshow -i video=Integrated Camera:audio=Mic"));
-        // Webcams deliver VFR wall-clock timestamps; the output must be CFR
-        // or the editor's integer-frame math rejects cuts in the recording.
         assert!(both.contains("-fps_mode cfr -r 30"));
         let video_only = joined(&RecordingMode::Camera {
             camera: "Integrated Camera".to_owned(),

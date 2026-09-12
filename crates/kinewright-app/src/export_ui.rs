@@ -409,12 +409,6 @@ pub(crate) fn export_lut_preflight(
 /// bytes the project claims to own, reports `imported_reason`.
 fn storeless_availability(asset: &LutAsset, imported_reason: &str) -> LutAvailabilityStatus {
     if let LutAssetSource::Builtin { name } = &asset.source {
-        // A built-in never lives in a store, so whether the project has been
-        // saved cannot decide its availability: only this binary's bake can.
-        // A recorded hash that matches no bake is `changed`, naming both
-        // hashes, exactly as the store-backed resolver reports it — calling it
-        // `missing` with a `project_not_saved` reason would send the operator
-        // to save a project that would still not export (CC4 §2.3).
         return match BuiltinLook::from_name(name) {
             Some(builtin) if builtin.sha256() == asset.sha256 => LutAvailabilityStatus {
                 kind: LutAvailabilityKind::Verified,
@@ -462,10 +456,6 @@ fn storeless_availability(asset: &LutAsset, imported_reason: &str) -> LutAvailab
     }
 }
 
-// ---------------------------------------------------------------------------
-// CC6 §8.4: the post-export verification block
-// ---------------------------------------------------------------------------
-
 /// The one-word verdict of a verification.
 ///
 /// Four labels, three styles: an over-budget difference and a mis-tagged file
@@ -498,12 +488,6 @@ pub(crate) fn verification_status(verification: Option<&ExportVerification>) -> 
             color: color::STATUS_DANGER,
         };
     }
-    // `!technical_pass` is folded in here rather than given a fifth label:
-    // CC6 §3.8 gives a verification exactly two `Error`-severity codes,
-    // `delivery_tag_mismatch` — already answered above — and
-    // `decoded_difference_over_budget`, which is a budget overrun. A
-    // `technical_pass = false` that reaches this line is therefore
-    // budget-shaped, and §8.4 pins the four labels.
     if !verification.comparison.within_budgets || !verification.technical_pass {
         return VerificationStatus {
             label: "OVER BUDGET",
@@ -608,11 +592,6 @@ pub(crate) fn verification_lines(
         "PROBED TAGS · source {}",
         verification.tags.tag_source
     )));
-    // Every checked field, whether or not it disagrees — the same rows the
-    // Colour QC window draws, from the same two functions, so the two surfaces
-    // cannot describe one `DeliveryTagCheck` differently. A field that is right
-    // is evidence too, and a field the container has no syntax for is drawn in
-    // its own muted tone rather than as a wrong tag (CC6 §3.6).
     for (field, expected, probed) in crate::color_qc_ui::tag_field_rows(&verification.tags) {
         lines.push(VerificationLine {
             text: format!("{field} · expected {expected} · probed {probed}"),
@@ -635,8 +614,6 @@ pub(crate) fn verification_lines(
         });
     }
     for entry in &verification.tags.not_representable {
-        // Not a wrong tag: a field the container has no syntax for. Muted and
-        // labelled so it reads differently from a mismatch.
         lines.push(VerificationLine::muted(format!(
             "NOT REPRESENTABLE · {} · expected {} · {}",
             entry.field, entry.expected, entry.reason
@@ -744,10 +721,6 @@ pub(crate) fn verification_lines(
     lines
 }
 
-// ---------------------------------------------------------------------------
-// AU3 §6.5: the `Loudness` row
-// ---------------------------------------------------------------------------
-
 /// The loudness target one export job runs under (AU3 §6.5).
 ///
 /// `None` — the default — leaves `ExportSettings.loudness_normalization`
@@ -801,10 +774,6 @@ fn loudness_row(
     response
 }
 
-// ---------------------------------------------------------------------------
-// AU3 §6.6: the audio half of the verification block
-// ---------------------------------------------------------------------------
-
 /// Hundredths of a decibel with an explicit sign, for a **change** rather than
 /// a level: `+6.40 dB` of applied gain reads as a direction, `6.40` does not.
 #[must_use]
@@ -841,17 +810,11 @@ pub(crate) fn audio_verification_status(
             color: color::STATUS_WARNING,
         };
     };
-    // Severity first, target second: a target-less measurement carries no
-    // exceptions today (`delivery_audio_exceptions` returns an empty list), and
-    // if one ever reaches here it is evidence, not something a softer word
-    // should hide.
     if verification
         .exceptions
         .iter()
         .any(|exception| exception.severity == QaSeverity::Error)
     {
-        // The only `Error` a delivery audio verification can raise is
-        // `delivery_true_peak_over_ceiling` (AU3 §5.3), so the word names it.
         return VerificationStatus {
             label: "AUDIO OVER CEILING",
             color: color::STATUS_DANGER,
@@ -882,8 +845,6 @@ fn target_readings(
     target: LoudnessTarget,
 ) -> Vec<VerificationLine> {
     let integrated = measured.integrated_lufs_hundredths;
-    // A file with no gated loudness never counts as within the target: there
-    // is no reading to be within it.
     let within = integrated.is_some_and(|value| {
         (value - target.integrated_lufs_hundredths).abs() <= target.tolerance_lu_hundredths
     });
@@ -1186,8 +1147,6 @@ fn export_job_body(ui: &mut egui::Ui, progress: &ExportProgress) -> bool {
             ui.colored_label(color::TEXT_SECONDARY, "Encoding on background worker");
         }
         ExportStage::Verifying => {
-            // The encode is done and the file is written: a bar pinned at
-            // 100 % would read as a hung encoder.
             ui.colored_label(color::TEXT_SECONDARY, VERIFYING_STAGE_NOTE);
         }
     }
@@ -1229,9 +1188,6 @@ pub(crate) fn verification_block(
     for line in verification_lines(verification) {
         ui.add(egui::Label::new(egui::RichText::new(line.text).color(line.color)).wrap());
     }
-    // A sub-heading rather than a second block: one export, one verification,
-    // measured on the one file, with the picture and the sound reported under
-    // their own verdicts.
     ui.label(theme::caps_label("AUDIO", color::TEXT_MUTED));
     for line in audio_verification_lines(audio, report, profile) {
         ui.add(egui::Label::new(egui::RichText::new(line.text).color(line.color)).wrap());
@@ -1330,9 +1286,6 @@ fn export_dialog_body(
                     .wrap(),
                 );
             }
-            // The window is fixed-size, so an unbounded advisory
-            // list would push the Export button out of reach. The
-            // remainder is counted rather than silently dropped.
             for issue in conformance.advisory.iter().take(MAX_ADVISORY_LINES) {
                 ui.add(
                     egui::Label::new(
@@ -1401,10 +1354,6 @@ fn export_dialog_body(
     {
         (dialog.width, dialog.height) = aspect.resolution();
     }
-    // CC6 §4.1/§8.4: one orthogonal lane choice, not eight
-    // profiles. It writes `ExportSettings.delivery_color.bit_depth`
-    // and nothing else — the project's own delivery contract is
-    // untouched, and `get_color_context` keeps reporting it.
     ui.horizontal_wrapped(|ui| {
         ui.label("Delivery depth");
         for depth in DeliveryEncodeDepth::ALL {
@@ -1419,9 +1368,6 @@ fn export_dialog_body(
         }
         ui.colored_label(color::TEXT_MUTED, "a job parameter, not a document edit");
     });
-    // AU3 §6.5: the second job parameter, in the same shape. Read
-    // after the aspect combo above, so the label follows the
-    // aspect on the frame it changes.
     let loudness_profile = export_delivery_profile(dialog.delivery_aspect);
     loudness_row(ui, &mut dialog.normalize_loudness, loudness_profile);
     ui.add_space(space::TWO);
@@ -1448,11 +1394,6 @@ fn export_dialog_body(
             ui.end_row();
             ui.label("Frame size");
             ui.horizontal(|ui| {
-                // The conformance gate validates the delivery
-                // profile's raster, but the encoder renders this
-                // value. An editable frame size under a delivery
-                // aspect lets those disagree, so the profile's
-                // raster is shown read-only instead.
                 if let Some(aspect) = dialog.delivery_aspect {
                     let (width, height) = aspect.resolution();
                     ui.colored_label(color::TEXT_SECONDARY, format!("{width} × {height}"));
@@ -1523,9 +1464,6 @@ fn export_dialog_body(
     // Nothing to report before the first export of the session.
     if verification.is_some() || audio_verification.is_some() {
         ui.separator();
-        // Uncapped, deliberately: MAX_ADVISORY_LINES governs
-        // preflight advisories, and a truncated verification result
-        // would be worse than none (CC6 §8.4).
         verification_block(
             ui,
             verification,
@@ -1617,10 +1555,6 @@ impl KinewrightApp {
             self.record_error("Export", media_preflight.summary());
             return None;
         }
-        // Every look a frame could need is rehashed here, alongside the media
-        // preflight, so a missing or changed LUT blocks the export with the
-        // asset id, title, hash, expected store path, and recovery action
-        // rather than failing at render time (CC4 §2.3).
         let lut_preflight = export_lut_preflight(
             &document,
             self.focused().lut_store.as_ref(),
@@ -1683,9 +1617,6 @@ impl KinewrightApp {
         if self.export_job.is_some() {
             return;
         }
-        // The encoder renders this raster and the gate below validates the
-        // delivery profile's. Re-apply the lock so they cannot disagree even if
-        // the export was started without the dialog having drawn a frame.
         self.lock_frame_size_to_delivery_aspect();
         if self.focused().document.duration <= TimeCode::ZERO {
             self.record_error("Export", "Add a clip to the timeline before exporting");
@@ -1721,10 +1652,6 @@ impl KinewrightApp {
             return;
         };
         let depth = self.export_dialog.delivery_bit_depth;
-        // R11: the dialog keeps its inline construction and moves exactly one
-        // field. Routing this through `DeliveryProfile::export_settings` would
-        // take the resolution from the profile and the fps from the document,
-        // silently disabling the Frame size and FPS controls above.
         let settings = ExportSettings {
             fps,
             resolution: (self.export_dialog.width, self.export_dialog.height),
@@ -1757,9 +1684,6 @@ impl KinewrightApp {
                     worker_store.as_ref(),
                     worker_store_error.as_deref(),
                 );
-                // The delivery document is already materialized, so the worker
-                // re-checks it as a master: no reframe is applied twice and the
-                // colour contract is measured on the exact rendered document.
                 let verify_document = Arc::clone(&worker_document);
                 let verify_settings = settings.clone();
                 let result = export_conformance_report(&worker_document, depth)
@@ -1770,12 +1694,6 @@ impl KinewrightApp {
                             &media_preflight,
                             &lut_preflight,
                             || {
-                                // AU3 §5.2: the reporting call, so the
-                                // normalization step's own report reaches the
-                                // dialog. Its default is `export_document`
-                                // plus an empty report, so a backend that
-                                // normalizes nothing behaves exactly as
-                                // before.
                                 media.export_document_reporting(
                                     worker_document,
                                     &worker_output,
@@ -1799,10 +1717,6 @@ impl KinewrightApp {
                             request,
                         )
                     });
-                // AU3 §6.5: the same target the job ran under, never the
-                // dialog's current one — the checkbox may have moved while the
-                // encode ran, and a verification describes the file that was
-                // written.
                 let audio_verification =
                     worker_audio_verification(&result, &verify_settings.cancellation, || {
                         worker_analysis.verify_delivery_audio(
@@ -1822,8 +1736,6 @@ impl KinewrightApp {
             return;
         }
         self.status = format!("Exporting {}…", output.display());
-        // A new run's verification is the new run's; the previous file's
-        // measurement must never be read as this one's.
         self.export_dialog.verification = None;
         self.export_dialog.audio_verification = None;
         self.export_dialog.audio_report = None;
@@ -1892,9 +1804,6 @@ impl KinewrightApp {
             match job.result_rx.try_recv() {
                 Ok(result) => completed = Some(result),
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    // The worker died without sending: there is no encode to
-                    // report and therefore nothing was measured, of the
-                    // picture or of the sound.
                     completed = Some(ExportOutcome {
                         path: PathBuf::from(&self.export_dialog.output),
                         result: Err(MediaError::Backend("export worker stopped".to_owned())),
@@ -1917,10 +1826,6 @@ impl KinewrightApp {
             self.export_job = None;
             match result {
                 Ok(report) => {
-                    // CC6 §8.4: the bare "Exported …" line is replaced by the
-                    // verification block in the dialog. The status bar keeps a
-                    // one-word verdict so a closed dialog still says something
-                    // — since AU3 §6.6, one per half.
                     self.export_dialog.verification = verification;
                     self.export_dialog.audio_verification = audio_verification;
                     self.export_dialog.audio_report = report.audio;
@@ -1950,23 +1855,15 @@ impl KinewrightApp {
         let project_color_pipeline = color_pipeline_summary(&self.focused().document.color_context);
         let color_pipeline_reset_needed =
             managed_sdr_reset_needed(&self.focused().document.color_context);
-        // Applied before the gate runs so the cache key, the displayed frame
-        // size, and the raster the encoder will render are the same value.
         self.lock_frame_size_to_delivery_aspect();
-        // Immediate mode: this reflects the aspect chosen on the previous
-        // frame. `start_export` re-runs the same gate before it spawns.
         let conformance = self.cached_export_conformance();
         let conformance_ready = conformance
             .as_ref()
             .is_ok_and(ExportConformance::export_ready);
         let export_blocked = color_pipeline_reset_needed || !conformance_ready;
-        // Cloned out before the window borrows `self` mutably: the block is a
-        // read-only report of a file that already exists.
         let verification = self.export_dialog.verification.clone();
         let audio_verification = self.export_dialog.audio_verification.clone();
         let audio_report = self.export_dialog.audio_report.clone();
-        // Borrowed field-wise: the closure below takes `self.export_dialog`
-        // mutably, so everything else the body reads is gathered first.
         let job_progress = self.export_job.as_ref().map(|job| &job.progress);
         let body = ExportDialogBodyContext {
             project_color_pipeline: &project_color_pipeline,
@@ -1984,17 +1881,12 @@ impl KinewrightApp {
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
-                // The window is not resizable and the findings list is
-                // data-dependent, so the body scrolls rather than growing past
-                // the screen and hiding the Export button.
                 egui::ScrollArea::vertical()
                     .max_height(EXPORT_DIALOG_MAX_BODY_HEIGHT)
                     .show(ui, |ui| {
                         requests = export_dialog_body(ui, &mut self.export_dialog, &body);
                     });
             });
-        // Read back into the flags below so the requests are applied in the
-        // order the dialog has always applied them, not in paint order.
         let mut browse = false;
         let mut start = false;
         let mut cancel = false;
@@ -2011,10 +1903,6 @@ impl KinewrightApp {
                 ExportDialogRequest::SaveCaptions(format) => caption_format = Some(format),
             }
         }
-        // The dialog is a window, and closing it is not cancelling: the export
-        // worker keeps going and the status bar keeps reporting it. Forcing it
-        // open for the life of the job left the close button inert for the
-        // whole verification pass, which sends no progress at all.
         self.export_dialog.open = open;
         if open_color_qc {
             self.color_qc.open = true;
@@ -2346,10 +2234,6 @@ mod tests {
         ));
     }
 
-    // -----------------------------------------------------------------------
-    // CC4 §2.3 LUT export gate
-    // -----------------------------------------------------------------------
-
     const SAMPLE_CUBE: &str = "TITLE \"Gate look\"\n\
          LUT_3D_SIZE 2\n\
          DOMAIN_MIN 0.000000 0.000000 0.000000\n\
@@ -2433,8 +2317,6 @@ mod tests {
         assert!(ready.export_ready(), "{}", ready.summary());
         assert_eq!(ready.checked_lut_assets, vec![LutAssetId(1)]);
 
-        // Removing the bytes the project claims to own blocks the export with
-        // the asset id, title, hash, and expected store path.
         std::fs::remove_file(store.luts_dir().join(format!("{sha256}.cube")))
             .expect("the store file is removable");
         let blocked = export_lut_preflight(&document, Some(&store), None);
@@ -2513,8 +2395,6 @@ mod tests {
         let import = store.import_lut_asset(&source).expect("import");
         let document = look_gate_document(import.into_lut_asset(LutAssetId(1)));
 
-        // A regular file occupies exactly where the store directory belongs,
-        // so the project is saved but its root is refused.
         std::fs::write(temporary.path("edit.kinewright-assets"), b"not a directory")
             .expect("the blocking file writes");
         let refusal = crate::project::derive_lut_store(Some(&project))
@@ -2576,8 +2456,6 @@ mod tests {
             "a built-in never depends on the store: {reason}"
         );
 
-        // A name this build has no bake for stays `missing`, with its own
-        // typed reason rather than the save recovery.
         let mut unknown = verified;
         unknown.source = LutAssetSource::Builtin {
             name: "sepia".to_owned(),
@@ -2588,8 +2466,6 @@ mod tests {
         assert!(reason.starts_with("unknown_builtin_look: "), "{reason}");
         assert!(reason.contains("sepia"), "{reason}");
 
-        // An imported asset is the one shape that still reports the save
-        // recovery, because its bytes really do need a store.
         let mut imported = BuiltinLook::Warm.to_lut_asset(LutAssetId(2));
         imported.source = LutAssetSource::Imported {
             source_path: "/looks/fixture.cube".to_owned(),
@@ -2615,16 +2491,10 @@ mod tests {
         std::fs::remove_file(store.luts_dir().join(format!("{sha256}.cube")))
             .expect("the store file is removable");
 
-        // A look the operator switched off is never evaluated, so its absent
-        // bytes cannot block a delivery (CC4 §2.3).
         let report = export_lut_preflight(&document, Some(&store), None);
         assert!(report.export_ready(), "{}", report.summary());
         assert!(report.checked_lut_assets.is_empty());
     }
-
-    // -----------------------------------------------------------------------
-    // CC6 §8.4: delivery depth, the conformance lane, and verification
-    // -----------------------------------------------------------------------
 
     /// A plane with no excursion at all.
     fn clean_plane() -> kinewright_core::PlaneLegalExcursion {
@@ -2676,9 +2546,6 @@ mod tests {
             tags.conforming, tags_conform,
             "the fixture's tag check has the direction it claims"
         );
-        // Every gated number is derived from the lane's own budgets rather
-        // than transcribed: a re-baselined constant must move this fixture with
-        // it, not turn a "within" case into a silent overrun.
         let budgets = DeliveryBudgets::for_depth(DeliveryEncodeDepth::Eight);
         let luma = if within_budgets {
             difference(
@@ -2694,8 +2561,6 @@ mod tests {
                 budgets.luma_mean_code_millionths.saturating_mul(30),
             )
         };
-        // Reported, never gated: the RGB extremes are deliberately larger than
-        // any luma budget, which is the point of the note beside them.
         let comparison = kinewright_core::DeliveryComparison {
             frames: vec![0, 14, 29, 44, 59],
             luma,
@@ -2797,8 +2662,6 @@ mod tests {
             "no measurement is never a pass"
         );
 
-        // The passing block names every gated number with its budget beside
-        // it, and is not capped by MAX_ADVISORY_LINES.
         let lines = verification_lines(Some(&passing));
         let text = lines
             .iter()
@@ -2810,9 +2673,6 @@ mod tests {
             "the verification block is uncapped: {} lines",
             lines.len()
         );
-        // Formatted from the lane's constants, never transcribed: a
-        // re-baselined budget is a change to what the dialog prints, and this
-        // test has to keep proving it prints the current one.
         let budgets = DeliveryBudgets::for_depth(DeliveryEncodeDepth::Eight);
         for expected in within_budget_lines(budgets) {
             assert!(text.contains(&expected), "missing {expected:?} in:\n{text}");
@@ -2864,15 +2724,11 @@ mod tests {
             "an overrun names the measurement, the budget, and the direction"
         );
 
-        // AU3 §6.6: the audio verdict is appended to the status line, never
-        // folded into the picture's.
         assert!(
             !statuses.contains(&audio_verification_status(None).label),
             "the audio verdict is its own word, never one of the picture's"
         );
 
-        // And every case lays out through a headless context, the way the
-        // dialog will draw it.
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         for case in [
@@ -2921,15 +2777,11 @@ mod tests {
             );
         }
 
-        // Three states, three tones: this fixture is mis-tagged on primaries
-        // and carries a white point H.264 cannot express.
         assert_eq!(text("primaries").color, color::STATUS_DANGER);
         assert_eq!(text("white_point").color, color::TEXT_MUTED);
         assert_eq!(text("transfer").color, color::TEXT_SECONDARY);
         assert_ne!(text("primaries").color, text("white_point").color);
 
-        // And a conforming file still gets every row: a field that is right is
-        // evidence too.
         let conforming = verification(true, true);
         let rows = verification_lines(Some(&conforming));
         for field in [
@@ -2974,9 +2826,6 @@ mod tests {
         let reason =
             cancelled_before_verification(&cancellation).expect("a cancelled export skips it");
         assert_eq!(reason, EXPORT_CANCELLED_BEFORE_VERIFICATION);
-        // AU3 §6.5: the reason, not the verification, because both halves of
-        // the block are skipped by one cancellation and each states it in its
-        // own type.
         let verification = ExportVerification::Unavailable(reason.to_owned());
         assert_eq!(
             verification_status(Some(&verification)).label,
@@ -3070,8 +2919,6 @@ mod tests {
             "an encode that did not finish wrote no file to verify"
         );
 
-        // Cancellation short-circuits the measurement rather than containing
-        // one: the verifier is never called at all.
         let cancelled = ExportCancellation::default();
         cancelled.cancel();
         assert_eq!(
@@ -3112,11 +2959,6 @@ mod tests {
             "and an over-count is not a way back to a progress bar"
         );
 
-        // And the body an operator actually reads is painted, at both stages.
-        // A sentence assembled from implicitly concatenated string literals
-        // keeps the source indentation between them, so the run of spaces
-        // reaches the screen; the only way to catch that is to read the
-        // painted galleys rather than the source.
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         let mut painted = Vec::new();
@@ -3153,8 +2995,6 @@ mod tests {
             body.contains("30 / 60 frames"),
             "and the encoding stage still counts frames: {body}"
         );
-        // The Cancel hover text is a tooltip, so it is never in a painted
-        // frame; it is prose all the same and is held to the same rule.
         assert!(
             !CANCEL_DURING_VERIFICATION_HINT.contains("  "),
             "{CANCEL_DURING_VERIFICATION_HINT:?}"
@@ -3253,8 +3093,6 @@ mod tests {
         };
         assert_ne!(eight, ten, "the lane is part of the cache identity");
 
-        // The computed report is tagged with the lane it was computed for, so
-        // a crossed cache would be visible rather than merely wrong.
         let computed = Cell::new(0_usize);
         let compute = |key: ConformanceKey| {
             computed.set(computed.get() + 1);
@@ -3326,10 +3164,6 @@ mod tests {
             "and the document keeps declaring its own 8-bit delivery"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // AU3 Part B: the `Loudness` row and the `AUDIO` block
-    // -----------------------------------------------------------------------
 
     /// One decoded audio verification of a written file.
     ///
@@ -3574,8 +3408,6 @@ mod tests {
         let row = measure(&mut |ui| {
             let _ = loudness_row(ui, &mut normalize, DeliveryProfile::Youtube1080p);
         });
-        // The loudest block this dialog can draw: a target, an over-ceiling
-        // Error, and the two Warnings beside it.
         let worst = audio_verification(
             Some(DeliveryProfile::Youtube1080p.loudness_target()),
             None,
@@ -3664,13 +3496,6 @@ mod tests {
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
                 ui.vertical(|ui| {
                     ui.set_max_width(EXPORT_DIALOG_MEASURED_WIDTH);
-                    // Painted inside the dialog's own scroll viewport, so the
-                    // body is laid out under exactly the height the app gives
-                    // it and `content_size` is what it actually needed. It is
-                    // measured on the first frame, before the floating
-                    // scrollbar allocates its 6 px, so the running app wraps
-                    // a few px taller; no export is running, so the
-                    // `Export MP4` tail is measured, not the taller job body.
                     let scrolled = egui::ScrollArea::vertical()
                         .max_height(EXPORT_DIALOG_MAX_BODY_HEIGHT)
                         .show(ui, |ui| {
@@ -3780,8 +3605,6 @@ mod tests {
              coloured like a verdict"
         );
 
-        // Normalized and on target: the reading, the target it was held to,
-        // and what the step did to get there.
         let report = audio_report(640, 1, 0, true);
         let youtube =
             |verification, report| audio_text(verification, report, DeliveryProfile::Youtube1080p);
@@ -3795,8 +3618,6 @@ mod tests {
             assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
         }
 
-        // Normalized and off target: the export still succeeded, and the block
-        // says by how much and in which direction.
         let missed = audio_report(640, 2, 180, false);
         let text = youtube(Some(&off_target), Some(&missed));
         for expected in [
@@ -3851,8 +3672,6 @@ mod tests {
             ExportAudioVerification::Unavailable("the file has no audio stream".to_owned());
         let report = audio_report(640, 1, 0, true);
 
-        // Not normalized: a measurement with the profile's target beside it as
-        // a reference, and no claim of conformance.
         let text = audio_text(Some(&measured_only), None, DeliveryProfile::Youtube1080p);
         for expected in [
             "integrated -19.50 LUFS · reference -14.00 ±1.00 (youtube_1080p) · not normalized",
@@ -3918,8 +3737,6 @@ mod tests {
             "a file with no gated loudness reads as a dash and an exception:\n{text}"
         );
 
-        // And every case lays out through a headless context, under an `AUDIO`
-        // sub-heading of the one verification block.
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         for case in [

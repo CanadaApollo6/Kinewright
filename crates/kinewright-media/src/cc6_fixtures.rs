@@ -92,10 +92,6 @@ use crate::{
 /// against the manifest.
 pub(crate) const CC6_CONTRACT: &str = "cc6_qc_and_managed_delivery";
 
-// ===========================================================================
-// §11.1: the QC raster.
-// ===========================================================================
-
 /// The four CC5 skin triples in `grade709` encoding, **independently
 /// transcribed** from CC5 §9.2.17 (rule 11.0.1's transcription clause: a
 /// fixture that imports the value it checks proves only that one copy exists).
@@ -157,9 +153,6 @@ pub(crate) fn cc6_qc_raster() -> WorkingFrame {
     for y in 0..height {
         for x in 0..width {
             let (rgb, population) = if x < 48 && y < 24 {
-                // In-range ramp: linear 0..1 on both axes, every channel
-                // inside [0, 1], so this is the population that must trip
-                // nothing.
                 let fx = x as f32 / 47.0;
                 let fy = y as f32 / 23.0;
                 ([fx, fy, f32::midpoint(fx, fy)], 0)
@@ -184,9 +177,6 @@ pub(crate) fn cc6_qc_raster() -> WorkingFrame {
             pixels.push(f16::from_f32(1.0));
         }
     }
-    // The populations are asserted here rather than in prose: a layout edit
-    // that silently moved a region would otherwise change what every
-    // measurement below is measuring.
     assert_eq!(
         populations, CC6_QC_RASTER_POPULATIONS,
         "the CC6 QC raster populations are the §11.1 table"
@@ -241,8 +231,6 @@ fn cc6_qc_raster_populations_are_the_contract_table() {
     assert_eq!(basis_points(over_block + isolated_over), 903);
     // Under, red: the 288-pixel block plus the below-black pixel.
     assert_eq!(basis_points(under_block + below_black), 903);
-    // Under, green and blue: the below-black pixel alone, in the same
-    // measurement, below the threshold.
     assert_eq!(basis_points(below_black), 3);
     // Gamut is the under-range pixel set exactly (§3.3).
     assert_eq!(basis_points(under_block + below_black), 903);
@@ -268,8 +256,6 @@ fn cc6_qc_raster_populations_are_the_contract_table() {
     assert_eq!(basis_points(288), 900);
     assert!(basis_points(288) >= 10);
 
-    // The sub-threshold ROI is 49 × 24 = 1 176 pixels: the whole ramp, the
-    // isolated over pixel, the below-black pixel, and 22 surround pixels.
     assert_eq!(CC6_SUB_THRESHOLD_ROI.width_basis_points, 6_125);
     assert_eq!(CC6_SUB_THRESHOLD_ROI.height_basis_points, 6_000);
     let roi_pixels = 49_u64 * 24;
@@ -286,10 +272,6 @@ fn cc6_qc_raster_populations_are_the_contract_table() {
     assert_eq!(10_000 / roi_pixels, 8);
     assert!(10_000 / roi_pixels < 10);
 }
-
-// ===========================================================================
-// §11.1: the synthetic delivery source.
-// ===========================================================================
 
 /// The §11.1 delivery source raster. 320 × 180 keeps the encoded round trip
 /// inside a default-lane CI budget on both operating systems while still
@@ -379,9 +361,6 @@ fn bt709_limited_source_codes(rgb: [u8; 3]) -> [u8; 3] {
 fn cc6_source_base_rgb(x: u32, y: u32, frame: u32) -> [u8; 3] {
     let square_left = CC6_MOVING_SQUARE_STEP * frame;
     let grey = |code: u8| [code, code, code];
-    // CC5's achromatic surround, at its display-encoded code. Everything that
-    // is not a named region sits in it, which is what keeps the saturated
-    // content a *feature* of the raster rather than most of it.
     let surround = grey((f64::from(CC6_CHART_SURROUND[0]) * 255.0).round() as u8);
     if y < 20 {
         // Horizontal neutral ramp.
@@ -396,15 +375,8 @@ fn cc6_source_base_rgb(x: u32, y: u32, frame: u32) -> [u8; 3] {
             grey(128)
         }
     } else if (36..52).contains(&y) && x < 12 * CC6_CHART_PATCH_WIDTH {
-        // The twelve-patch CC1 neutral chart, at CC1's own eight-pixel patch
-        // width (`chart_frame`, `cc1_fixtures.rs:1142-1155`) rather than
-        // stretched across the raster: the chart's proportions are CC1's, and
-        // a 320-wide chart would put eleven hard chroma edges in a fifth of
-        // every row.
         CC6_NEUTRAL_CHART_CODES[(x / CC6_CHART_PATCH_WIDTH) as usize]
     } else if (76..92).contains(&y) && x < 6 * CC6_SKIN_PATCH_WIDTH {
-        // The four CC5 skin patches and the two product patches, at their
-        // display-encoded codes.
         let patch = (x / CC6_SKIN_PATCH_WIDTH) as usize;
         let encoded = if patch < 4 {
             CC6_SKIN_PATCHES[patch]
@@ -413,10 +385,6 @@ fn cc6_source_base_rgb(x: u32, y: u32, frame: u32) -> [u8; 3] {
         };
         encoded.map(|value| (f64::from(value) * 255.0).round() as u8)
     } else if (116..134).contains(&y) && (40..120).contains(&x) {
-        // **One** hard saturated edge: a pure-blue block abutting a pure-green
-        // block, so §6.3(c)'s RGB-max term is exercised and reported. It is
-        // one edge, deliberately: §6.3 measures what 4:2:0 decimation costs at
-        // such an edge, and a raster made of them would measure the raster.
         if x < 80 { [0, 0, 255] } else { [0, 255, 0] }
     } else if y >= 146 {
         // Vertical neutral ramp.
@@ -504,11 +472,6 @@ fn cc6_delivery_source_moves_the_pinned_element_across_the_sampled_frames() {
             "frame {frame}: ({inside}, {BAND_ROW}) must be written as near-white limited luma"
         );
 
-        // Eight pixels clear of it, in the same band: the surround grey the
-        // element travels through. At frame 0 the element sits against the
-        // left edge and there is no pixel eight to its left, so the pixel
-        // eight clear of its *right* edge — the same population, the same row
-        // — stands in.
         let outside = if square_left >= CLEARANCE {
             square_left - CLEARANCE
         } else {
@@ -526,8 +489,6 @@ fn cc6_delivery_source_moves_the_pinned_element_across_the_sampled_frames() {
             "frame {frame}: ({outside}, {BAND_ROW}) must be written as the band's surround grey"
         );
     }
-    // Non-vacuity: five distinct positions, strictly increasing, none of them
-    // overlapping the previous sample's element.
     assert_eq!(positions.len(), CC6_DELIVERY_SOURCE_SAMPLES.len());
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(
@@ -654,8 +615,6 @@ fn cc6_delivery_grade() -> Vec<Effect> {
 /// The managed import of [`cc6_delivery_source`] with the §11.1 grade applied.
 pub(crate) fn cc6_delivery_document(source: &Path, size: (u32, u32), frames: u32) -> Document {
     let asset = probe_path(source, AssetId(2)).expect("the CC6 delivery source should probe");
-    // The managed import path is CC1's: an untagged source is refused, so the
-    // tags are asserted here rather than assumed.
     assert_eq!(asset.color_description.primaries, ColorPrimaries::Bt709);
     assert_eq!(asset.color_description.transfer, ColorTransfer::Bt709);
     assert_eq!(asset.color_description.matrix, ColorMatrix::Bt709);
@@ -681,8 +640,6 @@ pub(crate) fn cc6_delivery_settings(
         depth,
         ExportCancellation::default(),
     );
-    // §4.1: the depth argument is the single authority. The document keeps
-    // declaring the project's 8-bit delivery contract either way.
     assert_eq!(
         document.color_context.delivery.bit_depth,
         ColorBitDepth::Eight
@@ -691,10 +648,6 @@ pub(crate) fn cc6_delivery_settings(
     assert_eq!(settings.fps, document.fps);
     settings
 }
-
-// ===========================================================================
-// The encoded round trip: shared measurement, §11.2.10 / §11.2.11 / §11.2.13.
-// ===========================================================================
 
 /// Everything one lane's export and verification measured, so the two exit
 /// gates, the starved-bitrate failing direction, and the evidence payload all
@@ -776,7 +729,6 @@ fn assert_encoded_delivery_lane(lane: &LaneMeasurement, gpu: &FixtureGpu) -> Lan
     let verification = &lane.verification;
     let comparison = &verification.comparison;
 
-    // --- the re-probe (§11.2.10's tag clause) ---------------------------
     assert_eq!(verification.delivery_bit_depth, depth);
     assert_eq!(verification.output_path, lane.output);
     assert_eq!(verification.decoded_pixel_format, depth.pixel_format());
@@ -804,13 +756,10 @@ fn assert_encoded_delivery_lane(lane: &LaneMeasurement, gpu: &FixtureGpu) -> Lan
         verification.tags.mismatches
     );
     assert!(verification.tags.mismatches.is_empty());
-    // H.264 has no syntax for a white point, so exactly one field is not
-    // representable and it is that one.
     assert_eq!(verification.tags.not_representable.len(), 1);
     assert_eq!(verification.tags.not_representable[0].field, "white_point");
     assert_eq!(verification.probed.white_point, ColorWhitePoint::Unknown);
 
-    // --- §6.2 sampling ---------------------------------------------------
     assert_eq!(
         comparison.frames,
         CC6_DELIVERY_SOURCE_SAMPLES
@@ -832,14 +781,8 @@ fn assert_encoded_delivery_lane(lane: &LaneMeasurement, gpu: &FixtureGpu) -> Lan
             >= u64::from(CC6_DELIVERY_SOURCE_GOP)
     );
 
-    // --- the reported, never gated, RGB extremes --------------------------
     assert_eq!(comparison.rgb_extremes_note, DELIVERY_RGB_EXTREMES_NOTE);
     assert!(comparison.rgb_extremes_note.contains("4:2:0"));
-    // §6.3(c) is asserted, not just documented: the whole-raster RGB maximum
-    // is larger than *every* gated bound on this source — the saturated edge
-    // §11.1 mandates sees to that — and yet no exception names it and no
-    // budget field carries it. A version that quietly gated it would fail
-    // here.
     assert!(
         u64::from(comparison.combined.maximum_code_diff)
             > u64::from(comparison.budgets.luma_max_code),
@@ -859,7 +802,6 @@ fn assert_encoded_delivery_lane(lane: &LaneMeasurement, gpu: &FixtureGpu) -> Lan
         );
     }
 
-    // --- §6.4 decoded native-plane legality -------------------------------
     assert_eq!(
         comparison.decoded_ycbcr.source,
         YCbCrLegalSource::DecodedNativePlanes
@@ -875,10 +817,6 @@ fn assert_encoded_delivery_lane(lane: &LaneMeasurement, gpu: &FixtureGpu) -> Lan
     let tolerance = EBU_R103_TOLERANCE_CODES_8BIT * scale;
     let mut over_threshold_planes = Vec::new();
     let mut under_threshold_planes = Vec::new();
-    // §6.4 (a)'s rate is taken over the plane's **own** sampled population, so
-    // the fixture predicts that population from §11.1's raster and §6.2's
-    // sample count rather than reading it back from the report. 4:2:0 makes
-    // each chroma plane a quarter of the luma plane.
     let sampled_frames = u64::try_from(comparison.frames.len()).expect("a sample count");
     let luma_samples = u64::from(CC6_DELIVERY_SOURCE_SIZE.0)
         * u64::from(CC6_DELIVERY_SOURCE_SIZE.1)
@@ -904,10 +842,6 @@ fn assert_encoded_delivery_lane(lane: &LaneMeasurement, gpu: &FixtureGpu) -> Lan
             chroma_samples,
         ),
     ] {
-        // The EBU R 103 box is the hard half of the §6.4 rule, and this
-        // source stays inside it on both lanes: after `ad6f6a8` the encoder
-        // input never exceeds legal, so every decoded excursion is codec
-        // ringing of a code or two.
         assert!(
             plane.minimum_code_hundredths >= (16 * scale - tolerance) * 100,
             "{name} minimum {} is outside the EBU R 103 box",
@@ -918,17 +852,6 @@ fn assert_encoded_delivery_lane(lane: &LaneMeasurement, gpu: &FixtureGpu) -> Lan
             "{name} maximum {} is outside the EBU R 103 box",
             plane.maximum_code_hundredths
         );
-        // The strict-box rate is the soft half of §6.4, and it is core's own
-        // accessor over the **combined** count — `below + above`, not
-        // `max(below, above)`, which under-reports exactly the plane that
-        // leaves the box in both directions. `verify.rs`'s gate calls the same
-        // accessor, so the prediction and the gate agree only if both are
-        // right.
-        //
-        // The predicted population is checked against the report's two
-        // separately reported rates first, so a wrong raster or a wrong sample
-        // count fails here rather than quietly yielding a plausible combined
-        // rate.
         assert_eq!(
             plane.below_basis_points,
             u32::try_from(plane.below_count.saturating_mul(10_000) / samples).expect("a rate"),
@@ -941,15 +864,6 @@ fn assert_encoded_delivery_lane(lane: &LaneMeasurement, gpu: &FixtureGpu) -> Lan
             "{name}: the predicted sampled population of {samples} disagrees with the reported \
              above-box rate"
         );
-        // This source exercises the **under-threshold** direction only: after
-        // `ad6f6a8` the encoder input never exceeds legal, so what is left is
-        // codec ringing of a code or two and no plane is expected to reach
-        // `DECODED_RANGE_EXCEPTION_BASIS_POINTS`. The *raising* direction is
-        // owned by
-        // `cc6_decoded_native_planes_report_ycbcr_excursions_in_delivery_code_units`
-        // in `verify.rs`, which hand-builds a file with deliberately illegal
-        // codes; the branch below stays here so a source that ever did cross
-        // the threshold would still have to be reported rather than ignored.
         let rate = plane.excursion_basis_points(samples);
         let reported = verification.exceptions.iter().find(|exception| {
             exception.code == "decoded_range_excursion"
@@ -992,14 +906,12 @@ fn assert_encoded_delivery_lane(lane: &LaneMeasurement, gpu: &FixtureGpu) -> Lan
          has no passing direction on this source"
     );
 
-    // --- non-vacuity ------------------------------------------------------
     assert!(
         comparison.combined.mean_code_diff_millionths > 0,
         "the source does not exercise the codec"
     );
     assert!(comparison.luma.maximum_code_diff > 0);
 
-    // --- §6.3(a) + (b), with the measured margin (rule 11.0.5) ------------
     let budgets = comparison.budgets;
     assert_eq!(budgets, kinewright_core::DeliveryBudgets::for_depth(depth));
     let margins = LaneMargins {
@@ -1067,11 +979,6 @@ fn assert_encoded_delivery_lane(lane: &LaneMeasurement, gpu: &FixtureGpu) -> Lan
         comparison.decoded_ycbcr.cr.above_basis_points,
     );
 
-    // Rule 11.0.5: a budget no measurement approaches proves nothing, so every
-    // gated term records its measured margin and asserts it.
-    //
-    // The two luma terms and the luma mean are the *codec-only* error: no
-    // chroma decimation enters them, which is why §6.3 makes them the gate.
     for (name, measured) in [
         ("luma_max", margins.luma_max),
         ("luma_p99", margins.luma_p99),
@@ -1083,13 +990,6 @@ fn assert_encoded_delivery_lane(lane: &LaneMeasurement, gpu: &FixtureGpu) -> Lan
              {measured}x"
         );
     }
-    // The RGB mean is the whole-raster **sanity floor**, in the
-    // 8-bit-equivalent units §6.3 words it in — `verify.rs` reports it in
-    // those units, so nothing is converted here. It is dominated by the 4:2:0
-    // chroma decimation §6.3(c) says must never be gated, which is why it was
-    // re-baselined against this source rather than left at the value the
-    // 1920x1080 probe chart produced, where the same saturated edges are a
-    // ~36x smaller fraction of the raster.
     assert!(
         margins.rgb_mean >= 2.0,
         "the {depth:?} lane's RGB-mean budget must keep at least a 2x margin on \
@@ -1124,7 +1024,6 @@ fn assert_encoded_delivery_lane(lane: &LaneMeasurement, gpu: &FixtureGpu) -> Lan
             .any(|exception| exception.severity == QaSeverity::Error)
     );
 
-    // --- the budgets are not the compositor gate --------------------------
     assert_delivery_budgets_are_distinct(depth);
     margins
 }
@@ -1246,10 +1145,6 @@ fn assert_the_delivery_grade_clips(gpu: &FixtureGpu, document: &Arc<Document>) {
             "an over-range channel must record how far over it went: {channel:?}"
         );
     }
-    // The negative-lift window drives whole regions below black on every
-    // channel, so `Y < 0` there and §3.3's desaturation fraction is undefined
-    // and excluded from the maximum by design. What the grade must produce —
-    // and what is asserted — is the below-black population itself.
     assert!(
         report.gamut.below_black_pixel_count > 0,
         "the negative-lift window must drive part of the raster below black"
@@ -1308,10 +1203,6 @@ fn cc6_eight_bit_encoded_delivery_passes_tag_luma_and_difference_budgets() {
 #[test]
 fn cc6_ten_bit_encoded_delivery_passes_tag_luma_and_difference_budgets() {
     crate::initialize_ffmpeg().expect("FFmpeg must initialize for the CC6 exit gate");
-    // R5's cross-platform rule: the build's encoder is interrogated at
-    // runtime, and a build without the lane's pixel format fails **typed**.
-    // It never skips, so the first run on a new platform answers the question
-    // in a red or green build rather than in silence.
     assert_libx264_advertises_the_ten_bit_lane();
 
     let gpu = fallback_gpu();
@@ -1342,9 +1233,6 @@ fn cc6_ten_bit_encoded_delivery_passes_tag_luma_and_difference_budgets() {
         &ten.verification.comparison.frames,
     );
 
-    // The same source and the same frames through the 8-bit lane: the only
-    // claim that makes the 10-bit lane worth having is that it is measurably
-    // better, and it is measured rather than assumed.
     let eight_settings = cc6_delivery_settings(&document, DeliveryEncodeDepth::Eight);
     let eight = export_and_verify(
         &gpu,
@@ -1359,14 +1247,6 @@ fn cc6_ten_bit_encoded_delivery_passes_tag_luma_and_difference_budgets() {
         ten.verification.comparison.frames
     );
 
-    // §6.3 words this comparison in **8-bit-equivalent** units, and that is
-    // the unit `DeliveryComparison.combined.mean_code_diff_millionths` already
-    // carries — `verify.rs` divides by `s = 2^(bits − 8)` where the histogram
-    // is read, exactly as §6.3 words it, and PSNR has always been on the
-    // 8-bit-equivalent MSE for the same reason. The two lanes are therefore
-    // compared field to field, with no conversion in the fixture: a fixture
-    // that had to convert would be evidence that the report itself was in the
-    // wrong unit.
     let eight_rgb_mean = eight
         .verification
         .comparison
@@ -1391,9 +1271,6 @@ fn cc6_ten_bit_encoded_delivery_passes_tag_luma_and_difference_budgets() {
         "CC6_TEN_BIT_JUSTIFICATION eight_rgb_mean_millionths_8bit_equiv={eight_rgb_mean} ten_rgb_mean_millionths_8bit_equiv={ten_rgb_mean} eight_psnr_hundredths={eight_psnr} ten_psnr_hundredths={ten_psnr}"
     );
 
-    // Non-vacuity clause: an 8-bit lane measuring exactly zero would mean the
-    // source never exercised the codec, and "10-bit is not worse than
-    // nothing" is not a justification.
     assert_ne!(
         eight_rgb_mean, 0,
         "the source does not exercise the codec: the 8-bit lane's RGB mean is exactly 0, so the \
@@ -1527,8 +1404,6 @@ fn assert_starved_bitrate_direction(
          budgets: {comparison:?}"
     );
 
-    // Rule 11.0.4 on every raised exception, not just the first: code, field,
-    // observed, and allowed.
     let mut tripped = Vec::new();
     for exception in &verification.exceptions {
         if exception.code != "decoded_difference_over_budget" {
@@ -1559,8 +1434,6 @@ fn assert_starved_bitrate_direction(
     );
     assert!(!verification.technical_pass);
 
-    // The measurement never moves the file it measured: the encode is still
-    // where the export wrote it, and it is still a readable delivery.
     assert_eq!(verification.output_path, lane.output);
     assert!(
         lane.output.is_file(),
@@ -1577,8 +1450,6 @@ fn assert_starved_bitrate_direction(
         }
     );
 
-    // The tags are still right: this is a *difference* failure, not a tag
-    // failure, and the two are reported separately.
     assert!(verification.tags.conforming, "{:?}", verification.tags);
 
     println!(
@@ -1633,15 +1504,6 @@ fn cc6_starved_bitrate_export_trips_the_decoded_difference_budget() {
         "cc6-starved-bitrate.mp4",
     );
 
-    // The **codec-only** terms are what a starved codec breaks, and after the
-    // §6.3 re-baseline they are the only ones that do on this lane: at
-    // 100 kb/s the luma plane measures 35 codes against a budget of 8, a P99
-    // of 6.0 against 2.0, and a mean of 0.621 against 0.4, while the
-    // whole-raster RGB mean (1.330 of 1.5 8-bit-equivalent codes) and PSNR
-    // (35.88 dB against a 33.00 dB floor) stay inside their sanity floors —
-    // those two are dominated by 4:2:0 chroma decimation, which starving the
-    // bitrate barely moves. A fixture that accepted "any one of the five"
-    // would not have noticed which half of §6.3 actually caught the defect.
     assert_eq!(
         tripped,
         vec![
@@ -1678,12 +1540,6 @@ fn cc6_starved_bitrate_ten_bit_export_trips_the_decoded_difference_budget() {
         "cc6-starved-bitrate-ten.mp4",
     );
 
-    // All three luma terms, and — unlike the 8-bit lane — the RGB mean too.
-    // The 10-bit lane's sanity floor is 1.0 8-bit-equivalent codes rather than
-    // 1.5, because its *healthy* measurement is 0.415 rather than 0.744; a
-    // starved 10-bit encode measures 1.181 and crosses it. PSNR (35.98 dB
-    // against the same 33.00 dB floor) still does not trip, so the two halves
-    // of §6.3's sanity floor are not redundant with each other either.
     assert_eq!(
         tripped,
         vec![
@@ -1702,10 +1558,6 @@ fn cc6_starved_bitrate_ten_bit_export_trips_the_decoded_difference_budget() {
         &tripped,
     );
 }
-
-// ===========================================================================
-// Evidence.
-// ===========================================================================
 
 /// Every fixture in this file that emits a `CC6_EVIDENCE` payload.
 ///
@@ -1796,8 +1648,6 @@ fn emit_cc6_lane_evidence(
         "red": channel(&comparison.red),
         "green": channel(&comparison.green),
         "blue": channel(&comparison.blue),
-        // `maximum_code_diff` and `p99_code_diff_millionths` are in lane code
-        // units; `mean_code_diff_millionths` is 8-bit-equivalent (§6.3).
         "combined": channel(&comparison.combined),
         "psnr_db_hundredths": comparison.psnr_db_hundredths,
         "within_budgets": comparison.within_budgets,
@@ -1843,10 +1693,6 @@ fn emit_cc6_lane_evidence(
     );
 }
 
-// ===========================================================================
-// §11.2.14 (media half): document order against production z-order.
-// ===========================================================================
-
 /// §11.2.14. Core's candidate ordering — document track order, then clip order
 /// within a track, then effect-chain order within a clip — is asserted equal
 /// to `visual_layers_at`'s production z-order on a three-track document.
@@ -1871,8 +1717,6 @@ fn cc6_per_node_contribution_order_matches_production_z_order() {
     let base = cc6_delivery_document(&source, size, CC6_DELIVERY_SOURCE_FRAMES);
     let asset = base.media_pool[0].clone();
 
-    // Three video tracks, each carrying one clip of the same asset, with two
-    // colour nodes on the bottom clip, one on the middle, and two on the top.
     let mut document = base.clone();
     document.tracks = (0..3_u64)
         .map(|track| Track {
@@ -1963,9 +1807,6 @@ fn cc6_per_node_contribution_order_matches_production_z_order() {
     assert_eq!(contributions.considered_node_count, 5);
     assert!(!contributions.truncated);
 
-    // Failing direction: a document whose tracks are reversed produces the
-    // reversed order on *both* sides, so the assertion above is comparing two
-    // live orders rather than one order against itself.
     let mut reversed = document.clone();
     reversed.tracks.reverse();
     reversed
@@ -2013,10 +1854,6 @@ fn cc6_per_node_contribution_order_matches_production_z_order() {
     );
 }
 
-// ===========================================================================
-// §11.2.22: one delivery transfer, two crates.
-// ===========================================================================
-
 /// §11.2.22. `kinewright_core::color_qc::encode_bt709_delivery` and
 /// `kinewright_media::color_pipeline::encode_bt709` agree on `to_bits()` for
 /// the §3.2 anchors and for a dense sweep of `−2.0 ..= 2.0`.
@@ -2049,13 +1886,9 @@ fn cc6_core_delivery_transfer_is_bit_identical_to_the_media_transfer() {
             "the two delivery transfers disagree at {anchor}"
         );
     }
-    // `e(1.0) == 1.0` exactly, and it is the value the strict `>` test does
-    // not count.
     assert_eq!(encode_bt709_delivery(1.0), 1.0);
     assert_eq!(encode_bt709(1.0), 1.0);
 
-    // A dense sweep in steps of 1/4096, including both sides of the 0.018
-    // seam and both signs.
     let mut compared = 0_u32;
     let mut step = -2.0_f32 * 4_096.0;
     while step <= 2.0 * 4_096.0 {
@@ -2070,9 +1903,6 @@ fn cc6_core_delivery_transfer_is_bit_identical_to_the_media_transfer() {
     }
     assert_eq!(compared, 16_385, "the sweep covers -2.0 ..= 2.0 at 1/4096");
 
-    // Failing direction: a deliberately mis-seamed transcription (`<=` rather
-    // than `<` at the branch) differs at exactly 0.018, so the sweep is known
-    // to be able to see a one-branch error.
     fn mis_seamed(linear: f32) -> f32 {
         if linear < 0.0 {
             -mis_seamed(-linear)
@@ -2087,8 +1917,6 @@ fn cc6_core_delivery_transfer_is_bit_identical_to_the_media_transfer() {
         encode_bt709_delivery(0.018).to_bits(),
         "the mis-seamed transcription must differ at the seam, or the sweep proves nothing"
     );
-    // ... and agrees everywhere else on the anchors, so the difference is the
-    // branch and not a second bug.
     for anchor in ANCHORS {
         if anchor == 0.018 {
             continue;
@@ -2100,10 +1928,6 @@ fn cc6_core_delivery_transfer_is_bit_identical_to_the_media_transfer() {
         );
     }
 }
-
-// ===========================================================================
-// §11.2.24 (P9): performance evidence.
-// ===========================================================================
 
 /// The P9 raster: one 1920 × 1080 frame is what §11.2.24 costs, so the cost is
 /// measured at that raster and not extrapolated from 320 × 180.
@@ -2131,7 +1955,6 @@ fn assert_cc6_performance_evidence(gpu: &FixtureGpu, fixture: &str) {
     let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
         .expect("the production media engine should start");
 
-    // --- the working proof ------------------------------------------------
     let started = Instant::now();
     let proof = engine
         .working_proof_for_document(Arc::clone(&document), TimeCode::ZERO)
@@ -2140,7 +1963,6 @@ fn assert_cc6_performance_evidence(gpu: &FixtureGpu, fixture: &str) {
     assert_eq!((proof.image.width, proof.image.height), size);
     assert!(proof.metadata.render.full_resolution);
 
-    // --- a full report: range + gamut + skin + tags -----------------------
     let request = ColorQcRequest {
         roi: Some(NormalizedRoi::new(200, 4_500, 1_000, 1_000)),
         checks: vec![
@@ -2160,7 +1982,6 @@ fn assert_cc6_performance_evidence(gpu: &FixtureGpu, fixture: &str) {
     assert!(report.skin.is_some(), "the skin section was requested");
     assert!(report.tags.is_some(), "the tag section was requested");
 
-    // --- a five-frame verification ---------------------------------------
     let output = directory.path("cc6-performance-delivery.mp4");
     let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();
     let started = Instant::now();
@@ -2203,8 +2024,6 @@ fn assert_cc6_performance_evidence(gpu: &FixtureGpu, fixture: &str) {
             gpu.lane.id()
         );
     }
-    // Vacuity: a measurement of exactly zero would mean the clock, not the
-    // cost, was measured.
     assert!(proof_milliseconds > 0.0);
     assert!(qc_milliseconds > 0.0);
     assert!(verify_milliseconds > 0.0);
@@ -2251,10 +2070,6 @@ fn cc6_performance_evidence_is_recorded_on_hardware() {
         "cc6_performance_evidence_is_recorded_on_hardware",
     );
 }
-
-// ===========================================================================
-// §11.2.23: the manifest and the declared-test inventory.
-// ===========================================================================
 
 /// Every `cc6_*` test the **media** crate declares, across the three files
 /// that own CC6 evidence.
@@ -2382,8 +2197,6 @@ const CC6_EXTERNAL_OWNERS: [(u64, &str); 14] = [
     (4, "kinewright-core"),
     (5, "kinewright-core"),
     (9, "kinewright-core"),
-    // §6.4's excursion **rate** is core's accessor, and its own proof lives
-    // beside it; the decoded planes it is measured on are this crate's.
     (12, "kinewright-core"),
     (15, "kinewright-core"),
     (16, "kinewright-agent"),
@@ -2523,16 +2336,6 @@ fn declared_test_names(source: &str, prefix: &str) -> Vec<String> {
 /// "`fixture_gpu_or_skip` is forbidden here" in the very assertion that
 /// forbids it, and `include_str!` cannot tell prose from code on its own.
 fn uses_outside_prose(source: &str, needle: &str) -> bool {
-    // A call is the identifier followed by `(`, on a line that is not a
-    // comment, with any trailing `//` comment stripped first. Exempting every
-    // line that contains a string literal would let
-    // `fixture_gpu_or_skip("cc6-verify")` — the natural spelling — evade the
-    // guard, so string literals are not exempt; only the identifier-plus-paren
-    // shape counts, and prose mentions inside quotes never carry the paren
-    // directly after the name.
-    // The quoted form is the `std::env::var("NAME")` shape — the needle
-    // directly inside a call's parentheses — so this file's own needle list
-    // (`["…", "…"]`) cannot match itself.
     let call = format!("{needle}(");
     let env = format!("(\"{needle}\")");
     source.lines().any(|line| {
@@ -2558,7 +2361,6 @@ fn cc6_manifest() -> Value {
 /// test the media sources declare is listed.
 #[test]
 fn cc6_declared_test_names_exist_in_their_source_files() {
-    // --- both directions, for the media sources --------------------------
     let declared_in_media = sorted(
         CC6_MEDIA_TEST_SOURCES
             .into_iter()
@@ -2575,11 +2377,6 @@ fn cc6_declared_test_names_exist_in_their_source_files() {
             "{name} does not match the `cargo test -- cc6` filter"
         );
     }
-    // The media CC6 fixtures take the panicking `fallback_gpu()` convention,
-    // not `fixture_gpu_or_skip()`, which passes when the skip opt-in is set.
-    // `export.rs` is held to the same rule: its three GPU-backed CC6 export
-    // tests are §11.2 evidence for items 11 and 15, and evidence that reports
-    // `ok` without running is not evidence.
     let fixtures = cc6_test_source("crates/kinewright-media/src/cc6_fixtures.rs");
     for path in [
         "crates/kinewright-media/src/cc6_fixtures.rs",
@@ -2595,7 +2392,6 @@ fn cc6_declared_test_names_exist_in_their_source_files() {
         }
     }
 
-    // --- both directions, for the other three crates ----------------------
     for (path, expected) in [
         (
             "crates/kinewright-core/tests/cc6_core.rs",
@@ -2658,7 +2454,6 @@ fn cc6_declared_test_names_exist_in_their_source_files() {
         );
     }
 
-    // --- every name the manifest claims exists in the source it names -----
     let manifest = cc6_manifest();
     let mut verified = 0_usize;
     for entry in manifest["required_fixtures"]
@@ -2710,15 +2505,11 @@ fn cc6_declared_test_names_exist_in_their_source_files() {
         manifest["manifest_self_test"]["inventory_test"], CC6_INVENTORY_TESTS[1],
         "the manifest must name the test that ties its declared test names to their sources"
     );
-    // A count, so a manifest that quietly emptied its `tests` arrays cannot
-    // pass this test vacuously.
     assert!(
         verified >= 45,
         "only {verified} declared test names were verified; the manifest has lost entries"
     );
 
-    // Every §11.2 item is declared exactly once, and the items whose evidence
-    // lives outside this crate are the ones CC6_EXTERNAL_OWNERS names.
     let items = manifest["required_fixtures"]
         .as_array()
         .expect("items")
@@ -2788,7 +2579,6 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
     assert_eq!(manifest["contract"], "CC6 QC and managed delivery");
     assert_eq!(manifest["contract_token"], CC6_CONTRACT);
 
-    // --- §2.1 the two stages, and which one the scope engine may measure ---
     let stages = manifest["stages"].as_array().expect("two stages");
     assert_eq!(stages.len(), 2);
     for (declared, stage) in stages.iter().zip([
@@ -2808,7 +2598,6 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
     );
     assert_eq!(manifest["working_proof"]["full_resolution_only"], true);
 
-    // --- §4.1/§4.3 the two delivery lanes ---------------------------------
     let lanes = manifest["delivery_lanes"].as_array().expect("two lanes");
     assert_eq!(lanes.len(), 2);
     let export_source = cc6_test_source("crates/kinewright-media/src/export.rs");
@@ -2816,13 +2605,7 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
         assert_eq!(declared["name"], depth.as_str());
         assert_eq!(declared["bit_depth"], i64::from(depth.bits()));
         assert_eq!(declared["pixel_format"], depth.pixel_format());
-        // §4.3, R7/A10: no `profile` option on either lane — the pixel format
-        // selects High 10 and the output is byte-identical either way.
         assert_eq!(declared["profile_option"], Value::Null);
-        // The codec, the x264 parameter string, and the scaler flags are
-        // private constants in `export.rs`. They are tied to the manifest
-        // through the *source* the inventory already includes, so a change to
-        // either fails this fixture at compile time rather than drifting.
         for key in ["codec", "x264_params"] {
             let value = declared[key].as_str().expect("a declared string");
             assert!(
@@ -2852,7 +2635,6 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
         "§5.3's DELIVERY_SCALER_FLAGS must still be the measured `bicubic`"
     );
 
-    // --- §5.2 the delivery intermediate -----------------------------------
     assert_manifest_i64(
         &manifest["delivery_intermediate"],
         "white",
@@ -2863,7 +2645,6 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
         "ad6f6a8"
     );
 
-    // --- §3.5 the skin band -----------------------------------------------
     let skin = &manifest["skin"];
     assert_manifest_i64(
         skin,
@@ -2897,7 +2678,6 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
         "the manifest must record how the band constants were derived"
     );
 
-    // --- §3.4 the Y'CbCr reference ----------------------------------------
     let ycbcr = &manifest["ycbcr"];
     crate::cc1_fixtures::assert_manifest_f64(ycbcr, "bt709_kr", BT709_KR);
     crate::cc1_fixtures::assert_manifest_f64(ycbcr, "bt709_kb", BT709_KB);
@@ -2913,9 +2693,6 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
         "chroma_legal_high",
         i64::from(YCBCR_CHROMA_LEGAL_HIGH),
     );
-    // The eight anchors, at both depths, against an **independent** f64
-    // transcription of §3.4's equations. Nothing here calls
-    // `bt709_limited_ycbcr` (rule 11.0.1).
     let anchors = ycbcr["anchors"].as_array().expect("eight anchor rows");
     assert_eq!(anchors.len(), 8);
     for anchor in anchors {
@@ -2948,7 +2725,6 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
         }
     }
 
-    // --- §11.1 the raster --------------------------------------------------
     let raster = &manifest["raster"];
     assert_manifest_i64(raster, "width", i64::from(CC6_QC_RASTER.0));
     assert_manifest_i64(raster, "height", i64::from(CC6_QC_RASTER.1));
@@ -3012,13 +2788,10 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
         "the manifest's sampled frames are §6.2's closed form on T = 60, n = 5"
     );
 
-    // --- §11.3 thresholds: one key per pinned constant --------------------
     let thresholds = &manifest["thresholds"];
     let declared = thresholds
         .as_object()
         .expect("the manifest must declare a thresholds object");
-    // Rule: no unresolved probe placeholder. Every threshold key holds a
-    // number, so a key count alone cannot be satisfied by a placeholder.
     for (key, value) in declared {
         assert!(
             value.is_number(),
@@ -3144,15 +2917,12 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
     ] {
         assert_manifest_i64(thresholds, key, expected);
     }
-    // The key count, so a constant cannot be added to the code without being
-    // declared here.
     assert_eq!(
         declared.len(),
         34,
         "every pinned CC6 constant of §3-§6 must have exactly one threshold key"
     );
 
-    // --- §6.3 budgets, measured, and their distinctness -------------------
     let budgets = &manifest["budgets"];
     for (lane, depth) in [
         ("eight_bit", DeliveryEncodeDepth::Eight),
@@ -3176,8 +2946,6 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
                 "§11.3: {lane}.{key} must record the measurement the fixture made"
             );
         }
-        // Rule 11.0.5, recorded: `margin_ratio` is the arithmetic of the two
-        // numbers beside it, so a stale margin cannot survive a re-baseline.
         for key in [
             "luma_max_code",
             "luma_p99_code_millionths",
@@ -3204,8 +2972,6 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
             }
         }
     }
-    // CC1's rule: a codec tolerance and a compositor tolerance must be
-    // numerically distinct, in the manifest as well as in the code.
     let monitor = &budgets["monitor_cpu_gpu"];
     crate::cc1_fixtures::assert_manifest_f64(monitor, "max_code", f64::from(MONITOR_CPU_GPU_MAX));
     crate::cc1_fixtures::assert_manifest_f64(monitor, "p99_code", MONITOR_CPU_GPU_P99);
@@ -3233,11 +2999,6 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
     );
     assert_eq!(justification["strictly_better"], true);
 
-    // §11.2.13's recorded failing direction, both lanes. The manifest names
-    // which gated terms tripped and which stayed inside; the fixtures pin the
-    // same sets, so a re-baseline that moved the failure from the codec-only
-    // luma plane to the whole-raster sanity floor cannot be recorded here as
-    // if nothing had changed.
     let starved = &budgets["starved_bitrate_failing_direction"];
     assert_eq!(starved["within_budgets"], false);
     assert_eq!(starved["technical_pass"], false);
@@ -3291,7 +3052,6 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
         );
     }
 
-    // --- §5 measured behaviour --------------------------------------------
     let behaviour = &manifest["measured_behaviour"];
     assert!(
         behaviour["dither"]
@@ -3321,7 +3081,6 @@ fn cc6_manifest_declares_every_required_fixture_and_constant() {
         "§5.5's decode-flag rule must be recorded"
     );
 
-    // --- §11.2 the fixtures ------------------------------------------------
     assert_eq!(
         manifest["evidence_fixtures"],
         json!(CC6_EVIDENCE_FIXTURES),

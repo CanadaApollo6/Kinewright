@@ -694,8 +694,6 @@ fn push_silence_span(
     Ok(())
 }
 
-// Energy windows and normalization are intentionally f64 so the same PCM input
-// produces stable markers across supported sample rates.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -881,10 +879,6 @@ fn detect_scene_changes(
             if let Some(previous) = previous_pixels.as_deref() {
                 let difference = frame_difference(previous, &frame.rgba);
                 if let Some(previous_difference) = previous_difference {
-                    // This mirrors scdet's temporal-spike behavior: persistent
-                    // motion is suppressed while a one-frame discontinuity is
-                    // retained. Histogram distance makes hard palette cuts
-                    // robust; per-pixel SAD catches composition changes.
                     let confidence = difference
                         .min((difference - previous_difference).abs())
                         .clamp(0.0, 1.0);
@@ -965,8 +959,6 @@ where
             if !clip.content.is_media() {
                 continue;
             }
-            // Derived source timestamps no longer align project-linearly on a
-            // speed-changed clip; remapping them is deferred, so skip for now.
             if clip.speed_percent != 100 {
                 continue;
             }
@@ -1064,8 +1056,6 @@ where
             if !clip.content.is_media() {
                 continue;
             }
-            // Derived source timestamps no longer align project-linearly on a
-            // speed-changed clip; remapping them is deferred, so skip for now.
             if clip.speed_percent != 100 {
                 continue;
             }

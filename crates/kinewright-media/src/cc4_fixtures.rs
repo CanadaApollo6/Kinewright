@@ -134,15 +134,6 @@ const CC4_EVIDENCE_FIXTURES: [&str; 17] = [
     "cc4_typed_rejections",
 ];
 
-// ---------------------------------------------------------------------------
-// The independent f64 transcription of CC4 §2.6, §3.4, and §3.5.
-//
-// Nothing below calls the production evaluator. The constants are the contract
-// digits and the algorithms are the §3.5 pseudocode, transcribed by hand, so a
-// parity or anchor assertion compares two implementations of the written
-// contract rather than one implementation with itself.
-// ---------------------------------------------------------------------------
-
 /// `sgn` with `sgn(0) = 0`; `signum` returns `±1` at zero and would break the
 /// bit-exact identity CC4 §10.3.2 needs.
 fn spec_sign_f64(value: f64) -> f64 {
@@ -480,13 +471,6 @@ fn spec_builtin_formula_f64(look: BuiltinLook, e: [f64; 3]) -> [f64; 3] {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The fixture lattices, written as real `.cube` text and imported through the
-// real project store (CC4 §2.4: the renderer only ever consumes hash-verified
-// bytes, so a fixture that fabricated a `LutLibrary` from samples would not be
-// testing the production path).
-// ---------------------------------------------------------------------------
-
 /// The canonical serializer's fixed-decimal spelling.
 fn format_six(value: f64) -> String {
     format!("{value:.6}")
@@ -608,10 +592,6 @@ fn non_dyadic_look_lattice() -> SpecLattice {
     SpecLattice::new(NON_DYADIC_LOOK_SIZE, (0.0, 1.0), spec_non_dyadic_look_f64)
 }
 
-// ---------------------------------------------------------------------------
-// The store-backed library.
-// ---------------------------------------------------------------------------
-
 /// A real project store holding real `.cube` files, plus the verified library
 /// the renderer consumes.
 struct FixtureLuts {
@@ -676,10 +656,6 @@ impl FixtureLuts {
         document
     }
 }
-
-// ---------------------------------------------------------------------------
-// Effects.
-// ---------------------------------------------------------------------------
 
 fn effect_with(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
@@ -746,10 +722,6 @@ fn cc4_document() -> Document {
 fn clip_effects(document: &Document) -> &[Effect] {
     &document.tracks[0].clips[0].effects
 }
-
-// ---------------------------------------------------------------------------
-// CPU reference and GPU rendering.
-// ---------------------------------------------------------------------------
 
 fn cpu_nodes(effects: &[Effect], library: &LutLibrary) -> Vec<ColorNode> {
     resolve_color_nodes_with(effects, library).expect("CC4 fixture node stack must resolve")
@@ -921,11 +893,6 @@ fn assert_gpu_case(
     (monitor, linear, actual_monitor)
 }
 
-// ---------------------------------------------------------------------------
-// The CC4 §4.2 storage-buffer reader, so slot assignment is checked against
-// the bytes the shader actually reads.
-// ---------------------------------------------------------------------------
-
 const GRADE_HEADER_BYTES: usize = 16;
 const GRADE_NODE_WORDS: usize = 16;
 const GRADE_NODE_VALUE_OFFSET: usize = 4;
@@ -949,10 +916,6 @@ fn grade_kind(bytes: &[u8], node: usize) -> u32 {
     let offset = GRADE_HEADER_BYTES + node * GRADE_NODE_WORDS * 4;
     f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("kind word")) as u32
 }
-
-// ---------------------------------------------------------------------------
-// Evidence.
-// ---------------------------------------------------------------------------
 
 fn emit_cc4_evidence(
     fixture: &str,
@@ -992,10 +955,6 @@ fn emit_cc4_evidence(
     write_evidence_artefact(fixture, &payload);
 }
 
-// ---------------------------------------------------------------------------
-// §10.3.1: `.cube` parsing.
-// ---------------------------------------------------------------------------
-
 /// A minimal well-formed `S = 2` body, so a fault can be injected one line at
 /// a time without the rest of the file changing.
 fn minimal_cube_body() -> String {
@@ -1026,7 +985,6 @@ fn cc4_cube_parsing_accepts_and_rejects_exactly_what_the_contract_lists() {
         "CC4 §2.5 raises the largest lattice edge from 64 to 65"
     );
 
-    // --- accepted sizes -------------------------------------------------
     let mut accepted_sizes = Vec::new();
     for size in [2_u32, 17, 33, 65] {
         let lattice = identity_lattice(size);
@@ -1037,9 +995,6 @@ fn cc4_cube_parsing_accepts_and_rejects_exactly_what_the_contract_lists() {
         assert_eq!(parsed.domain_min, [0.0; 3]);
         assert_eq!(parsed.domain_max, [1.0; 3]);
         assert_eq!(parsed.sample_count(), 3 * (size as usize).pow(3));
-        // `S - 1` is a power of two for every accepted size, so the identity
-        // lattice values are exact binary fractions and exact six-decimal
-        // strings; the last red-fastest corner is (1, 1, 1) exactly.
         let last = (size as usize).pow(3) - 1;
         assert_eq!(parsed.sample(0), Some([0.0, 0.0, 0.0]));
         assert_eq!(parsed.sample(last), Some([1.0, 1.0, 1.0]));
@@ -1050,7 +1005,6 @@ fn cc4_cube_parsing_accepts_and_rejects_exactly_what_the_contract_lists() {
         accepted_sizes.push(size);
     }
 
-    // --- negative domain ------------------------------------------------
     let negative_domain = lattice_cube_text(&lut_d_lattice());
     let parsed = parse_cube_lut_typed(&negative_domain).expect("a negative domain is legal");
     assert_eq!(parsed.domain_min, [-0.5; 3]);
@@ -1061,8 +1015,6 @@ fn cc4_cube_parsing_accepts_and_rejects_exactly_what_the_contract_lists() {
         "the integer mirrors round half away from zero"
     );
 
-    // --- quoted title, comments, blank lines, lowercase keywords,
-    //     scientific notation ------------------------------------------
     let decorated = "\
 # a leading comment
 title  \"Kodak 2383 D65\"
@@ -1089,18 +1041,15 @@ domain_max 1.5e0 1.5 1.5
     assert_eq!(parsed.sample(3), Some([1.0, 0.5, 0.0]));
     assert_eq!(parsed.sample(4), Some([0.0, 0.0, 0.25]));
 
-    // --- CRLF -----------------------------------------------------------
     let crlf = decorated.replace('\n', "\r\n");
     let crlf_parsed = parse_cube_lut_typed(&crlf).expect("CRLF is accepted");
     assert_eq!(crlf_parsed, parsed, "CRLF must parse identically to LF");
 
-    // --- UTF-8 BOM ------------------------------------------------------
     let mut bom = vec![0xEF_u8, 0xBB, 0xBF];
     bom.extend_from_slice(decorated.as_bytes());
     let bom_parsed = parse_cube_lut_bytes(&bom).expect("a leading BOM is stripped");
     assert_eq!(bom_parsed, parsed);
 
-    // --- rejections -----------------------------------------------------
     let body = minimal_cube_body();
     let with_size = |head: &str| format!("{head}\n{body}");
     let mut rejections = Vec::new();
@@ -1176,17 +1125,11 @@ domain_max 1.5e0 1.5 1.5
         format!("LUT_3D_SIZE 2\nDOMAIN_MIN 1 1 1\nDOMAIN_MAX 1 1 1\n{body}"),
         LutParseError {
             code: LutParseErrorCode::LutDomainInvalid,
-            // The reported line is the last domain keyword the parser saw,
-            // because the comparison is only possible once both are known.
             line: Some(3),
             observed: "channel 0: DOMAIN_MIN 1, DOMAIN_MAX 1".to_owned(),
             allowed: "DOMAIN_MIN strictly less than DOMAIN_MAX on every channel".to_owned(),
         },
     );
-    // A data line carries exactly three values or it is `malformed_lut_file`,
-    // so the reachable count mismatch is one whole triple short or long — the
-    // `3 * S^3 ± 1` shape the contract names, at the granularity the grammar
-    // permits.
     let mut short = body.clone();
     short.truncate(
         short
@@ -1296,10 +1239,6 @@ domain_max 1.5e0 1.5 1.5
     );
 }
 
-// ---------------------------------------------------------------------------
-// §10.3.2: identity.
-// ---------------------------------------------------------------------------
-
 /// The §10.2 raster restricted to samples whose every channel lies in `[0, 1]`.
 ///
 /// §10.3.2a's bit-exactness claim is scoped to the in-domain part of the
@@ -1333,8 +1272,6 @@ fn cc4_identity_lattices_are_bit_exact_in_linear_on_cpu_and_gpu() {
     let (width, height, frame) = in_domain_raster_frame();
     let resolution = (width, height);
 
-    // The f16 working-storage view of the raster: this is the value the node
-    // is handed, so it is what "bit-identical to the input" means.
     let input_linear = cpu_reference_linear(&frame, &[]);
     let input_monitor = cpu_reference_monitor(&frame, &[]);
     let gpu_baseline = gpu_linear(&compositor, resolution, &frame, &[], None);
@@ -1438,8 +1375,6 @@ fn cc4_identity_round_trips_display709_and_grade709_within_the_linear_gate() {
         for encoding in [LutInputEncoding::Display709, LutInputEncoding::Grade709] {
             let label = format!("identity_{}_{size}", encoding.as_str());
             let stack = [creative_look(1, 1, encoding.token(), 10_000)];
-            // The node must actually be resolved and written, or "the output
-            // equals the input" would be a statement about an empty stack.
             let nodes = cpu_nodes(&stack, luts.library());
             assert_eq!(nodes.len(), 1, "{label}: the node must be active");
             assert_eq!(nodes[0].kind(), ColorNodeKind::CreativeLook);
@@ -1524,8 +1459,6 @@ fn cc4_inactive_lut_nodes_are_bit_identical_to_the_stack_without_them() {
     let resolution = (width, height);
     let luts = FixtureLuts::one("cc4-inactive", &non_dyadic_look_lattice());
 
-    // The reference stack: a real correction node, so the comparison is not
-    // between two empty stacks.
     let baseline = vec![primary_effect(10)];
     let baseline_nodes = cpu_nodes(&baseline, luts.library());
     let baseline_linear = cpu_reference_linear(&frame, &baseline_nodes);
@@ -1545,8 +1478,6 @@ fn cc4_inactive_lut_nodes_are_bit_identical_to_the_stack_without_them() {
         Some(luts.library()),
     );
 
-    // The same node, ACTIVE, must move the raster or the inactive cases below
-    // prove nothing.
     let active = vec![
         primary_effect(10),
         creative_look(1, 1, LutInputEncoding::Display709.token(), 10_000),
@@ -1570,8 +1501,6 @@ fn cc4_inactive_lut_nodes_are_bit_identical_to_the_stack_without_them() {
             ColorNodeInactiveReason::Neutral,
         ),
         (
-            // §3.3 makes this unreachable through Core, so it is constructed
-            // directly against the resolver, exactly as §10.3.2c requires.
             "unbound",
             creative_look(1, 0, LutInputEncoding::Display709.token(), 10_000),
             ColorNodeInactiveReason::Unbound,
@@ -1717,10 +1646,6 @@ fn cc4_inactive_lut_nodes_are_bit_identical_to_the_stack_without_them() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §10.3.3 – §10.3.5: anchors, out-of-domain, and mix.
-// ---------------------------------------------------------------------------
-
 /// A wide-bar frame holding one block per anchor sample.
 fn anchor_frame(samples: &[[f32; 3]]) -> (u32, u32, WorkingFrame) {
     let width = CC3_RASTER_BLOCK_WIDTH * samples.len() as u32;
@@ -1781,14 +1706,9 @@ fn cc4_interpolation_anchors_match_the_hand_derived_values() {
     let compositor = Compositor::new(gpu.context());
     let linear = LutInputEncoding::Linear.token();
 
-    // --- the six §3.5 formulas agree at the tie ------------------------
-    // Written out here, term by term, rather than driven by a loop, so the
-    // fixture is a transcription of the contract rather than a paraphrase.
     let b = lut_b_lattice();
     let v = |r: u32, g: u32, blue: u32| b.lattice(r, g, blue);
     let (f_r, f_g, f_b) = (0.5_f64, 0.5, 0.5);
-    // One line per §3.5 formula, so this reads as a transcription of the
-    // contract's branch table rather than as reformatted prose.
     #[rustfmt::skip]
     let tie_formulas: [[f64; 3]; 6] = [
         spec_tetra(v(0,0,0), f_r, v(1,0,0), v(0,0,0), f_g, v(1,1,0), v(1,0,0), f_b, v(1,1,1), v(1,1,0)),
@@ -1807,7 +1727,6 @@ fn cc4_interpolation_anchors_match_the_hand_derived_values() {
         );
     }
 
-    // --- the anchors ----------------------------------------------------
     struct Anchor {
         lut: &'static str,
         branch: &'static str,
@@ -1886,8 +1805,6 @@ fn cc4_interpolation_anchors_match_the_hand_derived_values() {
 
         for (index, anchor) in rows.iter().enumerate() {
             let label = format!("LUT {} {}", anchor.lut, anchor.branch);
-            // The independent f64 transcription of §3.5 must agree with the
-            // literal the contract states, before either is compared to code.
             let spec = lattice.apply(LutInputEncoding::Linear, 1.0, anchor.input.map(f64::from));
             for channel in 0..3 {
                 assert!(
@@ -1895,8 +1812,6 @@ fn cc4_interpolation_anchors_match_the_hand_derived_values() {
                     "{label}: the f64 transcription disagrees with the contract literal: {spec:?}"
                 );
             }
-            // Every anchor value is an exact binary fraction, so the CPU
-            // reference is an equality, not a tolerance.
             assert_eq!(
                 block_rgb(&cpu, index),
                 anchor.expected,
@@ -1919,11 +1834,6 @@ fn cc4_interpolation_anchors_match_the_hand_derived_values() {
         }
     }
 
-    // --- tetrahedral is not trilinear ----------------------------------
-    // The contract states the trilinear value of the same lattice at the same
-    // input; it is written out here and cross-checked against the
-    // test-only eight-vertex evaluator, then asserted to differ from what the
-    // production node produced.
     const TRILINEAR_B: [f32; 3] = [0.421_875, 0.296_875, 0.171_875];
     let cube: CubeLut =
         parse_cube_lut_typed(&lattice_cube_text(&lut_b_lattice())).expect("LUT B parses");
@@ -1988,10 +1898,6 @@ fn cc4_out_of_domain_restores_the_excursion_and_stays_monotone() {
         &[lattice_cube_text(&d), lattice_cube_text(&lut_e_lattice())],
     );
 
-    // `(2, 2, 2)` clamps to `(1.5, 1.5, 1.5)`, whose lookup is `(1, 1, 1)`, so
-    // the node output is `(1, 1, 1) + (2 - 1.5) = (1.5, 1.5, 1.5)`.
-    // `(-1, -1, -1)` clamps to `(-0.5, -0.5, -0.5)`, lookup `(0, 0, 0)`,
-    // output `(0, 0, 0) + (-1 + 0.5) = (-0.5, -0.5, -0.5)`.
     const CASES: [(&str, [f32; 3], [f32; 3], [f32; 3]); 2] = [
         (
             "above_dmax",
@@ -2060,7 +1966,6 @@ fn cc4_out_of_domain_restores_the_excursion_and_stays_monotone() {
         }));
     }
 
-    // --- monotonicity across the boundary -------------------------------
     let boundary_stack = [creative_look(1, 2, linear, 10_000)];
     let boundary_nodes = cpu_nodes(&boundary_stack, luts.library());
     let mut ramps = Vec::new();
@@ -2132,8 +2037,6 @@ fn cc4_mix_endpoints_and_midpoint_match_the_hand_derived_values() {
     let luts = FixtureLuts::one("cc4-mix", &b);
 
     const INPUT: [f32; 3] = [0.75, 0.50, 0.25];
-    // `look(x) = (0.5, 0.375, 0.25)` from §10.3.3, so
-    // `out = x + (look(x) - x) * mix`.
     const CASES: [(i64, [f32; 3]); 3] = [
         (0, [0.750_000, 0.500_000, 0.250_000]),
         (5_000, [0.625_000, 0.437_500, 0.250_000]),
@@ -2179,16 +2082,11 @@ fn cc4_mix_endpoints_and_midpoint_match_the_hand_derived_values() {
         );
 
         if mix == 0 {
-            // §3.6: `mix = 0` is decided on the stored integer, so the node is
-            // never written and the result is bit-identical to removal.
             assert_eq!(
                 color_node_inactive_reason(&stack[0]),
                 Some(ColorNodeInactiveReason::Neutral)
             );
             assert_eq!(nodes.len(), 0);
-            // Compared against the frame's own working values, not against
-            // `cpu_reference_linear(frame, &[])`, which would be the same
-            // function with the same arguments on both sides.
             assert_eq!(
                 bits_of(&cpu),
                 frame_working_bits(&frame),
@@ -2237,10 +2135,6 @@ fn cc4_mix_endpoints_and_midpoint_match_the_hand_derived_values() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §10.3.6: stage ordering.
-// ---------------------------------------------------------------------------
-
 /// The technical input transform used by the ordering and parity fixtures: a
 /// 17³ channel rotation with a slight gain.
 ///
@@ -2280,7 +2174,6 @@ fn cc4_stage_order_is_the_execution_order_and_a_violation_is_rejected() {
     );
     let baseline = cpu_reference_linear(&frame, &[]);
 
-    // --- the legal five-kind stack -------------------------------------
     let stack = five_kind_stack();
     let nodes = cpu_nodes(&stack, luts.library());
     assert_eq!(
@@ -2312,9 +2205,6 @@ fn cc4_stage_order_is_the_execution_order_and_a_violation_is_rejected() {
         "five_kind_stage_order",
     );
 
-    // --- the reversed order is a different picture ----------------------
-    // The document cannot store this order, so it is evaluated directly
-    // against the CPU reference, exactly as §10.3.6 requires.
     let forward_pair = vec![
         technical_lut(1, 1, LutInputEncoding::Display709.token()),
         creative_look(5, 2, LutInputEncoding::Display709.token(), 7_500),
@@ -2348,7 +2238,6 @@ fn cc4_stage_order_is_the_execution_order_and_a_violation_is_rejected() {
         "only {differing} samples differ between the two stage orders"
     );
 
-    // --- the violation is rejected, not reordered -----------------------
     let expected = OpError::ColorStageOrderViolation {
         clip: ClipId(1),
         effect: EffectId(1),
@@ -2401,9 +2290,6 @@ fn cc4_stage_order_is_the_execution_order_and_a_violation_is_rejected() {
         rejections.push(json!({"path": path, "error": error.to_string()}));
     }
 
-    // `validate_document` is Core-internal, so it is reached the only way a
-    // caller can: every operation validates the *incoming* document before it
-    // touches it, so a hand-built violating document rejects any edit at all.
     let mut violating = luts.document();
     violating.tracks[0].clips[0].effects = reversed_pair.clone();
     let error = Operation::SetTitleParam {
@@ -2421,7 +2307,6 @@ fn cc4_stage_order_is_the_execution_order_and_a_violation_is_rejected() {
     );
     rejections.push(json!({"path": "validate_document", "error": error.to_string()}));
 
-    // --- a legal insertion preserves relative order ---------------------
     let mut ordered = luts.document();
     for effect in [
         primary_effect(2),
@@ -2507,10 +2392,6 @@ fn stage_ranks(error: &OpError) -> (u8, u8) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// §10.2 raster coverage and §10.3.7 CPU/GPU parity.
-// ---------------------------------------------------------------------------
-
 /// How many of the 192 §10.2 raster samples encode outside `[0, 1]` in
 /// `display709`, and therefore exercise the §3.5 additive out-of-domain rule.
 fn raster_samples_outside_unit_display() -> usize {
@@ -2550,8 +2431,6 @@ fn cc4_parity_raster_exercises_the_out_of_domain_rule() {
 
 /// The §10.3.7 parity body, shared by the software and hardware lanes.
 fn assert_cc4_gpu_parity(gpu: &FixtureGpu) {
-    // §10.1.4: the gate constants are the CC1 §6.2 numbers, asserted against
-    // the code rather than restated.
     assert_eq!(MONITOR_CPU_GPU_MAX, 2);
     assert_eq!(MONITOR_CPU_GPU_P99, 1.0);
     assert_eq!(MONITOR_CPU_GPU_MEAN, 0.50);
@@ -2576,9 +2455,6 @@ fn assert_cc4_gpu_parity(gpu: &FixtureGpu) {
             lattice_cube_text(&non_dyadic_look_lattice()),
         ],
     );
-    // §10.1 rule 7: the precision gate uses a real non-dyadic 33³ look. A
-    // lattice sample that is exactly representable in f16 would make the
-    // lattice-precision claim vacuous, so the fixture proves it is not.
     let look_cube = luts
         .library()
         .get(LutAssetId(2))
@@ -2638,8 +2514,6 @@ fn assert_cc4_gpu_parity(gpu: &FixtureGpu) {
                 "vacuity_checked": true,
             }));
         } else {
-            // `mix = 0` is the neutral endpoint: it must be *bit-identical* to
-            // the look-free stack, so the vacuity gate does not apply to it.
             let nodes = cpu_nodes(stack, luts.library());
             assert!(nodes.is_empty());
             let rendered = gpu_linear(&compositor, resolution, &frame, stack, Some(luts.library()));
@@ -2701,10 +2575,6 @@ fn cc4_gpu_compositor_matches_the_cpu_reference_on_hardware() {
     assert_cc4_gpu_parity(&hardware_gpu());
 }
 
-// ---------------------------------------------------------------------------
-// §10.3.8: slots, limits, and the ABI.
-// ---------------------------------------------------------------------------
-
 /// The four mixed-size lattices §10.3.8 names, each a different affine map so
 /// any slot confusion changes the composed result.
 fn mixed_size_lattices() -> [SpecLattice; 4] {
@@ -2725,13 +2595,10 @@ fn cc4_lut_slots_limits_and_abi_constants_hold() {
     let compositor = Compositor::new(gpu.context());
     let linear = LutInputEncoding::Linear.token();
 
-    // --- the constants --------------------------------------------------
     assert_eq!(COMPOSITOR_LUT_SLOTS_PER_LAYER, 4);
     assert_eq!(COMPOSITOR_LUT_SLOTS_PER_LAYER, LUT_NODE_LIMIT_PER_LAYER);
     assert_eq!(COMPOSITOR_LEGACY_LUT_SLOT, 4);
     assert_eq!(COMPOSITOR_LUT_ATLAS_SLOTS, 5);
-    // CC5 §3.1 widens the binding to hold sixteen curve-plus-matte nodes;
-    // the binding *count* is unchanged, which is the portability claim.
     assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE, 32_768);
     assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, 1);
     assert_eq!(COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D, 512);
@@ -2742,7 +2609,6 @@ fn cc4_lut_slots_limits_and_abi_constants_hold() {
     );
     assert_eq!(COMPOSITOR_LUT_ATLAS_SLOTS * MAX_CUBE_SIZE as usize, 325);
 
-    // --- every ColorNodeKind has a shader branch ------------------------
     let shader = include_str!("compositor.wgsl");
     for kind in [
         ColorNodeKind::TechnicalLut,
@@ -2769,7 +2635,6 @@ fn cc4_lut_slots_limits_and_abi_constants_hold() {
          is never used for the atlas"
     );
 
-    // --- four nodes, four slots, four z_origins -------------------------
     let lattices = mixed_size_lattices();
     let luts = FixtureLuts::build(
         "cc4-slots",
@@ -2818,9 +2683,6 @@ fn cc4_lut_slots_limits_and_abi_constants_hold() {
         assert_eq!(grade_value(&bytes, node, 11), 0.0, "v11 is reserved");
         slot_rows.push(json!({"slot": slot, "size": size, "z_origin": z_origin}));
     }
-    // Everything below is read back out of the buffer the shader consumes,
-    // never out of the literal table above, so the distinctness and extent
-    // claims are statements about production values.
     let produced: Vec<(u32, u32, u32)> = (0..4)
         .map(|node| {
             (
@@ -2840,9 +2702,6 @@ fn cc4_lut_slots_limits_and_abi_constants_hold() {
             "atlas z_origins must be distinct and ascending: {produced:?}"
         );
     }
-    // The atlas is `(Smax, Smax, sum of the bound slot sizes)`: the depth is
-    // the last slot's origin plus its size and `Smax` is the largest bound
-    // edge, both taken from the production slot records.
     let depth = produced
         .iter()
         .map(|(_, size, z_origin)| z_origin + size)
@@ -2864,18 +2723,10 @@ fn cc4_lut_slots_limits_and_abi_constants_hold() {
         produced.iter().map(|(_, size, _)| size).sum::<u32>(),
         "only bound slots are allocated, so the depth is the sum of their sizes"
     );
-    // The binding itself must build on this adapter, or the layout above is
-    // describing an atlas nothing allocated.
     compositor
         .lut_binding(&stack, Some(luts.library()))
         .expect("four bound LUT nodes fit the atlas");
 
-    // --- and the composition is correct ---------------------------------
-    // (0.25, 0.75, 0.5)
-    //   x0.5      -> (0.125, 0.375, 0.25)
-    //   swap g,b  -> (0.125, 0.25,  0.375)
-    //   red x4    -> (0.5,   0.25,  0.375)
-    //   blue x0.5 -> (0.5,   0.25,  0.1875)
     const INPUT: [f32; 3] = [0.25, 0.75, 0.5];
     const EXPECTED: [f32; 3] = [0.5, 0.25, 0.187_5];
     let (width, height, frame) = anchor_frame(&[INPUT]);
@@ -2921,7 +2772,6 @@ fn cc4_lut_slots_limits_and_abi_constants_hold() {
         );
     }
 
-    // --- a fifth LUT node is rejected -----------------------------------
     let mut document = luts.document();
     for effect in &stack {
         Operation::AddEffect {
@@ -2979,10 +2829,6 @@ fn cc4_lut_slots_limits_and_abi_constants_hold() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §10.3.9: legacy coexistence.
-// ---------------------------------------------------------------------------
-
 /// CC4 §10.3.9. A managed `creative_look` and a legacy `cube_lut` coexist; the
 /// legacy stage runs after every managed node **regardless of their relative
 /// order** in `clip.effects`, and `qa_document` reports `legacy_lut_stage`
@@ -3034,8 +2880,6 @@ fn cc4_legacy_cube_lut_runs_last_beside_a_managed_look() {
     let mut rendered = Vec::new();
     let mut recorded = Vec::new();
     for (label, stack) in &orders {
-        // The legacy stage is not a managed node and never joins the stage
-        // ordering, so both vector orders are storable.
         let mut document = luts.document();
         for effect in stack {
             Operation::AddEffect {
@@ -3107,8 +2951,6 @@ fn cc4_legacy_cube_lut_runs_last_beside_a_managed_look() {
     );
     assert_ne!(legacy_only, managed_only);
 
-    // §4.1: the legacy lattice occupies the last atlas slot, after the four
-    // managed ones. Four managed nodes plus the legacy stage is the worst case.
     let four = mixed_size_lattices();
     let wide = FixtureLuts::build(
         "cc4-legacy-slots",
@@ -3155,10 +2997,6 @@ fn cc4_legacy_cube_lut_runs_last_beside_a_managed_look() {
         metrics,
     );
 }
-
-// ---------------------------------------------------------------------------
-// §10.3.10: built-in bake determinism.
-// ---------------------------------------------------------------------------
 
 /// Every field of one canonical `.cube` line, asserted to be `{:.6}` fixed
 /// decimal with no locale-dependent spelling.
@@ -3215,7 +3053,6 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
             "the legacy preset token mapping is normative"
         );
 
-        // --- the pinned hash, re-derived from the canonical bytes -------
         let text = look.canonical_text();
         let derived = sha256_bytes(text.as_bytes());
         assert_eq!(
@@ -3227,7 +3064,6 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
         assert_eq!(derived, output_hash(text.as_bytes()));
         assert_eq!(look.byte_len(), text.len() as u64);
 
-        // --- two independent bakes are byte-identical -------------------
         let first = look.bake();
         let second = look.bake();
         assert_eq!(first, second, "{name}: two bakes must be byte-identical");
@@ -3237,7 +3073,6 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
             "{name}: the cached bake and a fresh bake must serialize identically"
         );
 
-        // --- the pinned serializer structure ---------------------------
         assert!(
             !text.contains('\r'),
             "{name}: the canonical text is LF only"
@@ -3266,15 +3101,12 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
             assert_six_decimal_triple(line, &format!("{name} sample line {}", offset + 5));
         }
 
-        // The pinned text round-trips through the production parser in LF and
-        // in CRLF form.
         let parsed = parse_cube_lut_typed(text).expect("the canonical text parses");
         assert_eq!(parsed.size, size);
         assert_eq!(parsed.title.as_deref(), Some(look.cube_title()));
         let crlf = parse_cube_lut_typed(&text.replace('\n', "\r\n")).expect("CRLF parses");
         assert_eq!(crlf, parsed);
 
-        // --- the record ------------------------------------------------
         let asset = look.to_lut_asset(LutAssetId(index as u64 + 1));
         assert_eq!(asset.sha256, look.pinned_sha256());
         assert_eq!(asset.kind, LutAssetKind::Cube3d);
@@ -3298,10 +3130,6 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
         );
         assert_eq!(validate_lut_asset(&asset), Ok(()));
 
-        // --- the closed form on the §10.2 raster ------------------------
-        // The fixture's own f64 transcription is checked against the
-        // production formula first, so the comparison below is between two
-        // implementations of §2.6 rather than one with itself.
         for probe in [[0.0, 0.0, 0.0], [0.18, 0.5, 0.9], [-0.7, 1.5, 2.0]] {
             let mine = spec_builtin_formula_f64(look, probe);
             let theirs = look.formula(probe);
@@ -3324,8 +3152,6 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
         let nodes = cpu_nodes(&stack, &library);
         assert_eq!(nodes.len(), 1);
 
-        // The closed-form expectation, per pixel, in display code and in
-        // linear light.
         let mut expected_display = Vec::with_capacity(samples.len() * 3);
         let mut expected_linear_quantized = Vec::with_capacity(samples.len() * 4);
         for rgba in samples {
@@ -3344,8 +3170,6 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
             expected_linear_quantized.push(f16::from_f32(rgba[3].to_f32()).to_f32());
         }
 
-        // CPU: the unquantized reference against the closed form, in display
-        // code, at the §10.3.10 gate.
         let mut cpu_display_error = 0.0_f64;
         for (pixel, rgba) in samples.iter().enumerate() {
             let out = apply_stack(
@@ -3364,12 +3188,6 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
              {BUILTIN_DISPLAY_CODE_TOLERANCE}; the affine reproduction claim is broken"
         );
 
-        // GPU: the production `Rgba16Float` working surface quantizes its
-        // output, and one f16 step at a display code of ~0.5 is 1e-4 — fifty
-        // times the §10.3.10 gate — so the GPU is compared against the SAME
-        // closed form carried through the SAME normative quantization, under
-        // the CC1 §6.2 banded linear gate that exists for exactly this reason.
-        // The display-code deviation is measured and recorded either way.
         let rendered = gpu_linear(&compositor, resolution, &frame, &stack, Some(&library));
         let parity = linear_parity_metrics(&rendered, &expected_linear_quantized);
         assert_linear_parity(&parity, &format!("builtin_{name}_gpu_vs_closed_form"));
@@ -3383,8 +3201,6 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
             }
         }
 
-        // CPU against GPU under the ordinary §6.2 gates, so the two
-        // implementations are compared directly as well.
         let cpu_quantized = cpu_reference_linear(&frame, &nodes);
         let cpu_gpu = linear_parity_metrics(&rendered, &cpu_quantized);
         assert_linear_parity(&cpu_gpu, &format!("builtin_{name}_cpu_vs_gpu"));
@@ -3426,17 +3242,6 @@ fn cc4_builtin_bakes_are_deterministic_and_reproduce_their_formulas() {
         metrics,
     );
 }
-
-// ---------------------------------------------------------------------------
-// §10.3.11 (media half) and §10.3.12: relocatability and recovery.
-//
-// The save/open half of §10.3.11 is owned by `crates/kinewright-app`, which is
-// where `write_project` and the Save As store copy live. What is provable here
-// — and what the app half depends on — is that the store root is derived from
-// the project path at runtime, that a copied store reproduces the render
-// bit-identically, and that a missing store blocks the render with the typed
-// code instead of producing a look-free frame.
-// ---------------------------------------------------------------------------
 
 /// Copy a whole store directory tree.
 fn copy_tree(source: &Path, destination: &Path) {
@@ -3518,7 +3323,6 @@ fn cc4_relocating_the_store_reproduces_the_render_bit_identically() {
     let gpu = fallback_gpu();
     let context = gpu.context();
 
-    // --- the original project ------------------------------------------
     let original_dir = TempDirectory::new("cc4-relocate-origin");
     let project = original_dir.path("edit.kinewright");
     let store = LutStore::for_project(&project).expect("a saved project derives a store root");
@@ -3578,8 +3382,6 @@ fn cc4_relocating_the_store_reproduces_the_render_bit_identically() {
     let original_hash = published_render_hash(&context, &document, library)
         .expect("the published library renders the look");
 
-    // The same document without a look must hash differently, or the render
-    // hash is not evidence of anything.
     let look_free = relocatable_document(&assets, Vec::new());
     let look_free_hash =
         published_render_hash(&context, &look_free, LutLibrary::default()).expect("look-free");
@@ -3588,7 +3390,6 @@ fn cc4_relocating_the_store_reproduces_the_render_bit_identically() {
         "the creative look must actually change the rendered frame"
     );
 
-    // --- relocated: a different parent AND a different project stem ----
     let relocated_dir = TempDirectory::new("cc4-relocate-copy");
     let relocated_project = relocated_dir.path("renamed.kinewright");
     copy_tree(
@@ -3611,7 +3412,6 @@ fn cc4_relocating_the_store_reproduces_the_render_bit_identically() {
          look bit-identically"
     );
 
-    // --- without the store ---------------------------------------------
     let bare_dir = TempDirectory::new("cc4-relocate-bare");
     let bare_project = bare_dir.path("edit.kinewright");
     let bare_store = LutStore::for_project(&bare_project).expect("a bare project derives a root");
@@ -3657,7 +3457,6 @@ fn cc4_relocating_the_store_reproduces_the_render_bit_identically() {
         "no store root must block just as a missing file does"
     );
 
-    // --- restore returns it to the same bytes ---------------------------
     let restored_path = bare_store
         .restore(&asset, &source_cube)
         .expect("the original file restores");
@@ -3674,7 +3473,6 @@ fn cc4_relocating_the_store_reproduces_the_render_bit_identically() {
         "restoring the recorded bytes must return the render to the first hash bit-identically"
     );
 
-    // --- Save As into a third store -------------------------------------
     let saved_as_dir = TempDirectory::new("cc4-relocate-saveas");
     let saved_as_store = LutStore::for_project(&saved_as_dir.path("copy.kinewright"))
         .expect("the Save As target derives a root");
@@ -3757,7 +3555,6 @@ fn cc4_recovery_rejections_are_typed_and_leave_the_store_untouched() {
         )],
     );
 
-    // --- a different file is refused -----------------------------------
     let other = directory.path("other.cube");
     fs::write(&other, lattice_cube_text(&technical_lattice())).expect("the other LUT is written");
     let other_hash = sha256_bytes(&fs::read(&other).expect("readable"));
@@ -3789,7 +3586,6 @@ fn cc4_recovery_rejections_are_typed_and_leave_the_store_untouched() {
         LutAvailabilityKind::Verified
     );
 
-    // --- one corrupted byte ---------------------------------------------
     let mut corrupted = stored_bytes.clone();
     let flipped = corrupted
         .iter()
@@ -3835,7 +3631,6 @@ fn cc4_recovery_rejections_are_typed_and_leave_the_store_untouched() {
         LutAvailabilityKind::Verified
     );
 
-    // --- RemoveLutAsset is blocked by every kind of reference -----------
     let hold = AutomationCurve {
         keyframes: vec![
             Keyframe {
@@ -3949,10 +3744,6 @@ fn cc4_recovery_rejections_are_typed_and_leave_the_store_untouched() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §10.3.13: serialization, history, and typed rejections.
-// ---------------------------------------------------------------------------
-
 fn document_from(event: Event, label: &str) -> Arc<Document> {
     match event {
         Event::DocumentChanged { doc, .. } => doc,
@@ -4002,8 +3793,6 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
         .expect("the source imports")
         .into_lut_asset(LutAssetId(1));
 
-    // A pre-CC4 project has no `lut_assets` key at all and must re-serialize
-    // without one.
     let pre_cc4 = cc4_document();
     let serialized = serde_json::to_value(&pre_cc4).expect("a pre-CC4 project serializes");
     assert!(
@@ -4013,7 +3802,6 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
     let reopened: Document = serde_json::from_value(serialized).expect("it reopens");
     assert_eq!(reopened, pre_cc4);
 
-    // --- the batch through the actor ------------------------------------
     let core = Core::spawn(cc4_document()).expect("cc4 history core");
     let base = cc4_document();
     let added = document_from(
@@ -4032,8 +3820,6 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
         vec!["technical_lut"]
     );
 
-    // A legacy look becomes a managed one in place, through the explicit
-    // two-operation batch the contract names.
     let builtin = BuiltinLook::Warm.to_lut_asset(LutAssetId(2));
     let legacy = effect_with(
         2,
@@ -4134,7 +3920,6 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
         2
     );
 
-    // --- save and reopen -------------------------------------------------
     let saved = serde_json::to_vec(automated.as_ref()).expect("the CC4 document serializes");
     let reopened: Document = serde_json::from_slice(&saved).expect("the CC4 document reopens");
     assert_eq!(&reopened, automated.as_ref());
@@ -4156,7 +3941,6 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
         "imported provenance carries an informational source path"
     );
 
-    // --- journal replay ---------------------------------------------------
     let replay_core = Core::spawn(cc4_document()).expect("cc4 replay core");
     let mut replayed = Arc::new(base.clone());
     for (label, journal) in [
@@ -4196,7 +3980,6 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
     assert_eq!(replayed.lut_assets, converted.lut_assets);
     assert_eq!(clip_effects(&replayed), clip_effects(&converted));
 
-    // --- undo and redo -----------------------------------------------------
     let before_undo = serde_json::to_vec(automated.as_ref()).expect("serializes");
     let undone = document_from(core.request(Command::Undo).expect("undo"), "Undo");
     assert_eq!(
@@ -4211,9 +3994,6 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
         "redo must restore the document byte-for-byte"
     );
 
-    // Undo all the way back and confirm the asset record leaves with it.
-    // Four batches were accepted, and the undo/redo pair above left the
-    // history at the newest entry.
     for _ in 0..4 {
         let _ = core.request(Command::Undo).expect("undo");
     }
@@ -4232,7 +4012,6 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
         before_undo
     );
 
-    // --- ClearEffectKeyframes and RemoveLutAsset ---------------------------
     let cleared = document_from(
         core.request(Command::Do(Operation::ClearEffectKeyframes {
             clip: ClipId(1),
@@ -4539,9 +4318,6 @@ fn cc4_illegal_lut_edits_are_rejected_atomically_with_field_observed_and_allowed
         }));
     }
 
-    // --- the media-owned mismatch: a hand-edited record ------------------
-    // The bytes are hash-verified, so a disagreement can only mean the JSON
-    // was edited by hand; it is a typed error, never a silent preference.
     let verified = parse_cube_lut_typed(&text).expect("the store bytes parse");
     assert_eq!(metadata_mismatch(&asset, &verified), None);
     let hand_edited = LutAsset {
@@ -4560,8 +4336,6 @@ fn cc4_illegal_lut_edits_are_rejected_atomically_with_field_observed_and_allowed
         "allowed": allowed,
     }));
 
-    // The library refuses the hand-edited record entirely rather than
-    // rendering from a lossy mirror.
     let (library, statuses) = LutLibrary::build(std::slice::from_ref(&hand_edited), Some(&store));
     assert!(library.get(LutAssetId(1)).is_none());
     let reason = statuses[0]
@@ -4607,10 +4381,6 @@ fn cc4_illegal_lut_edits_are_rejected_atomically_with_field_observed_and_allowed
     );
 }
 
-// ---------------------------------------------------------------------------
-// §10.1.4 and §10.3: the manifest.
-// ---------------------------------------------------------------------------
-
 /// Every media-owned test this suite contains. The manifest may not name a
 /// media test that is not in this list, so a renamed or deleted fixture is a
 /// manifest failure rather than a silent gap.
@@ -4652,7 +4422,6 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
     assert_eq!(manifest["contract_token"], CC4_CONTRACT);
     assert_eq!(manifest["nodes"], json!(MANAGED_COLOR_NODE_NAMES));
 
-    // --- §3.1 stage table ------------------------------------------------
     let stages = manifest["stages"]
         .as_array()
         .expect("the manifest must declare the stage table");
@@ -4669,15 +4438,11 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
         );
     }
 
-    // --- §5 control tables ------------------------------------------------
     for name in ["technical_lut", "creative_look"] {
         let descriptor = effect_descriptor(name).expect("the descriptor exists");
         let declared = manifest["lut_node_controls"][name]
             .as_array()
             .unwrap_or_else(|| panic!("the manifest must declare the {name} controls"));
-        // CC5 §2.2 adds 47 `matte_*` parameters to `creative_look`'s
-        // descriptor. They are CC5's table, declared by the CC5 manifest, so
-        // this CC4 table counts the LUT controls only.
         let lut_controls = descriptor
             .parameters
             .iter()
@@ -4701,7 +4466,6 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
         }
     }
 
-    // --- §3.4 encodings ---------------------------------------------------
     let encodings = manifest["input_encodings"]
         .as_array()
         .expect("the manifest must declare the encoding tokens");
@@ -4715,7 +4479,6 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
         );
     }
 
-    // --- §2.1 asset model -------------------------------------------------
     let assets = &manifest["asset_model"];
     assert_eq!(assets["lut_size_min"], u64::from(MIN_CUBE_SIZE));
     assert_eq!(assets["lut_size_max"], u64::from(MAX_CUBE_SIZE));
@@ -4743,7 +4506,6 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
         crate::lut_store::LUT_STORE_LUTS_DIRECTORY
     );
 
-    // --- §2.6 pinned built-in hashes -------------------------------------
     let looks = manifest["builtin_looks"]
         .as_array()
         .expect("the manifest must declare the five built-in bakes");
@@ -4761,15 +4523,12 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
             "the manifest must carry the pinned hash the code asserts"
         );
         assert_eq!(declared["sha256"], BUILTIN_LOOK_SHA256[index].1);
-        // And the pin is the live bake, so a manifest hash can never outlive a
-        // formula change.
         assert_eq!(
             declared["sha256"],
             sha256_bytes(look.canonical_text().as_bytes())
         );
     }
 
-    // --- §4.1/§4.2 atlas and ABI constants --------------------------------
     let atlas = &manifest["atlas"];
     assert_eq!(
         atlas["compositor_lut_slots_per_layer"],
@@ -4799,9 +4558,6 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
         atlas["worst_case_atlas_depth"],
         (COMPOSITOR_LUT_ATLAS_SLOTS * MAX_CUBE_SIZE as usize) as u64
     );
-    // `GRADE_ABI_VERSION` is private to the compositor, so the manifest is
-    // asserted against the version the production serializer actually writes
-    // into `header.z` rather than against a restated literal.
     let empty = grade_buffer_bytes_with_luts(&[], None).expect("an empty stack serializes");
     assert_eq!(
         atlas["grade_abi_version"],
@@ -4809,7 +4565,6 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
     );
     assert_eq!(atlas["grade_abi_version"], 3);
 
-    // --- §10.2 raster -----------------------------------------------------
     let raster = &manifest["raster"];
     assert_eq!(raster["rgb_samples"], 192);
     assert_eq!(
@@ -4837,7 +4592,6 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
         raster_samples_outside_unit_display() as u64
     );
 
-    // --- §10.1.4 tolerances are the CC1 §6.2 code constants ---------------
     let tolerances = &manifest["tolerances"];
     assert_manifest_f64(
         tolerances,
@@ -4868,7 +4622,6 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
         MIN_CHANGED_LINEAR_BASIS_POINTS as f64,
     );
 
-    // --- the fixture inventory --------------------------------------------
     assert_eq!(
         manifest["required_evidence"],
         json!(CC4_EVIDENCE_FIXTURES),
@@ -4928,9 +4681,6 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
             }
         }
     }
-    // The manifest must account for every media test, not merely a subset.
-    // The inventory test itself is §10.1.4 rather than a §10.3 item, so it is
-    // declared separately below.
     declared_media_tests
         .push("cc4_manifest_declares_every_required_fixture_and_constant".to_owned());
     for name in CC4_MEDIA_TESTS {
@@ -4972,10 +4722,6 @@ fn cc4_manifest_declares_every_required_fixture_and_constant() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// §5 / §3.4: the `input_encoding_token` control.
-// ---------------------------------------------------------------------------
-
 /// CC4 §10.1 rule 2 for `input_encoding_token`: every one of the three tokens
 /// has a hand-derived numeric expected value, the token reaches the shader
 /// record, and the tokens are proved to dispatch to different transfer pairs.
@@ -5007,18 +4753,7 @@ fn cc4_input_encoding_tokens_are_hand_derived_and_dispatched() {
         ],
     );
 
-    // `x` is exactly representable in f16, so the working frame hands the node
-    // exactly these values.
     const INPUT: [f32; 3] = [0.5, 0.25, 0.125];
-    // `e = ENC(x)`, `y = tetrahedral(LUT B, e)` (branch 1 in every case, since
-    // `e_r > e_g > e_b` for all three encodings), `out = DEC(y)`:
-    //
-    //   linear      e = (0.500000, 0.250000, 0.125000)
-    //               y = (0.312500, 0.187500, 0.125000)
-    //   display709  e = (0.705515, 0.489940, 0.332129)
-    //               y = (0.518822, 0.411034, 0.332129)
-    //   grade709    e = (0.705436, 0.489802, 0.331949)
-    //               y = (0.518692, 0.410875, 0.331949)
     const EXPECTED: [(&str, i64, [f32; 3]); 3] = [
         ("linear", 1, [0.312_500_00, 0.187_500_00, 0.125_000_00]),
         ("display709", 0, [0.278_064_78, 0.181_599_54, 0.125_000_00]),
@@ -5034,8 +4769,6 @@ fn cc4_input_encoding_tokens_are_hand_derived_and_dispatched() {
             .unwrap_or_else(|| panic!("{token} is a documented encoding token"));
         assert_eq!(encoding.as_str(), name);
 
-        // The fixture's own f64 transcription of §3.5 must agree with the
-        // literal above before either is compared against production.
         let spec = b.apply(encoding, 1.0, INPUT.map(f64::from));
         for channel in 0..3 {
             assert!(
@@ -5053,10 +4786,6 @@ fn cc4_input_encoding_tokens_are_hand_derived_and_dispatched() {
             "{name}: the token must reach the shader record unchanged"
         );
 
-        // The unquantized CPU reference: `INPUT` is exactly representable in
-        // f16, so this is the very value the working frame hands the node, and
-        // the comparison is not limited by the `Rgba16Float` storage step the
-        // way a readback would be.
         let cpu = apply_stack(&cpu_nodes(&stack, luts.library()), INPUT);
         assert_rgb_within(cpu, expected, CPU_TOLERANCE, &format!("{name}: CPU"));
         let rendered = block_rgb(
@@ -5094,8 +4823,6 @@ fn cc4_input_encoding_tokens_are_hand_derived_and_dispatched() {
         );
     }
 
-    // --- display709 against grade709, where they actually separate --------
-    // The §10.2 raster's over-range extreme through the non-dyadic 33³ look.
     const OVER_RANGE: [f32; 3] = [4.0, 0.0, 0.0];
     let look = non_dyadic_look_lattice().quantized_like_cube_text();
     let (or_width, or_height, or_frame) = anchor_frame(&[OVER_RANGE]);
@@ -5122,9 +4849,6 @@ fn cc4_input_encoding_tokens_are_hand_derived_and_dispatched() {
             ),
             0,
         );
-        // The f16 working surface quantizes a value near 3.09 in steps of
-        // 2^-9, so the GPU is held to the §6.2 band rather than to the CPU
-        // tolerance.
         assert_rgb_within(
             rendered,
             expected,

@@ -1565,10 +1565,6 @@ impl KinewrightApp {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CC4 §7 look import, restore, and conversion
-// ---------------------------------------------------------------------------
-
 /// One finished `.cube` import, delivered from the worker thread.
 ///
 /// Parsing, hashing, and the store write are the same worker-thread shape M41
@@ -1687,9 +1683,6 @@ pub(crate) fn lut_import_operations(
                     .find(|node| node.id == *effect)
                     .map(|legacy| (target, legacy))
             }) {
-                // Reuses the inspector's rule so a legacy stage that sits
-                // before a managed correction is moved rather than rejected
-                // (CC4 §3.2, §9).
                 Some((target, legacy)) => {
                     batch
                         .operations
@@ -1857,8 +1850,6 @@ impl KinewrightApp {
     /// Parse, hash, and store one `.cube` on a named worker thread (CC4 §7).
     pub(crate) fn start_lut_import(&mut self, path: PathBuf, intent: LutImportIntent) {
         let Some(store) = self.focused().lut_store.clone() else {
-            // A refused root reports why it was refused; only a project that
-            // has never been saved reports the save recovery (CC4 §2.2).
             self.record_error(
                 "Look",
                 self.focused()
@@ -1952,11 +1943,6 @@ impl KinewrightApp {
             }
         };
         let title = import.title.clone();
-        // Built against the *current* document, not the revision the picker
-        // was opened at: an import creates a new record, so its id and its
-        // insert index must come from the document the batch will land on.
-        // Core still validates the batch atomically, so a concurrent change
-        // that invalidates it is rejected rather than silently applied.
         let batch = match lut_import_operations(
             &self.projects[project_index].document,
             import,
@@ -1968,15 +1954,6 @@ impl KinewrightApp {
                 return;
             }
         };
-        // A Save As that completed while the worker ran moved this session's
-        // store root, so the bytes are beside the *old* project file. Place
-        // them where the project now claims to own them before the document
-        // records a record that resolves against the new root (CC4 §2.2).
-        //
-        // A store that is `None` is the same failure, not an exemption: the
-        // Save As landed on a refused root, so there is nowhere to put the
-        // bytes and the batch is dropped with the store's own reason rather
-        // than registering an unreachable asset as an imported look.
         let store_unavailable = self.projects[project_index].lut_store_unavailable_reason();
         let realignment = import_realignment_failure(
             &title,
@@ -1997,9 +1974,6 @@ impl KinewrightApp {
             self.record_error("Look", "Core actor stopped while registering the look");
             return;
         }
-        // Hold the allocated id until the document records it, so a second
-        // response finishing in the same frame cannot be built against the
-        // same pre-import document (CC4 §7).
         self.lut_import_reservation = Some(LutImportReservation {
             session_id: response.session_id,
             asset: batch.asset.id,
@@ -2023,9 +1997,6 @@ impl KinewrightApp {
         };
         match response.result {
             Ok(_) => {
-                // The bytes changed under a document that did not, so the
-                // library has to be rebuilt explicitly: nothing else observes
-                // a restore.
                 let library = self.projects[project_index].rebuild_lut_library();
                 if project_index == self.focused_project {
                     self.lut_publisher.set_lut_library(library);
@@ -2632,14 +2603,8 @@ mod tests {
         assert!(proxy.persistence.contains("Unsupported"));
     }
 
-    // -----------------------------------------------------------------------
-    // CC4 §7 look import batches
-    // -----------------------------------------------------------------------
-
     fn sample_import() -> LutAssetImport {
         LutAssetImport {
-            // A syntactically valid digest; the store is what proves content,
-            // and this test never touches the filesystem.
             sha256: "a".repeat(64),
             title: "Fixture look".to_owned(),
             kind: kinewright_core::LutAssetKind::Cube3d,
@@ -2734,8 +2699,6 @@ mod tests {
             asset.source,
             kinewright_core::LutAssetSource::Imported { .. }
         ));
-        // The look lands after the correction, which is the first index that
-        // satisfies the stage order.
         assert!(matches!(
             batch.operations[1],
             Operation::InsertEffect { index: 1, .. }
@@ -2761,8 +2724,6 @@ mod tests {
 
     #[test]
     fn a_replace_registers_the_new_asset_and_retargets_the_node() {
-        // CC4 §2.3: a different LUT is a *different asset*. Nothing rewrites a
-        // hash in place.
         let document = import_document(vec![effect(4, "creative_look")]);
         let batch = lut_import_operations(
             &document,
@@ -2848,9 +2809,6 @@ mod tests {
 
     #[test]
     fn a_target_that_vanished_mid_import_still_registers_the_bytes() {
-        // The store write already happened, so throwing the whole batch away
-        // would lose the operator's import. The asset is registered and the
-        // lost target is reported, never silently substituted.
         let document = import_document(Vec::new());
         for intent in [
             LutImportIntent::Apply {
@@ -2894,8 +2852,6 @@ mod tests {
             asset: first.asset.id,
         });
 
-        // The batch is in flight, so the second response waits rather than
-        // being built against a document that does not record the first id.
         assert!(!lut_import_is_ready(reservation, Some(&document)));
         // Building it anyway is exactly the bug: a duplicate id.
         let collided = lut_import_operations(&document, sample_import(), &intent).expect("builds");

@@ -235,8 +235,6 @@ fn normalize_master(
         )));
     }
 
-    // The ceiling is validated before the master is touched, so a refused
-    // target leaves `mix` exactly as it was.
     let ceiling_tenth_db = delivery_limiter_ceiling_tenth_db(target)?;
     check_cancelled(settings)?;
     apply_gain(mix, gain);
@@ -245,10 +243,6 @@ fn normalize_master(
     let mut applied_gain_hundredths = gain;
     let mut after = LoudnessMeter::measure(mix, AUDIO_RATE, AUDIO_CHANNELS)?;
 
-    // AU3 §5.6 step 6: one corrective pass, and only when the programme
-    // reads under `target − tolerance`, which for a well-formed non-negative
-    // tolerance is the only direction a limiter can produce. Two passes is
-    // the ceiling.
     if let Some(measured) = after.integrated_lufs_hundredths
         && measured < target.integrated_lufs_hundredths - target.tolerance_lu_hundredths
     {
@@ -264,8 +258,6 @@ fn normalize_master(
     let on_target = after.integrated_lufs_hundredths.is_some_and(|measured| {
         (measured - target.integrated_lufs_hundredths).abs() <= target.tolerance_lu_hundredths
     });
-    // AU3 §5.2: derived from the two meter readings, so it is 0 when the
-    // limiter was an identity and positive exactly when it did work.
     let peak_reduction_hundredths = match (
         before.true_peak_dbtp_hundredths,
         after.true_peak_dbtp_hundredths,
@@ -289,8 +281,6 @@ fn normalize_master(
 
 /// AU3 §5.6 step 4: scale every sample by `gain_hundredths` hundredths of a
 /// decibel.
-// The gain is a decibel ratio, not a count: `f32` is the buffer's own
-// precision and the conversion is exactly the one `db_gain` performs per node.
 #[allow(clippy::cast_possible_truncation)]
 fn apply_gain(mix: &mut [f32], gain_hundredths: i32) {
     let gain = 10f64.powf(f64::from(gain_hundredths) / 2_000.0) as f32;
@@ -378,10 +368,6 @@ fn export_to_temporary(
         .map_err(|_| MediaError::Backend("export frame count is invalid".to_owned()))?;
     send_progress(progress, 0, total_frames);
 
-    // AU3 §5.5, normative: the normalization step sits between `mix_audio`
-    // and `encode_audio`, and only the `Some` arm allocates. With `None` the
-    // `map` is not entered and `encode_audio` receives `mix_audio`'s bytes
-    // exactly (B6).
     let mut audio_mix = mix_audio(document, settings)?;
     check_cancelled(settings)?;
     let audio = settings
@@ -396,11 +382,6 @@ fn export_to_temporary(
         .contains(ffmpeg::format::Flags::GLOBAL_HEADER);
     let video_codec = find_codec(&settings.video_codec, ffmpeg::codec::Id::H264)?;
     let audio_codec = find_codec(&settings.audio_codec, ffmpeg::codec::Id::AAC)?;
-    // CC6 4.1/4.3: `settings.delivery_color.bit_depth` is the single authority
-    // for the delivery lane. The codec pixel format and the filter graph's
-    // `format` node are both derived from it here, so they cannot diverge, and
-    // the encoder is asked for the lane's format before it is opened rather
-    // than silently negotiating a different one.
     let delivery_depth = delivery_encode_depth(&settings.delivery_color)?;
     let delivery_pixel = checked_delivery_pixel_format(
         video_codec,
@@ -437,30 +418,12 @@ fn export_to_temporary(
     if global_header {
         video_encoder.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
     }
-    // The current exporter is an explicit Rec.709 SDR metadata path. The
-    // validation above rejects other delivery descriptions before any output
-    // is created; this assignment therefore cannot silently mislabel another
-    // target. Pixel transforms remain a CC1 concern.
     video_encoder.set_colorspace(ffmpeg::color::Space::BT709);
     video_encoder.set_color_range(ffmpeg::color::Range::MPEG);
     let mut video_options = ffmpeg::Dictionary::new();
     if settings.video_codec == DELIVERY_VIDEO_CODEC {
         video_options.set("preset", "medium");
-        // FFmpeg's generic codec-context colour fields do not reliably carry
-        // primaries and transfer through libx264's SPS. These x264 options
-        // are required for the tags to survive a post-export re-probe.
-        //
-        // Identical on both delivery lanes (CC6 4.3). `range=tv` is *not* an
-        // x264 parameter in x264 core 165 -- it is parsed and discarded -- and
-        // `profile=high10` is not set either: the pixel format selects High 10,
-        // measured byte-identical with and without it on the pinned build.
         video_options.set("x264-params", DELIVERY_X264_PARAMS);
-        // AU3 §7 B6: x264 core 165's ABR frame-thread pool is not run-to-run
-        // deterministic. Two sequential encodes of one document on the Linux
-        // FFmpeg 8 pin differed in one GOP by ±2 luma codes and 31 mdat bytes
-        // while the AAC stream stayed byte-identical. One thread keeps the
-        // delivery encode bit-stable so off / skipped / acting file compares
-        // can prove the loudness step, not the encoder.
         video_options.set("threads", "1");
     }
     let mut video_encoder = video_encoder
@@ -529,11 +492,6 @@ fn export_to_temporary(
             map_frames_with_rounding(output_at, settings.fps, document.fps, FrameRounding::Floor)
                 .map_err(|error| MediaError::Backend(error.to_string()))?;
         let project_at = TimeCode(project_at.0.min(document.duration.0.saturating_sub(1)));
-        // CC1 3/5: export selects the delivery transform, not the monitor
-        // transform.  The compositor applies the BT.709 OETF in f32 and
-        // quantizes once at 16 bits, so the full->limited conversion below
-        // operates on 16-bit codes and the only delivery-depth quantization in
-        // the whole path is the YUV420P/YUV420P10LE output itself.
         let composed = renderer.render_delivery(
             document,
             project_at,
@@ -615,9 +573,6 @@ impl DeliveryFilter {
                 ))
             })?;
         }
-        // The `format` node is configured from the delivery lane, so a frame
-        // in any other format means the graph and the encoder have diverged.
-        // Refuse rather than hand the encoder a frame at the wrong depth.
         if output.format() != self.pixel_format {
             return Err(DeliveryColorError::PixelFormatDepthMismatch {
                 observed: pixel_format_name(output.format()).to_owned(),
@@ -1128,9 +1083,6 @@ pub(crate) fn mix_pass(
     collect: MixCollect,
     observer: &mut dyn MixObserver,
 ) -> Result<MixStems, MediaError> {
-    // AU2 §3.7: the processor holds `latency` sample frames of the mix, so the
-    // pass runs that much past the requested end and each stem family drops the
-    // leading frames its own tap carries. Zero for every pre-AU2 document.
     let latency = graph_latency_frames(&document.audio_mix.lookahead_milliseconds(), AUDIO_RATE);
     let total_sample_frames = frame_to_samples(range.end, AUDIO_RATE, document.fps)
         .saturating_add(u64::try_from(latency).unwrap_or(0));
@@ -1139,16 +1091,6 @@ pub(crate) fn mix_pass(
         .checked_mul(usize::from(AUDIO_CHANNELS))
         .ok_or_else(|| MediaError::Backend("audio mix is too large".to_owned()))?;
     let mut track_mixes = HashMap::<TrackId, Vec<f32>>::new();
-    // AU2 §3.7: the extra `latency` input frames must carry real programme
-    // audio, not silence, or a sub-range measurement's last `L` sample frames
-    // are gained as if the programme stopped at `range.end`. Enumerate exactly
-    // the project frames that contain the mixed sample frames: the last one
-    // consumed is `total_sample_frames - 1`, so the smallest sufficient
-    // exclusive end is that frame plus one. When `L == 0` this collapses to
-    // `range.end` — at 48 kHz and 10 fps, `samples_to_frame(47_999) + 1 == 10`
-    // — so no pre-AU2 measurement decodes a frame it did not decode before,
-    // and for `mix_audio` the clamp holds it at the duration. The head and
-    // tail trim below discards the surplus.
     let segment_end = if total_sample_frames == 0 {
         range.end
     } else {
@@ -1220,8 +1162,6 @@ pub(crate) fn mix_pass(
         .iter()
         .map(|bus| bus.id)
         .collect::<Vec<_>>();
-    // AU3 §3.8: the per-family windows the observer feed is trimmed through —
-    // AU2 §3.7's head drop (per family) plus `keep_from`, then `T` frames.
     let keep_from_frames = usize::try_from(frame_to_samples(range.start, AUDIO_RATE, document.fps))
         .unwrap_or(usize::MAX);
     let kept_frames = usize::try_from(
@@ -1258,18 +1198,6 @@ pub(crate) fn mix_pass(
         .iter()
         .map(|bus| (*bus, Vec::<f32>::new()))
         .collect::<Vec<_>>();
-    // AU4 §3.6 rule 67, normative and load-bearing: this loop **must** keep
-    // starting at project sample 0 whatever `range.start` is. Every track
-    // buffer above is built at the absolute offset
-    // `frame_to_samples(segment.project.start)`, so `start_frame` is the
-    // absolute project sample index the processor keys every automated owner
-    // by — the clip envelope, both track curves, and the bus and master faders.
-    // The head is trimmed afterwards via `keep_from`/`drop_leading_samples`.
-    // `measure_mix_levels` and `measure_audio_qc` go through this same pass, so
-    // a **windowed** measurement mixes from project sample 0 and reads every
-    // curve at the true project frame. A future optimisation that started the
-    // loop at `range.start` would break automation, playback/export parity and
-    // AU2's latency trim in one move.
     let mut start_frame = 0_u64;
     while start_frame < total_sample_frames {
         check_cancelled(settings)?;
@@ -1321,10 +1249,6 @@ pub(crate) fn mix_pass(
         start_frame = start_frame.saturating_add(u64::try_from(frame_count).unwrap_or(u64::MAX));
     }
     limit_audio_mix(&mut mix);
-    // AU2 §3.7: the head trim, per stem family and dropped unconditionally.
-    // Track stems are tapped pre-bus and carry nothing; bus stems are tapped
-    // after the bus stage's alignment pad; the master carries the whole graph
-    // latency. Unlike `keep_from`, this runs even when `range.start` is zero.
     drop_leading_samples(&mut mix, latency.saturating_mul(channel_count));
     let bus_head = bus_head_frames.saturating_mul(channel_count);
     for stem in &mut bus_stems {
@@ -1344,9 +1268,6 @@ pub(crate) fn mix_pass(
             stem.1.drain(..cut);
         }
     }
-    // AU2 §3.7/A2: and the tail trim, so every family covers exactly
-    // `[range.start, range.end)` and the meter reports one `sample_frames`
-    // for one requested range.
     let kept = kept_frames.saturating_mul(channel_count);
     mix.truncate(kept);
     for stem in &mut track_stems {
@@ -1672,11 +1593,6 @@ impl MixObserver for QcObserver {
         clamped.clear();
         clamped.extend_from_slice(chunk);
         limit_audio_mix(&mut clamped);
-        // The `?` is deferred to the end so `clamped` — taken out of `self`
-        // to borrow it while `self.meter` is borrowed mutably — is always put
-        // back, and its buffer reused, on the error path too. The error is in
-        // practice unreachable: the feed is whole stereo frames, and
-        // `FamilyWindow::take` only ever slices on a frame boundary.
         let pushed = self.meter.push(&clamped);
         for frame in clamped.chunks_exact(channels) {
             self.window_square_sum += frame
@@ -1763,8 +1679,6 @@ pub(crate) fn measure_mix_spectrum(
     request: &MixSpectrumRequest,
 ) -> Result<MixSpectrumReport, MediaError> {
     let range = clamped_measurement_range(document, request.range.clone(), "mix spectrum")?;
-    // AU2 §5.9/A23: rejected before any decoding, so a too-short range never
-    // costs a mix pass and never returns a degenerate spectrum.
     let sample_frames = frame_to_samples(range.end, AUDIO_RATE, document.fps)
         .saturating_sub(frame_to_samples(range.start, AUDIO_RATE, document.fps));
     if sample_frames < SPECTRUM_MINIMUM_FRAMES {
@@ -1793,8 +1707,6 @@ pub(crate) fn measure_mix_spectrum(
             .ok_or_else(|| MediaError::Backend(format!("bus {} is not in the document", bus.0)))?,
     };
     let channels = usize::from(AUDIO_CHANNELS);
-    // AU5 §0 R33: AU2's caller passes today's constants explicitly, so its
-    // goldens are byte-unchanged by the parameterisation (A4).
     let measured = third_octave_spectrum(
         samples,
         channels,
@@ -1816,8 +1728,6 @@ pub(crate) fn measure_mix_spectrum(
         bands: measured.bands,
     })
 }
-
-// ---- AU5 §3.7-§3.9: the three repair measurements ------------------------
 
 /// AU5 §3.3 rule 43 (R34): the **three conversions**, normatively and nowhere
 /// else, from one measured band level to one wire profile row.
@@ -1880,8 +1790,6 @@ pub(crate) fn measure_mix_noise_profile(
     request: &MixNoiseProfileRequest,
 ) -> Result<NoiseProfileReport, MediaError> {
     let range = clamped_measurement_range(document, request.range.clone(), "noise profile")?;
-    // AU5 §3.7 rule 63 (R37): refused before anything is decoded, on the caller's
-    // own conversion...
     let requested_frames = frame_to_samples(range.end, AUDIO_RATE, document.fps)
         .saturating_sub(frame_to_samples(range.start, AUDIO_RATE, document.fps));
     if requested_frames < NOISE_PROFILE_MINIMUM_FRAMES {
@@ -1895,8 +1803,6 @@ pub(crate) fn measure_mix_noise_profile(
     let samples = stem_at_point(&stems, request.point)?;
     let channels = usize::from(AUDIO_CHANNELS);
     let sample_frames = u64::try_from(samples.len() / channels.max(1)).unwrap_or(0);
-    // ...and **re-checked here** on the rendered count, rather than trusting the
-    // caller's frame-domain conversion (rule 63).
     if sample_frames < NOISE_PROFILE_MINIMUM_FRAMES {
         return Err(MediaError::MixLoudnessRangeTooShort {
             sample_frames,
@@ -1980,8 +1886,6 @@ pub(crate) fn measure_mix_window_levels(
         )));
     }
     let range = clamped_measurement_range(document, request.range.clone(), "mix window levels")?;
-    // AU5 §3.8 rule 66: the same truncating helper the nodes use, so a window is
-    // an exact frame count at every rate.
     let window_frames = stage_latency_frames(i64::from(request.window_milliseconds), AUDIO_RATE);
     let hop_frames = stage_latency_frames(i64::from(request.hop_milliseconds), AUDIO_RATE).max(1);
     let requested_frames = frame_to_samples(range.end, AUDIO_RATE, document.fps)
@@ -2129,8 +2033,6 @@ pub(crate) fn measure_audio_repair(
     let frames = samples.len() / channels.max(1);
     let sample_frames = u64::try_from(frames).unwrap_or(0);
 
-    // The percentiles. Hop = window; a window under `SILENCE_POWER` is excluded
-    // from the population and does not count into `windows`.
     let window_frames = stage_latency_frames(i64::from(REPAIR_WINDOW_MILLISECONDS), AUDIO_RATE);
     let mut levels = Vec::new();
     let mut start = 0_usize;
@@ -2155,10 +2057,6 @@ pub(crate) fn measure_audio_repair(
     let (hum_50, hum_50_harmonics) = hum_excess_hundredths(samples, channels, AUDIO_RATE, 50.0);
     let (hum_60, hum_60_harmonics) = hum_excess_hundredths(samples, channels, AUDIO_RATE, 60.0);
 
-    // Clicks: AU5 §3.5 rule 57's detector, at the descriptor's neutral
-    // threshold and its **maximum** repairable span — the inspector counts what
-    // the node could repair at all, not what a node parked at the neutral
-    // `max_click_milliseconds = 0` would repair, which is nothing (AU5 §0 R65).
     let threshold = descriptor_value("audio_declick", "detector_threshold_tenth_db", |p| {
         p.neutral
     });
@@ -2536,8 +2434,6 @@ mod tests {
         let (width, height) = TIMING_FIXTURE_SIZE;
         let mut input = Vec::new();
         for frame in 0..TIMING_FIXTURE_FRAMES {
-            // A moving bar, so consecutive pictures genuinely differ and the
-            // encoder has a reason to emit B-frames.
             let column = (frame * 2) % width;
             for _y in 0..height {
                 for x in 0..width {
@@ -2655,15 +2551,9 @@ mod tests {
     /// pinned `ffprobe -count_frames`.
     #[test]
     fn every_exported_frame_is_presented_after_the_mp4_edit_list() {
-        // Rule 11.0.6: the panicking acquisition, never the skipping one. A
-        // GPU-backed delivery fixture that reports `ok` without running is
-        // indistinguishable from one that passed.
         let gpu = fallback_gpu().context();
         crate::initialize_ffmpeg().expect("FFmpeg initializes");
         let directory = TempDirectory::new("cc6-export-presented-frames");
-        // Both rates, in one test: the integer lane and the NTSC lane are the
-        // same claim about the same muxer, and splitting them would let one be
-        // fixed while the other rotted.
         for (label, numerator, denominator) in TIMING_FIXTURE_RATES {
             let source = generate_timing_source(
                 &directory,
@@ -2697,8 +2587,6 @@ mod tests {
             export_document(&document, &output, &settings, &progress_tx, gpu.clone())
                 .expect("the production export should write the timing fixture");
 
-            // (a) The crate's own decoder, opened with no options at all, so
-            //     the edit list is honoured exactly as a player honours it.
             assert_eq!(
                 crate::verify::presented_frame_count(&output).expect("the export decodes"),
                 u64::from(TIMING_FIXTURE_FRAMES),
@@ -2754,8 +2642,6 @@ mod tests {
             delivery_encode_depth(&ten).expect("the 10-bit lane"),
             DeliveryEncodeDepth::Ten
         );
-        // Only the depth moved: every other delivery field is byte-identical
-        // to the 8-bit lane, which is why the tags and the x264 params are.
         assert_eq!(
             ColorDescription {
                 bit_depth: eight.bit_depth.clone(),
@@ -2764,9 +2650,6 @@ mod tests {
             eight
         );
 
-        // The numeric spelling of the same declared depth is the same depth
-        // (CC1 2.1 canonical equality), and the settings the queue materializes
-        // for the 10-bit lane pass the gate unchanged.
         let numeric = ColorDescription {
             bit_depth: ColorBitDepth::Integer(10),
             ..ten
@@ -3054,11 +2937,6 @@ mod tests {
     #[test]
     fn rejects_a_delivery_pixel_format_this_build_does_not_advertise() {
         crate::initialize_ffmpeg().expect("FFmpeg initializes");
-        // `mpeg1video` is a real H.264-adjacent stand-in for "an encoder that
-        // does not advertise this lane": it offers `yuv420p` only, so the
-        // 10-bit lane is genuinely unavailable on it. No production path can
-        // reach this encoder -- `validate_delivery_color` refuses every codec
-        // but libx264 -- so this exercises the check itself.
         let codec = ffmpeg::encoder::find_by_name("mpeg1video")
             .expect("mpeg1video is part of every FFmpeg build");
         let error = checked_delivery_pixel_format(
@@ -3103,8 +2981,6 @@ mod tests {
             ffmpeg::color::TransferCharacteristic::BT709
         );
 
-        // Both delivery lanes carry the same colour description; only the
-        // frame's pixel format differs (CC6 4.3).
         for depth in DeliveryEncodeDepth::ALL {
             let mut yuv = ffmpeg::frame::Video::new(delivery_lane_pixel_format(depth), 2, 2);
             stamp_delivery_yuv_color(&mut yuv);
@@ -3123,10 +2999,6 @@ mod tests {
     fn delivery_filter_converts_sixteen_bit_full_range_rgb_to_limited_yuv420p() {
         let resolution = (16_u32, 16_u32);
 
-        // (a) Nominal white. `libswscale` reads 16-bit RGB on the `255 << 8`
-        // scale, so the compositor's white must be DELIVERY_INTERMEDIATE_WHITE
-        // and must land on legal white 235 exactly, on every sample. 65_535
-        // would be read as *above* nominal white and quantize to 236.
         let white = encode_delivery_rgba16([1.0, 1.0, 1.0, 1.0]);
         assert_eq!(white, [DELIVERY_INTERMEDIATE_WHITE; 4]);
         let filtered_white =
@@ -3137,11 +3009,6 @@ mod tests {
             "nominal white must convert to legal white on every luma sample"
         );
 
-        // (b) Mid-gray at the compositor's single 16-bit quantization. An
-        // 8-bit intermediate could not represent this code at all.
-        // 46_056 / 65_280 = 0.705515, so limited luma is
-        // 16 + 219 * 0.705515 = 170.51 and swscale's deterministic 8x8 ordered
-        // dither splits a flat frame across exactly the two adjacent codes.
         let gray = encode_delivery_rgba16([0.5, 0.5, 0.5, 1.0]);
         assert_eq!(gray[0], 46_056);
         let filtered_gray = filter_flat_delivery_code(gray, resolution, DeliveryEncodeDepth::Eight);
@@ -3151,13 +3018,6 @@ mod tests {
             "mid-gray must land on the two codes straddling 170.51, nothing else"
         );
 
-        // Neutral gray and neutral white are both exactly 128.0 in chroma, so
-        // the *only* reason a neighbouring code can appear is the scaler's
-        // deterministic ordered dither straddling the exact value — and the
-        // two FFmpeg packages CI provisions do not dither chroma identically.
-        // Each system therefore carries the codes measured on it (CC6 §6.3 as
-        // amended); neither set may be widened to cover the other. What holds
-        // on both is the bound: nothing may reach 126 or 130.
         for frame in [&filtered_white, &filtered_gray] {
             let observed_blue = chroma_codes(frame, 1);
             let observed_red = chroma_codes(frame, 2);
@@ -3234,10 +3094,6 @@ mod tests {
             "nominal white must convert to legal 10-bit white on every luma sample"
         );
 
-        // (b) Mid-gray, the same 16-bit intermediate code the 8-bit lane
-        // splits across 170/171. 46_056 / 65_280 = 0.705515, so
-        // 64 + 876 * 0.705515 = 682.03 -> a single code 682, because the
-        // 16-to-10-bit path rounds and does not dither.
         let gray = encode_delivery_rgba16([0.5, 0.5, 0.5, 1.0]);
         assert_eq!(gray[0], 46_056);
         let filtered_gray = filter_flat_delivery_code(gray, resolution, DeliveryEncodeDepth::Ten);
@@ -3247,8 +3103,6 @@ mod tests {
             "a flat 10-bit delivery patch must be a single luma code: this lane is undithered"
         );
 
-        // Neutral stays neutral, and at 10 bits it is exactly neutral: 512 on
-        // both chroma planes, with no straddling pair.
         for frame in [&filtered_white, &filtered_gray] {
             assert_eq!(
                 chroma_codes_10bit(frame, 1),
@@ -3262,8 +3116,6 @@ mod tests {
             );
         }
 
-        // The 8-bit lane's dither is not a property the 10-bit lane inherits:
-        // the same mid-grey is two codes there and one here.
         assert_eq!(
             luma_codes(&filter_flat_delivery_code(
                 gray,
@@ -3283,9 +3135,6 @@ mod tests {
     /// sample. This test fails on that scale.
     #[test]
     fn delivery_nominal_white_encodes_to_legal_white_through_the_export_filter() {
-        // Rule 11.0.6: the panicking acquisition, never the skipping one. A
-        // GPU-backed delivery fixture that reports `ok` without running is
-        // indistinguishable from one that passed.
         let gpu = fallback_gpu().context();
         let compositor = Compositor::new(gpu);
         let resolution = (16_u32, 16_u32);
@@ -3333,9 +3182,6 @@ mod tests {
             "every luma sample of a rendered white frame must be legal white 235"
         );
 
-        // The same rendered raster on the 10-bit lane: legal white 940. The
-        // buffer source consumed the frame above, so submit a fresh copy of
-        // the same readback rather than the same buffer twice.
         let mut filter = delivery_filter_graph(resolution, DeliveryEncodeDepth::Ten)
             .expect("10-bit delivery filter graph");
         let mut rgba =
@@ -3360,9 +3206,6 @@ mod tests {
     /// impossible -- would fail both assertions.
     #[test]
     fn ten_bit_export_probes_as_rec709_limited_ten_bit_yuv420p10le() {
-        // Rule 11.0.6: the panicking acquisition, never the skipping one. A
-        // GPU-backed delivery fixture that reports `ok` without running is
-        // indistinguishable from one that passed.
         let gpu = fallback_gpu().context();
         crate::initialize_ffmpeg().expect("FFmpeg initializes");
         let directory = TempDirectory::new("cc6-ten-bit-delivery");
@@ -3380,8 +3223,6 @@ mod tests {
             DeliveryEncodeDepth::Ten,
             ExportCancellation::default(),
         );
-        // The document keeps declaring the project's 8-bit delivery contract;
-        // only the job's settings carry the 10-bit lane (CC6 4.1).
         assert_eq!(
             document.color_context.delivery.bit_depth,
             ColorBitDepth::Eight
@@ -3401,10 +3242,6 @@ mod tests {
         .expect("the production export must write the 10-bit delivery lane");
 
         assert_eq!(decoded_video_pixel_format(&output_path), "yuv420p10le");
-        // §4.3/R7: no `profile` option is ever set on either lane — the pixel
-        // format alone selects High 10. Read back from the written SPS by the
-        // pinned CLI, so "the depth reached the bitstream" is asserted rather
-        // than inferred from the decoder's own format negotiation.
         assert_eq!(
             ffprobe_video_field(&output_path, "profile"),
             "High 10",
@@ -3424,8 +3261,6 @@ mod tests {
         );
         assert_eq!(probed.provenance, ColorProvenance::StreamMetadata);
 
-        // Same source, same renderer, 8-bit lane: the two lanes are genuinely
-        // distinct files, so neither assertion above can pass by accident.
         let eight_bit = DeliveryProfile::SourceMaster.export_settings(
             &document,
             DeliveryEncodeDepth::Eight,
@@ -3435,9 +3270,6 @@ mod tests {
         export_document(&document, &eight_bit_path, &eight_bit, &progress_tx, gpu)
             .expect("the production export must still write the 8-bit delivery lane");
         assert_eq!(decoded_video_pixel_format(&eight_bit_path), "yuv420p");
-        // The control: the same source, the same renderer, and a plain High
-        // bitstream. A 10-bit request that silently fell back to eight bits
-        // would make these two profiles equal.
         assert_eq!(
             ffprobe_video_field(&eight_bit_path, "profile"),
             "High",
@@ -3458,16 +3290,8 @@ mod tests {
 
     #[test]
     fn delivery_intermediate_is_the_sixteen_bit_full_range_rgba_contract() {
-        // `libavfilter` only warns when an input frame's pixel format differs
-        // from the configured buffer source, so the export path's single
-        // quantization depends on this constant and the compositor readback
-        // agreeing. Keep them pinned together.
         assert_eq!(DELIVERY_INTERMEDIATE_PIXEL, ffmpeg::format::Pixel::RGBA64LE);
         assert_eq!(DELIVERY_INTERMEDIATE_BYTES_PER_PIXEL, 8);
-        // The intermediate's nominal white is swscale's 16-bit RGB white
-        // (`255 << 8`), not `u16::MAX`: this graph feeds `scale` with
-        // `in_range=jpeg`, and swscale maps 65_535 to *above* nominal white,
-        // which encodes to limited luma 236 instead of legal white 235.
         assert_eq!(DELIVERY_INTERMEDIATE_WHITE, 65_280);
         assert_ne!(DELIVERY_INTERMEDIATE_WHITE, u16::MAX);
         let frame = ffmpeg::frame::Video::new(DELIVERY_INTERMEDIATE_PIXEL, 16, 16);
@@ -3522,8 +3346,6 @@ mod tests {
             channels * 8
         );
     }
-
-    // ---- AU3 §5.6: the export's loudness normalization step ---------------
 
     /// AU3 §3.2/N1: the contract's calibration frequency. The Tech 3341 tone
     /// is "1 kHz per the standard; 997 Hz in this contract's calibration
@@ -3626,8 +3448,6 @@ mod tests {
     fn au3_normalizing_an_impulse_programme_takes_a_second_corrective_pass() {
         let frames = 5 * AUDIO_RATE as usize;
         let mut mix = normalization_tone_at_lufs(-3_000, frames);
-        // A 0 dBFS impulse every 500 ms, replacing the tone sample rather than
-        // adding to it so the fixture's peak is exactly full scale.
         for frame in (0..frames).step_by(AUDIO_RATE as usize / 2) {
             mix[frame * usize::from(AUDIO_CHANNELS)] = 1.0;
             mix[frame * usize::from(AUDIO_CHANNELS) + 1] = 1.0;
@@ -3678,8 +3498,6 @@ mod tests {
         let target = kinewright_core::STREAMING_PLATFORM_TARGET;
         let settings = normalization_settings();
 
-        // 300 ms: no complete 400 ms gating block exists, which is a different
-        // fact from silence and says so.
         let mut short = normalization_tone_at_lufs(-2_000, 3 * AUDIO_RATE as usize / 10);
         let short_report = normalize_master(&mut short, target, &settings)
             .expect("a short programme is not an error");
@@ -3779,8 +3597,6 @@ mod tests {
             "the refusal must name the offending ceiling and the range it is outside: {message}"
         );
 
-        // And the step itself refuses rather than normalizing against a
-        // ceiling the caller did not ask for.
         let mut mix = normalization_tone_at_lufs(-2_000, 5 * AUDIO_RATE as usize);
         let before = mix.clone();
         let error = normalize_master(&mut mix, target, &normalization_settings())
@@ -3816,18 +3632,11 @@ mod tests {
     /// directly.
     #[test]
     fn au5_the_profile_wire_conversion_holds_its_three_rules() {
-        // (i) A band that answers `None` is written as the neutral, so a learn
-        // over digital silence yields the all-neutral profile rule 41 handles.
         assert_eq!(profile_band_tenth_db(None), -1_200);
-        // (ii) Hundredths become tenths by `div_euclid(10)` — toward negative
-        // infinity — so a band is never written quieter than it measured.
         assert_eq!(profile_band_tenth_db(Some(-724)), -73);
         assert_eq!(profile_band_tenth_db(Some(-720)), -72);
         assert_eq!(profile_band_tenth_db(Some(-1)), -1);
         assert_eq!((-724_i32).div_euclid(10), -73);
-        // (iii) Clamped into the descriptor domain, so a band louder than a
-        // full-scale sine writes 0 rather than failing `SetEffectParam` inside a
-        // prepared plan, and one under -120 dBFS writes the neutral.
         assert_eq!(profile_band_tenth_db(Some(300)), 0);
         assert_eq!(profile_band_tenth_db(Some(-99_999)), -1_200);
     }

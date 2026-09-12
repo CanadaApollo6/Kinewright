@@ -71,9 +71,6 @@ impl KinewrightApp {
                 );
                 if response.drag_started() {
                     self.resume_after_scrub = self.playing;
-                    // CC6 §8.2: the drag pauses the transport, so `playing`
-                    // stops describing a moving playhead the instant the scrub
-                    // begins. The QC mask is told directly.
                     self.qc_mask.set_scrubbing(true);
                     if self.playing {
                         self.playback.pause();
@@ -128,14 +125,9 @@ impl KinewrightApp {
             ui.ctx().request_repaint();
         }
 
-        // On narrow transports the meter yields entirely: overflowing onto
-        // the timecode would trade real information for a decoration.
         if ui.available_width() < 132.0 {
             return;
         }
-        // A left-to-right horizontal nested bare in the transport's
-        // right-to-left layout overlaps its own children (the thread-row
-        // lesson); the meter block allocates its exact size instead.
         ui.allocate_ui_with_layout(
             egui::vec2(124.0, 14.0),
             egui::Layout::left_to_right(egui::Align::Center),

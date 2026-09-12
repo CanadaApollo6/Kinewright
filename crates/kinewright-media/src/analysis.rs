@@ -524,8 +524,6 @@ mod tests {
 
     #[test]
     fn same_id_different_files_are_distinct_jobs() {
-        // Two open projects can both name AssetId(1); the dedup key must
-        // treat different files as different work.
         let mut second = asset(1);
         second.path = PathBuf::from("other-project.wav");
         assert_ne!(

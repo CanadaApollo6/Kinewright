@@ -254,10 +254,6 @@ pub fn timeline_audio_segments(
             if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
                 continue;
             }
-            // Speed-changed clips are muted in v1: varispeed shifts pitch and
-            // pitch-preserving stretch is deferred, and silence is the honest
-            // middle ground. Remaining clips are all real time, so the asset
-            // rate below is already the effective rate.
             if clip.speed_percent != 100 {
                 continue;
             }
@@ -320,8 +316,6 @@ fn source_on_track(
     let Some(clip) = active_clip_on_track(document, track, project_at)? else {
         return Ok(None);
     };
-    // Freeze clips deliberately stay invisible here: this media-only lookup is
-    // used by split-at-playhead and freeze creation to resolve moving footage.
     if !clip.content.is_media() {
         return Ok(None);
     }
@@ -980,8 +974,6 @@ mod tests {
         let mut document = fixture();
         document.tracks[0].clips[0].speed_percent = 200;
 
-        // Source 10..20 at an effective 60 fps in a 30 fps project: the clip
-        // now covers 5 project frames, consuming two source frames per one.
         let layers = video_layers_at(&document, TimeCode(2)).unwrap();
         assert_eq!(layers.len(), 1);
         let source = &layers[0].source;

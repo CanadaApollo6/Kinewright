@@ -2074,8 +2074,6 @@ fn choose_montage_beats(
         return Ok(boundaries);
     }
 
-    // Preserve a useful source-envelope error when beats and shot lengths are
-    // otherwise feasible. Shot resolution identifies the exact bad envelope.
     select_montage_boundaries(
         candidates,
         timeline_range,
@@ -2109,12 +2107,6 @@ fn resolve_montage_shots(
         let media = document
             .asset(select.asset)
             .ok_or(CreatorPlanError::MissingAsset(select.asset))?;
-        // Match the operation's boundary derivation exactly, including mixed
-        // frame-rate rounding, so this is the source range apply will consume.
-        // A source envelope is an allowed region, not a required source_in.
-        // When absolute-boundary rounding makes the requested duration
-        // unavailable from the first frame, preserve the earliest feasible
-        // source subrange within the envelope instead of rejecting it.
         let source_range = resolve_montage_source_range(
             &select.source_range,
             media.fps,
@@ -3023,8 +3015,6 @@ mod tests {
             structure_beat(9, 150, 8_000, 1, 120_000),
             structure_beat(9, 180, 8_000, 1, 120_000),
         ];
-        // A source frame outside the asset is ignored even if its project
-        // frame and strength would otherwise make it eligible.
         let mut invalid_source = structure_beat(9, 210, 9_000, 1, 120_000);
         invalid_source.source_frame = TimeCode(1_000);
         let mut beats = beats;

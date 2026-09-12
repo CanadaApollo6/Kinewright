@@ -31,9 +31,6 @@ use crate::{
 const ACP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ACP_PROMPT_TIMEOUT: Duration = Duration::from_mins(30);
 static CURSOR_SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
-// Cursor's ACP config RPCs currently write through to the user's CLI-wide
-// model preference. Keep that mutation scoped to one active Kinewright turn,
-// then restore the exact values captured at session creation.
 static CURSOR_CONFIG_LEASED: AtomicBool = AtomicBool::new(false);
 
 pub const CURSOR_SANDBOX_NOTICE: &str = "Cursor sessions receive only the Kinewright HTTP MCP endpoint and run from an empty scratch directory. Cursor model settings are restored after each turn.";
@@ -419,8 +416,6 @@ impl AgentSession for CursorSession {
             let _ = self
                 .client
                 .notify("session/cancel", &json!({"sessionId": self.session_id}));
-            // Give Cursor a brief chance to acknowledge cancellation so the
-            // turn worker can restore the user's model configuration cleanly.
             for _ in 0..20 {
                 if self.done.load(Ordering::Acquire) {
                     break;
@@ -430,9 +425,6 @@ impl AgentSession for CursorSession {
             self.restore_configuration();
             let _ = self.events_tx.send(AgentEvent::Text("Stopped.".to_owned()));
         }
-        // Cursor ACP is long-lived. Closing a finished Kinewright session must
-        // still end the child so its HTTP MCP connection cannot hold project
-        // shutdown open indefinitely.
         self.client.kill();
         send_done(&self.events_tx, &self.done);
     }

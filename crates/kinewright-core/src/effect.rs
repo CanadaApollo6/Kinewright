@@ -701,10 +701,6 @@ const PRIMARY_CORRECTION_PARAMETERS: [EffectParameterDescriptor; 10] = [
     },
 ];
 
-// ---------------------------------------------------------------------------
-// CC5 §2.2 matte parameters
-// ---------------------------------------------------------------------------
-
 /// The most geometric windows one matte may carry (CC5 §2.2).
 pub const MATTE_WINDOW_LIMIT: usize = 4;
 /// [`MATTE_WINDOW_LIMIT`] as the `matte_window_count` descriptor maximum.
@@ -2004,8 +2000,6 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
             AUDIO_BYPASS_DESCRIPTOR,
         ],
     },
-    // AU2 §2.1: high-pass, two shelves, four peaking bands, and an output trim.
-    // All-neutral is an exact identity.
     EffectDescriptor {
         name: "audio_parametric_eq",
         parameters: &[
@@ -2138,8 +2132,6 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
             },
         ],
     },
-    // AU2 §2.1: downward expander. All-neutral is an identity twice over —
-    // `ratio_hundredths` 100 is 1:1 and `range_tenth_db` 0 is no attenuation.
     EffectDescriptor {
         name: "audio_gate",
         parameters: &[
@@ -2223,19 +2215,10 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
             },
         ],
     },
-    // AU5 §2.1: the STFT broadband gate. All-neutral is a structural identity
-    // twice over — `reduction_tenth_db` 0 makes the gain floor `10^0 = 1`, and
-    // all 31 bands at `PROFILE_BAND_NEUTRAL_TENTH_DB` means nothing has been
-    // learned, which the runtime reads as unity gain (rule 5, R4).
     EffectDescriptor {
         name: "audio_denoise",
         parameters: &AUDIO_DENOISE_PARAMETERS,
     },
-    // AU5 §2.1: the fixed-frequency peaking cascade. All-neutral is an exact
-    // identity: `depth_tenth_db` 0 makes every section's numerator and
-    // denominator bitwise equal, so the cascade is a pass-through sample for
-    // sample (AU5 §3.4 rule 49). It carries no `lookahead_milliseconds` row at
-    // all, so it contributes exactly 0 to a chain's declared latency.
     EffectDescriptor {
         name: "audio_hum_removal",
         parameters: &[
@@ -2261,10 +2244,6 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
                 neutral: 0,
                 uniform: EffectUniform::HumDepth,
             },
-            // Named for the `_q_hundredths` suffix, not a bare `q_hundredths`:
-            // the app's `mixer_unit` tests `_q_hundredths` -> Q *before*
-            // `_hundredths` -> Ratio, so a bare spelling would have read
-            // "12.0:1" (AU5 §0 R17).
             EffectParameterDescriptor {
                 name: "notch_q_hundredths",
                 min: 100,
@@ -2274,18 +2253,10 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
             },
         ],
     },
-    // AU5 §2.1: the second-difference click detector and its repair. All-neutral
-    // is an exact identity: `max_click_milliseconds` 0 means no span is short
-    // enough to qualify, so the detector runs, flags nothing, repairs nothing,
-    // and the output is the delayed input bit for bit.
     EffectDescriptor {
         name: "audio_declick",
         parameters: &[
             AUDIO_BYPASS_DESCRIPTOR,
-            // Deliberately *not* static (AU5 §2.2 rule 11): it is a threshold,
-            // not an allocation — the ring, guard and repair buffer are sized
-            // from this row's *maximum* at construction — so an editor can
-            // reach for it while listening.
             EffectParameterDescriptor {
                 name: "max_click_milliseconds",
                 min: 0,
@@ -2880,9 +2851,6 @@ pub fn color_node_inactive_reason(effect: &Effect) -> Option<ColorNodeInactiveRe
     if reason.is_some() {
         return reason;
     }
-    // CC5 §2.6 rule 2, tested last so a bypassed, neutral, or unbound node
-    // keeps reporting the reason it already had: a matte cannot make an
-    // already-identity node report a different cause.
     if kind.supports_matte() && MatteParams::from_effect(effect).node_excluded_by_matte() {
         return Some(ColorNodeInactiveReason::MatteExcluded);
     }

@@ -68,8 +68,6 @@ fn coverage_statistics_match_hand_derived_counts() {
 fn coverage_histogram_uses_the_cc2_bucketing_rule() {
     let stats = statistics(&hand_built_coverage());
 
-    // bucket = min(15, floor(code * 16 / 256)): code 0 -> 0, code 40 -> 2,
-    // code 255 -> 15.  Every pixel is counted, including the uncovered ones.
     let mut expected = [0_u64; MATTE_COVERAGE_HISTOGRAM_BUCKETS];
     expected[0] = 23;
     expected[2] = 1;
@@ -85,19 +83,11 @@ fn coverage_histogram_uses_the_cc2_bucketing_rule() {
 fn coverage_bounding_box_uses_the_roi_floor_ceil_rule() {
     let stats = statistics(&hand_built_coverage());
 
-    // Covered pixels span x in 2..=6 and y in 1..=3, so the tightest half-open
-    // pixel rect is [2, 7) x [1, 4).  Converted on an 8 x 4 raster:
-    //   x      = floor(2 * 10000 / 8)          = 2500
-    //   width  = ceil(7 * 10000 / 8)  - 2500   = 8750 - 2500 = 6250
-    //   y      = floor(1 * 10000 / 4)          = 2500
-    //   height = ceil(4 * 10000 / 4)  - 2500   = 10000 - 2500 = 7500
     assert_eq!(
         stats.bounding_box_basis_points,
         Some(NormalizedRoi::new(2500, 2500, 6250, 7500))
     );
 
-    // The reported rectangle must survive CC2's ROI rasterization and still
-    // contain every covered pixel.
     let pixels = stats
         .bounding_box_basis_points
         .expect("coverage is not empty")
@@ -113,18 +103,11 @@ fn coverage_bounding_box_uses_the_roi_floor_ceil_rule() {
 fn coverage_centroid_is_weighted_and_rounded_half_away_from_zero() {
     let stats = statistics(&hand_built_coverage());
 
-    // Sum m = 8 * 255 + 40 = 2080.
-    // Sum m * (2x + 1) = 510 * (5 + 7 + 9 + 11) + 40 * 13 = 16320 + 520 = 16840.
-    //   x = 16840 * 5000 / (8 * 2080) = 84_200_000 / 16_640 = 5060.096... -> 5060
-    // Sum m * (2y + 1) = 1020 * 3 + 1020 * 5 + 40 * 7 = 3060 + 5100 + 280 = 8440.
-    //   y = 8440 * 5000 / (4 * 2080) = 42_200_000 / 8_320 = 5072.115... -> 5072
     assert_eq!(stats.centroid_basis_points, Some((5060, 5072)));
 }
 
 #[test]
 fn full_coverage_centroid_is_the_raster_centre() {
-    // A fully covered 2 x 2 raster: sum m = 1020, sum m * (2x + 1) = 2040,
-    // so x = 2040 * 5000 / (2 * 1020) = 5000 exactly, and likewise for y.
     let stats = statistics(&coverage_image(2, 2, &[255; 4]));
 
     assert_eq!(stats.covered_pixel_count, 4);
@@ -265,8 +248,6 @@ fn monitor_frame() -> RgbaImage {
 #[test]
 fn matte_scoped_frame_keeps_only_covered_pixels() {
     let frame = monitor_frame();
-    // A 2 x 1 covered block at (1, 0): one full pixel and one at code 1, which
-    // the pinned `m > 0` threshold keeps.
     let coverage = coverage_image(4, 2, &[0, 255, 1, 0, 0, 0, 0, 0]);
 
     let scoped = matte_scoped_frame(&frame, &coverage).expect("dimensions agree");
@@ -298,8 +279,6 @@ fn the_unchanged_cc2_engine_measures_only_covered_pixels() {
     assert_eq!(evidence.metadata.roi_pixel_count, 8);
     assert_eq!(evidence.metadata.transparent_pixel_count, 6);
     assert_eq!(evidence.metadata.visible_pixel_count, 2);
-    // The stage is untouched: matte scoping changes the region, not the
-    // pipeline boundary.
     assert_eq!(evidence.metadata.stage, ScopeStage::MonitoringPostComposite);
     assert_eq!(evidence.metadata.matte_region, None);
 }
@@ -392,9 +371,6 @@ fn comparison_rejects_a_different_matte() {
         Err(ScopeComparisonError::MatteRegionMismatch { .. })
     ));
 
-    // The covered population is *reported*, not part of the region identity:
-    // a qualifier matte's coverage depends on the colour entering the node, so
-    // a before/after pair legitimately differs in count (CC5 §4.3).
     let mut other_count = scoped_evidence(Some(matte_region(7, 3)));
     let reference_count = reference
         .metadata
@@ -460,8 +436,6 @@ fn scope_metadata_serializes_the_matte_region_only_when_scoped() {
 
 #[test]
 fn scope_metadata_recorded_before_cc5_still_loads() {
-    // Evidence JSON written before matte scoping existed has no
-    // `matte_region` key at all.
     let legacy = r#"{
         "stage": "monitoring_post_composite",
         "source_resolution": { "width": 4, "height": 2 },
@@ -508,8 +482,6 @@ fn matte_proof_metadata_round_trips_through_json() {
     let metadata = proof_metadata();
     let json = serde_json::to_value(&metadata).expect("metadata serializes");
 
-    // Provenance is composed, not replaced: the render kind still names the
-    // renderer implementation rather than an output target.
     assert_eq!(
         json.get("render")
             .and_then(|render| render.get("render_kind"))

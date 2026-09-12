@@ -127,10 +127,6 @@ fn viewer_picture<'a, T>(
     matte.or(qc_mask).or(texture)
 }
 
-// ---------------------------------------------------------------------------
-// CC6 §8.2: the QC clipping mask
-// ---------------------------------------------------------------------------
-
 /// What the Program viewer paints instead of the picture (CC6 §8.2).
 ///
 /// A whole-picture replacement, exactly like the CC5 matte view: no shader
@@ -183,10 +179,6 @@ pub(crate) fn qc_mask_image(
     let mut pixels = Vec::with_capacity(pixel_count.saturating_mul(4));
     let source = image.pixels.as_chunks::<4>().0;
     for index in 0..pixel_count {
-        // Exactly `width · height` output pixels whatever the input length, so
-        // the texture upload — which asserts the two agree — can never panic on
-        // a truncated readback. A missing sample is drawn as black rather than
-        // as either flag: an absent pixel is not evidence of clipping.
         let Some(pixel) = source.get(index) else {
             pixels.extend_from_slice(&[0, 0, 0, 255]);
             continue;
@@ -198,26 +190,12 @@ pub(crate) fn qc_mask_image(
             .chain(&encoded)
             .any(|value| !value.is_finite())
         {
-            // A non-finite sample is drawn black, exactly as a missing one is,
-            // and for the same reason: it is not evidence of clipping.
-            //
-            // This is core's classification, not a second opinion:
-            // `RegionAccumulator::add` counts a pixel with any non-finite
-            // channel in `non_finite_pixel_count` and returns **before** the
-            // range and gamut accumulators see it, so such a pixel is neither
-            // over nor under however extreme its other channels are. The test
-            // is therefore made first and over the whole pixel — flagging the
-            // finite channel of a discarded pixel would draw an excursion core
-            // never counted.
             pixels.extend_from_slice(&[0, 0, 0, 255]);
         } else if encoded.iter().any(|value| *value < 0.0) {
             pixels.extend_from_slice(&QC_MASK_UNDER_RANGE_COLOR);
         } else if encoded.iter().any(|value| *value > 1.0) {
             pixels.extend_from_slice(&QC_MASK_OVER_RANGE_COLOR);
         } else {
-            // CC1's linear luma coefficients in the proof's own `f32`,
-            // encoded through the same transfer as the flags so the grey is
-            // the delivery's own value rather than a second opinion.
             let luma = 0.2126_f32 * linear[0] + 0.7152_f32 * linear[1] + 0.0722_f32 * linear[2];
             let encoded_luma = kinewright_core::encode_bt709_delivery(luma);
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -257,10 +235,6 @@ impl QcMaskKey {
 /// Gathered rather than passed around loose so the status line and the request
 /// path cannot disagree about them: each one withholds the *render*, not
 /// merely its picture.
-// Four bools on purpose: they are four independent standing reasons, each
-// with its own status, and every one of them has to be answerable on its own.
-// A state machine would have to name every combination of four conditions that
-// can hold at once, which is exactly what this value exists to avoid.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct QcMaskConditions {
@@ -500,10 +474,6 @@ impl QcMaskState {
             return QcMaskStatus::BehindMatteView;
         }
         if conditions.playing || conditions.scrubbing {
-            // Before the error and the mask: while the transport is moving
-            // nothing is in flight and the frame identity moves every tick, so
-            // neither a stale refusal nor a stale mask describes what the
-            // viewer shows. A scrub is the same situation reached by dragging.
             return QcMaskStatus::PausedOnly;
         }
         if let Some(message) = &self.error {
@@ -512,13 +482,6 @@ impl QcMaskState {
         if self.mask_for(key).is_some() {
             return QcMaskStatus::Ready;
         }
-        // On, nothing refused, nothing rendered: a render is on its way. The
-        // controls ask for one immediately after the toggle is applied and
-        // before this is read, so the only way to be here is between a
-        // measurement being invalidated and the next request landing — which
-        // is a pending render, not a failure. Reporting it as `Unavailable`
-        // put a red "QC mask unavailable" under the viewer for one frame every
-        // time the mask was switched on.
         QcMaskStatus::Pending
     }
 
@@ -731,14 +694,6 @@ fn matte_overlay_context_for(
         .effects
         .iter()
         .find(|effect| effect.id == target.effect)?;
-    // Effect keyframes are clip-local (CC3 §3), so the overlay evaluates at the
-    // playhead's local frame and draws the geometry the renderer used.
-    //
-    // `TimeCode` is a signed frame count, so `checked_sub` only fails on
-    // overflow — a playhead *before* the clip yields a negative local frame
-    // rather than `None`, which is why the range is tested explicitly. The old
-    // `unwrap_or(TimeCode::ZERO)` fallback therefore never fired at all: it
-    // evaluated a negative frame instead.
     let local_at = position.checked_sub(clip.timeline_start)?;
     let duration = document.clip_duration(clip).ok()?;
     if local_at < TimeCode::ZERO || local_at >= duration {
@@ -867,17 +822,9 @@ impl KinewrightApp {
         self.matte_overlay.poll();
         self.qc_mask.poll();
         let overlay = self.matte_overlay_context();
-        // `blocked` reaches the *request*, not just the picture: the coverage
-        // worker decodes the same media through its own renderer, so asking for
-        // one while the source is blocked would decode what the block exists to
-        // withhold (CC5 §4.1).
         let matte_texture = overlay
             .as_ref()
             .and_then(|context| self.matte_view_texture(ui.ctx(), blocked, context));
-        // CC6 §8.2: both views are whole-picture replacements, and the matte
-        // view wins. Decided from the *toggle*, not from whether its texture
-        // happens to be ready, so the mask never pays for a full-resolution
-        // working proof whose result `viewer_picture` would then discard.
         let qc_mask_conditions = QcMaskConditions {
             blocked,
             behind_matte_view: self.matte_overlay.matte_view(),
@@ -945,11 +892,6 @@ impl KinewrightApp {
                     QcMaskView::Off
                 });
             }
-            // Asked for *after* the toggle has been applied, and before the
-            // status is read: a request made earlier in the frame — before the
-            // checkbox was ticked — leaves the frame the user just turned the
-            // mask on with nothing in flight, which read as a red "QC mask
-            // unavailable" for exactly one frame.
             self.request_qc_mask_view(ui.ctx(), conditions);
             let current = self.qc_mask.status(key, conditions);
             match &current {
@@ -984,8 +926,6 @@ impl KinewrightApp {
             }
         });
         if self.qc_mask.is_on() {
-            // Always visible while the view is on: the two colours mean two
-            // different unrecoverable things and neither is guessable.
             ui.add(
                 egui::Label::new(egui::RichText::new(QC_MASK_LEGEND).color(color::TEXT_MUTED))
                     .wrap(),
@@ -1024,9 +964,6 @@ impl KinewrightApp {
         self.qc_mask
             .request_view_if_needed(conditions, source, cache, document, key);
         if self.qc_mask.is_pending() {
-            // Nothing else drives a repaint while a worker renders, and a
-            // result that lands between frames would otherwise wait for
-            // unrelated input.
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
@@ -1113,9 +1050,6 @@ impl KinewrightApp {
         {
             let next =
                 crate::matte_overlay_ui::drag_to_params(&drag, pointer, context.frame(image_rect));
-            // A frame that asks for the values the document already holds is
-            // not an edit: the press frame, and any frame the pointer has not
-            // moved far enough to change a basis point, write nothing.
             if next != context.matte.windows[drag.window] {
                 let operations = matte_window_drag_operations(
                     context.target.clip,
@@ -1234,9 +1168,6 @@ impl KinewrightApp {
             return None;
         }
         let key = context.key;
-        // Two `Arc` clones a frame, and the state decides whether a worker is
-        // wanted: the "is this frame blocked?" rule lives in one place rather
-        // than being restated by every caller.
         let source = Arc::new(AnalysisMatteProofSource(Arc::clone(&self.analysis)));
         let document = Arc::clone(&self.focused().document);
         self.matte_overlay
@@ -1245,8 +1176,6 @@ impl KinewrightApp {
             return Some(texture.clone());
         }
         let image = coverage_color_image(self.matte_overlay.coverage_for(key)?);
-        // Point sampling: a coverage code is evidence, and a bilinear filter
-        // would invent partial coverage that no pixel has.
         let texture = ctx.load_texture("matte-coverage", image, egui::TextureOptions::NEAREST);
         self.matte_overlay.set_texture(key, texture.clone());
         Some(texture)
@@ -1433,8 +1362,6 @@ impl KinewrightApp {
                 revalidation_pending,
             );
 
-            // Persist the exact interactive context before dispatching. The
-            // async completion compares it with the live session again.
             let session = self.focused_mut();
             session.source_position = TimeCode(source_position);
             session.source_in = TimeCode(source_in);
@@ -1702,10 +1629,6 @@ mod tests {
         assert_eq!(editing, egui::Sense::click_and_drag());
     }
 
-    // -----------------------------------------------------------------------
-    // CC5 §6 overlay context
-    // -----------------------------------------------------------------------
-
     const CLIP: kinewright_core::ClipId = kinewright_core::ClipId(10);
     const EFFECT: kinewright_core::EffectId = kinewright_core::EffectId(1);
 
@@ -1851,8 +1774,6 @@ mod tests {
             context.transform
         );
 
-        // And it reaches the geometry: the window centre is drawn where the
-        // reframed picture puts it, not where the raster centre is.
         let image_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(64.0, 36.0));
         let centre = crate::matte_overlay_ui::window_centre_point(
             &context.matte.windows[0],
@@ -1904,10 +1825,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // CC6 §8.2 QC clipping mask
-    // -----------------------------------------------------------------------
-
     /// The half-luma grey a hand-computed in-range pixel must take.
     ///
     /// Transcribed independently of `qc_mask_image`: the linear luma, the
@@ -1940,13 +1857,6 @@ mod tests {
     /// that is both over and under takes the under colour.
     #[test]
     fn cc6_qc_mask_marks_only_the_flagged_pixels() {
-        // Six hand-built linear pixels, in row-major order:
-        //   0: mid grey, in range
-        //   1: over range on green only
-        //   2: under range on blue only
-        //   3: over on red AND under on blue — the precedence case
-        //   4: black, exactly on the lower bound (e = 0, not an excursion)
-        //   5: nominal white, exactly on the upper bound (e = 1, strict >)
         let source = [
             [0.18_f32, 0.18, 0.18],
             [0.5, 1.4, 0.5],
@@ -2213,8 +2123,6 @@ mod tests {
         state.set_view(QcMaskView::Clipping);
         assert!(!state.is_scrubbing(), "nothing is being dragged yet");
 
-        // Drag start. The transport is paused throughout, so the only thing
-        // that knows a scrub is running is the flag the drag sets.
         state.set_scrubbing(true);
         assert!(state.is_scrubbing());
         let scrubbing = QcMaskConditions {
@@ -2298,13 +2206,6 @@ mod tests {
     /// report counts.
     #[test]
     fn a_non_finite_sample_is_black_and_core_counts_it_the_same_way() {
-        // Six hand-built pixels, in row-major order:
-        //   0: one NaN channel, the rest in range
-        //   1: every channel NaN
-        //   2: a NaN channel beside a genuinely over-range one
-        //   3: an infinity beside a genuinely negative one
-        //   4: finite and over range
-        //   5: finite and negative
         let source = [
             [f32::NAN, 0.5, 0.5],
             [f32::NAN, f32::NAN, f32::NAN],

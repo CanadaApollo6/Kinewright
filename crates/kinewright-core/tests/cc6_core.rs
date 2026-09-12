@@ -36,10 +36,6 @@ use kinewright_core::{
 /// the media crate and core cannot see it.
 const SPEC_F64_TOLERANCE: f64 = 1e-6;
 
-// ---------------------------------------------------------------------------
-// Independent transcriptions. None of these calls the engine under test.
-// ---------------------------------------------------------------------------
-
 /// The BT.709 display transfer, transcribed in `f64` from CC6 §3.2.
 fn reference_encode(linear: f64) -> f64 {
     if linear < 0.0 {
@@ -128,10 +124,6 @@ fn reference_basis_points(value: u64, count: u64) -> u32 {
     (value * 10_000 / count) as u32
 }
 
-// ---------------------------------------------------------------------------
-// §11.1: `cc6_qc_raster()` — 80 x 40 = 3200 with basis-point-exact rectangles.
-// ---------------------------------------------------------------------------
-
 const RASTER_WIDTH: u32 = 80;
 const RASTER_HEIGHT: u32 = 40;
 const RASTER_PIXELS: u64 = 3_200;
@@ -177,8 +169,6 @@ fn qc_raster_pixel(x: u32, y: u32) -> [f32; 3] {
             ];
         }
         if x == 48 && y == 0 {
-            // The isolated over pixel: one pixel is 3 bp of 3200, so it can
-            // never trip the 10 bp threshold at whole-raster scope.
             return [1.2, 1.2, 1.2];
         }
         if x == 48 && y == 1 {
@@ -284,17 +274,8 @@ fn patch_roi(index: u32) -> NormalizedRoi {
     NormalizedRoi::new(index * 1_500, 8_000, 1_500, 2_000)
 }
 
-// ---------------------------------------------------------------------------
-// §11.2.1
-// ---------------------------------------------------------------------------
-
 /// The ten §3.2 anchors, hand-derived: `(linear, f64 e, millionths)`.
 const RANGE_ANCHORS: [(f64, f64, i64); 10] = [
-    // Sign-preserving odd extension of the **power** branch: |−0.02| ≥ 0.018,
-    // so this is −(1.099·0.02^0.45 − 0.099) = −0.089_999_732_924_536_89, not
-    // the −0.090_000 the linear branch would give. It rounds to −90_000
-    // millionths, which is why the wrong pin survived: the pin is the
-    // function, not the rounding.
     (-0.02, -0.089_999_732_924_536_89, -90_000),
     (-0.01, -0.045_000, -45_000),
     (-0.005, -0.022_500, -22_500),
@@ -309,12 +290,6 @@ const RANGE_ANCHORS: [(f64, f64, i64); 10] = [
 
 #[test]
 fn cc6_negative_range_anchors_take_the_power_branch() {
-    // The odd extension takes the *power* branch whenever `|linear| >= 0.018`,
-    // and the pinned value has to say so. `-0.02` is checked to 1e-12 rather
-    // than to `SPEC_F64_TOLERANCE`, because the linear branch's
-    // `-4.5 · 0.02 = -0.090_000` sits 2.67e-7 away — inside the looser
-    // tolerance, and inside the millionths rounding as well, which is exactly
-    // how a wrong pin sits unnoticed in a passing table.
     let (linear, pinned, millionths) = RANGE_ANCHORS[0];
     assert!((linear - -0.02).abs() < f64::EPSILON);
     assert!((reference_encode(linear) - pinned).abs() < 1e-12);
@@ -355,23 +330,15 @@ fn cc6_range_anchors_match_the_hand_derived_delivery_encode() {
         );
     }
 
-    // The boundary is strict: `e(1.0) == 1.0` exactly, in both precisions, and
-    // is therefore not an excursion.
     assert!((reference_encode(1.0) - 1.0).abs() < f64::EPSILON);
     assert!((encode_bt709_delivery(1.0) - 1.0).abs() < f32::EPSILON);
     assert!(encode_bt709_delivery(1.0) <= 1.0);
 
-    // The 0.018 seam takes the *power* branch in both precisions, because the
-    // f32 literal 0.018 is 0.0179999992251396179 and `linear < 0.018` compares
-    // that value to itself.
     let linear_branch = 4.5 * 0.018_f64;
     let power_branch = 1.099 * 0.018_f64.powf(0.45) - 0.099;
     assert!(reference_encode(0.018) > linear_branch);
     assert!((reference_encode(0.018) - power_branch).abs() < SPEC_F64_TOLERANCE);
     assert!(f64::from(encode_bt709_delivery(0.018)) > linear_branch);
-    // BT.709's rounded constants make the transfer discontinuous there by
-    // 2.479e-4, which is 0.0543 eight-bit codes. Recorded so a future edit to
-    // the seam is visible.
     let discontinuity = power_branch - linear_branch;
     assert!(
         (discontinuity - 2.479e-4).abs() < 1e-6,
@@ -459,18 +426,11 @@ fn cc6_range_anchors_match_the_hand_derived_delivery_encode() {
     assert!(ramp.exceptions.is_empty());
 }
 
-// ---------------------------------------------------------------------------
-// §11.2.2
-// ---------------------------------------------------------------------------
-
 #[test]
 fn cc6_gamut_and_range_under_describe_the_same_pixel_set() {
     let proof = cc6_qc_raster();
     let report = measure_color_qc(&proof, &range_request(None)).expect("the raster measures");
 
-    // The out-of-gamut set is exactly the set of pixels with at least one
-    // under-range channel: the under block (288, red only) plus the
-    // below-black pixel (1, all three).
     assert_eq!(report.gamut.out_of_gamut_pixel_count, 289);
     assert_eq!(
         report.gamut.out_of_gamut_pixel_count,
@@ -482,8 +442,6 @@ fn cc6_gamut_and_range_under_describe_the_same_pixel_set() {
         "the report states the set relation itself"
     );
 
-    // The over block contributes zero to gamut: an over-range positive value
-    // is inside the chromaticity triangle and merely brighter than white.
     let over = measure_color_qc(&proof, &range_request(Some(OVER_BLOCK_ROI)))
         .expect("the over block measures");
     assert_eq!(over.visible_pixel_count, 288);
@@ -494,8 +452,6 @@ fn cc6_gamut_and_range_under_describe_the_same_pixel_set() {
     assert_eq!(over.gamut.minimum_linear_millionths, 0);
     assert_eq!(over.gamut.maximum_desaturation_millionths, 0);
 
-    // `d = -m / (Y - m)`, hand-computed for the under block's
-    // `(-0.01, 0.5, 0.5)`: Y = 0.391574, so d = 0.01 / 0.401574 = 0.0249021.
     let minimum = -0.01_f64;
     let luma = 0.2126 * minimum + 0.7152 * 0.5 + 0.0722 * 0.5;
     assert!((luma - 0.391_574).abs() < SPEC_F64_TOLERANCE);
@@ -505,8 +461,6 @@ fn cc6_gamut_and_range_under_describe_the_same_pixel_set() {
     assert_eq!(report.gamut.maximum_desaturation_millionths, 24_902);
     assert_eq!(report.gamut.minimum_linear_millionths, -20_000);
 
-    // The below-black pixel: Y = -0.008189 < 0, so `d` is undefined for it. It
-    // is counted as out of gamut and excluded from the maximum.
     let below_black_luma = 0.2126_f64 * -0.02 + 0.7152 * -0.005 + 0.0722 * -0.005;
     assert!((below_black_luma - -0.008_189).abs() < SPEC_F64_TOLERANCE);
     assert!(below_black_luma < 0.0);
@@ -516,9 +470,6 @@ fn cc6_gamut_and_range_under_describe_the_same_pixel_set() {
     assert!(unbounded > 1.0);
     assert!((unbounded - 1.693_340).abs() < 1e-5);
 
-    // A pixel with `m < 0 < Y` small gives `d` approaching but not exceeding 1.
-    // `d = |m| / (Y + |m|)` with `Y = 0.7874·t − 0.2126·a`: choosing
-    // `t / a = 0.28286` puts `Y` just above zero, so `d = 0.98998`.
     let near_black = [-0.5_f32, 0.141_43, 0.141_43];
     let near_luma = 0.2126_f64 * -0.5 + 0.7874 * 0.141_43;
     assert!(near_luma > 0.0);
@@ -555,8 +506,6 @@ fn cc6_gamut_and_range_under_describe_the_same_pixel_set() {
             .iter()
             .any(|exception| exception.code == "delivery_gamut_excursion")
     );
-    // The under block alone: every pixel is out of gamut and none is below
-    // black, so both directions of the same measurement are exercised.
     let under = measure_color_qc(&proof, &range_request(Some(UNDER_BLOCK_ROI)))
         .expect("the under block measures");
     assert_eq!(under.gamut.out_of_gamut_pixel_count, 288);
@@ -576,10 +525,6 @@ fn single_pixel_proof(linear: [f32; 3]) -> WorkingProof {
         true,
     )
 }
-
-// ---------------------------------------------------------------------------
-// §11.2.3
-// ---------------------------------------------------------------------------
 
 /// The §3.4 anchor table: `(R'G'B', [Y, Cb, Cr] at 8 bits)`.
 ///
@@ -628,17 +573,11 @@ fn cc6_bt709_forward_ycbcr_matches_the_spec_at_eight_and_ten_bits() {
                     expected[plane]
                 );
             }
-            // Passing direction: an in-range R'G'B' is never an excursion, and
-            // the values sitting exactly on a bound are asserted not to be one
-            // under the strict `>` / `<` tests.
             assert!(engine[0] >= 16.0 * scale && engine[0] <= 235.0 * scale);
             for chroma in [engine[1], engine[2]] {
                 assert!(chroma >= 16.0 * scale && chroma <= 240.0 * scale);
             }
 
-            // The round trip through the inverse matrix, after dividing the
-            // codes by `2^bits - 1` because the decode takes normalized
-            // samples.
             let max_code = f64::from((1u32 << bits) - 1);
             let normalized = [
                 engine[0] / max_code,
@@ -656,8 +595,6 @@ fn cc6_bt709_forward_ycbcr_matches_the_spec_at_eight_and_ten_bits() {
         }
     }
 
-    // The forward constants are the exact inverses of the four the media crate
-    // already carries for the decode direction.
     let blue_axis_to_green: f64 = 0.0722 * 1.8556 / 0.7152;
     let red_axis_to_green: f64 = 0.2126 * 1.5748 / 0.7152;
     assert!((blue_axis_to_green - 0.187_324_272_930_648_8).abs() < 1e-12);
@@ -672,13 +609,9 @@ fn cc6_bt709_forward_ycbcr_matches_the_spec_at_eight_and_ten_bits() {
     let luma_10 = reference_ycbcr([encoded; 3], 10);
     assert!((luma_8[0] - 240.342_726).abs() < SPEC_F64_TOLERANCE);
     assert!((luma_10[0] - 961.370_905).abs() < SPEC_F64_TOLERANCE);
-    // Cb and Cr stay exactly at their offsets: the excursion is luma-only, and
-    // that attribution is what the RGB test cannot see.
     assert!((luma_8[1] - 128.0).abs() < SPEC_F64_TOLERANCE);
     assert!((luma_10[1] - 512.0).abs() < SPEC_F64_TOLERANCE);
 
-    // Failing direction: a synthetic R'G'B' outside [0, 1] produces codes
-    // outside the legal box, in both directions and on both plane kinds.
     let over = bt709_limited_ycbcr([1.2, 1.2, 1.2], 8);
     assert!(over[0] > 235.0);
     let under = bt709_limited_ycbcr([-0.1, -0.1, -0.1], 8);
@@ -727,14 +660,8 @@ fn cc6_bt709_forward_ycbcr_matches_the_spec_at_eight_and_ten_bits() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// §11.2.4
-// ---------------------------------------------------------------------------
-
 #[test]
 fn cc6_skin_band_constants_are_derived_from_the_cc5_patches() {
-    // Each CC5 patch, transcribed independently and transformed
-    // grade709_decode -> encode -> Cb/Cr -> atan2.
     let mut hues = Vec::new();
     let mut chromas = Vec::new();
     for (name, grade709) in CHART_PATCHES {
@@ -771,8 +698,6 @@ fn cc6_skin_band_constants_are_derived_from_the_cc5_patches() {
     let resultant = (cosine * cosine + sine * sine).sqrt() / 4.0;
     assert_eq!(reference_millionths(resultant), 999_885);
 
-    // Every patch sits at least 1049 centidegrees inside a band edge and at
-    // most 1154.
     let half = SKIN_BAND_HALF_WIDTH_CENTIDEGREES;
     assert_eq!(half, 1_200);
     let margin = |hue: i32| half - (hue - SKIN_BAND_CENTER_CENTIDEGREES).abs();
@@ -783,8 +708,6 @@ fn cc6_skin_band_constants_are_derived_from_the_cc5_patches() {
         assert!(margin(hue) >= 1_049 && margin(hue) <= 1_154);
     }
 
-    // The derived NTSC +I axis at exactly 123.0000 degrees is corroboration,
-    // not the source of the centre.
     let ntsc_i = (33.0_f64)
         .to_radians()
         .cos()
@@ -811,17 +734,11 @@ fn cc6_skin_band_constants_are_derived_from_the_cc5_patches() {
     #[allow(clippy::cast_precision_loss)]
     let ratio = deep_chroma as f64 / SKIN_MIN_CHROMA_MILLIONTHS as f64;
     assert!((ratio - 3.67).abs() < 0.01);
-    // 0.02 * 224 = 4.48 eight-bit code units from 128: a few codes, not a
-    // fraction of one.
     assert!((0.02 * 224.0 - 4.48_f64).abs() < SPEC_F64_TOLERANCE);
     let surround_encoded = reference_encode(reference_grade709_decode(0.45));
     let (_, _, surround_chroma, _) = reference_chroma([surround_encoded; 3]);
     assert_eq!(reference_millionths(surround_chroma), 0);
 }
-
-// ---------------------------------------------------------------------------
-// §11.2.5
-// ---------------------------------------------------------------------------
 
 /// The display-encoded triple of one chart patch, transcribed independently.
 fn patch_encoded(index: usize) -> [f64; 3] {
@@ -849,8 +766,7 @@ fn cc6_skin_diagnostics_report_circular_statistics_on_a_chosen_region() {
         let (_, _, chroma, centidegrees) = reference_chroma(patch_encoded(index as usize));
         assert_eq!(skin.mean_hue_centidegrees, Some(centidegrees));
         assert_eq!(centidegrees, SKIN_PATCH_HUE_CENTIDEGREES[index as usize]);
-        // A uniform patch has R = 1 after the clamp, so the spread is exactly
-        // zero rather than NaN.
+        // A uniform patch has R = 1 after the clamp, so the spread is exactly zero rather than NaN.
         assert_eq!(skin.hue_concentration_millionths, 1_000_000);
         assert_eq!(skin.circular_spread_centidegrees, 0);
         let expected_chroma = reference_millionths(chroma);
@@ -892,8 +808,6 @@ fn cc6_skin_diagnostics_report_circular_statistics_on_a_chosen_region() {
         assert!(report.technical_pass);
     }
 
-    // The 0/0 rule: an all-achromatic region produces no hue evidence at all,
-    // and reporting it as "outside the band" would be a fabricated finding.
     let surround = measure_color_qc(&proof, &skin_request(SURROUND_ROI))
         .expect("the surround region measures");
     let skin = surround.skin.as_ref().expect("skin was requested");
@@ -916,18 +830,12 @@ fn cc6_skin_diagnostics_report_circular_statistics_on_a_chosen_region() {
             .any(|exception| exception.code == "skin_region_outside_band")
     );
 
-    // Wrap-around: two synthetic hues straddling 0/360 average to 0, not to
-    // 18000, because the mean is taken from f64 sums of cos and sin.
     let wrap = wrap_around_proof();
     let report = measure_color_qc(&wrap, &skin_request(NormalizedRoi::full_frame()))
         .expect("the wrap raster measures");
     let skin = report.skin.as_ref().expect("skin was requested");
     assert_eq!(skin.considered_pixel_count, 2);
     let mean = skin.mean_hue_centidegrees.expect("two chromatic pixels");
-    // Exactly 0, not "0 or nearly 360": `centidegrees` takes `rem_euclid`
-    // after rounding, so an angle a hair under 360° rounds to 36000 and wraps
-    // to 0. A two-branch assertion would have accepted a genuinely wrong mean
-    // of 359.99°.
     assert_eq!(
         mean, 0,
         "circular mean of 35900 and 100 centidegrees is 0, got {mean}"
@@ -946,8 +854,6 @@ fn wrap_around_proof() -> WorkingProof {
         let chroma = 0.10;
         let cb = chroma * radians.cos();
         let cr = chroma * radians.sin();
-        // Choose Y' = 0.5 and invert: R' = Y' + 1.5748 Cr, B' = Y' + 1.8556 Cb,
-        // G' = Y' - 0.187324 Cb - 0.468124 Cr.
         let luma = 0.5;
         let encoded = [
             luma + 1.5748 * cr,
@@ -976,17 +882,8 @@ fn wrap_around_proof() -> WorkingProof {
     )
 }
 
-// ---------------------------------------------------------------------------
-// §11.2.8
-// ---------------------------------------------------------------------------
-
 #[test]
 fn cc6_working_proof_refuses_a_claim_that_is_not_full_resolution() {
-    // A proof whose provenance cannot claim the document raster is refused
-    // before any measurement runs. The two legs of the compositor's
-    // `full_resolution` conjunction — a scale that is not full resolution, and
-    // a full scale whose rendered raster differs from `document.resolution` —
-    // are both derived on the media side and both arrive here as `false`.
     let mut proof = cc6_qc_raster();
     proof.metadata.render.full_resolution = false;
     let error = measure_color_qc(&proof, &range_request(None))
@@ -1004,10 +901,6 @@ fn cc6_working_proof_refuses_a_claim_that_is_not_full_resolution() {
     assert!(report.full_resolution);
 }
 
-// ---------------------------------------------------------------------------
-// §11.2.9
-// ---------------------------------------------------------------------------
-
 /// The description `probe_path` produces for a written H.264 delivery file.
 fn probed_h264_description(depth: DeliveryEncodeDepth) -> ColorDescription {
     ColorDescription {
@@ -1023,9 +916,6 @@ fn probed_h264_description(depth: DeliveryEncodeDepth) -> ColorDescription {
     }
 }
 
-// One fixture per contract clause: §11.2.9 states both modes, both lanes,
-// the not-representable rule, and the two functions' non-interchangeability
-// as one requirement, and splitting it would hide which half regressed.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn cc6_delivery_tag_check_covers_both_modes_and_marks_white_point_not_representable() {
@@ -1046,8 +936,6 @@ fn cc6_delivery_tag_check_covers_both_modes_and_marks_white_point_not_representa
         assert!(check.not_representable.is_empty());
     }
 
-    // Four wrong fields produce four mismatches in the fixed check order,
-    // while `delivery_color_mismatch` still returns exactly the first.
     let mut wrong = ColorContext::sdr_rec709().delivery;
     wrong.primaries = ColorPrimaries::Bt2020;
     wrong.transfer = ColorTransfer::Smpte2084;
@@ -1071,8 +959,6 @@ fn cc6_delivery_tag_check_covers_both_modes_and_marks_white_point_not_representa
     assert_eq!(check.mismatches.len(), 4);
     assert!(!check.conforming);
 
-    // Post-export mode: a probed description produces zero mismatches and
-    // exactly one not-representable entry, for both lanes.
     for depth in DeliveryEncodeDepth::ALL {
         let expected = delivery_color_for_depth(&document, depth);
         let probed = probed_h264_description(depth);
@@ -1090,9 +976,6 @@ fn cc6_delivery_tag_check_covers_both_modes_and_marks_white_point_not_representa
         assert_eq!(entry.expected, "d65");
         assert!(entry.reason.contains("no white-point field"));
 
-        // The two functions are not interchangeable: `delivery_color_mismatch`
-        // applied to the same probed description *does* reject it, on the
-        // white point, which is exactly why it must never be applied to one.
         let rejected = delivery_color_mismatch(&probed).expect("a probe cannot satisfy the gate");
         assert_eq!(rejected.field, "white_point");
     }
@@ -1111,8 +994,6 @@ fn cc6_delivery_tag_check_covers_both_modes_and_marks_white_point_not_representa
         .collect();
     assert_eq!(fields, vec!["primaries", "range"]);
 
-    // A tag mismatch is an Error and clears `technical_pass`; nothing else in
-    // the report does.
     let proof = cc6_qc_raster();
     let request = ColorQcRequest {
         checks: vec![ColorQcCheck::Tags],
@@ -1157,8 +1038,6 @@ fn cc6_delivery_tag_check_covers_both_modes_and_marks_white_point_not_representa
             .any(|exception| exception.code == "delivery_tag_mismatch")
     );
 
-    // The conformance message names both accepted depths, not the pre-CC6
-    // 8-bit-only string.
     let mut rejected_document = managed_document();
     rejected_document.color_context.delivery.transfer = ColorTransfer::Smpte2084;
     let report = kinewright_core::delivery_conformance(
@@ -1177,10 +1056,6 @@ fn cc6_delivery_tag_check_covers_both_modes_and_marks_white_point_not_representa
     assert!(issue.message.contains("8-bit or 10-bit"));
     assert!(!issue.message.contains("explicit 8-bit SDR"));
 }
-
-// ---------------------------------------------------------------------------
-// §11.2.15 (core half)
-// ---------------------------------------------------------------------------
 
 /// An opaque coverage raster with the given code in every colour channel.
 fn coverage_raster(width: u32, height: u32, code: u8) -> RgbaImage {
@@ -1284,10 +1159,6 @@ fn cc6_typed_qc_refusals_carry_code_field_observed_and_allowed() {
     assert_eq!(error.observed(), "81x40 with 12960 u8 samples");
     assert_eq!(error.allowed_values(), "80x40 with 12800 u8 samples");
 
-    // L6: dimensions that agree while the buffer does not. Without the length
-    // check this measured a silently smaller region — every pixel past the end
-    // of the coverage buffer reads as coverage 0 and is skipped — and reported
-    // it under the requested region's name.
     let mut short_coverage = coverage_raster(RASTER_WIDTH, RASTER_HEIGHT, 255);
     short_coverage
         .pixels
@@ -1356,8 +1227,6 @@ fn cc6_plane_excursion_basis_points_count_both_directions() {
         maximum_code_hundredths: 0,
     };
 
-    // The discriminating case: neither direction reaches the threshold on its
-    // own, and together they cross it. `max(below, above)` would answer 51.
     let both = excursion(50, 51);
     assert_eq!(both.excursion_basis_points(10_000), 101);
     assert!(both.excursion_basis_points(10_000) > DECODED_RANGE_EXCEPTION_BASIS_POINTS);
@@ -1368,15 +1237,11 @@ fn cc6_plane_excursion_basis_points_count_both_directions() {
         );
     }
 
-    // Integer floor, never rounding: 1 sample in 10 001 is 0 basis points, and
-    // the next one is 1.
     assert_eq!(excursion(1, 0).excursion_basis_points(10_001), 0);
     assert_eq!(excursion(2, 0).excursion_basis_points(10_001), 1);
     assert_eq!(excursion(0, 1).excursion_basis_points(10_001), 0);
     // Every sample outside the box is the whole population.
     assert_eq!(excursion(3, 7).excursion_basis_points(10), 10_000);
-    // An empty population is 0, the same answer the two per-direction rates
-    // carry for one, and never a division.
     assert_eq!(excursion(0, 0).excursion_basis_points(0), 0);
     assert_eq!(excursion(5, 5).excursion_basis_points(0), 0);
     // A plane nothing was measured on: no excursions and no rate.
@@ -1388,10 +1253,6 @@ fn cc6_plane_excursion_basis_points_count_both_directions() {
     assert!(!unseen.samples_seen());
     assert_eq!(unseen.excursion_basis_points(0), 0);
 }
-
-// ---------------------------------------------------------------------------
-// §11.2.17 (core half; the `ExportJobRecord` half is the agent's)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn cc6_export_settings_and_job_records_serialize_deterministically() {
@@ -1426,8 +1287,6 @@ fn cc6_export_settings_and_job_records_serialize_deterministically() {
         assert_eq!(restored.delivery_color.bit_depth, depth.color_bit_depth());
     }
 
-    // `DeliveryEncodeDepth` defaults to the 8-bit lane, so a pre-CC6 value
-    // deserializes to what it meant.
     assert_eq!(DeliveryEncodeDepth::default(), DeliveryEncodeDepth::Eight);
     assert_eq!(
         serde_json::from_str::<DeliveryEncodeDepth>("\"eight\"").unwrap(),
@@ -1448,8 +1307,6 @@ fn cc6_export_settings_and_job_records_serialize_deterministically() {
         ColorBitDepth::Ten
     );
 
-    // A conformance report recorded before CC6 carries no `delivery_bit_depth`
-    // and deserializes as the 8-bit lane.
     let report = kinewright_core::delivery_conformance(
         &document,
         DeliveryProfile::SourceMaster,
@@ -1468,12 +1325,6 @@ fn cc6_export_settings_and_job_records_serialize_deterministically() {
         serde_json::from_value(value).expect("a pre-CC6 report still loads");
     assert_eq!(legacy.delivery_bit_depth, DeliveryEncodeDepth::Eight);
 
-    // The four `DeliveryProfile` wire strings are byte-identical. Note that
-    // the crate has carried two spellings since CC0: `as_str` is the agent and
-    // manifest vocabulary the contract names, while serde's `rename_all =
-    // "snake_case"` produces `youtube1080p` for the one profile whose variant
-    // ends in a digit. CC6 changes neither, and both are pinned here so a
-    // future edit to either cannot pass unnoticed.
     let named: Vec<&str> = DeliveryProfile::ALL
         .iter()
         .map(|profile| profile.as_str())
@@ -1501,8 +1352,6 @@ fn cc6_export_settings_and_job_records_serialize_deterministically() {
         ]
     );
 
-    // The QC report round-trips as data, so the agent envelope and the
-    // manifest see the same shape.
     let qc = measure_color_qc(&cc6_qc_raster(), &range_request(None)).expect("the raster measures");
     let encoded = serde_json::to_string(&qc).expect("the report serializes");
     assert_eq!(encoded, serde_json::to_string(&qc).unwrap());
@@ -1510,10 +1359,6 @@ fn cc6_export_settings_and_job_records_serialize_deterministically() {
         serde_json::from_str(&encoded).expect("the report deserializes");
     assert_eq!(restored, qc);
 }
-
-// ---------------------------------------------------------------------------
-// §11.2.14 (the pure half; the GPU and z-order halves are the media crate's)
-// ---------------------------------------------------------------------------
 
 /// A deterministic [`Analysis`] double that renders from a gain table.
 ///
@@ -1744,9 +1589,6 @@ fn active_wheels_node(id: u64) -> Effect {
 #[allow(clippy::too_many_lines)]
 #[test]
 fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
-    // Node A is a neutral `primary_correction`; node B is the `color_wheels`
-    // node carrying the clipping gain. The base is 0.9, so with B the raster
-    // encodes over 1.0 and without it does not.
     let neutral = primary_node(1);
     let clipping = active_wheels_node(2);
     let document = Arc::new(managed_document_with_tracks(&[vec![
@@ -1760,8 +1602,6 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
     );
     let request = range_request(None);
 
-    // Hand-computed: 0.9 x 1.5 = 1.35 encodes to e > 1 on all three channels,
-    // so all four pixels clamp; 0.9 alone encodes to e < 1, so none do.
     assert!(reference_encode(1.35) > 1.0);
     assert!(reference_encode(0.9) < 1.0);
 
@@ -1775,8 +1615,6 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
     assert!(!contributions.truncated);
     assert_eq!(contributions.nodes.len(), 2);
 
-    // A `primary_correction` node is attributed normally by removal, which is
-    // the whole reason removal is the method: it has no `bypass` parameter.
     let node_a = &contributions.nodes[0];
     assert_eq!(node_a.effect, EffectId(1));
     assert_eq!(node_a.node_kind, "primary_correction");
@@ -1793,15 +1631,11 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
     assert_eq!(node_b.range_basis_points_delta, 10_000);
     assert_eq!(node_b.gamut_basis_points_delta, 0);
 
-    // Clipping is not additive: the deltas are deliberately not asserted to
-    // sum to the baseline, and here they happen to, which proves nothing.
     assert_eq!(analysis.render_count(), 3, "one baseline plus two scratch");
 
     // The live document is byte-identical afterwards.
     assert_eq!(document.as_ref(), &before);
 
-    // An inactive node reports its reason and both deltas exactly zero — and
-    // that zero is measured by actually removing it, not assumed.
     let document = Arc::new(managed_document_with_tracks(&[vec![
         inactive_wheels_node(3),
         clipping.clone(),
@@ -1818,8 +1652,6 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
     assert_eq!(inactive.range_basis_points_delta, 0);
     assert_eq!(inactive.gamut_basis_points_delta, 0);
 
-    // Ordering is track, then clip, then effect-chain order, and it is core's
-    // own: nothing here consults the compositor.
     let document = Arc::new(managed_document_with_tracks(&[
         vec![primary_node(1), primary_node(2)],
         vec![primary_node(3)],
@@ -1836,8 +1668,6 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
         .collect();
     assert_eq!(order, vec![(1, 1), (1, 2), (2, 3), (3, 4), (3, 5)]);
 
-    // Seventeen candidates truncate to sixteen in the stated order. The
-    // per-clip colour-node limit is sixteen, so seventeen needs two clips.
     let first: Vec<Effect> = (1..=9).map(primary_node).collect();
     let second: Vec<Effect> = (10..=17).map(primary_node).collect();
     let document = Arc::new(managed_document_with_tracks(&[first, second]));
@@ -1880,8 +1710,6 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
         Some(16)
     );
 
-    // Passing neighbour: sixteen candidates are not truncated and raise no
-    // exception, so the check is known to be able to stay silent.
     let document = Arc::new(managed_document_with_tracks(&[
         (1..=9).map(primary_node).collect(),
         (10..=16).map(primary_node).collect(),
@@ -1901,8 +1729,6 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
     };
     let error = measure_node_contributions(&analysis, document, TimeCode::ZERO, &budget)
         .expect_err("an out-of-range budget refuses");
-    // CC6 errata E32: the refusal travels structurally as MediaError::ColorQc,
-    // so a caller recovers the code without parsing the rendered message.
     let MediaError::ColorQc(ref refusal) = error else {
         panic!("a node budget refusal must arrive as MediaError::ColorQc, not {error:?}")
     };
@@ -1912,14 +1738,6 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
     assert_eq!(analysis.render_count(), 0);
 }
 
-// ---------------------------------------------------------------------------
-// §6.2/§6.3: the sampling rule and the per-lane budgets.
-//
-// Not a numbered §11.2 fixture — the numbered ones for these live with the
-// encoded round trip in the media crate — but the sampling rule and
-// `DeliveryBudgets::for_depth` are core code and rule 11.0.5 applies to them.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn cc6_delivery_verification_sampling_is_the_closed_form_integer_rule() {
     let request = |frame_count: u8| kinewright_core::DeliveryVerificationRequest {
@@ -1928,8 +1746,6 @@ fn cc6_delivery_verification_sampling_is_the_closed_form_integer_rule() {
         expected_delivery: ColorContext::sdr_rec709().delivery,
     };
 
-    // On the CC6 source (T = 60, n = 5) the samples are 0, 14, 29, 44, 59:
-    // `f_i = floor(i · (T − 1) / (n − 1))`, hand-evaluated.
     assert_eq!(
         request(kinewright_core::DELIVERY_VERIFICATION_FRAME_COUNT).sample_frames(60),
         vec![0, 14, 29, 44, 59]
@@ -1940,8 +1756,6 @@ fn cc6_delivery_verification_sampling_is_the_closed_form_integer_rule() {
     assert_eq!(kinewright_core::DELIVERY_VERIFICATION_FRAME_COUNT, 5);
     assert_eq!(kinewright_core::DELIVERY_VERIFICATION_MAX_FRAMES, 16);
 
-    // `n == 1` samples frame 0 only, and says so rather than claiming both
-    // ends.
     assert_eq!(request(1).sample_frames(60), vec![0]);
     // `T <= n` samples every frame.
     assert_eq!(request(5).sample_frames(3), vec![0, 1, 2]);
@@ -1960,15 +1774,8 @@ fn cc6_delivery_verification_sampling_is_the_closed_form_integer_rule() {
     // An empty file samples nothing rather than inventing frame 0.
     assert!(request(5).sample_frames(0).is_empty());
 
-    // The two lanes' budgets are separately baselined, never scaled from each
-    // other: scaling the 8-bit numbers by four would reuse a compositor
-    // tolerance as a codec tolerance.
     let eight = kinewright_core::DeliveryBudgets::for_depth(DeliveryEncodeDepth::Eight);
     let ten = kinewright_core::DeliveryBudgets::for_depth(DeliveryEncodeDepth::Ten);
-    // Every value re-baselined against `cc6_delivery_source()`'s own
-    // measurement before the fixture landed (§6.3), not widened afterwards to
-    // make a red build green; the media fixtures assert the >= 2x margin each
-    // one keeps.
     assert_eq!(eight.luma_max_code, 8);
     assert_eq!(eight.luma_p99_code_millionths, 3_000_000);
     assert_eq!(eight.luma_mean_code_millionths, 400_000);
@@ -1977,14 +1784,9 @@ fn cc6_delivery_verification_sampling_is_the_closed_form_integer_rule() {
     assert_eq!(ten.luma_max_code, 16);
     assert_eq!(ten.luma_p99_code_millionths, 4_000_000);
     assert_eq!(ten.luma_mean_code_millionths, 1_000_000);
-    // The 10-bit lane's RGB mean budget is *tighter*, not four times looser.
-    // Both are 8-bit-equivalent (§6.3), which is the unit the comparison
-    // reports them in, so the two numbers are directly comparable.
     assert_eq!(ten.rgb_mean_code_millionths, 1_000_000);
     assert!(ten.rgb_mean_code_millionths < eight.rgb_mean_code_millionths);
     assert_eq!(ten.psnr_floor_db_hundredths, 3_300);
-    // Not a scaling of the 8-bit lane by `s = 4` in any term (§6.3: the
-    // 10-bit budget is baselined, never derived).
     assert_ne!(ten.luma_max_code, eight.luma_max_code * 4);
     assert_ne!(
         ten.luma_p99_code_millionths,
@@ -2000,14 +1802,6 @@ fn cc6_delivery_verification_sampling_is_the_closed_form_integer_rule() {
     // The RGB extremes note travels with the numbers it explains.
     assert!(kinewright_core::DELIVERY_RGB_EXTREMES_NOTE.contains("evidence, not a gate"));
 }
-
-// ---------------------------------------------------------------------------
-// §3.1/§3.4 (core review round): non-finite samples, the strict legal bounds
-// measured through the engine, and the refusals and orderings around them.
-//
-// Not numbered §11.2 fixtures — rule 11.0.5 covers them as core code — but
-// every expected value below is still transcribed independently.
-// ---------------------------------------------------------------------------
 
 /// A range-and-gamut request at one delivery lane.
 fn depth_request(depth: DeliveryEncodeDepth) -> ColorQcRequest {
@@ -2071,8 +1865,6 @@ fn cc6_non_finite_samples_are_counted_and_never_classified() {
     assert_eq!(report.region.non_finite_pixel_count, 1);
     assert_eq!(report.transparent_pixel_count, 0);
 
-    // The pixel is counted, and it reaches no accumulator: every classified
-    // count belongs to the finite neighbour alone.
     assert_eq!(report.range.clamped_pixel_count, 0);
     assert_eq!(report.range.red.over_pixel_count, 0);
     assert_eq!(report.range.red.under_pixel_count, 0);
@@ -2098,8 +1890,7 @@ fn cc6_non_finite_samples_are_counted_and_never_classified() {
     assert!(exception.message.contains("non-finite"));
     assert!(!report.technical_pass);
 
-    // (b) The finite neighbour on its own passes, so the Error above is the
-    // NaN and nothing else.
+    // (b) The finite neighbour on its own passes, so the Error above is the NaN and nothing else.
     let clean = row_proof(&[[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]]);
     let report = measure_color_qc(&clean, &range_request(None)).expect("the raster measures");
     assert_eq!(report.non_finite_pixel_count, 0);
@@ -2110,9 +1901,7 @@ fn cc6_non_finite_samples_are_counted_and_never_classified() {
         GREY_HALF_LUMA_HUNDREDTHS
     );
 
-    // (c) A NaN with no finite neighbour anywhere: the planes saw nothing, and
-    // an unseen plane reports the empty interval rather than a fabricated
-    // `minimum_code_hundredths = 0` that reads as a legal black.
+    // (c) A NaN with no finite neighbour anywhere
     let only_nan = single_pixel_proof([f32::NAN, f32::NAN, f32::NAN]);
     let report = measure_color_qc(&only_nan, &range_request(None)).expect("the raster measures");
     assert_eq!(report.visible_pixel_count, 1);
@@ -2136,9 +1925,6 @@ fn cc6_non_finite_samples_are_counted_and_never_classified() {
         assert_eq!(plane.above_count, 0);
     }
 
-    // (d) `+inf`, which used to saturate the plane extreme to `i64::MAX` and
-    // be counted as an over-range pixel on the strength of a comparison
-    // against infinity.
     for sample in [f32::INFINITY, f32::NEG_INFINITY] {
         let infinite = single_pixel_proof([sample, 0.5, 0.5]);
         let report =
@@ -2156,8 +1942,7 @@ fn cc6_non_finite_samples_are_counted_and_never_classified() {
         assert!(!report.technical_pass);
     }
 
-    // (e) A NaN alpha is not visible: `NaN <= 0.0` is false, so the old
-    // spelling of the visibility test called it visible and then measured it.
+    // (e) A NaN alpha is not visible: `NaN <= 0.0` is false, so the old spelling of the visibility test called it visible and then measured it.
     let mut nan_alpha = single_pixel_proof([0.5, 0.5, 0.5]);
     nan_alpha.image.pixels[3] = f32::NAN;
     let error = measure_color_qc(&nan_alpha, &range_request(None))
@@ -2168,10 +1953,6 @@ fn cc6_non_finite_samples_are_counted_and_never_classified() {
 
 #[test]
 fn cc6_ycbcr_legal_bounds_are_strict_through_the_measurement() {
-    // Rec.709 red at exactly the ceiling. `e(1.0) = 1.099 · 1^0.45 − 0.099 =
-    // 1.000000`, and for a red-only pixel `Y' = Kr·R'`, so
-    // `Cr = 128·s + 224·s·(1 − Kr)/1.5748 = 128·s + 112·s·R' = 240·s` exactly.
-    // The comparison is strict, so the bound itself is legal.
     for (depth, ceiling) in [
         (DeliveryEncodeDepth::Eight, 24_000_i64),
         (DeliveryEncodeDepth::Ten, 96_000),
@@ -2186,8 +1967,6 @@ fn cc6_ycbcr_legal_bounds_are_strict_through_the_measurement() {
         assert_eq!(cr.above_basis_points, 0);
     }
 
-    // Yellow at exactly the floor: `Y' = (Kr + Kg)·v` with `B' = 0`, so
-    // `Cb = 128·s − 112·s·v = 16·s` at `v = 1`.
     for (depth, floor) in [
         (DeliveryEncodeDepth::Eight, 1_600_i64),
         (DeliveryEncodeDepth::Ten, 6_400),
@@ -2201,10 +1980,6 @@ fn cc6_ycbcr_legal_bounds_are_strict_through_the_measurement() {
         assert_eq!(cb.below_basis_points, 0);
     }
 
-    // The failing neighbours, one code away. `e(1.02) = 1.009837`, so the
-    // red-only pixel predicts `Cr = 128 + 112·1.009837 = 241.10` and the
-    // yellow pixel predicts `Cb = 128 − 112·1.009837 = 14.90`: one code past
-    // each bound, and each one counts.
     let neighbour_encoded = reference_encode(1.02);
     assert!((neighbour_encoded - 1.009_837_150_573_730_5).abs() < SPEC_F64_TOLERANCE);
     assert!((128.0 + 112.0 * neighbour_encoded - 241.101_760_864_257_8).abs() < 1e-4);
@@ -2241,10 +2016,7 @@ fn cc6_bt709_limited_ycbcr_refuses_a_depth_that_is_not_a_delivery_lane() {
 
 #[test]
 fn cc6_exceptions_sort_by_severity_then_code_then_field() {
-    // One over pixel, one under pixel, one NaN. Each channel is over once and
-    // under once out of three visible pixels, which is 3333 basis points and
-    // well past the 10 basis-point threshold, so all six range warnings and
-    // the gamut warning are raised together with the non-finite Error.
+    // One over pixel, one under pixel, one NaN.
     let proof = row_proof(&[
         [1.2, 1.2, 1.2],
         [-0.1, -0.1, -0.1],
@@ -2306,8 +2078,6 @@ fn cc6_delivery_verification_refuses_a_frame_count_outside_the_sampled_range() {
         for expected in ["field=frame_count", "allowed=1..=16"] {
             assert!(message.contains(expected), "{message}");
         }
-        // The reason the refusal exists: sampling stays total and silently
-        // measures a different number of frames than the one requested.
         let clamped = request(count).sample_frames(60);
         assert_eq!(clamped.len(), if count == 0 { 1 } else { 16 });
     }
@@ -2361,8 +2131,6 @@ fn track_document(clips: &[(u64, TimeCode)]) -> Document {
 #[test]
 fn cc6_per_node_candidates_find_the_on_screen_clip_whatever_the_clip_order() {
     let request = range_request(None);
-    // The ordinary path: two clips in timeline order, each attributed on its
-    // own frames and neither attributed on the other's.
     let sorted = Arc::new(track_document(&[(1, TimeCode::ZERO), (2, TimeCode(15))]));
     for (at, expected_clip, expected_effect) in [
         (TimeCode::ZERO, ClipId(1), EffectId(1)),
@@ -2389,14 +2157,6 @@ fn cc6_per_node_candidates_find_the_on_screen_clip_whatever_the_clip_order() {
     assert_eq!(contributions.considered_node_count, 0);
     assert!(contributions.nodes.is_empty());
 
-    // The same two clips listed out of timeline order. The editing operations
-    // refuse such a document — `OpError::ClipsUnsorted` — so the invariant
-    // holds for anything that reached the tree through an operation, but the
-    // type does not enforce it and a fixture or a deserialized document can
-    // present this order. Scanning with an early `break` reported the track as
-    // carrying no colour node at all, which is a missing measurement dressed
-    // as a clean one; finding the on-screen clip surfaces the document model's
-    // own refusal instead.
     let unsorted = Arc::new(track_document(&[(2, TimeCode(15)), (1, TimeCode::ZERO)]));
     let analysis = GainAnalysis::new(0.5, BTreeMap::new());
     let error = measure_node_contributions(&analysis, unsorted, TimeCode::ZERO, &request)
@@ -2407,10 +2167,6 @@ fn cc6_per_node_candidates_find_the_on_screen_clip_whatever_the_clip_order() {
         "{message}"
     );
     assert!(message.contains("not sorted"), "{message}");
-    // CC6 §3.8 / errata E32: it is a *typed* refusal, not a flattened backend
-    // string. A surface reporting it must be able to name what happened —
-    // the removal was rejected — rather than falling back on "the working
-    // proof was unavailable", which is not what went wrong.
     assert_eq!(
         error.recovery_code(),
         Some("color_qc_node_removal_rejected"),

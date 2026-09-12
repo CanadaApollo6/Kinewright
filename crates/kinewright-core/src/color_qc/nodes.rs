@@ -74,9 +74,6 @@ struct Candidate {
 /// [`super::ColorQcError::NodeRemovalRejected`] code and says so in its own
 /// words, rather than being flattened into a [`MediaError::Backend`] string an
 /// agent surface could only report as an unavailable working proof.
-// `Arc<Document>` is taken by value to match
-// `Analysis::working_proof_for_document`'s own signature, so the caller's
-// reference-count bump is explicit at the call site rather than hidden here.
 #[allow(clippy::needless_pass_by_value)]
 pub fn measure_node_contributions(
     analysis: &dyn Analysis,
@@ -217,8 +214,6 @@ fn candidates_at(document: &Document, at: TimeCode) -> Vec<Candidate> {
                 .checked_sub(clip.timeline_start)
                 .unwrap_or(TimeCode::ZERO);
             for effect in &clip.effects {
-                // CC3 §3.3: keyframes resolve first, then inactivity is tested
-                // on the stored integers.
                 let evaluated = effect.evaluated_at(local);
                 let Some(kind) = classify_color_node(&evaluated) else {
                     continue;

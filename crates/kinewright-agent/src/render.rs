@@ -287,8 +287,6 @@ fn is_internal_marker_label(label: &str) -> bool {
 /// # Errors
 ///
 /// Returns an error string when the clip or its referenced asset is missing.
-// Three sibling renderings (title, freeze, media) share one prologue; splitting
-// them would duplicate the lookup rather than shorten the file.
 #[allow(clippy::too_many_lines)]
 pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, String> {
     let (track, clip) = document
@@ -489,15 +487,7 @@ pub(crate) const fn track_kind_name(kind: TrackKind) -> &'static str {
 fn track_mix_fields(document: &Document, track: &kinewright_core::Track) -> Option<String> {
     let mix = document.track_mix(track.id);
     (!mix.is_neutral()).then(|| {
-        // AU4 §4.1 rule 79: each curve is present only when it is, and
-        // `is_neutral` is false for a curve-bearing entry, so an automated
-        // track keeps its suffix even at unity scalars. The key is looked up
-        // from the wire token rather than written twice, which is rule 81's
-        // guarantee on the rendering side.
         let curve_field = |parameter: &str, curve: Option<&AutomationCurve>| {
-            // Both call sites pass a `TRACK_AUTOMATION_PARAMETERS` constant,
-            // so the lookup cannot miss. Saying so beats the `map_or_else`
-            // that would have rendered nothing at all for an unknown token.
             let key = track_automation_render_key(parameter)
                 .expect("every call site passes a TRACK_AUTOMATION_PARAMETERS token (rule 81)");
             render_named_curve(&format!(",{key}:"), curve)
@@ -725,14 +715,7 @@ fn render_audio_mix(output: &mut String, document: &Document) {
             bus.id,
             bus.name,
             tracks,
-            // AU2 §6.3: the only conditional mid-line field in this module.
-            // A zero fader is the overwhelming default and the bus line is
-            // already the longest in the compact state.
             render_audio_gain(bus.gain_tenth_db),
-            // AU4 §4.1 rule 80: the fader ride sits directly after the fader,
-            // and is what makes rule 34's whole-owner-set semantics
-            // recoverable — the agent can read the curve before it rewrites
-            // the bus.
             render_named_curve(" gain_curve=", bus.gain_curve.as_ref()),
             if sidechain.is_empty() {
                 "none"
@@ -1041,13 +1024,6 @@ fn render_effects(effects: &[Effect]) -> String {
             rendered.push_str(", ");
         }
         let _ = write!(rendered, "{}:{}(", effect.id, effect.name);
-        // AU5 §4.2 rule 79: the 31 profile rows leave the parameter loop and
-        // are spelled once below, so a learned denoiser costs one block rather
-        // than 31 rows on every timeline-state render. The drop is gated on
-        // the descriptor that owns them for the same reason
-        // `render_noise_profile` is: a `profile_band`-named parameter on any
-        // other effect has no block to be collected into, so dropping it here
-        // would lose it rather than compact it.
         let hatched = effect.name == DENOISE_EFFECT_NAME;
         let mut parameter_index = 0usize;
         for (name, value) in &effect.parameters {
@@ -1072,8 +1048,6 @@ fn render_effects(effects: &[Effect]) -> String {
                 if curve_index != 0 {
                     rendered.push('|');
                 }
-                // AU4 §4.1: the shared spelling, so the clip, track, bus and
-                // master curves render exactly as an effect curve does.
                 let _ = write!(rendered, "{name}{}", render_curve(curve));
             }
         }
@@ -1107,10 +1081,6 @@ fn render_effects(effects: &[Effect]) -> String {
 /// some-but-not-all is already invalid. The fill is that rule made visible,
 /// not an arbitrary choice.
 fn render_noise_profile(effect: &Effect) -> Option<String> {
-    // Only one descriptor carries profile rows, so every other effect on the
-    // timeline — every colour node, title and transition — answers here rather
-    // than paying 31 `BTreeMap` lookups and an allocation to discover it has
-    // no profile. `render_effects` calls this for every effect it renders.
     if effect.name != DENOISE_EFFECT_NAME {
         return None;
     }
@@ -1466,8 +1436,6 @@ assets:
         assert!(!rendered.contains("audio_master"), "{rendered}");
         assert!(!rendered.contains("audio_pan_law"), "{rendered}");
 
-        // A master that is only gain, and a master that is only effects, each
-        // render; `is_neutral` is both fields at once.
         document.audio_mix.master = kinewright_core::AudioMaster {
             gain_tenth_db: -60,
             effects: Vec::new(),
@@ -1550,8 +1518,6 @@ assets:
         };
 
         let rendered = render_timeline_state(&document);
-        // The clip envelope joins the existing audio suffix, which now prints
-        // even though gain and both fades are still at their defaults.
         assert!(
             rendered.contains(
                 " effects=none transition_in=none audio=gain:0,fade_in:0f,fade_out:0f,envelope:[0:0:Linear,30:-60:Hold,59:-120:EaseInOut]"
@@ -1571,8 +1537,6 @@ assets:
             "missing bus or master fader curve, or out of order: {rendered}"
         );
 
-        // AU4 §4.1: the spelling is `render_effects`' own, so an effect curve
-        // carrying the same keys renders the same bytes between its brackets.
         let effect_spelling = render_effects(&[Effect {
             id: kinewright_core::EffectId(9),
             name: "audio_gain".to_owned(),
@@ -1617,8 +1581,6 @@ assets:
             assert!(!rendered.contains(absent), "{absent} in {rendered}");
         }
 
-        // A curve-free track entry, bus and master render exactly the AU1/AU2
-        // bytes they did before AU4.
         document.audio_mix.tracks = vec![kinewright_core::TrackMix {
             track: TrackId(7),
             gain_tenth_db: -60,
@@ -1671,8 +1633,6 @@ assets:
             ("bypass".to_owned(), ParamValue::Integer(0)),
             ("reduction_tenth_db".to_owned(), ParamValue::Integer(120)),
         ]);
-        // A learned profile: every band its own value, so the block's order is
-        // load-bearing and a reversed table would be visible here.
         for (index, name) in NOISE_PROFILE_PARAMETER_NAMES.iter().enumerate() {
             let band = -720 - i64::try_from(index).unwrap();
             parameters.insert((*name).to_owned(), ParamValue::Integer(band));
@@ -1704,8 +1664,6 @@ assets:
             !rendered.contains("profile_band"),
             "the 31 rows must never be enumerated: {rendered}"
         );
-        // The block is one row's worth of bytes against the enumeration it
-        // replaces, which is rule 79's whole argument.
         let enumerated = NOISE_PROFILE_PARAMETER_NAMES
             .iter()
             .enumerate()
@@ -1734,9 +1692,6 @@ assets:
             ("bypass".to_owned(), ParamValue::Integer(0)),
             ("reduction_tenth_db".to_owned(), ParamValue::Integer(200)),
         ]);
-        // The other spelling of "unlearned": all 31 rows written, all at the
-        // neutral. `insert_audio_effect` skips them, but a document that wrote
-        // them by hand must render the same bytes.
         let mut neutral = absent.clone();
         for name in NOISE_PROFILE_PARAMETER_NAMES {
             neutral.insert(
@@ -1757,12 +1712,6 @@ assets:
             );
         }
 
-        // The hatch drops a row only where there is a block to collect it
-        // into. A `profile_band`-named row on a descriptor that owns no
-        // profile, and an out-of-table band index on one that does, are both
-        // rendered as ordinary rows rather than silently dropped — the two
-        // ways the filter and the collector could disagree about which rows
-        // the block owns.
         for (name, parameter) in [
             ("primary_correction", "profile_band01_tenth_db"),
             ("audio_denoise", "profile_band99_tenth_db"),
@@ -1780,8 +1729,6 @@ assets:
             );
         }
 
-        // And the whole stored golden is byte-unchanged on a document that
-        // carries no repair node at all.
         for clip in document
             .tracks
             .iter_mut()
@@ -1813,8 +1760,6 @@ assets:
         assert_eq!(track_automation_render_key("gain_curve"), None);
         assert_eq!(track_automation_render_key(""), None);
 
-        // Each render key is the parameter token with its scalar suffix
-        // replaced by `_curve`, which is the invariant a rename must keep.
         assert_eq!(
             track_automation_render_key("gain_tenth_db"),
             Some("gain_curve")
@@ -1824,8 +1769,6 @@ assets:
             Some("pan_curve")
         );
 
-        // And the keys the renderer actually prints are those two, in that
-        // order, on one entry carrying both curves.
         let mut document = fixture();
         document.audio_mix.tracks = vec![kinewright_core::TrackMix {
             track: TrackId(7),
@@ -1865,8 +1808,6 @@ assets:
         let neutral = render_clip_info(&document, ClipId(10)).unwrap();
         assert!(!neutral.contains("track_mix="), "{neutral}");
 
-        // A title clip and a freeze clip on their own tracks, so all three
-        // `render_clip_info` branches are covered by the assertions below.
         document.tracks.push(Track {
             id: TrackId(8),
             kind: TrackKind::Video,
@@ -1942,8 +1883,6 @@ assets:
             );
         }
 
-        // In the media branch the speed suffix and the mix line are adjacent
-        // format arguments; pin their order with both non-empty.
         let clip = document
             .tracks
             .iter_mut()

@@ -98,8 +98,6 @@ pub(crate) fn get_audio_qc(
     {
         return Err(AudioQcRefusal::Stale(ScopeError::stale(expected, revision)));
     }
-    // AU1 §6.2's range rule: both bounds omitted measures the whole timeline,
-    // and either bound alone fills the other.
     let range = match (args.start_frame, args.end_frame) {
         (None, None) => None,
         (start, end) => {

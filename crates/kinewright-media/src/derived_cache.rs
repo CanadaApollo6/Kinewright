@@ -454,8 +454,6 @@ mod tests {
         let mut hashes = ContentHashes;
         let first = hashes.get(&path).unwrap();
 
-        // Keep both metadata fields identical so a size+mtime memoization scheme
-        // would incorrectly return `first`.
         fs::write(&path, b"other").unwrap();
         // `set_modified` needs write access to the handle: Windows refuses it
         // on a read-only `File::open` with `PermissionDenied`, where unix

@@ -348,8 +348,6 @@ impl KinewrightApp {
             ),
             resume_after_scrub: false,
             transcript_scope: TranscriptScope::default(),
-            // The screenshot harness can pre-raise a summoned surface that no
-            // startup interaction could otherwise reach in a static capture.
             material_tab: match std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").as_deref() {
                 Ok("transcript") => MaterialTab::Transcript,
                 Ok("mixer" | "mixer-chain") => MaterialTab::Mixer,
@@ -396,9 +394,6 @@ impl KinewrightApp {
             look_ab_hold: None,
             look_ab_hold_seen: false,
         };
-        // The startup session is focused from construction, so `focus_project`
-        // early-returns for it and would never publish: a project opened with
-        // LUT nodes would render against an empty library (CC4 §2.4).
         app.publish_focused_lut_library();
         app.playback
             .set_document(Arc::clone(&app.focused().document));
@@ -510,22 +505,12 @@ impl KinewrightApp {
         self.playing = false;
         self.resume_after_scrub = false;
         self.meter_levels = [0.0; 2];
-        // Mixer levels are keyed by `TrackId` and `AudioBusId`, which only
-        // mean anything inside one document: carrying them across a project
-        // switch would light the new project's identically numbered tracks
-        // with the old project's signal until they decayed (AU1 §5.1).
         self.mixer_levels = crate::mixer_ui::MixerMeterLevels::default();
-        // A selection names an `AudioBusId`, which only means anything inside
-        // one document (AU2 §6.6).
         self.mixer_selection = None;
         self.texture = None;
         self.focused_project = index;
         let document = Arc::clone(&self.focused().document);
         let position = self.focused().position;
-        // Publication is content-addressed and every render binds its own
-        // document's assets, so this republish is not a correctness
-        // requirement; it promotes the focused project's lattices in the
-        // engine's bounded published table before the first frame (CC4 §2.4).
         self.publish_focused_lut_library();
         self.playback.set_document(document);
         self.playback.seek(position);
@@ -565,8 +550,6 @@ impl KinewrightApp {
         session.set_lut_store(store, store_error);
         session.saved_document = Some(Arc::clone(&session.document));
         let library = session.rebuild_lut_library();
-        // The agent servers derive their own store root from the path, so a
-        // Save As has to republish it before any tool can import (CC4 §8).
         session.publish_project_path_to_agents();
         let core = session.core.clone();
         session
@@ -607,8 +590,6 @@ impl KinewrightApp {
             Ok(report) => {
                 self.status = format!("Saved {}", report.path.display());
                 if let Some(summary) = report.copy_failure_summary() {
-                    // A project with an unavailable asset is still saved; the
-                    // asset is simply `missing` at the new root (CC4 §2.2).
                     self.record_error(
                         "Look",
                         format!(
@@ -688,9 +669,6 @@ impl KinewrightApp {
             };
         session.saved_document = Some(Arc::clone(&session.document));
         let assets = session.document.media_pool.clone();
-        // `ProjectSession::create` already derived the store and built the
-        // library from the loaded document; surface the refusal it recorded
-        // rather than letting every look silently report `missing`.
         let store_refusal = session.lut_store_error.clone();
         let unavailable =
             crate::project::unavailable_lut_assets(&session.document, &session.lut_availability);
@@ -701,9 +679,6 @@ impl KinewrightApp {
             .collect();
         self.projects.push(session);
         self.focus_project(self.projects.len() - 1);
-        // `focus_project` publishes too; publishing is idempotent, and doing
-        // it here as well keeps "open publishes the library" true without
-        // depending on the focus path's early-return conditions.
         self.publish_focused_lut_library();
         if let Some(reason) = store_refusal {
             self.record_error(
@@ -1003,15 +978,10 @@ impl KinewrightApp {
     fn poll_background(&mut self, ctx: &egui::Context) {
         self.poll_agent(ctx);
         self.poll_export(ctx);
-        // Before any panel draws: the inspector's CC6 §8.3 clipping lines read
-        // the last report, and polling in `show_color_qc_window` — which runs
-        // after `panel_layout` — would leave every line one frame stale.
         let session = self.focused();
         let (session_id, revision, position) = (session.id, session.revision.0, session.position);
         self.color_qc
             .observe_context(session_id, revision, position);
-        // The shared working proof is a full-resolution raster: it is kept for
-        // the frame under the playhead and dropped the moment that moves.
         self.working_proof_cache
             .retain_context(crate::color_qc_ui::WorkingProofKey {
                 session_id,
@@ -1090,11 +1060,6 @@ impl KinewrightApp {
                     last_op,
                     journal_command,
                 } => {
-                    // AU2 §6.8: a change made only of mix operations that
-                    // declares the same processing latency keeps the transport
-                    // running. Decided before the command is consumed by the
-                    // status line below, and after `previous_document` is
-                    // fetched, because the predicate compares both documents.
                     let previous_document = Arc::clone(&self.projects[project_index].document);
                     let live_audio =
                         live_audio_change(journal_command.as_ref(), &previous_document, &doc);
@@ -1151,14 +1116,6 @@ impl KinewrightApp {
                     }
                     self.projects[project_index].document = Arc::clone(&doc);
                     self.projects[project_index].revision = revision;
-                    // Every path that changes the asset table — `AddLutAsset`,
-                    // `RemoveLutAsset`, undo, redo, journal replay — rebuilds
-                    // and republishes the verified library (CC4 §2.4).
-                    // Publication merges lattices by content hash and every
-                    // render resolves its own document's assets, so a
-                    // background project's import must be published too:
-                    // otherwise its queued export or branch proof could not
-                    // find the bytes until the project was focused.
                     if previous_document.lut_assets != doc.lut_assets {
                         let library = self.projects[project_index].rebuild_lut_library();
                         self.lut_publisher.set_lut_library(library);
@@ -1209,11 +1166,6 @@ impl KinewrightApp {
                     }
                     if let Some(Operation::AddAsset { asset }) = &last_op {
                         self.projects[project_index].cue_source_asset(asset.id);
-                        // A user import is one gesture: the probed asset goes
-                        // straight onto the timeline, and the playhead moves
-                        // to the new footage so the monitor answers "it
-                        // worked". The pending list keeps agent-driven asset
-                        // operations out of this path.
                         if let Some(index) = self.projects[project_index]
                             .pending_timeline_adds
                             .iter()
@@ -1240,8 +1192,6 @@ impl KinewrightApp {
                                         format!("Applied {} linked edits", operations.len());
                                 }
                                 Some(JournalCommand::DoBatchCoalesced { operations, .. }) => {
-                                    // Live slider drags coalesce into one undo entry; the
-                                    // status reflects the gesture rather than the frame count.
                                     self.status = format!(
                                         "Adjusting {} linked edit(s) as one undo step",
                                         operations.len()
@@ -1263,8 +1213,6 @@ impl KinewrightApp {
                         "Operations",
                         format!("Edit plan rejected in {name}: {error}"),
                     );
-                    // A rejected batch never registers its asset, so holding
-                    // the id would stall every later import forever.
                     self.release_lut_import_reservation(project_index);
                 }
                 Event::RevisionConflict { expected, actual } => {
@@ -1507,8 +1455,6 @@ impl KinewrightApp {
             .exact_size(size::TOP_BAR_HEIGHT)
             .show_separator_line(false)
             .frame(
-                // Separation by fill contrast, not outline (M25): the bar
-                // sits one surface step above the panels beneath it.
                 egui::Frame::new()
                     .fill(color::SURFACE)
                     .inner_margin(egui::Margin::symmetric(
@@ -1518,8 +1464,6 @@ impl KinewrightApp {
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    // The wordmark stays quiet: accent color is reserved for the
-                    // playhead, selection, and live agent state.
                     ui.label(theme::wordmark("KINEWRIGHT", color::TEXT_SECONDARY));
                     ui.separator();
                     self.file_menu(ui);
@@ -1539,8 +1483,6 @@ impl KinewrightApp {
                     }
                     self.record_control(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // A zero-count alert chip is permanent noise; show it
-                        // only when there is something to look at.
                         if self.error_log.len() > 0
                             && ui
                                 .add(egui::Button::image_and_text(
@@ -1582,15 +1524,6 @@ impl KinewrightApp {
     }
 
     fn panel_layout(&mut self, ui: &mut egui::Ui) {
-        // Conversation-first geometry (M24, slimmed in M25): three columns by
-        // default - thread rail, session, monitor. The media browser and the
-        // material strip are summoned, never resident; the one contextual
-        // self-raise left is a pending destructive confirmation raising the
-        // timeline (span-level truth beats watching for approvals). Import
-        // does not need a column: drop a file anywhere, use /import, or the
-        // rail's import row - media lands on the timeline either way.
-        // Summoned surfaces slide rather than pop (M28 motion): the animated
-        // panel variants ease presence over the house animation_time.
         let mut strip_open = self.show_material_strip
             || self
                 .focused()
@@ -1599,9 +1532,6 @@ impl KinewrightApp {
                 .any(|thread| !thread.pending_confirmations.is_empty());
         let mut thread_rail_open = self.show_thread_rail;
         let mut media_rail_open = self.show_media_rail;
-        // The Mixer needs more height than the Timeline does, and egui
-        // remembers a panel's size per id: giving the tab its own id lets each
-        // one keep the height its content asks for (AU1 §5.1).
         let (dock_id, dock_default, dock_minimum) = if self.material_tab == MaterialTab::Mixer {
             ("mixer-dock", 320.0, 260.0)
         } else {
@@ -1645,9 +1575,6 @@ impl KinewrightApp {
             .resizable(true)
             .frame(theme::panel_frame())
             .show_collapsible(ui, &mut media_rail_open, |ui| self.media_bin(ui));
-        // show_collapsible flips its flag when the user drags a panel shut;
-        // write the results back so the top-bar toggles stay truthful. A
-        // confirmation-forced strip reopens next frame by design.
         if self.show_material_strip && !strip_open {
             self.show_material_strip = false;
         }
@@ -1679,9 +1606,6 @@ impl KinewrightApp {
                     .inner_margin(egui::Margin::same(theme::margin(space::THREE))),
             )
             .show(ui, |ui| self.agent_panel(ui));
-        // The matte overlay's permission lives exactly one frame: the inspector
-        // has just had its turn, so a report nobody restated expires here
-        // (CC5 §6).
         self.matte_overlay.expire_unreported();
     }
 }
@@ -1757,9 +1681,6 @@ pub(crate) fn live_audio_change(
     new: &Document,
 ) -> LiveAudioChange {
     fn classify(operations: &[Operation]) -> LiveAudioChange {
-        // An empty batch changes nothing; taking the ordinary path for it
-        // costs one re-cue that nobody can hear and keeps the predicate a
-        // positive claim about operations that are actually present.
         let mut mix = false;
         let mut clip_shaping = false;
         for operation in operations {
@@ -1808,16 +1729,6 @@ fn apply_live_audio_change(
     position: TimeCode,
 ) -> bool {
     match change {
-        // Every live kind is one call, because the engine carries the kind
-        // beside the document in one `Control::UpdateAudio` (AU4 §3.8 rule
-        // 75). `Mix` retargets the audio processor in place, since the
-        // document differs only in `audio_mix` — which no video path reads —
-        // and declares the same latency (AU2 §6.8). `ClipShaping` rebuilds
-        // the mixer's per-source shaping in place, since no shaping operation
-        // can move a clip boundary, an asset, or the declared lookahead (AU4
-        // §3.8 rules 73–74, 77). `Both` applies one document to both halves
-        // with no re-cue between them, and sending it as two calls is exactly
-        // the interleaving AU4 §4.4 rule 89 forbids.
         LiveAudioChange::Mix | LiveAudioChange::ClipShaping | LiveAudioChange::Both => {
             playback.update_audio(change, Arc::clone(doc));
         }
@@ -2126,11 +2037,6 @@ fn window_icon() -> Option<egui::IconData> {
 fn native_wgpu_configuration() -> eframe::WgpuConfiguration {
     let mut configuration = eframe::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut configuration.wgpu_setup {
-        // Kinewright's native render contract is Vulkan on Linux, DX12 on
-        // Windows, and Metal on macOS. eframe otherwise also considers GL and
-        // requests WebGL2-compatible device limits there, which expose no
-        // fragment-stage storage buffers and cannot run the ordered primary
-        // correction shader.
         setup.instance_descriptor.backends = eframe::wgpu::Backends::PRIMARY;
         setup.device_descriptor = Arc::new(|_| eframe::wgpu::DeviceDescriptor {
             label: Some("Kinewright shared native device"),
@@ -2177,10 +2083,6 @@ pub(crate) fn run() -> eframe::Result {
         }),
     )
 }
-
-// ---------------------------------------------------------------------------
-// AU5 §6.3: the `Learn profile` worker
-// ---------------------------------------------------------------------------
 
 /// AU5 §3.7 rule 63: the shortest range a noise profile can be learned from,
 /// in **audio sample frames** at the render rate.
@@ -2298,9 +2200,6 @@ impl std::fmt::Debug for NoiseLearnState {
 
 impl Default for NoiseLearnState {
     fn default() -> Self {
-        // Unbounded, exactly as the colour-QC channel is: a superseded worker
-        // is retired by its flag and filtered by generation, so a full queue
-        // must never be able to drop the response the app is waiting for.
         let (response_tx, response_rx) = mpsc::channel();
         Self {
             active: None,
@@ -2382,10 +2281,6 @@ impl NoiseLearnState {
                 })
         };
         let Ok(handle) = spawn_result else {
-            // `pending` stays `Some(generation)`: `poll` drops any response
-            // whose generation is not the pending one, so clearing it here
-            // would swallow the very error this arm exists to report and the
-            // click would look like it did nothing.
             self.active = None;
             let _ = self.response_tx.send(NoiseProfileResponse {
                 generation,
@@ -2486,10 +2381,6 @@ impl KinewrightApp {
             let status = self.analysis.silence_status(asset);
             match status {
                 SilenceStatus::Ready(_) => {}
-                // Nothing to learn from an asset with no audio, and a failed
-                // or cancelled analysis is not "still running" — neither can
-                // ever become a span, so neither holds the card at the first
-                // refusal.
                 SilenceStatus::NoAudio | SilenceStatus::Failed(_) | SilenceStatus::Cancelled => {
                     continue;
                 }
@@ -2497,8 +2388,6 @@ impl KinewrightApp {
                 | SilenceStatus::Queued
                 | SilenceStatus::Hashing
                 | SilenceStatus::Analyzing => {
-                    // Ask for it, then say so. The card is the only surface
-                    // that wants this analysis for a bus.
                     if matches!(status, SilenceStatus::NotRequested) {
                         self.analysis.request_silence_detection(asset.clone());
                     }
@@ -2533,9 +2422,6 @@ impl KinewrightApp {
     /// AU5 §6.3: start one learn measurement for the node the card named.
     pub(crate) fn request_noise_profile(&mut self, chain: AudioChain, effect: EffectId) {
         let NoiseLearnRange::Span(start, end) = self.noise_learn_range(chain) else {
-            // The button is disabled in both refusal states, so this is a
-            // race — the analysis retired between the paint and the click —
-            // not a path the editor can reach by clicking twice.
             self.record_error("Mixer", LEARN_NO_SILENCE);
             return;
         };
@@ -2568,9 +2454,6 @@ impl KinewrightApp {
         bands: [i32; NOISE_PROFILE_BAND_COUNT],
     ) {
         if self.focused().id != session {
-            // The measurement describes a document that is no longer in front
-            // of the editor. Dropping it is the only honest answer: the
-            // operation would go to whatever project happens to be focused.
             return;
         }
         let document = Arc::clone(&self.focused().document);
@@ -2581,9 +2464,6 @@ impl KinewrightApp {
             );
             return;
         };
-        // One undo entry: a fresh gesture identity under the chain's own
-        // coalesce key, so a second `Learn` is a second entry rather than a
-        // continuation of the first.
         let gesture = self.begin_edit_gesture();
         let key = match chain {
             AudioChain::Bus(id) => crate::mixer_ui::MixerSelection::Bus(id).coalesce_key(),
@@ -2619,8 +2499,6 @@ fn assets_on_tracks(document: &Document, tracks: &[TrackId]) -> Vec<MediaAsset> 
     let mut assets: Vec<MediaAsset> = Vec::new();
     for track in document.tracks.iter().filter(|t| tracks.contains(&t.id)) {
         for clip in &track.clips {
-            // Titles and freezes carry no source audio to learn from; a title
-            // clip does not even use its `asset` field.
             if !clip.content.is_media() {
                 continue;
             }
@@ -2782,8 +2660,6 @@ mod tests {
         let plain = super::Document::default();
         let live = |command: Option<&JournalCommand>| live_audio_change(command, &plain, &plain);
 
-        // Every mix operation, alone and batched, is `Mix`. AU4 adds
-        // `SetTrackAutomation` to the set.
         let mix_operations = [
             set_track_mix(1),
             set_track_automation(1),
@@ -2859,8 +2735,6 @@ mod tests {
             LiveAudioChange::ClipShaping
         );
 
-        // Every mix of the two sets is `Both` — the case a widened bool would
-        // have served half of (AU4 §4.4 rule 89).
         for mix in &mix_operations {
             for clip in &clip_operations {
                 assert_eq!(
@@ -2935,9 +2809,6 @@ mod tests {
             "and neither does an empty coalesced batch"
         );
 
-        // Every operation is eligible and the documents still differ in the
-        // latency the chains declare, which no running processor can absorb
-        // (AU2 §5.8, OPEN-3).
         let mut with_lookahead = super::Document::default();
         with_lookahead.audio_mix.master = kinewright_core::AudioMaster {
             gain_tenth_db: 0,
@@ -3388,18 +3259,12 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // AU5 §6.3: the `Learn profile` worker
-    // -----------------------------------------------------------------------
-
     /// AU5 §3.7 rule 63: the three frame domains, derived and never written
     /// down.
     #[test]
     fn au5_the_learn_minimum_is_derived_per_rate() {
         use kinewright_core::Rational;
         let thirty = Rational::new(30, 1).unwrap();
-        // 22 528 / 48 000 s = 469.33 ms; at 30 fps that is 14.08 frames, and
-        // the ceiling is what makes a range long enough rather than nearly so.
         assert_eq!(super::noise_profile_minimum_frames(thirty), 15);
         assert_eq!(
             super::noise_profile_minimum_frames(Rational::new(24, 1).unwrap()),
@@ -3413,8 +3278,6 @@ mod tests {
             super::noise_profile_minimum_frames(Rational::new(60, 1).unwrap()),
             29
         );
-        // 48 000 sample frames a second is the render rate, so the sample
-        // domain is the constant itself.
         assert_eq!(
             super::noise_profile_minimum_frames(Rational::new(48_000, 1).unwrap()),
             super::NOISE_PROFILE_MINIMUM_SAMPLE_FRAMES
@@ -3550,8 +3413,6 @@ mod tests {
             Some(&ParamValue::Integer(50))
         );
 
-        // The coalesce key is the chain's own, so a second learn is a second
-        // undo entry rather than a continuation of the first.
         assert_eq!(
             crate::mixer_ui::MixerSelection::Bus(AudioBusId(3)).coalesce_key(),
             "audio_bus:3"
@@ -3578,8 +3439,6 @@ mod tests {
             "one `Undo` restores the pre-gesture document"
         );
 
-        // A node that left the chain between the request and the response is
-        // refused rather than written to whatever node now holds that id.
         document.audio_mix.buses[0].effects.clear();
         assert!(
             super::noise_profile_operation(
@@ -3735,8 +3594,6 @@ mod tests {
         };
         state.request(job(AudioChain::Master));
         assert!(state.is_pending());
-        // A second click while the first is still measuring parks rather than
-        // starting a second render.
         state.request(job(AudioChain::Bus(AudioBusId(2))));
         state.request(job(AudioChain::Bus(AudioBusId(5))));
         assert_eq!(
@@ -3746,8 +3603,6 @@ mod tests {
         );
         gate.store(true, std::sync::atomic::Ordering::Release);
 
-        // The first worker's answer belongs to a retired generation and is
-        // dropped; the parked one runs and is the one that lands.
         let mut landed = Vec::new();
         for _ in 0..2_000 {
             landed.extend(state.poll());

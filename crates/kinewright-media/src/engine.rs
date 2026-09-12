@@ -411,8 +411,6 @@ impl FfmpegMediaEngine {
         let worker_loudness = Arc::clone(&loudness);
         let frames_drop_rx = frames_rx.clone();
         let events_drop_rx = events_rx.clone();
-        // Scrub positions use shared atomics so rapid mouse movement is coalesced
-        // without an unbounded command backlog.
         let requested = Arc::new(RequestedPositions::default());
         let worker_requested = Arc::clone(&requested);
         let worker_gpu = gpu.clone();
@@ -546,10 +544,6 @@ impl FfmpegMediaEngine {
     ///
     /// Built-in looks need no publication at all: they are generated in this
     /// binary and resolve straight from the pinned bake table.
-    // The `Arc` is taken by value rather than by reference because this is the
-    // application's publication seam and the caller hands over a clone it has
-    // no further use for; narrowing it to `&Arc` would only move the clone to
-    // every call site.
     #[allow(clippy::needless_pass_by_value)]
     pub fn set_lut_library(&self, library: Arc<LutLibrary>) {
         if let Ok(mut published) = self.lut_lattices.write() {
@@ -973,18 +967,9 @@ impl Analysis for FfmpegMediaEngine {
         document: Arc<Document>,
         at: TimeCode,
     ) -> Result<MonitorProof, MediaError> {
-        // Proof rendering is deliberately isolated from the playback worker:
-        // a revision-bound before/after pair must not evict or reuse its
-        // proxy cache, alter transport state, or let one branch's asset ids
-        // collide with another branch.
         let mut renderer = FrameRenderer::new(self.gpu.clone());
-        // CC4 2.4: bound to THIS document's asset hashes, not to whatever
-        // library was published most recently, so a branch server's proof
-        // cannot resolve the focused project's looks.
         renderer.set_lut_library(self.document_lut_library(&document)?);
         let resolution = document.resolution;
-        // Bind the scale once so the render and the claim it produces cannot
-        // drift apart.
         let scale = RenderScale::FullResolution;
         let frame = renderer.render(&document, at, resolution, scale, DecodeStrategy::Seek)?;
         Ok(MonitorProof {
@@ -993,8 +978,6 @@ impl Analysis for FfmpegMediaEngine {
                 height: frame.height,
                 pixels: (*frame.rgba).clone(),
             },
-            // CC1 5: a proof may only claim the full raster when it was
-            // requested at full scale AND came back at the document raster.
             metadata: self.gpu.monitor_proof_metadata_for(
                 scale,
                 (frame.width, frame.height),
@@ -1010,30 +993,15 @@ impl Analysis for FfmpegMediaEngine {
         clip: ClipId,
         effect: EffectId,
     ) -> Result<MatteProof, MediaError> {
-        // Resolve the node against the document the caller named, before any
-        // rendering, so an absent clip or effect is a typed answer rather than
-        // a compositor-shaped one, and so the metadata below describes the
-        // node that was actually asked about.
         let (timeline_start, target) = locate_color_node(&document, clip, effect)?;
         let node_kind = target.name.clone();
-        // CC5 3.2: matte identity is resolved at the requested frame, after
-        // keyframe evaluation, exactly as the renderer resolves the active
-        // index it proves.
         let local_at = at.checked_sub(timeline_start).unwrap_or(TimeCode::ZERO);
         let matte = MatteParams::from_effect(&target.evaluated_at(local_at));
 
-        // Proof rendering is isolated from the playback worker for the same
-        // reasons as the monitor proof, and the document is additionally
-        // reduced to the target clip's track and clip so no other layer can
-        // composite over the coverage (CC5 4.1).
         let scratch = matte_proof_scratch_document(&document, clip, effect)?;
         let mut renderer = FrameRenderer::new(self.gpu.clone());
-        // CC4 2.4: bind THIS document's lattices; the reduction keeps
-        // `lut_assets`, so the target clip's LUT nodes still resolve.
         renderer.set_lut_library(self.document_lut_library(&scratch)?);
         let resolution = scratch.resolution;
-        // Bind the scale once so the render and the claim it produces cannot
-        // drift apart.
         let scale = RenderScale::FullResolution;
         let raster = renderer.render_matte(
             &scratch,
@@ -1058,9 +1026,6 @@ impl Analysis for FfmpegMediaEngine {
         }
         let mut pixels = Vec::with_capacity(pixel_count.saturating_mul(4));
         for coverage in &raster.coverage {
-            // R = G = B = round(255 * m) with an opaque alpha: CC5 writes no
-            // alpha, so the proof states full opacity rather than reporting a
-            // coverage byte a compositor could mistake for one.
             pixels.extend_from_slice(&[*coverage, *coverage, *coverage, u8::MAX]);
         }
         Ok(MatteProof {
@@ -1070,8 +1035,6 @@ impl Analysis for FfmpegMediaEngine {
                 pixels,
             },
             metadata: MatteProofMetadata {
-                // CC1 5: the full-raster claim is derived from the render that
-                // actually happened, not asserted by the caller.
                 render: self.gpu.monitor_proof_metadata_for(
                     scale,
                     (raster.width, raster.height),
@@ -1095,28 +1058,15 @@ impl Analysis for FfmpegMediaEngine {
         document: Arc<Document>,
         at: TimeCode,
     ) -> Result<WorkingProof, MediaError> {
-        // Proof rendering is deliberately isolated from the playback worker,
-        // for `monitor_proof_for_document`'s reasons verbatim: a
-        // revision-bound before/after pair must not evict or reuse its proxy
-        // cache, alter transport state, or let one branch's asset ids collide
-        // with another branch.
         let mut renderer = FrameRenderer::new(self.gpu.clone());
-        // CC4 2.4: bound to THIS document's asset hashes, not to whatever
-        // library was published most recently.
         renderer.set_lut_library(self.document_lut_library(&document)?);
         let resolution = document.resolution;
-        // Bind the scale once so the render and the claim it produces cannot
-        // drift apart. CC6 2.2: there is no proxy working proof, because this
-        // method takes no scale.
         let scale = RenderScale::FullResolution;
         let image =
             renderer.render_working(&document, at, resolution, scale, DecodeStrategy::Seek)?;
         let raster_aspect_millionths = raster_aspect_millionths(image.width, image.height);
         Ok(WorkingProof {
             metadata: WorkingProofMetadata {
-                // CC1 5: a proof may only claim the full raster when it was
-                // requested at full scale AND came back at the document
-                // raster. Derived, never asserted.
                 render: self.gpu.monitor_proof_metadata_for(
                     scale,
                     (image.width, image.height),
@@ -1152,9 +1102,6 @@ impl Analysis for FfmpegMediaEngine {
         path: &Path,
         target: Option<LoudnessTarget>,
     ) -> Result<DeliveryAudioVerification, MediaError> {
-        // AU3 §5.7: the same bare-path probe `verify_delivery_output` uses,
-        // so the written file is described by the production prober rather
-        // than by a document that may not name it.
         let asset = probe_path(path, AssetId(0))?;
         if asset.kind == MediaKind::Video {
             return Err(MediaError::Backend(format!(
@@ -1170,8 +1117,6 @@ impl Analysis for FfmpegMediaEngine {
             0,
             end_sample,
         )?;
-        // Streamed: `decode_audio_range` would materialise the whole delivery
-        // as one `Vec`, and a delivery is as long as the programme.
         let mut meter = LoudnessMeter::new(AUDIO_MEASUREMENT_RATE, AUDIO_MEASUREMENT_CHANNELS)?;
         while let Some(chunk) = decoder.next_chunk()? {
             meter.push(&chunk)?;
@@ -1422,9 +1367,6 @@ impl Export for FfmpegMediaEngine {
         settings: ExportSettings,
         progress: ProgressSink,
     ) -> Result<ExportReport, MediaError> {
-        // CC4 2.4: an export queue outlives focus, so the library is bound to
-        // the immutable document being encoded rather than to whichever
-        // project published last.
         let library = self.document_lut_library(&document)?;
         crate::export::export_document_with_luts(
             &document,
@@ -1612,9 +1554,6 @@ impl WorkerLoudness {
         };
         let paused_sample = frame_to_samples(position, meter.sample_rate(), fps);
         if paused_sample < reset_sample {
-            // A `reset_loudness` mid-play put the origin at the fed position
-            // and the sound never reached it: nothing measured was heard, so
-            // the origin moves back to the pause and a continue lines up.
             self.reset_to(paused_sample);
             return;
         }
@@ -1687,8 +1626,6 @@ struct WorkerChannels {
 }
 
 impl Worker {
-    // The worker's shared handles are constructed once, in the engine's
-    // constructor; a struct of eight `Arc`s would only move the count.
     #[allow(clippy::too_many_arguments)]
     fn new(
         channels: WorkerChannels,
@@ -1728,8 +1665,6 @@ impl Worker {
             match self.control_rx.recv_timeout(WORKER_TICK) {
                 Ok(control) => {
                     self.handle_control(control);
-                    // AU1 §5.3: a burst of controls cannot starve the ring for
-                    // longer than one decode.
                     self.fill_audio();
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -1759,10 +1694,6 @@ impl Worker {
                 reply,
             } => {
                 let scale = RenderScale::Proxy { max_width };
-                // A thumbnail may be requested for a document the worker is
-                // not previewing - a branch, a media-bin entry - so its looks
-                // are bound from that document's own asset hashes and the
-                // preview binding is restored afterwards (CC4 2.4).
                 let requested = document.unwrap_or_else(|| Arc::clone(&self.document));
                 self.renderer
                     .set_lut_library(self.bound_lut_library(&requested));
@@ -1849,11 +1780,6 @@ impl Worker {
     /// fall back to the same pause-and-re-cue branch the chain path uses.
     fn update_clip_shaping(&mut self, doc: Arc<Document>) {
         if !can_retarget_audio_mix(&self.document, &doc) {
-            // AU2 §5.8: "a pause and re-cue", not a rewind. `set_document`
-            // lands the transport on frame 0, so the position is captured
-            // first and restored afterwards exactly as the paused branch of
-            // `handle_coalesced_requests` does — the same place the app's own
-            // non-live path leaves it.
             self.recue_audio(&doc);
             return;
         }
@@ -1880,11 +1806,6 @@ impl Worker {
 
     fn update_audio_mix(&mut self, doc: Arc<Document>) -> bool {
         if !can_retarget_audio_mix(&self.document, &doc) {
-            // AU2 §5.8: "a pause and re-cue", not a rewind. `set_document`
-            // lands the transport on frame 0, so the position is captured
-            // first and restored afterwards exactly as the paused branch of
-            // `handle_coalesced_requests` does — the same place the app's own
-            // non-live path leaves it.
             self.recue_audio(&doc);
             return false;
         }
@@ -1892,9 +1813,6 @@ impl Worker {
         if self.audio.is_none() {
             return true;
         }
-        // AU2 §5.8/R8: the peak table is rebuilt only when its key set stops
-        // describing the document, so a fader drag does not zero every meter on
-        // every frame, and the rebuild attaches and publishes in one call.
         let rebuilt =
             self.mix_meters.read().ok().and_then(|installed| {
                 mix_meters_for_update(&installed, &self.document, &self.meter)
@@ -1916,8 +1834,6 @@ impl Worker {
         // AU3 §3.9: a new document is a new programme.
         self.loudness.reset(None, doc.fps);
         self.document = Arc::new(doc.clone());
-        // CC4 2.4: the incoming document may belong to a different project, so
-        // its looks are rebound before the first frame is presented.
         self.rebind_lut_library();
         self.renderer.clear();
         self.clock.set_fps(doc.fps);
@@ -1949,8 +1865,6 @@ impl Worker {
     fn start_playback(&mut self, from: TimeCode) {
         self.audio = None;
         self.meter.clear();
-        // AU1 §4.1: a seek during playback re-enters here without passing
-        // through `Playback::play`, so the installed slots are cleared too.
         if let Ok(meters) = self.mix_meters.read() {
             meters.clear();
         }
@@ -1968,16 +1882,12 @@ impl Worker {
         let opened = self.audio_for_position(from, Arc::clone(&mix_meters));
         let loudness = &mut self.loudness;
         match opened.and_then(|mut runtime| {
-            // AU3 §3.9: continue at `paused_at`, reset elsewhere; the meter
-            // is threaded through the initial fill before the stream starts.
             let meter = loudness.begin(from, runtime.sample_rate(), runtime.channels(), fps)?;
             runtime.fill(meter)?;
             runtime.play()?;
             Ok(runtime)
         }) {
             Ok(runtime) => {
-                // AU1 §4.1: installed only once the runtime exists, so
-                // `mix_peaks()` stays empty when playback fails to start.
                 self.install_mix_meters(mix_meters);
                 self.audio = Some(runtime);
                 self.playing = true;
@@ -1998,8 +1908,6 @@ impl Worker {
         self.clock
             .fallback_frame
             .store(position.0, Ordering::Release);
-        // AU3 §3.9: `paused_at` is this same position; the integration is
-        // truncated to what was heard and the paused snapshot published.
         if self.audio.is_some() {
             self.loudness.pause_at(position, self.document.fps);
         }
@@ -2213,9 +2121,6 @@ mod tests {
         let mut loudness = WorkerLoudness::new(Arc::clone(&shared));
         loudness.begin(TimeCode::ZERO, 48_000, 2, fps).unwrap();
 
-        // Playing: the fill has metered 2 s and the loudspeaker has heard 1 s.
-        // (Each later push is one second — ten sub-blocks — so the whole run
-        // stays inside the 16-entry ring.)
         let two_seconds = stereo_tone(96_000);
         let one_second = &two_seconds[..96_000];
         loudness
@@ -2227,8 +2132,6 @@ mod tests {
         assert_eq!(loudness.published_key(), Some(48_000));
         assert_ne!(shared.load(), LoudnessSnapshot::default());
 
-        // `Some(fed)`: the origin is the fed position, 96 000, so nothing is
-        // published until the loudspeaker has passed it by a whole sub-block.
         loudness.reset(Some(96_000), fps);
         assert_eq!(loudness.published_key(), None);
         assert_eq!(shared.load(), LoudnessSnapshot::default());
@@ -2246,8 +2149,6 @@ mod tests {
         loudness.publish_at(100_800);
         assert_eq!(loudness.published_key(), Some(4_800));
 
-        // `None` while paused: the origin is `paused_at`. Pausing at frame 12
-        // (1.2 s at 10 fps) leaves the ring keyed from 57 600.
         loudness.pause_at(TimeCode(12), fps);
         assert_eq!(loudness.paused_at(), Some(TimeCode(12)));
         loudness.reset(None, fps);
@@ -2266,8 +2167,6 @@ mod tests {
             "a paused reset keys from `paused_at`, so a continue lines up"
         );
 
-        // `None` with no `paused_at` (stopped, or reset before a first play):
-        // the origin is zero.
         loudness.begin(TimeCode(30), 48_000, 2, fps).unwrap();
         assert_eq!(loudness.paused_at(), None);
         loudness.reset(None, fps);
@@ -2381,11 +2280,6 @@ mod tests {
 
     #[test]
     fn two_projects_sharing_one_asset_id_bind_to_their_own_lattices() {
-        // CC4 2.4.  `LutAssetId(1)` names a different look in every project,
-        // and one engine serves them all.  Publication merges by content hash
-        // and each document rebinds from its own records, so publishing B
-        // after A cannot make A's node resolve to B's lattice - which is
-        // exactly what a single published-library slot did.
         let (alpha_sha, alpha_lut, alpha_asset) = published_pair(0.25, 1);
         let (beta_sha, beta_lut, beta_asset) = published_pair(0.75, 1);
         assert_eq!(alpha_asset.id, beta_asset.id, "the ids collide on purpose");
@@ -2412,9 +2306,6 @@ mod tests {
             "the two projects must not resolve to the same samples"
         );
 
-        // Order of publication is irrelevant, which is what makes focus
-        // switching unable to alias: republishing A last changes nothing
-        // about B.
         table.publish(&alpha_sha, &alpha_lut);
         let beta_again = bind_document_luts(&beta_document, &table.by_sha256)
             .expect("republishing A leaves B bound");
@@ -2426,8 +2317,6 @@ mod tests {
 
     #[test]
     fn an_unpublished_look_blocks_the_render_with_a_typed_failure() {
-        // CC4 2.3: a look a frame could need and the engine cannot resolve
-        // fails the render, naming the id and the hash that was looked for.
         let (sha256, _lut, asset) = published_pair(0.5, 1);
         let document = look_document(asset);
 
@@ -2452,9 +2341,6 @@ mod tests {
 
     #[test]
     fn an_asset_no_evaluable_node_needs_never_blocks() {
-        // CC4 2.3 blocks on the looks a frame could actually need.  An asset
-        // in the project table that no node references is not one of them, so
-        // an unpublished spare must not fail an otherwise deliverable export.
         let (_sha, lut, bound) = published_pair(0.25, 1);
         let (_spare_sha, _spare_lut, spare) = published_pair(0.75, 2);
         let mut document = look_document(bound.clone());
@@ -2474,9 +2360,6 @@ mod tests {
 
     #[test]
     fn a_hand_edited_record_is_withheld_even_when_its_lattice_is_published() {
-        // The table is keyed by hash, so a second project can publish the very
-        // bytes a first project misdescribes.  The record still loses: the
-        // bytes are the authority (CC4 2.1).
         let (sha256, lut, mut asset) = published_pair(0.5, 1);
         asset.size = lut.size + 1;
         let document = look_document(asset);
@@ -2497,12 +2380,7 @@ mod tests {
 
     #[test]
     fn the_published_table_is_bounded_in_publication_order() {
-        // The table outlives the projects that filled it - nothing else would
-        // ever drop an entry for a closed project - so it is bounded, most
-        // recently published first.
         let mut table = PublishedLattices::default();
-        // A green scale no later fixture rounds onto, so the first entry is
-        // genuinely evicted rather than accidentally republished.
         let first = published_pair(0.000_5, 1);
         table.publish(&first.0, &first.1);
 
@@ -2538,9 +2416,6 @@ mod tests {
 
     #[test]
     fn a_built_in_look_resolves_without_ever_being_published() {
-        // Built-ins are generated in this binary, so they come from the pinned
-        // bake table and need no publication at all - and a recorded hash this
-        // build does not bake is withheld rather than silently re-baked.
         let look = crate::builtin_looks::BuiltinLook::Warm;
         let baked = look.cached_bake();
         let (domain_min_millionths, domain_max_millionths) = baked.domain_millionths();
@@ -2682,9 +2557,6 @@ mod tests {
         let mut asset =
             probe_path(media.path(), AssetId(1)).expect("the matte source should probe");
         assert_eq!(asset.resolution, Some((64, 36)));
-        // The proof is about matte geometry, so the source colour is stated
-        // explicitly rather than inferred: an unknown-primaries source would
-        // fail the managed decode before any coverage existed.
         asset.color_description = kinewright_core::ColorDescription {
             primaries: kinewright_core::ColorPrimaries::Bt709,
             transfer: kinewright_core::ColorTransfer::Bt709,
@@ -2827,8 +2699,6 @@ mod tests {
             absent.starts_with("matte_proof_effect_not_found:"),
             "unexpected message: {absent}"
         );
-        // The clip itself is still provable, so the refusals above are about
-        // the named node rather than about a broken document.
         engine
             .matte_proof_for_document(
                 Arc::clone(&document),
@@ -2856,8 +2726,6 @@ mod tests {
         let engine = FfmpegMediaEngine::new_with_gpu(gpu)
             .expect("media engine should start for the matte proof fixture");
 
-        // The claim is only worth making if the same clip and node prove
-        // cleanly at a frame the clip *is* on screen at, so state that first.
         let clip = &document.tracks[0].clips[0];
         let past_the_end = TimeCode(
             clip.timeline_start.0 + clip.source_range.end.0 - clip.source_range.start.0 + 10,
@@ -2882,8 +2750,6 @@ mod tests {
             message.starts_with("matte_proof_clip_not_visible:"),
             "unexpected message: {message}"
         );
-        // The refusal names the clip and the frame it was asked about, which
-        // is the whole difference from the effect-not-found code.
         assert!(
             message.contains(&format!("{}", ClipId(1))),
             "the refusal must name the clip: {message}"
@@ -2900,8 +2766,6 @@ mod tests {
             .code(),
             "matte_proof_clip_not_visible"
         );
-        // And the node itself is still findable, so this is not the absent-id
-        // failure wearing a new name.
         let absent = engine
             .matte_proof_for_document(
                 Arc::clone(&document),
@@ -2941,8 +2805,6 @@ mod tests {
         let engine = FfmpegMediaEngine::new_with_gpu(gpu)
             .expect("media engine should start for the matte proof fixture");
 
-        // The isolation claim is only worth making if the covering layer would
-        // otherwise be visible, so state that first.
         let plain = engine
             .monitor_proof_for_document(Arc::clone(&document), TimeCode::ZERO)
             .expect("the single-layer monitor proof should render");
@@ -3162,8 +3024,6 @@ mod tests {
         faded.audio_mix.master.gain_tenth_db = -30;
         assert!(can_retarget_audio_mix(&document, &faded));
 
-        // `L_bus` is the maximum over buses, so a second 10 ms chain does not
-        // move it.
         let mut second = document.clone();
         second
             .audio_mix
@@ -3248,8 +3108,6 @@ mod tests {
             Arc::new(document)
         };
 
-        // The transport is playing at frame 10. No audio device is opened here:
-        // the guard runs before anything touches `self.audio`.
         worker.document = document(10);
         worker.playing = true;
         worker.clock.set_fps(worker.document.fps);
@@ -3268,8 +3126,6 @@ mod tests {
         assert!(!worker.playing, "the fallback pauses the transport");
         assert_eq!(worker.document.audio_mix, deeper.audio_mix);
 
-        // A gain-only update on the same lookahead stays on the live path and
-        // leaves the position alone too.
         let mut faded = (*deeper).clone();
         faded.audio_mix.buses[0].gain_tenth_db = -60;
         worker.update_audio_mix(Arc::new(faded));
@@ -3358,8 +3214,6 @@ mod tests {
             "no live kind re-cues"
         );
 
-        // And a double that overrides neither half falls all the way back to
-        // `set_document`, so nothing in the workspace has to change.
         let plain = PlainDouble::default();
         plain.update_audio(LiveAudioChange::Both, doc());
         assert_eq!(plain.0.load(Ordering::Relaxed), 2);
@@ -3435,8 +3289,6 @@ mod tests {
         worker.clock.set_fps(worker.document.fps);
         worker.clock.set_frame(TimeCode(10));
 
-        // One send, one control drained: a `Both` batch never crosses the
-        // channel as two.
         let both = document(10, -60);
         control_tx
             .send(Control::UpdateAudio(
@@ -3457,8 +3309,6 @@ mod tests {
         );
         assert!(worker.playing);
 
-        // The latency guard still wins inside `Both`: the mix half re-cues and
-        // the shaping half is not applied on top of a re-cued transport.
         let deeper = document(4, -60);
         worker.handle_control(Control::UpdateAudio(
             LiveAudioChange::Both,

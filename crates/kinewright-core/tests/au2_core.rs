@@ -452,9 +452,6 @@ fn audio_descriptor_tables_match_the_contract_exactly() {
         .map(|descriptor| descriptor.name)
         .filter(|name| is_audio_effect(name))
         .collect();
-    // AU5 §2.1 appended three more audio descriptors, so this is a prefix
-    // assertion now: AU2's eight come first, in AU2's order, and AU5's own
-    // count is pinned in `au5_core.rs`.
     assert_eq!(
         registered_audio[..AUDIO_EFFECT_NAMES.len()],
         AUDIO_EFFECT_NAMES
@@ -462,8 +459,6 @@ fn audio_descriptor_tables_match_the_contract_exactly() {
     assert!(!is_audio_effect("audio_parametric"));
     assert!(!is_audio_effect("brightness"));
 
-    // The three new descriptors are appended after `audio_limiter`, and the
-    // registry grew from 22 entries to 25 — then to 28 under AU5 §2.1.
     assert_eq!(kinewright_core::EFFECT_DESCRIPTORS.len(), 28);
     let after_limiter: Vec<&str> = kinewright_core::EFFECT_DESCRIPTORS
         .iter()
@@ -492,8 +487,6 @@ fn audio_descriptor_tables_match_the_contract_exactly() {
         assert_eq!(descriptor.uniform, uniform, "{effect}.{parameter} uniform");
     }
 
-    // Forty new rows and no more: the eight audio descriptors carry the
-    // fourteen pre-AU2 rows plus these.
     let audio_rows: usize = AUDIO_EFFECT_NAMES
         .into_iter()
         .map(|name| {
@@ -515,10 +508,6 @@ fn audio_descriptor_tables_match_the_contract_exactly() {
     uniforms.dedup();
     assert_eq!(uniforms.len(), 33);
 
-    // Read from the descriptors themselves, so reusing a pre-AU2 audio uniform
-    // on a new row would be caught: 54 audio rows carry 47 distinct uniforms —
-    // the 14 pre-AU2 ones plus these 33, the eight `bypass` rows collapsing to
-    // one.
     let mut live_uniforms: Vec<String> = AUDIO_EFFECT_NAMES
         .into_iter()
         .flat_map(|name| effect_descriptor(name).expect("registered").parameters)
@@ -528,8 +517,6 @@ fn audio_descriptor_tables_match_the_contract_exactly() {
     live_uniforms.dedup();
     assert_eq!(live_uniforms.len(), 47);
 
-    // One shared descriptor, not eight look-alikes: every `bypass` row is the
-    // same record.
     let bypass = effect_descriptor("audio_gain")
         .and_then(|descriptor| descriptor.parameter("bypass"))
         .expect("audio_gain exposes bypass");
@@ -617,10 +604,6 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
         assert_eq!(doc.audio_mix.buses[0].effects[0].name, effect);
     }
 
-    // Rule 2: a parameter read once at construction takes no curve at all, not
-    // even `Hold`. The two reasons stay distinct — only the lookahead
-    // parameters are latency; the RMS window merely sizes a buffer (AU2 §0
-    // E16).
     for (effect, parameter, value, reason) in [
         (
             "audio_compressor",
@@ -638,9 +621,6 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
             "audio_compressor",
             "rms_window_milliseconds",
             20,
-            // AU5 §2.2 rule 13 amended this string: the profile rows are
-            // re-derived on a `parameter_epoch` bump, so "once ... when the
-            // chain is built" became false.
             "is read when the chain is built or retuned and cannot be keyframed",
         ),
     ] {
@@ -675,8 +655,6 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
         doc.validate().unwrap();
     }
 
-    // Nothing else on an audio node is hold-only: a frequency, a gain, and a
-    // time constant all keep every interpolation.
     let mut doc = base.clone();
     Operation::UpsertAudioBus {
         bus: bus_with(vec![
@@ -708,9 +686,6 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
         "audio_compressor",
         "attack_milliseconds"
     ));
-    // The effect-name half is load-bearing: only two of the eight nodes carry
-    // a `lookahead_milliseconds` row at all, so the predicate must test the
-    // name as well as the parameter.
     assert!(!is_static_audio_parameter(
         "audio_gate",
         "lookahead_milliseconds"
@@ -719,8 +694,6 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
         "audio_parametric_eq",
         "lookahead_milliseconds"
     ));
-    // Only the compressor's RMS window is static; no other node has one, and
-    // the compressor's other time constants stay freely automatable.
     assert!(!is_static_audio_parameter(
         "audio_true_peak_limiter",
         "rms_window_milliseconds"
@@ -730,9 +703,6 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
         "release_milliseconds"
     ));
 
-    // The positive direction of §2.1's shared row: a static `bypass = 1` is a
-    // legal stored value on every one of the eight nodes, through the
-    // operation and through the document invariant.
     for name in AUDIO_EFFECT_NAMES {
         let mut doc = base.clone();
         let mut bus = bus_with(vec![audio_effect(1, name, &[("bypass", 1)])]);
@@ -753,8 +723,6 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
 fn a_chain_may_declare_twenty_milliseconds_of_lookahead_and_no_more() {
     assert_eq!(CHAIN_LOOKAHEAD_MILLISECONDS, 20);
 
-    // The declared sum reads static values, falls back to the descriptor
-    // neutral when the parameter is absent, and ignores bypass.
     assert_eq!(chain_lookahead_milliseconds(&[]), 0);
     assert_eq!(
         chain_lookahead_milliseconds(&[
@@ -907,10 +875,6 @@ fn upsert_audio_bus_round_trips_one_of_each_new_node() {
     assert_eq!(doc.audio_mix.lookahead_milliseconds().bus_stage, 10);
 }
 
-// ---------------------------------------------------------------------------
-// AU2 Part B — bus and master control (§5.1 to §5.4).
-// ---------------------------------------------------------------------------
-
 /// A master chain whose effect ids and names the caller chooses.
 fn master_with(gain_tenth_db: i32, effects: Vec<Effect>) -> AudioMaster {
     AudioMaster {
@@ -956,8 +920,6 @@ fn a_neutral_master_and_the_balance_law_never_reach_the_wire() {
     .apply(&mut only_neutral)
     .unwrap();
 
-    // A document that only ever set neutral is byte-identical to one that
-    // never touched either field.
     assert_eq!(only_neutral, untouched);
     assert_eq!(
         serde_json::to_string(&only_neutral).unwrap(),
@@ -966,8 +928,6 @@ fn a_neutral_master_and_the_balance_law_never_reach_the_wire() {
     assert!(!untouched_bytes.contains("master"));
     assert!(!untouched_bytes.contains("pan_law"));
 
-    // The two predicates stay `const`, so the serde skip and `is_empty` stay
-    // const too.
     assert!(master_is_neutral(&only_neutral.audio_mix.master));
     assert!(mix_is_empty(&only_neutral.audio_mix));
 
@@ -1009,8 +969,6 @@ fn a_neutral_master_and_the_balance_law_never_reach_the_wire() {
 /// AU2 §7 item B3.
 #[test]
 fn bus_and_master_gain_share_the_audio_gain_domain_and_reject_outside_it() {
-    // The bounds are the `audio_gain` descriptor's own, as AU1 pinned the
-    // track-mix bounds.
     let descriptor = effect_descriptor("audio_gain")
         .unwrap()
         .parameter("gain_tenth_db")
@@ -1019,8 +977,6 @@ fn bus_and_master_gain_share_the_audio_gain_domain_and_reject_outside_it() {
     assert_eq!(i64::from(AUDIO_BUS_GAIN_MAX), descriptor.max);
     assert_eq!(AUDIO_MASTER_GAIN_MIN, AUDIO_BUS_GAIN_MIN);
     assert_eq!(AUDIO_MASTER_GAIN_MAX, AUDIO_BUS_GAIN_MAX);
-    // The same domain AU1 gave the track fader, so one control reads the same
-    // everywhere in the mixer.
     assert_eq!(AUDIO_BUS_GAIN_MIN, kinewright_core::TRACK_MIX_GAIN_MIN);
     assert_eq!(AUDIO_BUS_GAIN_MAX, kinewright_core::TRACK_MIX_GAIN_MAX);
 
@@ -1084,8 +1040,6 @@ fn bus_and_master_gain_share_the_audio_gain_domain_and_reject_outside_it() {
         "audio master gain is -601 tenth-dB, outside the inclusive range -600..=120"
     );
 
-    // A hand-edited out-of-range fader is rejected on load, not just by the
-    // operation.
     let mut hand_edited = before.clone();
     hand_edited.audio_mix.buses[0].gain_tenth_db = -900;
     assert_eq!(
@@ -1238,13 +1192,9 @@ fn the_master_chain_carries_the_bus_rules_with_master_flavoured_errors() {
             Err(expected.clone())
         );
         assert_eq!(doc, before);
-        // ... and again from the document invariant, so a hand-edited project
-        // is refused on load.
         assert_eq!(hand_edited_master(master).validate(), Err(expected));
     }
 
-    // Exactly the budget is legal, and the effect-id scope is the chain: a bus
-    // may reuse the master's ids.
     Operation::SetAudioMaster {
         master: master_with(
             -30,
@@ -1379,8 +1329,6 @@ fn next_bus_id_allocates_max_plus_one_and_agrees_with_the_former_inline_scan() {
     assert_eq!(doc.audio_mix.bus(AudioBusId(3)), None);
     assert_eq!(doc.audio_mix.bus_for_track(TrackId(2)), Some(AudioBusId(9)));
     assert_eq!(doc.audio_mix.bus_for_track(TrackId(1)), Some(AudioBusId(1)));
-    // Track 3 exists but routes to no bus, so it reaches the master directly
-    // (AU2 §5.6); an unknown track answers the same way.
     assert!(doc.tracks.iter().any(|track| track.id == TrackId(3)));
     assert_eq!(doc.audio_mix.bus_for_track(TrackId(3)), None);
     assert_eq!(doc.audio_mix.bus_for_track(TrackId(404)), None);

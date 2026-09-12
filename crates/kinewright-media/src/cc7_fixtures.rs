@@ -150,10 +150,6 @@ pub(crate) const CC7_CONTRACT: &str = "cc7_workflow_evaluation";
 /// never enters a mean.
 const CC7_PATCH_INSET_PIXELS: u32 = 2;
 
-// ===========================================================================
-// §11.1: the rasters, the documents, and the committed canonical documents.
-// ===========================================================================
-
 /// One scenario's generated rasters plus the document they sit in.
 ///
 /// The `GeneratedMedia` values are held for the lifetime of the scene because
@@ -179,8 +175,6 @@ impl Cc7Scene {
             let id = AssetId(index as u64 + 1);
             let asset = probe_path(generated.path(), id)
                 .unwrap_or_else(|error| panic!("{label}: the CC7 source should probe: {error}"));
-            // CC1 refuses an untagged source, so the mux recipe's tags are
-            // asserted rather than assumed (CC7 §3.2).
             assert_eq!(asset.color_description.primaries, ColorPrimaries::Bt709);
             assert_eq!(asset.color_description.transfer, ColorTransfer::Bt709);
             assert_eq!(asset.color_description.matrix, ColorMatrix::Bt709);
@@ -318,10 +312,6 @@ fn cc7_working_proof(
     proof
 }
 
-// ===========================================================================
-// §4: raster statistics. Every one is taken on the 2-pixel inset §4 mandates.
-// ===========================================================================
-
 /// The half-open pixel rect `rect` inset by [`CC7_PATCH_INSET_PIXELS`] on
 /// every side.
 fn cc7_inset(rect: Cc7PixelRect) -> Cc7PixelRect {
@@ -392,8 +382,6 @@ fn cc7_chart_neutral_spread(image: &RgbaImage) -> (i64, usize) {
 const CC7_BT709_LUMA_WEIGHTS: [f64; 3] = [0.212_6, 0.715_2, 0.072_2];
 
 fn cc7_chart_band_luma_mean_codes(image: &RgbaImage) -> f64 {
-    // §2.1: the chart band's rect is derived from `cc7_scenarios`' own ROI,
-    // never restated as a literal here (R4-m1).
     let means = cc7_rect_mean_codes(image, cc7_chart_band_rect());
     CC7_BT709_LUMA_WEIGHTS[0] * means[0]
         + CC7_BT709_LUMA_WEIGHTS[1] * means[1]
@@ -420,10 +408,6 @@ fn cc7_skin_row_chroma_spread(image: &RgbaImage) -> f64 {
     }
     spread
 }
-
-// ---------------------------------------------------------------------------
-// The planner replica (CC7 §5.1(4), R-M8).
-// ---------------------------------------------------------------------------
 
 /// `bt709_eotf`, transcribed independently from
 /// `crates/kinewright-agent/src/color_scopes.rs:62-103`, which the media crate
@@ -590,10 +574,6 @@ fn cc7_primary_bounds(name: &str) -> (i64, i64) {
         .unwrap_or_else(|| panic!("primary_correction must declare {name}"))
 }
 
-// ===========================================================================
-// The canonical document of each scenario (§2.5), built over §3's rasters.
-// ===========================================================================
-
 /// One scenario's canonical document, the LUT library it needs, and a live
 /// engine already bound to that library.
 struct Cc7CanonicalPlan {
@@ -640,9 +620,6 @@ fn cc7_canonical_plan(gpu: &FixtureGpu, scenario: Cc7Scenario, label: &str) -> C
     let mut store = None;
     let (operations, library) = match scenario {
         Cc7Scenario::LogLike => {
-            // §4(c)(5): the (c) asset is a real import into a real project
-            // store, so the six-decimal quantisation `import_lut_asset`
-            // applies is inside every (c) measurement.
             let (directory, asset, library) = cc7_import_log_inverse_cube(CC7_LOG_CUBE_SIZE, false);
             engine.set_lut_library(Arc::clone(&library));
             store = Some(directory);
@@ -693,10 +670,6 @@ fn cc7_import_log_inverse_cube(
         .expect("the CC7 cube must import into the project store");
     let asset = import.into_lut_asset(LutAssetId(1));
     if !identity && size == CC7_LOG_CUBE_SIZE {
-        // §2.2's `cc7_log_lut_asset` pins `CC7_LOG_CUBE_SIZE`, so the record
-        // comparison applies at the canonical size only. §2.2's is the record the (c) commit carries; the
-        // digest and byte length are properties of the file core cannot read,
-        // so the fixture proves the two agree rather than assuming it.
         assert_eq!(
             asset,
             cc7_log_lut_asset(&asset.sha256, asset.byte_len, &source.display().to_string()),
@@ -766,10 +739,6 @@ fn cc7_operation_with(operation: &Cc7Operation, overrides: &[(&str, i64)]) -> Ve
     }
     parameters.into_iter().collect()
 }
-
-// ===========================================================================
-// §4(a) Mixed-camera interview.
-// ===========================================================================
 
 /// Everything one (a)/(b) match measures, so the passing gate, its two
 /// failing directions, and the evidence payload read the same numbers.
@@ -846,9 +815,6 @@ fn cc7_mixed_camera_match_meets_the_neutral_spread_and_luma_budgets() {
     let gpu = fallback_gpu();
     let measurement = cc7_measure_match(&gpu, Cc7Camera::B, "cc7-a-match", None);
 
-    // --- the replica reproduces the canonical proposal (R-M8) ------------
-    // §2.5's (a) row is a regression pin from exactly this transcription, so
-    // the fixture asserts the pin rather than re-deriving it.
     assert_eq!(
         measurement.proposal.value("exposure_milli_stops"),
         CC7_MATCH_PROPOSAL_B.exposure_milli_stops
@@ -877,8 +843,6 @@ fn cc7_mixed_camera_match_meets_the_neutral_spread_and_luma_budgets() {
             .collect::<Vec<_>>(),
         "the replicated proposal must equal `CC7_A_OPERATIONS`"
     );
-    // §4(a)(4): `saturation_percent` is never proposed, so the intentional
-    // difference is not corrected away.
     assert!(
         !measurement
             .proposal
@@ -887,7 +851,6 @@ fn cc7_mixed_camera_match_meets_the_neutral_spread_and_luma_budgets() {
         "the planner must not propose a saturation change"
     );
 
-    // --- §4(a)(2) the spread, with its margin ----------------------------
     let (spread, patch) = measurement.matched_spread;
     assert!(
         spread <= CC7_MATCH_NEUTRAL_SPREAD_MAX_CODE,
@@ -902,11 +865,8 @@ fn cc7_mixed_camera_match_meets_the_neutral_spread_and_luma_budgets() {
         CC7_MATCH_NEUTRAL_SPREAD_MAX_CODE >= 2 * spread,
         "rule 11.0.5: the spread budget must keep a 2x margin"
     );
-    // Camera A's own chart band is exactly neutral, which is what makes the
-    // statistic meaningful (A1).
     assert_eq!(cc7_chart_neutral_spread(&measurement.reference).0, 0);
 
-    // --- §4(a)(3) the luma mean, with its margin -------------------------
     let luma = measurement.matched_luma_millionths;
     assert!(
         luma.abs() <= CC7_MATCH_LUMA_MEAN_MAX_CODE_MILLIONTHS,
@@ -977,8 +937,6 @@ fn cc7_a_the_unrecoverable_candidate_exceeds_the_neutral_spread_budget() {
         "corrected C2's residual spread (patch {patch})"
     );
     assert!(spread > CC7_MATCH_NEUTRAL_SPREAD_MAX_CODE);
-    // R-M10: corrected C2 *passes* the luma term, which is why the spread and
-    // the luma mean are two gates and not one.
     assert_eq!(
         measurement.matched_luma_millionths,
         CC7_MEASURED_CORRECTED_C2_LUMA_MEAN_CODE_MILLIONTHS
@@ -1035,8 +993,6 @@ fn cc7_a_the_intentional_difference_survives_the_match() {
             skin.in_band_basis_points,
             "{which}: the four skin patches must be entirely inside the band"
         );
-        // R-M5: the rate is over the **considered** (chromatic) pixels, and
-        // the population it did not measure is reported beside it.
         assert!(skin.mean_hue_centidegrees.is_some(), "{which}: {skin:?}");
         assert_eq!(skin.excluded_achromatic_pixel_count, 0, "{which}");
         assert_eq!(
@@ -1054,9 +1010,6 @@ fn cc7_a_the_intentional_difference_survives_the_match() {
         rates.push(skin.in_band_basis_points);
     }
 
-    // The intentional desaturation: cam B's saturation is 0.85, and the match
-    // moves exposure and white balance only, so the matched skin row is still
-    // less saturated than the reference's.
     let reference = cc7_monitor_raster(&engine, &bare, TimeCode::ZERO, "reference");
     let matched = cc7_monitor_raster(&engine, &committed, candidate_frame, "matched");
     let reference_chroma = cc7_skin_row_chroma_spread(&reference);
@@ -1122,10 +1075,6 @@ fn cc7_skin_report(proof: &kinewright_core::WorkingProof, project_frame: i64) ->
     .expect("the CC7 skin diagnostic measures")
 }
 
-// ===========================================================================
-// Evidence.
-// ===========================================================================
-
 /// Every fixture in this file that emits a `CC7_EVIDENCE` payload.
 ///
 /// Declared rather than free-form so a payload cannot appear under a name the
@@ -1156,9 +1105,6 @@ fn emit_cc7_evidence(fixture: &str, gpu: &FixtureGpu, controls: Value, metrics: 
         "git_revision": git_revision(),
         "backend": gpu.backend(),
         "backend_name": field("backend"),
-        // Q5: the adapter is RECORDED, never asserted. On Windows it is not
-        // llvmpipe, and a fixture that asserted one would go red on the OS it
-        // was written to protect.
         "adapter": field("adapter"),
         "software_fallback": field("software_fallback"),
         "gpu_claim": field("gpu_claim"),
@@ -1174,10 +1120,6 @@ fn emit_cc7_evidence(fixture: &str, gpu: &FixtureGpu, controls: Value, metrics: 
     write_evidence_artefact(fixture, &payload);
 }
 
-// ===========================================================================
-// §4(b) Wrong white balance and underexposure.
-// ===========================================================================
-
 /// CC7 §11.2.22 — the (b) exit gate. §4(b)(2): C2's `temperature_percent`
 /// clamps at the descriptor bound with the raw first-order term published,
 /// while `exposure_milli_stops` does not clamp. §4(b)(3): the corrected clip
@@ -1191,7 +1133,6 @@ fn cc7_wrong_balance_clamps_temperature_and_raises_one_range_warning() {
     let gpu = fallback_gpu();
     let measurement = cc7_measure_match(&gpu, Cc7Camera::C2, "cc7-b2", None);
 
-    // --- §4(b)(2) the clamp -----------------------------------------------
     let temperature = measurement.proposal.get("temperature_percent");
     assert!(temperature.clamped, "{temperature:?}");
     assert_eq!(temperature.value, CC7_MATCH_PROPOSAL_C2.temperature_percent);
@@ -1227,7 +1168,6 @@ fn cc7_wrong_balance_clamps_temperature_and_raises_one_range_warning() {
         CC7_UNRECOVERABLE_RESIDUAL_SPREAD_REPORTED_CODE
     );
 
-    // --- §4(b)(3) the excursion and its attribution ----------------------
     let scene = cc7_two_clip_scene("cc7-b2-qc", Cc7Camera::C2);
     let engine = cc7_engine(&gpu);
     let committed = scene.commit(
@@ -1283,8 +1223,6 @@ fn cc7_wrong_balance_clamps_temperature_and_raises_one_range_warning() {
     assert_eq!(attribution.gamut_delta, 0);
     assert_eq!(attribution.without_node.range.clamped_basis_points, 0);
 
-    // The corrected clip's skin band is still above the Info threshold, so the
-    // compromise is visible in the number without a new code.
     let proof = cc7_working_proof(&engine, &committed, at, "cc7-b2 skin");
     let skin = cc7_skin_report(&proof, at.0)
         .skin
@@ -1425,10 +1363,6 @@ fn cc7_b1_residual_spread_meets_the_match_budget() {
         Some(cc7_b1_canonical_operations()),
     );
     let (spread, patch) = measurement.matched_spread;
-    // C-E7's ruling: (b1) gates against its OWN budget, one code above the (a)
-    // one, because (b1) is a harder recovery and because the shared budget
-    // cannot widen — 6 is exactly what unmatched cam B measures, so a shared 6
-    // would admit (a)'s failing direction (A15).
     assert!(
         spread <= CC7_B1_RESIDUAL_SPREAD_MAX_CODE,
         "the corrected C1 residual is {spread} codes at chart patch {patch}, over the budget of \
@@ -1444,18 +1378,12 @@ fn cc7_b1_residual_spread_meets_the_match_budget() {
         "the (b1) row must carry the programme's 2x margin: budget \
          {CC7_B1_RESIDUAL_SPREAD_MAX_CODE} over measured {spread}"
     );
-    // The split is one code and not a free hand: the (b1) budget is the (a)
-    // budget plus one, stated here so a later widening has to change this
-    // fixture too.
     assert_eq!(
         CC7_B1_RESIDUAL_SPREAD_MAX_CODE,
         CC7_MATCH_NEUTRAL_SPREAD_MAX_CODE + 1,
         "(b1) is exactly one code above (a)"
     );
 
-    // The replica reproduces §2.5's (b1) row exactly, including R-M19's
-    // absent-key rule: the tint delta rounds to zero, so `tint_percent` is
-    // OMITTED rather than stored as `0`.
     assert_eq!(
         measurement.proposal.value("exposure_milli_stops"),
         CC7_MATCH_PROPOSAL_C1.exposure_milli_stops
@@ -1477,8 +1405,6 @@ fn cc7_b1_residual_spread_meets_the_match_budget() {
             .collect::<Vec<_>>(),
         "the replicated proposal must equal `CC7_B1_OPERATIONS`"
     );
-    // The uncorrected candidate fails the same gate, so the (b1) row is not
-    // satisfied by a document that was already neutral.
     assert!(
         measurement.unmatched_spread.0 > CC7_B1_RESIDUAL_SPREAD_MAX_CODE,
         "uncorrected C1 measures {} and must fail the gate the corrected one passes",
@@ -1518,8 +1444,6 @@ fn cc7_b1_the_uncorrected_candidate_exceeds_the_residual_budget() {
         "the uncorrected candidate must fail the gate the corrected one passes; a budget of \
          {spread} would not have"
     );
-    // The second failing direction on the same term: the candidate beyond the
-    // planner's authority, which stays over the budget even once corrected.
     const {
         assert!(
             CC7_UNRECOVERABLE_RESIDUAL_SPREAD_REPORTED_CODE > CC7_B1_RESIDUAL_SPREAD_MAX_CODE,
@@ -1561,10 +1485,6 @@ fn cc7_b_c1_raises_no_range_excursion() {
         assert!(attribution.with_node.technical_pass, "{label}");
     }
 }
-
-// ===========================================================================
-// §4(c) Log-like input.
-// ===========================================================================
 
 /// The A2 gate set: the twelve achromatic chart patches **plus** the four skin
 /// patches. The five primaries are deliberately excluded (A2, A22): their
@@ -1692,8 +1612,6 @@ fn cc7_log_inverse_lands_every_patch_inside_the_budget() {
         CC7_LOG_INVERSE_MAX_CODE >= 2 * measurement.gate_set_worst,
         "rule 11.0.5: the log-inverse budget must keep a 2x margin"
     );
-    // §2.4.2 / A2: the black patch's error is a property of the curve, not of
-    // the lattice, and it is inside the budget rather than excluded from it.
     assert_eq!(
         measurement.per_patch["chart00"], CC7_LOG_BLACK_PATCH_REPORTED_CODE,
         "the black patch's floor is `v = 0` inverting to 2^-8 linear"
@@ -1741,8 +1659,6 @@ fn cc7_log_inverse_lands_every_patch_inside_the_budget() {
 #[test]
 fn cc7_c_an_identity_cube_does_not_undo_the_log_curve() {
     let gpu = fallback_gpu();
-    // §2.6: no CC7 gate uses a literal lattice size; 33 is the ladder's
-    // middle rung (R4-m2).
     let measurement = cc7_measure_log_inverse(&gpu, CC7_LOG_CUBE_SIZE_LADDER[1].0, true);
     assert_eq!(
         measurement.gate_set_worst, CC7_LOG_IDENTITY_CUBE_REPORTED_CODE,
@@ -1757,8 +1673,6 @@ fn cc7_c_an_identity_cube_does_not_undo_the_log_curve() {
         measurement.per_patch["chart06"], 1,
         "a single-patch gate at mid-grey would be vacuous: the log curve is near-neutral there"
     );
-    // The one inversion the contract states plainly: under the identity cube
-    // black reads 0, while under the correct one it reads 4.
     assert_eq!(measurement.per_patch["chart00"], 0);
 }
 
@@ -1803,8 +1717,6 @@ fn cc7_c_the_cube_size_sweep_is_monotone_and_size_seventeen_fails() {
     );
     assert!(ladder[1].1.gate_set_worst <= CC7_LOG_INVERSE_MAX_CODE);
     assert!(ladder[1].1.gate_set_worst > ladder[2].1.gate_set_worst);
-    // The two smaller sizes are pinned exactly; size 17's measured value is
-    // recorded rather than pinned (Implementer C erratum C-E4).
     assert_eq!(ladder[1].1.gate_set_worst, CC7_LOG_CUBE_SIZE_LADDER[1].1);
     assert_eq!(ladder[2].1.gate_set_worst, CC7_LOG_CUBE_SIZE_LADDER[2].1);
     assert!(
@@ -1813,8 +1725,6 @@ fn cc7_c_the_cube_size_sweep_is_monotone_and_size_seventeen_fails() {
         ladder[0].1.gate_set_worst,
         CC7_LOG_CUBE_SIZE_LADDER[0].1
     );
-    // `CC7_LOG_CUBE_SIZE` is PINNED, not selected: read as a selection rule
-    // the sweep would choose 33 at a 1.7x margin, below the programme's 2x bar.
     assert_eq!(CC7_LOG_CUBE_SIZE, ladder[2].0);
     assert!(CC7_LOG_INVERSE_MAX_CODE < 2 * ladder[1].1.gate_set_worst);
     assert!(CC7_LOG_INVERSE_MAX_CODE >= 2 * ladder[2].1.gate_set_worst);
@@ -1824,10 +1734,6 @@ fn cc7_c_the_cube_size_sweep_is_monotone_and_size_seventeen_fails() {
     );
     assert!(ladder[2].1.cube_bytes < LUT_MAX_FILE_BYTES);
 }
-
-// ===========================================================================
-// §4(d) Product and skin.
-// ===========================================================================
 
 /// The matte coverage statistics of one committed node, plus the covered set
 /// as a per-pixel mask for the containment gate.
@@ -1850,8 +1756,6 @@ fn cc7_measure_matte(
         )
         .unwrap_or_else(|error| panic!("{label}: the CC7 matte proof should render: {error}"));
     assert!(proof.metadata.matte_enabled, "{label}");
-    // R-M6: `matte_coverage_statistics` takes ONE argument and rates every
-    // count over the whole raster; it has no ROI parameter.
     let statistics = matte_coverage_statistics(&proof.coverage)
         .unwrap_or_else(|error| panic!("{label}: the coverage statistics: {error}"));
     assert_eq!(
@@ -1891,8 +1795,6 @@ fn cc7_product_qualifier_covers_exactly_its_patch_and_changes_nothing_outside() 
     assert_eq!(measurement.statistics.covered_pixel_count, expected);
     assert_eq!(measurement.statistics.full_pixel_count, expected);
     assert_eq!(measurement.statistics.partial_pixel_count, 0);
-    // The covered set is the `product_red` patch and nothing else, so a
-    // qualifier that happened to catch the same COUNT somewhere else fails.
     let product = CC7_PRODUCT_RED_ROI
         .to_pixels(CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT)
         .expect("the product ROI resolves");
@@ -2019,8 +1921,6 @@ fn cc7_d_the_skin_hue_is_unmoved_by_the_product_qualifier() {
         u32::try_from(CC7_SKIN_IN_BAND_EXACT_BASIS_POINTS).expect("a rate")
     );
     assert_eq!(after.in_band_basis_points, before.in_band_basis_points);
-    // R-M5: the rate's population is reported beside it, so 10 000 can never
-    // be read as a claim about a population it did not measure.
     assert_eq!(after.excluded_achromatic_pixel_count, 0);
     assert_eq!(
         after.considered_pixel_count,
@@ -2037,8 +1937,6 @@ fn cc7_d_a_qualifier_over_the_skin_row_moves_the_skin_hue() {
     let gpu = fallback_gpu();
     let engine = cc7_engine(&gpu);
     let scene = cc7_camera_a_scene("cc7-d-skin-hue");
-    // The `skin_tan` band: hue centre 2 500 cd with the same softness, and
-    // saturation/luma bands wide enough to admit the four skin patches.
     let skin_qualifier = cc7_operation_with(
         &kinewright_core::cc7_scenarios::CC7_D_OPERATIONS[0],
         &[
@@ -2090,9 +1988,6 @@ fn cc7_feather_counts_match_the_discrete_pixel_centre_model() {
     let scene = cc7_camera_a_scene("cc7-d2");
     let committed = scene.commit("cc7-d2", &cc7_d2_canonical_operations());
 
-    // R-B4: the committed node stores NO qualifier parameter, so a future
-    // merge of (d) and (d2) fails here rather than silently measuring
-    // `192 / 140 / 52`.
     let effect = &committed.tracks[0].clips[0].effects[0];
     assert!(
         !effect
@@ -2123,11 +2018,6 @@ fn cc7_feather_counts_match_the_discrete_pixel_centre_model() {
             "the {name} count measured {measured} against the discrete pixel-centre model's \
              {model}, outside the tolerance of {CC7_FEATHER_PARTIAL_TOLERANCE_PIXELS}"
         );
-        // §4.1's `feather counts` row claims the model error is measured
-        // *exactly* zero, so the claim is asserted rather than left to the
-        // tolerance: a drift to 3 would otherwise keep both green while
-        // `CC7_BUDGETS` still said "infinite (measured exactly zero)"
-        // (R4-m3).
         assert_eq!(
             (measured - model).abs(),
             CC7_MEASURED_FEATHER_MODEL_ERROR_PIXELS,
@@ -2136,8 +2026,6 @@ fn cc7_feather_counts_match_the_discrete_pixel_centre_model() {
         );
     }
     assert_eq!(measured_partial, covered - full);
-    // A7 / A-E12: the continuous-area formula is the WRONG model, by more than
-    // the tolerance, on both the nominal and the quantized half-extents.
     let nominal_tenths = CC7_D2_CONTINUOUS_AREA_WRONG_MODEL_PIXELS_TENTHS;
     assert!(
         (measured_partial * 10 - nominal_tenths).abs() > CC7_FEATHER_PARTIAL_TOLERANCE_PIXELS * 10,
@@ -2177,8 +2065,6 @@ fn cc7_d_feather_zero_has_no_partial_pixels() {
         measurement.statistics.covered_pixel_count,
         u64::from(CC7_PRODUCT_PATCH_PIXEL_COUNT)
     );
-    // Every histogram bucket but the first and last must be empty: coverage is
-    // exactly 0 or 255 with no feather.
     let histogram = measurement.statistics.coverage_histogram;
     for (bucket, count) in histogram.iter().enumerate() {
         if bucket == 0 || bucket == histogram.len() - 1 {
@@ -2187,10 +2073,6 @@ fn cc7_d_feather_zero_has_no_partial_pixels() {
         assert_eq!(*count, 0, "bucket {bucket} must be empty at feather 0");
     }
 }
-
-// ===========================================================================
-// §4(e) Creative look.
-// ===========================================================================
 
 /// CC7 §11.2.27 — the (e) exit gate. §4(e)(2): the built-in `warm` look drives
 /// **exactly** `CC7_LOOK_DEEP_SHADOW_OUT_OF_GAMUT_PIXELS` pixels out of gamut
@@ -2211,8 +2093,6 @@ fn cc7_warm_look_out_of_gamut_count_is_exact_on_the_deep_shadow_patch() {
     );
     let proof = cc7_working_proof(&engine, &committed, TimeCode::ZERO, "cc7-e");
 
-    // A19: the `ceil`ed `y` is normative. The resolved rect is asserted, not
-    // the arithmetic: the naive 4222 resolves to `y 75, h 17` = 204 pixels.
     let resolved = CC7_DEEP_SHADOW_ROI
         .to_pixels(CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT)
         .expect("the deep_shadow ROI resolves");
@@ -2341,19 +2221,10 @@ fn cc7_e_the_base_scene_without_the_look_is_in_gamut() {
         );
         assert!(report.technical_pass);
         if roi.is_some() {
-            // On the `deep_shadow` ROI the base scene raises nothing at all;
-            // the whole raster still carries the primaries band's saturated
-            // channels, which sit at the top of the delivery range and are a
-            // property of the RASTER rather than of the look (Implementer C
-            // erratum C-E5).
             assert!(report.exceptions.is_empty(), "{:?}", report.exceptions);
         }
     }
 }
-
-// ===========================================================================
-// §4(f) Tracked secondary — the source-side containment gate.
-// ===========================================================================
 
 /// One sample's containment requirement, in hundredths of a pixel.
 struct Cc7ContainmentSample {
@@ -2457,9 +2328,6 @@ fn cc7_tracked_window_contains_the_square_at_every_sampled_frame() {
         worst_y = worst_y.max(sample.required_half_height_hundredths);
     }
 
-    // The excluded sample is named, and it is excluded because it genuinely
-    // fails: a gate that silently dropped a sample that passed would be a
-    // tolerance in disguise.
     let lagging = lagging.expect("the final keyframe must be one of the surviving samples");
     assert!(
         lagging.required_half_width_hundredths > window_x,
@@ -2468,8 +2336,6 @@ fn cc7_tracked_window_contains_the_square_at_every_sampled_frame() {
         CC7_TRACK_LAGGING_FINAL_KEYFRAME
     );
 
-    // §2.3.6's reported half-extents and margins, within one hundredth of a
-    // pixel of the pinned figures (Implementer C erratum C-E6).
     assert!(
         (worst_x - CC7_TRACK_CONTAINMENT_REQUIRED_HALF_WIDTH_PIXELS_REPORTED).abs() <= 2,
         "the worst required half width measured {worst_x} hundredths against the reported {}",
@@ -2534,9 +2400,6 @@ fn cc7_f_a_window_smaller_than_the_square_loses_containment() {
         .map(|sample| sample.required_half_width_hundredths - seeded_x)
         .max()
         .expect("a shortfall");
-    // The seeded window is the square's own half extent, to within the
-    // basis-point quantization of §2.3.6's `round(12/180 * 10000) = 667`,
-    // which resolves back to 12.006 px rather than 12.000.
     let half = (CC7_TRACK_SQUARE_SIZE / 2) * 100;
     assert_eq!(seeded_x, half);
     assert!((seeded_y - half).abs() <= 1, "{seeded_y} against {half}");
@@ -2545,10 +2408,6 @@ fn cc7_f_a_window_smaller_than_the_square_loses_containment() {
         short.iter().map(|sample| sample.frame).collect::<Vec<_>>()
     );
 }
-
-// ===========================================================================
-// §4(g) Encoded delivery.
-// ===========================================================================
 
 /// Everything one scenario's export and verification measured.
 struct Cc7DeliveryMeasurement {
@@ -2607,8 +2466,6 @@ fn cc7_export_and_verify(
         kinewright_core::DELIVERY_VERIFICATION_FRAME_COUNT
     );
     let started = Instant::now();
-    // R-M7: the trait default is `NotImplemented`, so this gate holds against
-    // the real `FfmpegMediaEngine` and the fixture constructs one.
     let verification = plan
         .engine
         .verify_delivery_output(Arc::clone(&plan.document), &output, &settings, request)
@@ -2684,7 +2541,6 @@ fn assert_cc7_delivery_lane(
         "{label}"
     );
 
-    // --- the three conditions of §4(g)(1) --------------------------------
     assert!(
         verification.technical_pass,
         "{label}: {:?}",
@@ -2703,9 +2559,6 @@ fn assert_cc7_delivery_lane(
             "{label}: the allowed set is Info-only"
         );
     }
-    // A6: every verified H.264 export carries exactly one Info, on
-    // `white_point`, because the format has no white-point field. "No
-    // exceptions" would fail a perfectly conforming encode.
     assert_eq!(verification.tags.not_representable.len(), 1, "{label}");
     assert_eq!(
         verification.tags.not_representable[0].field, "white_point",
@@ -2730,13 +2583,6 @@ fn assert_cc7_delivery_lane(
     let budgets = comparison.budgets;
     assert_eq!(budgets, kinewright_core::DeliveryBudgets::for_depth(depth));
 
-    // R4-M2: every gated term of this lane equals the manifest's recorded
-    // measurement for this scenario at this depth, so the per-scenario
-    // `budget | measured | margin` triples cannot go stale behind the gate the
-    // way `CC7_MEASURED_DELIVERY_EIGHT` did. The manifest is the measured
-    // column of §4.1; `CC7_MEASURED_DELIVERY_*` is its worst-per-term
-    // summary, and `cc7_manifest_declares_every_required_fixture_and_constant`
-    // ties that summary to the same rows.
     let spec_id = cc7_spec(measurement.scenario).id;
     let depth_key = match depth {
         DeliveryEncodeDepth::Eight => "eight_bit",
@@ -2930,10 +2776,6 @@ fn cc7_g_a_starved_encode_trips_the_decoded_difference_budget() {
 /// re-chosen, so the failing direction is the one CC6 already measured.
 const CC7_STARVED_BITRATE_BITS_PER_SECOND: u64 = 100_000;
 
-// ===========================================================================
-// §4(a)(5) Render parity — the compositor-layer case (A5).
-// ===========================================================================
-
 /// A `WorkingFrame` carrying the CC7 base scene in scene-linear light.
 ///
 /// The display codes are decoded through `cc7_scenarios`' own transcription,
@@ -3024,11 +2866,6 @@ fn assert_cc7_canonical_parity(gpu: &FixtureGpu, fixture: &str) {
     // `LINEAR_CPU_GPU_{MAX,P99,MEAN}` are CC1's, reused unchanged (A5).
     assert_linear_parity(&metrics, "cc7_canonical_node_stack");
 
-    // The CC6 negative control: the same comparison against a reference
-    // perturbed by `2 x LINEAR_CPU_GPU_MAX` must fail.
-    // Only the three colour channels move: `linear_parity_metrics` asserts
-    // the alpha byte never changes, and a perturbed alpha would trip that
-    // rather than the gate under test.
     let perturbed = expected
         .iter()
         .enumerate()
@@ -3046,9 +2883,6 @@ fn assert_cc7_canonical_parity(gpu: &FixtureGpu, fixture: &str) {
         "the negative control must exceed the gate the real comparison passes: {control:?}"
     );
 
-    // Document-level render determinism, recorded as EVIDENCE, not as a
-    // budget (A5): two renders of the canonical document's working surface on
-    // one lane agree exactly.
     let repeat = compositor
         .render_working(
             resolution,
@@ -3120,10 +2954,6 @@ fn cc7_canonical_node_stack_matches_the_cpu_reference_on_hardware() {
     );
 }
 
-// ===========================================================================
-// §11.2.12b: the transcription cross-check (R-M2).
-// ===========================================================================
-
 /// CC7 §11.2.12b. `cc7_scenarios`' own `f64` transcriptions of `encode_bt709`,
 /// `decode_display709` and `grade709_decode` agree with
 /// `kinewright_media::color_pipeline`'s real functions within `1e-6` at every
@@ -3162,9 +2992,6 @@ fn cc7_core_transcriptions_agree_with_the_pipeline() {
             ),
         ] {
             let error = (transcribed - production).abs();
-            // §2.7 and §11.2.12b both state a **flat** `1e-6`; the relative
-            // widening this used to carry reached ~1.4e-6 over the sweep,
-            // while the worst measured error is 8.57e-7 (C-E12, R4-m9).
             assert!(
                 error <= tolerance,
                 "{label}: {name}({value}) transcribed {transcribed}, production {production}, \
@@ -3185,8 +3012,6 @@ fn cc7_core_transcriptions_agree_with_the_pipeline() {
             check("row patch linear", channel as f64 / 1_000_000.0);
         }
     }
-    // The twelve chart codes and the five primaries, as normalized display
-    // values.
     for patch in CC7_CHART_PATCHES.iter().chain(CC7_PRIMARY_PATCHES.iter()) {
         for code in patch.display_code_cam_a {
             check("patch code", f64::from(code) / 255.0);
@@ -3204,20 +3029,12 @@ fn cc7_core_transcriptions_agree_with_the_pipeline() {
         check("sweep", index * step);
         index += 1.0;
     }
-    // Both sides of every seam. The offset is `1e-6` rather than an `f64`
-    // hair: the production functions are `f32`, whose ULP at `0.018` is
-    // `1.9e-9`, so a smaller offset would put the `f64` transcription on the
-    // linear side of the branch and the `f32` original on the power side and
-    // measure the seam's own representation rather than the transcription.
     for seam in [0.018_f64, 0.081, 0.081_242_86, 0.0, 1.0] {
         for offset in [-1e-6, 0.0, 1e-6] {
             check("seam", seam + offset);
         }
     }
 
-    // The failing direction: a transcription mis-seamed at `linear <= 0.018`
-    // differs from the pipeline at exactly that value, so the sweep above is
-    // known to be able to see a one-branch error.
     let mis_seamed = |linear: f64| -> f64 {
         if linear <= 0.018 {
             4.5 * linear
@@ -3233,10 +3050,6 @@ fn cc7_core_transcriptions_agree_with_the_pipeline() {
     );
     println!("CC7_TRANSCRIPTIONS compared={compared} worst_error={worst} tolerance={tolerance}");
 }
-
-// ===========================================================================
-// R-M15: the per-scenario luma percentiles the manifest records.
-// ===========================================================================
 
 /// CC7 §11.3 and R-M15. Every scenario's canonical document is measured at its
 /// sample frame and its `{first, median, ninety_ninth}` luma percentiles — the
@@ -3292,10 +3105,6 @@ fn cc7_scenario_luma_percentiles_match_the_manifest() {
         );
     }
 }
-
-// ===========================================================================
-// §11.3: the manifest.
-// ===========================================================================
 
 fn cc7_manifest() -> Value {
     serde_json::from_str(include_str!("../tests/fixtures/cc7_manifest.json"))
@@ -3371,7 +3180,6 @@ fn check_cc7_measurement(
 fn cc7_threshold_constants() -> Vec<(&'static str, i64)> {
     use kinewright_core::cc7_scenarios as spec;
     vec![
-        // --- §2.6 gated ---------------------------------------------------
         (
             "cc7_match_neutral_spread_max_code",
             CC7_MATCH_NEUTRAL_SPREAD_MAX_CODE,
@@ -3412,7 +3220,6 @@ fn cc7_threshold_constants() -> Vec<(&'static str, i64)> {
             spec::CC7_TRACK_RANGE_END_LOCAL_FRAME,
         ),
         ("cc7_track_f2_step_frames", spec::CC7_TRACK_F2_STEP_FRAMES),
-        // --- §2.6 reported, never gated -----------------------------------
         (
             "cc7_unrecoverable_residual_spread_reported_code",
             CC7_UNRECOVERABLE_RESIDUAL_SPREAD_REPORTED_CODE,
@@ -3482,7 +3289,6 @@ fn cc7_threshold_constants() -> Vec<(&'static str, i64)> {
             "cc7_d2_continuous_area_wrong_model_pixels_tenths",
             CC7_D2_CONTINUOUS_AREA_WRONG_MODEL_PIXELS_TENTHS,
         ),
-        // --- §2.6 exact, derived rather than measured ----------------------
         ("cc7_source_width", i64::from(CC7_SOURCE_WIDTH)),
         ("cc7_source_height", i64::from(CC7_SOURCE_HEIGHT)),
         ("cc7_source_fps", i64::from(CC7_SOURCE_FPS)),
@@ -3673,8 +3479,6 @@ fn cc7_canonical_parameter_names() -> Vec<String> {
         }
     }
     names.extend(kinewright_core::cc7_scenarios::CC7_F_KEYFRAMED_PARAMETERS.map(str::to_owned));
-    // The two descriptor neutrals the canonical documents deliberately do NOT
-    // store, and which a leaking form would still name.
     names.extend([
         "input_encoding_token".to_owned(),
         "mix_basis_points".to_owned(),
@@ -3704,13 +3508,10 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
     assert_eq!(manifest["contract"], "CC7 workflow evaluation");
     assert_eq!(manifest["contract_token"], CC7_CONTRACT);
 
-    // --- §11.3 thresholds: one key per pinned constant --------------------
     let thresholds = &manifest["thresholds"];
     let declared = thresholds
         .as_object()
         .expect("the manifest must declare a thresholds object");
-    // Rule: no unresolved probe placeholder. Every threshold key holds a
-    // number, so a key count alone cannot be satisfied by a placeholder.
     for (key, value) in declared {
         assert!(
             value.is_number(),
@@ -3740,7 +3541,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
         json!(CC7_DELIVERY_ALLOWED_INFO_CODES)
     );
 
-    // --- §11.3 scenarios ---------------------------------------------------
     let scenarios = manifest["scenarios"]
         .as_array()
         .expect("one object per scenario");
@@ -3767,7 +3567,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
         }
     }
 
-    // --- §11.3 raster ------------------------------------------------------
     let raster = &manifest["raster"];
     assert_eq!(raster["size"], json!([CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT]));
     assert_eq!(raster["fps"], CC7_SOURCE_FPS);
@@ -3792,7 +3591,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
         "cc7_the_chart_band_is_achromatic_and_the_primaries_band_has_no_red"
     );
 
-    // --- §11.3 patches -----------------------------------------------------
     assert_eq!(
         manifest["patches"]["chart"],
         json!(CC7_CHART_PATCHES.map(|patch| patch.display_code_cam_a[0]))
@@ -3806,7 +3604,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
         json!(CC7_ROW_PATCHES.map(|patch| patch.display_code_cam_a))
     );
 
-    // --- §11.3 log ---------------------------------------------------------
     let log = &manifest["log"];
     assert_manifest_i64(
         &log["curve"],
@@ -3850,7 +3647,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
     assert_eq!(log["cube_size_ladder_monotone_non_increasing"], true);
     assert_eq!(log["cube_title"], CC7_LOG_CUBE_TITLE);
 
-    // --- §11.3 tracking ----------------------------------------------------
     let tracking = &manifest["tracking"];
     assert_eq!(
         tracking["amplitudes"],
@@ -3878,7 +3674,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
     assert_eq!(tracking["radius_10_and_25_identical"], true);
     assert_eq!(tracking["owner"], "kinewright-agent");
 
-    // --- §11.3 transcriptions ---------------------------------------------
     let transcriptions = &manifest["transcriptions"];
     assert_eq!(
         transcriptions["functions"],
@@ -3897,14 +3692,10 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
         Some(kinewright_core::cc7_scenarios::CC7_SPEC_F64_TOLERANCE)
     );
 
-    // --- §11.3 budgets ------------------------------------------------------
     let budgets = &manifest["budgets"];
     for row in kinewright_core::cc7_scenarios::CC7_BUDGETS {
         let declared = &budgets["terms"][row.term];
         assert_manifest_i64(declared, "budget", row.budget);
-        // R4-m4: "is a number" is not "is the number". Every `CC7_BUDGETS`
-        // row's `measured` is an `i64`, so the manifest declares the same
-        // integer and cannot drift from `CC7_MEASURED_*`.
         assert_manifest_i64(declared, "measured", row.measured);
         assert!(
             declared.get("margin").is_some(),
@@ -4016,11 +3807,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
         .expect("§4.2's table");
     assert!(failing.len() >= 12, "§4.2 lists at least twelve rows");
 
-    // --- §11.3 measurement provenance --------------------------------------
-    // The provenance block is per operating system, because every field in it
-    // — the FFmpeg build, the library versions, the x264 core, the adapter —
-    // is a property of the machine that produced that system's measured
-    // column. A single block could only ever describe one of them.
     let measurement = &budgets["measurement"][cc7_os()];
     assert!(
         measurement.is_object(),
@@ -4050,7 +3836,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
     assert_eq!(measurement["os"], std::env::consts::OS);
     assert_eq!(measurement["arch"], std::env::consts::ARCH);
 
-    // --- §11.3 review, eval, scorecard, m36, external owners ---------------
     let review = &manifest["review"];
     assert_eq!(review["schema_version"], 2);
     assert_eq!(review["blind_key_location"], "run_root");
@@ -4109,7 +3894,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
         manifest["fixture_quality_rules"],
         "docs/CC6-QC-AND-MANAGED-DELIVERY.md:1352-1362"
     );
-    // --- the manifest names the same tests --------------------------------
     let all = cc7_declared_test_names();
     let mut verified = 0_usize;
     for entry in manifest["required_fixtures"]
@@ -4152,7 +3936,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
         );
     }
 
-    // --- the manifest records the arrays themselves ------------------------
     let inventory = &manifest["inventory"];
     assert_eq!(inventory["asserted_by"], CC7_INVENTORY_TESTS[1]);
     for (label, expected) in [
@@ -4205,16 +3988,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
         "CC7_EXTERNAL_OWNERS and the manifest's cited fixtures disagree"
     );
 }
-
-// ===========================================================================
-// CC7 §12 step 9b and §11.3 — the inventory (R-M12).
-// ===========================================================================
-//
-// This is the LAST thing CC7 writes. `CC7_TEST_SOURCES` `include_str!`s the
-// agent (§12 step 4), app (step 7) and eval (step 8) files at **compile**
-// time, so renaming a test in another crate rebuilds this fixture and fails
-// it, instead of leaving a manifest entry that names a function nobody has
-// written for three commits.
 
 /// The two media files that own a `cc7_*` test.
 ///
@@ -4365,8 +4138,6 @@ const CC7_EVAL_TESTS: [&str; 28] = [
     "cc7_color_evidence_is_computed_where_the_analysis_is_alive",
     "cc7_delivery_verification_without_a_deliverable_is_recorded_as_an_error",
     "cc7_the_colour_template_marks_the_editorial_dimensions_not_applicable",
-    // R1-B1's addition: §11.2.32 names it, and step 9b declared the tree as it
-    // stood before the R1 fixers landed it (G-E3 item 2, review R4-B1).
     "cc7_a_fixture_project_path_reaches_the_server",
     // bin/kinewright-eval.rs — the suite, the blind package and the CLI.
     "cc7_the_blind_package_discloses_no_machine_provenance",
@@ -4642,7 +4413,6 @@ fn cc7_declared_test_names() -> Vec<String> {
 /// name that does not exist.
 #[test]
 fn cc7_declared_test_names_exist_in_their_source_files() {
-    // --- both directions, per crate ---------------------------------------
     for (label, sources, expected) in cc7_inventory_groups() {
         for name in expected {
             assert!(
@@ -4668,7 +4438,6 @@ fn cc7_declared_test_names_exist_in_their_source_files() {
         );
     }
 
-    // --- the `cargo test -- cc7_` filter, and no name declared twice -------
     let mut all = Vec::new();
     for (_, _, expected) in cc7_inventory_groups() {
         for name in expected {
@@ -4714,10 +4483,6 @@ fn cc7_declared_test_names_exist_in_their_source_files() {
         );
     }
 
-    // --- §11.3's `uses_outside_prose` guard --------------------------------
-    // The CC7 media and core gates take the panicking `fallback_gpu()`
-    // convention: evidence that reports `ok` without running is not evidence,
-    // and §10 forbids env-conditional behaviour in a gate outright.
     for path in CC7_MEDIA_TEST_SOURCES
         .into_iter()
         .chain(CC7_CORE_TEST_SOURCES)
@@ -4729,8 +4494,6 @@ fn cc7_declared_test_names_exist_in_their_source_files() {
             );
         }
     }
-    // The app's person-path tests drive a headless `egui` context and never a
-    // GPU proof, so the first two needles apply to them as well (§11.3).
     for path in CC7_APP_TEST_SOURCES {
         for needle in [CC7_FORBIDDEN_HELPERS[0], CC7_FORBIDDEN_HELPERS[1]] {
             assert!(
@@ -4739,11 +4502,6 @@ fn cc7_declared_test_names_exist_in_their_source_files() {
             );
         }
     }
-    // `tests/mcp_server.rs` is the ONE file permitted to consult the skip
-    // opt-in, and only inside §5.3's template: the branch must assert a typed
-    // code and print a `SKIPPED:` line, never accept both branches silently.
-    // The needles are re-assembled from the array rather than written as
-    // literals, so this assertion cannot self-match (R-M11).
     assert_eq!(CC7_GPU_SKIP_OWNER, CC7_AGENT_TEST_SOURCES[0]);
     let agent = cc7_test_source(CC7_GPU_SKIP_OWNER);
     let any_call = format!("{}(", CC7_FORBIDDEN_HELPERS[2]);

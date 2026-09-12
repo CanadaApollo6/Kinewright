@@ -156,8 +156,6 @@ async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation()
     let applied_text = &applied.content[0].as_text().unwrap().text;
     assert!(applied_text.contains("op 1 add_track: applied"));
     assert!(applied_text.contains("op 2 move_clip: applied"));
-    // Every plan result self-reports remaining cuttable silence so the agent
-    // cannot mistake a partial cleanup for a finished one.
     assert!(
         applied_text.contains("cuttable silence"),
         "plan result must include the silence completion footer: {applied_text}"
@@ -379,13 +377,6 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
         tracking["prepared_edit_plan"]["preview"]["operation_count"],
         2
     );
-    // CC5 §5.2: the prepared values are *layer*-space and are asserted as
-    // values, not only counted. The clip carries an opacity-0 node, so every
-    // composited thumbnail is uniform and the tracker holds its seeded centre:
-    // the 50 percent seed is pixel 32 of the 64-wide thumbnail and pixel 18 of
-    // the 36-tall one, which as fractions of the extent are
-    // round(32.5 * 100 / 64) = 51 and round(18.5 * 100 / 36) = 51. The layer
-    // transform is the identity here, so the conversion is that read alone.
     assert_eq!(tracking["coordinate_space"]["thumbnail"]["width"], 64);
     assert_eq!(tracking["coordinate_space"]["thumbnail"]["height"], 36);
     assert_eq!(tracking["coordinate_space"]["samples"][0]["scale"], 1.0);
@@ -401,8 +392,6 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
     );
     assert_eq!(tracking["observations"][0]["layer_center_x_percent"], 51);
     assert_eq!(tracking["observations"][0]["center_x_percent"], 51);
-    // The composite provenance rides alongside, on the same fraction-of-extent
-    // convention the response's `coordinate_space.pixel_to_unit` declares.
     assert_eq!(
         tracking["observations"][0]["composite_center_x_percent"],
         51
@@ -608,8 +597,6 @@ async fn cc5_secondary_plan_and_commit_land_the_matte_parameters() {
         .unwrap();
     assert_eq!(revision, 0);
 
-    // A matte on a node that does not exist yet: the planner allocates it and
-    // inserts it at the stage-legal index.
     let plan = invoke_capability(
         &client,
         "plan_secondary_correction",
@@ -708,8 +695,6 @@ async fn cc5_secondary_plan_and_commit_land_the_matte_parameters() {
         .unwrap();
     assert_eq!(committed.is_error, Some(false));
 
-    // The exact `matte_*` integers landed on the stored node, and nothing the
-    // caller did not ask for was written.
     let after = query_document(&core);
     let effects = &after.tracks[0].clips[0].effects;
     assert_eq!(effects.len(), 1);
@@ -768,8 +753,6 @@ async fn cc5_secondary_plan_and_commit_land_the_matte_parameters() {
     assert_eq!(matte["qualifier"]["enabled"], true);
     assert_eq!(matte["qualifier"]["saturation_low_basis_points"], 3_000);
     assert_eq!(matte["qualifier"]["saturation_high_basis_points"], 9_000);
-    // The hue leg stays at its 180 degree neutral, which disables it, so a
-    // qualifier that names only saturation does not drop every grey pixel.
     assert_eq!(matte["qualifier"]["hue_leg_disabled"], true);
     let windows = matte["windows"].as_array().unwrap();
     assert_eq!(windows.len(), 1);
@@ -777,11 +760,6 @@ async fn cc5_secondary_plan_and_commit_land_the_matte_parameters() {
     assert_eq!(windows[0]["center_x_basis_points"], 6_000);
     assert_eq!(windows[0]["feather_basis_points"], 1_200);
 
-    // A node whose colour controls are all neutral is the exact identity, so
-    // CC5 §2.6 reports it inactive and there is no coverage to inspect however
-    // capable the renderer is. Give the node something to do first, so the
-    // inspection below is a real measurement rather than a refusal the test
-    // would have to accept either way.
     let wheels = invoke_capability(
         &client,
         "plan_color_wheels",
@@ -810,8 +788,6 @@ async fn cc5_secondary_plan_and_commit_land_the_matte_parameters() {
         Some(false)
     );
 
-    // CC5 §7: the matte-scoped surfaces refuse honestly while this build's
-    // renderer cannot proof a matte, rather than inventing coverage.
     let inspect = invoke_capability(
         &client,
         "inspect_grade_matte",
@@ -825,10 +801,6 @@ async fn cc5_secondary_plan_and_commit_land_the_matte_parameters() {
     .await;
     let inspect_body = inspect.structured_content.as_ref().unwrap();
     if inspect.is_error == Some(true) {
-        // A test that accepts both branches asserts nothing: a renderer that
-        // silently stopped producing matte proofs would look exactly like a
-        // green run. Refusing is a *skip*, and skipping is opt-in, on the same
-        // workspace variable the media crate's GPU tests use.
         assert!(
             std::env::var("KINEWRIGHT_GPU_TESTS_MAY_SKIP")
                 .ok()
@@ -845,8 +817,6 @@ async fn cc5_secondary_plan_and_commit_land_the_matte_parameters() {
              inspect_grade_matte's measured statistics were not exercised."
         );
     } else {
-        // Once the engine lands matte proofs, the statistics must describe the
-        // same node the manifest just published.
         assert_eq!(inspect_body["effect_id"], target_effect_id);
         assert_eq!(inspect_body["kind"], "color_wheels");
         assert_eq!(
@@ -859,9 +829,6 @@ async fn cc5_secondary_plan_and_commit_land_the_matte_parameters() {
         let covered = inspect_body["statistics"]["covered_pixel_count"]
             .as_u64()
             .unwrap();
-        // One ellipse well inside the frame plus a saturation band: the matte
-        // must select a strict, non-empty subset of the frame. An empty matte
-        // and a matte that degenerated to the whole frame both fail here.
         assert!(total > 0);
         assert!(covered > 0, "the matte covered nothing: {inspect_body}");
         assert!(
@@ -1039,8 +1006,6 @@ async fn cc4_creative_look_plan_and_commit_create_the_ordered_node() {
     let generated = managed_color_media();
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let asset = media.probe(generated.path()).unwrap();
-    // A built-in generated look is `verified` from the binary's own bake, so
-    // the store never has to be touched to prove the agent surface (CC4 §2.6).
     let warm = kinewright_media::BuiltinLook::Warm;
     let mut document = single_clip_document(asset);
     document.lut_assets = vec![warm.to_lut_asset(kinewright_core::LutAssetId(1))];
@@ -1167,8 +1132,6 @@ async fn cc4_creative_look_plan_and_commit_create_the_ordered_node() {
         json!([{"clip_id": 1, "effect_id": target_effect_id}])
     );
 
-    // `AddLutAsset` is unreachable through the plan path over the wire, and
-    // the refusal names the one capability that can register a record.
     let refused = prepare_plan(
         &client,
         revision + 1,
@@ -1241,8 +1204,6 @@ async fn cc4_convert_legacy_look_submits_the_batch_the_evidence_publishes() {
         "{conversion}"
     );
 
-    // The published batch is still refused on the plan path, which is exactly
-    // why the capability exists.
     let refused = prepare_plan(&client, revision, conversion["operations"].clone()).await;
     assert_eq!(refused.is_error, Some(true));
     assert!(
@@ -1297,9 +1258,6 @@ async fn cc4_convert_legacy_look_submits_the_batch_the_evidence_publishes() {
         ParamValue::Integer(7_500)
     );
 
-    // Nothing new is blocked: with the asset registered, the second node's
-    // batch is a lone `ConvertLegacyLook`, which the ordinary plan path still
-    // accepts. Only `AddLutAsset` was ever refused there.
     let plain = prepare_plan(
         &client,
         revision + 1,
@@ -1369,8 +1327,6 @@ async fn cc4_branch_server_with_the_project_path_handle_resolves_imported_availa
     document.lut_assets = vec![imported.into_lut_asset(kinewright_core::LutAssetId(1))];
     document.validate().expect("the imported record is valid");
 
-    // The regression: a branch server with its own `None` handle cannot see
-    // the store even though the project is saved.
     let blind_core = Core::spawn(document.clone()).unwrap();
     let blind = McpServer::start_isolated(blind_core, media.clone(), media.clone()).unwrap();
     let blind_client =
@@ -1411,8 +1367,6 @@ async fn cc4_branch_server_with_the_project_path_handle_resolves_imported_availa
         "a verified asset needs no recovery"
     );
 
-    // The handle is shared, so a later Save As reaches the branch with no
-    // republishing.
     *handle.write().unwrap() = None;
     let listed = invoke_capability(&client, "list_look_assets", json!({})).await;
     assert_eq!(
@@ -1441,8 +1395,6 @@ async fn cc4_render_color_proof_reports_the_unpublished_lut_asset_from_the_real_
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let warm = kinewright_media::BuiltinLook::Warm;
-    // Valid, self-consistent metadata from a real bake, recorded as an
-    // imported asset so its bytes have to come from a store nobody published.
     let mut unpublished = warm.to_lut_asset(kinewright_core::LutAssetId(1));
     unpublished.title = "Unpublished look".to_owned();
     unpublished.source = kinewright_core::LutAssetSource::Imported {
@@ -1483,8 +1435,6 @@ async fn cc4_render_color_proof_reports_the_unpublished_lut_asset_from_the_real_
     .await;
     assert_eq!(refused.is_error, Some(true));
     let structured = refused.structured_content.as_ref().unwrap();
-    // CC4 §2.3, §8: the refusal is typed and names the asset, not a prose
-    // `render_failed` message an agent would have to parse.
     assert_eq!(structured["code"], "missing_lut_asset");
     let details = &structured["details"];
     assert_eq!(details["field"], "lut_asset_id");
@@ -1503,8 +1453,6 @@ async fn cc4_render_color_proof_reports_the_unpublished_lut_asset_from_the_real_
             .is_some_and(|action| action.contains("list_look_assets")),
         "{details}"
     );
-    // The BEFORE cell removes the node, so only the AFTER render needs the
-    // asset. That ordering is the document's, never the adapter's.
     assert_eq!(details["stage"], "after");
     assert!(
         details["availability"].is_object(),
@@ -1614,8 +1562,6 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
     let generated = managed_color_media();
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let asset = media.probe(generated.path()).unwrap();
-    // The project is exactly the asset's frames, so `duration` below is the
-    // half-open project range `get_color_qc` has to enforce.
     let duration = asset.duration.0;
     let core = Core::spawn(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -1633,9 +1579,6 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
         .as_u64()
         .unwrap();
 
-    // CC6 R13: the published schema carries no `resolution`, `proxy_sampling`,
-    // or `max_width`. A working-stage measurement is full-resolution or it is
-    // refused, so there is nothing for a caller to turn down.
     let opened = client
         .call_tool(
             CallToolRequestParams::new("get_capability")
@@ -1672,8 +1615,6 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
     assert_eq!(stale_body["details"]["expected_revision"], revision + 7);
     assert_eq!(stale_body["details"]["actual_revision"], revision);
 
-    // CC6 §3.5: skin is a diagnostic of a region the operator chose, so it is
-    // refused without one, before any render.
     let unscoped_skin = invoke_capability(
         &client,
         "get_color_qc",
@@ -1685,10 +1626,6 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
     assert_eq!(unscoped_body["code"], "color_qc_region_required");
     assert_eq!(unscoped_body["details"]["field"], "checks");
 
-    // CC6 §7 / errata E32: a frame the project does not have is refused, not
-    // measured. Both directions, before any render: the compositor would
-    // happily return its cleared target and the report would read as a clean
-    // legal-range pass over opaque black that no export will ever contain.
     assert!(duration > 0);
     for (field, request) in [
         ("timecode", json!({"timecode": -1})),
@@ -1704,8 +1641,6 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
         assert_eq!(body["details"]["field"], field, "{body}");
         assert_eq!(body["details"]["allowed"], format!("0..{duration}"));
     }
-    // The last frame the project has is inside the half-open range, so the
-    // guard cannot be passing by refusing everything.
     let last = invoke_capability(&client, "get_color_qc", json!({"timecode": duration - 1})).await;
     assert_ne!(
         last.structured_content.as_ref().unwrap()["code"],
@@ -1713,9 +1648,6 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
         "the last project frame must not be refused as out of range"
     );
 
-    // CC6 §7: `max_nodes` is validated on every call, not only when `per_node`
-    // is asked for - an out-of-range budget is a malformed request whether or
-    // not this call would have spent it. Refused before any render.
     for budget in [0, 17] {
         let refused = invoke_capability(
             &client,
@@ -1730,14 +1662,9 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
         assert_eq!(body["details"]["observed"], budget.to_string());
     }
 
-    // The measurement itself. `expected_revision` is deliberately absent: this
-    // is an inspector, not a planner.
     let report = invoke_capability(&client, "get_color_qc", json!({"timecode": 5})).await;
     let body = report.structured_content.as_ref().unwrap();
     if report.is_error == Some(true) {
-        // A test that accepts both branches asserts nothing: a renderer that
-        // silently stopped producing working proofs would look exactly like a
-        // green run. Refusing is a *skip*, and skipping is opt-in.
         assert!(
             std::env::var("KINEWRIGHT_GPU_TESTS_MAY_SKIP")
                 .ok()
@@ -1746,8 +1673,6 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
             "get_color_qc refused: {body}. Set KINEWRIGHT_GPU_TESTS_MAY_SKIP=1 to accept an \
              unavailable working proof on a machine with no usable adapter."
         );
-        // Even the skip branch asserts a typed code, so a refusal for the
-        // wrong reason still fails.
         assert_eq!(body["code"], "working_proof_unavailable");
         assert_eq!(body["applied"], false);
         assert_eq!(body["evidence_only"], true);
@@ -1757,9 +1682,6 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
              proof; get_color_qc's measured report was not exercised."
         );
     } else {
-        // The human-readable line reads the envelope's typed values rather
-        // than `Value`'s Display, so the stage is not quoted and the frame is
-        // not a JSON number rendering.
         let text = report.content[0].as_text().unwrap().text.clone();
         assert!(
             text.contains("stage=working_linear_post_composite,"),
@@ -1781,15 +1703,9 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
         assert_eq!(qc["delivery_bit_depth"], 8);
         // §3.1: the composite target is opaque by construction at this stage.
         assert_eq!(qc["transparent_pixel_count"], 0);
-        // Exact, not merely self-consistent: an unscoped measurement is every
-        // pixel of the 320x180 raster, and alpha is 1 everywhere at this
-        // stage, so both counts are the full raster and neither can drift
-        // without failing here.
         assert_eq!(qc["raster"], json!([320, 180]));
         assert_eq!(qc["visible_pixel_count"], json!(320 * 180));
         assert_eq!(qc["region"]["region_pixel_count"], json!(320 * 180));
-        // The default checks produce range, gamut, and a pre-export tag check,
-        // and never the optional sections.
         assert!(qc["range"].is_object());
         assert!(qc["gamut"].is_object());
         assert_eq!(
@@ -1805,11 +1721,6 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
         assert_eq!(qc["tags"]["conforming"], true);
         assert_eq!(qc["skin"], json!(null));
         assert_eq!(qc["nodes"], json!(null));
-        // The default `checks` publish exactly six assumptions: the four that
-        // hold for every measurement, the pre-export tag note, and the
-        // evidence-only boundary. The skin and per-node notes are absent
-        // because those checks did not run - a `>= 4` bound would pass even if
-        // the tool started describing a skin population it never measured.
         let assumptions = body["assumptions"]
             .as_array()
             .unwrap()
@@ -1842,8 +1753,6 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
         assert!(body["exceptions"].is_array());
         assert_eq!(qc["provenance"]["engine"], "kinewright_color_qc_v1");
 
-        // A region makes the skin check legal, and it measures the region the
-        // caller named rather than the whole raster.
         let scoped = invoke_capability(
             &client,
             "get_color_qc",
@@ -1868,8 +1777,6 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
         let scoped = scoped.structured_content.as_ref().unwrap();
         assert!(scoped["report"]["skin"].is_object());
         assert_eq!(scoped["report"]["tags"], json!(null));
-        // 2500..7500 basis points of 320x180 is x 80..240 and y 45..135 by
-        // CC2's floor/ceil rule: exactly 160 x 90 pixels, not merely "fewer".
         assert_eq!(scoped["report"]["visible_pixel_count"], json!(160 * 90));
         assert_eq!(
             scoped["report"]["region"]["region_pixel_count"],
@@ -1955,15 +1862,10 @@ async fn cc6_video_scopes_v2_points_at_get_color_qc_instead_of_a_fabricated_zero
             .is_some_and(|definition| definition.contains("display-clamped")),
         "{gamut}"
     );
-    // The fabricated zero is the actual defect: it reads as "measured, none
-    // found". Both keys must be absent, not zero.
     let gamut = gamut.as_object().unwrap();
     assert!(!gamut.contains_key("out_of_range_pixels"));
     assert!(!gamut.contains_key("out_of_range_basis_points"));
 
-    // CC6 §2.1: the working stage is a real name in one shared vocabulary, and
-    // the CC2 scope engine fails closed on it rather than falling back to
-    // monitoring evidence.
     let working = invoke_capability(
         &client,
         "get_video_scopes_v2",
@@ -2117,27 +2019,6 @@ async fn resolve_plan_confirmation(broker: kinewright_agent::ConfirmationBroker,
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
 }
-
-// ===========================================================================
-// CC7 §5 — the six scripted agent end-to-end tests.
-//
-// One `cc7_` test per scenario, driving the *real* MCP endpoint over
-// `McpServer::start` + `StreamableHttpClientTransport` with scripted tool
-// calls. There is no LLM here and no `AgentDriver`: every number these tests
-// assert comes from `kinewright_core::cc7_scenarios` (the scenario authority,
-// CC7 §2) or from `kinewright_media::cc7_sources` (the one raster generator,
-// CC7 §3), never from a literal restated at this call site.
-//
-// CC7 §5.1's uniform assertions run in every one of the six:
-//   1. every planner/inspector response carries `evidence_only: true` and
-//      `applied: false`, and the document is unchanged after planning;
-//   2. a stale `expected_revision` returns the typed `stale_revision`;
-//   3. one commit advances `timeline_revision` exactly once;
-//   4. the committed document EQUALS `cc7_canonical_operations` applied to the
-//      same base document — a regression pin on `match_parameters`, whose
-//      values were measured by an independent f64 transcription (R-M8);
-//   5. the same integers are re-read from `get_color_context`'s `color_nodes`.
-// ===========================================================================
 
 use kinewright_core::{
     NormalizedRoi, Operation, SCOPE_BASIS_POINTS, apply_batch,
@@ -2612,9 +2493,6 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         Some("get_audio_qc"),
         "AU3 §4.2: get_audio_qc is registered directly after get_audio_spectrum"
     );
-    // AU5 §4.3 rule 81: the repair inspector joins the audio evidence family
-    // at its end, so the three measurement surfaces stay adjacent and a fourth
-    // one appended anywhere else would fail here.
     let qc = registry
         .iter()
         .position(|entry| entry == "get_audio_qc")
@@ -2624,9 +2502,6 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         Some("get_audio_repair"),
         "AU5 §4.3: get_audio_repair is registered directly after get_audio_qc"
     );
-    // AU4 §4.3: each new mutator is generated directly after the scalar tool
-    // whose owner it automates, because `operation_tools` follows `Operation`
-    // declaration order and the two variants were declared there.
     for (scalar, curve) in [
         ("set_track_mix", "set_track_automation"),
         ("set_clip_audio", "set_clip_gain_envelope"),
@@ -2638,9 +2513,6 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
             "AU4 §4.3: {curve} is registered directly after {scalar}"
         );
     }
-    // AU4 §6.3 rule 134: the two Part B planners keep the audio family's
-    // alphabetical order around `plan_audio_normalization` — the ordering
-    // assert is extended, never relaxed.
     let normalization = registry
         .iter()
         .position(|entry| entry == "plan_audio_normalization")
@@ -2655,10 +2527,6 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         Some("plan_clip_fades"),
         "AU4 §6.3: plan_clip_fades is registered directly after plan_audio_normalization"
     );
-    // AU5 §5.9 rule 117: the ordering assert is EXTENDED, never relaxed. The
-    // three Part B capabilities follow the audio family in one run, with
-    // `capture_room_tone` directly before the planner that consumes what it
-    // writes, so appending a fourth anywhere else fails here.
     for (before, after) in [
         ("plan_clip_fades", "plan_dialogue_repair"),
         ("plan_dialogue_repair", "capture_room_tone"),
@@ -2672,17 +2540,6 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         );
     }
 
-    // The served byte counts CC6 recorded, asserted byte-identically: no AU1,
-    // AU2, AU3, or AU4 tool is served, and the seven served tools do not embed
-    // the `Operation` schema, so neither the generated mutators nor the new
-    // audio descriptor rows, prose, and QC schema reach them. AU3 Part B
-    // (§6.4/B13) moves the registry by 783 B — `QueueExportArgs`'
-    // `normalize_loudness` boolean and three rewritten descriptions — and none
-    // of it is served: `queue_export`, `get_export_jobs` and
-    // `plan_audio_normalization` are all registry-only tools. AU4 Part A
-    // (§4.3/A19) moves it by 93,394 B — two generated mutators and 820 B of
-    // shared `$defs` field growth on every tool that embeds `Operation` — and
-    // none of that is served either, for the same structural reason.
     let metrics = server.tool_surface_metrics();
     assert_eq!(metrics.tool_count, 7);
     assert_eq!(metrics.serialized_bytes, 5_660, "{metrics:?}");
@@ -2813,8 +2670,6 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let asset = media.probe(generated.path()).unwrap();
 
-    // Two tracks carrying the same sine so the report has a track to mute and
-    // a track to attenuate independently.
     let mut document = single_clip_document(asset.clone());
     document.tracks.push(Track {
         id: TrackId(2),
@@ -2946,9 +2801,6 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
     .await;
     assert_eq!(inverted.is_error, Some(true), "{inverted:?}");
 
-    // AU1 §6.2: one bound given fills the other. `start_frame` alone runs to
-    // the timeline duration; `end_frame` alone starts at frame 0. The echoed
-    // `report.range` is the proof.
     let from_start = invoke_capability(
         &client,
         "get_audio_levels",
@@ -2971,8 +2823,6 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
     assert_eq!(range["start"], json!(0), "{range}");
     assert_eq!(range["end"], json!(duration / 2), "{range}");
 
-    // AU1 §6.1: a range past the end is clamped by the media side, not
-    // rejected — unlike the sibling transcript/silence range helper.
     let beyond = invoke_capability(
         &client,
         "get_audio_levels",
@@ -3011,8 +2861,6 @@ async fn au2_set_audio_master_and_pan_law_round_trip_through_edit_plans_and_stat
             .await
             .unwrap();
 
-    // One plan, all three Part B edits: a bus with a non-zero fader, a master
-    // chain, and the constant-power law.
     let prepared = prepare_plan(
         &client,
         0,
@@ -3078,8 +2926,6 @@ async fn au2_set_audio_master_and_pan_law_round_trip_through_edit_plans_and_stat
         "{text}"
     );
 
-    // A neutral set removes the master and returns the law to balance, so
-    // both lines disappear again.
     let prepared = prepare_plan(
         &client,
         1,
@@ -3189,8 +3035,6 @@ async fn au4_set_clip_gain_envelope_and_track_automation_round_trip_through_edit
             .await
             .unwrap();
 
-    // One plan, all three curve writes: the clip envelope in clip-local
-    // frames and both track rides in project frames.
     let prepared = prepare_plan(
         &client,
         0,
@@ -3242,15 +3086,11 @@ async fn au4_set_clip_gain_envelope_and_track_automation_round_trip_through_edit
             .len(),
         3
     );
-    // AU4 §2.5 rule 32a: a `SetTrackAutomation` on an un-mixed track pushes a
-    // new entry, and the five scalars stay neutral.
     assert_eq!(document.audio_mix.tracks.len(), 1);
     let mix = document.track_mix(TrackId(1));
     assert_eq!(mix.gain_tenth_db, 0);
     assert_eq!(mix.pan_percent, 0);
     assert!(mix.gain_curve.is_some() && mix.pan_curve.is_some());
-    // AU4 §2.1 rule 11: a curve-bearing entry is not neutral, which is the
-    // only reason the `mix=` suffix below exists at all.
     assert!(!mix.is_neutral());
 
     let state = client
@@ -3271,8 +3111,6 @@ async fn au4_set_clip_gain_envelope_and_track_automation_round_trip_through_edit
         "{text}"
     );
 
-    // Clearing every curve removes both suffixes, and rule 32a removes the
-    // whole entry, so the document is the one that never carried a curve.
     let prepared = prepare_plan(
         &client,
         1,
@@ -3338,8 +3176,6 @@ async fn au4_set_clip_gain_envelope_and_track_automation_round_trip_through_edit
     let text = &omitted.content[0].as_text().unwrap().text;
     assert!(text.contains("missing field `curve`"), "{text}");
 
-    // AU4 §2.6 rule 39: the vocabulary comes back with the refusal, and it is
-    // raised before the curve is even validated.
     let unknown = prepare_plan(
         &client,
         2,
@@ -3434,8 +3270,6 @@ async fn au4_audio_bus_and_master_fader_curves_round_trip_and_clear_when_omitted
         "{text}"
     );
 
-    // The round trip: read the rendered ride back, write it straight into
-    // `upsert_audio_bus`, and the document does not move.
     let before = query_document(&core);
     let bus_curve = curve_from_rendered(&rendered_curve(&text, "gain_curve=["));
     let prepared = prepare_plan(
@@ -3465,8 +3299,6 @@ async fn au4_audio_bus_and_master_fader_curves_round_trip_and_clear_when_omitted
         "writing back the rendered fader curve must be the identity"
     );
 
-    // Rule 34: an omitted `gain_curve` clears it, exactly as an omitted
-    // `effects` clears the chain.
     let prepared = prepare_plan(
         &client,
         2,
@@ -3610,16 +3442,8 @@ async fn au4_get_audio_levels_reports_both_track_automation_curves() {
         json!([{"at": 0, "value": -50, "interpolation": "hold"}]),
         "{report}"
     );
-    // AU3 A14's walk, applied to the automated report: an envelope adds no
-    // float to the wire.
     assert_integer_leaves("report", &report);
 
-    // The golden half: stripping the two new keys gives back the pre-AU4
-    // `mix` object byte for byte, so the only shape change AU4 makes to this
-    // report is the two default-omitted fields. Compared on the `mix` object
-    // rather than the whole report because the *measurement* is media's to
-    // change once automation is evaluated (AU4 §3), while `mix` is document
-    // state and must not move at all.
     let mut stripped = mix.clone();
     let stripped = stripped.as_object_mut().unwrap();
     stripped.remove("gain_curve");
@@ -3730,8 +3554,6 @@ async fn au2_get_audio_spectrum_measures_the_real_mix() {
         "a 1 kHz sine must peak in the 1000 Hz band: {report}"
     );
 
-    // AU2 §6.2: the text format, including the five flagged bands and the
-    // one-decimal centre.
     let text = &master.content[0].as_text().unwrap().text;
     let lines = text.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 32, "one header and 31 band lines: {text}");
@@ -3804,12 +3626,6 @@ async fn au2_get_audio_spectrum_measures_the_real_mix() {
         .unwrap()
         .clone();
     assert_eq!(peak["center_hertz_tenths"], json!(10_000), "{report}");
-    // AU2 §5.6: the bus fader sits inside the bus stem, so a -60 tenth-dB bus
-    // gain must move every band of that stem by -600 hundredths against the
-    // post-track-stage stem feeding it. This is the AU1 gain pin
-    // (`au1_get_audio_levels_measures_the_real_mix`) applied to the spectrum:
-    // a bus stem tapped pre-fader, or the wrong stem entirely, would still
-    // peak at 1 kHz and pass the assertion above.
     let bus_1k = spectrum_band_level(report, 10_000);
     assert!(
         (bus_1k - track_1k + 600).abs() <= 5,
@@ -3825,8 +3641,6 @@ async fn au2_get_audio_spectrum_measures_the_real_mix() {
         "{bus:?}"
     );
 
-    // AU2 §5.9/A23: a range shorter than two Welch segments is refused with
-    // the typed `MixSpectrumRangeTooShort`, never a degenerate spectrum.
     let short = invoke_capability(
         &client,
         "get_audio_spectrum",
@@ -3841,8 +3655,6 @@ async fn au2_get_audio_spectrum_measures_the_real_mix() {
         "{text}"
     );
 
-    // An inverted range is refused rather than clamped, exactly as
-    // `get_audio_levels` refuses one.
     let inverted = invoke_capability(
         &client,
         "get_audio_spectrum",
@@ -3998,8 +3810,6 @@ async fn au3_get_audio_qc_is_evidence_only_and_revision_gated() {
         .as_u64()
         .unwrap();
 
-    // The published schema: an inspector with exactly the four AU3 §4.1
-    // arguments and nothing else accepted.
     let opened = client
         .call_tool(
             CallToolRequestParams::new("get_capability")
@@ -4016,8 +3826,6 @@ async fn au3_get_audio_qc_is_evidence_only_and_revision_gated() {
     }
     assert_eq!(properties.len(), 4, "{opened}");
     assert_eq!(opened["input_schema"]["additionalProperties"], json!(false));
-    // `get_capability` publishes the description's first sentence as the
-    // summary; the full description's 1 KB budget is pinned in-crate.
     let summary = opened["capability"]["summary"].as_str().unwrap();
     assert!(
         summary.starts_with("Measure evidence-only audio QC of the master mix")
@@ -4053,8 +3861,6 @@ async fn au3_get_audio_qc_is_evidence_only_and_revision_gated() {
         "get_audio_qc needs start_frame < end_frame; got 30..10"
     );
 
-    // `deny_unknown_fields`: a resolution knob of any spelling is a malformed
-    // request, surfaced as a protocol error rather than silently ignored.
     let unknown = client
         .call_tool(
             CallToolRequestParams::new("invoke_capability").with_arguments(
@@ -4067,8 +3873,6 @@ async fn au3_get_audio_qc_is_evidence_only_and_revision_gated() {
         .await;
     assert!(unknown.is_err(), "{unknown:?}");
 
-    // F12: every delivery profile publishes its loudness target, and the
-    // description says so.
     let profiles = invoke_capability(&client, "get_delivery_profiles", json!({})).await;
     assert_eq!(profiles.is_error, Some(false), "{profiles:?}");
     let profiles = profiles.structured_content.as_ref().unwrap()["profiles"]
@@ -4111,8 +3915,6 @@ async fn au3_get_audio_qc_is_evidence_only_and_revision_gated() {
         "{summary}"
     );
 
-    // Q3: a range shorter than one 400 ms gating block is refused, typed,
-    // with the frame counts. One frame at 30 fps is 1 600 sample frames.
     let short = invoke_capability(
         &client,
         "get_audio_qc",
@@ -4125,8 +3927,6 @@ async fn au3_get_audio_qc_is_evidence_only_and_revision_gated() {
         "get_audio_qc needs at least one 400 ms gating block (19200 sample frames); got 1600"
     );
 
-    // The measurement itself. `expected_revision` is deliberately absent:
-    // this is an inspector, not a planner.
     let report = invoke_capability(&client, "get_audio_qc", json!({})).await;
     assert_eq!(report.is_error, Some(false), "{report:?}");
     let body = report.structured_content.as_ref().unwrap();
@@ -4145,8 +3945,6 @@ async fn au3_get_audio_qc_is_evidence_only_and_revision_gated() {
     assert_eq!(qc["provenance"]["measurement_rate"], 48_000);
     assert!(qc["target"].is_null(), "no profile, no target: {qc}");
     assert_eq!(body["exceptions"], qc["exceptions"]);
-    // A14: every leaf of the report and of the envelope is an integer, a
-    // bool, a string, or null.
     assert_integer_leaves("envelope", body);
     // A15: the four text lines of §4.1, none of them quoted JSON.
     let text = report.content[0].as_text().unwrap().text.clone();
@@ -4182,9 +3980,6 @@ async fn au3_get_audio_qc_is_evidence_only_and_revision_gated() {
         "{assumptions:#?}"
     );
 
-    // A profile binds the report to that profile's published target and adds
-    // exactly one assumption. The wire spelling is serde's `youtube1080p`;
-    // the text echoes `get_delivery_profiles`' id.
     let judged =
         invoke_capability(&client, "get_audio_qc", json!({"profile": "youtube1080p"})).await;
     assert_eq!(judged.is_error, Some(false), "{judged:?}");
@@ -4292,8 +4087,6 @@ async fn au3_get_audio_qc_measures_the_real_mix() {
         momentary + 1 >= before,
         "the loudest window {momentary} is at or above the gated mean {before}"
     );
-    // §2.1 / §6.9: the 2.002 s fixture reports no short-term maximum and no
-    // loudness range, both of which need complete 3 s windows.
     assert!(
         master["short_term_max_lufs_hundredths"].is_null(),
         "{master}"
@@ -4311,9 +4104,6 @@ async fn au3_get_audio_qc_measures_the_real_mix() {
     assert_eq!(qc["exceptions"], json!([]), "{qc}");
     assert_eq!(qc["technical_pass"], true);
 
-    // A streaming profile: a -18 dBFS sine is far under -14 LUFS, so exactly
-    // the out-of-tolerance warning is raised, the peak is under the ceiling,
-    // and technical_pass stays true because no Error was raised.
     let judged =
         invoke_capability(&client, "get_audio_qc", json!({"profile": "youtube1080p"})).await;
     assert_eq!(judged.is_error, Some(false), "{judged:?}");
@@ -4340,8 +4130,6 @@ async fn au3_get_audio_qc_measures_the_real_mix() {
         -2_300
     );
 
-    // Exactly one gating block (12 frames at 30 fps = 19 200 sample frames)
-    // measures; one frame is refused before anything is decoded.
     let one_block = invoke_capability(
         &client,
         "get_audio_qc",
@@ -4355,8 +4143,6 @@ async fn au3_get_audio_qc_measures_the_real_mix() {
         qc["master"]["integrated_lufs_hundredths"].is_i64(),
         "one complete block is gated in: {qc}"
     );
-    // An `end_frame` past the timeline is clamped, not refused: the report's
-    // range and the first text line both show the clamped bounds.
     let over_long = invoke_capability(
         &client,
         "get_audio_qc",
@@ -4439,8 +4225,6 @@ async fn au3_get_audio_qc_measures_the_real_mix() {
         "sample peak {sample_peak} -> {after_sample_peak}"
     );
 
-    // AU3 §2.1 gloss on `get_audio_levels`: the master line spells the four
-    // new fields, `none` for the two a 2 s programme cannot measure.
     let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
     assert_eq!(levels.is_error, Some(false), "{levels:?}");
     let levels_text = levels.content[0].as_text().unwrap().text.clone();
@@ -4457,8 +4241,6 @@ async fn au3_get_audio_qc_measures_the_real_mix() {
         "{master_line}"
     );
 
-    // A muted track is digital silence: measured, not refused, with
-    // `integrated: null`, the lone `audio_silent` warning, and no Error.
     let prepared = prepare_plan(
         &client,
         1,
@@ -4546,8 +4328,6 @@ async fn au5_get_audio_repair_is_evidence_only_and_revision_gated() {
         .as_u64()
         .unwrap();
 
-    // The published schema: an inspector with exactly the five AU5 §4.1
-    // arguments and nothing else accepted.
     let opened = client
         .call_tool(
             CallToolRequestParams::new("get_capability").with_arguments(
@@ -4574,8 +4354,6 @@ async fn au5_get_audio_repair_is_evidence_only_and_revision_gated() {
     }
     assert_eq!(properties.len(), 5, "{opened}");
     assert_eq!(opened["input_schema"]["additionalProperties"], json!(false));
-    // Rule 76: `get_capability` publishes only the first sentence, so the
-    // percentile and the DIRECTION of its bias have to be inside it.
     let summary = opened["capability"]["summary"].as_str().unwrap();
     assert!(
         summary.starts_with("Measures a percentile noise floor, percentile SNR"),
@@ -4605,8 +4383,6 @@ async fn au5_get_audio_repair_is_evidence_only_and_revision_gated() {
     assert_eq!(stale_body["details"]["expected_revision"], revision + 7);
     assert_eq!(stale_body["details"]["actual_revision"], revision);
 
-    // The range rule is `get_audio_levels`': an inverted range is refused by
-    // name rather than clamped.
     let inverted = invoke_capability(
         &client,
         "get_audio_repair",
@@ -4627,8 +4403,6 @@ async fn au5_get_audio_repair_is_evidence_only_and_revision_gated() {
         "get_audio_repair takes at most one of track and bus"
     );
 
-    // `deny_unknown_fields`: a misspelled bound is a malformed request,
-    // surfaced as a protocol error rather than silently defaulted.
     let unknown = client
         .call_tool(
             CallToolRequestParams::new("invoke_capability").with_arguments(
@@ -4641,13 +4415,9 @@ async fn au5_get_audio_repair_is_evidence_only_and_revision_gated() {
         .await;
     assert!(unknown.is_err(), "{unknown:?}");
 
-    // The measurement itself. `expected_revision` is deliberately absent:
-    // this is an inspector, not a planner.
     let report = invoke_capability(&client, "get_audio_repair", json!({})).await;
     assert_eq!(report.is_error, Some(false), "{report:?}");
     let body = report.structured_content.as_ref().unwrap();
-    // A15: exactly the two keys, and every leaf an integer, bool, string or
-    // null.
     assert_eq!(
         body.as_object().unwrap().keys().collect::<Vec<_>>(),
         vec!["report", "timeline_revision"],
@@ -4667,10 +4437,6 @@ async fn au5_get_audio_repair_is_evidence_only_and_revision_gated() {
         repair.get("export_ready").is_none(),
         "an evidence report never carries an export gate: {repair}"
     );
-    // Two seconds of steady tone is 200 whole 10 ms windows, all but the odd
-    // edge window energetic, so the percentiles are reported and their
-    // difference is small: the 10th and 90th percentile of a constant signal
-    // are nearly the same window level.
     let windows = repair["windows"].as_i64().unwrap();
     assert!(
         (190..=200).contains(&windows),
@@ -4685,9 +4451,6 @@ async fn au5_get_audio_repair_is_evidence_only_and_revision_gated() {
         "a signal with no silence in it reads a near-zero SNR, which is the \
          percentile bias rule 21 publishes: {repair}"
     );
-    // The 440 Hz sine carries no mains hum: every 50 and 60 Hz harmonic sits
-    // at or under its own sixth-octave shoulders, so both summed excesses are
-    // clamped to zero and neither raises `mains_hum_present`.
     assert_eq!(repair["hum_50_excess_db_hundredths"], 0, "{repair}");
     assert_eq!(repair["hum_60_excess_db_hundredths"], 0, "{repair}");
     // The click density is derived from the count, not measured twice.
@@ -4708,9 +4471,6 @@ async fn au5_get_audio_repair_is_evidence_only_and_revision_gated() {
         );
     }
 
-    // Rule 77: the rendered text names every figure with its unit and repeats
-    // the percentile clause in prose, so a reader of the text alone still
-    // learns what the floor is.
     let text = report.content[0].as_text().unwrap().text.clone();
     assert!(
         text.starts_with(&format!(
@@ -4766,8 +4526,6 @@ fn au5_effect_documentation_hatches_the_noise_profile() {
         .filter(|parameter| kinewright_core::is_noise_profile_parameter(parameter.name))
         .collect::<Vec<_>>();
     assert_eq!(bands.len(), 31, "AU5 §2.1: 31 profile rows");
-    // The row spelling `effect_documentation` would otherwise have emitted,
-    // built from the same descriptor the hatch reads.
     let enumerated = bands
         .iter()
         .map(|parameter| {
@@ -4818,11 +4576,6 @@ fn au5_effect_documentation_hatches_the_noise_profile() {
             !description.contains(&enumerated),
             "{name} must not carry the enumeration"
         );
-        // AU5 §0 R81/R82: the whole AU5 growth on this description is the
-        // three new descriptor sections, and it is 758 B — the per-tool figure
-        // the registry ledger's description-byte split is built from. Pinning
-        // it here makes that split falsifiable without re-measuring the whole
-        // registry.
         let first = description
             .find("; audio_denoise(")
             .expect("the three AU5 descriptors are appended after audio_true_peak_limiter");
@@ -4834,9 +4587,6 @@ fn au5_effect_documentation_hatches_the_noise_profile() {
             758,
             "{name}: AU5's three descriptor sections must measure 758 B"
         );
-        // The hatch is worth more than four times its own length on every one
-        // of the five tools, which is rule 78's argument measured rather than
-        // asserted.
         let pattern = description
             .split_once("profile_band{01..31}")
             .map(|(_, rest)| {
@@ -4899,8 +4649,6 @@ async fn au3_plan_audio_normalization_converges_through_the_real_engine() {
     );
     let body = planned.structured_content.as_ref().unwrap();
     let revision = body["timeline_revision"].as_u64().unwrap();
-    // AU3 §6.3: the headroom is core's, and the processing ceiling is the
-    // requested ceiling minus it.
     assert_eq!(body["lossy_codec_peak_headroom_hundredths"], 200);
     assert_eq!(body["processing_ceiling_dbfs_hundredths"], -300);
     // The predicted measurement carries AU3's true peak through `AudioLoudness`.
@@ -4935,8 +4683,6 @@ async fn au3_plan_audio_normalization_converges_through_the_real_engine() {
         committed.structured_content
     );
 
-    // What landed in the document: one delivery bus whose last node is the
-    // inter-sample-aware limiter, never the legacy sample-peak clamp.
     let document = query_document(&core);
     let bus = document
         .audio_mix
@@ -4974,8 +4720,6 @@ async fn au3_plan_audio_normalization_converges_through_the_real_engine() {
         "F17b: one re-cue, 5 ms of the 20 ms budget"
     );
 
-    // The committed mix really measures where the plan said it would, and its
-    // decoded true peak is under the requested ceiling.
     let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
     assert_eq!(levels.is_error, Some(false), "{levels:?}");
     let master = &levels.structured_content.as_ref().unwrap()["report"]["master"];
@@ -5104,9 +4848,6 @@ async fn au3_plan_audio_normalization_engages_the_true_peak_limiter_on_hot_mater
         committed.structured_content
     );
 
-    // The same chain contract the steady-sine test pins, on hot material: a
-    // true-peak limiter last, never the legacy sample-peak clamp, and 5 ms of
-    // the 20 ms re-cue budget.
     let document = query_document(&core);
     let bus = document
         .audio_mix
@@ -5129,8 +4870,6 @@ async fn au3_plan_audio_normalization_engages_the_true_peak_limiter_on_hot_mater
         5,
         "F17b: one re-cue, 5 ms of the 20 ms budget"
     );
-    // The compressor is engaged, not the 1:1 pass-through the steady sine
-    // gets: this is the branch whose peak the limiter has to finish.
     let compressor = bus
         .effects
         .first()
@@ -5155,10 +4894,6 @@ async fn au3_plan_audio_normalization_engages_the_true_peak_limiter_on_hot_mater
         "au3 hot chain: {names:?} planned_gain_tenth_db={planned_gain_tenth_db} compressor_threshold_tenth_db={:?}",
         compressor.static_integer_parameter("threshold_tenth_db")
     );
-    // The planner's own compression-required test, restated on the numbers it
-    // published: the gain it committed carries the measured peak over the
-    // processing ceiling, which is exactly why the compressor is engaged and
-    // why the limiter below has a peak left to catch.
     assert!(
         current_peak + planned_gain_tenth_db * 10 > -300,
         "measured peak {current_peak} plus {planned_gain_tenth_db} tenth dB must clear the -300 processing ceiling"
@@ -5183,8 +4918,6 @@ async fn au3_plan_audio_normalization_engages_the_true_peak_limiter_on_hot_mater
         "the true-peak limiter must hold the requested ceiling: {limited_true_peak}"
     );
 
-    // The differential: the same bus with only the limiter removed. If the
-    // limiter were a no-op, this would measure the same peak.
     let mut unlimited_bus = bus.clone();
     let removed = unlimited_bus
         .effects
@@ -5278,8 +5011,6 @@ async fn au3_queue_export_normalizes_and_verifies_audio() {
             .await
             .unwrap();
 
-    // The target is never on the request: the request says yes, the profile
-    // says what to. `get_delivery_profiles` publishes the same number.
     let profiles = invoke_capability(&client, "get_delivery_profiles", json!({})).await;
     let published = profiles.structured_content.as_ref().unwrap()["profiles"]
         .as_array()
@@ -5314,8 +5045,6 @@ async fn au3_queue_export_normalizes_and_verifies_audio() {
         queued.structured_content
     );
 
-    // Poll the queue rather than sleeping on a fixed budget: a real encode
-    // plus a real decode is the slowest thing in this file.
     let deadline = std::time::Instant::now() + Duration::from_secs(180);
     let job = loop {
         let jobs = invoke_capability(&client, "get_export_jobs", json!({})).await;
@@ -5364,8 +5093,6 @@ async fn au3_queue_export_normalizes_and_verifies_audio() {
         "the pre-encode master is on target: {after}"
     );
 
-    // AU3 §5.3: the written file was decoded and measured against that target,
-    // independently of `verify: false`.
     assert_eq!(
         record["audio_verification_unavailable_reason"],
         serde_json::Value::Null,
@@ -5492,9 +5219,6 @@ async fn cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_
     )
     .await;
 
-    // CC7 §4(a)(1) failing direction: the reference may not also be a
-    // candidate, so "the reference was retained" cannot be satisfied by
-    // matching it against itself.
     let self_match = invoke_capability(
         &client,
         "plan_shot_match",
@@ -5532,8 +5256,6 @@ async fn cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_
     );
     let matched = matched.structured_content.as_ref().unwrap().clone();
     cc7_assert_evidence_only(&matched, "plan_shot_match");
-    // `reference_retained` is a hardcoded literal (`color_scopes.rs:906`) and
-    // is asserted **present**, never as the evidence of retention (R-M19).
     assert_eq!(matched["reference_retained"], true);
     let candidates = matched["editable_operations"].as_array().unwrap();
     assert_eq!(candidates.len(), 1);
@@ -5541,8 +5263,6 @@ async fn cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_
     assert_eq!(proposal["clip_id"], CC7_CANDIDATE_CLIP_ID.0);
     cc7_assert_evidence_only(proposal, "plan_shot_match candidate");
 
-    // CC7 §5.1(4): the regression pin. These integers are exactly what
-    // `match_parameters` produced when probe-2 transcribed it in f64.
     assert_eq!(
         proposal["parameters"]["exposure_milli_stops"], CC7_MATCH_PROPOSAL_B.exposure_milli_stops,
         "{proposal}"
@@ -5555,8 +5275,6 @@ async fn cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_
         proposal["parameters"]["tint_percent"], CC7_MATCH_PROPOSAL_B.tint_percent,
         "{proposal}"
     );
-    // CC7 §4(a)(4): the intentional desaturation is not corrected away, so no
-    // saturation term is proposed anywhere in the response.
     assert!(
         proposal["parameters"].get("saturation_percent").is_none(),
         "no saturation term may be proposed: {proposal}"
@@ -5567,8 +5285,6 @@ async fn cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_
             .is_none(),
         "no saturation control may appear in proposal_details: {proposal}"
     );
-    // CC7 §4(b)(1)'s absent-key rule, in the passing direction here: every
-    // control the planner *did* propose is unclamped for cam B.
     for name in [
         "exposure_milli_stops",
         "temperature_percent",
@@ -5592,8 +5308,6 @@ async fn cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_
     )
     .await;
 
-    // CC7 §4(a)(1): the reference clip carries zero effects, and its
-    // serialized form is byte-identical to its pre-commit form.
     let after = query_document(&core);
     assert!(
         after.tracks[0].clips[0].effects.is_empty(),
@@ -5744,7 +5458,6 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
     let unrecoverable_media = cc7_camera_source(Cc7Camera::C2);
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
 
-    // ---------------------------------------------------------------- (b1)
     let reference = media.probe(reference_media.path()).unwrap();
     let recoverable = media.probe(recoverable_media.path()).unwrap();
     let candidate_start = reference.duration.0;
@@ -5790,11 +5503,6 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
     let matched = matched.structured_content.as_ref().unwrap().clone();
     cc7_assert_evidence_only(&matched, "plan_shot_match");
     let recoverable_proposal = &matched["editable_operations"][0];
-    // CC7 §4(b)(1), R-M19: an absent `proposal_details` key means *not
-    // proposed*, never *zero* (`color_scopes.rs:1897-1903`), so the gate
-    // iterates the controls that ARE present — and separately asserts
-    // `temperature_percent` is one of them, so a run in which the planner
-    // proposed nothing at all cannot pass by vacuous iteration.
     let details = recoverable_proposal["proposal_details"]
         .as_object()
         .unwrap();
@@ -5810,9 +5518,6 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
     ] {
         if let Some(control) = details.get(name) {
             present.push(name);
-            // `cc7_b_c1_publishes_no_clamp`, inline: C1 is recoverable, so
-            // every control it *did* propose is inside its descriptor bound,
-            // and (b2)'s clamp assertion below is therefore not tautological.
             assert_eq!(
                 control["clamped"], false,
                 "C1 is inside the planner's authority: {control}"
@@ -5827,12 +5532,6 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
         !present.is_empty(),
         "the planner must propose something for C1: {recoverable_proposal}"
     );
-    // CC7 §5.1(4), R2-MAJ-1: `CC7_MATCH_PROPOSAL_C1` is a **regression pin on
-    // the live planner**, taken here against the real `match_parameters`
-    // (`color_scopes.rs:1860-1965`) rather than only against the media crate's
-    // independent f64 replica. Without these three lines a planner that
-    // stopped proposing exposure, or moved `+1 465`, would still pass the
-    // iteration above — which is the vacuity R-M19 exists to close.
     assert_eq!(
         recoverable_proposal["parameters"]["exposure_milli_stops"],
         CC7_MATCH_PROPOSAL_C1.exposure_milli_stops,
@@ -5843,9 +5542,6 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
         CC7_MATCH_PROPOSAL_C1.temperature_percent,
         "{recoverable_proposal}"
     );
-    // Errata D-E5: C1's tint delta rounds to `0`, so the control is omitted
-    // entirely — the absent-key rule (R-M19) exercised by a real measurement.
-    // `CC7_MATCH_PROPOSAL_C1.tint_percent == 0` *means* "not proposed".
     assert_eq!(CC7_MATCH_PROPOSAL_C1.tint_percent, 0);
     assert!(
         !details.contains_key("tint_percent"),
@@ -5869,15 +5565,11 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
         "CC7 (b1) measured on the amended twelve-patch band: present={present:?} parameters={} details={}",
         recoverable_proposal["parameters"], recoverable_proposal["proposal_details"],
     );
-    // §5.2's (b) script commits C2, never C1: (b1)'s canonical document is
-    // proved by the media fixtures, so nothing is committed on this server and
-    // the revision must not have moved.
     assert_eq!(query_document(&core), base);
     assert_eq!(cc7_revision(&client).await, revision);
     client.cancel().await.unwrap();
     server.shutdown();
 
-    // ---------------------------------------------------------------- (b2)
     let reference = media.probe(reference_media.path()).unwrap();
     let unrecoverable = media.probe(unrecoverable_media.path()).unwrap();
     let base = cc7_two_clip_document(reference, unrecoverable);
@@ -5930,11 +5622,6 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
         temperature["clamped"], CC7_MATCH_PROPOSAL_C2.temperature_clamped,
         "{temperature}"
     );
-    // R2 minor 1/2: the published bound is the **descriptor's**, read from the
-    // same place `primary_parameter_bounds` reads it. Comparing `max` against
-    // the clamped value would let a descriptor change and a clamp change move
-    // together and cancel; a bare `-100` would restate a CC1 fact at the call
-    // site (§2.1).
     let (temperature_min, temperature_max) = cc7_primary_bounds("temperature_percent");
     assert_eq!(temperature["min"], temperature_min, "{temperature}");
     assert_eq!(temperature["max"], temperature_max, "{temperature}");
@@ -5942,12 +5629,6 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
         CC7_MATCH_PROPOSAL_C2.temperature_percent, temperature_max,
         "C2's published value IS the descriptor's upper bound"
     );
-    // `requested` is `current + delta`, i.e. the **rounded** first-order term
-    // for a non-composed proposal (`color_scopes.rs:1918-1924`).
-    // `CC7_MATCH_PROPOSAL_C2.temperature_unrounded_delta` is that rounded
-    // number despite its name (R2 minor 3), so the response's real `f64`
-    // `unrounded_delta` is read here too and asserted to round onto it — the
-    // one place the two quantities are tied together.
     let requested = CC7_MATCH_PROPOSAL_C2
         .temperature_unrounded_delta
         .expect("C2's temperature clamps from a measured raw delta");
@@ -5970,8 +5651,6 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
         "exposure stays inside its bound while temperature clamps: {proposal}"
     );
 
-    // CC7 §5.1(1), R2 minor 9: planning applied nothing on the (b2) leg
-    // either — the same check (a), (c), (d) and (e) make before their commits.
     assert_eq!(query_document(&core), base, "planning must apply nothing");
 
     cc7_prepare_commit_and_compare(
@@ -5983,9 +5662,6 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
     )
     .await;
 
-    // CC7 §5.1(5), R2-MAJ-2: the same three integers, re-read from
-    // `get_color_context`'s `color_nodes` manifest, so the committed document
-    // and the agent-visible manifest cannot disagree.
     let context = invoke_capability(&client, "get_color_context", json!({})).await;
     let context = context.structured_content.as_ref().unwrap();
     assert!(
@@ -6009,15 +5685,11 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
         node["parameters"]["tint_percent"], CC7_MATCH_PROPOSAL_C2.tint_percent,
         "{node}"
     );
-    // The manifest publishes the clamped value, never the raw term the planner
-    // asked for.
     assert_ne!(
         node["parameters"]["temperature_percent"], requested,
         "{node}"
     );
 
-    // CC6 §7: `max_nodes` is validated on every call, not only when `per_node`
-    // is asked for.
     let over_budget = invoke_capability(
         &client,
         "get_color_qc",
@@ -6092,13 +5764,6 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
         );
         assert_eq!(report["range"]["red"]["over_pixel_count"], 0, "{report}");
         assert_eq!(report["range"]["green"]["over_pixel_count"], 0, "{report}");
-        // R2 minor 5: §4(b)(3)'s `maximum_over_excursion_millionths` was
-        // printed and never read. The magnitude itself has no constant in
-        // `cc7_scenarios` (recorded as owed in the errata; §4(b)(3) states
-        // 41 538 in prose and §2.1 forbids restating it here), but the
-        // channel it lands on is asserted: the excursion's depth is on blue
-        // alone, so a run that clipped red or green fails here rather than in
-        // a printed line nobody reads.
         assert!(
             report["range"]["blue"]["maximum_over_excursion_millionths"]
                 .as_i64()
@@ -6201,9 +5866,6 @@ async fn cc7_c_log_like_input_is_normalised_by_an_imported_technical_lut() {
     let revision = cc7_revision(&client).await;
     assert_eq!(revision, 0);
 
-    // CC7 §4(c)(1), A21: the log signature, in the 16-bit unit the tool
-    // publishes. `mean_code_values.luma` is an 8-bit mean and is the wrong
-    // field; these two are `ChannelStatistics` percentiles (`scopes.rs:576`).
     let analysis = invoke_capability(
         &client,
         "analyze_color_shot",
@@ -6270,8 +5932,6 @@ async fn cc7_c_log_like_input_is_normalised_by_an_imported_technical_lut() {
     let lut_asset_id = imported["lut_asset"]["lut_asset_id"].as_u64().unwrap();
     assert_eq!(lut_asset_id, CC7_LUT_ASSET_ID.0);
     assert_eq!(imported["lut_asset"]["size"], CC7_LOG_CUBE_SIZE);
-    // `import_lut_asset` applies its own `AddLutAsset`, so the revision has
-    // already moved once before the node is planned.
     let after_import = cc7_revision(&client).await;
     assert_eq!(after_import, revision + 1);
 
@@ -6357,14 +6017,8 @@ async fn cc7_c_log_like_input_is_normalised_by_an_imported_technical_lut() {
     assert_eq!(nodes[0]["color_stage"], "input");
     assert_eq!(nodes[0]["stage_index"], 0);
     assert_eq!(nodes[0]["lut_asset_id"], lut_asset_id);
-    // `input_encoding_token = 0` is the descriptor neutral and is therefore
-    // not stored, but the manifest still resolves it (§2.5).
     assert_eq!(nodes[0]["input_encoding"], "display709");
     assert_eq!(nodes[0]["mix_basis_points"], CC7_LOOK_MIX_BASIS_POINTS);
-    // R2 minor 6: the ordering loop that used to stand here could never run —
-    // `nodes.len() == 1` above — so it read as a gate and was not one. §4(c)(4)
-    // on a one-node stack is exactly the two facts asserted above: the node is
-    // at the **input** stage and at `stage_index 0`, so nothing precedes it.
     assert!(
         nodes
             .iter()
@@ -6372,14 +6026,6 @@ async fn cc7_c_log_like_input_is_normalised_by_an_imported_technical_lut() {
         "(c) commits one input-stage node and nothing else: {nodes:#?}"
     );
 
-    // CC7 errata D-E3: the agent server never publishes an imported LUT's
-    // bytes to the renderer — the boundary
-    // `cc4_render_color_proof_reports_the_unpublished_lut_asset_from_the_real_renderer`
-    // (`:1439`) already pins — so (c)'s proof-side calls cannot render, and
-    // both refuse **deterministically and typed**. That is not a GPU-
-    // availability question, so §5.3's skip branch does not apply and these
-    // are asserted unconditionally: accepting either branch would assert
-    // nothing.
     let qc = invoke_capability(&client, "get_color_qc", json!({"timecode": 0})).await;
     let qc_body = qc.structured_content.as_ref().unwrap();
     assert_eq!(qc.is_error, Some(true), "{qc_body}");
@@ -6453,8 +6099,6 @@ async fn cc7_d_product_qualifier_selects_its_patch_and_leaves_skin_alone() {
     let revision = cc7_revision(&client).await;
     assert_eq!(revision, 0);
 
-    // CC7 §4(d)(3): the skin band before the grade, so "unchanged" is a
-    // measured difference rather than a single reading.
     let skin_before = invoke_capability(
         &client,
         "get_color_qc",
@@ -6568,11 +6212,6 @@ async fn cc7_d_product_qualifier_selects_its_patch_and_leaves_skin_alone() {
     );
     assert_eq!(cc7_revision(&client).await, revision + 1);
 
-    // CC7 errata D-E4: `SecondaryCorrectionPlanArgs` has no `saturation_percent`
-    // field (`color_status.rs:4326-4374`), so §5.2's (d) call is two calls: the
-    // matte through the secondary planner, then the grade through the CC1
-    // primary planner, which retargets the same node in place and therefore
-    // emits `SetEffectParam` alone — no second `AddEffect` and no neutral fill.
     let grade = invoke_capability(
         &client,
         "plan_primary_correction",
@@ -6749,8 +6388,6 @@ async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
     let asset = media.probe(generated.path()).unwrap();
     let warm = kinewright_media::BuiltinLook::Warm;
     let mut base = single_clip_document(asset);
-    // A built-in look is `verified` from this binary's own bake, so the
-    // scenario's own node needs no store (CC4 §2.6).
     base.lut_assets = vec![warm.to_lut_asset(CC7_LUT_ASSET_ID)];
     base.validate().expect("the CC7 (e) base document is valid");
     let expected =
@@ -6815,8 +6452,6 @@ async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
     .await;
     let after_commit = revision + 1;
 
-    // CC7 §5.1(5), R2-MAJ-2: the binding and the mix, re-read from
-    // `get_color_context`'s `color_nodes` manifest.
     let context = invoke_capability(&client, "get_color_context", json!({})).await;
     let context = context.structured_content.as_ref().unwrap();
     let nodes = context["clips"][0]["color_nodes"].as_array().unwrap();
@@ -6826,9 +6461,6 @@ async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
     assert_eq!(node["color_stage"], "look", "{node}");
     assert_eq!(node["lut_asset_id"], CC7_LUT_ASSET_ID.0, "{node}");
     assert_eq!(node["lut_sha256"], warm.pinned_sha256(), "{node}");
-    // The neutral mix is resolved by the manifest and stored by neither the
-    // planner nor the document (§2.5), so the manifest republishes `10 000`
-    // while the node's parameter map does not carry it.
     assert_eq!(
         node["mix_basis_points"], CC7_LOOK_MIX_BASIS_POINTS,
         "{node}"
@@ -6891,12 +6523,6 @@ async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
             );
             continue;
         }
-        // `bypass_not_lossless` is a refusal, never a `false` footnote
-        // (R-M4): reaching this branch is the assertion that it did not fire.
-        // R2 minor 13: `assert_ne!(body["code"], "bypass_not_lossless")` on a
-        // success body compared `Value::Null` against a string and could never
-        // fire, so the claim is made in the only non-vacuous form there is —
-        // a successful proof publishes **no** refusal code at all.
         assert_eq!(
             body["code"],
             json!(null),
@@ -6969,11 +6595,6 @@ async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
         );
         let report = &qc_body["report"];
         assert_eq!(report["technical_pass"], true, "{report}");
-        // R2 minor 12: "how many pixels the ROI resolves to" and "how many of
-        // them are out of gamut" are two quantities and are read from two
-        // constants, so an ROI that shrank and a look that stopped clipping
-        // can no longer cancel. §11.2.1's resolved-pixel-rect claim is the
-        // first; §4(e)(2)'s gamut count is the second.
         assert_eq!(
             report["region"]["region_pixel_count"],
             CC7_DEEP_SHADOW_RECT.pixels(),
@@ -7001,8 +6622,6 @@ async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
         );
     }
 
-    // CC7 §4(e)(4): the one agent-visible portability check. Import an asset
-    // into this project's store, Save As, and read the availability back.
     let imported = invoke_capability(
         &client,
         "import_lut_asset",
@@ -7035,8 +6654,6 @@ async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
     );
     assert_eq!(availability(&listed, imported_id)["sha256"], cube_sha);
 
-    // A *bare* relocation — the project path moves and the store does not —
-    // must not report `verified`, so the check below is not vacuous.
     server.set_project_path(Some(relocated.clone()));
     let unrelocated = invoke_capability(&client, "list_look_assets", json!({})).await;
     let unrelocated = unrelocated.structured_content.as_ref().unwrap().clone();
@@ -7046,8 +6663,6 @@ async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
         "a bare relocation cannot report verified: {unrelocated}"
     );
 
-    // Save As copies the store beside the new project file, and the same
-    // sha256 verifies again.
     let store_root = directory.join("look.kinewright-assets");
     let relocated_root = directory.join("look-saved-as.kinewright-assets");
     cc7_copy_directory(&store_root, &relocated_root);
@@ -7113,10 +6728,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
     let revision = cc7_revision(&client).await;
     assert_eq!(revision, 0);
 
-    // The seeded window: CC7 §2.3.6's `375 / 667` bp half extents on frame 0's
-    // square. Its centre is the descriptor neutral `5 000 / 5 000`, which is
-    // exactly frame 0's continuous centre, so it is resolved and not stored
-    // (errata A-E4).
     let plan = invoke_capability(
         &client,
         "plan_secondary_correction",
@@ -7186,8 +6797,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
     );
     let tracked_revision = revision + 2;
     assert_eq!(cc7_revision(&client).await, tracked_revision);
-    // The document the tracker is handed, kept so §5.1(1) can be asserted
-    // against it: `track_matte_window` is evidence-only and must not write.
     let graded = query_document(&core);
 
     // CC7 §5.5: a window index past the node's one active window is typed.
@@ -7252,8 +6861,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
         tracked_body["minimum_confidence_basis_points"],
         CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS
     );
-    // CC7 §5.1(1), R2 minor 9: the tracker publishes a prepared plan and
-    // writes nothing until it is committed.
     assert_eq!(
         query_document(&core),
         graded,
@@ -7287,8 +6894,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
         "the tool's even-distribution rule gives CC7_TRACK_SAMPLE_FRAMES: {tracked_body}"
     );
 
-    // R4-M1: the two pinned observation tables are indexed by position in
-    // `sample_frames`, so their length is asserted before either is indexed.
     assert_eq!(
         sample_frames.len(),
         CC7_TRACK_OBSERVED_CENTRES_BASIS_POINTS.len()
@@ -7298,8 +6903,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
         CC7_TRACK_OBSERVED_CONFIDENCE_BASIS_POINTS.len()
     );
 
-    // CC7 §4(f)(2): every surviving observation is within CC5's tolerance of
-    // the analytic centre — read from `observations[]`, in **layer** space.
     let mut worst = 0_i64;
     for sample in observations {
         let frame = sample["local_frame"].as_i64().unwrap();
@@ -7323,15 +6926,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
             sample["confidence_basis_points"].as_i64().unwrap()
                 >= CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS
         );
-        // CC7 §5.1(4), R4-M1: the analytic gate above is a 200 bp tolerance and
-        // cannot see a systematic drift smaller than that.
-        // `CC7_TRACK_OBSERVED_CENTRES_BASIS_POINTS` and
-        // `CC7_TRACK_OBSERVED_CONFIDENCE_BASIS_POINTS` are compared against the
-        // live `track_matte_window` **nowhere else in the workspace** — media's
-        // containment fixture reads the table and is therefore a pure function
-        // of it — so a tracker that moved every observation 150 bp would leave
-        // both gates green. R-M8 permits these two tables as regression pins;
-        // this is where they are taken, exactly, against the shipped tracker.
         assert_eq!(
             [
                 sample["center_x_basis_points"].as_i64().unwrap(),
@@ -7353,8 +6947,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
     assert!(
         low[0]["confidence_basis_points"].as_i64().unwrap() < CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS
     );
-    // R4-M1: the dropped sample is the eleventh row of both tables — the
-    // frozen pre-occlusion position and the confidence that fails the floor.
     let occluded = sample_frames.len() - 1;
     assert_eq!(
         [
@@ -7372,8 +6964,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
         low[0]
     );
 
-    // CC7 §4(f)(1) failing direction: the tool's own default drops nothing, so
-    // `CC7_TRACK_MIN_CONFIDENCE_BASIS_POINTS` is load-bearing.
     let defaulted = invoke_capability(
         &client,
         "track_matte_window",
@@ -7397,8 +6987,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
         CC7_DEFAULT_MATTE_TRACK_MINIMUM_CONFIDENCE_BASIS_POINTS
     );
 
-    // Commit the tracker's own prepared plan: `track_matte_window` publishes a
-    // `prepared_edit_plan`, not a bare operation list.
     let plan_id = tracked_body["prepared_edit_plan"]["plan_id"].clone();
     let committed = client
         .call_tool(
@@ -7424,12 +7012,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
         "the committed document must equal cc7_canonical_operations(TrackedSecondary)"
     );
 
-    // CC7 §4(f)(3), R4-M1: the committed curves, keyframe by keyframe, against
-    // `cc7_track_keyframe_centres(axis)` — the smoother's own output over the
-    // pinned observations. The whole-document equality above covers this as a
-    // `Document` diff; taken here by name, a tracker regression is reported as
-    // "curve X keyframe i" rather than as a two-thousand-line struct mismatch,
-    // and the derivation table gets a second, explicit live comparison.
     let tracked_document = query_document(&core);
     let tracked_effects = &tracked_document.tracks[0].clips[0].effects;
     assert_eq!(tracked_effects.len(), 1, "{tracked_effects:?}");
@@ -7456,14 +7038,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
         }
     }
 
-    // CC7 §5.1(5), R2-MAJ-2: the tracked node, re-read from
-    // `get_color_context`'s `color_nodes` manifest. The tracker writes two
-    // **curves** and no static centre, so the manifest — which reports the
-    // stored static values for this metadata-only surface
-    // (`color_status.rs:3111-3114`) — must still publish the seeded window at
-    // its neutral centre and the contract's own half extents. A manifest that
-    // silently flattened the curve into the static centre, or a commit that
-    // lost the window, fails here.
     let context = invoke_capability(&client, "get_color_context", json!({})).await;
     let context = context.structured_content.as_ref().unwrap();
     let manifest_nodes = context["clips"][0]["color_nodes"].as_array().unwrap();
@@ -7496,10 +7070,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
         "{node}"
     );
 
-    // CC7 §5.2 (f): the matte is inspectable at the sampled frames it moved
-    // through. R2 minor 10: §5.2's five frames are **indexed out of**
-    // `CC7_TRACK_SAMPLE_FRAMES` rather than restated as literals — positions
-    // 0, 2, 4 and 6, plus the last surviving sample at position 9.
     let gpu_may_skip = std::env::var("KINEWRIGHT_GPU_TESTS_MAY_SKIP")
         .ok()
         .as_deref()
@@ -7598,8 +7168,6 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
         details["observed"]["low_confidence_samples"][0]["confidence_basis_points"]
     );
 
-    // CC7 §4(f)(4)'s second direction: the same call at the 5 000 default does
-    // **not** refuse, so the floor is what produced the refusal.
     let permissive = invoke_capability(
         &client,
         "track_matte_window",
@@ -7842,8 +7410,6 @@ async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
             .await
             .unwrap();
 
-    // Silence analysis is asynchronous. The first call requests it and is
-    // refused by name; the loop is the readiness refusal's other branch.
     let depth = -120_i64;
     let arguments = json!({
         "music_track": 1,
@@ -7875,8 +7441,6 @@ async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
         json!([{"start_frame": 60, "end_frame": 126}]),
         "the 2.0-4.0 s burst plus the 200 ms hold is a 66-frame floor: {body}"
     );
-    // Rule 124: the parked fader is unity here, so the floor is the depth
-    // itself — and it is the *sum*, not the depth, that is committed.
     assert_eq!(body["parked_gain_tenth_db"], 0);
     assert_eq!(
         body["ducked_gain_tenth_db"].as_i64().unwrap(),
@@ -7912,9 +7476,6 @@ async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
         committed.structured_content
     );
 
-    // What landed: one gain curve on the music track, four keys, the attack
-    // key 5 frames before the first spoken frame and the release key 12 after
-    // the held floor ends.
     let document = query_document(&core);
     let curve = document
         .track_mix(TrackId(1))
@@ -7927,8 +7488,6 @@ async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
     assert_eq!(curve.value_at(TimeCode(125)), Some(depth));
     assert_eq!(curve.value_at(TimeCode(200)), Some(0));
 
-    // The engine's own answer: the music stem measured inside the ducked
-    // floor and inside the un-ducked stretch.
     let ducked = au4_music_track_loudness(&client, 66, 120).await;
     let unducked = au4_music_track_loudness(&client, 180, 240).await;
     let delta = ducked - unducked;
@@ -7940,8 +7499,6 @@ async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
         "the committed ride must really move the music stem by {depth} tenth dB: \
          unducked={unducked} ducked={ducked} delta={delta}"
     );
-    // The planner's own measurement agrees with the re-measurement, which is
-    // what makes rule 129's `measured` worth publishing.
     assert!(
         (plan_measured["delta_hundredths"].as_i64().unwrap() - delta).abs()
             <= PLAN_DUCKING_DEPTH_BUDGET_HUNDREDTHS,
@@ -7966,10 +7523,6 @@ async fn au4_music_track_loudness(
     .await;
     assert_eq!(levels.is_error, Some(false), "{levels:?}");
     let report = &levels.structured_content.as_ref().unwrap()["report"];
-    // AU4 §6.1 rule 128.1: the agent restates media's private audio rate as
-    // `MIX_MEASUREMENT_SAMPLE_RATE`, and this is where that restatement meets
-    // the real decoder — `LOUDNESS_GATING_BLOCK_FRAMES / rate == 400 ms` is
-    // only a fact about the gating block if the mix really runs at 48 kHz.
     assert_eq!(
         report["master"]["sample_rate"].as_u64(),
         Some(kinewright_agent::MIX_MEASUREMENT_SAMPLE_RATE),
@@ -8016,9 +7569,6 @@ async fn au4_plan_clip_fades_measures_the_real_mix_and_commits_set_clip_audio() 
             .await
             .unwrap();
 
-    // `deny_unknown_fields` closes the schema: a misspelled threshold is a
-    // protocol-level refusal that names the three accepted fields, not a
-    // silent fall back to the default.
     let misspelled = client
         .call_tool(
             CallToolRequestParams::new("invoke_capability").with_arguments(
@@ -8093,16 +7643,6 @@ async fn au4_plan_clip_fades_measures_the_real_mix_and_commits_set_clip_audio() 
     client.cancel().await.unwrap();
     server.shutdown();
 }
-
-// ===========================================================================
-// AU5 Part B — the agent's real-engine lanes (§7 B2, B6, B7, B10, B11).
-//
-// Every fixture here is exact `wav_f32` bytes through `GeneratedMedia::
-// from_bytes`, never lavfi, for AU5 §3.11's reason: the provisioned FFmpeg's
-// `sine` emits -18 dBFS. Every gated term prints its measurement beside its
-// budget in the `AU3_NORMALIZE` / `AU4_DUCK` house style, and no tolerance is
-// conditioned on the operating system.
-// ===========================================================================
 
 /// AU5 §3.11(e): the SNR gain `plan_dialogue_repair` must buy on fixture (a)
 /// at its **default** `reduction_tenth_db` of 120, in hundredths of a dB.
@@ -8275,8 +7815,6 @@ async fn au5_plan_dialogue_repair_moves_the_snr_through_the_real_engine() {
         json!(["audio_denoise", "audio_hum_removal", "audio_declick"]),
         "{body}"
     );
-    // Rule 107: the profile is learned over the LONGEST silence span, which on
-    // this fixture is the leading second of noise-only material.
     let learn = &body["learn_range"];
     assert_eq!(learn["track"], 1, "{body}");
     assert!(
@@ -8342,8 +7880,6 @@ async fn au5_plan_dialogue_repair_moves_the_snr_through_the_real_engine() {
         margin >= 2.0,
         "AU5 §3.12: every gated term keeps a 2x margin; measured {margin:.2}x"
     );
-    // The planner's own measurement agrees with the re-measurement, which is
-    // what makes rule 106's `measured` worth publishing at all.
     assert!(
         (body["measured"]["snr_gain_db_hundredths"].as_i64().unwrap() - gain).abs()
             <= PLAN_REPAIR_SNR_GAIN_BUDGET_HUNDREDTHS,
@@ -8353,7 +7889,6 @@ async fn au5_plan_dialogue_repair_moves_the_snr_through_the_real_engine() {
     client.cancel().await.unwrap();
     server.shutdown();
 
-    // ---- The negative arm: clean material refuses, naming both numbers. ----
     let clean = au5_clean_media();
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let asset = media.probe(clean.path()).unwrap();
@@ -8384,8 +7919,6 @@ async fn au5_plan_dialogue_repair_moves_the_snr_through_the_real_engine() {
         text.contains("HIGHER floor and therefore a LOWER gain"),
         "and which way the percentile floor biases it (rule 21): {text}"
     );
-    // Nothing was prepared, so nothing can be committed: the timeline is
-    // exactly where it started.
     assert_eq!(cc7_revision(&client).await, 0);
     assert!(query_document(&core).audio_mix.buses.is_empty());
     println!("AU5_PLAN_REPAIR_REFUSAL {text}");
@@ -8595,8 +8128,6 @@ async fn au5_the_repair_and_normalization_planners_agree_in_either_order() {
         assert_eq!(curve.keyframes[0].value, -2, "{label}");
         assert_eq!(curve.keyframes[1].value, -1, "{label}");
         assert_eq!(bus.tracks, vec![TrackId(1)], "{label}");
-        // Effect ids are unique, in both orders: the delivery processing never
-        // reuses a repair node's id.
         let mut ids = bus
             .effects
             .iter()
@@ -8606,8 +8137,6 @@ async fn au5_the_repair_and_normalization_planners_agree_in_either_order() {
         ids.dedup();
         assert_eq!(ids.len(), bus.effects.len(), "{label}: {:?}", bus.effects);
 
-        // The loudness the convergence landed on is the REPAIRED loudness,
-        // measured through the public inspector on the committed document.
         let levels = invoke_capability(&client, "get_audio_levels", json!({})).await;
         let levels = levels.structured_content.as_ref().unwrap();
         let measured = levels["report"]["master"]["integrated_lufs_hundredths"]
@@ -8719,8 +8248,6 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
             .await
             .unwrap();
 
-    // A refused confirmation writes nothing at all, which is the whole reason
-    // the confirmation is raised before the decode rather than after it.
     let capture = json!({
         "expected_revision": 0,
         "asset_id": asset.id.0,
@@ -8741,9 +8268,6 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
         "a refused capture leaves no store directory behind"
     );
 
-    // The approved capture: one 48 kHz stereo second, written under its own
-    // digest, probed, and registered as ONE AddAsset carrying an overridden
-    // name.
     let (captured, ()) = tokio::join!(
         invoke_capability(&client, "capture_room_tone", capture.clone()),
         au5_approve_capture(confirmations.clone(), true),
@@ -8760,8 +8284,6 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
         "1 s is a whole 30 fps asset frame count: {tone}"
     );
     assert_eq!(tone["fps"], "30/1", "an audio-only asset probes at 30 fps");
-    // R46 / rule 115: `probe_path` names a store file after its own digest, so
-    // the capture OVERRIDES that name rather than carrying it.
     let name = tone["name"].as_str().unwrap();
     assert!(name.starts_with("Room tone — "), "{tone}");
     assert!(
@@ -8792,10 +8314,6 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
     assert_eq!(room_tone.name, name);
     let after_capture = cc7_revision(&client).await;
     assert_eq!(after_capture, 1, "one AddAsset, one revision");
-    // AU5 §0 R112: a captured room tone earns NO background analysis. Queueing
-    // a transcription on a second of noise means downloading the Whisper model
-    // to read a file with no speech in it, and the abort that used to end this
-    // test binary was that download still in flight at process exit.
     let jobs = invoke_capability(
         &client,
         "get_analysis_status",
@@ -8803,15 +8321,6 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
     )
     .await;
     let jobs = jobs.structured_content.as_ref().unwrap();
-    // F11: assert the SHAPE, not the absence of two words. Silence detection on
-    // one second of noise can finish between the capture and this line, and a
-    // `"ready"` phase would sail through a substring search — so a regression
-    // that re-enabled `request_asset_analysis` would be caught only by
-    // whichever job happened to still be pending. Every phase is checked, and
-    // the only two a never-requested asset may report are these.
-    // Pass-2 finding 5: assert the list is non-empty first, so a shape change
-    // that answered `[]` for an un-requested asset would turn this pin
-    // green-and-vacuous rather than red.
     let jobs = jobs["jobs"].as_array().unwrap();
     assert!(
         !jobs.is_empty(),
@@ -8824,9 +8333,6 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
         );
     }
 
-    // Rule 116: a second identical capture is a NO-OP — the same asset id, no
-    // operation, and the revision does not move. It still asks first, because
-    // the caller cannot know it is a repeat.
     let (again, ()) = tokio::join!(
         invoke_capability(
             &client,
@@ -8844,9 +8350,6 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
     assert_eq!(again.is_error, Some(false), "{body}");
     assert_eq!(body["reused_existing_asset"], true, "{body}");
     assert_eq!(body["applied"], false, "{body}");
-    // F2 / rule 114: the reused branch publishes the SAME `room_tone_asset`
-    // shape the applied branch does, so a caller reads one key either way —
-    // `import_lut_asset`'s own rule, which is what "on its exact shape" means.
     assert_eq!(
         body["room_tone_asset"]["asset_id"], room_tone.id.0,
         "{body}"
@@ -8864,8 +8367,6 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
     );
     assert_eq!(cc7_revision(&client).await, after_capture);
 
-    // §5.5: the fill. One 30-frame gap, one tile of the 30-frame sample, and
-    // `asset_id` defaulted to the sole registered room-tone asset.
     let planned = invoke_capability(&client, "plan_room_tone_fill", json!({"track": 1})).await;
     let body = planned.structured_content.as_ref().unwrap();
     assert_eq!(planned.is_error, Some(false), "{body}");
@@ -8877,8 +8378,6 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
     );
     au5_commit_prepared(&client, body).await;
 
-    // What landed: one ordinary media clip of the room-tone asset, butt-joined
-    // at the gap, at `speed_percent = 100` and with no fade of any kind.
     let document = query_document(&core);
     let filled = document.tracks[0]
         .clips
@@ -8893,8 +8392,6 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
     assert!(filled.audio_gain_curve.is_none());
     // Rule 97's own assertion, taken from the committed document.
     assert_eq!(document.clip_duration(filled).unwrap(), TimeCode(30));
-    // The gap is gone, which is the only observable "the hole is closed"
-    // signal the product has (rule 96).
     assert_eq!(
         document.track_gaps(TrackId(1)),
         Some(Vec::new()),
@@ -9094,10 +8591,6 @@ fn au5_room_tone_media_of(mono_samples: usize) -> GeneratedMedia {
 /// own covering range, and really closes the gap.
 #[tokio::test(flavor = "multi_thread")]
 async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_29_97_fps() {
-    // Twenty seconds, not three: at 30 -> 29.97 the covering phases for a
-    // ten-frame span sit around source frame 500, so a three-second sample is
-    // provably too short and core answers `NoCoveringSourceRange` — a real
-    // refusal with a real reason, and the wrong fixture for this lane.
     let generated = au5_long_room_tone_media();
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let asset = media.probe(generated.path()).unwrap();
@@ -9214,8 +8707,6 @@ async fn au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps() {
         "40 s at the 30 fps audio grid"
     );
     let project_fps = Rational::new(30_000, 1_001).unwrap();
-    // The step-down this length really needs, taken from core rather than
-    // restated: a bound of 4 could never have reached it.
     let (tile, source) = kinewright_core::longest_coverable_project_tile(
         asset.duration,
         asset.fps,

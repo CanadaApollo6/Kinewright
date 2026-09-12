@@ -155,10 +155,6 @@ const CAPABILITY_KIND_OVERRIDES: &[(&str, CapabilityKind)] = &[
     ("render_color_proof", CapabilityKind::Inspector),
     // CC4 §8: `list_look_assets` is read-only LUT-asset evidence.
     ("list_look_assets", CapabilityKind::Inspector),
-    // CC5 §7: `inspect_` matches no inference rule, and name-prefix inference
-    // is a convenience, not a contract. `track_matte_window` and
-    // `plan_secondary_correction` are already inferred correctly by the
-    // `track_` and `plan_` prefixes and need no entry.
     ("inspect_grade_matte", CapabilityKind::Inspector),
 ];
 
@@ -289,9 +285,6 @@ impl PreparedPlanStore {
                 "RelinkAsset is only available through relink_media, which probes and hashes the replacement path before applying it".to_owned(),
             ));
         }
-        // CC4 §8: a prepared plan has no way to write the project LUT store, so
-        // a plan-supplied record could name bytes that do not exist. Only
-        // `import_lut_asset` can create a `LutAsset`.
         if operations
             .iter()
             .any(|operation| matches!(operation, Operation::AddLutAsset { .. }))

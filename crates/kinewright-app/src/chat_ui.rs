@@ -241,13 +241,6 @@ impl AgentThread {
         let name = name.into();
         let branch = TimelineBranch::new(name.clone(), base_revision, Arc::clone(base_document))
             .map_err(|error| error.to_string())?;
-        // The branch server derives its own `<stem>.kinewright-assets` root
-        // from this handle, and a server started without it reports
-        // `project_not_saved` from `import_lut_asset` and `unknown_no_store`
-        // from every availability surface — on a project that is saved, whose
-        // live server resolves the same looks fine. Sharing the session's one
-        // handle makes a store-blind branch server unrepresentable, and makes
-        // one Save As visible to every thread at once (CC4 §2.2, §8).
         let mcp_server = match McpServer::start_isolated_with_exporter_and_project_path(
             branch.core(),
             Arc::clone(playback),
@@ -426,8 +419,6 @@ impl KinewrightApp {
                 model,
                 effort,
                 service_tier,
-                // Subscription harnesses are flat fee and the Stop button is
-                // always available, so sessions run without a turn ceiling.
                 max_turns: None,
                 mcp_url: Some(endpoint),
                 tool_names: Some(compact_tool_names()),
@@ -980,8 +971,6 @@ impl KinewrightApp {
         });
         ui.add_space(space::ONE);
 
-        // Settings lives in the rail's bottom corner, T3/Discord-style: the
-        // rail is the app's hub, and identity/configuration anchors its foot.
         egui::Panel::bottom("rail-settings")
             .frame(egui::Frame::new().inner_margin(egui::Margin::same(theme::margin(space::ONE))))
             .show_separator_line(false)
@@ -1017,9 +1006,6 @@ impl KinewrightApp {
                     let can_close_project = self.projects.len() > 1;
                     let collapsed_caption = background_project_caption(project);
                     let mut close_clicked = false;
-                    // Rail rows are a flat list, not cards (Riel's review):
-                    // the focused row steps up one ladder fill and nothing
-                    // pops, floats, or catches the light.
                     let frame = egui::Frame::new()
                         .fill(if focused {
                             color::SURFACE
@@ -1125,9 +1111,6 @@ impl KinewrightApp {
             }
         });
 
-        // Media enters through the project hub, T3-style: the focused
-        // project's expanded section ends with a quiet import row, so the
-        // media column never has to exist to get footage in.
         let mut import_media = false;
         egui::Frame::new()
             .outer_margin(egui::Margin {
@@ -1358,9 +1341,6 @@ impl KinewrightApp {
         let project_index = self.focused_project;
         let project_id = self.projects[project_index].id;
         let active_thread = self.projects[project_index].active_thread;
-        // A provider is offered only when it is both detected and enabled in
-        // Settings; a disabled provider vanishes from the picker but running
-        // sessions on it are never interrupted.
         let claude_ready = self.claude_info.is_some()
             && crate::settings_ui::provider_enabled(ui.ctx(), AgentHarnessChoice::ClaudeCode);
         let codex_ready = self.codex_info.is_some()
@@ -1393,10 +1373,6 @@ impl KinewrightApp {
                     self.projects[project_index].threads[active_thread].harness = remembered;
                 }
             }
-            // Model and effort choices follow the same idle-restore pattern;
-            // ids no longer valid for the current catalog (or the currently
-            // chosen model) fall back to Default. An effort remembered for a
-            // model that stops offering it resurfaces if the model returns.
             self.claude_model = restore_choice(ui.ctx(), CLAUDE_MODEL_MEMORY_ID, |id| {
                 self.claude_models.iter().any(|model| model.id == id)
             });
@@ -1433,10 +1409,6 @@ impl KinewrightApp {
         }
         let any_harness = !ready_harnesses.is_empty();
 
-        // No header chrome (M24): the stream is the surface, and the harness
-        // controls live in the composer row like T3 Code's model row. The one
-        // exception is the no-harness state, which explains itself up front -
-        // distinguishing "nothing installed" from "everything switched off".
         if !any_harness {
             let any_installed = self.claude_info.is_some()
                 || self.codex_info.is_some()
@@ -1488,8 +1460,6 @@ impl KinewrightApp {
         };
         // Owned summary so the composer row can render it while self mutates.
         let harness_summary = selected_info.map(|info| {
-            // CLI version strings often repeat the product name; keep the
-            // number only.
             let version = info.version.as_deref().map_or("version unknown", |value| {
                 value.split_whitespace().next().unwrap_or(value)
             });
@@ -1504,8 +1474,6 @@ impl KinewrightApp {
                 authentication_label(info.authentication)
             )
         });
-        // The summary rides the brand mark as a tooltip: inline it was the
-        // first thing to collide once the thread rail narrowed the column.
         let harness_hover = harness_summary.map(|summary| {
             if harness == AgentHarnessChoice::Codex {
                 format!("{summary}\n{CODEX_SANDBOX_NOTICE}")
@@ -1582,17 +1550,7 @@ impl KinewrightApp {
 
         self.branch_review_panel(ui, project_index, active_thread);
 
-        // Reserve room below the history for the composer and send row - an
-        // uncapped scroll area consumes the whole dock and pushes the input
-        // out of the clipped panel, leaving no visible way to talk to the
-        // agent.
         let mut card_action: Option<EditCardAction> = None;
-        // Everything below the stream (suggestion rows, input, controls) must
-        // come out of the stream's share or it gets pushed out of the clipped
-        // panel. Estimating those heights proved fragile, so the block is
-        // MEASURED: reserve what it actually used last time at this
-        // suggestion count, with a generous estimate covering only the first
-        // frame a given count appears.
         let matches = crate::slash::matching_commands(
             &self.projects[project_index].threads[active_thread].input,
         );
@@ -1609,8 +1567,6 @@ impl KinewrightApp {
                 };
                 148.0 + suggestions
             });
-        // The composer anchors to the bottom of the session column (T3-style):
-        // the stream owns everything above it and sticks to its latest entry.
         let stream_height = (ui.available_height() - composer_reserve).max(96.0);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -1618,16 +1574,8 @@ impl KinewrightApp {
             .max_height(stream_height)
             .min_scrolled_height(stream_height)
             .show(ui, |ui| {
-                // Machine activity collapses into one compact dropdown per
-                // run (T3-style): the header keeps updating with the latest
-                // step while the agent works, and expanding it reveals the
-                // full cards, review actions included. Messages stay
-                // first-class.
                 let fps = self.projects[project_index].document.fps;
                 let chat = &self.projects[project_index].threads[active_thread].chat;
-                // An untouched session gets an art-directed empty state
-                // instead of one hint line above a void: quiet glyph, one
-                // invitation, centered in the column (M28).
                 if chat.len() <= 1 {
                     ui.add_space((stream_height * 0.5 - 64.0).max(0.0));
                     ui.vertical_centered(|ui| {
@@ -1689,8 +1637,6 @@ impl KinewrightApp {
         // Slash suggestions float directly above the composer while typing.
         let mut run_command: Option<&'static crate::slash::SlashCommand> = None;
         if !matches.is_empty() {
-            // Slash suggestions sit on SURFACE_RAISED over PANEL; the fill
-            // step is the edge (M28).
             let slash = chat_frame(color::SURFACE_RAISED).show(ui, |ui| {
                 for command in &matches {
                     let label = format!("/{}", command.name);
@@ -1710,9 +1656,6 @@ impl KinewrightApp {
         ui.add_space(space::ONE);
         let composer_id = egui::Id::new(("agent-composer", project_id, active_thread));
         let composer_focused = ui.ctx().memory(|memory| memory.has_focus(composer_id));
-        // The composer is ONE card (Riel's review): the input is the card's
-        // top face and the controls row its foot, sharing a fill with no seam
-        // between them; a focus ring wraps the whole card while writing.
         let input_frame = egui::Frame::new()
             .fill(color::SURFACE)
             .corner_radius(egui::CornerRadius {
@@ -1741,8 +1684,6 @@ impl KinewrightApp {
                 )
             });
         let input_response = input_frame.inner;
-        // Enter sends (Shift+Enter for a newline); with a slash query active,
-        // Enter runs the top match.
         if input_response.has_focus()
             && ui.input(|input| input.key_pressed(egui::Key::Enter) && !input.modifiers.shift)
         {
@@ -1767,20 +1708,9 @@ impl KinewrightApp {
                 .clear();
             self.run_slash_command(command);
         }
-        // The composer row carries the session controls, T3-style: harness on
-        // the left, transport on the right, everything else is the stream.
-        // Its card fill is painted after layout (rect known then) into a
-        // placeholder shape reserved before the row draws, so the row and the
-        // input above read as one continuous surface.
         ui.add_space(-ui.spacing().item_spacing.y);
         let controls_bg = ui.painter().add(egui::Shape::Noop);
-        // Wrapped, not rigid: on narrow columns the pickers flow onto a
-        // second line instead of clipping at the card's edge.
         let controls_row = ui.horizontal_wrapped(|ui| {
-            // The row shares the card's inner margins on both sides: the max
-            // width shrinks so the right-anchored Send keeps its inset (a
-            // leading add_space in the RTL section pushes past the clip edge
-            // instead), and the leading space insets the brand mark.
             ui.set_max_width(ui.available_width() - f32::from(theme::margin(space::TWO)));
             ui.add_space(f32::from(theme::margin(space::TWO)));
             if ready_harnesses.len() > 1 {
@@ -1860,9 +1790,6 @@ impl KinewrightApp {
                         .label(),
                 );
             }
-            // Model picker for the selected harness. Default defers to the
-            // CLI's configured model; a change restarts the session, same as
-            // switching harnesses.
             if selected_available {
                 let running = self.projects[project_index].threads[active_thread].running;
                 let composer_harness = self.projects[project_index].threads[active_thread].harness;
@@ -1919,8 +1846,6 @@ impl KinewrightApp {
                     }
                 }
             }
-            // Effort picker: only levels the chosen model supports (or that
-            // every catalog model supports when the model is Default).
             if selected_available {
                 let running = self.projects[project_index].threads[active_thread].running;
                 let composer_harness = self.projects[project_index].threads[active_thread].harness;
@@ -1969,9 +1894,6 @@ impl KinewrightApp {
                     }
                 }
             }
-            // Speed picker: shown only when the harness catalog advertises
-            // faster-than-standard service tiers (Codex's "Fast" = 1.5x at
-            // increased usage). Standard is the reset entry, like Default.
             if selected_available {
                 let running = self.projects[project_index].threads[active_thread].running;
                 let composer_harness = self.projects[project_index].threads[active_thread].harness;
@@ -2040,9 +1962,6 @@ impl KinewrightApp {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // One transport slot (M25): Send while idle, Stop while
-                // running. A permanently visible disabled twin is noise and
-                // the row shares its width with three pickers.
                 let running = self.projects[project_index].threads[active_thread].running;
                 if running {
                     if ui
@@ -2097,8 +2016,6 @@ impl KinewrightApp {
                 }
             });
         });
-        // The painted foot spans the input face's exact width regardless of
-        // how the row's content laid out inside it.
         let mut controls_rect = controls_row
             .response
             .rect
@@ -2126,8 +2043,6 @@ impl KinewrightApp {
                 egui::StrokeKind::Outside,
             );
         }
-        // Record what the block below the stream actually used so the next
-        // frame at this suggestion count reserves exactly that.
         let composer_block_height = ui.cursor().top() - composer_block_top;
         ui.ctx()
             .data_mut(|data| data.insert_temp(reserve_id, composer_block_height));
@@ -2252,8 +2167,6 @@ fn render_stream_entry(
             theme::paint_raised_lighting(ui.painter(), card.response.rect, radius::px(radius::MD));
         }
         ChatEntry::Text(text) => {
-            // The agent's words are the conversation itself: no container,
-            // just the role label and prose (T3-style).
             ui.label(theme::caps_label("AGENT", color::TEXT_SECONDARY));
             ui.label(text);
         }
@@ -2370,9 +2283,6 @@ fn show_thread_row(
     fps: kinewright_core::Rational,
 ) -> ThreadRowAction {
     let mut close_clicked = false;
-    // Tree depth (M25): thread rows sit one indent step inside
-    // their project header, so the two raised surfaces read as
-    // parent and child rather than neighbors.
     let frame = egui::Frame::new()
         .fill(if active {
             color::SURFACE
@@ -2386,10 +2296,6 @@ fn show_thread_row(
         })
         .inner_margin(egui::Margin::same(theme::margin(space::ONE)))
         .show(ui, |ui| {
-            // A bare with_layout claims the rail's full
-            // height; the row must allocate exactly one
-            // line. Trailing controls pack from the right,
-            // the identity anchors left and truncates.
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), size::ICON_SM + space::ONE),
                 egui::Layout::right_to_left(egui::Align::Center),

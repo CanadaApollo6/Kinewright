@@ -294,8 +294,6 @@ pub(crate) fn existing_primary_node(
         .iter()
         .filter(|effect| effect.name == PRIMARY_CORRECTION_EFFECT_NAME)
         .collect::<Vec<_>>();
-    // The compositor evaluates the chain in order, so the last node is the one
-    // a correction has to move.
     let effect = primaries.last()?;
     let parameters = descriptor
         .parameters
@@ -484,7 +482,6 @@ pub(crate) enum ColorProofError {
         absent_raster: (u32, u32),
         bypass_raster: (u32, u32),
     },
-    // ---- CC5 §7 ----
     #[error("matte_comparison requires effect_id, which names the matte-carrying node")]
     MatteComparisonRequiresEffectId,
     #[error(
@@ -760,10 +757,6 @@ impl ColorProofError {
         let Some(refusal) = message.strip_prefix("missing_lut_asset:") else {
             return Self::from_media_error(stage, error);
         };
-        // Every renderer shape names the asset after `LUT asset`, with the
-        // punctuation varying (`LUT asset 3`, `LUT asset(s) 3 (<sha>)`). A
-        // report that names several takes the first, because the variant
-        // describes one asset and the first is the one the operator recovers.
         let Some(lut_asset) = parse_id_after(refusal, "LUT asset").map(LutAssetId) else {
             return Self::from_media_error(stage, error);
         };
@@ -779,8 +772,6 @@ impl ColorProofError {
             store_path: asset.and_then(|asset| looks.store_path(asset)),
             availability: match asset {
                 Some(_) => looks.availability_value(lut_asset),
-                // Not "unknown because no store": the project registers no
-                // asset with this id at all, which no store could change.
                 None => json!({
                     "kind": "unregistered",
                     "reason": "the project registers no LUT asset with this id",
@@ -853,8 +844,6 @@ impl PrimaryPlanError {
             Self::UnknownParameter { name } => json!({
                 "parameter": name,
                 "allowed_parameters": primary_parameter_documentation(),
-                // CC5 §2.2: the 47 matte parameters are legal on this node but
-                // are described by one legend, never enumerated.
                 "matte_parameters": matte_parameter_legend(),
             }),
             Self::ParameterOutOfRange {
@@ -869,10 +858,6 @@ impl PrimaryPlanError {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// CC5 §2.2 — the compact matte legend
-// ---------------------------------------------------------------------------
 
 /// The 47 CC5 matte parameters, summarised in one legend (CC5 §2.2, M36).
 ///
@@ -1019,8 +1004,6 @@ fn retain_requested_matte_parameters(
 #[must_use]
 pub(crate) fn primary_parameter_documentation() -> Vec<Value> {
     effect_descriptor(PRIMARY_CORRECTION_EFFECT_NAME).map_or_else(Vec::new, |descriptor| {
-        // CC5 §2.2: the 47 matte parameters are described by the legend that
-        // rides alongside this list, never enumerated.
         non_matte_parameters(descriptor)
             .map(|parameter| {
                 json!({
@@ -1133,9 +1116,6 @@ pub(crate) fn color_context_value_with_options(
                         "input": {
                             "bit_depth": asset.color_description.bit_depth,
                             "range": asset.color_description.range,
-                            // §5 requires the source raster alongside the
-                            // input format. `null` means the probe did not
-                            // report a resolution; it is never invented.
                             "raster": asset.resolution,
                         },
                     },
@@ -1144,11 +1124,6 @@ pub(crate) fn color_context_value_with_options(
         })
         .collect::<Vec<_>>();
 
-    // CC1 §5 observability is a *visual* colour surface. Audio-track clips can
-    // never occupy a colour stage, so they are excluded rather than listed
-    // without an ordering. Video tracks composite in ascending document order,
-    // which is exactly the order `kinewright_media::visual_layers_at` uses to
-    // build the `render_color_proof` manifest.
     let clips = document
         .tracks
         .iter()
@@ -1205,9 +1180,6 @@ pub(crate) fn color_context_value_with_options(
             "raw_only_requires_explicit_assumption": true,
             "raw_only_available": true,
         },
-        // `get_color_context` reads persisted metadata only. It never renders
-        // or samples a frame, so there is no sampled region to report and the
-        // marker is explicit rather than absent.
         "sampling_region": Value::Null,
         "sampling_region_note": "get_color_context is metadata-only; call render_color_proof for a rendered frame, or get_video_scopes_v2, whose top-level `roi` key reports the region actually sampled.",
         "layer_scope": "video_tracks_only",
@@ -1215,9 +1187,6 @@ pub(crate) fn color_context_value_with_options(
         "assets": assets,
         "clips": clips,
         "legacy_stage_warnings": legacy_stage_warnings,
-        // CC4 §9: the explicit [AddLutAsset, ConvertLegacyLook] batch each
-        // legacy look would need. Conversion is never automatic and is not
-        // bit-identical, so the batch is evidence, not an applied edit.
         "legacy_look_conversions": legacy_look_conversions,
         "managed_blocking_asset_ids": assets
             .iter()
@@ -1277,10 +1246,7 @@ fn source_status(
             "status": "supported",
             "supported_profile": profile.id(),
             "profile_assumption": {
-                // Serialise the assumption that was actually applied rather
-                // than a hardcoded name, so a future assumption variant cannot
-                // be silently reported as d65.  An assumption only changes the
-                // classification when the raw white point is unknown.
+                // Serialise the assumption that was actually applied rather than a hardcoded name
                 "selected": if description.white_point == ColorWhitePoint::Unknown {
                     profile_assumption.map_or(Value::Null, assumption_value)
                 } else {
@@ -1380,15 +1346,9 @@ fn clip_status(
         "asset_id": clip.asset.0,
         "content": clip_content_name(&clip.content),
         "timeline_start": clip.timeline_start.0,
-        // The complete ordered chain, not just the primary nodes: a legacy
-        // stage between two primaries changes the result and must be visible.
         "effects": effect_chain_manifest(&clip.effects),
-        // CC3 §8: the ordered managed colour-node stack, in `clip.effects`
-        // order, with per-node bypass, activity, and resolved values.
         "color_nodes": color_node_manifest(&clip.effects, looks),
         "legacy_stage_warnings": legacy_stage_warnings(clip),
-        // Occlusion is frame-dependent and this surface is not a sampled
-        // render; the marker is explicit rather than silently omitted.
         "active_at_frame": Value::Null,
     })
 }
@@ -1418,10 +1378,6 @@ pub(crate) fn effect_chain_manifest(effects: &[Effect]) -> Vec<Value> {
                 "name": effect.name,
                 "parameters": effect.parameters,
                 "primary_parameters": primary_parameters,
-                // CC3 §8: flag the managed colour nodes of the chain so a
-                // reader knows which entries have a fully resolved,
-                // bypass-aware description in the sibling `color_nodes` list
-                // without duplicating that payload here.
                 "color_node_kind": classify_color_node(effect)
                     .map_or(Value::Null, |kind| json!(kind.effect_name())),
                 "keyframes": effect.keyframes,
@@ -1526,10 +1482,6 @@ pub(crate) fn plan_primary_correction(
         }
     }
 
-    // CC5 §2.2: an omitted matte parameter resolves to its neutral and the
-    // matte is inactive, so a fresh primary stores its ten CC1 controls and
-    // none of the 47 matte neutrals. Writing them would bloat every project
-    // JSON and would make a CC4-era node textually different for no effect.
     let neutral_parameters = non_matte_parameters(descriptor)
         .map(|parameter| {
             (
@@ -1539,9 +1491,6 @@ pub(crate) fn plan_primary_correction(
         })
         .collect::<BTreeMap<_, _>>();
 
-    // A managed clip carries at most one primary correction. Stacking a second
-    // node silently compounds two white-balance/exposure transforms, so an
-    // existing node is corrected in place instead.
     let existing = existing_primary_node(document, args.clip_id);
     let existing_primary_node_count = existing.as_ref().map_or(0, |node| node.node_count);
     let mut warnings = Vec::new();
@@ -1581,8 +1530,6 @@ pub(crate) fn plan_primary_correction(
         resolved_parameters.insert(name.clone(), *value);
     }
     retain_requested_matte_parameters(&mut resolved_parameters, &args.parameters);
-    // Only controls whose value actually moves are written. An unchanged
-    // control produces no operation, so an empty proposal stays empty.
     let changed = args
         .parameters
         .iter()
@@ -1612,8 +1559,6 @@ pub(crate) fn plan_primary_correction(
     }
     let no_change = operations.is_empty();
 
-    // Core rejects an empty batch, and a no-op proposal is a legitimate answer
-    // rather than a rejection: there is simply nothing to validate.
     if !operations.is_empty() {
         let mut candidate = document.clone();
         apply_batch(&mut candidate, &operations)
@@ -1651,10 +1596,6 @@ fn next_effect_id(document: &Document) -> Option<EffectId> {
         .checked_add(1)
         .map(EffectId)
 }
-
-// ---------------------------------------------------------------------------
-// CC3 §8 — managed colour-node planners (`plan_color_wheels`, `plan_color_curves`)
-// ---------------------------------------------------------------------------
 
 /// Why a clip cannot receive a managed colour node.
 ///
@@ -2034,7 +1975,6 @@ pub(crate) enum ColorNodePlanError {
         /// without a second round trip.
         allowed: Vec<u64>,
     },
-    // ---- CC5 §7 ----
     #[error("send exactly one of target_effect_id or node_kind, not both")]
     MatteTargetAmbiguous,
     #[error("send target_effect_id or node_kind to name the node the matte belongs to")]
@@ -2317,8 +2257,6 @@ impl ColorNodePlanError {
                 "allowed": MATTE_CAPABLE_NODE_NAMES,
                 "recovery_action": "A matte belongs to a managed correction node; target one of the matte-capable kinds.",
             }),
-            // CC5 §2.1: a technical input transform normalizes the *whole*
-            // source, so a partially applied one is not a meaningful state.
             Self::MatteUnsupportedKind { observed } => json!({
                 "field": "node_kind",
                 "observed": observed,
@@ -2358,9 +2296,6 @@ impl ColorNodePlanError {
                 "allowed": allowed,
                 "recovery_action": format!("Send windows[{index}].{field} as one of {}.", allowed.join(" or ")),
             }),
-            // CC5 §5.1: a token accepts Hold keyframes only, and an existing
-            // Hold curve wins over a static write at every frame from its first
-            // keyframe onward — so this is a refusal, not a warning.
             Self::MatteHoldOnlyParameterKeyframed { effect, name } => json!({
                 "field": name,
                 "observed": format!("effect {effect} keyframes {name}"),
@@ -2472,8 +2407,6 @@ pub(crate) fn lut_node_parameter_summary(kind: ColorNodeKind) -> String {
             .collect::<Vec<_>>()
             .join("; ");
         let mut summary = format!("{controls}; {}", input_encoding_legend());
-        // CC5 §2.1: `technical_lut` carries no matte, so only `creative_look`
-        // gains the legend.
         if effect_carries_matte_parameters(kind.effect_name()) {
             summary.push_str("; ");
             summary.push_str(&matte_parameter_pointer());
@@ -2667,8 +2600,6 @@ pub(crate) fn plan_color_wheels(
         (effect.id, false, operations)
     } else {
         let effect_id = next_effect_id(document).ok_or(ColorNodePlanError::EffectIdExhausted)?;
-        // CC3 §2.4: an omitted parameter resolves to its neutral, so a new
-        // node stores only the controls the caller actually moved.
         let parameters = changed
             .iter()
             .filter(|(name, value)| {
@@ -2856,8 +2787,6 @@ fn curve_operations(
         operations.push(operation(point_count, minimum));
         active_count = minimum;
     }
-    // `x_parameter(1)` always exists; the saturating fallback simply keeps
-    // the natural index order if a future descriptor ever shrinks.
     let stored_x1 = curve.x_parameter(1).map_or(i64::MAX, &stored);
     let leading_order = if target[0][0] < stored_x1 {
         [0_usize, 1]
@@ -3102,10 +3031,6 @@ pub(crate) fn plan_color_curves(
     })
 }
 
-// ---------------------------------------------------------------------------
-// CC3 §8 — the ordered `color_nodes` manifest
-// ---------------------------------------------------------------------------
-
 /// One managed colour node of the ordered CC1/CC3 stack, fully resolved.
 ///
 /// `effects` must already be keyframe-evaluated when the caller renders a
@@ -3123,8 +3048,6 @@ pub(crate) fn color_node_value(
     let mut warnings = Vec::new();
     let mut lut_fields = serde_json::Map::new();
     let (bypass, inactive_reason, parameters, curves) = match kind {
-        // CC1 primaries have neither a bypass control nor a neutral
-        // short-circuit, so they are always evaluated (CC3 §3.3).
         ColorNodeKind::Primary => (
             0,
             None,
@@ -3186,10 +3109,6 @@ pub(crate) fn color_node_value(
                 COLOR_NODE_BYPASS_PARAMETER.to_owned(),
                 resolved.bypass_token,
             );
-            // A bypassed node renders as the exact identity (CC3 §5), so its
-            // truncation changes no pixel. Core QA and the inspector both
-            // suppress the warning there; the agent surface must agree or the
-            // three descriptions of one node disagree.
             let truncated = if resolved.bypass() {
                 Vec::new()
             } else {
@@ -3219,8 +3138,6 @@ pub(crate) fn color_node_value(
                 Value::Object(curves),
             )
         }
-        // CC4 §8: the two LUT kinds are mathematically identical and differ
-        // only in stage, role, and mix bounds, so one arm describes both.
         ColorNodeKind::TechnicalLut | ColorNodeKind::CreativeLook => {
             let resolved = LutNodeParams::from_effect(effect);
             let parameters = BTreeMap::from([
@@ -3252,10 +3169,6 @@ pub(crate) fn color_node_value(
             )
         }
     };
-    // CC5 §2.6 rule 2: a matte that resolves to `m = 0` everywhere makes the
-    // node the exact identity, which Core reports as `matte_excluded`. Reading
-    // the reason through Core keeps the manifest, the inspector, and the
-    // renderer describing one node the same way.
     let inactive_reason = kinewright_core::color_node_inactive_reason(effect).or(inactive_reason);
     if let Some(warning) = matte_band_warning(effect_index, effect) {
         warnings.push(warning);
@@ -3267,8 +3180,6 @@ pub(crate) fn color_node_value(
         "effect_id": effect.id.0,
         "kind": kind.effect_name(),
         "name": effect.name,
-        // CC4 §3.1: the stable role and stage tokens every colour surface
-        // reports, so a reader can tell an input transform from a look.
         "role": kind.role(),
         "color_stage": kind.stage().as_str(),
         "color_stage_rank": kind.stage().rank(),
@@ -3282,8 +3193,6 @@ pub(crate) fn color_node_value(
         "keyframes": effect.keyframes,
         "warnings": warnings,
     });
-    // CC5 §7: absent entirely when the node carries no matte, so every CC4
-    // manifest is byte-unchanged.
     if let Some(matte) = matte_manifest_value(effect)
         && let Some(object) = value.as_object_mut()
     {
@@ -3296,10 +3205,6 @@ pub(crate) fn color_node_value(
     }
     Some(value)
 }
-
-// ---------------------------------------------------------------------------
-// CC5 §7 — the compact `matte` manifest object
-// ---------------------------------------------------------------------------
 
 /// The stable `combine` token for one resolved matte (CC5 §2.3).
 #[must_use]
@@ -3347,8 +3252,6 @@ pub(crate) fn matte_manifest_value(effect: &Effect) -> Option<Value> {
     let degenerate = matte.degenerate_bands();
     Some(json!({
         "enabled": matte.is_enabled(),
-        // CC5 §2.6 rule 2: an inverted empty matte or a zero mix makes the
-        // whole node the exact identity.
         "active": !excluded,
         "inactive_reason": if excluded {
             json!(ColorNodeInactiveReason::MatteExcluded.as_str())
@@ -3378,9 +3281,6 @@ pub(crate) fn matte_manifest_value(effect: &Effect) -> Option<Value> {
             .active_windows()
             .map(matte_window_value)
             .collect::<Vec<_>>(),
-        // CC5 §2.6: a band whose low edge resolved above its high edge selects
-        // nothing.  Core QA reports the same fact as
-        // `matte_band_inverted_by_automation`; the manifest must agree.
         "degenerate_bands": degenerate,
     }))
 }
@@ -3446,10 +3346,6 @@ fn resolved_descriptor_parameters(effect: &Effect, name: &str) -> BTreeMap<Strin
             .collect()
     })
 }
-
-// ---------------------------------------------------------------------------
-// CC4 §8 — LUT assets, LUT node manifests, and the two look planners
-// ---------------------------------------------------------------------------
 
 /// The `availability` token reported when the project has never been saved, so
 /// no LUT store root exists to probe (CC4 §2.2, §8).
@@ -3569,11 +3465,6 @@ impl LookAssetContext {
         let mut assets = BTreeMap::new();
         let mut availability = BTreeMap::new();
         for asset in &document.lut_assets {
-            // CC4 §2.3: a built-in is `verified` exactly when this binary's
-            // bake hashes to the record, which needs no store and no
-            // filesystem at all. Reporting `unknown_no_store` for a built-in
-            // in an unsaved project would be a status the contract says is
-            // always knowable, so the built-in probe runs either way.
             let status = match availability_for {
                 Some(resolver) => Some(resolver(asset)),
                 None => builtin_availability(asset),
@@ -3669,8 +3560,6 @@ impl LookAssetContext {
     pub(crate) fn provenance_value(asset: &LutAsset) -> Value {
         match &asset.source {
             LutAssetSource::Builtin { name } => json!({"kind": "builtin", "name": name}),
-            // `source_path` is informational only: never opened by the
-            // renderer and never resolved relative to anything (CC4 §2.1).
             LutAssetSource::Imported { source_path } => {
                 json!({"kind": "imported", "source_path": source_path})
             }
@@ -3692,9 +3581,6 @@ impl LookAssetContext {
             "domain_max_millionths": asset.domain_max_millionths,
             "provenance": Self::provenance_value(asset),
             "availability": self.availability_value(asset.id),
-            // CC4 §8: a plan referencing a `missing`/`changed`/`unreadable`
-            // asset is returned with the status *and* the recovery action, not
-            // silently.
             "recovery_action": self.availability_recovery_action(asset.id),
             "store_path": self.store_path(asset),
         })
@@ -3798,9 +3684,6 @@ impl LookAssetContext {
             "input_encoding_token".to_owned(),
             json!(resolved.input_encoding_token),
         );
-        // Availability is evaluated conservatively for reporting exactly as it
-        // is for export preflight: a node counts as active unless no stored or
-        // keyframed value could make it evaluate (CC4 §2.3, §3.6).
         fields.insert("may_be_active".to_owned(), json!(may_be_active));
         fields
     }
@@ -3841,8 +3724,6 @@ fn lut_node_warning(
         "effect_id": effect.id.0,
         "stage_index": effect_index,
         "lut_asset_id": lut_asset.0,
-        // An asset referenced only by nodes that can never evaluate does not
-        // block proof or export; the status is still reported (CC4 §2.3).
         "blocking": blocking,
         "message": format!("effect {} references lut_asset_id {}: {detail}", effect.id, lut_asset.0),
         "recovery_action": "Call list_look_assets for the registered assets, then import_lut_asset or restore the store file before rendering or exporting.",
@@ -4043,9 +3924,6 @@ fn plan_lut_node(
         return Err(ColorNodePlanError::MissingDescriptor(effect_name));
     };
 
-    // The asset must already be registered: `validate_document` forbids a
-    // dangling reference, so a plan that named an unknown id could never be
-    // committed (CC4 §2.7).
     let Some(asset) = looks.asset(args.lut_asset_id) else {
         return Err(ColorNodePlanError::UnknownLutAsset {
             clip: args.clip_id,
@@ -4201,9 +4079,6 @@ fn plan_lut_node(
             });
         }
         let effect_id = next_effect_id(document).ok_or(ColorNodePlanError::EffectIdExhausted)?;
-        // CC3 §2.4: a new node stores only the controls the caller moved.
-        // `lut_asset_id` is the exception, because its neutral `0` is the
-        // unbound state `validate_document` rejects (CC4 §3.3).
         let parameters = requested_parameters
             .iter()
             .filter(|(name, value)| {
@@ -4259,10 +4134,6 @@ fn plan_lut_node(
         sample_evidence: None,
     })
 }
-
-// ---------------------------------------------------------------------------
-// CC5 §7 — `plan_secondary_correction`
-// ---------------------------------------------------------------------------
 
 /// One ergonomic geometric window in a `plan_secondary_correction` request.
 ///
@@ -4440,9 +4311,6 @@ fn matte_request_parameters(
     derived_qualifier: Option<&BTreeMap<String, i64>>,
 ) -> Result<BTreeMap<String, i64>, ColorNodePlanError> {
     let mut parameters = BTreeMap::new();
-    // Any CC5 request is a request for a matte, so the master switch is always
-    // part of the proposal. Without it every other value would be stored and
-    // ignored, which is the one failure a 47-integer expansion must not have.
     parameters.insert("matte_enabled".to_owned(), 1);
 
     if let Some(windows) = &args.windows {
@@ -4519,10 +4387,6 @@ fn matte_request_parameters(
         set("matte_luma_low_basis_points", qualifier.luma_low);
         set("matte_luma_high_basis_points", qualifier.luma_high);
         set("matte_luma_softness_basis_points", qualifier.luma_softness);
-        // An explicit `enabled` always wins; otherwise naming any band — here
-        // or by asking for one to be derived from a sample — is the request to
-        // enable the leg, because a band nobody evaluates is not a state a
-        // caller can have meant.
         let enabled = qualifier
             .enabled
             .unwrap_or(!named.is_empty() || derived_qualifier.is_some());
@@ -4531,16 +4395,10 @@ fn matte_request_parameters(
     }
 
     if let Some(derived) = derived_qualifier {
-        // Same rule as the bands below: an explicit `qualifier.enabled: false`
-        // is a request, and a derived sample is only evidence, so the derived
-        // enable never overrides it. Absent an explicit qualifier there is
-        // nothing to beat and the derived leg turns itself on.
         parameters
             .entry("matte_qualifier_enabled".to_owned())
             .or_insert(1);
         for (name, value) in derived {
-            // An explicit qualifier field always beats a derived one: the
-            // caller's number is a request, the sample is only evidence.
             parameters.entry(name.clone()).or_insert(*value);
         }
     }
@@ -4577,9 +4435,6 @@ pub(crate) fn plan_secondary_correction(
     let (clip, source_profile, profile_assumption) =
         managed_color_clip(document, args.clip_id, args.profile_assumption)?;
 
-    // ------------------------------------------------------------------
-    // Target resolution, before any operation exists.
-    // ------------------------------------------------------------------
     if args.target_effect_id.is_some() && args.node_kind.is_some() {
         return Err(ColorNodePlanError::MatteTargetAmbiguous);
     }
@@ -4629,9 +4484,6 @@ pub(crate) fn plan_secondary_correction(
         return Err(ColorNodePlanError::MissingDescriptor(effect_name));
     };
 
-    // ------------------------------------------------------------------
-    // Evidence: the sample ROI, and the qualifier it may derive.
-    // ------------------------------------------------------------------
     let measured_at = match args.timecode {
         Some(frame) => frame,
         None => matte_plan_default_frame(document, clip)?,
@@ -4650,9 +4502,6 @@ pub(crate) fn plan_secondary_correction(
         _ => None,
     };
 
-    // ------------------------------------------------------------------
-    // Expand and validate every requested integer against the descriptor.
-    // ------------------------------------------------------------------
     let requested_parameters = matte_request_parameters(args, derived_qualifier.as_ref())?;
     for (name, value) in &requested_parameters {
         let Some(parameter) = descriptor.parameter(name) else {
@@ -4672,9 +4521,6 @@ pub(crate) fn plan_secondary_correction(
         }
     }
 
-    // ------------------------------------------------------------------
-    // Operations. Nothing above this line constructed one.
-    // ------------------------------------------------------------------
     let existing_color_node_count = managed_color_node_count(&clip.effects);
     let existing_nodes_of_kind = clip
         .effects
@@ -4734,20 +4580,6 @@ pub(crate) fn plan_secondary_correction(
         .map(|(name, value)| (name.clone(), *value))
         .collect::<Vec<_>>();
 
-    // CC5 §5.1: a Hold-only token that already carries automation is written by
-    // that automation at every frame from its first keyframe onward, so a
-    // static write is guaranteed dead. Every other planner warns about a
-    // keyframed control and writes the static value anyway; here that would be
-    // a lie, so the plan refuses and names the recovery.
-    //
-    // Every requested token is checked, not only the ones in `changed`: the
-    // plan's manifest and `predicted_coverage` both describe the requested
-    // value, and a Hold curve that disagrees with it renders something else
-    // even when the stored static already matches (so nothing is written).
-    // Every CC5 request injects `matte_enabled: 1`, so a curve that already
-    // holds exactly the requested value at every keyframe is accepted — it
-    // renders exactly what the plan claims — which keeps a node with a
-    // `matte_enabled` Hold curve plannable (window slides and the like).
     for (name, value) in &requested_parameters {
         if !kinewright_core::is_hold_only_matte_parameter(name) {
             continue;
@@ -4782,9 +4614,6 @@ pub(crate) fn plan_secondary_correction(
         (effect.id, false, operations)
     } else {
         let effect_id = next_effect_id(document).ok_or(ColorNodePlanError::EffectIdExhausted)?;
-        // CC5 §2.2: a fresh node stores only the values the caller moved off
-        // their neutrals, exactly as CC3 §2.4 stores only the curve points that
-        // exist.
         let parameters = changed
             .iter()
             .filter(|(name, value)| {
@@ -4804,9 +4633,6 @@ pub(crate) fn plan_secondary_correction(
                     limit: COLOR_NODE_LIMIT_PER_LAYER,
                 });
             }
-            // CC4 §3.2: a new node is inserted at the first stage-legal index,
-            // never appended, so an ordering rejection is unreachable through
-            // the ordinary path.
             let index = stage_insert_index(&clip.effects, kind);
             insert_index = Some(index);
             vec![Operation::InsertEffect {
@@ -4831,8 +4657,6 @@ pub(crate) fn plan_secondary_correction(
             .map_err(|error| ColorNodePlanError::CoreRejected(error.to_string()))?;
     }
 
-    // The proposal's own matte, read back off the scratch document rather than
-    // recomputed, so `matte` and `predicted_coverage` describe the same node.
     let planned_effect = candidate
         .clip(args.clip_id)
         .and_then(|clip| clip.effects.iter().find(|effect| effect.id == effect_id))
@@ -4997,9 +4821,6 @@ impl MatteSampleStatistics {
                 MATTE_SAMPLE_SOFTNESS,
             ),
         ]);
-        // CC5 §2.4: with no chromatic pixel the hue is undefined, so the hue
-        // leg stays at its 180° neutral, which disables it rather than
-        // selecting an arbitrary sector.
         if let Some(hue) = self.hue_median_centidegrees {
             qualifier.insert("matte_hue_center_centidegrees".to_owned(), hue);
             qualifier.insert(
@@ -5100,8 +4921,6 @@ fn measure_matte_sample_roi(
             message: format!("monitor proof raster is {}x{}", image.width, image.height),
         });
     }
-    // CC2's ROI rule: a start boundary floors and an exclusive end ceils, so
-    // the measured rectangle covers every pixel the caller named.
     let scale = |value: f64, extent: u32| (value * f64::from(extent)).max(0.0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let left = (scale(roi.x, image.width).floor() as u32).min(image.width.saturating_sub(1));
@@ -5129,8 +4948,6 @@ fn measure_matte_sample_roi(
             let Some(pixel) = image.pixels.get(index..index.saturating_add(4)) else {
                 continue;
             };
-            // CC2's rule: a fully transparent pixel is not part of the
-            // population, and partial alpha is never a weight.
             if pixel[3] == 0 {
                 continue;
             }
@@ -5155,13 +4972,6 @@ fn measure_matte_sample_roi(
             if chroma <= 0.0 {
                 achromatic_pixel_count = achromatic_pixel_count.saturating_add(1);
             } else {
-                // CC5 §2.4's branch order, written out so the sample and the
-                // renderer agree on a tie. The comparisons are exact on
-                // purpose: `maximum` *is* one of the three encoded values, by
-                // construction, and CC5 §2.4 pins "the first matching branch in
-                // that written order" so both implementations resolve a tie the
-                // same way. An epsilon here would change which branch a tie
-                // takes and make the agent disagree with the renderer.
                 #[allow(clippy::float_cmp)]
                 let degrees = if maximum == encoded[0] {
                     60.0 * (((encoded[1] - encoded[2]) / chroma).rem_euclid(6.0))
@@ -5248,9 +5058,6 @@ fn circular_median_centidegrees(hues: &mut [i64]) -> Option<i64> {
     }
     hues.sort_unstable();
     let count = hues.len();
-    // Prefix sums over `hues ++ (hues + 36000)`. A hue is at most 35999 and a
-    // chromatic ROI has at most a few hundred million pixels, so the running
-    // total cannot approach `i64::MAX`.
     let mut prefix = Vec::with_capacity(2 * count + 1);
     let mut total = 0_i64;
     prefix.push(total);
@@ -5271,9 +5078,6 @@ fn circular_median_centidegrees(hues: &mut [i64]) -> Option<i64> {
     };
     let as_i64 = |value: usize| i64::try_from(value).unwrap_or(i64::MAX);
 
-    // The first index past the half-turn boundary. Both the boundary and the
-    // window start advance with the candidate, so this never moves backwards
-    // and the sweep is linear.
     let mut boundary = 0_usize;
     let mut best = (i64::MAX, hues[0]);
     for (index, candidate) in hues.iter().copied().enumerate() {
@@ -5292,10 +5096,6 @@ fn circular_median_centidegrees(hues: &mut [i64]) -> Option<i64> {
     }
     Some(best.1)
 }
-
-// ---------------------------------------------------------------------------
-// CC4 §9 — the explicit legacy conversion batch
-// ---------------------------------------------------------------------------
 
 /// What a legacy look at one effect position converts into (CC4 §9).
 #[derive(Debug, Clone, PartialEq)]
@@ -5463,11 +5263,6 @@ pub(crate) fn legacy_look_conversions_value(document: &Document) -> Vec<Value> {
                         "mix_basis_points": mix_basis_points,
                         "reused_existing_asset": reused_existing_asset,
                         "operations": operations,
-                        // `ready` means "submittable exactly as it stands".
-                        // When the batch still has to register the built-in,
-                        // the only path that can is `convert_legacy_look`:
-                        // `AddLutAsset` is refused everywhere else by design
-                        // (CC4 §8).
                         "recovery_action": LEGACY_LOOK_CONVERSION_RECOVERY_ACTION,
                     }),
                     Ok(LegacyLookConversion::NeedsImport {
@@ -5530,8 +5325,6 @@ pub(crate) fn legacy_look_conversion(
             clip: clip_id,
             effect: effect_id,
         })?;
-    // CC4 §9: `intensity_percent * 100`, clamped to the managed basis-point
-    // range so a hand-edited legacy value cannot produce an invalid node.
     let mix_basis_points = stored_parameter(Some(effect), "intensity_percent", 100)
         .saturating_mul(100)
         .clamp(0, LUT_MIX_BASIS_POINTS_MAX);
@@ -5540,9 +5333,6 @@ pub(crate) fn legacy_look_conversion(
             let token = stored_parameter(Some(effect), "preset_token", 0);
             let builtin = kinewright_media::BuiltinLook::from_preset_token(token)
                 .ok_or(LegacyLookConversionError::InvalidPresetToken { observed: token })?;
-            // Built-ins are content-addressed like every other asset, so an
-            // already-registered record with the pinned hash is reused rather
-            // than duplicated.
             let existing = document
                 .lut_assets
                 .iter()
@@ -5913,8 +5703,6 @@ mod tests {
         for name in ["look_lut", "cube_lut"] {
             assert_eq!(warning(name).unwrap()["code"], "legacy_lut_stage");
         }
-        // Core canonicalises color_grade to primary_correction on load, so the
-        // dead arm is gone and neither name is a compatibility stage.
         assert!(warning("color_grade").is_none());
         assert!(warning("primary_correction").is_none());
         assert!(warning("opacity").is_none());
@@ -5935,9 +5723,6 @@ mod tests {
             parameters: BTreeMap::new(),
             keyframes: BTreeMap::new(),
         });
-        // An audio clip must not appear in a colour layer list at all, and its
-        // effects are not part of the CC1 image chain: a legacy-named effect
-        // there must not produce a colour compatibility warning either.
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
@@ -6209,10 +5994,6 @@ mod tests {
         assert!(summary.contains("contrast_pivot_basis_points=0..=10000, neutral 5000"));
     }
 
-    // -----------------------------------------------------------------------
-    // CC3 §8 — plan_color_wheels
-    // -----------------------------------------------------------------------
-
     fn wheels_args(parameters: BTreeMap<String, i64>) -> ColorWheelsPlanArgs {
         ColorWheelsPlanArgs {
             expected_revision: TimelineRevision(0),
@@ -6407,8 +6188,6 @@ mod tests {
             appended.assumptions
         );
 
-        // Requesting the value the node already holds proposes nothing, and
-        // the targeted node is still the honest answer.
         let unchanged = plan_color_wheels(
             &document,
             TimelineRevision(0),
@@ -6529,10 +6308,6 @@ mod tests {
         assert!(untouched.warnings.is_empty());
     }
 
-    // -----------------------------------------------------------------------
-    // CC3 §8 — plan_color_curves
-    // -----------------------------------------------------------------------
-
     #[test]
     fn color_curves_plan_expands_a_three_point_master_curve_and_never_applies() {
         let document = document();
@@ -6558,9 +6333,6 @@ mod tests {
                 ("master_y2".to_owned(), 10_000),
             ])
         );
-        // CC3 §2.4: only the parameters that move off their neutrals are
-        // stored. `master_x0`/`master_y0` are neutral at 0 and point 2 lands
-        // exactly on the neutral (10000, 10000).
         assert_eq!(
             plan.operations,
             vec![Operation::AddEffect {
@@ -6681,8 +6453,6 @@ mod tests {
             ]),
         ));
 
-        // Shrinking from four points to two: the active prefix is collapsed
-        // first so no single SetEffectParam ever sees a crossing x.
         let plan = plan_color_curves(
             &document,
             TimelineRevision(0),
@@ -6814,10 +6584,6 @@ mod tests {
             plan.warnings
         );
     }
-
-    // -----------------------------------------------------------------------
-    // CC3 §8 — the ordered `color_nodes` manifest
-    // -----------------------------------------------------------------------
 
     #[test]
     fn color_nodes_report_ordered_stages_with_bypass_and_inactive_reasons() {
@@ -6977,10 +6743,6 @@ mod tests {
             assert_eq!(stored_curve_points(None, curve), identity);
         }
     }
-
-    // -----------------------------------------------------------------------
-    // CC4 §10.3.14 — plan-not-apply, stage ordering, manifests, and evidence
-    // -----------------------------------------------------------------------
 
     fn cc4_lut_asset(id: u64, title: &str, digit: char) -> kinewright_core::LutAsset {
         kinewright_core::LutAsset {
@@ -7174,8 +6936,6 @@ mod tests {
             4,
             "a creative look goes immediately after the last correction node"
         );
-        // With no managed node at all, both kinds append and leave every
-        // unrelated effect's relative order untouched.
         let plain = vec![cc4_effect(1, "crop", &[])];
         assert_eq!(stage_insert_index(&plain, ColorNodeKind::TechnicalLut), 1);
         assert_eq!(stage_insert_index(&plain, ColorNodeKind::CreativeLook), 1);
@@ -7202,8 +6962,6 @@ mod tests {
         assert_eq!(details["observed"], 5_000);
         assert_eq!(details["allowed"], json!({"min": 10_000, "max": 10_000}));
 
-        // The same value is legal on a creative look, whose mix is the
-        // audition control.
         let mut creative = cc4_plan_args(1);
         creative.mix_basis_points = Some(5_000);
         let plan = plan_creative_look(&document, TimelineRevision(0), &creative, &looks)
@@ -7310,8 +7068,6 @@ mod tests {
         assert_eq!(technical["bypass"], 0);
         assert_eq!(technical["active"], true);
         assert_eq!(technical["inactive_reason"], Value::Null);
-        // No store root is published to a document-only context, so the
-        // availability marker is honest rather than invented.
         assert_eq!(
             technical["lut_availability"]["kind"],
             LUT_AVAILABILITY_UNKNOWN_NO_STORE
@@ -7392,8 +7148,6 @@ mod tests {
             "{details}"
         );
 
-        // The colour-pipeline shape names no node, so the proofed node is the
-        // honest fallback.
         let error = ColorProofError::from_proof_render_error(
             "before",
             MediaError::Backend(
@@ -7406,8 +7160,6 @@ mod tests {
         assert_eq!(error.code(), "missing_lut_asset");
         assert_eq!(error.details()["effect_id"], 7);
 
-        // The engine's pre-render binding shape, which names the ids as
-        // `LUT asset(s) <id> (<sha256>)` and can name several.
         let error = ColorProofError::from_proof_render_error(
             "after",
             MediaError::Backend(format!(
@@ -7424,8 +7176,6 @@ mod tests {
         assert_eq!(details["effect_id"], 7);
         assert_eq!(details["lut_title"], "Kodak 2383 D65");
 
-        // An id the project does not register reports exactly that, rather
-        // than borrowing the "no store root is published" marker.
         let error = ColorProofError::from_proof_render_error(
             "after",
             MediaError::Backend(
@@ -7722,10 +7472,6 @@ mod tests {
         assert!(lut_asset["recovery_action"].is_string());
     }
 
-    // -----------------------------------------------------------------------
-    // CC5 §7 — plan_secondary_correction
-    // -----------------------------------------------------------------------
-
     /// An `Analysis` double that answers only what CC5 §7 needs.
     ///
     /// `matte_proof_for_document` is defaulted to `NotImplemented` on the trait
@@ -7975,8 +7721,6 @@ mod tests {
         )
         .expect("valid secondary plan");
 
-        // Every operation, hand-written: the exact `matte_*` names CC5 §2.2
-        // generates and the exact integers the request named.
         let expected = [
             ("matte_enabled", 1),
             ("matte_luma_high_basis_points", 8_500),
@@ -8006,9 +7750,6 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         );
-        // `matte_window0_invert` was requested as `false`, which is its
-        // neutral, so no operation writes it — an unchanged control produces
-        // none (CC5 §2.2).
         assert!(
             !plan
                 .operations
@@ -8029,8 +7770,6 @@ mod tests {
     #[test]
     fn secondary_plan_inserts_a_new_node_at_the_stage_legal_index() {
         let mut document = document();
-        // A creative_look sits at the Look stage, so a new color_wheels node
-        // must land before it (CC4 §3.2).
         document.lut_assets.push(LutAsset {
             id: LutAssetId(1),
             sha256: "a".repeat(64),
@@ -8074,9 +7813,6 @@ mod tests {
                 effect: Effect {
                     id: EffectId(10),
                     name: "color_wheels".to_owned(),
-                    // Only the non-neutral values: `matte_window0_center_x` is
-                    // 2500 against a 5000 neutral, and the count and the master
-                    // switch are both off their neutrals.
                     parameters: integers([
                         ("matte_enabled", 1),
                         ("matte_window0_center_x_basis_points", 2_500),
@@ -8160,8 +7896,6 @@ mod tests {
 
         let mut args = secondary_args(Some(EffectId(5)), None);
         args.windows = Some(vec![MatteWindowRequest {
-            // The centre range is deliberately wide so a tracked window may
-            // leave and re-enter frame; 20001 is one past its maximum.
             center_x: Some(20_001),
             ..MatteWindowRequest::default()
         }]);
@@ -8197,8 +7931,6 @@ mod tests {
         );
         assert_eq!(error.details()["allowed"], json!({"min": 1, "max": 10_000}));
 
-        // More than four windows is refused by the window rule itself, not by
-        // a descriptor bound, because there is no fifth window to name.
         let mut args = secondary_args(Some(EffectId(5)), None);
         args.windows = Some(vec![MatteWindowRequest::default(); 5]);
         let error = plan_secondary_correction(
@@ -8292,8 +8024,6 @@ mod tests {
                 .unwrap()
                 .contains("ClearEffectKeyframes")
         );
-        // Every fully keyframable control keeps the ordinary CC3 posture: a
-        // warning, and the static value is still written.
         let mut node = wheels_node(6, BTreeMap::new());
         node.keyframes.insert(
             "matte_mix_basis_points".to_owned(),
@@ -8354,8 +8084,6 @@ mod tests {
                 .contains("inspect_grade_matte")
         );
 
-        // A 4 × 2 coverage: the left half fully covered, the right half not.
-        // Hand-derived: 4 covered of 8, so 5000 basis points.
         let analysis = MatteAnalysisDouble {
             coverage: Some(coverage_raster(4, 2, |x, _| if x < 2 { 255 } else { 0 })),
             monitor: None,
@@ -8375,8 +8103,6 @@ mod tests {
             kinewright_core::MATTE_SCOPE_THRESHOLD
         );
         assert_eq!(measured["raster"], json!({"width": 4, "height": 2}));
-        // The scratch document the coverage was measured on is not the
-        // analyzed one: the source clip still carries no matte parameter.
         assert!(
             document.clip(ClipId(1)).unwrap().effects[0]
                 .parameters
@@ -8399,8 +8125,6 @@ mod tests {
         document.tracks[0].clips[0]
             .effects
             .push(wheels_node(5, BTreeMap::new()));
-        // Display-coded (200, 40, 40) on the left, (128, 128, 128) on the
-        // right. The plan measures only the left half.
         let mut pixels = Vec::new();
         for _ in 0..2 {
             pixels.extend_from_slice(&[200, 40, 40, 255]);
@@ -8429,8 +8153,6 @@ mod tests {
             height: 1.0,
         });
 
-        // Without the opt-in the sample is evidence only: no qualifier
-        // parameter is proposed at all.
         let evidence_only =
             plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
                 .expect("valid plan");
@@ -8456,9 +8178,6 @@ mod tests {
                     && !name.starts_with("matte_luma")),
             "evidence must not become a proposal without the explicit opt-in"
         );
-        // The measured hue of a red-dominant pixel sits near 0 degrees: with
-        // `max == r` the hue is `60 * ((g - b) / C mod 6)`, and `g == b` here,
-        // so the hue is exactly 0.
         assert_eq!(sample["hue_median_centidegrees"], 0);
         let saturation = sample["saturation_basis_points"]["median"]
             .as_i64()
@@ -8491,8 +8210,6 @@ mod tests {
             requested["matte_luma_softness_basis_points"],
             MATTE_SAMPLE_SOFTNESS
         );
-        // The bands are the measured percentiles widened by the pinned margin
-        // and clamped to the descriptor range.
         let p10 = sample["saturation_basis_points"]["p10"].as_i64().unwrap();
         let p90 = sample["saturation_basis_points"]["p90"].as_i64().unwrap();
         assert_eq!(
@@ -8512,8 +8229,6 @@ mod tests {
         assert!(formula.contains("p10 - 1000"));
         assert!(formula.contains("p90 + 1000"));
 
-        // An explicit qualifier field always beats a derived one: the caller's
-        // number is a request, the sample is only evidence.
         args.qualifier = Some(MatteQualifierRequest {
             hue_center: Some(12_000),
             ..MatteQualifierRequest::default()
@@ -8539,8 +8254,6 @@ mod tests {
             monitor: Some(kinewright_core::RgbaImage {
                 width: 4,
                 height: 2,
-                // Fully transparent: CC2's rule says a transparent pixel is not
-                // part of the population, and partial alpha is never a weight.
                 pixels: vec![0; 32],
             }),
         };
@@ -8585,10 +8298,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // CC5 §7 — the `matte` manifest object
-    // -----------------------------------------------------------------------
-
     /// CC5 §7: absent entirely when the node carries no matte, so every CC4
     /// manifest is byte-unchanged.
     #[test]
@@ -8602,8 +8311,6 @@ mod tests {
         );
         assert!(matte_manifest_value(&plain).is_none());
 
-        // CC5 §2.6: `matte_enabled = 0` is still no matte at all, whatever the
-        // other 46 integers say.
         let disabled = wheels_node(
             5,
             integers([("matte_enabled", 0), ("matte_window_count", 2)]),
@@ -8632,8 +8339,6 @@ mod tests {
                 ("matte_hue_width_centidegrees", 1_500),
                 ("matte_window0_shape_token", 2),
                 ("matte_window0_center_x_basis_points", 6_000),
-                // Window 1 is stored but past the count, so it renders nothing
-                // and must not be published.
                 ("matte_window1_center_x_basis_points", 1_234),
             ]),
         );
@@ -8670,9 +8375,6 @@ mod tests {
     #[test]
     fn matte_manifest_reports_the_node_excluded_by_its_matte() {
         let looks = LookAssetContext::default();
-        // A non-neutral gain, so the node is not already the identity: Core
-        // tests the matte rule *last*, and a bypassed, neutral, or unbound node
-        // keeps the reason it already had.
         for mut parameters in [
             integers([("matte_enabled", 1), ("matte_mix_basis_points", 0)]),
             integers([("matte_enabled", 1), ("matte_invert", 1)]),
@@ -8733,13 +8435,6 @@ mod tests {
             );
         }
 
-        // The one-line pointer rides on every planner summary, so a caller is
-        // told the capability exists and which tool expands it. It is
-        // deliberately terse: `plan_color_wheels` spends 981 of its M36
-        // kilobyte on thirteen descriptor controls before the pointer is
-        // appended, so the pointer names the capability and the one tool that
-        // expands it and nothing else. `inspect_grade_matte` is reachable from
-        // there and from the legend, and is not repeated here.
         assert!(
             matte_parameter_pointer().len() <= 42,
             "the pointer is {} bytes; plan_color_wheels has only 42 to spare",
@@ -8758,9 +8453,6 @@ mod tests {
             );
             assert!(summary.len() < 1_024, "summary is {} bytes", summary.len());
         }
-        // `plan_secondary_correction`'s own description points at the two
-        // surfaces that enumerate the legend instead of repeating it, and does
-        // not recommend itself.
         let reference = matte_legend_reference();
         assert!(reference.contains("add_effect"));
         assert!(reference.contains("details.matte_parameters"));
@@ -8777,8 +8469,6 @@ mod tests {
         assert!(legend.contains("-10000..=20000"));
         assert!(!legend.contains("matte_window0_"));
 
-        // A rejection carries the base list *and* the legend, so an agent that
-        // reached for a matte name is pointed at the right surface.
         let error = plan_color_wheels(
             &document(),
             TimelineRevision(0),
@@ -8824,8 +8514,6 @@ mod tests {
     fn circular_median_agrees_with_brute_force_and_survives_two_million_samples() {
         assert_eq!(circular_median_centidegrees(&mut []), None);
 
-        // A deterministic, dependency-free generator: a 64-bit LCG. Random-ish
-        // inputs, reproducible failures.
         let mut state = 0x2545_F491_4F6C_DD1D_u64;
         let mut next = |modulus: u64| {
             state = state
@@ -8838,9 +8526,6 @@ mod tests {
             vec![0],
             vec![0, 18_000],
             vec![35_900, 100],
-            // The red seam, straddled: 359° and 1°. A plain median answers
-            // 18000, the opposite hue; the circular median must answer one of
-            // the reds.
             vec![35_900, 35_950, 35_990, 10, 60, 100],
             vec![35_990, 10],
             // Two antipodal clusters, where the tie-break matters.
@@ -8881,8 +8566,6 @@ mod tests {
             );
         }
 
-        // The seam case, spelled out: every sample is within 1° of red, so the
-        // answer must be a red and never the opposite hue.
         let mut seam = vec![35_900, 35_950, 35_990, 10, 60, 100];
         let median = circular_median_centidegrees(&mut seam).unwrap();
         assert!(
@@ -8890,17 +8573,6 @@ mod tests {
             "the seam median must be a red, was {median}"
         );
 
-        // Two million samples is the order of a 1080p full-frame ROI, and the
-        // double loop this replaced took tens of minutes on that many.
-        //
-        // The claim is a complexity one, so the bound is **relative to one
-        // `sort_unstable` of the same data** rather than a wall clock: the
-        // sort is what dominates `circular_median_centidegrees`, everything
-        // after it is one linear prefix pass and one monotone sweep, and a
-        // quadratic scorer would be five orders of magnitude above the sort
-        // on any machine. An absolute two-second threshold measured 2.36 s on
-        // a `windows-latest` runner — a loaded box, not a regression — and a
-        // wall clock cannot tell those apart.
         let large = (0..2_000_000_i64)
             .map(|index| (index * 7_919) % 36_000)
             .collect::<Vec<_>>();
@@ -8966,8 +8638,6 @@ mod tests {
                 .all(|name| !name.starts_with("matte_"))
         );
 
-        // Setting a real matte adds the `matte` object and still adds no
-        // parameter: one window, so it is not the inactive neutral matte.
         for (name, value) in [("matte_enabled", 1), ("matte_window_count", 1)] {
             document.tracks[0].clips[0].effects[0]
                 .parameters
@@ -9035,8 +8705,6 @@ mod tests {
             .expect("valid plan");
         assert_eq!(derived.requested_parameters["matte_qualifier_enabled"], 1);
 
-        // An empty `qualifier: {}` alongside a derivation is not an explicit
-        // "off" either: the derived bands are the request to enable the leg.
         args.qualifier = Some(MatteQualifierRequest::default());
         let empty = plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
             .expect("valid plan");
@@ -9070,9 +8738,6 @@ mod tests {
         document.tracks[0].clips[0].effects.push(node);
         let analysis = MatteAnalysisDouble::default();
 
-        // Only the window centre moves. `matte_enabled` and `matte_window_count`
-        // are already at the requested values, so the plan writes neither, and
-        // the curve on `matte_enabled` overrides nothing.
         let mut args = secondary_args(Some(EffectId(5)), None);
         args.windows = Some(vec![MatteWindowRequest {
             center_x: Some(7_000),
@@ -9089,8 +8754,6 @@ mod tests {
                 value: ParamValue::Integer(7_000),
             }]
         );
-        // The keyframed control is still called out, as every other planner
-        // calls out automation it did not write.
         assert!(
             plan.warnings
                 .iter()
@@ -9099,16 +8762,12 @@ mod tests {
             plan.warnings
         );
 
-        // Toggling `matte_invert` against its own Hold curve is still refused:
-        // that write really would be dead.
         args.invert = Some(true);
         let error = plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
             .unwrap_err();
         assert_eq!(error.code(), "matte_hold_only_parameter_keyframed");
         assert_eq!(error.details()["field"], "matte_invert");
 
-        // And a Hold curve that already holds exactly the requested value is
-        // not a dead write, because the render already agrees with the plan.
         args.invert = Some(false);
         plan_secondary_correction(&document, TimelineRevision(0), &analysis, &args)
             .expect("a curve that already holds the requested value is not overridden");

@@ -230,8 +230,6 @@ pub fn audio_qc_exceptions(measured: &AudioQcMeasurements) -> Vec<AudioQcExcepti
                 allowed: Some(balance_allowed),
             });
         }
-        // The gate passed blocks (integrated is `Some`) on a stereo master,
-        // yet no ratio could be formed: one side's gated energy is zero.
         None if measured.master.channels >= 2 => {
             exceptions.push(AudioQcException {
                 code: "audio_channel_imbalance".to_owned(),

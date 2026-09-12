@@ -133,9 +133,6 @@ const MATTE_INVERT_PARAMETER: &str = "matte_invert";
 pub(crate) const REFRAME_SUBJECT_PROVENANCE_PREFIX: &str = "__kinewright_reframe_subject_v1:";
 const REFRAME_SUBJECT_PROVENANCE_HEADER_BYTES: usize = 18;
 const REFRAME_SUBJECT_PROVENANCE_SAMPLE_BYTES: usize = 16;
-// AU3 §2.3: the lossy-codec peak headroom the normalization planner holds
-// under its ceiling is core's `LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS`,
-// shared with the export step; the agent keeps no copy of its own.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmationRequest {
@@ -1128,8 +1125,6 @@ impl KinewrightMcp {
             "relink_asset" => Ok(error_text(
                 "relink_asset is not exposed as a generated operation; use relink_media so the replacement is probed and hashed first",
             )),
-            // CC4 §8: only `import_lut_asset` can create a `LutAsset`, because
-            // only it can write the hashed bytes into the project store.
             "add_lut_asset" => Ok(error_text(
                 "add_lut_asset is not exposed as a generated operation; use import_lut_asset so the .cube bytes are parsed, hashed, and stored first",
             )),
@@ -1334,10 +1329,6 @@ impl KinewrightMcp {
             )));
         };
 
-        // Probe and hash the replacement before constructing the Core
-        // operation. Core remains filesystem-free and receives only this
-        // typed candidate; all mismatches therefore remain atomic Core
-        // rejections after this read-only preflight.
         let probed = match self.analysis.probe(&args.path) {
             Ok(asset) => asset,
             Err(error) => return Ok(error_text(error.to_string())),
@@ -1357,8 +1348,6 @@ impl KinewrightMcp {
         };
         let result = self.apply_operation("relink_media", args.expected_revision, operation);
         if result.is_error != Some(true) {
-            // Refresh content-addressed analysis for the replacement path.
-            // The operation itself remains the one Core history entry.
             if let Ok((_, updated)) = self.snapshot()
                 && let Some(updated_asset) = updated.asset(current.id)
             {
@@ -1461,8 +1450,6 @@ impl KinewrightMcp {
                 "RelinkAsset cannot be submitted through apply_edit_plan; use relink_media so the replacement is probed and hashed first",
             ));
         }
-        // CC4 §8: the plan path has no way to write the project LUT store, so
-        // a plan-supplied record could reference bytes that do not exist.
         if operations
             .iter()
             .any(|operation| matches!(operation, Operation::AddLutAsset { .. }))
@@ -1774,8 +1761,6 @@ impl KinewrightMcp {
         let (revision, document) = self.snapshot()?;
         let looks = self.look_context(&document);
         let value = if args.raw_only {
-            // `raw_only_conflict` above already refused `raw_only` combined with
-            // an explicit assumption, so there is no assumption left to forward.
             color_context_value_with_options(
                 revision,
                 &document,
@@ -1836,9 +1821,6 @@ impl KinewrightMcp {
             "timeline_revision": plan.expected_revision.0,
             "clip_id": plan.clip_id.0,
             "effect_id": plan.effect_id.0,
-            // Null when the proposal changes nothing and would have had to
-            // create the node: no operation allocates that id, so publishing it
-            // would name a node that does not exist and may later be reused.
             "target_effect_id": plan.target_effect_id().map(|effect| effect.0),
             "created_new_node": plan.created_new_node,
             "existing_primary_node_count": plan.existing_primary_node_count,
@@ -1897,9 +1879,6 @@ impl KinewrightMcp {
                     Some(&resolver as &dyn Fn(&_) -> _),
                 )
             }
-            // No store root, or a root this process refuses to read: every
-            // availability surface reports `unknown_no_store` rather than
-            // inventing a status.
             Some(Err(_)) | None => LookAssetContext::document_only(document),
         }
     }
@@ -1933,9 +1912,6 @@ impl KinewrightMcp {
     fn import_lut_asset(&self, args: &ImportLutAssetArgs) -> Result<CallToolResult, McpError> {
         let (actual_revision, document) = self.snapshot()?;
         if args.expected_revision != actual_revision {
-            // CC4 §8: every rejection this tool can return is structured, so a
-            // conflict is a machine-readable `revision_conflict`, not prose the
-            // caller has to pattern-match on.
             return Ok(lut_revision_conflict(
                 "import_lut_asset",
                 args.expected_revision,
@@ -1960,9 +1936,6 @@ impl KinewrightMcp {
                 return Ok(lut_store_error_result("import_lut_asset", &error));
             }
         };
-        // Ask before touching the filesystem. `symlink_metadata` on the source
-        // is cheap and is the honest size to quote; a source we cannot even
-        // stat is refused before a confirmation is spent on it.
         let observed_bytes = std::fs::symlink_metadata(&args.path)
             .ok()
             .filter(std::fs::Metadata::is_file)
@@ -1995,12 +1968,6 @@ impl KinewrightMcp {
             Ok(import) => import,
             Err(error) => return Ok(lut_store_error_result("import_lut_asset", &error)),
         };
-        // CC4 §2.1/§2.3: assets are content-addressed, so a second import of
-        // the same bytes is the *same* asset. Allocating a second record would
-        // give one look two ids, make `referenced_by` lie, and leave
-        // `RemoveLutAsset` unable to clean either one up. The store write above
-        // is idempotent by the same hash, so re-importing still repairs a
-        // missing store file before this returns.
         if let Some(existing) = document
             .lut_assets
             .iter()
@@ -2167,15 +2134,6 @@ impl KinewrightMcp {
                 }),
             ));
         }
-        // F10: the store's 60 s cap is enforced by `write_capture`, which runs
-        // AFTER the decode — so a ten-minute request used to buy a
-        // confirmation and a ten-minute synchronous decode on the handler
-        // thread before being told no, and R111's `ExportCancellation::default`
-        // is what makes that wait uninterruptible. The same cap is therefore
-        // checked here, in the units the caller asked in, before a byte is
-        // read. The store stays authoritative: this bound is computed from
-        // frames and rounds down, so a range this arm lets through can still be
-        // refused there on its exact sample count.
         let requested_milliseconds = capture_range_milliseconds(from, to, source.fps);
         if requested_milliseconds > kinewright_media::ROOM_TONE_MAX_CAPTURE_MILLISECONDS {
             return Ok(room_tone_capture_error(
@@ -2204,10 +2162,6 @@ impl KinewrightMcp {
                 }),
             ));
         }
-        // Ask before touching the filesystem, exactly as `import_lut_asset`
-        // does, and quote the honest length: the store truncates the capture
-        // down to a whole 30 fps asset frame, so the figure a caller approves
-        // is the requested range, in the units it asked in.
         let description = format!(
             "The agent wants to capture room tone from source frames {from}..{to} of \"{}\" into this project's room-tone store at {}. The decoded 48 kHz stereo samples are written under the project directory and registered as an undoable AddAsset operation.",
             source.name,
@@ -2255,9 +2209,6 @@ impl KinewrightMcp {
             Ok(capture) => capture,
             Err(error) => return Ok(room_tone_store_error_result(&error)),
         };
-        // Rule 116: the store write is idempotent by digest, and so is this.
-        // A second identical call finds the pooled asset at the same store
-        // path and returns its id, emitting no operation at all.
         if let Some(existing) = document
             .media_pool
             .iter()
@@ -2270,12 +2221,6 @@ impl KinewrightMcp {
                 ),
                 serde_json::json!({
                     "timeline_revision": actual_revision.0,
-                    // Rule 114's "`import_lut_asset`'s exact shape" includes its
-                    // payload shape: that tool publishes `lut_asset` in BOTH the
-                    // reused and the applied branch, so a caller reads one key
-                    // either way. Spilling these fields flat here would make the
-                    // shape depend on `reused_existing_asset`, which is the one
-                    // thing rule 114 promises it does not (F2).
                     "room_tone_asset": room_tone_asset_summary(existing, &capture, store.root()),
                     "reused_existing_asset": true,
                     "applied": false,
@@ -2298,9 +2243,6 @@ impl KinewrightMcp {
                 ));
             }
         };
-        // R46 / rule 115: `probe_path` writes a `name` from the file name,
-        // which for a content-addressed store file is `<sha256>.wav`. The
-        // capture therefore OVERRIDES probe's answer rather than carrying it.
         asset.name = args
             .name
             .as_deref()
@@ -2565,8 +2507,6 @@ impl KinewrightMcp {
                 return Err(lut_store_error_result("convert_legacy_look", &error));
             }
         };
-        // Ask before touching the filesystem, exactly as `import_lut_asset`
-        // does: a refused conversion must leave no store file behind.
         let observed_bytes = std::fs::symlink_metadata(&source)
             .ok()
             .filter(std::fs::Metadata::is_file)
@@ -2672,9 +2612,6 @@ impl KinewrightMcp {
             "clip_id": plan.clip_id.0,
             "kind": plan.kind.effect_name(),
             "effect_id": plan.effect_id.0,
-            // Null when the proposal changes nothing and would have had to
-            // create the node: no operation allocates that id, so publishing it
-            // would name a node that does not exist and may later be reused.
             "target_effect_id": plan.target_effect_id().map(|effect| effect.0),
             "created_new_node": plan.created_new_node,
             "targets_existing_node": plan.targets_existing_node,
@@ -2702,9 +2639,6 @@ impl KinewrightMcp {
             "resolved_parameters": plan.resolved_parameters,
             "requested_curves": plan.requested_curves,
             "resolved_curves": plan.resolved_curves,
-            // CC4 §8: the LUT planners publish the exact index their
-            // InsertEffect uses, so an ordering rejection is unreachable
-            // through the ordinary path, plus the bound asset's identity.
             "insert_index": plan.insert_index,
             "lut_asset": plan.lut_asset,
             "lut_node_limit_per_layer": kinewright_core::LUT_NODE_LIMIT_PER_LAYER,
@@ -2713,9 +2647,6 @@ impl KinewrightMcp {
             "operations": operations,
             "next": "Review these exact operations; submit them through prepare_edit_plan at the same revision if the edit is requested.",
         });
-        // CC5 §7: inserted rather than written into the literal above, so a
-        // CC3/CC4 plan response is byte-unchanged — the keys are absent, not
-        // null, when the planner does not touch a matte.
         let mut value = value;
         if let Some(object) = value.as_object_mut() {
             for (key, field) in [
@@ -2743,8 +2674,6 @@ impl KinewrightMcp {
     fn render_color_proof(&self, args: &RenderColorProofArgs) -> Result<CallToolResult, McpError> {
         let (actual_revision, document) = self.snapshot()?;
         let looks = self.look_context(&document);
-        // CC4 §8: `effect_id` proofs the *stored* node, so a proposed-primary
-        // parameter set alongside it would describe a different edit.
         if let Some(effect) = args.effect_id
             && !args.parameters.is_empty()
         {
@@ -2757,9 +2686,6 @@ impl KinewrightMcp {
                 ColorProofError::LookComparisonRequiresEffectId,
             ));
         }
-        // CC5 §7: `matte_comparison` is valid only alongside `effect_id`, and
-        // both comparisons select what the AFTER cell renders, so exactly one
-        // may be sent.
         if args.matte_comparison.is_some() && args.effect_id.is_none() {
             return Ok(color_proof_error_result(
                 ColorProofError::MatteComparisonRequiresEffectId,
@@ -2770,8 +2696,6 @@ impl KinewrightMcp {
                 ColorProofError::MatteComparisonConflictsWithLookComparison,
             ));
         }
-        // Resolve the stored node before any render work: an unrenderable
-        // request must cost nothing.
         let stored_node = match args.effect_id {
             None => None,
             Some(effect_id) => {
@@ -2794,13 +2718,6 @@ impl KinewrightMcp {
                         },
                     ));
                 };
-                // LUT nodes render through the `LutLibrary` the application
-                // publishes on the media engine (`FfmpegMediaEngine::
-                // set_lut_library`), which the proof renderer reads. An active
-                // LUT node whose asset is not published fails the render with a
-                // typed `missing_lut_asset:` error rather than a look-free frame.
-                // CC3 §5: a CC1 primary carries no bypass control, so the
-                // bypass variant is not a state this node can be put into.
                 if matches!(args.look_comparison, Some(LookComparison::Bypass))
                     && kind == ColorNodeKind::Primary
                 {
@@ -2811,9 +2728,6 @@ impl KinewrightMcp {
                         },
                     ));
                 }
-                // CC5 §7: a matte comparison needs a node that both may carry a
-                // matte and actually does. Both are checked before any render
-                // work, so an unrenderable request costs nothing.
                 if args.matte_comparison.is_some() {
                     if !kind.supports_matte() {
                         return Ok(color_proof_error_result(
@@ -2913,11 +2827,6 @@ impl KinewrightMcp {
                 },
             )));
         };
-        // A proof renders one exact project frame.  Availability therefore
-        // follows the compositor's active visual layers at that frame, not
-        // every clip in the document (and never audio-only tracks).  This is
-        // important for offline bins and for a later shot that is not part of
-        // the requested BEFORE/AFTER image.
         let active_visual_layers =
             match kinewright_media::visual_layers_at(&document, args.timecode) {
                 Ok(layers) => layers,
@@ -2957,9 +2866,6 @@ impl KinewrightMcp {
                 selected_clip_is_rendered = true;
             }
             let Some(asset_id) = asset_id else {
-                // Titles are compositor-native overlays and do not require a
-                // source file. Record the production title layer explicitly,
-                // without inventing asset identity or availability fields.
                 let kinewright_media::TimelineVisualLayer::Title(title_layer) = &layer else {
                     unreachable!("only title layers omit an asset id")
                 };
@@ -3046,17 +2952,11 @@ impl KinewrightMcp {
                     }));
                 }
             };
-            // Every active layer is composited into the same BEFORE/AFTER
-            // raster, so a non-selected layer's source profile is part of the
-            // proof's claim and is classified with the same normative
-            // assumption rather than left unreported.
             let (layer_source_status, layer_source_error) =
                 active_layer_source_classification(&timeline_asset.color_description);
             if let Some(error) = layer_source_error
                 && blocking_layer_source.is_none()
             {
-                // The full warning list is only known once every layer has been
-                // classified, so the refusal is assembled after the loop.
                 blocking_layer_source = Some((timeline_clip.id, timeline_asset.id, error));
             }
             unsupported_layer_warnings.extend(Self::layer_compatibility_warnings(
@@ -3080,10 +2980,6 @@ impl KinewrightMcp {
                 },
                 "source_fingerprint": timeline_asset.source_fingerprint,
                 "availability": availability,
-                // `visual_layers_at` has already evaluated clip-local
-                // automation at this exact project frame. Preserve the
-                // serialized vector order and resolved primary values so the
-                // production layer can be reproduced from the manifest.
                 "effects": proof_effect_manifest(&video_layer.effects),
                 "color_nodes": proof_color_node_manifest(&video_layer.effects, &looks),
                 "transition": {
@@ -3093,16 +2989,8 @@ impl KinewrightMcp {
                 },
                 "legacy_stage_warnings": legacy_stage_warnings(timeline_clip),
             }));
-            // Retain one manifest entry per rendered clip so per-clip legacy
-            // warnings remain observable when an asset is overlaid more than
-            // once.
             active_rendered_sources.push((track_id, timeline_clip, timeline_asset, availability));
         }
-        // A proof whose composite includes an unsupported source cannot honestly
-        // claim managed CC1 conformance, so it fails with the exact
-        // asset/field/observed/allowed evidence instead of rendering. The
-        // non-blocking layer warnings ride along: this error path is the only
-        // place they can still be reported for this composite.
         if let Some((clip, asset, error)) = blocking_layer_source {
             return Ok(color_proof_error_result(
                 ColorProofError::UnsupportedActiveLayerSource {
@@ -3123,9 +3011,6 @@ impl KinewrightMcp {
             }));
         }
 
-        // CC4 §8: the BEFORE cell of a stored-node proof is the same composite
-        // with the node removed, so `bypass` can be asserted byte-identical to
-        // `before` rather than merely assumed (CC4 §3.6).
         let scratch_document = |operations: &[Operation]| -> Result<Arc<Document>, String> {
             if operations.is_empty() {
                 return Ok(Arc::clone(&document));
@@ -3134,9 +3019,6 @@ impl KinewrightMcp {
             apply_batch(&mut candidate, operations).map_err(|error| error.to_string())?;
             Ok(Arc::new(candidate))
         };
-        // CC5 §7: the scratch automation this proof had to remove to render the
-        // variant it names, published in the manifest so the removal is a
-        // stated fact rather than an invisible difference from the document.
         let mut cleared_keyframes: Vec<&'static str> = Vec::new();
         let clip_local = args
             .timecode
@@ -3149,25 +3031,12 @@ impl KinewrightMcp {
                     clip: args.clip_id,
                     effect: effect_id,
                 }];
-                // CC5 §7: `inside_only` is the document exactly as stored, and
-                // `outside_only` is a scratch copy with `matte_invert` toggled,
-                // so the two variants partition the raster.
                 let after = match (args.matte_comparison, look_comparison) {
                     (Some(MatteComparison::OutsideOnly), _) => {
                         let stored_effect = document.clip(args.clip_id).and_then(|clip| {
                             clip.effects.iter().find(|effect| effect.id == effect_id)
                         });
-                        // `matte_invert` is Hold-only but it *is* keyframable,
-                        // and automation beats the stored static value at every
-                        // frame from its first keyframe onward. So the value to
-                        // complement is the one this frame actually renders,
-                        // and the static write only lands once the curve is out
-                        // of the way — otherwise the "outside" cell would
-                        // silently render the inside and the manifest would say
-                        // otherwise. The clear is emitted on the scratch copy
-                        // only, and only when a curve exists, so a node without
-                        // automation produces the byte-identical single
-                        // operation it always did.
+                        // Automation beats the stored static invert from the first keyframe.
                         let rendered_invert = stored_effect
                             .and_then(|effect| {
                                 effect.integer_parameter_at(MATTE_INVERT_PARAMETER, clip_local)
@@ -3220,9 +3089,6 @@ impl KinewrightMcp {
                 (remove, after)
             }
         };
-        // A request that changes nothing produces no operations at all. Core
-        // rejects an empty batch, and an identical BEFORE/AFTER is the honest
-        // proof of a no-op request.
         let before_document = match scratch_document(&before_operations) {
             Ok(document) => document,
             Err(message) => {
@@ -3247,8 +3113,6 @@ impl KinewrightMcp {
         {
             Ok(proof) => proof,
             Err(error) => {
-                // CC4 §2.3: an unpublished LUT asset is a typed refusal
-                // naming the asset, not a prose render failure.
                 return Ok(color_proof_error_result(
                     ColorProofError::from_proof_render_error(
                         "before",
@@ -3308,10 +3172,6 @@ impl KinewrightMcp {
                 ),
             }));
         }
-        // CC5 §7: `coverage` replaces the AFTER cell with the §4.1 proof
-        // image itself. It is rendered here, after the BEFORE/AFTER rasters
-        // have been proved to match the document raster, so the coverage is
-        // asserted to be the same size as the picture it describes.
         let mut after = after;
         let mut matte_coverage = None;
         if matches!(args.matte_comparison, Some(MatteComparison::Coverage))
@@ -3361,11 +3221,6 @@ impl KinewrightMcp {
                 });
             after.image = proof.coverage;
         }
-        // CC4 §8: the manifest *asserts* that the bypass variant is the
-        // byte-identical twin of the node-removed variant. A difference means
-        // a bypassed node still contributed something, so the proof is refused
-        // with both hashes and both rasters rather than published with a
-        // `bypass_matches_absent: false` footnote nobody has to read.
         let bypass_matches_absent = match (look_comparison, stored_node) {
             (LookComparison::Bypass, Some((effect_id, _))) => {
                 let absent = kinewright_media::sha256_bytes(&before.image.pixels);
@@ -3457,8 +3312,6 @@ impl KinewrightMcp {
             .timecode
             .checked_sub(clip.timeline_start)
             .unwrap_or(TimeCode::ZERO);
-        // CC5 §7, hoisted out of the manifest literal so the `json!` macro
-        // stays inside its recursion budget.
         let matte_comparison_manifest = args.matte_comparison.map(|variant| {
             serde_json::json!({
                 "variant": variant.as_str(),
@@ -3470,11 +3323,6 @@ impl KinewrightMcp {
                     MatteComparison::OutsideOnly => "a scratch copy with matte_invert toggled: the correction applies outside the matte and nowhere else",
                 },
                 "after_operations": after_operations,
-                // CC5 §7: `matte_invert` is Hold-only but keyframable, and a
-                // static write under an existing curve is dead. `outside_only`
-                // therefore clears that curve on the scratch copy, and names it
-                // here; empty for every other variant and for a node with no
-                // `matte_invert` automation.
                 "cleared_keyframes": cleared_keyframes,
                 "coverage": matte_coverage,
             })
@@ -3570,8 +3418,6 @@ impl KinewrightMcp {
                 "requested_parameters": plan.requested_parameters,
                 "resolved_parameters": plan.resolved_parameters,
             },
-            // CC4 §8: which variant the AFTER cell actually rendered, and the
-            // exact scratch operations each cell was rendered from.
             "look_comparison": stored_node.map(|(effect_id, kind)| serde_json::json!({
                 "effect_id": effect_id.0,
                 "kind": kind.effect_name(),
@@ -3611,9 +3457,6 @@ impl KinewrightMcp {
             "objective": objective,
             "next": "Review the mapped BEFORE/AFTER cells and exact unapplied operations; submit through prepare_edit_plan at the same revision only if the edit is requested.",
         });
-        // CC5 §7: inserted rather than written into the literal above, which is
-        // already at the `json!` macro's recursion budget. Absent entirely when
-        // no matte variant was requested, so a CC4 manifest is byte-unchanged.
         let mut manifest = manifest;
         if let Some(matte_comparison) = matte_comparison_manifest
             && let Some(object) = manifest.as_object_mut()
@@ -3672,9 +3515,6 @@ impl KinewrightMcp {
                     "denominator": settings.fps.denominator(),
                 },
                 "delivery_color": settings.delivery_color,
-                // AU3 §2.3 / F12: the profile's loudness target, the contract
-                // `get_audio_qc` judges against when given this profile and
-                // the export normalization step brings the master to.
                 "loudness_target": profile.loudness_target(),
             })
         });
@@ -4130,8 +3970,6 @@ impl KinewrightMcp {
         match get_color_qc(&document, revision, self.analysis.as_ref(), args) {
             Ok(value) => Ok(success_structured(
                 format!(
-                    // Read as the typed values they are: `Value`'s own Display
-                    // would quote the stage and is only correct by accident.
                     "evidence-only CC6 colour QC at timeline revision {revision}, stage={}, project frame {}; no operation was applied",
                     value["stage"]
                         .as_str()
@@ -4244,13 +4082,6 @@ impl KinewrightMcp {
         }
         let parameter =
             |name: &str, neutral: i64| effect.integer_parameter_at(name, start).unwrap_or(neutral);
-        // CC5 §5.2: `mask_center_x/y_percent` are evaluated at the fragment's
-        // *layer* uv (`compositor.wgsl` reads `value / 100` of `input.uv`),
-        // which the vertex stage's `scale`/`offset` placement has not yet
-        // touched, while the tracker measures the *composited* thumbnail. Seed
-        // the search with the stored centre pushed forward through the layer
-        // transform resolved at the first sampled frame, and rescale the
-        // template by that same scale — exactly as `track_matte_window` does.
         let seed_transform = resolve_layer_transform_at(effect_chain(clip), start);
         let stored_center_percent = [
             parameter("center_x_percent", 50).clamp(0, 100),
@@ -4282,11 +4113,6 @@ impl KinewrightMcp {
             tracked_box_percent(stored_box_percent[0], seed_transform.scale),
             tracked_box_percent(stored_box_percent[1], seed_transform.scale),
         ];
-        // CC5 §5.2: the template is sized once, at the seed frame's scale, but
-        // it must be a legal template at *every* sampled frame. `tracked_box_percent`
-        // is monotone in the scale, so testing the smallest and the largest
-        // resolved scale tests the whole range — and the refusal names the
-        // frame and the scale that failed, not the seed's.
         let scale_extremes = layer_scale_extremes(effect_chain(clip), &sample_frames);
         if let Some((offending, [template_width, template_height])) = scale_extremes
             .and_then(|extremes| offending_template_scale(stored_box_percent, extremes))
@@ -4333,10 +4159,6 @@ impl KinewrightMcp {
             Err(error) => return Ok(error_text(error)),
         };
         let observations = tracked.observations;
-        // CC5 §5.2: the transform is resolved at *each* observation's own
-        // frame, so a keyframed scale or offset is converted sample by sample
-        // rather than refused. Every written value is the composite centre
-        // measured as a fraction of the extent and pulled back into layer uv.
         let converted = observations
             .iter()
             .map(|observation| {
@@ -4392,20 +4214,10 @@ impl KinewrightMcp {
                 serde_json::json!({
                     "local_frame": observation.local_frame.0,
                     "project_frame": observation.project_frame.0,
-                    // The values the plan writes, in the layer uv the mask is
-                    // evaluated in.
                     "center_x_percent": layer[0],
                     "center_y_percent": layer[1],
                     "layer_center_x_percent": layer[0],
                     "layer_center_y_percent": layer[1],
-                    // Provenance: what the tracker actually measured, on the
-                    // composited thumbnail, in its own raster — read with the
-                    // *same* fraction-of-the-extent convention this response's
-                    // `coordinate_space.pixel_to_unit` publishes and the layer
-                    // values above are converted from, so applying the published
-                    // `composite_to_layer` map to these numbers reproduces
-                    // `layer_center_*_percent`. The `extent − 1` lattice would
-                    // silently disagree with the stated map.
                     "composite_center_pixel": observation.center,
                     "composite_center_x_percent": layer_unit_to_percent(
                         tracker_pixel_to_composite_unit(observation.center[0], tracked.width),
@@ -4435,8 +4247,6 @@ impl KinewrightMcp {
                 "center_x_percent": x_curve,
                 "center_y_percent": y_curve,
             },
-            // CC5 §5.2: the two spaces and the exact maps between them, stated
-            // rather than inferred, mirroring `track_matte_window`.
             "coordinate_space": {
                 "measured_on": "composited thumbnail, whose uv is the output frame",
                 "written_in": "layer uv, which is where the mask is evaluated",
@@ -4534,8 +4344,6 @@ impl KinewrightMcp {
                     "field": "effect_id",
                     "observed": {"effect_id": args.effect_id.0, "name": effect.name},
                     "allowed": crate::color_status::MATTE_CAPABLE_NODE_NAMES,
-                    // CC5 §1: the layer `mask` effect is a compositing alpha
-                    // operation, not a colour node, and is never a secondary.
                     "recovery_action": "A matte belongs to a managed correction node. The layer `mask` effect is a compositing alpha operation, not a matte; inspect it with get_clip_info.",
                 }),
             ));
@@ -4553,8 +4361,6 @@ impl KinewrightMcp {
             ));
         }
 
-        // CC5 §2.6: every inactivity question is answered on the *evaluated*
-        // stored integers, never on floats and never on the authored values.
         let clip_local = args
             .timecode
             .0
@@ -4573,11 +4379,6 @@ impl KinewrightMcp {
         ) {
             Ok(proof) => proof,
             Err(error) => {
-                // The engine may not implement matte proofs yet, and a node
-                // that is inactive or matte-free fails typed rather than
-                // returning a blank frame (CC5 §4.1). Both surface here as one
-                // stable code with the backend's own message attached, so a
-                // caller never mistakes "could not measure" for "empty".
                 return Ok(matte_error_result(
                     crate::color_status::MATTE_PROOF_UNAVAILABLE,
                     &format!(
@@ -4635,8 +4436,6 @@ impl KinewrightMcp {
             "kind": kind.effect_name(),
             "role": kind.role(),
             "color_stage": kind.stage().as_str(),
-            // CC5 §1: the two coverage concepts are named apart on every
-            // surface, so a reader cannot mistake one for the other.
             "surface": "Matte (this correction)",
             "distinct_from": "Mask (layer alpha), which is a compositing operation and is never a CC1 secondary",
             "active": inactive_reason.is_none(),
@@ -4790,11 +4589,6 @@ impl KinewrightMcp {
         let Some(first_local) = sample_frames.first().copied() else {
             return Ok(error_text("tracking requires at least one sample"));
         };
-        // CC5 §5.2: the window is stored in *layer* uv while the tracker
-        // measures the *composite*, so the layer transform must be resolvable
-        // and static across the tracked range. A keyframed scale or offset
-        // would make one composite pixel mean a different layer position at
-        // every sample, which no single conversion can express.
         let transform = match resolve_static_layer_transform(effect_chain(clip), &sample_frames) {
             Ok(transform) => transform,
             Err(unsupported) => {
@@ -4829,9 +4623,6 @@ impl KinewrightMcp {
                     "field": "window_index",
                     "observed": args.window_index,
                     "allowed": {"max_active_index": matte.window_count.saturating_sub(1), "window_count": matte.window_count},
-                    // CC5 §2.2: a window at index >= window_count is preserved
-                    // but never rendered, so tracking it would animate geometry
-                    // that affects no pixel.
                     "recovery_action": "Raise matte_window_count with plan_secondary_correction so the window renders, then track it.",
                 }),
             ));
@@ -4840,9 +4631,6 @@ impl KinewrightMcp {
             return Ok(error_text("matte window index is outside 0..=3"));
         };
 
-        // CC5 §5.2: the tracking box is the window's axis-aligned bounding box
-        // mapped into the composited thumbnail, so it is rescaled by the layer
-        // scale. `box_percent` is a full width/height, hence the factor two.
         let box_percent = [
             matte_track_box_percent(window.half_width_bp, transform.scale),
             matte_track_box_percent(window.half_height_bp, transform.scale),
@@ -4876,9 +4664,6 @@ impl KinewrightMcp {
         ) {
             Ok(percent) => percent,
             Err(seed) => {
-                // The repairable input is the window's own stored centre, not
-                // the index that selected it, so the refusal names the offending
-                // parameter and keeps the index as context.
                 let index = args.window_index;
                 return Ok(tracking_seed_outside_composite_result(
                     [
@@ -4903,12 +4688,6 @@ impl KinewrightMcp {
             box_percent,
             search_radius_percent: search_radius,
             max_width,
-            // CC5 §5.2: excluding *this exact node* by id removes the feedback
-            // a matte-scoped correction would otherwise create — as the window
-            // moves the graded picture changes inside it and a SAD template
-            // would chase its own output — while leaving every other grade and
-            // every other effect, including a second node of the same kind,
-            // intact.
             excluded_effect: args.effect_id,
         }) {
             Ok(tracked) => tracked,
@@ -4940,8 +4719,6 @@ impl KinewrightMcp {
             observations.push((observation.local_frame, layer, record));
         }
 
-        // CC5 §5.2: two surviving samples is the minimum a Linear curve can be
-        // built from, and the roadmap's manual fallback is the recovery.
         if observations.len() < MATTE_TRACK_MINIMUM_SAMPLES {
             return Ok(matte_error_result(
                 "tracking_confidence_too_low",
@@ -4964,10 +4741,6 @@ impl KinewrightMcp {
             ));
         }
 
-        // CC5 §5.2 / M40: raw tracker centres stutter, and tracker noise must
-        // not become visible matte motion. The dead zone is deliberately zero
-        // - a dead zone lags, which is right for a virtual camera and wrong for
-        // a matte, which must stay on the subject.
         let smoothed = [0_usize, 1].map(|axis| {
             kinewright_core::stabilize_tracked_centres_basis_points(
                 &observations
@@ -4999,8 +4772,6 @@ impl KinewrightMcp {
                 .map(|(index, (local_frame, _, _))| Keyframe {
                     at: *local_frame,
                     value: smoothed[axis].get(index).copied().unwrap_or_default(),
-                    // CC5 §5.2: sustained movement gets continuous velocity;
-                    // M40 rejected eased per-segment curves.
                     interpolation: KeyframeInterpolation::Linear,
                 })
                 .collect(),
@@ -5050,8 +4821,6 @@ impl KinewrightMcp {
                 y_name.clone(): y_curve,
             },
             "parameters": [x_name, y_name],
-            // CC5 §5.2: the pinned M40 smoothing policy, published so a reader
-            // can reproduce the smoothed curve from the raw observations.
             "window_stabilization": {
                 "median_filter": true,
                 "dead_zone_basis_points": MATTE_TRACK_DEAD_ZONE_BASIS_POINTS,
@@ -5163,13 +4932,6 @@ impl KinewrightMcp {
                 sample_frames.len()
             )));
         }
-        // The stored focus, in the compositor's own precedence: an explicitly
-        // stored `focus_*_basis_points` wins over `focus_*_percent`
-        // (`compositor.rs`'s `ReframeFocusXBasisPoints` arm only overwrites the
-        // percent-derived focus when the parameter is actually present), and a
-        // reframe carrying neither is centred. This tool *writes* basis points,
-        // so reading only the percent would seed a re-track of its own output
-        // at 50 percent instead of where the camera actually is.
         let stored_focus = |basis_points: &str, percent: &str| -> u8 {
             if let Some(value) = effect.integer_parameter_at(basis_points, start) {
                 let rounded = (value.clamp(0, 10_000) + 50) / 100;
@@ -5226,14 +4988,6 @@ impl KinewrightMcp {
         if !(64..=512).contains(&max_width) {
             return Ok(error_text("max_width must be in 64..=512"));
         }
-        // CC5 §5.2: `focus_x/y_basis_points` name the centre of the visible
-        // window *inside the layer texture* — `compositor.wgsl` builds
-        // `sample_uv` from `reframe_focus_x/y` before the vertex stage places
-        // the quad — while the tracker measures the composited thumbnail. Seed
-        // the search with the initial focus pushed forward through the layer
-        // transform resolved at the first sampled frame, and rescale the
-        // subject template by that same scale, exactly as `track_matte_window`
-        // does for a window.
         let seed_transform = resolve_layer_transform_at(effect_chain(clip), start);
         let seed_center_percent = match composite_seed_percent(
             seed_transform,
@@ -5259,10 +5013,6 @@ impl KinewrightMcp {
             tracked_box_percent(subject_box_percent[0], seed_transform.scale),
             tracked_box_percent(subject_box_percent[1], seed_transform.scale),
         ];
-        // CC5 §5.2: the template is sized once, at the seed frame's scale, but
-        // it must be a legal template at *every* sampled frame, so the gate is
-        // applied at the smallest and the largest resolved scale and the
-        // refusal names the frame and scale that failed rather than the seed's.
         let scale_extremes = layer_scale_extremes(effect_chain(clip), &sample_frames);
         if let Some((offending, [template_width, template_height])) = scale_extremes
             .and_then(|extremes| offending_template_scale(subject_box_percent, extremes))
@@ -5291,9 +5041,6 @@ impl KinewrightMcp {
             Ok(tracked) => tracked,
             Err(error) => return Ok(error_text(error)),
         };
-        // CC5 §5.2: one transform per observation, resolved at that
-        // observation's own frame, so a keyframed scale or offset is converted
-        // sample by sample rather than refused.
         let sample_transforms = tracked
             .observations
             .iter()
@@ -5301,11 +5048,6 @@ impl KinewrightMcp {
                 resolve_layer_transform_at(effect_chain(clip), observation.local_frame)
             })
             .collect::<Vec<_>>();
-        // The bounds the tracker measured, on the composite, from the same
-        // rescaled template it matched with. Pure provenance: nothing plans
-        // from these, because the template is sized once at the seed frame's
-        // scale and converting it back through a *different* observation's
-        // scale would inflate the box by `seed_scale / observation_scale`.
         let composite_samples = tracked
             .observations
             .iter()
@@ -5313,8 +5055,6 @@ impl KinewrightMcp {
                 tracked_subject_bounds(observation, tracked.width, tracked.height, box_percent)
             })
             .collect::<Vec<_>>();
-        // Every observation's centre, converted into layer uv with the
-        // transform resolved at that observation's own frame.
         let layer_centres = tracked
             .observations
             .iter()
@@ -5328,12 +5068,6 @@ impl KinewrightMcp {
                 )
             })
             .collect::<Vec<_>>();
-        // The reframe crop selects a sub-rectangle of the *layer* texture, so
-        // the containment constraint — and the provenance marker that records
-        // it — are stated in layer uv too. The box is the converted layer
-        // centre bracketed by the *declared* layer subject size, rounded
-        // outward and clamped to 0..=10000; it is never routed through the
-        // composite template, whose size is pinned to the seed frame's scale.
         let provenance_samples = tracked
             .observations
             .iter()
@@ -5365,10 +5099,6 @@ impl KinewrightMcp {
             Ok(constraints) => constraints,
             Err(error) => return Ok(error_text(error)),
         };
-        // CC5 §5.2: every observation is converted *before* the planner sees
-        // it — composite pixel as a fraction of the extent, then pulled back
-        // into layer uv — so the focus curve is planned, clamped, and written
-        // entirely in the space the compositor reads it in.
         let samples = tracked
             .observations
             .iter()
@@ -5469,8 +5199,6 @@ impl KinewrightMcp {
                 },
             }
         };
-        // CC5 §5.2 provenance: the raw composite measurement beside the layer
-        // value that was actually planned from it, one row per sample.
         let subject_samples = tracked
             .observations
             .iter()
@@ -5499,9 +5227,6 @@ impl KinewrightMcp {
                         "top": composite.top_basis_points,
                         "bottom": composite.bottom_basis_points,
                     },
-                    // The box containment was planned from and the provenance
-                    // marker records: the converted layer centre bracketed by
-                    // the declared layer subject size, rounded outward.
                     "layer_bounds_basis_points": {
                         "left": layer.left_basis_points,
                         "right": layer.right_basis_points,
@@ -5539,8 +5264,6 @@ impl KinewrightMcp {
                 "composite_box_percent": box_percent,
                 "composite_seed_center_percent": seed_center_percent,
             },
-            // CC5 §5.2: the two spaces and the exact maps between them, stated
-            // rather than inferred, mirroring `track_matte_window`.
             "coordinate_space": {
                 "measured_on": "composited thumbnail, whose uv is the output frame",
                 "written_in": "layer uv, which is where the reframe crop window is centred",
@@ -6156,12 +5879,6 @@ impl KinewrightMcp {
             video_track: args.video_track,
             audio_track: args.audio_track,
         };
-        // Resolve the derived range on an isolated, clip-free copy. This is
-        // deliberately separate from the actual preview: overwrite may
-        // remove the highest existing clip id and Core is allowed to reuse
-        // that id for the replacement. Matching by source/timeline semantics
-        // therefore remains correct where an id-only before/after diff would
-        // lose the new clip.
         let mut range_document = document.as_ref().clone();
         for track in &mut range_document.tracks {
             track.clips.clear();
@@ -6834,9 +6551,6 @@ impl KinewrightMcp {
         document: &Document,
         consumer: &str,
     ) -> Option<CallToolResult> {
-        // An offline item sitting unused in the media pool must not block a
-        // timeline proof. Only source-backed clips can contribute decoded
-        // pixels; titles are project-native and need no source file.
         let mut inspected = BTreeSet::new();
         document.tracks.iter().find_map(|track| {
             track.clips.iter().find_map(|clip| {
@@ -7537,9 +7251,6 @@ impl KinewrightMcp {
         };
         let report = match self.analysis.mix_levels(&document, &request) {
             Ok(report) => report,
-            // AU3 §2.5 / Q3: a range shorter than one 400 ms gating block is
-            // refused before decoding, named as such so a caller can widen it
-            // rather than read the refusal as a backend failure.
             Err(kinewright_core::MediaError::MixLoudnessRangeTooShort {
                 sample_frames,
                 required,
@@ -7586,9 +7297,6 @@ impl KinewrightMcp {
                 render_optional_hundredths(bus.levels.sample_peak_dbfs_hundredths),
             );
         }
-        // AU3 §2.1: the master line also spells the four AU3 fields, `none`
-        // where the programme is too short to measure one (short-term needs
-        // 3 s, the range two gated windows) or is silent.
         let _ = write!(
             text,
             "master lufs={} peak={} momentary_max={} short_term_max={} lra={} true_peak={}",
@@ -7599,10 +7307,6 @@ impl KinewrightMcp {
             render_optional_hundredths(report.master.loudness_range_lu_hundredths),
             render_optional_hundredths(report.master.true_peak_dbtp_hundredths),
         );
-        // AU1 §2.1: `TrackMix` skips its neutral fields on the wire, so a
-        // neutral track serialises as `{"track": 1}` here and a reader must
-        // default the absent `gain_tenth_db`, `pan_percent`, `mute` and `solo`.
-        // The text lines above always spell all four.
         Ok(success_structured(
             text,
             serde_json::json!({
@@ -7627,8 +7331,6 @@ impl KinewrightMcp {
             (None, Some(bus)) => MixSpectrumPoint::Bus(bus),
             (None, None) => MixSpectrumPoint::Master,
         };
-        // The same range rule as `get_audio_levels`: both bounds omitted
-        // measures the whole timeline, and either bound alone fills the other.
         let range = match (args.start_frame, args.end_frame) {
             (None, None) => None,
             (start, end) => {
@@ -7643,9 +7345,6 @@ impl KinewrightMcp {
             }
         };
         let request = MixSpectrumRequest { range, point };
-        // Every analysis failure, including the typed
-        // `MixSpectrumRangeTooShort` a sub-512 ms range earns, is reported as
-        // tool-call text rather than a protocol error.
         let report = match self.analysis.mix_spectrum(&document, &request) {
             Ok(report) => report,
             Err(error) => {
@@ -8672,8 +8371,6 @@ impl KinewrightMcp {
     #[allow(clippy::too_many_lines)]
     fn plan_audio_ducking(&self, args: &AudioDuckingPlanArgs) -> Result<CallToolResult, McpError> {
         let (revision, document) = self.snapshot()?;
-        // Rule 125's refusal is raised before any evidence is read, so an
-        // editor's existing ride is never even measured against.
         let settings = match ducking_settings(&document, args) {
             Ok(settings) => settings,
             Err(error) => return Ok(error_text(error)),
@@ -8688,9 +8385,6 @@ impl KinewrightMcp {
             Err(result) => return Ok(result),
         };
         let spoken = match &settings.range {
-            // Rule 126: `range` restricts which dialogue spans are considered
-            // — a span is kept when it intersects the window — and then clamps
-            // the emitted curve. It never restricts the measurement.
             Some(range) => spoken
                 .into_iter()
                 .filter(|span| span.start < range.end && span.end > range.start)
@@ -8723,11 +8417,6 @@ impl KinewrightMcp {
             Err(error) => return Ok(error_text(error)),
         };
         let keyframe_count = curve.keyframes.len();
-        // Rule 128.2 is read off the curve that was actually emitted, not off
-        // the merged spans it was built from: a key clamped into `bounds` can
-        // reshape a window, and both the reported `windows` and the two
-        // measurement windows would then describe a curve this plan does not
-        // commit.
         let (ducked_windows, unducked_windows) = ducking_flat_spans(
             &curve,
             settings.parked_gain_tenth_db,
@@ -8745,9 +8434,6 @@ impl KinewrightMcp {
                 "ducking curve does not fit the current timeline: {error}"
             )));
         }
-        // Rule 128: the measurement is best-effort. When no flat window
-        // reaches one gating block the planner reports why and still commits
-        // the curve — the ride is correct whether or not it can be measured.
         let measured = self.measure_ducking(
             &candidate,
             &settings,
@@ -9025,18 +8711,7 @@ impl KinewrightMcp {
         let fade_milliseconds = args
             .fade_milliseconds
             .unwrap_or(DEFAULT_CLIP_FADE_MILLISECONDS);
-        // Rule 132's fade length is `ceil(fade_ms x fps / 1000)` and nothing
-        // else: `fade_milliseconds: 0` really does round to a 0-frame fade,
-        // and a 0-frame fade proposes nothing rather than being floored up
-        // into a 1-frame edit the caller did not ask for.
         let fade_frames = milliseconds_to_project_frames(fade_milliseconds, document.fps);
-        // AU5 §3.8 rule 67: AU4's two 400 ms `mix_levels` renders per clip
-        // become ONE `mix_window_levels` pass per track. The window is the
-        // fade itself — the audio the proposed ramp would actually act on —
-        // clamped into the accessor's `1..=1000` millisecond domain, so a clip
-        // no longer has to be a whole loudness gating block long to be
-        // measured at all and the skip-with-a-reason arm for a short clip is
-        // down to genuinely sub-window clips.
         let window_milliseconds = fade_milliseconds.clamp(1, CLIP_FADE_MAX_WINDOW_MILLISECONDS);
         let window_frames = milliseconds_to_project_frames(window_milliseconds, document.fps);
         let window_sample_frames =
@@ -9044,20 +8719,12 @@ impl KinewrightMcp {
         let mut operations = Vec::new();
         let mut planned = Vec::new();
         let mut skipped = Vec::new();
-        // Rule 132's empty-plan reason has to be true. A clip counts here only
-        // when it was actually measured and the THRESHOLD is what refused it;
-        // a clip skipped short, silent, or over a fade the editor already set
-        // never reached the threshold at all, and saying nothing peaked above
-        // it would be a lie the structured content contradicts.
         let mut rejected_on_threshold = 0usize;
         for track in document
             .tracks
             .iter()
             .filter(|track| tracks.contains(&track.id))
         {
-            // One pass over this track's whole stem, whatever its clip count.
-            // A hundred-clip timeline that cost 200 renders costs one — and a
-            // track with nothing to propose on costs none at all.
             let has_candidate = track.clips.iter().any(|clip| clip.content.is_media());
             let levels = if fade_frames == 0 || !has_candidate {
                 None
@@ -9073,8 +8740,6 @@ impl KinewrightMcp {
                 ) {
                     Ok(report) => Some(report),
                     Err(error) => {
-                        // One measurement failure is this track's clips'
-                        // per-clip reason, never the whole plan's.
                         for clip in track.clips.iter().filter(|clip| clip.content.is_media()) {
                             skipped.push((
                                 clip.id,
@@ -9114,10 +8779,6 @@ impl KinewrightMcp {
                     continue;
                 };
                 let Some(report) = levels.as_ref() else {
-                    // `fade_frames == 0` is the only way to reach this with a
-                    // media clip in hand, and it already carried its own
-                    // reason above; a measurement failure `continue`s the
-                    // TRACK loop and never arrives here.
                     continue;
                 };
                 let Some((head_level, tail_level)) =
@@ -9253,18 +8914,12 @@ impl KinewrightMcp {
             Ok(settings) => settings,
             Err(error) => return Ok(error_text(error)),
         };
-        // `None` is an unknown track, which `room_tone_fill_settings` already
-        // refused by name; an existing track with no gaps answers an empty
-        // list, which is the idempotent re-run.
         let gaps = document.track_gaps(settings.track).unwrap_or_default();
         let mut operations = Vec::new();
         let mut reported = Vec::new();
         let mut filled = 0usize;
         let mut tile_total = 0usize;
         for gap in gaps {
-            // Rule 103's `range` is `plan_audio_ducking`'s: it restricts which
-            // gaps are considered and clamps what is proposed inside them, so
-            // a caller can repair one act without touching the reel.
             let clamped = match &settings.range {
                 Some(range) => {
                     let start = gap.start.max(range.start);
@@ -9294,12 +8949,6 @@ impl KinewrightMcp {
                     reported.push(room_tone_gap_value(&clamped, tiles.len(), None));
                     let mut at = clamped.start;
                     for (tile, duration) in &tiles {
-                        // Rule 95: same track, butt-joined, no fade. Rule 44:
-                        // `AddClip` writes `speed_percent = 100`, which is what
-                        // makes rule 97's helper a true inverse of
-                        // `clip_duration`. F7: the advance is the length
-                        // `room_tone_fill_tiles` already measured, not a second
-                        // derivation of it.
                         operations.push(Operation::AddClip {
                             track: settings.track,
                             asset: settings.asset.id,
@@ -9330,8 +8979,6 @@ impl KinewrightMcp {
             "prepared_edit_plan": serde_json::Value::Null,
         });
         if operations.is_empty() {
-            // Rule 103: an empty plan states the reason that applied, and the
-            // per-gap list beside it is what makes that statement checkable.
             let reason = if reported.is_empty() {
                 format!(
                     "track {} has no leading or interior gap to fill",
@@ -9392,10 +9039,6 @@ impl KinewrightMcp {
             Ok(settings) => settings,
             Err(error) => return Ok(error_text(error)),
         };
-        // Rule 109: a track routes to at most one bus, so reusing the tracks'
-        // bus is not a choice between candidates — it is the only bus there
-        // can be. Its existing effects are preserved and the repair prefix is
-        // inserted at the head.
         let existing = document.audio_mix.buses.iter().find(|bus| {
             bus.tracks
                 .iter()
@@ -9450,9 +9093,6 @@ impl KinewrightMcp {
         let gain_tenth_db = existing.map_or(0, |bus| bus.gain_tenth_db);
         let gain_curve = existing.and_then(|bus| bus.gain_curve.clone());
         let sidechain = existing.map_or_else(Vec::new, |bus| bus.ducking_sidechain_tracks.clone());
-        // Rule 107: the readiness gate is checked FIRST, because it is free
-        // and the measurement below is a render. An agent waiting on an async
-        // silence analysis should not pay for two mixes to be told to wait.
         let learn_span = if settings.denoise {
             match self.dialogue_repair_learn_span(&document, &settings) {
                 Ok(span) => Some(span),
@@ -9461,11 +9101,7 @@ impl KinewrightMcp {
         } else {
             None
         };
-        // Rule 109: reusing a bus preserves **its** routing as well as its
-        // effects. A bus carrying more tracks than were asked for is repaired
-        // whole — a chain is per bus, so there is no other thing it could
-        // mean — and rewriting `tracks` to the requested subset here would
-        // silently un-route the tracks the caller did not name.
+        // Rule 109: reusing a bus preserves **its** routing as well as its effects.
         let routed = existing.map_or_else(|| settings.tracks.clone(), |bus| bus.tracks.clone());
         let bus_of = |effects: Vec<Effect>| AudioBus {
             id: bus_id,
@@ -9476,11 +9112,6 @@ impl KinewrightMcp {
             effects,
             ducking_sidechain_tracks: sidechain.clone(),
         };
-        // Rule 106's "before" and "after" are measured at the SAME point, on
-        // two documents that differ only by the repair prefix: the baseline
-        // carries the bus without it. Measuring the track stem before and the
-        // bus stem after would fold a routing change into the number the
-        // refusal is built on.
         let baseline = match candidate_document(&document, bus_of(carried.clone())) {
             Ok(candidate) => candidate,
             Err(error) => {
@@ -9504,10 +9135,6 @@ impl KinewrightMcp {
                 )));
             }
         };
-        // Rule 105: the hum default is whichever of the two measured excesses
-        // is larger, so an unarmed caller notches the mains frequency the
-        // material actually carries rather than the one the descriptor
-        // happens to neutral at.
         let fundamental = settings.hum_fundamental_hertz.unwrap_or(
             match (
                 before.hum_50_excess_db_hundredths,
@@ -9598,18 +9225,11 @@ impl KinewrightMcp {
             .map(|effect| effect.name.clone())
             .collect::<Vec<_>>();
         let prefix_declared = kinewright_core::chain_lookahead_milliseconds(&effects);
-        // Rule 108: the whole prefix declares 15 ms — 12 of denoise plus 3 of
-        // de-click, hum declaring none — and a caller that disables a node
-        // pays less, never more. The budget below is therefore checked against
-        // what this call really built.
         debug_assert!(
             prefix_declared <= REPAIR_CHAIN_DECLARED_MILLISECONDS,
             "the repair prefix declared {prefix_declared} ms, over rule 108's {REPAIR_CHAIN_DECLARED_MILLISECONDS}"
         );
         effects.extend(carried.iter().cloned());
-        // Rule 109: refuse by name rather than letting `UpsertAudioBus` fail
-        // inside a prepared plan, quoting the existing chain's declared
-        // milliseconds and the prefix's own.
         let declared = kinewright_core::chain_lookahead_milliseconds(&effects);
         if declared > kinewright_core::CHAIN_LOOKAHEAD_MILLISECONDS {
             let carried_declared = kinewright_core::chain_lookahead_milliseconds(&carried);
@@ -9817,15 +9437,6 @@ fn clip_window_levels(
     if window_samples == 0 {
         return None;
     }
-    // Media's own conversion, not a second spelling of it (R50, R85): the
-    // window indices are only meaningful against the grid `measure_mix_window_
-    // levels` actually laid down, so a change to media's frame->sample
-    // rounding must move both together or neither. Converted **then**
-    // subtracted, exactly as `mix_pass` establishes stem sample 0 —
-    // `keep_from_frames = frame_to_samples(range.start)` (export.rs:1218-1226),
-    // the same spelling `measure_mix_window_levels`' own `requested_frames`
-    // uses — because the conversion truncates and subtracting first loses a
-    // sample at a non-integer sample-per-frame rate such as 30000/1001.
     let origin = kinewright_media::frame_to_samples(report.range.start, report.sample_rate, fps);
     let offset = |frame: TimeCode| {
         kinewright_media::frame_to_samples(frame, report.sample_rate, fps).saturating_sub(origin)
@@ -9925,8 +9536,6 @@ fn room_tone_fill_settings(
             track_kind_name(track.kind)
         ));
     }
-    // Rule 102: `asset_id` defaults to the sole registered room-tone asset,
-    // and a missing one is **named** rather than assumed (B7).
     let registered = document
         .media_pool
         .iter()
@@ -10130,11 +9739,6 @@ fn room_tone_fill_tiles(
             remaining,
         )
         .map_err(|error| {
-            // The headline names the GAP, which is what a caller can see, while
-            // core's refusal is about whatever is left of it. When those differ
-            // — the tiler covered part of the gap and then ran out of
-            // representable spans — the residue is named too, so a reader is not
-            // told "gap of 1 project frames" about a seven-frame hole.
             let reason = room_tone_skip_reason(length, source_fps, project_fps, &error);
             if remaining == length {
                 reason
@@ -10148,11 +9752,6 @@ fn room_tone_fill_tiles(
         tiles.push(source);
         remaining = TimeCode(remaining.0.saturating_sub(want.0));
     }
-    // Rule 97's assertion, taken through the document's own accessor rather
-    // than through the arithmetic that produced the answer: `clip_duration`
-    // maps through `clip_effective_fps`, so this is also what pins
-    // `speed_percent = 100` (R44). The measured durations are what the caller
-    // then advances by.
     let mut measured = 0_i64;
     let mut at = gap.start;
     let mut placed = Vec::with_capacity(tiles.len());
@@ -10550,8 +10149,6 @@ fn ducking_settings(
         None => None,
     };
     let mix = document.track_mix(args.music_track);
-    // Rule 125: a silent whole-curve replace of an editor's ride is not
-    // recoverable from structured content, so it is refused by name.
     if mix.gain_curve.is_some() && !args.replace {
         return Err(format!(
             "track {} already carries a gain curve; clear it or pass replace: true",
@@ -10561,25 +10158,15 @@ fn ducking_settings(
     let depth_tenth_db = args
         .depth_tenth_db
         .unwrap_or(DEFAULT_DUCKING_DEPTH_TENTH_DB);
-    // Rule 124: a duck ducks. A non-negative depth would key the music LOUDER
-    // under dialogue and still report it as a "ducked window" with a positive
-    // delta, so the sign is refused rather than reinterpreted.
     if depth_tenth_db >= 0 {
         return Err(format!(
             "depth_tenth_db must be negative; got {depth_tenth_db}"
         ));
     }
     let parked_gain_tenth_db = mix.gain_tenth_db;
-    // Rule 124: the ducked value is keyed RELATIVE to the parked scalar,
-    // because a curve replaces that scalar outright.
     let ducked_gain_tenth_db = parked_gain_tenth_db
         .saturating_add(depth_tenth_db)
         .clamp(TRACK_MIX_GAIN_MIN, TRACK_MIX_GAIN_MAX);
-    // A track already parked on the floor clamps the ducked value back onto
-    // the parked one. The plan would then commit a no-op curve that still
-    // replaces the scalar (and trips rule 125 on the next call), coalesce the
-    // whole project into one fabricated "dialogue window", and report
-    // `measured: null` blaming the window length. Refuse instead.
     if ducked_gain_tenth_db == parked_gain_tenth_db {
         return Err(format!(
             "depth_tenth_db {depth_tenth_db} leaves the music at its parked {parked_gain_tenth_db} tenth dB; nothing to duck"
@@ -10649,11 +10236,6 @@ fn dialogue_spoken_spans(
         .filter(|track| dialogue.contains(&track.id))
     {
         for clip in &track.clips {
-            // `map_timeline_silences` skips a retimed clip, so its silent
-            // spans are unknown and its spoken spans cannot be derived. A
-            // clip whose asset has no audio stream is skipped for the
-            // opposite reason: its silences are not unknown, they are the
-            // whole clip, and no complement of them is speech.
             if !clip.content.is_media()
                 || clip.speed_percent != 100
                 || no_audio.contains(&clip.asset)
@@ -10798,8 +10380,6 @@ fn ducking_curve(
     let mut deduped: Vec<Keyframe> = Vec::with_capacity(keyframes.len());
     for keyframe in keyframes {
         match deduped.last_mut() {
-            // Rule 126's dedupe is last-wins: a clamped key overwrites the one
-            // already sitting on that frame.
             Some(last) if last.at == keyframe.at => *last = keyframe,
             _ => deduped.push(keyframe),
         }
@@ -11039,13 +10619,7 @@ fn normalization_context(
             return Err(format!("track {track} contains no audio source clips"));
         }
     }
-    // AU5 §5.7 rule 111: one relaxation, and only one. A bus that carries a
-    // repair prefix and *nothing else*, whose `tracks` equal the requested set
-    // exactly, is EXTENDED rather than refused — otherwise a repaired dialogue
-    // track could never be normalized and AU6's noisy-location workflow would
-    // have no path. Any other intersection still refuses with the message it
-    // always did. The `tracks`-equality condition is not optional: without it
-    // normalization would silently re-target a different set.
+    // AU5 §5.7 rule 111: one relaxation, and only one.
     let mut extends = None;
     if let Some(bus) = document
         .audio_mix
@@ -11079,18 +10653,9 @@ fn normalization_context(
     if !(25..=300).contains(&args.tolerance_hundredths) {
         return Err("tolerance_hundredths must be in 25..=300".to_owned());
     }
-    // AU2 §5.4/B5: the shared `max + 1` allocator, which core pins against
-    // this call site's former inline loop. There is deliberately no matching
-    // document-wide effect-id helper (N1), so the scan below stays local.
-    // AU5 §5.7 rule 111: an extended bus keeps its own id, so the plan rewrites
-    // the bus the repair already built rather than routing the same tracks a
-    // second time — which `validate_audio_mix` would refuse anyway.
     let bus_id = extends
         .as_ref()
         .map_or_else(|| document.audio_mix.next_bus_id(), |bus| bus.id);
-    // AU3 §6.3: the shared scan, which reads every audio effect the document
-    // has — including an extended bus's repair prefix, so the delivery
-    // processing appended after it can never reuse one of its ids.
     let first_effect_id = next_audio_effect_id(document);
     Ok(NormalizationContext {
         tracks: tracks.into_iter().collect(),
@@ -11277,14 +10842,6 @@ fn normalization_bus(
         ));
         next_effect_id = next_effect_id.saturating_add(1);
     }
-    // AU3 §6.3: the delivery limiter is the inter-sample-aware one. The legacy
-    // `audio_limiter` clamps sample peaks only, so a chain that satisfied it
-    // could still overshoot the target's true-peak ceiling after a lossy
-    // encode — which is the one thing this plan exists to prevent. The
-    // parameters are the descriptor's own neutrals (AU2 §2.2): 5 ms of
-    // lookahead, a 50 ms release, and the true-peak detector on. The
-    // compressor above declares none, so the bus declares 5 ms of
-    // `chain_lookahead_milliseconds`' 20 ms budget.
     effects.push(static_audio_effect(
         EffectId(next_effect_id),
         "audio_true_peak_limiter",
@@ -12961,11 +12518,6 @@ fn inspector_tools() -> Vec<Tool> {
             schema_object::<SpeakerMulticamPlanArgs>(),
         )
         .with_annotations(read_only()),
-        // AU4 §6.1: the ducking planner's first sentence carries the two facts
-        // an agent must know before it commits — that the plan REPLACES the
-        // music track's gain automation, and that the measurement can come
-        // back null — because `get_capability` and `search_capabilities`
-        // publish only `first_sentence(description)` (runtime.rs:184-190).
         Tool::new(
             "plan_audio_ducking",
             "Build one revision-gated music-under-dialogue gain ride that REPLACES the music track's whole gain automation, keyed relative to that track's parked fader so an already-trimmed music level survives, refused by name when a gain curve already exists unless replace is true, and reporting measured as null with a stated reason - while still committing the curve - when no flat window reaches the 400 ms loudness gating block. Dialogue windows come from the selected dialogue tracks' silence analysis and any ready diarized transcript, merged in project frames and extended by hold_milliseconds; each merged window gets four linear keys, at attack before its start, at its start, at its end, and at release after its end. An optional range restricts which dialogue spans are considered and clamps the emitted curve; it never restricts the measurement. It emits exactly one SetTrackAutomation on gain_tenth_db, raises no confirmation because it removes nothing, and mutates nothing until commit_edit_plan.",
@@ -12978,30 +12530,18 @@ fn inspector_tools() -> Vec<Tool> {
             schema_object::<AudioNormalizationPlanArgs>(),
         )
         .with_annotations(read_only()),
-        // AU4 §6.2: the fade planner's first sentence carries the skip rule and
-        // the never-overwrite rule, for the same reason.
         Tool::new(
             "plan_clip_fades",
             "Propose short audio fade-in and fade-out frame counts on media clips whose head or tail window reads above threshold_dbfs_hundredths, emitting set_clip_audio only - never adding a curve, never overwriting a fade that is already non-zero - and skipping any clip that holds no whole window with a per-clip reason in structured content instead of failing the whole plan. The window is the proposed fade itself, clamped to 1000 ms - the audio the ramp would act on - and the decision reads the track stem's RMS level in dBFS over it, measured in one short-window pass per track rather than one render per clip edge. Each proposal carries that clip's existing gain and its untouched fade through, and clamps the pair so fade_in plus fade_out never exceeds the clip duration. Returns an opaque prepared_edit_plan preview; the timeline is unchanged until commit_edit_plan.",
             schema_object::<ClipFadesPlanArgs>(),
         )
         .with_annotations(read_only()),
-        // AU5 §5.6 / §5.9 rule 117: the repair planner's first sentence carries
-        // the two facts an agent must know before it calls — that the planner
-        // REFUSES when it cannot measure an improvement, and which way the
-        // percentile floor biases that measurement — because `get_capability`
-        // and `search_capabilities` publish only `first_sentence(description)`
-        // (runtime.rs:184-190).
         Tool::new(
             "plan_dialogue_repair",
             "Build a measured denoise, hum-removal and de-click chain at the head of the selected audio tracks' bus and REFUSE it, naming both numbers, when the measured signal-to-noise gain falls under minimum_snr_gain_db_hundredths - the floor is a 10th-percentile short window rather than a detected silence, so continuous speech reads a higher floor and a lower gain than material carrying real room tone. The noise profile is learned over the longest silence span on those tracks, so a project whose silence analysis has not finished is refused with a different sentence from one whose longest silence is too short to learn over. An existing bus is reused with its own effects preserved and the repair prefix inserted at the head; a chain that would exceed the 20 ms lookahead budget is refused by name before it can fail inside a plan; replace must be true to rebuild a repair prefix that is already there. Returns an opaque prepared_edit_plan preview; the timeline is unchanged until commit_edit_plan.",
             schema_object::<DialogueRepairPlanArgs>(),
         )
         .with_annotations(read_only()),
-        // AU5 §5.8 rule 114: `capture_room_tone` is an Action, not a planner -
-        // it writes bytes under the project directory and applies its own
-        // operation - so it carries the destructive annotations
-        // `import_lut_asset` carries and its first sentence says so.
         Tool::new(
             "capture_room_tone",
             "Decode one source range of an existing asset at 48 kHz stereo, write it into this project's room-tone store as a content-addressed WAV, and register it as one ordinary AddAsset - this WRITES BYTES under the project directory, so it asks for confirmation first and reports a refusal rather than silently skipping. The capture must be at least 500 ms and at most 60 s, and it is truncated down to a whole 30 fps asset frame so plan_room_tone_fill can tile it to an exact gap length. The new asset is named \"Room tone - <source asset name>\" unless name overrides it, because the store file is named after its own digest. Idempotent by content: a second identical capture returns the existing asset_id and emits no operation instead of failing as a duplicate. Frames are exact source integers of the named asset.",
@@ -13014,9 +12554,6 @@ fn inspector_tools() -> Vec<Tool> {
                 .idempotent(true)
                 .open_world(false),
         ),
-        // AU5 §5.5 rule 103: the fill planner's first sentence carries the gap
-        // definition, the same-track butt join and the never-fail-a-whole-plan
-        // rule, for the same reason.
         Tool::new(
             "plan_room_tone_fill",
             "Propose butt-joined room tone clips that fill one audio track's leading and interior gaps - never the trailing one, which is not a hole - on that same track with no fade, skipping any gap it cannot fill to the exact frame with a per-gap reason instead of failing the whole plan. Each gap is tiled forward from the chosen room-tone asset and capped at maximum_tiles, and every tile's source range is picked so the fill's mapped project length equals the gap exactly, which is why a 60 fps project reading a 30 fps audio-only asset can only fill even-frame gaps and skips the rest. asset_id defaults to the project's sole registered room-tone asset; a project with none is refused by name rather than assumed. It raises no confirmation because a fill removes nothing, and it is idempotent: a filled gap is not a gap, so a second run over the committed timeline proposes nothing. Returns an opaque prepared_edit_plan preview; the timeline is unchanged until commit_edit_plan.",
@@ -14021,8 +13558,6 @@ fn lut_error_field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     let end = LUT_ERROR_FIELD_KEYS
         .iter()
         .filter(|other| **other != key)
-        // A value's own first byte is not a field boundary: only a `"; "`
-        // delimiter inside it introduces the next field.
         .filter_map(|other| lut_error_field_start(value, other, false))
         // Back up over the `"; "` that introduced the next field.
         .map(|index| index.saturating_sub("; ".len()))
@@ -14039,8 +13574,6 @@ fn lut_error_detail(remainder: &str) -> &str {
         .map(|index| index.saturating_sub("; ".len()))
         .min()
         .unwrap_or(remainder.len());
-    // A parse failure leads with `observed`, so it has no detail sentence of
-    // its own; quoting the whole remainder beats an empty message.
     if cut == 0 {
         return remainder;
     }
@@ -14053,9 +13586,6 @@ fn lut_error_detail(remainder: &str) -> &str {
 /// payload without the tool body growing past what one screen can hold.
 fn export_queue_error_result(error: ExportQueueError) -> CallToolResult {
     match error {
-        // CC4 §2.3: a blocked look is a typed, recoverable status naming
-        // the asset, its recorded hash, the expected store path, and the
-        // nodes that would have evaluated it — never a render-time failure.
         ExportQueueError::LutPreflight(report) => error_structured(
             report.summary(),
             serde_json::json!({
@@ -14071,10 +13601,6 @@ fn export_queue_error_result(error: ExportQueueError) -> CallToolResult {
                 "applied": false,
             }),
         ),
-        // CC4 §2.2: "there is no project path" and "the path is published but
-        // its derived root is refused" are different failures with opposite
-        // recoveries. Collapsing them would tell an operator who already saved
-        // the project to save it again, which is a loop that cannot terminate.
         error @ ExportQueueError::LutStoreNotSaved => error_structured(
             format!("export blocked: {error}"),
             serde_json::json!({
@@ -14509,10 +14035,6 @@ pub(crate) fn decode_reframe_subject_provenance(
     }))
 }
 
-// ---------------------------------------------------------------------------
-// CC5 §5.2 — matte window tracking
-// ---------------------------------------------------------------------------
-
 /// A dead zone deliberately lags. That is right for a virtual camera and wrong
 /// for a matte, which must stay on the subject (CC5 §5.2).
 pub(crate) const MATTE_TRACK_DEAD_ZONE_BASIS_POINTS: i64 = 0;
@@ -14826,8 +14348,6 @@ fn tracking_seed_outside_composite_result(
     let field = match outside {
         [true, true] => serde_json::json!([axis_fields[0], axis_fields[1]]),
         [false, true] => serde_json::json!(axis_fields[1]),
-        // A refusal is only raised when at least one axis is outside, so the
-        // remaining arms both name the horizontal parameter.
         _ => serde_json::json!(axis_fields[0]),
     };
     let mut observed = serde_json::json!({
@@ -14870,8 +14390,6 @@ fn matte_track_centre_basis_points(pixel: u32, extent: u32) -> i64 {
     if extent == 0 {
         return 0;
     }
-    // round((pixel + 0.5) * 10000 / extent), in exact integer arithmetic:
-    // (2*pixel + 1) * 10000 / (2*extent), rounded half up by adding `extent`.
     let numerator = (u64::from(pixel).saturating_mul(2).saturating_add(1)).saturating_mul(10_000);
     let denominator = u64::from(extent).saturating_mul(2);
     i64::try_from(numerator.saturating_add(u64::from(extent)) / denominator).unwrap_or(10_000)
@@ -14985,8 +14503,6 @@ fn matte_parameter_object(matte: &kinewright_core::MatteParams) -> serde_json::V
         "matte_luma_low_basis_points": matte.qualifier.luma_low_bp,
         "matte_luma_high_basis_points": matte.qualifier.luma_high_bp,
         "matte_luma_softness_basis_points": matte.qualifier.luma_softness_bp,
-        // CC5 §2.2: stored windows past the count render nothing, so only the
-        // active ones are published.
         "windows": matte
             .active_windows()
             .enumerate()
@@ -15043,12 +14559,6 @@ fn layer_subject_bounds(
     let edge = |centre: f64, percent: i64, upper: bool| -> u16 {
         #[allow(clippy::cast_precision_loss)]
         let half = percent as f64 * 50.0;
-        // A basis point is the finest unit these parameters carry, so an edge
-        // that is analytically integral is snapped onto the grid before the
-        // outward rounding. Without it the last bits of the affine conversion
-        // would inflate every exact box by a whole basis point on the ceil
-        // side; 1e-6 bp is a thousand times the worst-case error at this
-        // magnitude and a millionth of the finest real unit.
         let snap = |value: f64| {
             let nearest = value.round();
             if (value - nearest).abs() < 1e-6 {
@@ -15144,11 +14654,6 @@ fn tracking_sample_frames(range: std::ops::Range<TimeCode>, step: i64) -> Vec<Ti
         return vec![range.start];
     }
 
-    // Treat `step` as the requested maximum spacing, then distribute the
-    // samples across the whole visible span. Appending `last` after stepping
-    // leaves a one-frame tail whenever the span is not divisible by `step`.
-    // Evenly distributing ceil(span / step) intervals keeps every gap within
-    // one frame of its neighbours and makes the final interval ordinary.
     let span = i128::from(last) - i128::from(range.start.0);
     let requested_step = i128::from(step.max(1));
     let interval_count = usize::try_from((span + requested_step - 1) / requested_step)
@@ -15679,8 +15184,6 @@ mod tracking_tests {
     /// quietly swap them.
     #[test]
     fn matte_centre_conversion_uses_the_pixel_centre_over_the_full_extent() {
-        // round((pixel + 0.5) * 10000 / extent), hand-computed.
-        // extent 512: (0 + 0.5) * 10000 / 512 = 9.765625 -> 10
         assert_eq!(matte_track_centre_basis_points(0, 512), 10);
         // (255 + 0.5) * 10000 / 512 = 4990.234375 -> 4990
         assert_eq!(matte_track_centre_basis_points(255, 512), 4990);
@@ -15691,11 +15194,6 @@ mod tracking_tests {
         // extent 288: (144 + 0.5) * 10000 / 288 = 5017.361 -> 5017
         assert_eq!(matte_track_centre_basis_points(144, 288), 5017);
 
-        // The tracker's own conversion divides by `extent - 1` and adds no
-        // half pixel. The two agree in the middle and diverge most at the
-        // edges, by 10 bp on a 512-wide thumbnail and 17 bp on a 288-tall one
-        // — the divergence CC5 §9.2.11 records so a refactor cannot quietly
-        // swap them.
         for (pixel, extent, expected_divergence) in [
             (0_u32, 512_u32, 10_i64),
             (511, 512, 10),
@@ -15710,8 +15208,6 @@ mod tracking_tests {
                 "pixel {pixel} of {extent}: matte {matte} vs lattice {lattice}"
             );
         }
-        // In the middle of the raster the two coincide, which is why only the
-        // edges bound the error.
         assert_eq!(
             matte_track_centre_basis_points(255, 512),
             i64::from(pixel_to_basis_points(255, 512))
@@ -15744,10 +15240,6 @@ mod tracking_tests {
     /// directions, so every case here is a hand-worked absolute value.
     #[test]
     fn layer_transform_offsets_move_the_window_the_way_the_compositor_does() {
-        // At scale 1 an offset of 1.0 shifts the picture half a frame. The
-        // composite point 10000 bp (the bottom edge) therefore came from the
-        // layer's *centre*, 5000 bp — not from 15000 bp, which is what a
-        // doubly-negated y produced.
         let vertical_shift = LayerTransform {
             scale: 1.0,
             offset_x: 0.0,
@@ -15776,8 +15268,6 @@ mod tracking_tests {
         assert!((composite[0] - 1.0).abs() < 1e-12, "{composite:?}");
         assert!((composite[1] - 0.5).abs() < 1e-12, "{composite:?}");
 
-        // A negative y offset moves the picture the other way, by the same
-        // half-frame: the layer centre lands on the top edge.
         let negative_y = LayerTransform {
             scale: 1.0,
             offset_x: 0.0,
@@ -15788,10 +15278,6 @@ mod tracking_tests {
             [5_000, 5_000]
         );
 
-        // Hand-worked from the forward formula at scale 0.5 with both offsets
-        // non-zero: offsets (0.4, -0.2).
-        //   u_c.x = 0.5·(0.25 − 0.5) + 0.4/2 + 0.5 = 0.575  -> 5750 bp
-        //   u_c.y = 0.5·(0.75 − 0.5) − 0.2/2 + 0.5 = 0.525  -> 5250 bp
         let both = LayerTransform {
             scale: 0.5,
             offset_x: 0.4,
@@ -15851,8 +15337,6 @@ mod tracking_tests {
             transform.composite_to_layer_basis_points([3_750, 6_250]),
             [2_500, 7_500]
         );
-        // An off-frame composite centre stays legal: CC5 §2.2's centre range
-        // is deliberately wide so a tracked window may leave and re-enter.
         assert_eq!(
             transform.composite_to_layer_basis_points([0, 10_000]),
             [-5_000, 15_000]
@@ -15886,9 +15370,6 @@ mod tracking_tests {
             MATTE_TRACK_MAX_STEP_BASIS_POINTS,
         );
         assert_eq!(smoothed.len(), observations.len());
-        // CC5 §5.2's stated systematic lag: the filter replaces the final
-        // sample with median(o[n-3], o[n-2], o[n-1]) = median(1400, 1600,
-        // 1800) = 1600, one inter-sample displacement behind the true 1800.
         assert!(
             smoothed[4] <= 1_600,
             "the last smoothed value must lag by one inter-sample displacement, was {}",
@@ -15934,9 +15415,6 @@ mod tracking_tests {
             .unwrap_or_else(|_| panic!("a static transform is one affine map"));
         assert!((resolved.scale - 0.5).abs() < f64::EPSILON);
 
-        // A keyframe curve that resolves to one constant value is *also*
-        // accepted: the rule is about the values the renderer uses, not about
-        // the presence of automation.
         let mut constant = static_transform[0].clone();
         constant.keyframes.insert(
             "scale_percent".to_owned(),
@@ -16020,16 +15498,12 @@ mod tracking_tests {
             offset_y: 0.4,
         };
 
-        // Pixel 160 of 320: u_c = 160.5 / 320 = 0.5015625,
-        // u_l = 2 · 0.5015625 − 0.9 = 0.103125.
         let layer = tracked_centre_layer_unit([160, 125], 320, 180, transform);
         assert!(
             (layer[0] - 0.103_125).abs() < 1e-12,
             "x converted to {}",
             layer[0]
         );
-        // Pixel 125 of 180: u_c = 125.5 / 180 = 0.697222…,
-        // u_l = 2 · 0.697222… − 0.9 = 0.494444….
         assert!(
             (layer[1] - 0.494_444_444_444_444_4).abs() < 1e-12,
             "y converted to {}",
@@ -16047,13 +15521,8 @@ mod tracking_tests {
         assert_eq!(layer_unit_to_percent(layer[0]), 50);
         assert_eq!(layer_unit_to_basis_points(layer[0]), 5_031);
 
-        // The composite value the *unconverted* code wrote is nowhere near it:
-        // round(224 · 100 / 319) = 70 percent against the layer's 50.
         assert_eq!(pixel_to_percent(224, 320), 70);
 
-        // At the identity the conversion is the fraction-of-extent read alone,
-        // which is the deliberate ≤ 1 unit correction over the old `extent − 1`
-        // lattice: pixel 0 of 320 is 0.15625 percent of the extent, not 0.
         let identity = tracked_centre_layer_unit([0, 0], 320, 180, LayerTransform::IDENTITY);
         assert!((identity[0] - 0.001_562_5).abs() < 1e-12);
         assert_eq!(layer_unit_to_percent(identity[0]), 0);
@@ -16067,8 +15536,6 @@ mod tracking_tests {
             i64::from(pixel_to_percent(160, 320))
         );
 
-        // Both writers clamp: a layer coordinate outside the layer's own quad
-        // is a real possibility at scale < 1, and neither control accepts it.
         assert_eq!(layer_unit_to_percent(-0.02), 0);
         assert_eq!(layer_unit_to_percent(1.4), 100);
         assert_eq!(layer_unit_to_basis_points(-0.02), 0);
@@ -16140,8 +15607,6 @@ mod tracking_tests {
             "a moving scale is not one affine map"
         );
 
-        // A static chain resolves to the same values at every frame, and the
-        // offsets are the compositor's own `percent / 50`.
         let static_chain = [Effect {
             id: EffectId(3),
             name: "transform".to_owned(),
@@ -16299,9 +15764,6 @@ mod reframe_geometry_tests {
         let constraint = tracked_subject_focus_constraint(subject, 1_920, 1_080, 5_625)
             .expect("subject fits the vertical short crop");
 
-        // 1920x1080 into a 9:16 delivery leaves 3165 basis points of source
-        // width visible. The left crop edge is clamped for focus 0..=1582,
-        // so the valid focus interval includes that entire plateau.
         assert_eq!(
             (constraint.min_x_basis_points, constraint.max_x_basis_points),
             (0, 2_082)
@@ -16349,9 +15811,6 @@ mod reframe_geometry_tests {
         let constraint = tracked_subject_focus_constraint(subject, 1_080, 1_920, 16_000)
             .expect("subject fits the tall crop");
 
-        // ceil(1080 * 100000000 / (1920 * 16000)) = 3516. The helper must
-        // preserve that conservative evaluator rounding when inverting the
-        // vertical crop axis.
         assert_eq!(
             (constraint.min_y_basis_points, constraint.max_y_basis_points),
             (4_242, 4_758)
@@ -17025,10 +16484,6 @@ mod tests {
         fn request_silence_detection(&self, _asset: MediaAsset) {}
 
         fn silence_status(&self, asset: &MediaAsset) -> SilenceStatus {
-            // `request_silences` answers `NoAudio` for any asset that is not
-            // `Audio` or `AudioVideo` (kinewright-media `derived.rs`), and
-            // never `Ready`; the double mirrors that, so the ducking
-            // planner's video-only branch is reachable here.
             if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
                 return SilenceStatus::NoAudio;
             }
@@ -17390,10 +16845,6 @@ mod tests {
             id: TrackId(9),
             kind: TrackKind::Video,
             sync_lock: false,
-            // Keep a lower id after the overwrite so Core's post-clear id
-            // allocator reuses the removed highest id (99). An id-only
-            // before/after diff would mistake the valid replacement for the
-            // old clip and fail to report the routed result.
             clips: vec![
                 Clip {
                     id: ClipId(99),
@@ -19232,8 +18683,6 @@ mod tests {
             })
         };
 
-        // A later offline video and an offline audio track are irrelevant to
-        // the exact frame being proven.
         let media = media_for(BTreeMap::from([
             (AssetId(2), offline("later video is offline")),
             (AssetId(3), offline("audio is offline")),
@@ -19256,8 +18705,6 @@ mod tests {
         );
         assert_eq!(manifest["active_rendered_sources"][0]["asset_id"], 1);
 
-        // An offline source on a second video track is an active overlay and
-        // must block even though the selected clip itself is online.
         let mut overlay_document = document.clone();
         let mut overlay_clip = overlay_document.tracks[0].clips[0].clone();
         overlay_clip.id = ClipId(4);
@@ -19286,8 +18733,6 @@ mod tests {
         assert_eq!(structured["details"]["clip_id"], 4);
         assert_eq!(structured["details"]["asset_id"], 4);
 
-        // Freeze frames are source-backed visual layers too; their held frame
-        // still requires the referenced asset to be available.
         let mut freeze_document = overlay_document;
         freeze_document.tracks[2].clips[0].content =
             kinewright_core::ClipContent::Freeze(kinewright_core::FreezeFrame {
@@ -19310,8 +18755,6 @@ mod tests {
         assert_eq!(structured["code"], "media_offline");
         assert_eq!(structured["details"]["clip_id"], 4);
 
-        // The selected source remains an explicit hard failure when it is the
-        // active source that is offline.
         let media = media_for(BTreeMap::from([(
             AssetId(1),
             offline("selected source is offline"),
@@ -19351,8 +18794,6 @@ mod tests {
         let mut document = (*seed).clone();
         document.media_pool[0].color_description = managed_source;
 
-        // A second, non-selected video track composites into the same proof
-        // raster with a source the managed pipeline cannot classify.
         let mut overlay_asset = document.media_pool[0].clone();
         overlay_asset.id = AssetId(2);
         overlay_asset.name = "unsupported-overlay".to_owned();
@@ -19362,9 +18803,6 @@ mod tests {
         let mut overlay_clip = document.tracks[0].clips[0].clone();
         overlay_clip.id = ClipId(4);
         overlay_clip.asset = AssetId(2);
-        // A non-blocking post-primary stage on the same refused composite. The
-        // error is the only place it can still be reported, because the
-        // successful payload that normally carries it is never produced.
         overlay_clip.effects.push(Effect {
             id: EffectId(41),
             name: "look_lut".to_owned(),
@@ -19418,8 +18856,6 @@ mod tests {
         assert!(structured["details"]["observed"].is_string());
         assert!(structured["details"]["allowed"].is_string());
 
-        // Non-blocking layer warnings ride along on the refusal instead of
-        // being dropped with the success payload.
         let warnings = structured["details"]["unsupported_layer_warnings"]
             .as_array()
             .expect("the refusal carries the non-blocking layer warnings");
@@ -19660,10 +19096,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // CC5 §4.2 / §5.2 / §7 — the matte agent surface
-    // -----------------------------------------------------------------------
-
     /// A `width × height` coverage raster whose codes come from `code(x, y)`.
     ///
     /// Built as a plain RGBA buffer, so no CC5 code path can prove its own
@@ -19700,8 +19132,6 @@ mod tests {
             panic!("expected fixture document");
         };
         let mut document = (*seed_document).clone();
-        // A managed CC1 source: an unknown-primaries fixture is refused before
-        // any proof or matte work happens.
         document.media_pool[0].color_description = ColorDescription {
             primaries: ColorPrimaries::Bt709,
             transfer: ColorTransfer::Bt709,
@@ -19736,9 +19166,6 @@ mod tests {
         for (name, value) in extra_matte_parameters {
             parameters.insert(name, ParamValue::Integer(value));
         }
-        // Extras go first so an Input-stage node such as `technical_lut` sits
-        // ahead of the Correction-stage wheels node Core's ordering rule
-        // requires (CC4 §3.2).
         document.tracks[0].clips[0].effects = extra_effects
             .into_iter()
             .chain(std::iter::once(Effect {
@@ -19802,14 +19229,6 @@ mod tests {
     /// that produced it.
     #[test]
     fn inspect_grade_matte_reports_the_cc5_coverage_statistics() {
-        // A 4 × 2 coverage:
-        //   row 0: 255 255 128   0
-        //   row 1: 255 255 128   0
-        // Hand-derived: 6 covered (m > 0), 4 full (code 255), 2 partial,
-        // 8 total, floor(6 * 10000 / 8) = 7500 basis points. The bounding box
-        // of the covered set is columns 0..3 of rows 0..2, i.e. x 0..7500 of
-        // the width and the whole height. Buckets are
-        // min(15, floor(code * 16 / 256)): code 0 -> 0, 128 -> 8, 255 -> 15.
         let coverage = matte_coverage_raster(4, 2, |x, _| match x {
             0 | 1 => 255,
             2 => 128,
@@ -19939,8 +19358,6 @@ mod tests {
                 .unwrap()
                 .contains("no coverage is invented here")
         );
-        // The resolved matte is still published: the refusal is about the
-        // render, not about the request.
         assert_eq!(details["resolved_matte"]["matte_enabled"], 1);
     }
 
@@ -20063,8 +19480,6 @@ mod tests {
                 .contains("exactly one")
         );
 
-        // A matte-capable node that carries no matte has no coverage to
-        // partition, so the proof refuses rather than rendering a blank frame.
         let no_matte = proof(Some(EffectId(3)), Some(MatteComparison::OutsideOnly), None);
         assert_eq!(no_matte["code"], "matte_proof_no_matte");
         assert_eq!(no_matte["details"]["observed"]["has_matte"], false);
@@ -20083,9 +19498,6 @@ mod tests {
     #[test]
     fn render_color_proof_outside_only_clears_a_keyframed_matte_invert_on_the_scratch_copy() {
         let (service, core) = matte_service(None);
-        // A Hold curve that turns the matte inversion *on* from frame 0. The
-        // stored static value stays 0, so a planner reading only the static
-        // value would toggle to 1 and render exactly the inside cell.
         let Event::DocumentChanged { revision, .. } = core
             .request(Command::Do(Operation::SetEffectKeyframes {
                 clip: ClipId(1),
@@ -20125,10 +19537,6 @@ mod tests {
         );
         let comparison = &manifest["matte_comparison"];
         assert_eq!(comparison["variant"], "outside_only");
-        // The curve is cleared first, then the complement of the value the
-        // curve renders at this frame is written. The rendered value is 1, so
-        // the outside cell writes 0 — not 1, which is what complementing the
-        // stored static value would have produced.
         assert_eq!(
             comparison["after_operations"],
             json!([
@@ -20156,8 +19564,6 @@ mod tests {
         );
         assert!(!effect.parameters.contains_key("matte_invert"));
 
-        // A node with no `matte_invert` automation is byte-unchanged: one
-        // operation, and an empty `cleared_keyframes`.
         let (plain, _) = matte_service(None);
         let plain = plain
             .render_color_proof(&RenderColorProofArgs {
@@ -20223,8 +19629,6 @@ mod tests {
                 "value": 1,
             }}])
         );
-        // `inside_only` renders the document exactly as stored, so it has no
-        // scratch operation at all.
         let inside = service
             .render_color_proof(&RenderColorProofArgs {
                 expected_revision: TimelineRevision(0),
@@ -20281,8 +19685,6 @@ mod tests {
 
         let comparison = &manifest["matte_comparison"];
         assert_eq!(comparison["variant"], "coverage");
-        // 106 columns of 320, over 180 rows: 106 * 180 = 19080 of 57600, and
-        // floor(19080 * 10000 / 57600) = 3312 basis points.
         assert_eq!(comparison["coverage"]["covered_pixel_count"], 19_080);
         assert_eq!(
             comparison["coverage"]["statistics"]["covered_basis_points"],
@@ -20340,18 +19742,6 @@ mod tests {
             pixels,
         }
     }
-
-    // -----------------------------------------------------------------------
-    // CC5 §5.2, the mask and reframe halves.
-    //
-    // `track_mask_region` and `track_reframe_subject` measure the *composited*
-    // thumbnail and write controls the compositor evaluates in *layer* uv, so
-    // both need the same composite → layer conversion `track_matte_window`
-    // already does. The analysis double answers the composited thumbnail the
-    // real compositor would produce, with the subject drawn at the position the
-    // shader's forward map puts it — the double ignores the document, so the
-    // placement is stated here by hand rather than rendered.
-    // -----------------------------------------------------------------------
 
     /// A 320 × 180 frame carrying one white box of half extent `half` pixels
     /// centred on `centre`, over `matte_box_frame`'s dark background.
@@ -20516,9 +19906,6 @@ mod tests {
             start_local_frame: Some(TimeCode(0)),
             end_local_frame: Some(TimeCode(41)),
             step_frames: Some(10),
-            // A 5 percent radius is a 16 pixel horizontal search, whose coarse
-            // grid lands exactly on a subject moving 8 pixels a sample, so the
-            // template match is pixel-exact rather than plateaued.
             search_radius_percent: Some(5),
             max_width: Some(320),
         }
@@ -20542,10 +19929,6 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        // Seed on the subject: 44 percent of 320 is pixel 140 exactly. The
-        // region is deliberately small — a 6 × 11 percent region is a 21 × 21
-        // pixel template, and `track_region` subsamples a template that size
-        // every pixel, so the match is exact rather than plateaued.
         let (service, core) =
             transform_track_service(vec![tracking_mask_effect([44, 50], [6, 11])], frames);
 
@@ -20570,15 +19953,6 @@ mod tests {
             observation_values(&structured, "observations", "center_x_percent"),
             observation_values(&structured, "observations", "layer_center_x_percent"),
         );
-        // At the identity the layer and the composite readings agree to the
-        // percent, so nothing about this shot could hide a missing conversion —
-        // which is exactly why the transformed cases below exist. They agree
-        // *exactly*, on every observation and both axes, only because the
-        // composite provenance is read with the same fraction-of-the-extent
-        // convention `coordinate_space.pixel_to_unit` publishes: on the
-        // `extent − 1` lattice pixel 172 of 320 would read 54 against the same
-        // 54 here but pixel 32 of 64 would read 51 against 51 only by luck, and
-        // the identity would stop being an identity in general.
         for axis in ["x", "y"] {
             assert_eq!(
                 observation_values(
@@ -20643,9 +20017,6 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        // Seed on the subject through the forward map: layer 10 percent is
-        // composite 0.5·0.10 + 0.45 = 0.50, which is pixel 160 of 320. Layer 49
-        // percent is composite 0.695, which is pixel 125 of 180.
         let (service, core) = transform_track_service(
             vec![
                 half_scale_transform(),
@@ -20678,8 +20049,6 @@ mod tests {
                 "vertical layer centre {value} against the analytic 49"
             );
         }
-        // The raw composite reading is preserved as provenance, and is nowhere
-        // near the written value: this is the whole point of the conversion.
         let composite =
             observation_values(&structured, "observations", "composite_center_x_percent");
         assert_eq!(composite, vec![50, 53, 55, 58, 60]);
@@ -20687,14 +20056,10 @@ mod tests {
             observation_values(&structured, "observations", "layer_center_x_percent"),
             written
         );
-        // The template is the stored region rescaled by the layer scale:
-        // 12 × 0.5 = 6 and 22 × 0.5 = 11 percent of the composite.
         assert_eq!(
             structured["coordinate_space"]["box_percent"],
             json!([6, 11])
         );
-        // Seeded through the forward map: layer 10/49 percent is composite
-        // 50/70 percent.
         assert_eq!(
             structured["coordinate_space"]["seed_center_percent"],
             json!([50, 70])
@@ -20709,8 +20074,6 @@ mod tests {
             assert_eq!(sample["offset_y"], 0.4);
         }
 
-        // The plan is still exactly two non-destructive keyframe operations,
-        // and nothing is committed.
         let preview = &structured["prepared_edit_plan"]["preview"];
         assert_eq!(preview["operation_count"], 2);
         assert_eq!(preview["destructive_operations"], json!([]));
@@ -20746,8 +20109,6 @@ mod tests {
         let frames = (0..60)
             .map(|frame| {
                 let scale = 1.0 - 0.5 * (frame as f64) / 40.0;
-                // The layer shrinks, so the subject drawn on the composite
-                // shrinks with it: half of 40 px times the scale.
                 let half = (5.0 * scale).round() as i64;
                 (
                     TimeCode(frame),
@@ -20780,8 +20141,6 @@ mod tests {
                 "sample {index}: wrote {value} against the analytic layer 25"
             );
         }
-        // The composite reading walks away from it — from about 25 percent to
-        // about 37 — which is exactly what the per-frame conversion undoes.
         let composite =
             observation_values(&structured, "observations", "composite_center_x_percent");
         assert!(
@@ -20818,8 +20177,6 @@ mod tests {
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(200))]),
             keyframes: BTreeMap::new(),
         };
-        // 50 percent of the layer is a legal mask, and 50 × 2 = 100 percent of
-        // the composite is not a legal template.
         let (service, _core) = transform_track_service(
             vec![doubled, tracking_mask_effect([50, 50], [50, 50])],
             frames,
@@ -20900,16 +20257,12 @@ mod tests {
                 layer[index]
             );
         }
-        // At the identity the composite and the layer reading are the same
-        // number, which is why the transformed case below is the real gate.
         assert_eq!(
             observation_values(&structured, "subject_samples", "composite_x_basis_points"),
             layer
         );
         assert_eq!(structured["coordinate_space"]["samples"][0]["scale"], 1.0);
 
-        // The planned focus follows the subject: the three-sample median lags a
-        // ramp by one inter-sample step, which is 312 bp here.
         let focus = observation_values(&structured, "focus_keyframes", "x_basis_points");
         for (index, expected) in layer.iter().enumerate() {
             assert!(
@@ -20957,8 +20310,6 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        // Layer 40 percent is composite 0.5·0.40 + 0.45 = 0.65, which seeds at
-        // pixel 207 of 320; layer 49 percent is composite 0.695, pixel 125.
         let (service, core) = transform_track_service(
             vec![half_scale_transform(), tracking_reframe_effect([40, 49])],
             frames,
@@ -20982,8 +20333,6 @@ mod tests {
                 layer[index]
             );
         }
-        // The composite provenance is preserved, and is thousands of basis
-        // points away from what was planned.
         let composite =
             observation_values(&structured, "subject_samples", "composite_x_basis_points");
         for (index, expected) in [6_484_i64, 6_734, 6_984, 7_234, 7_484].iter().enumerate() {
@@ -20992,9 +20341,6 @@ mod tests {
                 "sample {index}: composite {} against the analytic {expected}",
                 composite[index]
             );
-            // The gap runs 2515 bp at the first sample down to 1515 at the
-            // last, because the layer moves twice as far as the composite at
-            // scale 0.5. Either end is far outside any tracker error.
             assert!(
                 (composite[index] - layer[index]).abs() > 1_400,
                 "the two spaces must not coincide, or this test proves nothing"
@@ -21007,8 +20353,6 @@ mod tests {
                 "vertical layer centre {value} against the analytic 4944"
             );
         }
-        // The subject template is rescaled onto the composite: 12 × 0.5 = 6 and
-        // 22 × 0.5 = 11 percent.
         assert_eq!(
             structured["coordinate_space"]["box_percent"],
             json!([6, 11])
@@ -21023,8 +20367,6 @@ mod tests {
             0.4
         );
 
-        // The focus is planned in the same space it is written in, so it stays
-        // near the layer-space subject and far from the composite reading.
         let focus = observation_values(&structured, "focus_keyframes", "x_basis_points");
         for (index, expected) in layer.iter().enumerate() {
             assert!(
@@ -21147,9 +20489,6 @@ mod tests {
         assert_eq!(bounds.right_basis_points - bounds.left_basis_points, 1_200);
         assert_eq!(bounds.bottom_basis_points - bounds.top_basis_points, 2_200);
 
-        // The composite template the tracker matched with is *not* the box: at
-        // this scale a 12 percent layer subject is a 6 percent composite
-        // template, and converting that back would halve the box.
         assert_eq!(tracked_box_percent(12, transform.scale), 6);
     }
 
@@ -21157,17 +20496,11 @@ mod tests {
     /// **outward**, and a box that leaves the layer is clamped to `0..=10000`.
     #[test]
     fn layer_subject_bounds_rounds_outward_and_clamps_at_the_layer_edges() {
-        // Layer centre 3968.5 bp, half extent 600: 3368.5 floors to 3368 and
-        // 4568.5 ceils to 4569, so the box is one basis point wider than the
-        // declared 1200 and never narrower.
         let bounds = layer_subject_bounds(TimeCode(0), [0.396_85, 0.5], [12, 12]);
         assert_eq!(bounds.left_basis_points, 3_368);
         assert_eq!(bounds.right_basis_points, 4_569);
         assert_eq!(bounds.right_basis_points - bounds.left_basis_points, 1_201);
 
-        // 200 − 600 clamps to 0 and 9800 + 600 clamps to 10000: the crop can
-        // only sample layer uv 0..1, so a subject hanging off the layer is
-        // recorded up to the edge and no further.
         let clamped = layer_subject_bounds(TimeCode(0), [0.02, 0.98], [12, 12]);
         assert_eq!(clamped.left_basis_points, 0);
         assert_eq!(clamped.right_basis_points, 800);
@@ -21243,10 +20576,6 @@ mod tests {
             let right = bounds["right"].as_i64().unwrap();
             let top = bounds["top"].as_i64().unwrap();
             let bottom = bounds["bottom"].as_i64().unwrap();
-            // 30 percent of the layer is 3000 basis points, plus at most the
-            // one basis point the outward rounding adds when the centre does
-            // not land on the grid. Nothing is clamped here: the box sits
-            // between 1656 and 4703, well inside 0..=10000.
             assert!(
                 (3_000..=3_001).contains(&(right - left)),
                 "sample {index}: horizontal box {left}..{right} is not the declared 3000 bp"
@@ -21255,8 +20584,6 @@ mod tests {
                 (3_000..=3_001).contains(&(bottom - top)),
                 "sample {index}: vertical box {top}..{bottom} is not the declared 3000 bp"
             );
-            // The box is centred on the converted layer centre, not on a
-            // composite reading.
             let centre = sample["layer_x_basis_points"].as_i64().unwrap();
             assert!(
                 (i64::midpoint(left, right) - centre).abs() <= 1,
@@ -21264,9 +20591,6 @@ mod tests {
             );
         }
 
-        // The composite template stays the seed-scale one throughout, and at
-        // the last sample converting *its* bounds through that sample's own
-        // scale is what used to blow past the 5625 bp delivery crop.
         let last = samples.last().unwrap();
         let composite = &last["composite_bounds_basis_points"];
         let composite_width =
@@ -21280,9 +20604,6 @@ mod tests {
             "the pre-fix construction must be out of range, or this test proves nothing: {seed_template_layer_width}"
         );
 
-        // The converted layer centres follow the analytic values. The template
-        // is a coarse 30 percent box, so the matcher is subsampled and lags by
-        // a couple of composite pixels; 200 bp covers that at every scale here.
         let layer = observation_values(&structured, "subject_samples", "layer_x_basis_points");
         let composite_centres =
             observation_values(&structured, "subject_samples", "composite_x_basis_points");
@@ -21293,16 +20614,11 @@ mod tests {
                 layer[index]
             );
         }
-        // The composite reading walks away from the layer reading as the layer
-        // shrinks: 3203 bp at the seed against 4078 bp at the last sample.
         assert!(
             (composite_centres[4] - layer[4]).abs() > 700,
             "the two spaces must not coincide, or this test proves nothing: {composite_centres:?} against {layer:?}"
         );
 
-        // The focus is planned in the same space, so it stays near the layer
-        // subject; the three-sample median lags a ramp by one inter-sample
-        // step, which is about 120 bp here.
         let focus = observation_values(&structured, "focus_keyframes", "x_basis_points");
         for (index, expected) in layer.iter().enumerate() {
             assert!(
@@ -21312,8 +20628,6 @@ mod tests {
             );
         }
 
-        // The published contract says the template is seed-sized while the
-        // conversion is per frame, and names the resolved range.
         let note = structured["coordinate_space"]["keyframed_transform"]
             .as_str()
             .unwrap();
@@ -21335,9 +20649,6 @@ mod tests {
             frames,
         );
 
-        // 50 × 1.0 = 50 percent is a legal template at the seed frame, so a
-        // seed-only gate would accept this and then match a 100 percent
-        // template at frame 40.
         let result = service
             .track_reframe_subject(&reframe_tracking_args([50, 50], [50, 50]))
             .unwrap();
@@ -21422,8 +20733,6 @@ mod tests {
         let structured = result.structured_content.clone().unwrap();
         assert_eq!(structured["code"], "tracking_seed_outside_composite");
         let details = &structured["details"];
-        // Only the horizontal axis left the frame, so the refusal names exactly
-        // the one repairable argument rather than both or a generic selector.
         assert_eq!(details["field"], json!("initial_subject_x_percent"));
         assert_eq!(details["observed"]["layer_center_unit"], json!([0.5, 0.5]));
         assert_eq!(
@@ -21554,8 +20863,6 @@ mod tests {
             initial["x"], 25,
             "the stored 2500 bp focus must seed at 25 percent, not the 50 percent twin"
         );
-        // No `focus_y_basis_points` is stored, so the vertical axis falls back
-        // to `focus_y_percent`.
         assert_eq!(initial["y"], 50);
         assert_eq!(
             structured["coordinate_space"]["seed_center_percent"],
@@ -21573,8 +20880,6 @@ mod tests {
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
         for y in 0..height {
             for x in 0..width {
-                // An avalanche mix, so the field has no translational symmetry
-                // a shifted template could exploit.
                 let mut hash = x.wrapping_mul(0x9E37_79B9)
                     ^ y.wrapping_mul(0x85EB_CA6B)
                     ^ seed.wrapping_mul(0xC2B2_AE35);
@@ -21597,8 +20902,6 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn track_matte_window_prepares_two_keyframe_operations_without_committing() {
-        // The subject travels from x = 80 to x = 240 across frames 0..=40,
-        // 4 pixels per frame, at a constant y = 90.
         let frames = (0..=40)
             .map(|frame| {
                 (
@@ -21607,8 +20910,6 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        // Seed the window on the subject at frame 0: pixel 80 of 320 is 2500
-        // basis points of the width, and pixel 90 of 180 is 5000 of the height.
         let (service, core) = matte_track_service(
             frames,
             BTreeMap::from([("matte_window0_center_x_basis_points".to_owned(), 2_500)]),
@@ -21646,11 +20947,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 10, 20, 30, 40]
         );
-        // Raw centres, hand-derived through CC5 §5.2's conversion at scale 1:
-        // the subject centre is pixel x = 80 + 4 * frame, and
-        // round((pixel + 0.5) * 10000 / 320) gives 2516, 3766, 5016, 6266,
-        // 7516. The tracker seeds from the window centre, so the first sample
-        // is the seeded position and the rest are matched.
         let raw = observations
             .iter()
             .map(|observation| observation["center_x_basis_points"].as_i64().unwrap())
@@ -21662,16 +20958,11 @@ mod tests {
                 raw[index]
             );
         }
-        // A static subject on the vertical axis: every raw y stays at the
-        // seeded centre, round((89.5 + 0.5) * 10000 / 180) = 5000.
         for observation in observations {
             assert!((observation["center_y_basis_points"].as_i64().unwrap() - 5_000).abs() <= 200);
             assert!(observation["confidence_basis_points"].as_u64().unwrap() >= 5_000);
         }
 
-        // The smoothed curve differs from the raw observations, and the last
-        // sample lags by one inter-sample displacement exactly as CC5 §5.2
-        // states.
         let smoothed = structured["curves"]["matte_window0_center_x_basis_points"]["keyframes"]
             .as_array()
             .unwrap()
@@ -21689,8 +20980,6 @@ mod tests {
             (raw[4] - smoothed[4]) <= 2 * (raw[4] - raw[3]),
             "the lag is bounded by one inter-sample displacement"
         );
-        // Every keyframe is Linear: sustained movement gets continuous
-        // velocity, and M40 rejected eased per-segment curves.
         for keyframe in structured["curves"]["matte_window0_center_x_basis_points"]["keyframes"]
             .as_array()
             .unwrap()
@@ -21727,15 +21016,11 @@ mod tests {
         assert!(boundary.contains("no learned object, face, or skin detection"));
         assert!(boundary.contains("rotation_centidegrees"));
 
-        // The prepared plan carries exactly the two keyframe operations, and
-        // neither is destructive.
         let preview = &structured["prepared_edit_plan"]["preview"];
         assert_eq!(preview["operation_count"], 2);
         assert_eq!(preview["destructive_operations"], json!([]));
         assert_eq!(preview["expected_revision"], 0);
         assert_eq!(preview["before_clips"], preview["after_clips"]);
-        // The two parameters CC5 §5.2 writes, and no others: rotation and the
-        // half extents are never written.
         assert_eq!(
             structured["parameters"],
             json!([
@@ -21766,16 +21051,6 @@ mod tests {
             "track_matte_window commits nothing"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // CC5 §9.2.11, agent half: the tracked shot.
-    //
-    // The media crate owns the generated clip and proves containment for a
-    // *simulated* smoother; the real `track_matte_window` lives here, so the
-    // same containment gate is run against the curve the tool actually emits.
-    // The shot is the media crate's recipe, restated because its generator and
-    // its analytic helpers are `pub(crate)` to `kinewright-media`.
-    // -----------------------------------------------------------------------
 
     /// The §9.2.11 tracked shot's raster and subject, from the media recipe.
     const TRACKED_SHOT_WIDTH: u32 = 640;
@@ -21981,10 +21256,6 @@ mod tests {
     fn track_matte_window_smoothed_curve_contains_the_subject_at_every_frame() {
         let (service, _core) = tracked_shot_service();
 
-        // The media recipe's tracking call: step 5, radius 25, max_width 512.
-        // The analysis double answers thumbnails at the frames' own raster, so
-        // the tracker measures 640 × 360 and `max_width` only records the
-        // recipe.
         let result = service
             .track_matte_window(&TrackMatteWindowArgs {
                 expected_revision: Some(TimelineRevision(0)),
@@ -22005,8 +21276,6 @@ mod tests {
             Some(true),
             "tracking refused: {structured}"
         );
-        // The window really is the contract's: `2 · hw · scale · 100` is 26
-        // percent of the width and 36 percent of the height at scale 1.
         assert_eq!(
             structured["coordinate_space"]["box_percent"],
             json!([26, 36])
@@ -22016,9 +21285,6 @@ mod tests {
             json!({"width": TRACKED_SHOT_WIDTH, "height": TRACKED_SHOT_HEIGHT})
         );
 
-        // `tracking_sample_frames(0..100, 5)` distributes 20 even intervals
-        // across the 99-frame span: 0, 4, 9, …, 94, 99. Not multiples of five,
-        // and the media fixture's sequence exactly.
         let observations = structured["observations"].as_array().unwrap();
         let sample_frames = observations
             .iter()
@@ -22034,7 +21300,6 @@ mod tests {
             "every sample must survive the confidence floor, at the media fixture's own frames"
         );
 
-        // --- §9.2.11: the raw observations stay within 200 bp --------------
         let mut worst_raw = [0.0_f64; 2];
         let mut worst_raw_frame = [0_i64; 2];
         for observation in observations {
@@ -22061,7 +21326,6 @@ mod tests {
             assert!(observation["confidence_basis_points"].as_u64().unwrap() >= 5_000);
         }
 
-        // --- the smoothed curves the tool prepared -------------------------
         let curve_for = |axis: usize| {
             let name = if axis == 0 {
                 "matte_window0_center_x_basis_points"
@@ -22104,21 +21368,11 @@ mod tests {
                 }
             }
         }
-        // The smoother is not a pass-through: it costs lag, and the lag is
-        // what the margin budget below is spent on.
         assert!(
             worst_smoothed[0] > 0.0 && worst_smoothed[1] > 0.0,
             "a smoothed curve identical to ground truth would not exercise the margin budget"
         );
 
-        // --- §9.2.11: containment at EVERY frame, not only the samples -----
-        //
-        // The window is `[cx ± 1300, cy ± 1800]` and the subject box is
-        // `[analytic ± (625, 1111.1)]`, both in basis points of the frame
-        // extent, so the margin on each axis collapses to
-        // `half_extent − subject_half_extent − |centre error|`. The four edge
-        // comparisons are written out anyway: containment is the assertion the
-        // contract makes, and the margin is the evidence.
         let half_extent = [
             TRACKED_SHOT_HALF_WIDTH_BASIS_POINTS as f64,
             TRACKED_SHOT_HALF_HEIGHT_BASIS_POINTS as f64,
@@ -22172,17 +21426,6 @@ mod tests {
                 budget[axis]
             );
         }
-        // The measured evidence, pinned. Every number below is a measurement
-        // of the real tool on the real shot rather than arithmetic on the
-        // contract's constants, so a regression in the tracker or in the
-        // smoother moves it. The tracker is integer SAD over synthetic frames
-        // and the curve evaluator is integer, so the run is exactly
-        // reproducible and an exact comparison is honest.
-        //
-        // Both smoothed peaks and both margin minima land on frame 99, which
-        // is §5.2's stated last-sample median substitution: the filter
-        // replaces `o[n-1]` with `median(o[n-3], o[n-2], o[n-1])`, so the last
-        // value lags a moving subject and spends the most margin.
         for (label, measured, recorded, frame, expected_frame) in [
             (
                 "raw_x",
@@ -22236,12 +21479,6 @@ mod tests {
                 "{label}: the worst frame moved from {expected_frame} to {frame}"
             );
         }
-        // The margin and the lag are one measurement seen twice, not two
-        // independent literals: the sample frame carrying the worst lag is one
-        // of the hundred frames checked above, so the worst margin can never
-        // exceed the budget less that lag. Here the two are equal to the bp,
-        // because the worst lag falls on sample frame 99 rather than on an
-        // interpolated frame between two samples.
         for axis in 0..2 {
             assert!(
                 worst_margin[axis] <= budget[axis] - worst_smoothed[axis] + 1.0e-6,
@@ -22258,11 +21495,6 @@ mod tests {
     /// roadmap's manual fallback, reported typed with field/observed/allowed.
     #[test]
     fn track_matte_window_refuses_when_confidence_is_too_low() {
-        // Every frame carries a completely different deterministic pattern, so
-        // no template matches its successor and the confidence floor rejects
-        // every sample after the seeded first one. This is the shape of a real
-        // failure: the tracker has no occlusion handling, so a subject that
-        // vanishes leaves nothing to match.
         let frames = (0..=40)
             .map(|frame| (TimeCode(frame), matte_noise_frame(frame)))
             .collect::<BTreeMap<_, _>>();
@@ -22279,8 +21511,6 @@ mod tests {
                 step_frames: Some(10),
                 search_radius_percent: Some(25),
                 max_width: Some(320),
-                // Only a perfect match survives, which the seeded first sample
-                // alone reports.
                 minimum_confidence_basis_points: Some(10_000),
             })
             .unwrap();
@@ -22368,10 +21598,6 @@ mod tests {
                 .unwrap()
                 .contains("one value across the whole tracked range")
         );
-        // LOW C: the window is tracked with one fixed-size template, so the
-        // contract asks for a static transform to keep the window
-        // reproducible. It is *not* that a per-frame conversion is impossible
-        // — `track_mask_region` and `track_reframe_subject` both do one.
         let recovery = details["recovery_action"].as_str().unwrap();
         assert!(
             recovery.contains("one template of one fixed size"),
@@ -22458,8 +21684,6 @@ mod tests {
             max_width: 320,
             excluded_effect: excluded,
         };
-        // Both calls succeed; the point is that the *identity* selects which
-        // effect is removed, so a second effect of the same name survives.
         assert!(service.track_clip_region(&request(EffectId(7))).is_ok());
         assert!(service.track_clip_region(&request(EffectId(8))).is_ok());
         // The document itself is never touched by tracking isolation.
@@ -22562,13 +21786,6 @@ mod tests {
         }
         assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 84);
 
-        // M36: every colour planner and every CC5 tool stays inside the
-        // kilobyte description budget, measured on the *registered* descriptor
-        // rather than on a copy of the literal, so a descriptor-derived legend
-        // that grows is caught here. `plan_secondary_correction` carries a
-        // pointer to the matte legend, not the legend itself; the four other
-        // planners carry only `matte_parameter_pointer`. AU3 §4.2 adds the
-        // audio QC inspector to the same budget.
         for name in [
             "plan_primary_correction",
             "plan_color_wheels",
@@ -22582,8 +21799,6 @@ mod tests {
             "track_reframe_subject",
             "get_color_qc",
             "get_audio_qc",
-            // AU5 §4.3: the repair inspector joins the same budget, whose
-            // first sentence carries rule 21's percentile bias.
             "get_audio_repair",
             // AU4 §6.3 rule 135: both Part B planners join the same budget.
             "plan_audio_ducking",
@@ -22601,8 +21816,6 @@ mod tests {
                 description.len()
             );
         }
-        // The matte's own planner must not repeat the 47-parameter legend, and
-        // must not recommend itself.
         let secondary = tools
             .iter()
             .find(|tool| tool.name == "plan_secondary_correction")
@@ -22617,8 +21830,6 @@ mod tests {
             "plan_secondary_correction must not recommend itself"
         );
         assert!(secondary.contains("details.matte_parameters"));
-        // The legend itself is still served, in full, by the two enumerating
-        // surfaces the pointer names.
         for name in ["add_effect", "set_effect_param"] {
             let tool = tools.iter().find(|tool| tool.name == name).unwrap();
             assert!(
@@ -22642,8 +21853,6 @@ mod tests {
             kind("inspect_grade_matte"),
             crate::runtime::CapabilityKind::Inspector
         );
-        // These two are inferred correctly by their name prefixes and need no
-        // override entry.
         assert_eq!(
             kind("track_matte_window"),
             crate::runtime::CapabilityKind::Inspector
@@ -22666,8 +21875,6 @@ mod tests {
         assert_eq!(annotations.destructive_hint, Some(false));
         assert_eq!(annotations.idempotent_hint, Some(true));
         assert_eq!(annotations.open_world_hint, Some(false));
-        // CC6 R13: a working-stage measurement is full-resolution or refused,
-        // so the tool must not offer a resolution knob of any spelling.
         let schema = serde_json::to_value(color_qc.input_schema.as_ref()).unwrap();
         let properties = schema["properties"].as_object().unwrap();
         for absent in ["resolution", "proxy_sampling", "max_width"] {
@@ -22678,9 +21885,6 @@ mod tests {
         }
         assert_eq!(schema["additionalProperties"], serde_json::json!(false));
 
-        // AU3 §4.1: the audio twin is registered the same way — `get_`
-        // infers Inspector with no override entry, read-only, and its
-        // `deny_unknown_fields` args close the schema.
         assert_eq!(
             kind("get_audio_qc"),
             crate::runtime::CapabilityKind::Inspector
@@ -22749,8 +21953,6 @@ mod tests {
             .range
             .clone()
             .unwrap_or(TimeCode::ZERO..TimeCode(60));
-        // The fixture is 30 fps, so one project frame is 1 600 sample frames
-        // at 48 kHz.
         let sample_frames = u64::try_from(range.end.0 - range.start.0).unwrap() * 1_600;
         if sample_frames < 19_200 {
             return Err(MediaError::MixLoudnessRangeTooShort {
@@ -22907,9 +22109,6 @@ mod tests {
         };
         let room_tone = MediaAsset {
             id: AssetId(2),
-            // AU5 §5.1: the store path is the only identity a captured
-            // room-tone asset has, because rule 89 registers it as an
-            // ORDINARY `MediaAsset` with no flag of its own.
             path: PathBuf::from("/p/show.kinewright-assets/room-tone/abc.wav"),
             name: "Room tone — dialogue".to_owned(),
             duration: TimeCode(60),
@@ -22984,22 +22183,13 @@ mod tests {
              frame 90 is not a gap at all: {body}"
         );
         assert_eq!(body["tiles"], 1);
-        // Rule 102: the asset defaults to the project's sole room-tone asset,
-        // found by its store directory and nothing else.
         assert_eq!(body["asset_id"], 2);
         assert!(body["prepared_edit_plan"]["plan_id"].is_u64(), "{body}");
-        // Rule 103: no confirmation — a fill removes nothing — and nothing is
-        // mutated, so an identical second call sees the identical gap. (A
-        // `ConfirmationBroker::default()` refuses every request, so a tool that
-        // raised one could not have reached `prepared_edit_plan` at all.)
         let again = call(json!({"track": 1})).unwrap();
         let again = again.structured_content.as_ref().unwrap();
         assert_eq!(again["timeline_revision"], 0, "{again}");
         assert_eq!(again["gaps"], body["gaps"], "{again}");
 
-        // A gap under `minimum_gap_frames` is REPORTED and skipped, not
-        // silently dropped, and the plan that results is empty rather than
-        // failed.
         let skipped = call(json!({"track": 1, "minimum_gap_frames": 31})).unwrap();
         let body = skipped.structured_content.as_ref().unwrap();
         assert_eq!(skipped.is_error, Some(false), "{body}");
@@ -23066,8 +22256,6 @@ mod tests {
             "{body}"
         );
         assert_eq!(body["tiles"], 2);
-        // Two butt-joined `AddClip`s of the same asset, the second starting
-        // where the first ends.
         let plan_id = PreparedPlanId(body["prepared_edit_plan"]["plan_id"].as_u64().unwrap());
         let plan = service
             .prepared_plans
@@ -23085,8 +22273,6 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(starts, [(30, 0, 60), (90, 0, 30)], "{starts:?}");
 
-        // The cap is a per-gap reason naming itself, and the plan still ends
-        // cleanly rather than failing.
         let capped = call(json!({"track": 1, "maximum_tiles": 1})).unwrap();
         let body = capped.structured_content.as_ref().unwrap();
         assert_eq!(capped.is_error, Some(false), "{body}");
@@ -23219,25 +22405,13 @@ mod tests {
                 .to_owned()
         };
 
-        // Not representable: a 60 fps project reading a 30 fps asset can only
-        // express even spans, at any phase and any asset length.
         let unrepresentable = reason(Rational::new(60, 1).unwrap(), 17, 60);
-        // Core's tiler covers the six even frames it can and then has one
-        // unrepresentable frame left, so the gap is still skipped whole — and
-        // the reason names the GAP, the rate pair and the residue, rather than
-        // reporting a "gap of 1 project frames" nobody can see on the timeline.
         assert_eq!(
             unrepresentable,
             "gap of 7 project frames has no exact source range at 30/1 / 60/1; 1 tile(s) covered \
              all but its last 1 project frame(s)"
         );
 
-        // Representable, but not coverable inside THIS asset: at 30 -> 29.97
-        // every covering phase sits hundreds of source frames in, so a 60-frame
-        // sample supplies no whole tile at any length core will search. The
-        // reason is core's own `NoCoveringSourceRange` kind, which names the
-        // asset — the rates are fine, the asset is short — and it is a
-        // different sentence from the rate refusal above (R119).
         let uncoverable = reason(Rational::new(30_000, 1_001).unwrap(), 40, 60);
         assert_eq!(
             uncoverable,
@@ -23278,19 +22452,9 @@ mod tests {
     #[test]
     fn au5_plan_room_tone_fill_skips_a_gap_with_no_exact_source_range() {
         let mut document = au5b_fill_document();
-        // A 60 fps project reading the 30 fps audio-only asset: `round(2E)`
-        // has no solution for an odd project duration, so a 7-frame gap has no
-        // exact source range at all.
         document.fps = Rational::new(60, 1).unwrap();
         document.tracks[0].clips[0].source_range = TimeCode::ZERO..TimeCode(5);
         document.tracks[0].clips[1].timeline_start = TimeCode(17);
-        // Clip A is 5 source frames = 10 project frames at 60 fps and clip B is
-        // 30 source frames = 60, so the first gap is `10..17` — seven frames,
-        // odd, and therefore unrepresentable. F4: a THIRD clip opens a second
-        // gap of `77..83`, six frames and even, which is fillable, so this lane
-        // pins rule 103's real claim — one gap is skipped **while the rest of
-        // the plan commits** — rather than the degenerate case where the only
-        // gap is the one that failed.
         let mut third = document.tracks[0].clips[0].clone();
         third.id = ClipId(3);
         third.timeline_start = TimeCode(83);
@@ -23322,8 +22486,6 @@ mod tests {
             "{body}"
         );
         assert_eq!(body["tiles"], 1, "{body}");
-        // Rule 103 / `plan_clip_fades`' idiom: one gap's reason never fails the
-        // whole plan, and the other gap really is prepared.
         assert!(body["prepared_edit_plan"]["plan_id"].is_u64(), "{body}");
         assert!(
             planned.content[0]
@@ -23350,8 +22512,6 @@ mod tests {
     fn au5_plan_room_tone_fill_takes_its_tile_from_the_covering_source_range() {
         let mut document = au5b_fill_document();
         document.fps = Rational::new(25, 1).unwrap();
-        // Clip A is 30 source frames = 25 project frames at 25 fps, so the gap
-        // opens at 25; clip B starts at 32, making the gap exactly 7 frames.
         document.tracks[0].clips[1].timeline_start = TimeCode(32);
         document.duration = TimeCode(57);
         let asset = document.media_pool[1].clone();
@@ -23488,11 +22648,6 @@ mod tests {
                 })
             })),
             audio_repair: Some(Box::new(move |document, request| {
-                // R113 / F1: record WHAT was asked, not only what was answered.
-                // Without this the lanes would pass identically if the baseline
-                // `UpsertAudioBus` were deleted, or if "before" were measured
-                // at `MixSpectrumPoint::Track` and "after" at
-                // `MixSpectrumPoint::Bus` — the exact fold R113 forbids.
                 calls
                     .lock()
                     .unwrap()
@@ -23580,11 +22735,6 @@ mod tests {
             kinewright_core::NOISE_PROFILE_BAND_COUNT
         );
 
-        // R113 / F1: exactly two measurements, both at the SAME bus point, and
-        // both on a document that already carried the bus — which is what makes
-        // the baseline `UpsertAudioBus` load-bearing rather than decorative. A
-        // "before" taken on a bus-less document, or at the track point, fails
-        // here.
         let observed = calls.lock().unwrap().clone();
         assert_eq!(observed.len(), 2, "{observed:?}");
         let bus_id = kinewright_core::AudioBusId(body["audio_bus"].as_u64().unwrap());
@@ -23597,8 +22747,6 @@ mod tests {
             "before and after must be one point on two documents that differ only by the prefix"
         );
 
-        // F6: `deny_unknown_fields`, on the planner with the most optional
-        // knobs and therefore the most room for a silently ignored typo.
         assert!(call(json!({"tracks": [1], "reduction_tenth_dbs": 200})).is_err());
         assert!(call(json!({"tracks": [1], "minimum_snr_gain": 100})).is_err());
 
@@ -23738,10 +22886,7 @@ mod tests {
              carried node keeps its own"
         );
 
-        // Rule 109: a bus carrying MORE tracks than were asked for keeps its
-        // own routing. Rewriting `tracks` to the requested subset would
-        // silently un-route track 2 from a bus the caller only meant to add a
-        // repair prefix to.
+        // Rule 109: a bus carrying MORE tracks than were asked for keeps its own routing.
         let mut wider = document.clone();
         wider.tracks.push(Track {
             id: TrackId(2),
@@ -23766,8 +22911,6 @@ mod tests {
             vec![TrackId(1), TrackId(2)]
         );
 
-        // Rule 109: a repair prefix already on the bus refuses unless
-        // `replace` is true.
         let mut replaced = document.clone();
         replaced.audio_mix.buses[0].effects.insert(
             0,
@@ -23804,8 +22947,6 @@ mod tests {
         assert_eq!(rebuilt.is_error, Some(false), "{body}");
         assert_eq!(body["carried_effects"], json!(["audio_compressor"]));
 
-        // Rule 109's budget refusal, quoting both figures rather than letting
-        // `UpsertAudioBus` fail inside a prepared plan.
         let mut heavy = document;
         heavy.audio_mix.buses[0].effects = vec![static_audio_effect(
             EffectId(9),
@@ -23851,8 +22992,6 @@ mod tests {
             text.contains("HIGHER floor and therefore a LOWER gain"),
             "rule 21's bias direction: {text}"
         );
-        // A deliberately lowered gate accepts the same measurement, which is
-        // what makes the refusal a gate rather than a ceiling.
         let planned = service
             .call_blocking(
                 CallToolRequestParams::new("plan_dialogue_repair").with_arguments(
@@ -23888,9 +23027,6 @@ mod tests {
             "B9: the assertion is `contains`, because the real message names the asset: {not_ready}"
         );
 
-        // Silence analysis complete, but the longest span is 14 project
-        // frames — one under the 15 a 22,528 sample-frame profile window needs
-        // at 30 fps.
         let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia {
             silence_ready: [AssetId(1)].into_iter().collect(),
             timeline_silences: vec![TimelineSilenceSpan {
@@ -23944,10 +23080,6 @@ mod tests {
         };
         assert_eq!(kind("plan_dialogue_repair"), CapabilityKind::Planner);
         assert_eq!(kind("plan_room_tone_fill"), CapabilityKind::Planner);
-        // Rule 114: no `get_`/`plan_`/`track_` prefix and no
-        // `CAPABILITY_KIND_OVERRIDES` entry, so inference falls through to
-        // `Action` — which is what a tool that writes bytes and applies its
-        // own operation is.
         assert_eq!(kind("capture_room_tone"), CapabilityKind::Action);
 
         let description = |name: &str| {
@@ -23978,8 +23110,6 @@ mod tests {
         assert!(capture.contains("WRITES BYTES"), "{capture}");
         assert!(capture.contains("confirmation"), "{capture}");
 
-        // Rule 114's annotations: the capture is the only one of the three
-        // that is not read-only.
         let annotations = |name: &str| {
             tools
                 .iter()
@@ -24048,9 +23178,6 @@ mod tests {
             "revision_conflict"
         );
 
-        // The mandatory revision gate: `expected_revision` has no serde
-        // default, so omitting it is a malformed request rather than a silent
-        // zero.
         assert!(
             service
                 .call_blocking(
@@ -24083,9 +23210,6 @@ mod tests {
                 .is_err()
         );
 
-        // F5: with a project path set, the argument refusals become reachable.
-        // The path need not exist — the store root is derived, and every arm
-        // below returns before anything is written.
         let mut document = au5b_repair_document();
         document.media_pool.push(MediaAsset {
             id: AssetId(10),
@@ -24162,11 +23286,6 @@ mod tests {
             assert_eq!(refusal_code(&refused), "invalid_source_range", "{label}");
         }
 
-        // F10: the store's 60 s cap is checked HERE, before the confirmation
-        // and before a ten-minute decode nobody can cancel.
-        // 2,400 frames of a 30 fps asset is 80 s. Reaching the store with it
-        // would have meant an 80-second synchronous decode first — and, in this
-        // test, a confirmation nobody answers.
         let long = call(json!({
             "expected_revision": 0,
             "asset_id": 10,
@@ -24185,8 +23304,6 @@ mod tests {
             "{long:?}"
         );
 
-        // A picture-only asset carries nothing to capture, and says so rather
-        // than failing inside the decoder.
         let silent = call(json!({
             "expected_revision": 0,
             "asset_id": 9,
@@ -24285,8 +23402,6 @@ mod tests {
         );
         assert_integer_leaves("envelope", body);
 
-        // The rendered text: every figure with its unit, the percentile clause
-        // in prose, and all three warnings core raised.
         let text = &measured.content[0].as_text().unwrap().text;
         let lines = text.lines().collect::<Vec<_>>();
         assert_eq!(
@@ -24367,9 +23482,6 @@ mod tests {
         );
         assert!(inverted.structured_content.is_none());
 
-        // Q3: a range shorter than one 400 ms gating block is the typed
-        // refusal, spelled with the frame counts. Either bound alone fills
-        // the other before the rule is applied.
         for arguments in [
             json!({"start_frame": 0, "end_frame": 1}),
             json!({"end_frame": 1}),
@@ -24384,13 +23496,9 @@ mod tests {
             );
         }
 
-        // `deny_unknown_fields`: a resolution knob of any spelling is a
-        // malformed request, not an ignored one.
         assert!(call(json!({"resolution": "proxy"})).is_err());
         assert!(call(json!({"range": {"start": 0, "end": 30}})).is_err());
 
-        // Digital silence measures rather than refuses: `integrated` is null
-        // and the lone `audio_silent` warning leaves `technical_pass` true.
         let silent = call(json!({})).unwrap();
         assert_eq!(silent.is_error, Some(false), "{silent:?}");
         let body = silent.structured_content.as_ref().unwrap();
@@ -24440,8 +23548,6 @@ mod tests {
             ]
         );
 
-        // A profile binds the report to that profile's published target and
-        // adds exactly one assumption; every severity reaches the text.
         let judged = call(json!({"profile": "youtube1080p"})).unwrap();
         assert_eq!(judged.is_error, Some(false), "{judged:?}");
         let body = judged.structured_content.as_ref().unwrap();
@@ -24941,8 +24047,6 @@ mod tests {
         let media = Arc::new(NoopMedia {
             thumbnail_frames: BTreeMap::from([(TimeCode(12), before.clone())]),
             candidate_thumbnail_frames: BTreeMap::from([(TimeCode(12), after.clone())]),
-            // The fixture clip already carries primary node 6, so the plan
-            // corrects it in place instead of stacking a second node.
             candidate_effect_id: Some(EffectId(6)),
             candidate_primary_exposure_milli_stops: Some(1_000),
             ..NoopMedia::default()
@@ -25102,8 +24206,6 @@ mod tests {
                 .len(),
             10
         );
-        // The clip already carries primary node 6, so the proposal corrects it
-        // in place: one SetEffectParam and no second AddEffect.
         let operations = value["operations"].as_array().unwrap();
         assert_eq!(operations.len(), 1);
         assert!(operations[0].get("AddEffect").is_none());
@@ -25148,9 +24250,6 @@ mod tests {
         assert_eq!(value["applied"], false);
         assert_eq!(service.snapshot().unwrap(), before_snapshot);
 
-        // Freeze clips use the same source-backed production layer shape as
-        // media clips. Keep an online freeze overlay in this focused manifest
-        // check so its exact effect/primary fields cannot regress separately.
         let mut freeze_document = proof_document.clone();
         freeze_document.tracks[1].clips[0].asset = AssetId(1);
         freeze_document.tracks[1].clips[0].content =
@@ -25429,9 +24528,6 @@ mod tests {
             )]),
             keyframes: BTreeMap::new(),
         });
-        // Bypassed but deliberately non-neutral: CC3 §5 keeps its slot, its
-        // stage index, and every stored value while it renders as the exact
-        // identity.
         effects.push(Effect {
             id: EffectId(7),
             name: "color_wheels".to_owned(),
@@ -26329,307 +25425,6 @@ mod tests {
         assert_eq!(served_metrics.tool_count, 7);
         assert!(served_metrics.tool_count < registry_metrics.tool_count / 4);
         assert!(served_metrics.serialized_bytes < registry_metrics.serialized_bytes / 4);
-        // CC7 §5.4, R2-MAJ-3: M36's registry byte count is only measurable from
-        // inside the crate (`capability_tools` is private), so it is pinned
-        // here beside the served figure CC7 asserts is byte-identical to CC6's.
-        // Errata D-E9 claimed this test already did that; it did not until now.
-        // AU1 §6.2 regenerated the registry figure (126 tools, 1,303,967 B =
-        // 1,186,449 B of input schemas + 96,840 B of descriptions); served is
-        // byte-identical because the seven served tools do not embed the
-        // `Operation` schema.
-        // AU2 §4.2 Part A added no tool: the count stayed 126 and the registry
-        // grew to 1,312,132 B = the same 1,186,449 B of input schemas plus
-        // 105,005 B of descriptions. Only descriptions moved, because the
-        // `Operation` schema embeds `Effect.parameters` as an untyped map, so
-        // no descriptor addition reaches an input schema. That +8,165 B split
-        // two ways: the forty new descriptor rows added 1,299 B to each of the
-        // five effect tools that carry `effect_documentation()` (6,495 B), and
-        // §4.1's rewritten bus prose grew the arm shared by
-        // `upsert_audio_bus` and `remove_audio_bus` from 335 B to 1,170 B
-        // (835 B x 2 = 1,670 B). §4.2's "only the five effect tools'
-        // descriptions grow" overlooked its own §4.1 rewrite.
-        //
-        // AU2 §6.4 Part B adds three tools — the generated `set_audio_master`
-        // and `set_pan_law` mutators and the `get_audio_spectrum` inspector —
-        // so 52 generated operations + 77 inspectors = 129 and the registry
-        // grows to 1,421,520 B = 1,293,084 B of input schemas + 107,271 B of
-        // descriptions.
-        //
-        // Unlike Part A, Part B does move input schemas (+106,635 B), because
-        // it changes the `Operation` model rather than the descriptor table.
-        // The measured split, which sums exactly:
-        //
-        //   43,559 B  the two new mutators' own schemas (21,785 + 21,774),
-        //             each carrying its own copy of the shared `Operation`
-        //             `$defs`;
-        //    1,340 B  `get_audio_spectrum`'s own schema, which embeds no
-        //             `Operation` and is the cheapest tool in the registry;
-        //   61,736 B  spread over the 51 pre-existing tools that do embed
-        //             `Operation`, namely 1,195 B of shared `$defs` growth on
-        //             each of the fifty generated tools (`AudioMaster` and
-        //             `PanLaw` are new definitions and `AudioBus` gains
-        //             `gain_tenth_db`; nothing references `AudioMix`, so its
-        //             two new fields reach no input schema at all), plus 62 B
-        //             on `set_track_mix` for the reworded `pan_percent` doc
-        //             comment, plus 1,924 B on `apply_edit_plan` — the one
-        //             non-generated tool that embeds `Operation`, whose inline
-        //             definition gains the two new `oneOf` variants and the
-        //             same 62 B doc comment.
-        //
-        // So 49 x 1,195 + (1,195 + 62) + 1,924 = 61,736, and
-        // 43,559 + 1,340 + 61,736 = 106,635.
-        //
-        // The +2,266 B of descriptions splits exactly four ways: 1,302 B of
-        // the two new mutators' descriptions, 636 B of `get_audio_spectrum`'s,
-        // 194 B for §6.1's bus fader sentence on the two bus tools (97 B x 2),
-        // and 134 B for the law-neutral `set_track_mix` rewrite. Served stays
-        // 5,660 B in both parts.
-        //
-        // AU3 §4.2 Part A adds one tool, the `get_audio_qc` inspector, so
-        // 52 + 78 = 130 and the registry grows by 3,355 B to 1,424,875 B =
-        // 1,295,138 B of input schemas + 108,413 B of descriptions. The
-        // +2,054 B of input schemas is `get_audio_qc`'s own schema entire: it
-        // embeds no `Operation`, and nothing else moved because none of the
-        // AU3 core types (`AudioLoudness`'s four new fields, `LoudnessTarget`,
-        // `AudioQcReport`) appears in any tool's arguments. The +1,142 B of
-        // descriptions splits exactly three ways: 890 B of `get_audio_qc`'s
-        // own prose, 205 B for `get_audio_levels`' four-field gloss and its
-        // sub-block refusal sentence, and 47 B for `get_delivery_profiles`'
-        // loudness-target clause. 2,054 + 890 = 2,944 B is `get_audio_qc`'s
-        // schema-plus-description share of the 3,103 B it costs serialized;
-        // the remaining 252 B are the two amended descriptions.
-        //
-        // AU3 §6.4 Part B adds no tool: the counts stay 52 + 78 = 130 and the
-        // registry grows by 783 B to 1,425,658 B = 1,295,459 B of input
-        // schemas + 108,875 B of descriptions. The +321 B of input schemas is
-        // `QueueExportArgs`' `normalize_loudness` boolean and nothing else —
-        // the three new `ExportJobRecord` fields and `ExportSettings`'
-        // `loudness_normalization` are *outputs*, and no tool takes an
-        // `ExportJobRecord` or an `ExportSettings` as an argument. The +462 B
-        // of descriptions splits exactly three ways: 124 B for
-        // `plan_audio_normalization`'s true-peak rename and its re-cue clause,
-        // 267 B for `queue_export`'s `normalize_loudness` clause, and 71 B for
-        // `get_export_jobs`' two new report clauses. The planner's clause is
-        // 4 B dearer than the standalone sentence it replaced because it has
-        // to live *inside* the first sentence: `get_capability` and
-        // `search_capabilities` publish only `first_sentence(description)`, so
-        // a second sentence would have cost 120 B and reached no agent. Served
-        // is byte-identical again: `queue_export` is not served, and the seven
-        // served tools embed no export argument schema at all.
-        //
-        // AU4 §4.3 Part A adds two generated mutators, `set_clip_gain_envelope`
-        // and `set_track_automation`, so 54 generated operations + 78
-        // inspectors = 132 and the registry grows by 93,394 B to 1,519,052 B =
-        // 1,386,288 B of input schemas + 111,103 B of descriptions.
-        //
-        // The +90,829 B of input schemas splits three ways and sums exactly:
-        //
-        //   45,878 B  the two new mutators' own schemas (22,842 + 23,036),
-        //             each carrying its own copy of the shared curve `$defs`;
-        //   42,640 B  820 B of shared `$defs` growth on each of the 52
-        //             pre-existing generated tools;
-        //    2,311 B  on `apply_edit_plan` — the same 820 B of `$defs` growth
-        //             plus 1,491 B for the two new `oneOf` variants its
-        //             inlined `Operation` definition gains (844 + 645 + the
-        //             two separating commas).
-        //
-        // So 45,878 + 52 x 820 + 2,311 = 90,829. The 820 B is *field* growth
-        // on the three `Operation`-reachable types that gained a curve and
-        // not a new `$defs` type (§4.3 rule 85): `AutomationCurve`, `Keyframe`
-        // and `KeyframeInterpolation` are already reachable through
-        // `SetEffectKeyframes`, so reusing them costs a fifth of AU2 Part B's
-        // 1,195 B per-tool bill for two genuinely new definitions. Measured
-        // per tool: `$defs/Clip/properties/audio_gain_curve` 347 B,
-        // `$defs/AudioBus/properties/gain_curve` 234 B,
-        // `$defs/AudioMaster/properties/gain_curve` 236 B, plus three
-        // separating commas = 820 B. `TrackMix` is NOT `Operation`-reachable
-        // (`$defs/Track` carries no `mix`), so `TrackMix.gain_curve` and
-        // `TrackMix.pan_curve` cost the registry nothing; they reach the wire
-        // only through the document.
-        //
-        // Each of the four `curve` occurrences — one per new tool's own
-        // variant schema, one per `apply_edit_plan` `oneOf` variant — is a
-        // `$ref`/`null` `anyOf` rather than an inlined `AutomationCurve`
-        // object, because F1's `required` attribute alone would strip the null
-        // branch and make E1's one documented clear schema-invalid. That is
-        // 96 B cheaper per occurrence, i.e. 384 B of the 91,213 B the
-        // null-stripping first draft billed.
-        //
-        // The +2,228 B of descriptions is the two new tools' prose entire
-        // (1,003 + 1,225): no existing description was touched, and the check
-        // that the sum is exact is what proves it.
-        //
-        // Serialized: 24,015 + 24,429 = 48,444 B of the two new tools whole,
-        // plus the same 44,951 B of schema growth on the 53 pre-existing
-        // `Operation`-embedding tools (52 x 820 + 2,311), minus **1 B**. The
-        // missing byte is rule 84's annotation flip: `set_effect_keyframes`
-        // joins the `.idempotent(...)` list, and `"idempotentHint":true` is
-        // one byte shorter than the `"idempotentHint":false` it replaces. So
-        // 48,444 + 44,951 - 1 = 93,394.
-        //
-        // Served is byte-identical for the ninth consecutive measurement:
-        // neither new tool is served, and the seven served tools embed no
-        // `Operation` schema at all, so even a model change cannot reach them.
-        //
-        // AU4 §6.3 Part B adds two planners, `plan_audio_ducking` and
-        // `plan_clip_fades`, so 54 generated operations + 80 inspectors = 134
-        // and the registry grows by 5,318 B to 1,524,370 B = 1,389,434 B of
-        // input schemas + 112,948 B of descriptions.
-        //
-        // Unlike Part A this costs nothing outside the two new rows. Neither
-        // planner touches the `Operation` model, and a planner's arguments
-        // embed no `Operation` at all, so no pre-existing tool moves a byte
-        // and the split is simply the two tools whole:
-        //
-        //   +3,146 B  input schemas: `AudioDuckingPlanArgs` 2,391 B and
-        //             `ClipFadesPlanArgs` 755 B, both `deny_unknown_fields`
-        //             and both embedding only `TrackId`, `TimeCode` and the
-        //             shared `TranscriptRangeArgs` shape;
-        //   +1,845 B  descriptions: 1,000 B of `plan_audio_ducking`'s prose
-        //             and 845 B of `plan_clip_fades`', each under rule 135's
-        //             1,024 B budget and each carrying its load-bearing
-        //             clause in the FIRST sentence, because `get_capability`
-        //             and `search_capabilities` publish only
-        //             `first_sentence(description)`. The fade row is 14 B
-        //             heavier than the first measurement: "emitting
-        //             set_clip_audio only" moved out of the third sentence,
-        //             which no compact surface publishes, into the first.
-        //
-        // The ducking row is 137 B heavier than the first measurement, and
-        // every byte is a FIELD doc comment rather than prose: +10 B on
-        // `depth_tenth_db` for the sign it now refuses, and +127 B on `range`
-        // for the straddling window that holds the floor to the end of the
-        // project (126 B of text plus one escaped newline, because schemars
-        // joins a doc comment's lines). A field doc is billed to the input
-        // schema column, not the description column, which is why the
-        // description total does not move: the two descriptions are byte for
-        // byte what they were, and rule 135's 24 B of remaining budget was
-        // never spent.
-        //
-        // So 3,146 + 1,845 = 4,991 B of schema-plus-description against
-        // 5,318 B serialized; the remaining 327 B are the two rows' names,
-        // annotations and JSON envelopes (3,556 + 1,762 = 5,318 B measured
-        // whole), unchanged by either move because a row's envelope does not
-        // grow with its payload. Served is byte-identical for the tenth
-        // consecutive measurement: a planner is registry-only, reached
-        // through `invoke_capability`, whose argument schema is generic.
-        // AU5 §4.3 Part A adds one hand-written capability, the
-        // `get_audio_repair` inspector, so 54 generated operations + 81
-        // inspectors = 135 and the registry grows by 6,894 B to 1,531,264 B =
-        // 1,391,430 B of input schemas + 117,683 B of descriptions.
-        //
-        // The +1,996 B of input schemas is `AudioRepairArgs`' own schema
-        // entire, and nothing else moves. AU5 adds no `Operation` variant, so
-        // no generated tool changes; and the three new effect descriptors
-        // reach no input schema at all, because the `Operation` schema embeds
-        // `Effect.parameters` as an untyped map (:22986-22990). A new
-        // descriptor is free on this column by construction, which is why 45
-        // new parameter rows cost zero here and something on the next one.
-        //
-        // The +4,735 B of descriptions splits exactly three ways:
-        //
-        //     925 B  `get_audio_repair`'s own prose, inside rule 135's
-        //            1,024 B budget, carrying rule 21's percentile clause AND
-        //            the direction of its bias in the FIRST sentence, because
-        //            `get_capability` and `search_capabilities` publish only
-        //            `first_sentence(description)`;
-        //   3,790 B  758 B of `effect_documentation()` growth on each of the
-        //            five spliced effect tools (add_effect, insert_effect,
-        //            set_effect_param, set_effect_keyframes,
-        //            clear_effect_keyframes) — the three new descriptor names,
-        //            their 14 enumerated rows, and §4.2 rule 78's single
-        //            profile pattern sentence, 175 B with its separator;
-        //      20 B  `plan_clip_fades`' rewritten window sentence, which now
-        //            describes §3.8 rule 67's fade-length RMS window and its
-        //            one-pass-per-track measurement instead of the 400 ms
-        //            gating block it no longer uses, and spells the surviving
-        //            skip with R80(iii)'s own predicate ("holds no whole
-        //            window") rather than AU4's "shorter than that window",
-        //            which over-claims by two bytes' worth of accuracy. Its
-        //            description is 865 B, still inside rule 135's 1,024 B
-        //            budget.
-        //
-        // So 925 + 5 x 758 + 20 = 4,735.
-        //
-        // Rule 78's hatch, measured rather than estimated (R23, R46): an
-        // enumerated profile row is `profile_band01_tenth_db=-1200..=0,
-        // neutral -1200` at 48 B, and 31 of them with their separators are
-        // 1,550 B, so the unhatched growth would have been 2,133 B per spliced
-        // tool and 10,665 B over the five, against the 758 and 3,790 measured
-        // here. The hatch saves 1,375 B a tool and 6,875 B in all. The
-        // contract estimated 49 B a row, 2,065 B a tool and a 6.3 kB saving;
-        // the measurement is 48, 2,133 and 6.9 kB, so the argument holds with
-        // slightly more margin than it claimed.
-        //
-        // Serialized: 3,084 B of the new tool whole plus the same 3,790 B of
-        // description growth on the five effect tools plus `plan_clip_fades`'
-        // 20 B = 6,894. 1,996 + 925 =
-        // 2,921 B is `get_audio_repair`'s schema-plus-description share of the
-        // 3,084 B it costs serialized; the remaining 163 B are its name, its
-        // annotations and its JSON envelope, 4 B dearer than `get_audio_qc`'s
-        // 159 B because the name is 4 B longer.
-        //
-        // Served is byte-identical for the eleventh consecutive measurement:
-        // `get_audio_repair` is registry-only, no AU5 capability is in
-        // `COMPACT_TOOL_NAMES`, and the seven served tools embed no
-        // `Operation` schema, so neither the new inspector nor the three new
-        // descriptors can reach them.
-        //
-        // AU5 §5.9 Part B adds three hand-written capabilities —
-        // `plan_dialogue_repair` and `plan_room_tone_fill` (Planners by the
-        // `plan_` prefix) and `capture_room_tone` (an Action by inference, no
-        // prefix and no `CAPABILITY_KIND_OVERRIDES` entry) — so 54 generated
-        // operations + 84 inspectors = 138 and the registry grows by 9,000 B
-        // to 1,540,264 B = 1,397,156 B of input schemas + 120,458 B of
-        // descriptions.
-        //
-        // Nothing else moves at all, which is what makes the split trivial to
-        // check: Part B adds no `Operation` variant and no effect descriptor,
-        // so no generated tool and no spliced `effect_documentation()` row
-        // changes by a byte, and R84's pattern sentence — which has named
-        // `plan_dialogue_repair` on five tool descriptions since Part A — is
-        // deliberately left exactly as it was.
-        //
-        // The +5,726 B of input schemas is the three new argument schemas,
-        // whole:
-        //
-        //   2,207 B  `DialogueRepairPlanArgs`;
-        //   1,855 B  `RoomToneFillPlanArgs`;
-        //   1,664 B  `CaptureRoomToneArgs`.
-        //
-        // The +2,775 B of descriptions is the three new prose blocks, each
-        // inside rule 135's 1,024 B budget with its load-bearing clause in the
-        // FIRST sentence, because `get_capability` and `search_capabilities`
-        // publish only `first_sentence(description)`:
-        //
-        //     995 B  `plan_dialogue_repair` — that it REFUSES when the
-        //            measured SNR gain misses the minimum, and which way the
-        //            percentile floor biases that measurement (rule 21);
-        //     972 B  `plan_room_tone_fill` — leading and interior gaps only,
-        //            same-track and butt-joined, and a gap it cannot fill
-        //            exactly is skipped rather than failing the plan;
-        //     808 B  `capture_room_tone` — that it WRITES BYTES under the
-        //            project directory and therefore confirms first.
-        //
-        // Serialized, the three rows whole are 3,369 + 2,993 + 2,638 = 9,000,
-        // and the per-row sums close exactly: 2,207 + 995 = 3,202 against
-        // 3,369, 1,855 + 972 = 2,827 against 2,993, and 1,664 + 808 = 2,472
-        // against 2,638. The three remainders are 167, 166 and 166 B of name,
-        // annotations and JSON envelope. A row's envelope is **147 B plus its
-        // name**, which reproduces every earlier measurement — `get_audio_qc`
-        // 147 + 12 = 159, `get_audio_repair` 147 + 16 = 163,
-        // `plan_dialogue_repair` 147 + 20 = 167, `plan_room_tone_fill`
-        // 147 + 19 = 166 — and `capture_room_tone` reads 166 rather than its
-        // 147 + 17 = 164 because its description quotes the default asset name
-        // and `description_bytes` counts the two `"` unescaped while
-        // `serialized_bytes` counts them escaped. The two annotation sets cost
-        // the same: `read_only` true/`destructive` false and `read_only`
-        // false/`destructive` true are `true`+`false` either way.
-        //
-        // Served is byte-identical for the TWELFTH consecutive measurement,
-        // for the same structural reason as the eleventh: all three Part B
-        // capabilities are registry-only, reached through `invoke_capability`,
-        // whose argument schema is generic.
         assert_eq!(
             (
                 registry_metrics.serialized_bytes,
@@ -26646,9 +25441,6 @@ mod tests {
             registry_metrics.description_bytes, 120_458,
             "registry={registry_metrics:?}"
         );
-        // AU2 §6.4/B15, AU3 §4.2/A16, AU3 §6.4/B13, AU4 §4.3/A19,
-        // AU4 §6.3/B13, AU5 §4.3/A18, AU6 §5.4 Part A and Part B: the served
-        // quad, byte-identical to CC6's through every part of both programmes.
         assert_eq!(
             (
                 served_metrics.tool_count,
@@ -28335,10 +27127,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // CC4 §10.3.14 — import authorization, plan rejection, and proof honesty
-    // -----------------------------------------------------------------------
-
     fn cc4_project_directory(label: &str) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let path = std::env::temp_dir().join(format!(
@@ -28471,8 +27259,6 @@ mod tests {
         assert_eq!(document.lut_assets.len(), 1);
         assert_eq!(document.lut_assets[0].sha256, expected_sha);
 
-        // The asset is immediately visible to the read-only look surface with
-        // a verified availability, because the store root is now known.
         let listed = service.list_look_assets().unwrap();
         let listed = listed.structured_content.unwrap();
         assert_eq!(listed["store_root_known"], true);
@@ -29122,8 +27908,6 @@ mod tests {
             "`baseline` is not a `line` field"
         );
 
-        // The parser's own shape, which leads with `observed` and ends with a
-        // 1-based line number.
         let parse = kinewright_core::MediaError::Backend(
             "invalid_lut_sample: observed 1.0 2.0; allowed three floats in 0..=1; line 42"
                 .to_owned(),
@@ -29146,8 +27930,6 @@ mod tests {
     /// immediately and report the empty string.
     #[test]
     fn a_lut_error_value_that_begins_with_another_key_is_not_truncated() {
-        // The `.cube` sample the parser rejected literally begins with the
-        // word `line`, and the trailing `line` field still has to be found.
         let parse = kinewright_core::MediaError::Backend(
             "invalid_lut_sample: observed line 1 2 3 4; allowed three floats in 0..=1; line 12"
                 .to_owned(),
@@ -29159,8 +27941,6 @@ mod tests {
         assert_eq!(structured["details"]["allowed"], "three floats in 0..=1");
         assert_eq!(structured["details"]["line"], "12");
 
-        // The unified `; <key>=<value>` shape, with a value that begins with
-        // the next key's name.
         let store = kinewright_core::MediaError::Backend(
             "lut_store_root_invalid: the derived store root is a symbolic link; observed=allowed=x; allowed=a writable directory; line=3"
                 .to_owned(),
@@ -29239,8 +28019,6 @@ mod tests {
         let error = prepared.expect_err("a prepared plan cannot register a LUT asset");
         assert!(error.to_string().contains("import_lut_asset"), "{error}");
 
-        // The dispatcher refuses the name outright rather than reporting an
-        // unknown tool, so the recovery path is stated.
         let dispatched = service
             .call_blocking(CallToolRequestParams::new("add_lut_asset").with_arguments(
                 serde_json::Map::from_iter([(
@@ -29294,8 +28072,6 @@ mod tests {
                 Some(true)
             );
         }
-        // The generated effect documentation shares the compact form, so the
-        // range never reaches an AddEffect/SetEffectParam schema either.
         let add_effect = operation_tools()
             .unwrap()
             .into_iter()
@@ -29319,9 +28095,6 @@ mod tests {
             ("plan_creative_look", CapabilityKind::Planner),
             ("list_look_assets", CapabilityKind::Inspector),
             ("import_lut_asset", CapabilityKind::Action),
-            // CC4 §9: the hand-written conversion capability replaces the
-            // generated `ConvertLegacyLook` tool, whose published batch was
-            // unsubmittable whenever it opened with `AddLutAsset`.
             ("convert_legacy_look", CapabilityKind::Action),
         ] {
             assert!(
@@ -29404,8 +28177,6 @@ mod tests {
             "look_comparison_requires_effect_id"
         );
 
-        // CC3 §5: a CC1 primary has no bypass control, so the bypass variant
-        // is refused rather than synthesized with an invalid SetEffectParam.
         let (_, seeded) = service.snapshot().unwrap();
         let mut with_primary = (*seeded).clone();
         with_primary.tracks[0].clips[0].effects = vec![Effect {
@@ -29476,10 +28247,6 @@ mod tests {
                 matte_comparison: None,
             })
             .unwrap();
-        // The LUT node is no longer refused up front. The proof proceeds to
-        // the renderer, and the `NoopMedia` double has no decoder, so the
-        // failure is the render-stage error that double produces - named
-        // exactly, not asserted by exclusion.
         assert_eq!(refused.is_error, Some(true));
         let structured = refused.structured_content.unwrap();
         assert_eq!(
@@ -29582,8 +28349,6 @@ mod tests {
             );
         }
 
-        // A track with no clips is a different refusal from a track that does
-        // not exist: one is a typo, the other is an empty lane.
         document.tracks.push(Track {
             id: TrackId(4),
             kind: TrackKind::Audio,
@@ -29595,9 +28360,6 @@ mod tests {
             "track 4 contains no audio source clips"
         );
 
-        // An existing bus that already owns one of the tracks is refused by
-        // name, because silently re-routing a deliberate mix is the one thing
-        // a delivery plan must not do.
         document.audio_mix.buses.push(kinewright_core::AudioBus {
             id: kinewright_core::AudioBusId(7),
             name: "Dialogue".to_owned(),
@@ -29613,12 +28375,7 @@ mod tests {
              revise that mix before normalizing"
         );
 
-        // AU5 §5.7 rule 111 / B11: the relaxation is narrow, and these are the
-        // arms that say how narrow. A bus carrying one `audio_gain` beside the
-        // repair prefix is NOT a repair prefix and still refuses; a bus whose
-        // `tracks` differ from the requested set still refuses, because
-        // extending it would silently re-target normalization at a different
-        // set; and an empty bus keeps the refusal it always had (R110).
+        // AU5 §5.7 rule 111 / B11: the relaxation is narrow, and these are the arms that say how narrow.
         let repair_prefix = || {
             vec![
                 static_audio_effect(
@@ -29657,9 +28414,6 @@ mod tests {
             "the tracks-equality condition is not optional"
         );
 
-        // The one accepted shape: a non-empty repair prefix over exactly the
-        // requested tracks. It EXTENDS bus 7 rather than allocating a new one,
-        // and carries every `AudioBus` field except `effects` (R35).
         let bus = document.audio_mix.buses.last_mut().unwrap();
         bus.tracks = vec![TrackId(3)];
         bus.gain_tenth_db = -35;
@@ -29679,9 +28433,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["audio_denoise", "audio_declick"]
         );
-        // Rule 112: the delivery processing is APPENDED to that prefix, the
-        // bus keeps its name, and the chain still ends in the 5 ms true-peak
-        // limiter — 15 + 5 = 20, exactly `CHAIN_LOOKAHEAD_MILLISECONDS`.
         let extended = normalization_bus(
             context.bus_id,
             context.first_effect_id,
@@ -29724,9 +28475,6 @@ mod tests {
     /// the new one is present.
     #[test]
     fn normalization_bus_emits_a_true_peak_limiter_and_never_the_legacy_clamp() {
-        // A positive gain that fits under the ceiling: gain node, no
-        // compression curve; a positive gain that does not: a real threshold
-        // and a 4:1 ratio; a negative gain: one attenuation node.
         for (label, gain, peak, expected_names) in [
             (
                 "positive, no compression needed",
@@ -29790,8 +28538,6 @@ mod tests {
                     "{label}: {parameter}"
                 );
             }
-            // AU3 §6.3/F17b: the compressor declares no lookahead, so the whole
-            // bus costs 5 ms of `CHAIN_LOOKAHEAD_MILLISECONDS`' 20.
             assert_eq!(
                 kinewright_core::chain_lookahead_milliseconds(&bus.effects),
                 5,
@@ -29870,9 +28616,6 @@ mod tests {
             "{planner}"
         );
 
-        // The compact surfaces publish only the first sentence, so the re-cue
-        // clause has to live in it. `capabilities` is what `get_capability`
-        // and `search_capabilities` both project through.
         let summary = crate::runtime::capabilities(&tools)
             .into_iter()
             .find(|capability| capability.name == "plan_audio_normalization")
@@ -29954,9 +28697,6 @@ mod tests {
              job 4 normalization gain=640 passes=1 reduction=0 on_target=true skipped=none"
         );
 
-        // A reference measurement of a job that asked for no normalization: no
-        // target, no report line, and a silent file reads `none` rather than a
-        // zero it never measured.
         let mut reference = au3_export_job_record(ExportJobId(5));
         reference.audio_verification = Some(kinewright_core::DeliveryAudioVerification {
             output_path: reference.output_path.clone(),
@@ -30042,10 +28782,6 @@ mod tests {
             audio_verification_unavailable_reason: None,
         }
     }
-
-    // -----------------------------------------------------------------
-    // AU4 §6.1 / §6.2 Part B: the two envelope planners.
-    // -----------------------------------------------------------------
 
     /// AU4 §6.1 rule 130's shape without a decoder: a 360-frame (12 s at
     /// 30 fps) document with a music track 1 and a dialogue track 2.
@@ -30257,8 +28993,6 @@ mod tests {
 
         let document = au4_ducking_document();
         let dialogue = BTreeSet::from([TrackId(2)]);
-        // Speech from 2.0 s to 4.0 s is the complement of the two silent
-        // spans around it.
         let spoken = dialogue_spoken_spans(
             &document,
             &dialogue,
@@ -30312,8 +29046,6 @@ mod tests {
             ),
             vec![TimeCode(60)..TimeCode(186)]
         );
-        // Every key clamps into `0..=duration - 1`, so a span at the head of
-        // the project cannot key a negative frame.
         let clamped = ducking_curve(
             &[TimeCode(0)..TimeCode(20)],
             0,
@@ -30364,8 +29096,6 @@ mod tests {
                 "parked {parked} + depth {depth}"
             );
         }
-        // A non-negative "depth" would key the music LOUDER under dialogue and
-        // report it as a ducked window, so it is refused by name.
         let mut document = au4_ducking_document();
         document.audio_mix.tracks.push(TrackMix {
             gain_tenth_db: 120,
@@ -30458,8 +29188,6 @@ mod tests {
         assert_eq!(body["keyframe_count"], 4);
         assert!(!body["prepared_edit_plan"]["plan_id"].is_null(), "{body}");
 
-        // Rule 127: `plan_confirmation_description` fires only on clip or
-        // track removal, so an envelope-only plan raises none.
         assert_eq!(
             plan_confirmation_description(
                 &document,
@@ -30525,9 +29253,6 @@ mod tests {
             "{planned:?}"
         );
 
-        // Rule 128.2's stated floor: 200 ms of speech at the 200 ms hold is
-        // exactly one gating block, and it does measure — read, like the
-        // planner reads it, off the emitted curve rather than off the span.
         let curve = ducking_curve(
             &[TimeCode(60)..TimeCode(72)],
             0,
@@ -30607,8 +29332,6 @@ mod tests {
             vec![(55, 0), (60, -120), (126, -120), (129, 0)]
         );
 
-        // The measurement is NOT restricted by `range`: the longest un-ducked
-        // window runs from the release key to the end of the project.
         let measured = calls.lock().unwrap().clone();
         assert!(
             measured.iter().any(|range| range.end > TimeCode(130)),
@@ -30616,8 +29339,6 @@ mod tests {
         );
         assert!(body["measured"]["delta_hundredths"].is_i64(), "{body}");
 
-        // The clamp on the *served* path, not just in `ducking_curve`: commit
-        // the plan and read the key back off the committed `TrackMix`.
         let plan_id = body["prepared_edit_plan"]["plan_id"].clone();
         let committed = service
             .call_blocking(
@@ -30685,9 +29406,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(55, 0), (60, -120), (141, -120), (153, 0)]
         );
-        // Both spoken spans sit on the floor at every frame — the property
-        // the un-merged emission broke, where `value_at(110)` came back
-        // essentially un-ducked.
         for frame in (60..90).chain(105..135) {
             assert_eq!(curve.value_at(TimeCode(frame)), Some(-120), "frame {frame}");
         }
@@ -30699,8 +29417,6 @@ mod tests {
                 .any(|key| key.value == 0 && (60..=141).contains(&key.at.0)),
             "{curve:?}"
         );
-        // The only two ramps are outside the merged window, and each is
-        // monotone across its whole length.
         for frame in 55..60 {
             assert!(
                 curve.value_at(TimeCode(frame)) > curve.value_at(TimeCode(frame + 1)),
@@ -30713,11 +29429,6 @@ mod tests {
                 "the release ramp rises at frame {frame}"
             );
         }
-        // The boundary: a gap of exactly attack + release does NOT merge, and
-        // degenerates continuously into an instantaneous touch at `u` — the
-        // release key at 96 + 12 and the attack key at 113 - 5 are the same
-        // frame carrying the same value, so the dedupe is a no-op and there is
-        // no flat un-ducked span for the measurement to select.
         let boundary = ducking_windows(
             &[TimeCode(60)..TimeCode(90), TimeCode(113)..TimeCode(143)],
             6,
@@ -30820,8 +29531,6 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let analysis = NoopMedia {
             silence_ready: BTreeSet::from([AssetId(1)]),
-            // Speech from 150 to 244; the 200 ms hold makes the floor
-            // [150, 250), which straddles the range's end at 200.
             timeline_silences: au4_silence_spans(&[(0, 150), (244, 360)]),
             mix_levels: Some(au4_mix_levels_double(Arc::clone(&calls), -1_600, -300)),
             ..NoopMedia::default()
@@ -30917,8 +29626,6 @@ mod tests {
             source_fingerprint: MediaSourceFingerprint::default(),
             color_description: ColorDescription::default(),
         });
-        // Nothing validates `TrackKind` on `dialogue_tracks`, so a video
-        // track of B-roll can be named beside the real dialogue track.
         document.tracks.push(Track {
             id: TrackId(3),
             kind: TrackKind::Video,
@@ -31032,8 +29739,6 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn au4_plan_clip_fades_proposes_fades_and_measures_in_one_pass() {
         let mut document = au4_ducking_document();
-        // Track 2 carries a hot 60-frame clip whose fade-in the editor has
-        // already set, plus the 6-frame clip AU4 could not reach.
         document.tracks[1].clips[0].source_range = TimeCode::ZERO..TimeCode(60);
         document.tracks[1].clips[0].audio_fade_in_frames = TimeCode(4);
         let short = |id: u64, start: i64, frames: i64| Clip {
@@ -31074,27 +29779,9 @@ mod tests {
         assert_eq!(body["window_project_frames"], 1);
         assert_eq!(body["fade_frames"], 1);
         assert_eq!(body["threshold_dbfs_hundredths"], -4_000);
-        // Nothing is skipped any more: a 4-frame clip is 133 ms, which holds
-        // six whole 20 ms windows (110..=115 below).
         assert_eq!(body["skipped"], json!([]), "{body}");
         let clips = body["clips"].as_array().unwrap();
         assert_eq!(clips.len(), 3, "{body}");
-        // The evidence is the RMS window level the decision actually read, and
-        // the double's level is `-1000 - index`, so each figure below names
-        // the window index `clip_window_levels` picked. One project frame is
-        // 1 600 sample frames at 30 fps and a 20 ms window is 960, so for a
-        // clip spanning `[s, e)` sample frames the wholly-inside windows are
-        // `ceil(s / 960) ..= e / 960 - 1`:
-        //
-        //   clip 2, frames  0..60 =      0..96 000 -> windows   0 ..=  99
-        //   clip 3, frames 60..66 = 96 000..105 600 -> windows 100 ..= 109
-        //   clip 4, frames 66..70 = 105 600..112 000 -> windows 110 ..= 115
-        //
-        // Clip 2's tail is window 99, ending exactly at sample 96 000, and
-        // clip 3's head is window 100, starting exactly there: the cut between
-        // them is a window boundary and neither reads a sample of the other.
-        // Window 116 would straddle clip 4's end at 112 000 and is excluded,
-        // which is the other half of the same rule.
         assert_eq!(clips[0]["clip"], 2);
         assert_eq!(clips[0]["fade_in_frames"], 4, "a non-zero fade is kept");
         assert_eq!(clips[0]["fade_out_frames"], 1);
@@ -31115,8 +29802,6 @@ mod tests {
              run past its end at sample 112 000"
         );
         assert!(!body["prepared_edit_plan"]["plan_id"].is_null(), "{body}");
-        // Rule 67's whole point: ONE pass for the track, whatever its clip
-        // count, and the hop equals the window so no sample is counted twice.
         let measured = calls.lock().unwrap().clone();
         assert_eq!(
             measured,
@@ -31124,12 +29809,6 @@ mod tests {
             "one short-window pass per track, not two renders per clip"
         );
 
-        // The only refusal left: a clip that holds no whole window — which is
-        // not the same thing as a clip shorter than one, and is why clip 3
-        // (exactly one window, aligned) is measured below while clip 4 (longer
-        // than half a window, aligned across a boundary) is not. At 30 fps a
-        // 20 ms window can never trip it — one frame is 33 ms — so it takes a
-        // 200 ms fade and a 133 ms clip to reach the arm at all.
         let calls = Arc::new(Mutex::new(Vec::new()));
         let analysis = NoopMedia {
             mix_window_levels: Some(au5_window_levels_double(Arc::clone(&calls), -1_000)),
@@ -31222,8 +29901,6 @@ mod tests {
     #[test]
     fn au4_plan_clip_fades_proposes_nothing_under_the_threshold() {
         let mut document = au4_ducking_document();
-        // A clip the measurement cannot reach, so the empty-plan branch still
-        // has a `skipped` reason to carry.
         document.tracks[1].clips[0].source_range = TimeCode::ZERO..TimeCode(60);
         document.tracks[1].clips.push(Clip {
             id: ClipId(3),
@@ -31276,8 +29953,6 @@ mod tests {
                 (MixSpectrumPoint::Track(TrackId(2)), 200, 200),
             ],
         );
-        // The other branch of the empty-plan text: here clips really were
-        // measured and refused by the threshold, so the clause is true.
         assert_eq!(
             planned.content[0].as_text().unwrap().text,
             "nothing to propose: no clip head or tail window reads above -4000 hundredths dBFS with a fade still at zero; 1 clip(s) were skipped and nothing was prepared",
@@ -31317,17 +29992,11 @@ mod tests {
             skipped[0]["reason"],
             "fade_milliseconds rounds to 0 frames at this fps"
         );
-        // The clip's true peak is -300 hundredths, ten times over the -4,000
-        // default: the empty-plan text must NOT claim nothing peaked above the
-        // threshold, because no clip was ever measured against it.
         assert_eq!(
             planned.content[0].as_text().unwrap().text,
             "nothing to propose; 1 clip(s) were skipped and nothing was prepared",
             "{planned:?}"
         );
-        // AU5 §3.8 rule 67: a zero-frame fade measures nothing at all. The
-        // pass is per track, so skipping it is a whole render saved rather
-        // than a per-clip branch.
         assert!(
             calls.lock().unwrap().is_empty(),
             "a zero-frame fade must not decode anything"

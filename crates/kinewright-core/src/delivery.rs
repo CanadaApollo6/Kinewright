@@ -179,9 +179,6 @@ impl DeliveryProfile {
             audio_codec: "aac".to_owned(),
             video_bitrate,
             audio_bitrate,
-            // AU3 §5.1: normalization is a job parameter, never a profile
-            // fact. `loudness_target()` publishes the target; asking for it is
-            // the caller's decision.
             loudness_normalization: None,
             cancellation,
         }
@@ -612,9 +609,6 @@ pub fn delivery_color_mismatches(color: &ColorDescription) -> Vec<DeliveryColorM
     if !matches!(&color.white_point, ColorWhitePoint::D65) {
         push("white_point", format!("{:?}", color.white_point), "d65");
     }
-    // CC1 §2.1 makes `Integer(8)` and `Eight` the same declared depth, and CC6
-    // §4.1 widens the accepted set to the two managed lanes; every other depth
-    // stays rejected with a typed reason.
     if !DeliveryEncodeDepth::ALL
         .iter()
         .any(|depth| color.bit_depth == depth.color_bit_depth())
@@ -753,10 +747,6 @@ pub fn document_for_delivery_variant(
     output.validate()?;
     Ok(output)
 }
-
-// ---------------------------------------------------------------------------
-// CC6 §4.2: typed delivery rejection.
-// ---------------------------------------------------------------------------
 
 /// A managed delivery encode refused for a typed colour reason.
 ///
@@ -1003,10 +993,6 @@ impl DeliveryVerificationError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CC6 §3.6: delivery tag checks.
-// ---------------------------------------------------------------------------
-
 /// Which side of an export a [`DeliveryTagCheck`] was taken from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1146,10 +1132,6 @@ pub fn delivery_tag_check(
         not_representable,
     }
 }
-
-// ---------------------------------------------------------------------------
-// CC6 §6.2/§6.3: verification request, budgets, and decoded comparison.
-// ---------------------------------------------------------------------------
 
 /// Default number of frames one verification samples.
 pub const DELIVERY_VERIFICATION_FRAME_COUNT: u8 = 5;
@@ -2290,8 +2272,6 @@ mod tests {
     #[test]
     fn delivery_bit_depth_leg_accepts_the_two_managed_lanes_and_rejects_every_other() {
         let supported = ColorContext::sdr_rec709().delivery;
-        // Passing direction: both managed lanes, in both spellings. CC1 §2.1
-        // makes `Integer(n)` and the named variant the same declared depth.
         for accepted in [
             ColorBitDepth::Eight,
             ColorBitDepth::Ten,

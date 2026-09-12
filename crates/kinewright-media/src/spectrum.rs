@@ -320,10 +320,6 @@ pub(crate) fn third_octave_spectrum(
                     high.min(nyquist),
                     bin_width,
                 ),
-                // AU2 §5.9: true for the five bands narrower than the analysis
-                // window's main lobe — 20, 25, 31.5, 40, and 50 Hz at 48 kHz.
-                // AU5 §3.7 rule 61(iii): **eleven** at the profile's 4 096
-                // window, 20 Hz through 200 Hz, and they are still learned.
                 window_limited: high - low < main_lobe,
             }
         })
@@ -481,7 +477,6 @@ pub(crate) fn hann_window(length: usize) -> Vec<f64> {
     let denominator = length as f64;
     (0..length)
         .map(|index| {
-            // Likewise exact.
             #[allow(clippy::cast_precision_loss)]
             let phase = 2.0 * std::f64::consts::PI * index as f64 / denominator;
             0.5 * (1.0 - phase.cos())
@@ -835,10 +830,6 @@ mod tests {
         let untabled = started.elapsed().as_secs_f64();
 
         let speedup = untabled / tabled.max(f64::MIN_POSITIVE);
-        // The `profile=` field is part of the evidence: the table replaces a
-        // `sin_cos` per butterfly, and an unoptimised build spends most of its
-        // time elsewhere, so a debug speedup near 1.0 is expected and a release
-        // one is not.
         let profile = if cfg!(debug_assertions) {
             "debug"
         } else {
@@ -888,8 +879,6 @@ mod tests {
             "digital silence learns no band at all, which rule 43(i) writes as the neutral"
         );
 
-        // AU5 §3.7 rule 61(iii): **eleven** bands (20 Hz ... 200 Hz) are
-        // `window_limited` at a 4 096 window, not AU2's five.
         let noise = crate::test_support::pseudo_random_amplitude(22_528 * 2, 0.1);
         let spectrum = third_octave_spectrum(
             &noise,

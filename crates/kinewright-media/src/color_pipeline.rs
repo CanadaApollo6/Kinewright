@@ -706,10 +706,6 @@ impl PrimaryCorrection {
         }
 
         for (name, value) in &effect.parameters {
-            // CC5 §2.1: `primary_correction` is matte-capable, so its Core
-            // descriptor carries the 47 `matte_*` parameters. They are
-            // resolved by `MatteParams::from_effect` and are not CC1 controls,
-            // so they must not be read as an unimplemented Core parameter.
             if is_matte_parameter(name) {
                 continue;
             }
@@ -904,10 +900,6 @@ pub fn apply_primary_corrections(
     Ok(linear_rgb)
 }
 
-// ---------------------------------------------------------------------------
-// CC3 §2: the `grade709` working encoding.
-// ---------------------------------------------------------------------------
-
 /// CC3 §2.1 `ALPHA`: the precise BT.709 alpha, not the rounded 1.099.
 const GRADE709_ALPHA: f32 = 1.099_296_8;
 /// CC3 §2.1 `BETA`: the precise BT.709 linear-segment breakpoint.
@@ -984,10 +976,6 @@ pub fn grade709_decode(e: f32) -> f32 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CC3 §2.2: `color_wheels`.
-// ---------------------------------------------------------------------------
-
 /// The CC3 `color_wheels` node resolved to ASC CDL slope/offset/power triples.
 ///
 /// Master combines multiplicatively for gain and power and additively for
@@ -1062,10 +1050,6 @@ impl ColorWheels {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CC3 §2.3: `color_curves`.
-// ---------------------------------------------------------------------------
-
 /// One CC3 curve with its Fritsch--Carlson tangents already solved (§2.3).
 ///
 /// This is the CPU *reference* implementation.  It is written from the CC3
@@ -1105,9 +1089,6 @@ impl ColorCurve {
             .map(|(_, y)| *y as f32 / CURVE_BASIS_POINTS_PER_UNIT)
             .collect();
 
-        // Step 1: secant slopes.  A non-positive span cannot occur for a
-        // Core-resolved curve; guarding it keeps a hand-built point list from
-        // producing an infinity instead of a flat segment.
         let deltas: Vec<f32> = xs
             .windows(2)
             .zip(ys.windows(2))
@@ -1124,16 +1105,10 @@ impl ColorCurve {
         // Step 2: initial tangents.
         let mut tangents = Vec::with_capacity(count);
         tangents.push(deltas[0]);
-        // The contract writes the interior tangent as a literal average.
-        // `f32::midpoint` takes a different branch for huge magnitudes, and a
-        // reference implementation must not carry a second rounding rule.
         #[allow(clippy::manual_midpoint)]
         tangents.extend(deltas.windows(2).map(|pair| (pair[0] + pair[1]) / 2.0));
         tangents.push(deltas[count - 2]);
 
-        // Step 3: the Fritsch--Carlson limiter, forward and in place.  The
-        // visitation order is normative: index `i + 1` is read after index `i`
-        // has already been rewritten.
         for (index, delta) in deltas.iter().copied().enumerate() {
             if delta == 0.0 {
                 tangents[index] = 0.0;
@@ -1267,15 +1242,6 @@ impl ColorCurves {
         encoded.map(|value| grade709_decode(self.master.evaluate(value)))
     }
 }
-
-// ---------------------------------------------------------------------------
-// CC4 §3.4--§3.5: LUT nodes.
-//
-// This evaluator is written from the CC4 §3.5 contract text alone.  It shares
-// no code with `compositor.rs` or `compositor.wgsl`, because the CC3/CC4
-// parity fixtures must compare two independent implementations of the written
-// contract rather than one implementation with itself (CC4 §4.4).
-// ---------------------------------------------------------------------------
 
 /// The encoding a LUT node's lattice is authored in (CC4 §3.4).
 ///
@@ -1457,8 +1423,6 @@ impl Lut3d {
             |d_r: u32, d_g: u32, d_b: u32| self.lattice(i[0] + d_r, i[1] + d_g, i[2] + d_b);
         let c000 = corner(0, 0, 0);
 
-        // CC4 §3.5, transcribed verbatim so tie handling is identical on the
-        // CPU reference and the shader.  The conditions are strict `>`.
         let y = if f_r > f_g {
             if f_g > f_b {
                 let (c100, c110, c111) = (corner(1, 0, 0), corner(1, 1, 0), corner(1, 1, 1));
@@ -1669,16 +1633,6 @@ impl Lut3d {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CC5 §2.3--§2.5: the per-node matte.
-//
-// This is the **independent CPU reference**.  It is written from the CC5
-// contract text alone and deliberately shares no code with the compositor's
-// matte-block builder or with `compositor.wgsl` (CC5 §3.4, CC3's rule), so the
-// parity fixtures compare two independent implementations of the same written
-// equations.
-// ---------------------------------------------------------------------------
-
 /// Basis points per unit of a matte control (CC5 §2.2).
 const MATTE_BASIS_POINTS_PER_UNIT: f64 = 10_000.0;
 /// Hundredths of a degree per degree of a matte angle control (CC5 §2.2).
@@ -1807,10 +1761,6 @@ impl MatteWindow {
         let ny = qy / self.hh;
         match self.shape {
             MatteWindowShape::Rect => nx.abs().max(ny.abs()),
-            // Written as the contract writes it.  `mul_add` is deliberately
-            // not used: a fused multiply-add rounds once where the shader
-            // rounds twice, which is exactly the kind of silent divergence the
-            // independent-reference rule exists to catch.
             MatteWindowShape::Ellipse => (nx * nx + ny * ny).sqrt(),
         }
     }
@@ -1928,9 +1878,6 @@ impl MatteQualifier {
             chroma / maximum
         };
         let luma = BT709_LUMA_RED * red + BT709_LUMA_GREEN * green + BT709_LUMA_BLUE * blue;
-        // The written branch order is normative: a tie is resolved by the
-        // first matching channel, red before green before blue, so this
-        // reference and the shader agree on the seam.
         let hue = if chroma == 0.0 {
             None
         } else if maximum == red {
@@ -2115,10 +2062,6 @@ impl Matte {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CC3 §3.1: the ordered node stack.
-// ---------------------------------------------------------------------------
-
 /// One resolved node of the CC1/CC3 ordered colour-correction stack (§3.1).
 ///
 /// `technical_lut`, `primary_correction`, `color_wheels`, `color_curves`, and
@@ -2266,10 +2209,6 @@ pub fn resolve_color_nodes_with(
     let mut nodes = Vec::with_capacity(count);
     for (index, kind) in active_color_nodes(effects) {
         let effect = &effects[index];
-        // CC5 §2.6: the matte question is answered on Core's stored integers.
-        // `active_color_nodes` has already dropped every node Core reports
-        // inactive, `MatteExcluded` included, so a node that reaches this loop
-        // either carries a matte the renderer must evaluate or none at all.
         let matte = Matte::from_params(&MatteParams::from_effect(effect));
         nodes.push(match kind {
             ColorNodeKind::TechnicalLut => ColorNode::TechnicalLut(LutNode::from_params(
@@ -2693,8 +2632,6 @@ mod tests {
 
         let mut limited_10 = rec709(ColorRange::Limited, ColorTransfer::Bt709);
         limited_10.bit_depth = ColorBitDepth::Ten;
-        // The direct limited YUV -> RGBA64 swscale path uses the 8-bit
-        // fixed-point RGB scale even when its input planes are 10-bit.
         assert_eq!(rgba64_promoted_max(&limited_10), Ok(65_472));
         assert_eq!(rgba64_normalization_max(&limited_10), Ok(65_280));
 
@@ -2732,9 +2669,6 @@ mod tests {
 
     #[test]
     fn transfer_thresholds_match_the_contract() {
-        // The CC1 inverse is specified with a strict low-branch comparison:
-        // exactly .081 therefore takes the nonlinear branch. The rounded
-        // constants intentionally leave a tiny seam at the branch boundary.
         assert_close(
             decode_bt709(0.081),
             ((0.081_f32 + 0.099) / 1.099).powf(1.0 / 0.45),
@@ -2754,8 +2688,6 @@ mod tests {
         );
         assert_close(decode_bt1886(-0.25), 0.0, 0.0);
         assert_close(decode_bt1886(0.5), 0.5_f32.powf(2.4), 1.0e-6);
-        // The forward contract also uses a strict low-branch comparison, so
-        // exactly .018 is evaluated by the nonlinear branch.
         assert_close(
             encode_bt709(0.018),
             1.099 * 0.018_f32.powf(0.45) - 0.099,
@@ -2783,9 +2715,6 @@ mod tests {
             }
         }
 
-        // Rounded BT.709 constants produce a small, specified discontinuity
-        // at the strict .081 branch boundary. Each branch remains monotone;
-        // retain an explicit seam assertion so a larger regression fails.
         let mut previous = f32::NEG_INFINITY;
         for index in 0_u16..=809 {
             let value = decode_bt709(f32::from(index) / 10_000.0);
@@ -2904,8 +2833,6 @@ mod tests {
             .apply_checked([0.0, 0.5, 1.0])
             .expect("valid controls");
 
-        // White balance first gives [0.0, 0.45, 0.9]. Tonal weights use the
-        // clamped post-white-balance values and never clamp the resulting x.
         let expected_red = 0.25 + 0.20;
         let expected_green = 0.45 + 0.20 * (1.0 - smoothstep(0.15, 0.50, 0.45));
         let expected_blue =
@@ -3034,8 +2961,6 @@ mod tests {
             .expect("valid controls");
         assert!(over_range.iter().all(|value| *value > 1.0));
 
-        // A later negative exposure recovers the original sample because the
-        // serial node boundary does not clamp the over-range intermediate.
         let recovered = apply_primary_corrections([0.75, 0.75, 0.75], &[positive, negative])
             .expect("valid serial controls");
         for value in recovered {
@@ -3043,8 +2968,6 @@ mod tests {
         }
         assert_eq!(encode_monitor_rgb8(over_range), [255, 255, 255]);
 
-        // Clamping after the first node would irreversibly lose the exposure
-        // result and cannot recover the original sample.
         let incorrectly_clipped = negative
             .apply_checked(over_range.map(|value| value.clamp(0.0, 1.0)))
             .expect("valid clipped controls");
@@ -3090,11 +3013,6 @@ mod tests {
 
     #[test]
     fn delivery_encoding_quantizes_mid_gray_once_at_sixteen_bits() {
-        // One BT.709 OETF in f32, one clamp, one rounding.  Mid-gray linear
-        // 0.5 encodes to 1.099 * 0.5^0.45 - 0.099 and must land on the exact
-        // 16-bit intermediate code, not on an 8-bit code re-promoted to 16
-        // bits.  The scale is swscale's nominal 16-bit RGB white, not
-        // `u16::MAX`.
         assert_eq!(DELIVERY_INTERMEDIATE_WHITE, 65_280);
         assert_eq!(u32::from(DELIVERY_INTERMEDIATE_WHITE), 255_u32 << 8);
         let encoded = encode_bt709(0.5);
@@ -3106,8 +3024,6 @@ mod tests {
             [expected, expected, expected, DELIVERY_INTERMEDIATE_WHITE]
         );
 
-        // The 8-bit monitor code for the same value is 180; a delivery path
-        // that quantized to 8 bits first would produce 180 << 8 = 46080.
         assert_eq!(encode_monitor_rgb8([0.5; 3]), [180; 3]);
         assert_ne!(expected, 46_080);
 
@@ -3152,10 +3068,6 @@ mod tests {
             Err(ColorPipelineError::UnknownTransfer)
         );
     }
-
-    // -----------------------------------------------------------------------
-    // CC3 curves and wheels.
-    // -----------------------------------------------------------------------
 
     /// The CC3 §10.2 parity raster levels: negatives, the 0..1 range, the
     /// `grade709` breakpoint itself, and six levels above display white.
@@ -3351,8 +3263,6 @@ mod tests {
         assert_eq!(grade709_decode(0.0).to_bits(), 0.0_f32.to_bits());
         assert_eq!(grade709_decode(-0.0).to_bits(), 0.0_f32.to_bits());
 
-        // A wheels node with zero offset maps 0 to 0: y = 0*slope + 0 = 0,
-        // z = sgn(0)*|0|^p = 0, D(0) = 0, for any slope and any p > 0.
         let node = wheels(&[
             ("gain_red_thousandths", 1_200),
             ("gamma_master_thousandths", 100),
@@ -3363,16 +3273,6 @@ mod tests {
 
     #[test]
     fn fritsch_carlson_limits_tangents_above_the_radius_three_circle() {
-        // Points (0,0) (1250,1250) (2500,11250) are x = 0, 0.125, 0.25 and
-        // y = 0, 0.125, 1.125 -- all exact in f32.
-        //   delta   = [1.0, 8.0]
-        //   step 2  -> m = [1.0, (1.0 + 8.0)/2 = 4.5, 8.0]
-        //   i = 0: delta = 1, a = 1.0, b = 4.5, a^2 + b^2 = 21.25 > 9
-        //          tau  = 3 / sqrt(21.25) = 0.650_791_373
-        //          m[0] = tau * 1.0 * 1.0 = 0.650_791_373
-        //          m[1] = tau * 4.5 * 1.0 = 2.928_561_181
-        //   i = 1: delta = 8, a = m[1]/8 = 0.366_070_148, b = 1.0,
-        //          a^2 + b^2 = 1.134 <= 9, so nothing more is limited.
         let curve = solved_curve(&[(0, 0), (1_250, 1_250), (2_500, 11_250)]);
         assert_close(curve.tangents()[0], 0.650_791_4, 1e-6);
         assert_close(curve.tangents()[1], 2.928_561_2, 1e-6);
@@ -3381,14 +3281,6 @@ mod tests {
 
     #[test]
     fn fritsch_carlson_leaves_the_radius_three_boundary_unlimited() {
-        // Points (0,0) (2500,0) (5000,625) (7500,3750) are x = 0, 0.25, 0.5,
-        // 0.75 and y = 0, 0, 0.0625, 0.375 -- all exact in f32.
-        //   delta   = [0.0, 0.25, 1.25]
-        //   step 2  -> m = [0.0, 0.125, 0.75, 1.25]
-        //   i = 0: delta == 0 -> m[0] = 0, m[1] = 0
-        //   i = 1: delta = 0.25, a = 0/0.25 = 0, b = 0.75/0.25 = 3 exactly,
-        //          a^2 + b^2 = 9 exactly, and 9 > 9 is false: no limiting.
-        //   i = 2: delta = 1.25, a = 0.75/1.25 = 0.6, b = 1.0, sum = 1.36.
         let curve = solved_curve(&[(0, 0), (2_500, 0), (5_000, 625), (7_500, 3_750)]);
         let expected = [0.0_f32, 0.0, 0.75, 1.25];
         assert_eq!(
@@ -3403,13 +3295,6 @@ mod tests {
 
     #[test]
     fn zero_slope_plateau_zeroes_both_tangents_and_stays_monotone() {
-        // Points (0,0) (2500,5000) (5000,5000) (10000,10000) are x = 0, 0.25,
-        // 0.5, 1.0 and y = 0, 0.5, 0.5, 1.0.
-        //   delta   = [2.0, 0.0, 1.0]
-        //   step 2  -> m = [2.0, 1.0, 0.5, 1.0]
-        //   i = 0: delta = 2, a = 1.0, b = 0.5, sum = 1.25 <= 9
-        //   i = 1: delta == 0 -> m[1] = 0, m[2] = 0
-        //   i = 2: delta = 1, a = 0.0, b = 1.0, sum = 1.0 <= 9
         let curve = solved_curve(&[(0, 0), (2_500, 5_000), (5_000, 5_000), (10_000, 10_000)]);
         let expected = [2.0_f32, 0.0, 0.0, 1.0];
         assert_eq!(
@@ -3421,8 +3306,6 @@ mod tests {
             expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
         );
 
-        // Both endpoints of the plateau segment are 0.5 with zero tangents, so
-        // the Hermite basis is the constant 0.5 across it.
         for sample in [0.25_f32, 0.3, 0.375, 0.45, 0.499] {
             assert_close(curve.evaluate(sample), 0.5, 1e-6);
         }
@@ -3448,8 +3331,6 @@ mod tests {
         let points: Vec<(i32, i32)> = COORDINATES.iter().map(|x| (*x, *x)).collect();
         let curve = ColorCurve::from_points(&curve_points(&points));
 
-        // dy and dx are the same f32, so every secant slope is exactly 1.0,
-        // the averages are exactly 1.0, and a = b = 1 never trips the limiter.
         for tangent in curve.tangents() {
             assert_eq!(tangent.to_bits(), 1.0_f32.to_bits());
         }
@@ -3457,8 +3338,6 @@ mod tests {
             assert_close(curve.evaluate(sample), sample, 1e-6);
         }
 
-        // The curve is mathematically identity but not *structurally* identity,
-        // so CC3 §3.3 must still evaluate the node.
         let effect = curve_effect(ColorCurveChannel::Master, &points, 0);
         assert_eq!(
             resolve_color_nodes(std::slice::from_ref(&effect))
@@ -3470,8 +3349,6 @@ mod tests {
 
     #[test]
     fn curves_extrapolate_with_the_limited_end_tangents() {
-        // (0,0) (5000,6000) (10000,10000): delta = [1.2, 0.8], m = [1.2, 1.0,
-        // 0.8], and neither segment trips the limiter.
         let curve = solved_curve(&[(0, 0), (5_000, 6_000), (10_000, 10_000)]);
         assert_close(curve.tangents()[0], 1.2, 1e-6);
         assert_close(curve.tangents()[1], 1.0, 1e-6);
@@ -3507,16 +3384,12 @@ mod tests {
 
     #[test]
     fn color_wheels_stay_finite_and_documented_at_the_control_bounds() {
-        // gain_master = 0 -> slope 0 on every channel.  With offset 0 the node
-        // is the constant 0: y = 0, z = sgn(0)*|0|^1 = 0, D(0) = 0.
         let zero_gain = wheels(&[("gain_master_thousandths", 0)]);
         assert_eq!(bits(zero_gain.slope()), bits([0.0; 3]));
         for level in [-0.5_f32, 0.18, 4.0] {
             assert_eq!(bits(zero_gain.apply([level; 3])), bits([0.0; 3]));
         }
 
-        // gain_master = 0 with lift_master = 500 -> y = 0.05 for every input,
-        // power 1, and |0.05| < BETA_E, so the output is 0.05 / 4.5.
         let lifted = wheels(&[
             ("gain_master_thousandths", 0),
             ("lift_master_basis_points", 500),
@@ -3525,8 +3398,6 @@ mod tests {
             assert_close(lifted.apply([level; 3])[0], 0.011_111_111, 1e-7);
         }
 
-        // Both gamma controls at their minimum give the documented minimum
-        // power of 0.1 * 0.1 = 0.01.
         let flat = wheels(&[
             ("gamma_master_thousandths", 100),
             ("gamma_red_thousandths", 100),
@@ -3534,14 +3405,10 @@ mod tests {
             ("gamma_blue_thousandths", 100),
         ]);
         assert_close(flat.power()[0], 0.01, 1e-7);
-        // y = E(0.18) = 0.408_848_126; z = y^0.01 = 0.991_095_764;
-        // D(z) = ((z + K) / ALPHA)^INV = 0.982_089_168
         assert_close(flat.apply([0.18; 3])[0], 0.982_089, 2e-5);
         // y = E(2.5) = 1.526_281; z = y^0.01 = 1.004_463_252; D(z) = 1.009_044_8
         assert_close(flat.apply([2.5; 3])[0], 1.009_045, 2e-5);
 
-        // Both gain controls at their maximum give the documented maximum
-        // slope of 4 * 4 = 16.
         let gain_max = wheels(&[
             ("gain_master_thousandths", 4_000),
             ("gain_red_thousandths", 4_000),
@@ -3554,8 +3421,6 @@ mod tests {
         // y = E(4.0) * 16 = 31.236_505; D(y) = 1710.256_596
         assert_close(gain_max.apply([4.0; 3])[0], 1_710.256_6, 3e-2);
 
-        // Both gamma controls at their maximum give the documented maximum
-        // power of 4 * 4 = 16.
         let gamma_max = wheels(&[
             ("gamma_master_thousandths", 4_000),
             ("gamma_red_thousandths", 4_000),
@@ -3565,9 +3430,6 @@ mod tests {
         assert_close(gamma_max.apply([0.18; 3])[0], 1.354_502e-7, 1e-11);
         // The odd extension keeps undershoot signed: z = -|E(-0.5)|^16.
         assert_close(gamma_max.apply([-0.5; 3])[0], -8.358_053e-4, 1e-8);
-        // Maximum slope and maximum power together on the largest raster
-        // level would exceed the f32 range; on an in-gamut sample they do not.
-        // y = E(0.18) * 16 = 6.541_570; z = y^16 = 3.263_60e26 (approximately)
         let loud = wheels(&[
             ("gain_master_thousandths", 4_000),
             ("gain_red_thousandths", 4_000),
@@ -3611,12 +3473,8 @@ mod tests {
         assert_eq!(wheels_first[0].kind(), ColorNodeKind::Wheels);
         assert_eq!(curves_first[0].kind(), ColorNodeKind::Curves);
 
-        // wheels then curves, red: D(E(0.18)*1.2) = 0.250_770_15, then the
-        // master curve on E of that gives D(...) = 0.355_061_1.
         let sample = [0.18_f32; 3];
         assert_close(apply_stack(&wheels_first, sample)[0], 0.355_061, 2e-5);
-        // curves then wheels, red: the master curve gives 0.262_430_5, then
-        // D(E(0.262_430_5) * 1.2) = 0.369_891_6.
         assert_close(apply_stack(&curves_first, sample)[0], 0.369_892, 2e-5);
         assert!(
             (apply_stack(&wheels_first, sample)[0] - apply_stack(&curves_first, sample)[0]).abs()
@@ -3686,15 +3544,6 @@ mod tests {
             bits(apply_stack(&nodes, sample))
         );
     }
-
-    // -----------------------------------------------------------------------
-    // CC4 §10.3.2--§10.3.6: LUT nodes.
-    //
-    // Every expected value below is transcribed from the CC4 contract text or
-    // derived by hand from the §3.5 equations. No expectation is obtained by
-    // calling `Lut3d::lookup`, `LutNode::apply`, or `apply_color_nodes_at`
-    // (CC4 §10.1.1).
-    // -----------------------------------------------------------------------
 
     /// The eight CC3 §10.2 channel patterns, verbatim.
     fn cc4_pattern_sample(pattern: usize, level: f32) -> [f32; 3] {
@@ -3808,13 +3657,8 @@ mod tests {
         library
     }
 
-    // --- §3.4 -------------------------------------------------------------
-
     #[test]
     fn decode_display709_is_the_exact_inverse_of_encode_bt709() {
-        // CC4 §3.4: `decode_display709(encode_bt709(x)) = x` for every finite
-        // `x` in exact arithmetic, including the negatives and the over-range
-        // levels CC3 §10.2 carries and where `decode_bt709` cannot.
         let mut worst = 0.0_f64;
         for level in CC3_RASTER_LEVELS {
             for x in [level, -level] {
@@ -3830,8 +3674,6 @@ mod tests {
         // Recorded, not gated: the measured f32 `powf` round-trip floor.
         assert!(worst < 1e-6, "observed worst round-trip deviation {worst}");
 
-        // `sgn(0) = 0`, so zero is exact rather than merely close, and the
-        // sign is preserved rather than taken from `f32::signum`.
         assert_eq!(decode_display709(0.0).to_bits(), 0.0_f32.to_bits());
         assert_eq!(
             decode_display709(encode_bt709(0.0)).to_bits(),
@@ -3842,8 +3684,6 @@ mod tests {
             (-decode_display709(0.45)).to_bits()
         );
 
-        // This is exactly why CC4 needs its own decode: CC1's source decode
-        // takes the linear branch unconditionally for a negative argument.
         assert!((decode_bt709(encode_bt709(-0.25)) + 0.25).abs() > 0.1);
         assert!((decode_display709(-0.5) - decode_bt709(-0.5)).abs() > 0.1);
         // ... and it is untouched: `decode_bt709(-0.5) = -0.5 / 4.5`.
@@ -3852,10 +3692,6 @@ mod tests {
 
     #[test]
     fn decode_display709_crosses_the_0_018_seam_consistently() {
-        // CC1's encode branches at linear 0.018; CC4's decode branches at the
-        // encoded 0.081. `0.018` itself takes the *power* branch of the
-        // encode (the test is `linear < 0.018`), so its encoded value must
-        // land at or above 0.081 and decode through the power branch.
         let encoded = encode_bt709(0.018);
         assert!(
             encoded >= 0.081,
@@ -3863,9 +3699,6 @@ mod tests {
         );
         assert_close(decode_display709(encoded), 0.018, 1e-6);
 
-        // The f32 immediately below 0.018 takes the linear branch and must
-        // encode strictly below 0.081, so no encoded value can fall into the
-        // gap and be decoded through the wrong branch.
         let below = f32::from_bits(0.018_f32.to_bits() - 1);
         let encoded_below = encode_bt709(below);
         assert!(
@@ -3931,31 +3764,17 @@ mod tests {
         );
     }
 
-    // --- §10.3.3 interpolation anchors ------------------------------------
-
     #[test]
     fn lut_b_reproduces_the_three_tetrahedral_anchors() {
         let lut = lut_b();
-        // Row 1, branch `f_r > f_g > f_b`:
-        //   c000 + 0.75*(c100-c000) + 0.50*(c110-c100) + 0.25*(c111-c110)
-        // = 0.75*(.5,0,0) + 0.5*(0,.5,0) + 0.25*(.5,.5,1)
-        // = (0.500000, 0.375000, 0.250000)
         assert_eq!(
             bits(lut.lookup([0.75, 0.50, 0.25])),
             bits([0.500_000, 0.375_000, 0.250_000])
         );
-        // Row 2, `f_r <= f_g` then `f_b > f_g`:
-        //   c000 + 0.25*(c111-c011) + 0.50*(c011-c001) + 0.75*(c001-c000)
-        // = 0.25*(1,.5,.5) + 0.5*(0,.5,0) + 0.75*(0,0,.5)
-        // = (0.250000, 0.375000, 0.500000)
         assert_eq!(
             bits(lut.lookup([0.25, 0.50, 0.75])),
             bits([0.250_000, 0.375_000, 0.500_000])
         );
-        // Row 3, the three-way tie falling to the final `else`:
-        //   c000 + 0.5*(c110-c010) + 0.5*(c010-c000) + 0.5*(c111-c110)
-        // = 0.5*(.5,0,0) + 0.5*(0,.5,0) + 0.5*(.5,.5,1)
-        // = (0.500000, 0.500000, 0.500000)
         assert_eq!(
             bits(lut.lookup([0.50, 0.50, 0.50])),
             bits([0.500_000, 0.500_000, 0.500_000])
@@ -3964,9 +3783,6 @@ mod tests {
 
     #[test]
     fn the_first_anchor_differs_from_trilinear_interpolation() {
-        // CC4 §10.3.3: trilinear interpolation of the same lattice at the same
-        // point is (0.421875, 0.296875, 0.171875) -- proving the production
-        // evaluator is actually tetrahedral rather than a renamed trilinear.
         let lut = lut_b();
         assert_eq!(
             bits(lut.trilinear_lookup([0.75, 0.50, 0.25])),
@@ -3985,11 +3801,6 @@ mod tests {
 
     #[test]
     fn the_tie_case_agrees_through_all_six_branch_formulas() {
-        // CC4 §3.5 states the six formulas agree analytically on the shared
-        // faces, so a tie is well defined. At `f = (0.5, 0.5, 0.5)` every
-        // branch condition is false, so this transcribes all six directly
-        // from the contract and asserts they agree with each other and with
-        // the production evaluator.
         let lut = lut_b();
         let corner = |r: u32, g: u32, b: u32| lut.lattice(r, g, b);
         let (c000, c001, c010, c011) = (
@@ -4036,9 +3847,6 @@ mod tests {
 
     #[test]
     fn lut_c_reproduces_the_separable_anchor() {
-        // CC4 §10.3.3 LUT C, `S = 3`, domain [0, 1], f = (0, 0.25, 1.0).
-        // s = (1.5, 0.5, 1.0); i = (1, 0, 1); f = (0.5, 0.5, 0.0) -> the tie
-        // falls to the final `else`, giving (0.625, 0.125, 0.25).
         let lut = lut_cd([0.0; 3], [1.0; 3]);
         assert_eq!(
             bits(lut.lookup([0.75, 0.25, 0.50])),
@@ -4048,9 +3856,6 @@ mod tests {
 
     #[test]
     fn lut_d_reproduces_the_domain_mapping_anchor() {
-        // CC4 §10.3.3 LUT D: the LUT C lattice over DOMAIN [-0.5, 1.5].
-        // t = (u + 0.5) / 2 = (0.5, 0.25, 0.75); s = (1.0, 0.5, 1.5);
-        // i = (1, 0, 1); f = (0.0, 0.5, 0.5) -> the `f_b > f_r` branch.
         let lut = lut_cd([-0.5; 3], [1.5; 3]);
         assert_eq!(
             bits(lut.lookup([0.50, 0.00, 1.00])),
@@ -4058,23 +3863,13 @@ mod tests {
         );
     }
 
-    // --- §10.3.4 out of domain --------------------------------------------
-
     #[test]
     fn out_of_domain_excursions_are_restored_additively_not_clamped() {
         let lut = lut_cd([-0.5; 3], [1.5; 3]);
 
-        // e = (2, 2, 2) clamps to (1.5, 1.5, 1.5), whose lookup is (1, 1, 1);
-        // the 0.5 excursion above dmax is added back on top of the boundary
-        // value, so the node output is (1.5, 1.5, 1.5).
         assert_eq!(bits(lut.lookup([2.0; 3])), bits([1.5, 1.5, 1.5]));
-        // e = (-1, -1, -1) clamps to (-0.5, -0.5, -0.5), lookup (0, 0, 0),
-        // output (-0.5, -0.5, -0.5).
         assert_eq!(bits(lut.lookup([-1.0; 3])), bits([-0.5, -0.5, -0.5]));
 
-        // A pure-clamp implementation would return the boundary lookups
-        // (1, 1, 1) and (0, 0, 0). Asserting the difference is what stops the
-        // additive rule regressing silently.
         let clamp_only_high = lut.lookup([1.5; 3]);
         let clamp_only_low = lut.lookup([-0.5; 3]);
         assert_eq!(bits(clamp_only_high), bits([1.0, 1.0, 1.0]));
@@ -4082,17 +3877,11 @@ mod tests {
         assert_ne!(bits(lut.lookup([2.0; 3])), bits(clamp_only_high));
         assert_ne!(bits(lut.lookup([-1.0; 3])), bits(clamp_only_low));
 
-        // Ordering above the domain boundary survives, which is the whole
-        // point: a pure clamp would collapse both to (1, 1, 1).
         assert!(lut.lookup([2.5; 3])[0] > lut.lookup([2.0; 3])[0]);
     }
 
-    // --- §10.3.5 mix -------------------------------------------------------
-
     #[test]
     fn mix_blends_in_linear_light_at_both_endpoints_and_the_midpoint() {
-        // CC4 §10.3.5 with LUT B, `input_encoding = linear`,
-        // x = (0.75, 0.50, 0.25), look(x) = (0.5, 0.375, 0.25).
         let sample = [0.75_f32, 0.50, 0.25];
         let neutral = lut_node(lut_b(), LutInputEncoding::Linear, 0.0);
         assert_eq!(bits(neutral.apply(sample)), bits(sample));
@@ -4109,8 +3898,6 @@ mod tests {
             bits([0.500_000, 0.375_000, 0.250_000])
         );
 
-        // The basis-point ladder Core resolves must reach exactly those
-        // factors: 0, 5000, and 10000.
         for (basis_points, expected) in [(0_i64, 0.0_f32), (5_000, 0.5), (10_000, 1.0)] {
             let params = LutNodeParams {
                 lut_asset_id: LutAssetId(1),
@@ -4122,13 +3909,8 @@ mod tests {
         }
     }
 
-    // --- §10.3.2 identity --------------------------------------------------
-
     #[test]
     fn identity_lattices_are_bit_exact_in_linear_at_dyadic_sizes() {
-        // CC4 §3.5: with `input_encoding = linear`, domain [0, 1], and
-        // `S - 1` a power of two, every lattice coordinate, fraction, and
-        // interpolation weight is an exact binary fraction.
         for size in [2_u32, 17, 33, 65] {
             let node = lut_node(identity_lut(size), LutInputEncoding::Linear, 1.0);
             for sample in cc4_raster() {
@@ -4146,10 +3928,6 @@ mod tests {
 
     #[test]
     fn a_non_dyadic_identity_lattice_is_not_bit_exact() {
-        // The counter-check for the claim above: `S = 64` gives `S - 1 = 63`,
-        // so `1/63` is not a binary fraction and the reproduction is only
-        // close, not exact. This is why CC4 §3.5 names {2, 17, 33, 65}
-        // explicitly rather than "any size".
         let node = lut_node(identity_lut(64), LutInputEncoding::Linear, 1.0);
         let mut differing = 0_usize;
         let mut worst = 0.0_f32;
@@ -4177,9 +3955,6 @@ mod tests {
 
     #[test]
     fn identity_lattices_are_tolerance_exact_in_display709_and_grade709() {
-        // CC4 §3.5: for `display709` / `grade709` the f32 `pow` round trip is
-        // not bit-exact even though the pair is an exact analytic bijection,
-        // so the gate is the CC1 §6.2 linear maximum, never bit equality.
         const LINEAR_MAX: f32 = 1.5e-3;
         for encoding in [LutInputEncoding::Display709, LutInputEncoding::Grade709] {
             let mut worst = 0.0_f32;
@@ -4212,16 +3987,8 @@ mod tests {
         }
     }
 
-    // --- §10.3.10 built-in bakes -------------------------------------------
-
     #[test]
     fn builtin_bakes_reproduce_their_closed_form_on_the_raster() {
-        // CC4 §2.6/§10.3.10: all five formulas are affine in `e`, and
-        // tetrahedral interpolation reproduces an affine function exactly on
-        // every simplex, so the node output must match the closed form to
-        // within 2e-6 in display code. The expectation is computed in f64
-        // from `BuiltinLook::formula`, which is the contract's closed form,
-        // not the code under test.
         const DISPLAY_CODE_MAX: f64 = 2e-6;
         for look in crate::builtin_looks::BuiltinLook::ALL {
             let node = LutNode::new(
@@ -4258,8 +4025,6 @@ mod tests {
             );
         }
     }
-
-    // --- §3.6 inactive nodes and §4.4 resolution ---------------------------
 
     #[test]
     fn lut_node_resolution_reports_a_missing_asset_and_a_bad_encoding() {
@@ -4307,9 +4072,6 @@ mod tests {
 
     #[test]
     fn inactive_lut_nodes_are_skipped_bit_identically() {
-        // CC4 §3.6: bypass, `mix = 0`, and an unbound reference are each the
-        // exact identity, tested on the stored integers, so each is losslessly
-        // identical to removing the node.
         let library = builtin_library();
         let sample = [0.18_f32, -0.05, 2.5];
         let wheels = wheels_effect_with_id(9, &[("gain_master_thousandths", 1_200)]);
@@ -4318,8 +4080,6 @@ mod tests {
         let expected = apply_stack(&baseline, sample);
         assert_eq!(baseline.len(), 1);
 
-        // The same asset with an active node really does change the frame, so
-        // the identity claims below are not vacuous.
         let active = lut_effect(1, "creative_look", 1, &[]);
         let with_look =
             resolve_color_nodes_with(&[wheels.clone(), active], &library).expect("look resolves");
@@ -4350,8 +4110,6 @@ mod tests {
             );
         }
 
-        // The unbound reason is the CC4 §3.6 token, constructed below the
-        // operation layer because §3.3 makes it unreachable through Core.
         let unbound = LutNodeParams {
             lut_asset_id: LutAssetId(0),
             mix_basis_points: 10_000,
@@ -4366,8 +4124,6 @@ mod tests {
 
     #[test]
     fn the_legacy_resolver_fails_closed_on_an_active_lut_node() {
-        // CC4 §4.4: the old symbol is kept as a wrapper over an *empty*
-        // library, so no caller silently renders a look-free frame.
         let technical = lut_effect(1, "technical_lut", 1, &[]);
         assert_eq!(
             resolve_color_nodes(std::slice::from_ref(&technical)),
@@ -4397,10 +4153,6 @@ mod tests {
 
     #[test]
     fn the_stage_order_of_the_five_kind_stack_is_the_execution_order() {
-        // CC4 §10.3.6: the CPU reference evaluates the vector order, so the
-        // stage-ordered stack and the reversed one differ. The reversed stack
-        // cannot be stored -- Core rejects it with ColorStageOrderViolation --
-        // so it is asserted directly against the reference here.
         let library = builtin_library();
         let ordered = vec![
             lut_effect(1, "technical_lut", 1, &[]),
@@ -4503,16 +4255,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // CC5 §2.3--§2.5: the matte.
-    //
-    // Every expected value below is derived by hand from the CC5 contract
-    // equations, or transcribed independently in f64 here.  No expectation is
-    // obtained by calling `Matte::coverage`, `MatteWindow::weight`,
-    // `MatteQualifier::weight`, `apply_color_nodes_at`, or the compositor
-    // (CC5 §9.0.1).
-    // -----------------------------------------------------------------------
-
     /// The CC5 §9.1 raster: 64 x 36, so `a = 16/9` and there are 2304 pixels.
     const MATTE_RASTER_WIDTH: usize = 64;
     /// The CC5 §9.1 raster height.
@@ -4584,14 +4326,6 @@ mod tests {
     #[test]
     #[allow(clippy::cast_possible_wrap)]
     fn matte_window_geometry_matches_the_hand_derived_pixel_counts() {
-        // §9.2.2, anchor 1.  A centred rect with `hw = hh = 0.25` selects
-        // `|u.x - 0.5| <= 0.25` and `|u.y - 0.5| <= 0.25` — the aspect factor
-        // cancels exactly at theta = 0 (§2.3).  With pixel centres at
-        // `(x + 0.5)/64` and `(y + 0.5)/36` that is `16 <= x <= 47` and
-        // `9 <= y <= 26`: 32 x 18 = 576 of 2304 pixels, exactly 2500 basis
-        // points.  No pixel centre is on the boundary: the tightest margins
-        // are |n.x| = 0.96875 / 1.03125 at x = 16 / 15 and |n.y| = 0.94444 /
-        // 1.05555 at y = 9 / 8.
         let centred = matte(&window_parameters(1, (5_000, 5_000), (2_500, 2_500), 0, 0));
         let mut inside = 0_usize;
         for y in 0..MATTE_RASTER_HEIGHT {
@@ -4599,8 +4333,6 @@ mod tests {
                 let coverage =
                     centred.coverage(matte_uv(x, y), MATTE_RASTER_ASPECT, MATTE_NEUTRAL_SAMPLE);
                 let expected = (16..=47).contains(&x) && (9..=26).contains(&y);
-                // `feather = 0` takes the hard branch, so the weight is
-                // exactly 1 or exactly 0 — never an epsilon (§2.3).
                 assert_eq!(
                     coverage.to_bits(),
                     if expected { 1.0_f32 } else { 0.0_f32 }.to_bits(),
@@ -4616,11 +4348,6 @@ mod tests {
             "the outside set is the containment gate's population"
         );
 
-        // §9.2.2, anchor 2.  `hw = 0.1125`, `hh = 0.2`: `hw * a = hh = 0.2`,
-        // so the field is 7.2 pixels in every direction.  Pixel offsets from
-        // the raster centre are `dx = x - 31.5`, `dy = y - 17.5`, both
-        // half-integers, so `|d| <= 7.2` is `|d| <= 6.5`: 14 columns
-        // (25..=38) x 14 rows (11..=24) = 196.
         let square = matte(&window_parameters(1, (5_000, 5_000), (1_125, 2_000), 0, 0));
         let unrotated = covered_cells(&square);
         assert_eq!(unrotated.len(), 196);
@@ -4631,11 +4358,6 @@ mod tests {
             "the unrotated pixel square is columns 25..=38 by rows 11..=24"
         );
 
-        // §9.2.2, anchor 3 — **the aspect gate**.  Rotated 45 degrees the
-        // condition is `|dx + dy| <= 7.2 * sqrt(2) = 10.18234` and
-        // `|dy - dx| <= 10.18234`; both are integers (`x + y - 49` and
-        // `y - x + 14`), so it is `<= 10`, and their sum `2 * dy` is odd, so
-        // exactly one of them is odd.  Counting gives 220.
         let rotated = matte(&window_parameters(
             1,
             (5_000, 5_000),
@@ -4653,9 +4375,6 @@ mod tests {
                 "({x}, {y}) is outside the hand-derived 45 degree set"
             );
         }
-        // The covered set is symmetric under `(dx, dy) -> (dy, dx)`, which is
-        // true only when the aspect correction is applied: without it a 45
-        // degree rotation on a 16:9 raster shears the window (§2.3).
         let offsets: std::collections::BTreeSet<(i64, i64)> = rotated_cells
             .iter()
             .map(|&(x, y)| (2 * x as i64 - 63, 2 * y as i64 - 35))
@@ -4664,13 +4383,6 @@ mod tests {
             offsets.iter().map(|&(dx, dy)| (dy, dx)).collect();
         assert_eq!(offsets, swapped, "the 45 degree set must be swap-symmetric");
 
-        // §9.2.2, anchor 4.  The same half-extents as an ellipse:
-        // `dx^2 + dy^2 <= 51.84`.  Per quadrant the row counts are
-        // 7, 7, 7, 6, 6, 5, 3 = 41, so 4 * 41 = 164, and the bounding box is
-        // 14 x 14.  `(2i+1)^2 + (2j+1)^2 = 207.36` has no integer solution, so
-        // no pixel centre is on the boundary; the tightest interior margin is
-        // 1.34 px^2 at (+-5.5, +-4.5) and the tightest exterior margin is
-        // 2.66 px^2 at (+-3.5, +-6.5).
         let ellipse = matte(&window_parameters(2, (5_000, 5_000), (1_125, 2_000), 0, 0));
         let ellipse_cells = covered_cells(&ellipse);
         assert_eq!(ellipse_cells.len(), 164);
@@ -4689,9 +4401,6 @@ mod tests {
             (25, 38, 11, 24)
         );
 
-        // The ellipse is circular in pixels exactly when `hw * a == hh`, and
-        // for this half-extent pair that holds as exact f32 equality on the
-        // constants the shader also consumes.
         let resolved = ellipse.windows()[0].half_extents();
         for aspect in [64.0 / 36.0, 16.0 / 9.0, 1920.0 / 1080.0_f32] {
             assert_eq!(
@@ -4701,8 +4410,6 @@ mod tests {
             );
         }
 
-        // §2.3's defensive rule: a degenerate half-extent makes that window's
-        // weight 0, with no error and no clamp.
         let degenerate = MatteWindow::from_params(&MatteWindowParams {
             half_width_bp: 0,
             ..MatteWindowParams::NEUTRAL
@@ -4716,10 +4423,6 @@ mod tests {
     #[test]
     #[allow(clippy::cast_precision_loss)]
     fn matte_feather_matches_the_hand_derived_smoothstep() {
-        // §9.2.3.  A rect centred at `(0.5, 0.0)` with `hw = hh = 0.5` makes
-        // `D = u.y / 0.5` along `u.x = 0.5`, which is exact in f32 for every
-        // dyadic `u.y`, so these anchors test the smoothstep and not the
-        // rounding of the distance field.
         let feathered = matte(&window_parameters(1, (5_000, 0), (5_000, 5_000), 0, 4_000));
         let weight_at = |distance_half: f32| {
             feathered.coverage(
@@ -4729,30 +4432,16 @@ mod tests {
             )
         };
 
-        // `f = 0.4`: `w = 1 - smoothstep(0.6, 1.4, D)`.
-        // D = 0.8 -> t = 0.25 -> s = 0.15625 -> w = 0.84375.
         assert_eq!(weight_at(0.4).to_bits(), 0.843_75_f32.to_bits());
         // D = 1.0 -> t = 0.5 -> s = 0.5 -> w = 0.5, exact at the edge.
         assert_eq!(weight_at(0.5).to_bits(), 0.5_f32.to_bits());
-        // D = 1.2 -> t = 0.75 -> s = 0.84375 -> w = 0.15625.  `4000 / 10000`
-        // is not a dyadic rational, so `1 - f` and `1 + f` each round and `t`
-        // lands one ulp above 0.75; the deviation is 1.2e-7, which is why this
-        // one anchor is asserted to within two ulps rather than bit for bit.
         assert_close(weight_at(0.6), 0.156_25, 1.5e-7);
-        // The band straddles the edge: `w = 1` at `D <= 1 - f` and `w = 0` at
-        // `D >= 1 + f`, both exactly.
         assert_eq!(weight_at(0.3).to_bits(), 1.0_f32.to_bits());
         assert_eq!(weight_at(0.7).to_bits(), 0.0_f32.to_bits());
-        // Symmetry: `w(1 - d) + w(1 + d) = 1`, so `1 - w` is the exact
-        // complement of the same shape with the same band.
-        // `u.y = (1 -+ delta) / 2` for delta = 0.1, 0.2, 0.4, written as the
-        // dyadic literals so the halving is exact.
         for (below, above) in [(0.45_f32, 0.55_f32), (0.4, 0.6), (0.3, 0.7)] {
             assert_close(weight_at(below) + weight_at(above), 1.0, 1.5e-7);
         }
 
-        // `f = 0.25` is dyadic, so the same three smoothstep anchors — now at
-        // D = 0.875, 1.0, 1.125 — and the symmetry are exact in f32.
         let dyadic = matte(&window_parameters(1, (5_000, 0), (5_000, 5_000), 0, 2_500));
         let dyadic_at = |distance_half: f32| {
             dyadic.coverage(
@@ -4774,10 +4463,6 @@ mod tests {
             );
         }
 
-        // The affected set of a feathered centred rect is exactly `{D < 1.4}`,
-        // measured against an independent f64 transcription of §2.3.  The
-        // tightest margin on this raster is |D - 1.4| = 0.00625, four orders
-        // of magnitude above f32 noise.
         let banded = matte(&window_parameters(
             1,
             (5_000, 5_000),
@@ -4813,11 +4498,6 @@ mod tests {
 
     #[test]
     fn matte_windows_combine_by_union_and_intersection() {
-        // §9.2.4.  Window A is the centred 2500/2500 rect (columns 16..=47);
-        // window B is the same rect at `center_x = 7500` (columns 32..=63).
-        // Both cover 576 pixels over rows 9..=26 and overlap on columns
-        // 32..=47, which is 16 x 18 = 288.  Inclusion-exclusion gives
-        // 576 + 576 - 288 = 864 for the union.
         let two_windows = |combine_token: i64, invert_a: i64| {
             matte(&[
                 ("matte_window_count", 2),
@@ -4848,22 +4528,14 @@ mod tests {
                 .all(|&(x, y)| (32..=47).contains(&x) && (9..=26).contains(&y))
         );
 
-        // Per-window invert inside a union: `!A | B` is the complement of
-        // `A & !B`, which is 576 - 288 = 288 pixels, so 2304 - 288 = 2016.
         assert_eq!(covered_cells(&two_windows(0, 1)).len(), 2_016);
     }
 
     #[test]
     #[allow(clippy::too_many_lines)]
     fn matte_qualifier_matches_the_hand_derived_anchors() {
-        // §9.2.5.  The anchors are stated on `grade709`-encoded triples, so
-        // they are fed to the qualifier as `grade709_decode(e)` — the value
-        // entering the node — and the qualifier re-encodes them itself.
         let encoded = |e: [f32; 3]| e.map(grade709_decode);
 
-        // e = (0.8, 0.2, 0.2): M = 0.8 = r, mn = 0.2, C = 0.6, S = C/M = 0.75,
-        // Y = 0.2126*0.8 + 0.7152*0.2 + 0.0722*0.2 = 0.32756, H = 0 because
-        // g == b makes (g - b)/C exactly zero.
         let warm = MatteQualifier::selectors(encoded([0.8, 0.2, 0.2]));
         assert_close(warm.chroma, 0.6, 2e-6);
         assert_close(warm.saturation, 0.75, 2e-6);
@@ -4873,8 +4545,6 @@ mod tests {
             0.0_f32.to_bits()
         );
 
-        // Wraparound: e = (0.8, 0.2, 0.35) keeps M = r and C = 0.6, and
-        // (g - b)/C = -0.25, so H = 60 * (5.75) = 345.
         let wrapped = MatteQualifier::selectors(encoded([0.8, 0.2, 0.35]));
         assert_close(wrapped.hue.expect("a chromatic pixel"), 345.0, 1e-3);
 
@@ -4906,8 +4576,6 @@ mod tests {
             .to_bits(),
             1.0_f32.to_bits()
         );
-        // H = 345 against a band centred on 350 with a 10 degree half-width:
-        // dh = 5 <= 10, so h = 1.  The seam is crossed, not the long way.
         assert_eq!(
             weight(
                 &[
@@ -4919,9 +4587,6 @@ mod tests {
             .to_bits(),
             1.0_f32.to_bits()
         );
-        // H = 345 against a band centred on 2 degrees: dh = min(343, 17) = 17,
-        // t = (17 - 10)/10 = 0.7, smoothstep = 0.49 * (3 - 1.4) = 0.784, so
-        // h = 0.216.
         assert_close(
             weight(
                 &[
@@ -4934,8 +4599,6 @@ mod tests {
             0.216,
             1e-4,
         );
-        // Achromatic, both normative branches: a named hue excludes grey, and
-        // the 180 degree half-width disables the hue leg and includes it.
         assert_eq!(
             weight(&[("matte_hue_width_centidegrees", 3_000)], [0.5, 0.5, 0.5],).to_bits(),
             0.0_f32.to_bits()
@@ -4944,8 +4607,6 @@ mod tests {
             weight(&[("matte_hue_width_centidegrees", 18_000)], [0.5, 0.5, 0.5],).to_bits(),
             1.0_f32.to_bits()
         );
-        // Saturation softness: S = 0.75 against the band 0.8..1.0 with a 0.1
-        // shoulder is min(smoothstep(0.7, 0.8, 0.75), 1) = min(0.5, 1) = 0.5.
         assert_close(
             weight(
                 &[
@@ -5042,8 +4703,6 @@ mod tests {
     #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn matte_mix_and_invert_scale_the_coverage() {
-        // §9.2.6.  A 0.4 feather evaluated exactly on the edge gives
-        // `m_raw = 0.5`; `matte_mix = 6000` scales it to 0.3.
         let mixed = matte(&[
             ("matte_window_count", 1),
             ("matte_window0_center_x_basis_points", 5_000),
@@ -5057,9 +4716,6 @@ mod tests {
         let coverage = mixed.coverage(edge_uv, MATTE_RASTER_ASPECT, MATTE_NEUTRAL_SAMPLE);
         assert_eq!(coverage.to_bits(), 0.3_f32.to_bits());
 
-        // `out = x + (node(x) - x) * 0.3`, against an independent f64
-        // transcription of the wheels node, on three samples: mid grey, a
-        // negative undershoot, and an over-range highlight.
         let node = wheels_effect(&[("gain_master_thousandths", 1_500)]);
         let mut effect = node;
         for (name, value) in [
@@ -5089,8 +4745,6 @@ mod tests {
             }
         }
 
-        // `matte_invert` is a true complement of the feather band:
-        // `m_raw = 0.15625` becomes 0.84375, exactly.
         let inverted = matte(&[
             ("matte_window_count", 1),
             ("matte_window0_center_x_basis_points", 5_000),
@@ -5111,9 +4765,6 @@ mod tests {
     #[test]
     #[allow(clippy::float_cmp)]
     fn zero_coverage_is_an_exact_per_pixel_identity() {
-        // §2.5.5.  `x + (node(x) - x) * 0.0` is not the identity in f32: it
-        // maps -0.0 to +0.0 and maps any x to NaN when node(x) is non-finite.
-        // The `m == 0` branch is therefore normative, not an optimization.
         let mut effect = wheels_effect(&[
             ("gain_master_thousandths", 4_000),
             ("gain_red_thousandths", 4_000),
@@ -5173,8 +4824,6 @@ mod tests {
 
     #[test]
     fn matte_free_nodes_take_the_cc4_path_bit_identically() {
-        // §2.5.4.  A node without a matte must not take the blend path at all,
-        // because `x + (y - x) * 1.0` is not bit-identical to `y` in f32.
         let effects = [
             wheels_effect(&[("gain_red_thousandths", 1_200)]),
             curve_effect(
@@ -5206,8 +4855,6 @@ mod tests {
                 bits(expected),
                 "matte-free node stack moved {sample:?}"
             );
-            // The result is independent of the position, which is what makes
-            // a pre-CC5 project render bit-identically.
             assert_eq!(
                 bits(apply_color_nodes_at(&nodes, sample, [0.9, 0.1], 1.0)),
                 bits(expected)
@@ -5251,8 +4898,6 @@ mod tests {
             );
         }
 
-        // §2.6 rule 2: `MatteExcluded` drops the node entirely, so bypass and
-        // a zero-mix matte are losslessly identical to removing the node.
         for excluded in [
             vec![("matte_enabled", 1_i64), ("matte_mix_basis_points", 0)],
             vec![("matte_enabled", 1), ("matte_invert", 1)],
@@ -5283,8 +4928,6 @@ mod tests {
             30.0
         );
 
-        // `technical_lut` cannot carry a matte at all: Core resolves the
-        // neutral block, and the variant has no place to put one.
         let technical = lut_effect(1, "technical_lut", 1, &[("matte_enabled", 1)]);
         let library = builtin_library();
         let resolved = resolve_color_nodes_with(std::slice::from_ref(&technical), &library)

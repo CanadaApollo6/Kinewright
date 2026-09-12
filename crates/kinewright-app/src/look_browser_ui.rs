@@ -601,10 +601,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // CC7 §6 (e) — the person path for the creative look
-    // -----------------------------------------------------------------------
-
     use kinewright_core::cc7_scenarios::{
         CC7_E_OPERATIONS, CC7_LOOK_MIX_BASIS_POINTS, CC7_LUT_ASSET_ID, CC7_SOURCE_FPS,
         CC7_SOURCE_FRAMES, CC7_SOURCE_HEIGHT, CC7_SOURCE_WIDTH, Cc7Scenario,
@@ -716,8 +712,6 @@ mod tests {
             .expect("the canonical document is valid");
         assert_eq!(document, expected);
 
-        // The node stores the binding and nothing else, and the one node CC7
-        // pins for (e) is the `creative_look` at the look stage.
         let node = document
             .clip(clip.id)
             .expect("the clip")

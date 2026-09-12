@@ -98,9 +98,6 @@ impl KinewrightApp {
         };
         let selected_indices = filler_word_indices(&words);
         if selected_indices.is_empty() {
-            // An empty result right after an import usually means the
-            // transcript is still being generated, not that the speech is
-            // filler-free - say which one it is.
             let message = if words.is_empty() && self.transcription_in_progress() {
                 "The transcript is still being generated - try removing fillers again in a moment"
             } else if words.is_empty() {

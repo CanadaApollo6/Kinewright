@@ -361,9 +361,6 @@ impl NormalizedRoi {
                 "ROI must have positive width and height",
             ));
         }
-        // Core quantizes the ROI to basis points, so a positive-but-subquantum
-        // extent silently collapses to an empty region.  Reject it here, at the
-        // agent boundary, naming the offending field and the quantum.
         for (field, extent) in [("width", right - left), ("height", bottom - top)] {
             if normalized_basis_points(extent) == 0 {
                 return Err(ScopeError::invalid_roi(format!(
@@ -464,10 +461,6 @@ impl SamplingResolution {
                 "renderer": "analysis.thumbnail_for_document",
                 "full_resolution": false,
                 "max_width": self.max_width,
-                // The proxy path returns a bare raster with no backend
-                // metadata, so there is nothing to attribute.  Reporting the
-                // request back as if it were backend provenance would fabricate
-                // evidence, so both fields are explicit instead.
                 "backend": Value::Null,
                 "adapter": Value::Null,
                 "provenance": "proxy_unverified_by_backend",
@@ -653,8 +646,6 @@ pub(crate) fn video_scopes_v2(
         args.max_width,
         args.bins,
         args.columns,
-        // The dedicated scope tool is the one surface whose whole purpose is
-        // the density grids, so they are included unless the caller opts out.
         args.include_grids.unwrap_or(true),
     )?;
     let rendered = render_samples(document, analysis, &request)?;
@@ -695,8 +686,6 @@ pub(crate) fn analyze_color_shot(
         args.max_width,
         args.bins,
         args.columns,
-        // Diagnosis needs statistics, clipping, and histograms; the density
-        // grids are opt-in so a routine analysis stays a small payload.
         args.include_grids.unwrap_or(false),
     )?;
     ensure_frames_in_clip(&request.frames, clip, duration)?;
@@ -711,8 +700,6 @@ pub(crate) fn analyze_color_shot(
         "requested_stage": args.stage,
         "evidence_only": true,
         "applied": false,
-        // Marked at every level: a proxy sample must never be readable as a
-        // full-resolution proof from any nesting depth of this response.
         "resolution": request.resolution.value(),
         "full_resolution": !request.resolution.proxy,
         "grids_omitted": !request.include_grids,
@@ -775,8 +762,6 @@ pub(crate) fn plan_shot_match(
     let reference_stats = shot_stats(&reference_scope_evidence);
     let reference_evidence = json!({
         "summary": shot_evidence(&reference_rendered, &reference_scope_evidence, &request),
-        // Routed through the same override `scope_response` applies, so the
-        // reference cannot report `full_resolution: true` for a proxy sample.
         "scope_evidence": core_evidence_value(&request, &reference_scope_evidence, None)?,
         "resolution": request.resolution.value(),
         "full_resolution": !request.resolution.proxy,
@@ -821,11 +806,6 @@ pub(crate) fn plan_shot_match(
         let scope_comparison =
             compare_scope_evidence(&reference_scope_evidence, &candidate_scope_evidence)
                 .map_err(|error| ScopeError::new("scope_comparison_failed", error.to_string()))?;
-        // The scopes measured this candidate through whatever grade it already
-        // carries, so the match term is a delta on top of that node. Read the
-        // node from the staged document the plan will be validated against and
-        // compose, or the proposal would overwrite the existing grade with the
-        // delta alone.
         let existing = existing_primary_node(&operation_document, candidate.clip_id);
         let proposal = match_parameters(reference_stats, stats, existing.as_ref());
         let proposed_parameters = proposal.parameters.clone();
@@ -843,8 +823,6 @@ pub(crate) fn plan_shot_match(
                 format!("could not serialize candidate operations: {error}"),
             )
         })?;
-        // An already-matching candidate proposes nothing; Core rejects an empty
-        // batch, so there is simply nothing to stage for the next candidate.
         if !plan.operations.is_empty() {
             apply_batch(&mut operation_document, &plan.operations).map_err(|error| {
                 ScopeError::new(
@@ -861,13 +839,9 @@ pub(crate) fn plan_shot_match(
             "operations": operations,
             "operation_visibility": "exact_unapplied_primary_correction_operations",
             "existing_primary_node_count": plan.existing_primary_node_count,
-            // Null when the proposal changes nothing and no node exists: the
-            // planner's fresh id is never allocated by any operation here.
             "target_effect_id": plan.target_effect_id().map(|effect| effect.0),
             "created_new_node": plan.created_new_node,
             "no_change": plan.no_change,
-            // The written values are absolute. `composed` says whether they
-            // already include the node's prior grade.
             "composed": proposal.composed,
             "current_parameters": proposal.details["current_parameters"].clone(),
             "delta_parameters": proposal.details["delta_parameters"].clone(),
@@ -905,8 +879,6 @@ pub(crate) fn plan_shot_match(
         "applied": false,
         "reference_retained": true,
         "match_scope": request.roi.value(),
-        // Marked at every level: top-level, reference evidence, each candidate,
-        // each sample, and inside the typed core evidence.
         "resolution": request.resolution.value(),
         "full_resolution": !request.resolution.proxy,
         "grids_omitted": !request.include_grids,
@@ -946,9 +918,6 @@ fn resolve_candidates(args: &PlanShotMatchArgs) -> Result<Vec<ShotSelectorArgs>,
         })
         .collect::<Vec<_>>();
     candidates.extend(args.candidate_shots.clone());
-    // Each candidate costs one full-resolution monitor proof, so the list is
-    // capped before any render rather than after the first few have already
-    // been paid for.
     if candidates.len() > MAX_SHOT_MATCH_CANDIDATES {
         return Err(ScopeError::excessive(format!(
             "plan_shot_match requested {} candidate shots, above the {MAX_SHOT_MATCH_CANDIDATES} candidate limit; each candidate renders one managed monitor proof",
@@ -1147,8 +1116,6 @@ fn select_frames(
         }
         (step.0, "explicit")
     } else {
-        // A range without an explicit step still has a deterministic bounded
-        // default.  Explicit steps are never clamped or reinterpreted.
         (
             span.saturating_add(i64::try_from(MAX_SCOPE_SAMPLES).unwrap_or(i64::MAX) - 1)
                 / i64::try_from(MAX_SCOPE_SAMPLES).unwrap_or(1),
@@ -1293,8 +1260,6 @@ fn apply_matte_region(
                 "recovery_action": "The renderer returned a raster that is not a coverage proof; report this build's provenance.",
             }))
         })?;
-    // CC5 §4.3: the coverage and the measured raster must be the same size, or
-    // the region names pixels that do not correspond.
     let scoped = kinewright_core::matte_scoped_frame(&image, &proof.coverage).map_err(|error| {
         ScopeError::new("matte_region_raster_mismatch", error.to_string()).with_details(json!({
             "field": "matte_region",
@@ -1469,10 +1434,6 @@ fn scope_response(
     rendered: &[RenderedSample],
 ) -> Result<Value, ScopeError> {
     let core_evidence = measure_core_scopes(request, rendered)?;
-    // CC5 §4.3: the whole-response coverage bounds the affected set anywhere in
-    // the sampled span; each sample below reports its own exact count.
-    // `measure_core_scopes` stamped the typed field, so the JSON decoration is
-    // read back off it rather than computed a second time.
     let matte_region = core_evidence.metadata.matte_region.clone();
     let core_value = core_evidence_value(request, &core_evidence, matte_region.as_ref())?;
     let mut samples = Vec::with_capacity(rendered.len());
@@ -1490,10 +1451,6 @@ fn scope_response(
         "roi": request.roi.value(),
         "temporal": {
             "frames": request.frames.iter().map(|frame| frame.0).collect::<Vec<_>>(),
-            // The requested span and the span actually covered by samples are
-            // different facts.  A step larger than one frame leaves the tail of
-            // the request unsampled, so both are reported separately and the
-            // ambiguous single `range` key is gone.
             "requested_range": request.requested_range.map_or(Value::Null, |(start, end)| json!({
                 "start": start.0,
                 "end": end.0,
@@ -1519,28 +1476,12 @@ fn scope_response(
                 "resolution": sample.provenance,
             })).collect::<Vec<_>>(),
         },
-        // CC6 §7: a typed pointer, never a fabricated zero.  The former
-        // `"out_of_range_pixels": 0` read as "measured, none found" when
-        // nothing had been measured at all, and the two keys are now asserted
-        // absent.  Measuring gamut inline would need a *second* full-resolution
-        // render inside every scopes call and would place a
-        // `working_linear_post_composite` number inside a result whose
-        // `stage_measured` says `monitoring_post_composite`.
         "gamut": gamut_pointer(),
-        // `core_evidence` is the single typed source of truth.  The former
-        // top-level waveform/rgb_parade/vectorscope/histogram/clipping aliases
-        // repeated the same arrays verbatim and roughly doubled the payload.
         "core_evidence": core_value,
         "grids_omitted": !request.include_grids,
         "sample_results": samples,
     });
-    // `core_evidence` above is the only copy of the scope arrays, so name the
-    // engine that produced them explicitly rather than leaving callers to infer
-    // it from the typed field shapes.
     value["provenance"]["scope_engine"] = json!("kinewright_core::measure_scopes");
-    // CC5 §4.3: at the top level too, plus the exact analysis-only construction
-    // so a reader knows the document, the render, and the layer alpha were not
-    // touched.
     attach_matte_region(&mut value, matte_region.as_ref());
     if matte_region.is_some() {
         value["matte_region_construction"] = json!(
@@ -1603,15 +1544,6 @@ fn measure_core_scopes(
         .collect::<Vec<_>>();
     let mut evidence = measure_scopes(&frames, &core_request)
         .map_err(|error| ScopeError::new("scope_measurement_failed", error.to_string()))?;
-    // CC5 §4.3: Core measures whatever raster it is handed and cannot know the
-    // population was restricted to a matte, so the agent stamps the typed
-    // description onto the evidence *here* — at the one place every measurement
-    // passes through — rather than onto the per-sample JSON clones only.
-    // `compare_scope_evidence`'s cross-population guard and its
-    // `matte_covered_pixel_delta` read that typed field, so a measurement that
-    // reaches the comparison without it is silently differenced against an
-    // unscoped one. Every JSON `matte_region` decoration below is now a copy of
-    // this field rather than a second, independently computed answer.
     evidence.metadata.matte_region =
         matte_region_description(request, aggregate_covered_pixel_count(rendered));
     Ok(evidence)
@@ -1622,11 +1554,6 @@ fn sample_value(sample: &RenderedSample, evidence: &ScopeEvidence, proxy: bool) 
     if proxy {
         metadata.full_resolution = false;
     }
-    // CC5 §4.3: each sample carries its own exact coverage count, because a
-    // matte moves and a per-frame number is the only one that is a fact.
-    // `measure_core_scopes` already stamped it — this evidence was measured
-    // from this one sample — and the JSON decoration is read back off the typed
-    // field so the two can never disagree.
     let region = metadata.matte_region.clone();
     let mut value = json!({
         "project_frame": sample.frame.0,
@@ -1653,8 +1580,6 @@ fn shot_stats(evidence: &ScopeEvidence) -> ShotStats {
     let count = evidence.metadata.visible_pixel_count;
     let chroma =
         (means[0].max(means[1]).max(means[2]) - means[0].min(means[1]).min(means[2])).max(0.0);
-    // Every gain proposal is computed in linear light, so the display-coded
-    // channel means are decoded once here and reused.
     let linear = [
         bt709_eotf(means[0] / CODE_VALUE_MAXIMUM),
         bt709_eotf(means[1] / CODE_VALUE_MAXIMUM),
@@ -1695,12 +1620,6 @@ fn shot_evidence(
     json!({
         "sample_count": rendered.len(),
         "frames": rendered.iter().map(|sample| sample.frame.0).collect::<Vec<_>>(),
-        // The two `luma` fields are different quantities and must not be
-        // compared or converted into each other: the display-coded means carry
-        // the integer luma statistic the scope engine measured, while the
-        // linear-light means apply BT.709 weights to the *linearised* RGB
-        // means. Linearising is non-linear, so weighting-then-linearising and
-        // linearising-then-weighting do not agree.
         "mean_code_values": {"red": stats.means[0], "green": stats.means[1], "blue": stats.means[2], "luma": stats.means[3], "luma_basis": "integer_luma_code"},
         "mean_normalized": {"red": stats.means[0] / CODE_VALUE_MAXIMUM, "green": stats.means[1] / CODE_VALUE_MAXIMUM, "blue": stats.means[2] / CODE_VALUE_MAXIMUM, "luma": stats.means[3] / CODE_VALUE_MAXIMUM, "luma_basis": "integer_luma_code"},
         "mean_linear_light": {"red": stats.linear[0], "green": stats.linear[1], "blue": stats.linear[2], "luma": stats.linear_luma, "luma_basis": "bt709_weights_on_linearised_means"},
@@ -1742,9 +1661,6 @@ fn signed_deltas(reference: ShotStats, candidate: ShotStats) -> Value {
         "green_basis_points": signed_round((candidate.means[1] - reference.means[1]) * 10_000.0 / 255.0),
         "blue_basis_points": signed_round((candidate.means[2] - reference.means[2]) * 10_000.0 / 255.0),
         "luma_basis_points": signed_round((candidate.means[3] - reference.means[3]) * 10_000.0 / CODE_VALUE_MAXIMUM),
-        // Chroma is the spread of the three channel means, so it moves with any
-        // colour cast.  It is reported as evidence and is deliberately never
-        // turned into a saturation proposal.
         "chroma_code_values": signed_round(candidate.chroma - reference.chroma),
         "linear_luma_ratio_basis_points": signed_round(
             linear_ratio(reference.linear_luma, candidate.linear_luma).map_or(0.0, |ratio| (ratio - 1.0) * 10_000.0)
@@ -1910,15 +1826,11 @@ fn match_parameters(
         };
         let delta = signed_round(raw_delta);
         if delta == 0 {
-            // Nothing to move: the composed value would equal the value the
-            // node already holds, so the proposal stays empty for this control.
             continue;
         }
         let current = existing.map_or(0, |node| {
             node.parameters.get(name).copied().unwrap_or_default()
         });
-        // First-order additive composition, before the clamp: clamping the
-        // delta on its own and adding afterwards can leave the descriptor range.
         let requested = current.saturating_add(delta);
         let (min, max) = primary_parameter_bounds(name);
         let value = requested.clamp(min, max);
@@ -1936,8 +1848,6 @@ fn match_parameters(
                 "clamped": value != requested,
                 "min": min,
                 "max": max,
-                // The raw first-order term before rounding. It is a delta, not
-                // the value written: `requested` is `current + delta`.
                 "unrounded_delta": raw_delta,
                 "composed": composed,
                 "keyframed": keyframed,
@@ -2517,8 +2427,6 @@ mod tests {
         };
         let evidence = measure_scopes(&[ScopeFrame::new(0, &image())], &request).unwrap();
         let stats = shot_stats(&evidence);
-        // The fixture is one dark pixel (10,20,30) and one bright pixel
-        // (240,220,200), so every channel mean sits near the midpoint.
         assert!((stats.means[0] - 125.0).abs() < 1.0, "{:?}", stats.means);
         assert!((stats.means[1] - 120.0).abs() < 1.0, "{:?}", stats.means);
         assert!((stats.means[2] - 115.0).abs() < 1.0, "{:?}", stats.means);
@@ -2538,15 +2446,11 @@ mod tests {
             linear_luma: 0.001,
         };
         let delta = signed_deltas(stats, darker);
-        // Candidate minus reference: the darker candidate is negative on every
-        // channel, and the sign is asserted rather than merely "is a number".
         assert!(delta["red_code_values"].as_i64().unwrap() < -100);
         assert!(delta["green_code_values"].as_i64().unwrap() < -100);
         assert!(delta["blue_code_values"].as_i64().unwrap() < -100);
         assert!(delta["luma_code_values"].as_i64().unwrap() < -100);
         assert!(delta["red_basis_points"].as_i64().unwrap() < -4_000);
-        // The reference is chromatic and the candidate is neutral, so the
-        // chroma delta is negative evidence.
         assert!(delta["chroma_code_values"].as_i64().unwrap() < 0);
         assert!(serde_json::to_value(evidence).unwrap()["parade"]["red"].is_object());
     }
@@ -2580,8 +2484,6 @@ mod tests {
     fn match_parameters_move_a_candidate_toward_the_reference() {
         let reference = flat_stats(128.0, 128.0, 128.0);
 
-        // A green cast must produce a POSITIVE tint, because the CC1 model uses
-        // green_gain = 1 - 0.1 * tint.
         let green_cast = match_parameters(reference, flat_stats(128.0, 150.0, 128.0), None);
         let tint = green_cast.parameters["tint_percent"];
         assert!(
@@ -2609,8 +2511,6 @@ mod tests {
             exposure > 0,
             "dark candidate must propose a positive exposure, got {exposure}"
         );
-        // 128 -> 64 in code is roughly a 2.4 stop linear change, far more than
-        // the ~1 stop a naive gamma-coded log2 ratio would have proposed.
         assert!(exposure > 1_500, "linearised exposure was {exposure}");
 
         // No difference proposes nothing at all.
@@ -2700,9 +2600,6 @@ mod tests {
                 .is_some_and(|delta| delta > 0)
         );
 
-        // The candidate (100,120,140) is darker, bluer, and greener than the
-        // reference (40,50,60) is... in fact it is brighter, so the proposal
-        // must darken it while correcting the blue cast.
         let parameters = &result["candidates"][0]["proposed_parameters"];
         assert!(
             parameters["exposure_milli_stops"].as_i64().unwrap() < 0,
@@ -2764,8 +2661,6 @@ mod tests {
 
     #[test]
     fn shot_match_signs_are_asserted_for_synthetic_casts() {
-        // Reference is neutral mid-grey; the candidate carries an explicit cast
-        // in each variant below.
         let document = Arc::new(two_shot_document());
         let base = |red: u8, green: u8, blue: u8| RgbaImage {
             width: 2,
@@ -2863,9 +2758,6 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn shot_match_targets_an_existing_primary_node_without_stacking() {
         let mut document = two_shot_document();
-        // A non-neutral grade the scopes already measured through. The match
-        // term is a delta on top of these values, so the proposal has to
-        // compose rather than overwrite them.
         document.tracks[0].clips[1]
             .effects
             .push(kinewright_core::Effect {
@@ -2956,8 +2848,6 @@ mod tests {
                 .all(|operation| operation["SetEffectParam"]["effect"] == 9)
         );
 
-        // The candidate is half the reference's code value, so the match term
-        // is a large positive exposure delta and nothing else moves.
         let entry = &result["editable_operations"][0];
         assert_eq!(entry["composed"], true);
         assert_eq!(entry["current_parameters"]["exposure_milli_stops"], 500);
@@ -2986,16 +2876,12 @@ mod tests {
             "existing_plus_delta_first_order_additive"
         );
 
-        // The written operation carries the composed absolute value, not the
-        // bare delta.
         let exposure_operation = operations
             .iter()
             .find(|operation| operation["SetEffectParam"]["name"] == "exposure_milli_stops")
             .expect("the exposure control is written");
         assert_eq!(exposure_operation["SetEffectParam"]["value"], composed);
 
-        // A control whose delta rounds to zero is left exactly as the operator
-        // graded it: no operation, no entry in the proposal.
         assert!(entry["parameters"].get("temperature_percent").is_none());
         assert!(
             operations
@@ -3003,8 +2889,6 @@ mod tests {
                 .all(|operation| operation["SetEffectParam"]["name"] != "temperature_percent")
         );
 
-        // Composing against an animated control is ambiguous, so the plan says
-        // it targets the static value instead of failing silently.
         let warnings = entry["warnings"].as_array().unwrap();
         assert!(
             warnings.iter().any(|warning| {
@@ -3283,8 +3167,6 @@ mod tests {
             false
         );
         assert_eq!(proxy_value["core_evidence"]["vectorscope"]["size"], 16);
-        // The typed core evidence is the single source of truth; the old
-        // top-level aliases duplicated it verbatim.
         assert!(proxy_value.get("waveform").is_none());
         assert!(proxy_value.get("rgb_parade").is_none());
         assert!(proxy_value.get("vectorscope").is_none());
@@ -3411,10 +3293,6 @@ mod tests {
         assert!(serde_json::to_vec(&with_grids).unwrap().len() > analysis_bytes);
     }
 
-    // -----------------------------------------------------------------------
-    // CC5 §4.3 — matte-scoped scopes
-    // -----------------------------------------------------------------------
-
     /// A one-clip 4 × 2 document carrying one matted `color_wheels` node.
     fn matte_scope_document() -> Document {
         let mut document = two_shot_document();
@@ -3464,8 +3342,6 @@ mod tests {
     fn matte_scoped_evidence_reaches_cores_comparison_guard_and_delta() {
         let document = Arc::new(matte_scope_document());
         let grey = || raster_4x2(|_, _| [128, 128, 128, 255]);
-        // Two mattes over the same picture: the first covers the left half
-        // (4 pixels), the second only the left column (2 pixels).
         let covering = |columns: u32| StubAnalysis {
             frames: BTreeMap::from([(TimeCode(0), grey())]),
             coverage: Some(raster_4x2(|x, _| {
@@ -3503,8 +3379,6 @@ mod tests {
         let narrow = measure(region, &covering(1));
         let unscoped = measure(None, &covering(2));
 
-        // The typed field is the thing under test: it must be on the evidence
-        // itself, not only on the serialized samples.
         assert_eq!(
             wide.metadata
                 .matte_region
@@ -3522,8 +3396,6 @@ mod tests {
         );
         assert!(unscoped.metadata.matte_region.is_none());
 
-        // A matte-scoped measurement and an unscoped one describe different
-        // populations, so Core refuses to difference them — in both directions.
         assert!(matches!(
             compare_scope_evidence(&wide, &unscoped),
             Err(kinewright_core::ScopeComparisonError::MatteRegionMismatch { .. })
@@ -3533,9 +3405,6 @@ mod tests {
             Err(kinewright_core::ScopeComparisonError::MatteRegionMismatch { .. })
         ));
 
-        // Two measurements of the *same* matte are comparable, and the change
-        // in covered population is reported rather than refused: a qualifier
-        // matte's coverage legitimately moves with the colour entering it.
         let comparison = compare_scope_evidence(&wide, &narrow).expect("same region compares");
         assert_eq!(
             comparison.matte_covered_pixel_delta,
@@ -3597,8 +3466,6 @@ mod tests {
         )
         .unwrap();
 
-        // CC5 §4.3, the central assertion: the transparent set is exactly the
-        // uncovered set, and the visible set is exactly the covered one.
         let metadata = &value["core_evidence"]["metadata"];
         assert_eq!(metadata["transparent_pixel_count"], 4);
         assert_eq!(metadata["visible_pixel_count"], 4);
@@ -3619,8 +3486,6 @@ mod tests {
             );
             assert_eq!(level["covered_pixel_count"], 4);
         }
-        // `ScopeMeasurementMetadata` carries it too, so `compare_scope_evidence`
-        // can refuse a cross-population difference.
         assert_eq!(
             value["sample_results"][0]["metadata"]["matte_region"]["covered_pixel_count"],
             4
@@ -3692,8 +3557,6 @@ mod tests {
         assert_eq!(metadata["roi_pixel_count"], 4);
         assert_eq!(metadata["visible_pixel_count"], 2);
         assert_eq!(metadata["transparent_pixel_count"], 2);
-        // The coverage count is a property of the *matte*, not of the ROI, so
-        // it still reports the whole covered set.
         assert_eq!(value["matte_region"]["covered_pixel_count"], 2);
     }
 
@@ -3828,8 +3691,6 @@ mod tests {
         assert!(value.get("matte_threshold").is_none());
         assert!(value["core_evidence"].get("matte_region").is_none());
         assert!(value["sample_results"][0].get("matte_region").is_none());
-        // `.get()` rather than an index: an explicit `null` would also be a
-        // byte-level change to the unscoped response.
         assert!(
             value["sample_results"][0]["metadata"]
                 .get("matte_region")
@@ -3856,15 +3717,11 @@ mod tests {
             pointer["stage_required"],
             ScopeStage::WorkingLinearPostComposite.as_str()
         );
-        // The definition has to say why, not just that: an operator reading
-        // "measured: false" needs the display-clamp reason in the same object.
         assert!(
             GAMUT_POINTER_DEFINITION.contains("display-clamped")
                 && GAMUT_POINTER_DEFINITION.contains("get_color_qc"),
             "{GAMUT_POINTER_DEFINITION}"
         );
-        // A zero in either key would read as "measured, none found", which is
-        // the exact defect the pointer replaced.
         let pointer = pointer.as_object().unwrap().clone();
         assert!(!pointer.contains_key("out_of_range_pixels"));
         assert!(!pointer.contains_key("out_of_range_basis_points"));

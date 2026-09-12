@@ -574,8 +574,6 @@ impl Recovery {
             pending,
             runtime_error,
         };
-        // Per-project files never collide with pending ones, so journaling
-        // starts immediately even while restores await a decision.
         recovery.attach(core, project_path);
         recovery
     }
@@ -750,8 +748,6 @@ impl Recovery {
 impl Drop for Recovery {
     fn drop(&mut self) {
         self.stop_active();
-        // A clean exit owes nothing to recovery; undecided pending journals
-        // from other crashed sessions stay for the next launch.
         self.remove_journal();
     }
 }
@@ -1499,8 +1495,6 @@ mod tests {
                 ..
             })
         ));
-        // Journaling starts immediately at a non-colliding name; the stale
-        // file is untouched and survives an undecided shutdown.
         assert!(recovery.recorder.is_some());
         assert_ne!(recovery.path, stale);
         assert!(stale.is_file());
@@ -1550,9 +1544,6 @@ mod tests {
         let project = directory.0.join("My Video.kinewright");
         recovery.checkpoint(&core, Some(&project));
 
-        // The journal migrated to the project's name and the unsaved file
-        // is gone; a later crash only offers post-save commands, attributed
-        // to the right project.
         assert_ne!(recovery.path, unsaved_path);
         assert!(!unsaved_path.exists());
         let second = JournalCommand::Do(Operation::AddAsset { asset: asset(2) });
@@ -1593,8 +1584,6 @@ mod tests {
             allocate_journal_path(directory, Some(project), &placeholder, &[]),
             base
         );
-        // The project's own crash journal is pending: allocate a suffix so
-        // the undecided data is never truncated by the new session.
         let reserved = [base.as_path()];
         let suffixed = allocate_journal_path(directory, Some(project), &placeholder, &reserved);
         assert_ne!(suffixed, base);

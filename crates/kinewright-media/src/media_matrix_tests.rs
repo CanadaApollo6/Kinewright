@@ -493,9 +493,6 @@ fn probe_preserves_tagged_and_untagged_source_color_metadata() {
         ColorTransfer::Unknown
     );
     assert_eq!(partial_asset.color_description.matrix, ColorMatrix::Unknown);
-    // FFmpeg's setparams filter preserves the format's limited-range default
-    // alongside the sole explicit primaries tag, so this fixture has two of
-    // four stream colorimetry fields plus inferred component depth.
     assert_eq!(partial_asset.color_description.range, ColorRange::Limited);
     assert_eq!(
         partial_asset.color_description.bit_depth,
@@ -986,8 +983,6 @@ fn fast_media_matrix_covers_hostile_probe_decode_audio_seek_and_export() {
     let broken = directory.path("truncated.mp4");
     fs::write(&broken, b"incomplete media container").unwrap();
     let error = probe_path(&broken, AssetId(999)).unwrap_err().to_string();
-    // Naming the file already implies the "truncated" substring, so the
-    // second, weaker assertion is not a separate check.
     assert!(error.contains("truncated.mp4"), "probe error: {error}");
 }
 

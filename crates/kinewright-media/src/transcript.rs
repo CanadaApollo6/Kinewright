@@ -306,10 +306,6 @@ fn run_whisper(
             },
         );
     });
-    // whisper-rs 0.16's safe abort wrapper instantiates its C trampoline with
-    // a pointer type different from the erased closure it stores. On Windows
-    // this spuriously aborts healthy graphs. Cancellation remains checked
-    // immediately before and after the synchronous inference boundary.
     if let Err(error) = state.full(params, samples) {
         return if cancellation.is_cancelled() {
             Err(MediaError::Cancelled)
@@ -482,9 +478,6 @@ fn push_word(
     if text.is_empty() || (text.starts_with("<|") && text.ends_with("|>")) {
         return Ok(());
     }
-    // Word endpoints are shared edit boundaries. Map both sides with the same
-    // rounding rule so adjacent tokens stay adjacent after conversion to the
-    // asset's integer frame time base.
     let start = centiseconds_to_frames(start_centiseconds, fps, FrameRounding::Nearest)?;
     let end = centiseconds_to_frames(end_centiseconds, fps, FrameRounding::Nearest)?;
     let source_start = TimeCode(start.0.clamp(0, duration.0));
@@ -540,8 +533,6 @@ where
             if !clip.content.is_media() {
                 continue;
             }
-            // Derived source timestamps no longer align project-linearly on a
-            // speed-changed clip; remapping them is deferred, so skip for now.
             if clip.speed_percent != 100 {
                 continue;
             }

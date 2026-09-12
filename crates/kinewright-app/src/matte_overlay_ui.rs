@@ -77,10 +77,6 @@ impl MatteTarget {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Coverage source
-// ---------------------------------------------------------------------------
-
 /// The single blocking operation the matte view performs.
 ///
 /// Modelled on the private `ScopeProofSource` in `color_scopes_ui.rs` for the
@@ -120,10 +116,6 @@ impl MatteProofSource for AnalysisMatteProofSource {
             .map_err(|error| error.to_string())
     }
 }
-
-// ---------------------------------------------------------------------------
-// Geometry (CC5 §2.3, walked backwards)
-// ---------------------------------------------------------------------------
 
 /// One layer's resolved geometric transform, exactly as the compositor
 /// accumulates it into `LayerParams` (CC5 §5.2).
@@ -451,11 +443,6 @@ pub(crate) fn rotation_handle_point(window: &MatteWindowParams, frame: MatteFram
     let geometry = WindowGeometry::new(window, frame);
     let centre = geometry.point((0.0, 0.0));
     let top = geometry.point((0.0, -1.0));
-    // The *unnormalized* separation is what can be degenerate, and testing it
-    // is simply the clearer statement of the condition: "this window has no
-    // measurable up direction". (`emath`'s `normalized` returns `self` for a
-    // zero-length vector, so testing the normalized length would answer the
-    // same question — it just states it less directly.)
     let up = top - centre;
     if up.length() <= f32::EPSILON {
         return top;
@@ -603,15 +590,8 @@ pub(crate) fn drag_to_params(
             }
         }
         MatteHit::Rotate => {
-            // Measured in the window's own aspect-corrected field `d`, not in
-            // screen pixels: θ is defined in that field (CC5 §2.3), so a
-            // viewer whose `image_rect` aspect differs from the document's —
-            // or a scaled layer — would otherwise write a sheared angle.
             let d = geometry.field_delta(pointer);
             if d.0.hypot(d.1) > f64::EPSILON {
-                // `θ = 0` points the window's own up at the top of the frame,
-                // and θ grows clockwise as the viewer sees it (CC5 §2.2), so
-                // the angle of the grab is `atan2(d.x, -d.y)`.
                 let degrees = d.0.atan2(-d.1).to_degrees();
                 #[allow(clippy::cast_possible_truncation)]
                 let centidegrees = round_half_away_from_zero(degrees * CENTIDEGREES).clamp(
@@ -635,10 +615,6 @@ fn shift_basis_points(start: i64, delta_uv: f64) -> i64 {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Painting
-// ---------------------------------------------------------------------------
-
 /// Draw every active window of one matte through the letterbox transform.
 ///
 /// The selected window carries its handles and its rotation arm; the others are
@@ -650,9 +626,6 @@ pub(crate) fn paint_matte_overlay(
     matte: &MatteParams,
     state: &MatteOverlayState,
 ) {
-    // No extra clip: the caller's painter is already bounded by the viewer
-    // frame, and clipping to `image_rect` would cut the rotation arm off
-    // whenever a window sits against the top of the picture.
     let selected_window = state.selected_window(matte.window_count);
     for (index, window) in matte.active_windows().enumerate() {
         let selected = Some(index) == selected_window;
@@ -697,10 +670,6 @@ pub(crate) fn paint_matte_overlay(
 fn window_geometry_top(window: &MatteWindowParams, frame: MatteFrame) -> Pos2 {
     WindowGeometry::new(window, frame).point((0.0, -1.0))
 }
-
-// ---------------------------------------------------------------------------
-// Overlay state and the matte-view worker
-// ---------------------------------------------------------------------------
 
 /// The identity of one matte-view coverage render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -837,8 +806,6 @@ impl MatteOverlayState {
 
     fn set_expanded(&mut self, target: Option<MatteTarget>) {
         if self.expanded.is_some() && self.expanded != target {
-            // A different node's section opened: its window selection and any
-            // coverage belong to the node that just closed.
             self.selected_window = 0;
             self.invalidate_view();
         }
@@ -971,8 +938,6 @@ impl MatteOverlayState {
         if self.coverage_for(key).is_some() {
             return false;
         }
-        // A refusal is sticky for the key it refused, so a `NotImplemented`
-        // backend is asked once per frame identity instead of every repaint.
         !self.error_matches(key)
     }
 
@@ -1064,8 +1029,6 @@ impl MatteOverlayState {
                 if worker_cancelled.load(Ordering::Acquire) {
                     return;
                 }
-                // Unbounded channel: the send only fails once the panel that
-                // owns the receiver is gone.
                 let _ = response_tx.send(MatteViewResponse {
                     generation,
                     key,
@@ -1316,8 +1279,6 @@ mod tests {
                 "{what} at {pointer:?}"
             );
         }
-        // Just past the 8 px radius, the rotation handle is not grabbed and the
-        // pointer is outside the window, so nothing is.
         assert_eq!(
             hit_test(
                 pos2(
@@ -1359,8 +1320,6 @@ mod tests {
             Some(MatteHit::Move),
             "the centre handle"
         );
-        // n = (0.8, 0.8): |n| = 1.13, so inside the bounding box and outside the
-        // disc, and 36.7 px from the nearest handle.
         assert_eq!(hit_test(pos2(448.0, 252.0), &ellipse, frame, true), None);
         // The same pointer on a rect window is inside it.
         assert_eq!(
@@ -1406,10 +1365,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // The layer transform (CC5 §5.2)
-    // -----------------------------------------------------------------------
-
     /// The shader evaluates the matte at the *layer* quad's uv while
     /// `image_rect` holds the *composited* output, so the overlay converts
     /// between them. Hand-derived: at `scale = 0.5`, `x_percent = +25`
@@ -1432,10 +1387,6 @@ mod tests {
             (48.0, 14.4),
             "the reframed centre",
         );
-        // The same reframe on a ten-times raster, so the eight-pixel handle
-        // radius cannot swallow the window: the pre-transform centre pixel
-        // (320, 180) now belongs to no window at all, which is exactly the bug
-        // this fixes, and the reframed centre (480, 144) is where it moved to.
         let big = reframed_in(
             Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 360.0)),
             50,
@@ -1475,17 +1426,12 @@ mod tests {
             "the composite delta (0.125, 0.1) is a layer delta of (0.25, 0.2)"
         );
 
-        // And the written centre round-trips: redrawing the window there puts
-        // its centre under the pointer that dragged it.
         assert_close(
             window_centre_point(&moved, frame),
             (56.0, 18.0),
             "the drag result draws back under the pointer",
         );
 
-        // A resize is measured in the layer's own field too: dragging the right
-        // edge handle to the composite pixel the drag above landed on asks for
-        // a half width of 0.25 layer-uv, unchanged by the reframe.
         let resize = drag(
             MatteHit::Resize(MatteHandle::Right),
             start,
@@ -1669,10 +1615,6 @@ mod tests {
         );
         let start = MatteWindowParams::NEUTRAL;
         let gesture = drag(MatteHit::Rotate, start, pos2(32.0, 16.0));
-        // d = ((u.x − 0.5)·a, u.y − 0.5). Up-and-right at exactly 45° in that
-        // field needs d = (0.25, −0.25), so u = (0.5 + 0.25·9/16, 0.25) and the
-        // pixel is (41, 16) — *not* the 45° screen diagonal, which the raw
-        // pixel offset would have read as 2936 centidegrees.
         assert_eq!(
             drag_to_params(&gesture, pos2(41.0, 16.0), square).rotation_cd,
             4_500,
@@ -1697,8 +1639,6 @@ mod tests {
     /// 24 px along it is 24 px of lie.
     #[test]
     fn a_degenerate_window_grows_no_rotation_arm() {
-        // A one-basis-point half height on a 1e-4 px tall picture: the top edge
-        // and the centre are 1e-8 px apart, far below f32::EPSILON.
         let sliver = MatteFrame::new(
             ASPECT,
             Rect::from_min_size(pos2(0.0, 0.0), vec2(64.0, 1e-4)),
@@ -1724,8 +1664,6 @@ mod tests {
         assert!(handle.x.is_finite() && handle.y.is_finite());
         assert_eq!(handle, window_geometry_top(&collapsed, frame()));
 
-        // An ordinary window is untouched: the arm sits exactly the contract's
-        // offset outside the top edge midpoint.
         let ordinary = MatteWindowParams::NEUTRAL;
         assert_close(
             rotation_handle_point(&ordinary, frame()),
@@ -1866,8 +1804,6 @@ mod tests {
         );
         assert!(state.coverage_for(next).is_none());
 
-        // Turning the toggle off drops the evidence rather than showing a stale
-        // coverage the next time it is turned on.
         state.set_matte_view(false);
         assert_eq!(state.view_status(key), MatteViewStatus::Off);
         assert!(state.coverage_for(key).is_none());
@@ -1950,8 +1886,6 @@ mod tests {
         );
         assert_eq!(state.selected_window(0), None, "no window, no selection");
 
-        // A selection is clamped when it is made, too, so a card that offers a
-        // stale index cannot store one.
         state.select_window(9, 2);
         assert_eq!(state.selected_window(2), Some(1));
         state.select_window(0, 0);
@@ -1962,8 +1896,6 @@ mod tests {
     /// on is the window whose handles can be grabbed.
     #[test]
     fn the_hit_path_grabs_the_handles_the_overlay_actually_drew() {
-        // Four small windows in a row along the bottom of the raster; only the
-        // first three are active.
         let small = |center_x_bp| MatteWindowParams {
             center_x_bp,
             center_y_bp: 8_000,
@@ -1981,8 +1913,6 @@ mod tests {
 
         let mut state = MatteOverlayState::default();
         state.select_window(3, 4);
-        // W2's rotation arm: 24 px above its top edge midpoint, which is
-        // (32, 27) on the 64 × 36 raster, and nowhere near another window.
         let arm = pos2(32.0, 27.0 - MATTE_ROTATION_HANDLE_OFFSET_PX);
         assert_eq!(
             rotation_handle_point(&matte.windows[2], frame),

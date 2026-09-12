@@ -144,14 +144,6 @@ fn pre_cc0_project_without_color_context_receives_the_managed_defaults() {
     let document: Document =
         serde_json::from_str(include_str!("fixtures/pre_m13_project.json")).unwrap();
 
-    // CC1 §4.1: a pre-CC0 project with no `color_context` receives the CC0
-    // explicit unknown source descriptions plus the current SDR Rec.709
-    // monitor/delivery defaults. Combined with §4.2 (the CC0 working
-    // placeholder becomes the managed linear/float16 working description) every
-    // stage of the absent context is exactly the managed target, so the
-    // resulting context is `managed_sdr_v1`. "Absent means legacy" governs an
-    // absent `pipeline_state` inside a *present*, project-custom context; it
-    // does not strand a project that has no stored context at all.
     assert_eq!(
         document.color_context.pipeline_state,
         ColorPipelineState::ManagedSdrV1
@@ -178,8 +170,6 @@ fn pre_cc0_project_without_color_context_receives_the_managed_defaults() {
 
 #[test]
 fn cc0_document_with_old_working_placeholder_migrates_to_the_managed_working_target() {
-    // The CC0 working placeholder: BT.709 primaries/transfer, rgb matrix, full
-    // range, 8-bit, application default, with no `pipeline_state` field.
     let cc0_working = serde_json::json!({
         "primaries": "bt709",
         "transfer": "bt709",
@@ -209,8 +199,6 @@ fn cc0_document_with_old_working_placeholder_migrates_to_the_managed_working_tar
     let document: Document =
         serde_json::from_value(saved).expect("a CC0 document should remain readable");
 
-    // CC1 §4.2: the placeholder was never an executed transform, so it becomes
-    // the fixed linear `Rgba16Float` working description.
     assert_eq!(
         document.color_context.working,
         ColorContext::sdr_rec709().working
@@ -421,8 +409,6 @@ fn source_error_field_observed_and_allowed_cover_every_unknown_field() {
         );
     }
 
-    // The short-circuit itself is part of the contract: a wholly unknown
-    // description reports the first field only.
     let error =
         classify_source(&ColorDescription::unknown()).expect_err("unknown metadata is not Rec.709");
     assert_eq!(error, ColorSourceError::UnknownPrimaries);

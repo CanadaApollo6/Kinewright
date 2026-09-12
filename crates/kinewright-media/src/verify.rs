@@ -209,9 +209,6 @@ fn read_plane_codes(
         } else {
             let end = start.saturating_add(width.saturating_mul(2));
             for sample in data[start..end].as_chunks::<2>().0 {
-                // Little-endian 16-bit containers with the top six bits zero.
-                // A byte-order mistake reads as a value in the thousands, so
-                // it is refused here rather than reported as an excursion.
                 let code = u16::from_le_bytes([sample[0], sample[1]]);
                 if i64::from(code) > code_ceiling(bit_depth) {
                     return Err(MediaError::DeliveryVerification(
@@ -265,9 +262,6 @@ fn verification_input(path: &Path) -> Result<ffmpeg::format::context::Input, Med
 #[cfg(test)]
 pub(crate) fn presented_frame_count(path: &Path) -> Result<u64, MediaError> {
     let asset = probe_path(path, AssetId(0))?;
-    // The coded count is an upper bound on the presented count, so seeking to
-    // its last frame lands at or after the last picture the file presents and
-    // the tail scan still sees every one of them.
     let coded = u64::try_from(asset.duration.0).unwrap_or(0);
     DeliveryDecoder::open(path, asset.fps, &asset.color_description)?.presented_frame_count(coded)
 }
@@ -343,12 +337,6 @@ impl DeliveryDecoder {
             .decoder()
             .video()
             .map_err(|error| media_error(path, "could not open the video decoder", error))?;
-        // §5.5, normative: the managed decoder's `flags=bicubic` with explicit
-        // matrix and range is the measured-best configuration, and
-        // `full_chroma_int` must never be added — it interpolates chroma
-        // across the 4:2:0 edge instead of replicating it and costs 63 codes
-        // on max and 5 dB. This reuses the ingest decoder's own graph rather
-        // than building a second one.
         let graph = managed_filter_graph(
             path,
             &decoder,
@@ -382,9 +370,6 @@ impl DeliveryDecoder {
     pub(crate) fn sample(&mut self, index: u64) -> Result<DecodedSample, MediaError> {
         let (at, frame) = self.decode_frame_at(index)?;
         let native = native_planes(&frame)?;
-        // Some containers leave `AVCodecContext::pix_fmt` unresolved until the
-        // first decoded frame, so the negotiated format is taken from the
-        // picture rather than trusted from the opened decoder.
         self.pixel_format.clone_from(&native.pixel_format);
         let rgba64 = self.scale_to_rgba64(frame)?;
         Ok(DecodedSample {
@@ -454,20 +439,12 @@ impl DeliveryDecoder {
             stream_timestamp_to_global(self.stream_start, self.stream_time_base),
         );
         if self.input.seek(timestamp, ..timestamp).is_err() {
-            // A target past the last coded picture — which is precisely what a
-            // cross-check against a document claiming one frame too many asks
-            // for — can fail to resolve to a keyframe. Rewinding is correct
-            // rather than fatal: the answer is still the file's own presented
-            // length, and this branch is unreachable for a well-formed encode
-            // whose implied frame count is right.
             self.input
                 .seek(0, ..)
                 .map_err(|error| media_error(&self.path, "delivery output seek failed", error))?;
         }
         self.decoder.flush();
 
-        // Disjoint field borrows: the packet iterator holds the input while
-        // the decoder is fed, which one `&mut self` method call could not do.
         let Self {
             path,
             input,
@@ -521,11 +498,6 @@ impl DeliveryDecoder {
 
     /// Push one decoded picture through the managed scaler and read RGBA64.
     fn scale_to_rgba64(&mut self, mut frame: ffmpeg::frame::Video) -> Result<Vec<u16>, MediaError> {
-        // Seeking makes the decoded presentation timestamps go backwards,
-        // which a `buffer` source rejects. The filter graph is a colour
-        // conversion with no temporal state, so the submission order is
-        // restamped monotonically and the frame identity stays with the
-        // caller.
         self.filter_pts = self.filter_pts.saturating_add(1);
         frame.set_pts(Some(self.filter_pts));
         {
@@ -584,8 +556,6 @@ fn frame_index(
     if denominator <= 0 {
         return i64::MAX;
     }
-    // Round to nearest so a one-tick muxer rounding cannot shift a frame
-    // identity by a whole frame.
     i64::try_from((numerator.saturating_mul(2) + denominator) / (denominator * 2))
         .unwrap_or(i64::MAX)
 }
@@ -731,8 +701,6 @@ impl PlaneLegalAccumulator {
 
     fn push(&mut self, code: i64) {
         self.total = self.total.saturating_add(1);
-        // Strict comparisons: a sample sitting exactly on a bound — 75 % blue
-        // is `Cb = 240.0` exactly — is legal, not an excursion.
         if code < self.low {
             self.below = self.below.saturating_add(1);
         } else if code > self.high {
@@ -810,33 +778,17 @@ pub(crate) fn verify_delivery_output(
     settings: &ExportSettings,
     request: &DeliveryVerificationRequest,
 ) -> Result<DeliveryVerification, MediaError> {
-    // 0. The request itself, before anything is opened or measured.
     let depth = requested_lane(settings, request)?;
     let bits = depth.bits();
 
-    // 1. Probe the written file. The probe is the only thing that reads the
-    //    tags, and it also states the file's own frame count, so no extra
-    //    traversal is needed to cross-check `T`.
     let probed_asset = probe_path(path, AssetId(0))?;
     let probed = probed_asset.color_description.clone();
 
-    // 2. `T` is the frame count the document implies at the export fps — the
-    //    same mapping the exporter itself used.
     let expected_frames = implied_frame_count(document, settings)?;
 
-    // 3. One decoder, opened once, for both the cross-check and the
-    //    comparison.
     let mut decoder = DeliveryDecoder::open(path, settings.fps, &probed)?;
     let expected_pixel_format = depth.pixel_format();
 
-    // 4. Cross-check `T` against the number of frames the file actually
-    //    **presents** (E21: `O(GOP)`, not a straight decode — verification
-    //    must not scale with the export's length). Not `probe_path`'s
-    //    duration either: that is the coded packet count, and a container
-    //    whose edit list trims a coded picture would pass it while a viewer
-    //    was shown one frame fewer. Verification never silently samples a
-    //    shorter file, and never accepts a file that codes a frame it does not
-    //    present.
     let presented_frames = decoder.presented_frame_count(expected_frames)?;
     if presented_frames != expected_frames {
         return Err(MediaError::DeliveryVerification(
@@ -847,12 +799,8 @@ pub(crate) fn verify_delivery_output(
         ));
     }
 
-    // 5. The §6.2 closed-form integer sample. No clock, no adaptive stride.
     let samples = sampled_frames(request, expected_frames)?;
 
-    // The reference renderer is isolated from the playback worker for
-    // `monitor_proof_for_document`'s reasons: a verification must not evict or
-    // reuse a proxy cache, and it must not touch transport state.
     let mut renderer = FrameRenderer::new(gpu.clone());
     renderer.set_lut_library(library);
 
@@ -866,10 +814,6 @@ pub(crate) fn verify_delivery_output(
         &samples,
     )?;
 
-    // The negotiated pixel format is read from the decoded pictures, not from
-    // the opened decoder, because some containers leave it unresolved until
-    // the first frame. A lane whose file does not carry the declared depth is
-    // refused typed rather than compared against the wrong budgets.
     let decoded_pixel_format = decoder.pixel_format().to_owned();
     if decoded_pixel_format != expected_pixel_format {
         return Err(MediaError::DeliveryColor(
@@ -882,9 +826,6 @@ pub(crate) fn verify_delivery_output(
 
     let scale = code_scale(bits);
     let budgets = request.budgets;
-    // §6.3, normative: the luma plane is gated in **lane** code units, while
-    // the RGB mean is gated 8-bit-equivalent. The RGB maxima and P99s stay in
-    // lane code units and are reported, never gated.
     let luma = measured.luma.difference(1);
     let [red, green, blue] = [0, 1, 2].map(|index| measured.channels[index].difference(scale));
     let combined = measured.combined.difference(scale);
@@ -1058,11 +999,6 @@ fn measure_samples(
     // Both planes share the same floor, `16·s`; only the ceiling differs.
     let chroma_low = luma_low;
     let chroma_high = i64::from(YCBCR_CHROMA_LEGAL_HIGH) * scale;
-    // §5.7: the delivery reference scale is bound **once**, here, so the
-    // render and the claim it produces cannot drift apart. `delivery_reference`
-    // takes it as an argument rather than binding it internally so the refusal
-    // has a reachable failing case (rule 11.0.5): a caller that hands it a
-    // proxy scale is refused typed instead of silently measuring a proxy.
     let reference_scale = RenderScale::FullResolution;
     let mut measured = SampleMeasurements {
         frames: Vec::with_capacity(samples.len()),
@@ -1080,12 +1016,6 @@ fn measure_samples(
 
     for output_frame in samples.iter().copied() {
         let sample = decoder.sample(output_frame)?;
-        // §6.2 asks for frame `n`; the decoder answers with the first picture
-        // at or after `n`. When the file's own frame identities do not land
-        // where the export fps says they do, those two are different frames,
-        // and comparing the picture that came back against the reference for
-        // the frame that was asked for would publish a measurement of one
-        // frame under another frame's number. Refuse typed instead.
         let requested = i64::try_from(output_frame).unwrap_or(i64::MAX);
         if sample.at != requested {
             return Err(MediaError::from(
@@ -1098,12 +1028,7 @@ fn measure_samples(
                 },
             ));
         }
-        // The **decoded** identity, not the requested one: the two are equal
-        // by the refusal above, and recording the one the picture carried is
-        // what makes `DeliveryComparison.frames` a statement about the file.
         let output_at = TimeCode(sample.at);
-        // The exact frame mapping the exporter used, so the reference is the
-        // same project frame the encode carried.
         let project_at =
             map_frames_with_rounding(output_at, settings.fps, document.fps, FrameRounding::Floor)
                 .map_err(|error| MediaError::Backend(error.to_string()))?;
@@ -1205,9 +1130,6 @@ fn accumulate_frame(
                 ]);
                 *value = f64::from(code) / denominator;
             }
-            // §6.3, normative: both sides go through the *same* denominator.
-            // `ref_code = round(U · v16 / 65280)` and
-            // `dec_code = round(U · C_rgba64 / 65280)`.
             for (channel, encoded) in encoded.iter().enumerate() {
                 let reference_code = (encoded * unit).round() as i64;
                 let decoded_offset = pixel.saturating_mul(4).saturating_add(channel);
@@ -1217,10 +1139,6 @@ fn accumulate_frame(
                 measured.channels[channel].push(difference);
                 measured.combined.push(difference);
             }
-            // §6.3(a): the reference Y' plane through the §3.4 matrix at the
-            // lane depth, against the decoded *native* Y plane. This term
-            // carries no chroma decimation error at all, which is why it — and
-            // not the RGB maximum — is the gate.
             let reference_luma = bt709_limited_ycbcr(
                 [
                     encoded[0].clamp(0.0, 1.0),
@@ -1246,8 +1164,6 @@ fn psnr_hundredths(combined: &DifferenceHistogram, scale: i64) -> Option<i32> {
     let mean_squares = combined.sum_squares as f64 / combined.total as f64;
     let mse8 = mean_squares / (scale * scale);
     if mse8 <= 0.0 {
-        // `Option` for the degenerate case, following `AudioLoudness`'s
-        // precedent, not a sentinel.
         return None;
     }
     let psnr = 10.0 * (255.0_f64 * 255.0 / mse8).log10();
@@ -1344,9 +1260,6 @@ fn range_exceptions(
 ) -> Vec<ColorQcException> {
     let mut exceptions = Vec::new();
     for (name, plane) in planes {
-        // §6.4 (a)'s rate is core's own accessor over the *combined* count, so
-        // the gate and the fixture prediction cannot drift apart and neither
-        // can silently become `max(below, above)`.
         let rate = plane.excursion().excursion_basis_points(plane.total);
         let outside = plane.outside_r103(tolerance);
         if rate <= DECODED_RANGE_EXCEPTION_BASIS_POINTS && !outside {
@@ -1464,10 +1377,6 @@ mod tests {
     const CC6_SOURCE_SIZE: (u32, u32) = (64, 32);
     const CC6_SOURCE_FRAMES: u32 = 12;
     const CC6_SOURCE_FPS: u32 = 25;
-
-    // -----------------------------------------------------------------------
-    // Source generation, through the pinned CLI, test-only.
-    // -----------------------------------------------------------------------
 
     /// Write raw `yuv420p` planes to a tagged, lossless FFV1 file.
     ///
@@ -1595,10 +1504,6 @@ mod tests {
         decoder.sample(0).expect("frame 0 should decode").native
     }
 
-    // -----------------------------------------------------------------------
-    // §11.2.12: decoded native planes.
-    // -----------------------------------------------------------------------
-
     #[test]
     #[allow(clippy::too_many_lines)]
     fn cc6_decoded_native_planes_report_ycbcr_excursions_in_delivery_code_units() {
@@ -1607,10 +1512,6 @@ mod tests {
         let size = (32_u32, 16_u32);
 
         for (label, ten_bit, base, illegal, expect_above_luma, expect_below_cb) in [
-            // 8-bit: Y = 250 is above both the strict box (235) and the
-            // EBU R 103 box (246); Cb = 5 is below the strict box (16) and
-            // exactly on the R 103 floor, so it is a strict-box excursion and
-            // not an R 103 one.
             (
                 "eight_bit",
                 false,
@@ -1619,9 +1520,6 @@ mod tests {
                 250_i64,
                 5_i64,
             ),
-            // 10-bit: the same picture on the lane's own scale, with Cb = 16
-            // taken *below* the R 103 floor of 20 so the ten-bit box is
-            // exercised on both sides.
             (
                 "ten_bit",
                 true,
@@ -1642,8 +1540,6 @@ mod tests {
             );
             let native = read_native_frame(&path);
 
-            // Plane dimensions are `(w, h)` and `(w/2, h/2)`, and every code
-            // stays inside its container.
             assert_eq!((native.width, native.height), size, "{label}");
             assert_eq!(
                 (native.chroma_width, native.chroma_height),
@@ -1682,8 +1578,6 @@ mod tests {
             for code in &native.cr {
                 red.push(i64::from(*code));
             }
-            // The excursions are reported in delivery code units at the lane
-            // depth, not rescaled to a common scale.
             assert_eq!(luma.maximum, expect_above_luma, "{label}");
             assert!(luma.excursion().above_count > 0, "{label}");
             assert_eq!(blue.minimum, expect_below_cb, "{label}");
@@ -1715,8 +1609,6 @@ mod tests {
                 blue.maximum
             );
 
-            // Passing direction: a legal file of the same shape reports no
-            // excursion at all, so the reader is known to be able to say "none".
             let legal_planes = planar_frame(
                 size,
                 ten_bit,
@@ -1745,10 +1637,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // §11.2.15: the typed verification refusals, each with a passing neighbour.
-    // -----------------------------------------------------------------------
-
     #[test]
     fn cc6_delivery_verification_plane_out_of_container_is_typed() {
         initialize_ffmpeg().expect("FFmpeg must initialize");
@@ -1771,8 +1659,6 @@ mod tests {
         let native = native_planes(&frame).expect("1023 fits a ten-bit container");
         assert_eq!(native.luma[0], 1023);
 
-        // Failing direction: one code past the container. A byte-order mistake
-        // must not be mistaken for a colossal excursion.
         let _ = stride;
         frame.data_mut(0)[..2].copy_from_slice(&1024_u16.to_le_bytes());
         let error = native_planes(&frame).expect_err("1024 does not fit a ten-bit container");
@@ -1785,10 +1671,6 @@ mod tests {
         assert_eq!(error.allowed_values(), "0..=1023");
         assert!(!error.recovery_action().is_empty());
     }
-
-    // -----------------------------------------------------------------------
-    // The end-to-end 8-bit export, verified through the production surface.
-    // -----------------------------------------------------------------------
 
     /// The CC6 verification source: five neutral grey bars plus one moving
     /// white square, tagged BT.709 limited, lossless FFV1.
@@ -1879,8 +1761,6 @@ mod tests {
         assert_eq!(asset.color_description.bit_depth, ColorBitDepth::Eight);
         assert_eq!(asset.duration, TimeCode(i64::from(CC6_SOURCE_FRAMES)));
         let mut document = simple_document(asset, CC6_SOURCE_SIZE);
-        // A managed primary node, so the encode is a product of the pipeline
-        // rather than a copy of the source.
         let correction = PrimaryCorrection {
             exposure_milli_stops: 100,
             ..PrimaryCorrection::default()
@@ -1977,8 +1857,6 @@ mod tests {
         );
         assert_eq!(comparison.decoded_ycbcr.bit_depth, 8);
 
-        // Non-vacuity: a measurement of exactly zero would prove the codec was
-        // never exercised, not that it is perfect.
         assert!(
             comparison.combined.mean_code_diff_millionths > 0,
             "the source does not exercise the codec"
@@ -2008,8 +1886,6 @@ mod tests {
             comparison.decoded_ycbcr.cb.above_basis_points,
         );
 
-        // Rule 11.0.5: a budget no measurement approaches proves nothing, so
-        // the margin is measured, printed, and asserted rather than assumed.
         let budgets = comparison.budgets;
         let margin = |observed: i64, allowed: i64| {
             if observed == 0 {
@@ -2070,12 +1946,6 @@ mod tests {
             verification.exceptions
         );
 
-        // Evidence: the export's coded length and its *presented* length, the
-        // two numbers the MP4 edit list can separate. They were once one frame
-        // apart -- the muxer's negative-DTS `elst` trimmed the final coded
-        // picture from presentation -- and this line records that they now
-        // agree, at the same time as `presented_frame_count` gates it inside
-        // `verify_delivery_output`.
         let coded = crate::decode::probe_path(&output, AssetId(9))
             .expect("the export re-probes")
             .duration;
@@ -2093,8 +1963,6 @@ mod tests {
         );
         assert_eq!(coded.0, i64::from(CC6_SOURCE_FRAMES));
 
-        // §11.2.15's frame-count refusal, and its passing neighbour one step
-        // away: the same file against a document that claims one more frame.
         let mut longer = (*document).clone();
         longer.duration = TimeCode(longer.duration.0 + 1);
         longer.tracks[0].clips[0].source_range = TimeCode::ZERO..longer.duration;
@@ -2117,9 +1985,6 @@ mod tests {
         assert_eq!(error.observed(), CC6_SOURCE_FRAMES.to_string());
         assert_eq!(error.allowed_values(), (CC6_SOURCE_FRAMES + 1).to_string());
 
-        // §11.2.15's full-resolution refusal, and its passing neighbour: the
-        // same reference render at a proxy scale is refused typed, while the
-        // full-resolution one succeeds.
         let mut renderer = FrameRenderer::new(gpu.context());
         let full = delivery_reference(
             &gpu.context(),
@@ -2182,8 +2047,6 @@ mod tests {
         )
         .expect("the test-only defective export should still write a file");
 
-        // The file is not truncated: every picture is coded, and the crate's
-        // reader of a file's *coded* length says so.
         assert_eq!(
             probe_path(&output, AssetId(11))
                 .expect("the defective export probes")
@@ -2251,8 +2114,6 @@ mod tests {
         let mut renderer = FrameRenderer::new(gpu.context());
         let context = gpu.context();
 
-        // Passing direction: read at the file's own rate, frame 1 is frame 1,
-        // and the comparison records that identity.
         let mut honest = DeliveryDecoder::open(&output, settings.fps, &probed)
             .expect("the export opens for verification");
         assert_eq!(
@@ -2300,8 +2161,6 @@ mod tests {
                 8,
                 &[1],
             )
-            // `err()` rather than `expect_err`: the Ok side is a histogram of
-            // millions of samples and has no business in a panic message.
             .err()
             .expect("a picture that is not the requested frame is never compared"),
         );
@@ -2311,13 +2170,6 @@ mod tests {
         assert_eq!(error.allowed_values(), "decoded frame 1");
         assert!(!error.recovery_action().is_empty());
     }
-
-    // -----------------------------------------------------------------------
-    // The request-shaped refusals: neither of these opens the file at all, so
-    // they are asserted against a path that does not exist. A version that
-    // decoded first and validated afterwards would fail here with a decode
-    // error instead of the typed refusal.
-    // -----------------------------------------------------------------------
 
     /// A document and settings for one lane, with no source and no file.
     fn lane_settings(depth: DeliveryEncodeDepth) -> (Arc<Document>, ExportSettings) {
@@ -2349,10 +2201,6 @@ mod tests {
     /// sample set is refused rather than measured.
     #[test]
     fn cc6_an_unseen_plane_reports_the_empty_interval_and_an_empty_sample_set_is_refused() {
-        // (a) An accumulator nothing was pushed into reports core's empty
-        //     interval, not `0..=0`. `0` is a code a real sample can land on,
-        //     so a fabricated `0..=0` beside `below_count == 0` would be
-        //     indistinguishable from a plane whose every sample was black.
         let unseen = PlaneLegalAccumulator::new(16, 235).excursion();
         assert!(
             !unseen.samples_seen(),
@@ -2371,8 +2219,6 @@ mod tests {
         assert_eq!(unseen.above_count, 0);
         assert_eq!(unseen.excursion_basis_points(0), 0);
 
-        // Passing direction, one sample away: a single legal sample gives the
-        // plane a real, seen extreme pair on that code.
         let mut seen = PlaneLegalAccumulator::new(16, 235);
         seen.push(0);
         let seen = seen.excursion();
@@ -2382,10 +2228,6 @@ mod tests {
         assert_eq!(seen.below_count, 1, "code 0 is below the 16 floor");
         assert_eq!(seen.excursion_basis_points(1), 10_000);
 
-        // (b) The sample set behind those accumulators. `sample_frames` is
-        //     total and answers `[]` for a document that implies no frames;
-        //     measuring that would publish `within_budgets == true` because
-        //     nothing exceeded anything.
         let (_, settings) = lane_settings(DeliveryEncodeDepth::Eight);
         let request = DeliveryVerificationRequest::new(
             DeliveryEncodeDepth::Eight,
@@ -2417,8 +2259,6 @@ mod tests {
         let directory = TempDirectory::new("cc6-verify-budget-lane");
         let absent = directory.path("never-written.mp4");
 
-        // Both directions: 8-bit settings with the 10-bit lane's budgets, and
-        // 10-bit settings with the 8-bit lane's.
         for (settings_depth, budget_depth) in [
             (DeliveryEncodeDepth::Eight, DeliveryEncodeDepth::Ten),
             (DeliveryEncodeDepth::Ten, DeliveryEncodeDepth::Eight),
@@ -2460,8 +2300,6 @@ mod tests {
             );
             assert!(!error.recovery_action().is_empty());
 
-            // Passing direction, one field away: the matching budgets get past
-            // this refusal and fail on the *file*, which does not exist.
             let matching =
                 DeliveryVerificationRequest::new(settings_depth, settings.delivery_color.clone());
             let error = engine
@@ -2497,8 +2335,6 @@ mod tests {
                 settings.delivery_color.clone(),
             );
             request.frame_count = frame_count;
-            // The clamp this refusal exists to keep from being published: the
-            // sampler would have answered a *different* question.
             assert!(!request.sample_frames(60).is_empty());
             let error = verification_error(
                 engine
@@ -2541,16 +2377,11 @@ mod tests {
 
     #[test]
     fn cc6_delivery_reference_denominator_is_the_delivery_intermediate_white() {
-        // Not a second copy of 65_280: the encode side quantizes on this very
-        // constant, and §6.3 requires both sides of the comparison to divide
-        // by it.
         assert_eq!(
             DELIVERY_REFERENCE_DENOMINATOR,
             crate::color_pipeline::DELIVERY_INTERMEDIATE_WHITE
         );
         assert_eq!(u32::from(DELIVERY_REFERENCE_DENOMINATOR), 255_u32 << 8);
-        // The `EBU R 103` tolerance is -5 %/+105 % of the nominal range, i.e.
-        // 11 codes at 8 bits and 44 at 10.
         assert_eq!(EBU_R103_TOLERANCE_CODES_8BIT, 11);
         assert_eq!(16 - EBU_R103_TOLERANCE_CODES_8BIT, 5);
         assert_eq!(235 + EBU_R103_TOLERANCE_CODES_8BIT, 246);
@@ -2565,9 +2396,6 @@ mod tests {
     fn cc6_delivery_budgets_are_distinct_from_the_compositor_gate() {
         use crate::cc1_fixtures::{MONITOR_CPU_GPU_MAX, MONITOR_CPU_GPU_MEAN, MONITOR_CPU_GPU_P99};
 
-        // CC1's compositor tolerances must never be silently substituted for a
-        // codec budget: they are flat-field numbers and would fail instantly on
-        // any raster carrying a saturated edge.
         for depth in DeliveryEncodeDepth::ALL {
             let budgets = DeliveryBudgets::for_depth(depth);
             assert_ne!(budgets.luma_max_code, u32::from(MONITOR_CPU_GPU_MAX));

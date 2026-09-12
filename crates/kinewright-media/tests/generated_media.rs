@@ -278,8 +278,6 @@ fn probe_records_the_source_sha256_and_byte_length() {
     let engine = FfmpegMediaEngine::new().unwrap();
     let asset = engine.probe(clip.path()).unwrap();
     let bytes = std::fs::read(clip.path()).unwrap();
-    // The digest half is checked against an independent SHA-256 rather than
-    // against `source_fingerprint`, which is the function under test.
     assert_eq!(
         asset.source_fingerprint.content_sha256.as_deref(),
         Some(reference_sha256::hex_digest(&bytes).as_str())
@@ -405,8 +403,6 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
     let blue = generate_solid("blue", "blue", "660");
     let mut red_asset = engine.probe(&red.0).unwrap();
     let mut blue_asset = engine.probe(&blue.0).unwrap();
-    // Keep the generated files alive for the duration of the test by taking
-    // ownership of their paths. The caller removes them with the document assets.
     red_asset.path.clone_from(&red.0);
     blue_asset.path.clone_from(&blue.0);
     std::mem::forget(red);
@@ -999,8 +995,6 @@ fn relinked_moved_source_round_trip_renders_identical_frame() {
     // Exercise the persisted project boundary before the source path changes.
     let encoded = serde_json::to_vec(&document).unwrap();
     let mut relinked_document: Document = serde_json::from_slice(&encoded).unwrap();
-    // Flush the worker's decoder before renaming. This also keeps the test
-    // valid on Windows, where an open FFmpeg handle can prevent a rename.
     engine.set_document(std::sync::Arc::new(Document::default()));
     engine.request_frame(TimeCode::ZERO);
     let _ = receive_frame(&frames, TimeCode::ZERO);
@@ -1137,8 +1131,6 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
     assert_ne!(first_clip.rgba, second_clip.rgba);
     for gap in [gap_start, gap_end] {
         let pixels = gap.rgba.as_chunks::<4>().0;
-        // An empty raster would satisfy `all` vacuously, which is exactly the
-        // failure this assertion exists to catch.
         assert_eq!(
             pixels.len(),
             (gap.width * gap.height) as usize,

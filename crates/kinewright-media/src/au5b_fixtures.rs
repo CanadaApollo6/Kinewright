@@ -36,10 +36,6 @@ use crate::{
     test_support::{GeneratedMedia, TempDirectory, pseudo_random_amplitude, tone, wav_f32},
 };
 
-// ---------------------------------------------------------------------------
-// Budgets
-// ---------------------------------------------------------------------------
-
 /// AU5 §5.4 rule 100, the roadmap's own number: the per-sample deviation a
 /// fill may show across a join.
 ///
@@ -74,10 +70,6 @@ const FIXTURE_MINIMUM_MARGIN: f64 = 2.0;
 /// The window either side of a join the seam is measured over, in
 /// milliseconds (AU5 §5.4 rule 100).
 const SEAM_WINDOW_MILLISECONDS: u64 = 10;
-
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
 
 /// AU5 §5.4 rule 99's room tone: `pseudo_random_amplitude(96_000 * 2, 0.010)`.
 ///
@@ -126,13 +118,8 @@ fn seam_document(fps: Rational, assets: &[MediaAsset], pieces: Vec<Piece>) -> Do
             transition_in: None,
             link: None,
             audio_gain_tenth_db: 0,
-            // AU5 §5.3 rule 95: butt-joined, **with no fade**. Two ramps
-            // meeting at an abutment are a dip to silence, which is the exact
-            // artefact the fill removes.
             audio_fade_in_frames: TimeCode::ZERO,
             audio_fade_out_frames: TimeCode::ZERO,
-            // AU5 §0 R44: the fill is written at 100, which is what makes the
-            // source range a true inverse of `clip_duration`.
             speed_percent: 100,
             audio_gain_curve: None,
         })
@@ -275,8 +262,6 @@ impl SeamFixture {
         let store = RoomToneStore::for_project(&store_root.path("seam.kinewright"))
             .expect("the store root derives");
         let room_tone_samples = room_tone_samples();
-        // The lane measures the **product's own** file, written by the store
-        // under its digest, not a fixture the test wrote itself.
         let capture = store
             .write_capture(&room_tone_samples)
             .expect("2 s of room tone is a legal capture");
@@ -311,10 +296,6 @@ impl SeamFixture {
         vec![self.room_tone.clone(), self.dialogue.clone()]
     }
 }
-
-// ---------------------------------------------------------------------------
-// (i) The single-tile pin — exit-gate clause 2 (B4)
-// ---------------------------------------------------------------------------
 
 /// AU5 §7 B4 / §5.4 rule 100: clip A `0..30`, gap `30..60`, clip B `60..90`,
 /// one tile of room tone in the gap, at 30 fps.
@@ -360,8 +341,6 @@ fn au5_a_single_tile_fill_is_seamless_across_its_join() {
     let mixed = mix_audio(&document, &seam_settings(&document)).expect("the seam document mixes");
     let mut expected = reference_decode(&fixture.dialogue, TimeCode(0)..TimeCode(30));
     let reference = reference_decode(&fixture.room_tone, TimeCode(0)..TimeCode(30));
-    // Half the stored capture, sample for sample: the fill really replays the
-    // bytes the store wrote.
     assert_eq!(reference, fixture.room_tone_samples[..reference.len()]);
     expected.extend_from_slice(&reference);
     expected.extend(reference_decode(
@@ -458,10 +437,6 @@ fn au5_a_one_frame_slip_breaks_the_seam_pin() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// (ii) The multi-tile arm — all three joins (B5, R46)
-// ---------------------------------------------------------------------------
-
 /// AU5 §7 B5 / §5.4 rule 101(i): a 90-frame gap tiled from the 60-frame
 /// sample, asserting **all three** joins — clip A → tile 1, tile 1 → tile 2,
 /// tile 2 → clip B, of which one is internal to the fill.
@@ -538,10 +513,6 @@ fn au5_a_tiled_fill_is_seamless_across_all_three_joins() {
     );
     assert_seam("tiled", "whole_gap", measured);
 }
-
-// ---------------------------------------------------------------------------
-// (iii) The 25 fps arm — a project slower than the asset (B6, R12, R96, R101)
-// ---------------------------------------------------------------------------
 
 /// AU5 §7 B6 / §5.4 rule 101(ii): a **25 fps** project reading the 30 fps
 /// audio-only asset over a **7**-frame gap, filled seamlessly.
@@ -634,8 +605,6 @@ fn au5_a_twenty_five_fps_fill_is_seamless_across_its_join() {
     );
 
     let mut expected = reference_decode(&fixture.dialogue, TimeCode(0)..TimeCode(30));
-    // The mixer plays the mapped project span and stops; the excess is
-    // truncated, not padded, and **no silence is modelled here**.
     expected.extend_from_slice(&reference[..usize::try_from(required * channels).unwrap()]);
     expected.extend(reference_decode(
         &fixture.dialogue,
@@ -722,9 +691,6 @@ fn au5_a_zero_phase_fill_at_twenty_five_fps_falls_short_of_its_gap() {
     let residual = required - supplied;
     assert_eq!((required, supplied), (13_440, 12_800));
 
-    // The shortfall has to be modelled to compare at all, and that it compares
-    // **exactly** is what proves the silence is frame quantisation rather than
-    // a mixer error.
     let mut expected = reference_decode(&fixture.dialogue, TimeCode(0)..TimeCode(30));
     expected.extend_from_slice(&reference);
     expected.extend(std::iter::repeat_n(
@@ -765,8 +731,6 @@ fn au5_a_zero_phase_fill_at_twenty_five_fps_falls_short_of_its_gap() {
          {ROOM_TONE_FILL_RESIDUAL_BUDGET_SAMPLE_FRAMES}",
     );
 
-    // And the covering phase really does exist for this very gap, which is what
-    // makes the shortfall a construction defect rather than a rate limitation.
     assert_eq!(
         covering_source_range_for_project_duration(
             gap_frames,
@@ -778,10 +742,6 @@ fn au5_a_zero_phase_fill_at_twenty_five_fps_falls_short_of_its_gap() {
         Ok(TimeCode(1)..TimeCode(10)),
     );
 }
-
-// ---------------------------------------------------------------------------
-// (iv) The 60 fps arm — a project faster than the asset (B6, R12)
-// ---------------------------------------------------------------------------
 
 /// AU5 §7 B6 / §5.4 rule 101(iii): a **60 fps** project over a **7**-frame gap
 /// has no exact source range, so the planner skips the gap with rule 97's
@@ -803,10 +763,6 @@ fn au5_a_sixty_fps_gap_of_seven_frames_has_no_exact_source_range() {
             project_duration: 7,
         }),
     ));
-    // And through the helper the product actually calls, so all three arms are
-    // measured on the same path (§0 R96). No phase can rescue this one — the
-    // exhaustive scan below is why — so the sweep inside the helper reports the
-    // same refusal its phase-0 candidate does.
     assert!(matches!(
         covering_source_range_for_project_duration(
             TimeCode(7),
@@ -838,10 +794,6 @@ fn au5_a_sixty_fps_gap_of_seven_frames_has_no_exact_source_range() {
             assert_eq!(found, None, "no source range maps to {duration} at 60 fps");
         }
     }
-    // The exhaustive statement the window search only samples, and the reason
-    // no phase of `source_start` can help: `map_frames(x, 30, 60) = 2x`
-    // exactly, so **every** boundary maps to an even 60 fps frame and every
-    // difference of two of them is even.
     assert!(
         (1..=240_i64).all(|candidate| {
             map_frames(TimeCode(candidate), source_fps, project_fps)
@@ -856,8 +808,6 @@ fn au5_a_sixty_fps_gap_of_seven_frames_has_no_exact_source_range() {
         map_project_duration_to_source(TimeCode::ZERO, TimeCode(7), source_fps, twenty_five).ok(),
         Some(TimeCode(8)),
     );
-    // And a same-rate project is the identity, which is what makes §5.4's own
-    // 30 fps fixture blind to this whole class (AU5 §5.3 rule 98).
     for duration in 1..=120_i64 {
         assert_eq!(
             map_project_duration_to_source(

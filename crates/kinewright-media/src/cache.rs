@@ -218,9 +218,6 @@ mod tests {
 
     #[test]
     fn arc_shared_grid_frames_are_charged_once_for_actual_residency() {
-        // The decoder inserts `Arc` clones of one decoded picture for every
-        // grid frame it covers. Charging each clone would report several
-        // times the memory that is actually resident.
         let shared = FrameTexture {
             width: 1,
             height: 1,
@@ -241,8 +238,6 @@ mod tests {
         cache.insert(TimeCode(3), other);
         assert_eq!(cache.byte_len(), 80);
 
-        // Evicting one of three references frees nothing: the buffer is
-        // still resident behind the other two entries.
         assert!(cache.evict_oldest());
         assert_eq!(cache.byte_len(), 80);
         assert!(cache.evict_oldest());

@@ -122,8 +122,6 @@ pub(crate) fn constrain_dragged_x(points: &[(i32, i32)], index: usize, x: i32) -
         point.0.saturating_sub(MINIMUM_X_SEPARATION)
     });
     if low > high {
-        // Unreachable on a valid curve: two neighbours are always at least two
-        // basis points apart when a point sits between them.
         return low;
     }
     clamp_coordinate(x).clamp(low, high)
@@ -247,8 +245,6 @@ fn solve_tangents(points: &[(f64, f64)]) -> Vec<f64> {
     tangents[0] = delta[0];
     tangents[count - 1] = delta[count - 2];
     for index in 1..count - 1 {
-        // Transcribed literally from CC3 §2.3 step 2 rather than routed through
-        // `f64::midpoint`, so the written contract is readable at the call site.
         tangents[index] = (delta[index - 1] + delta[index]) / 2.0;
     }
     for index in 0..count - 1 {
@@ -372,9 +368,6 @@ pub(crate) fn curve_editor(
             if moved.as_slice() != points {
                 response.points = Some(moved);
             }
-            // `is_live_drag` keeps the release frame inside the gesture: egui
-            // reports it with `dragged() == false`, and dropping it here would
-            // file the final point position as a second undo entry.
             response.live = true;
         }
         if area.drag_stopped() {
@@ -454,8 +447,6 @@ fn paint(
     painter.rect_filled(rect, radius::SM, color::LETTERBOX);
     theme::paint_inset_well(&painter, rect, radius::px(radius::SM));
 
-    // The display-range box: (0, 0) to (10000, 10000) inside the -2000..=12000
-    // domain, so a point placed below black or above white reads as such.
     let white = COLOR_CURVE_WHITE_BASIS_POINTS;
     let unit = egui::Rect::from_two_pos(
         basis_to_pixel(rect, (0, 0)),

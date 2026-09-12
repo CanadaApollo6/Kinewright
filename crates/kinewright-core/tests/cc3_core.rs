@@ -144,8 +144,6 @@ fn color_wheels_descriptor_matches_the_published_control_table() {
         ("bypass", 0, 1, 0),
     ];
 
-    // CC5 §2.2 appends 47 matte parameters after this table; they are pinned
-    // in `cc5_core.rs`, and the CC3 controls keep their positions and bounds.
     assert_eq!(
         descriptor.parameters.len(),
         expected.len() + MATTE_PARAMETER_COUNT
@@ -244,8 +242,6 @@ fn curve_parameter_name_helper_lists_every_parameter_one_curve_owns() {
 /// CC3 §3.1 and §9: the new nodes are managed, never compatibility stages.
 #[test]
 fn the_new_nodes_are_managed_colour_nodes_and_never_compatibility_stages() {
-    // CC4 §3.1 grew this list from three to five and reordered it into stage
-    // order; the three CC3 correction kinds keep their relative order.
     assert_eq!(
         MANAGED_COLOR_NODE_NAMES,
         [
@@ -353,8 +349,6 @@ fn control_bounds_accept_the_extremes_and_reject_one_step_beyond() {
         }
     );
 
-    // The maximum point count is legal when the sixteen points are distinct,
-    // which is the only way to declare them: the descriptor neutrals collide.
     let ramp: Vec<(String, i64)> = std::iter::once(("blue_point_count".to_owned(), 16))
         .chain((0..16).flat_map(|index| {
             [
@@ -438,8 +432,6 @@ fn curve_points_must_be_strictly_increasing_in_x_over_the_active_prefix() {
     );
     assert_eq!(document, before, "a rejected AddEffect must be atomic");
 
-    // Points at index >= point_count are ignored, so their colliding
-    // (10000, 10000) neutrals - and any stored value there - are legal.
     add(
         &mut document,
         effect(
@@ -455,8 +447,6 @@ fn curve_points_must_be_strictly_increasing_in_x_over_the_active_prefix() {
     )
     .expect("inactive points are ignored even when they collide");
 
-    // Raising the count activates the colliding points, and that edit is
-    // rejected against the map the change would produce.
     let before = document.clone();
     let error = set_param(&mut document, 1, "master_point_count", 4)
         .expect_err("activating colliding points must be rejected");
@@ -472,8 +462,6 @@ fn curve_points_must_be_strictly_increasing_in_x_over_the_active_prefix() {
     );
     assert_eq!(document, before, "a rejected SetEffectParam must be atomic");
 
-    // Separating the third point first makes the same activation legal, which
-    // is what a curve editor does when it adds a point.
     set_param(&mut document, 1, "master_x2", 8_000).expect("an inactive point may move freely");
     set_param(&mut document, 1, "master_point_count", 3).expect("three separated points are legal");
 
@@ -655,8 +643,6 @@ fn animated_point_count_and_animated_coordinates_are_mutually_exclusive() {
     );
     assert_eq!(document, before);
 
-    // One point-count keyframe is policy 2's constant point count and stays
-    // legal alongside animated coordinates.
     set_keyframes(
         &mut document,
         1,
@@ -713,8 +699,6 @@ fn degenerate_resolved_curves_truncate_to_the_longest_increasing_prefix() {
     assert!(resolved.blue.is_structural_identity());
     assert_eq!(resolved.blue.declared_point_count, 3);
 
-    // The same node reached through keyframe evaluation, which is how §3.4
-    // actually happens: the point count steps up past the authored points.
     let mut animated = effect(
         1,
         "color_curves",
@@ -782,8 +766,6 @@ fn neutral_and_bypassed_nodes_are_inactive_on_the_stored_integers() {
     );
     assert_eq!(ColorNodeInactiveReason::Bypassed.as_str(), "bypassed");
 
-    // Curves: structural identity only. A collinear 16-point curve is
-    // mathematically identity but must still be evaluated (§2.3, §10.3.6).
     let neutral_curves = effect(2, "color_curves", &[]);
     let resolved = ResolvedCurves::from_effect(&neutral_curves);
     assert!(resolved.is_neutral());
@@ -1046,8 +1028,6 @@ fn qa_reports_a_curve_truncated_by_automation() {
         "truncation is reportable, not an export blocker"
     );
 
-    // A bypassed node is the exact identity, so its truncation is not
-    // reported.
     set_param(&mut document, 1, "bypass", 1).expect("bypass is an ordinary parameter");
     assert!(
         !qa_document(&document)
@@ -1096,8 +1076,6 @@ fn validate_document_rejects_stored_curve_points_that_are_not_strictly_increasin
         "the same points `AddEffect` rejects must not load",
     );
 
-    // Points at index >= point_count keep their colliding neutrals and stay
-    // legal, exactly as on the operation path.
     hand_edited_document(vec![effect(
         1,
         "color_curves",
@@ -1205,9 +1183,6 @@ fn validate_document_rejects_more_than_sixteen_managed_colour_nodes() {
 fn a_keyframed_bypass_is_part_of_the_qa_truncation_scan() {
     let mut document = managed_document();
     add(&mut document, effect(1, "color_curves", &[])).expect("a neutral curves node is legal");
-    // A single Hold keyframe holds sixteen points at every frame, with the
-    // coordinates omitted so each one resolves to the colliding neutral. The
-    // static value stays at two, so the document itself remains legal.
     set_keyframes(
         &mut document,
         1,

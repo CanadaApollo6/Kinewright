@@ -508,9 +508,6 @@ impl ClipAudioShaping {
         let fade_out_start = clip_end
             .checked_sub(clip.audio_fade_out_frames)
             .unwrap_or(clip.timeline_start);
-        // AU4 §3.2 rule 52: a curve **replaces** the scalar rather than
-        // multiplying with it, so the constant is exactly 1.0 whenever one
-        // exists — the envelope is never gained twice (A13).
         #[allow(clippy::cast_precision_loss)]
         let constant_gain = if clip.audio_gain_curve.is_some() {
             1.0
@@ -690,8 +687,6 @@ impl ParametricEqSettings {
     }
 
     /// The cascade in stage order: high-pass, low shelf, bands 1..4, high shelf.
-    // Descriptor bounds keep every control exactly representable at audio
-    // precision, so the integer-to-float conversions here cannot lose one.
     #[allow(clippy::cast_precision_loss)]
     fn coefficients(self, sample_rate: u32) -> [BiquadCoefficients; PARAMETRIC_EQ_SECTIONS] {
         let mut sections = [BiquadCoefficients::IDENTITY; PARAMETRIC_EQ_SECTIONS];
@@ -807,8 +802,6 @@ struct TruePeakLimiterState {
     group_delay: usize,
     minimum_gain: f32,
 }
-
-// ---- AU5 §3.2-§3.5: the three repair nodes -------------------------------
 
 /// AU5 §3.2 rule 31: the Hann-squared overlap constant at `hop = window / 4`.
 ///
@@ -1066,10 +1059,6 @@ struct DenoiseState {
 
 impl DenoiseState {
     fn new(effect: &Effect, channels: usize, sample_rate: u32, latency_frames: usize) -> Self {
-        // AU5 §3.2 rule 32: `window` is the largest power of two at or under
-        // the declared latency, `hop = window / 4`, and the OLA delay is
-        // `window - 1` — not `window`, because an output sample at `p` is
-        // complete only once the window *starting* at `p` has been added.
         let window = latency_frames
             .max(DENOISE_MINIMUM_WINDOW)
             .next_power_of_two()
@@ -1185,11 +1174,6 @@ impl DenoiseState {
                 self.smoother[channel][bin] = gain;
                 self.scratch[bin].re *= gain;
                 self.scratch[bin].im *= gain;
-                // Mirror onto the negative-frequency bin so the spectrum stays
-                // conjugate-symmetric and the inverse is real.
-                // AU5 §0 R76: `bins = window/2 + 1`, so the loop reaches the
-                // Nyquist bin, whose mirror is itself — gaining it again would
-                // apply `g^2` to one bin in 257.
                 let mirror = window - bin;
                 if bin > 0 && mirror < window && mirror != bin {
                     self.scratch[mirror].re *= gain;
@@ -1198,9 +1182,6 @@ impl DenoiseState {
                 minimum = minimum.min(gain);
             }
             inverse_fft(&mut self.scratch);
-            // The accumulator slot for output index `p` is `accumulator_read`
-            // at the frame that completes `p`, so one block covers the whole
-            // `window`-long buffer starting there.
             for index in 0..window {
                 let slot = (self.accumulator_read + index) % window;
                 self.accumulator[channel][slot] += self.scratch[index].re * self.shape[index];
@@ -1267,10 +1248,6 @@ impl DenoiseState {
         if channels == 0 {
             return;
         }
-        // AU5 §3.2 rule 41: when `direct` clears, the accumulator and the
-        // smoother are zeroed and the switch window opens; when it sets, the
-        // switch is immediate and exact, because `bypass_delay` has been fed
-        // all along.
         if direct_now != self.direct {
             if !direct_now {
                 for channel in &mut self.accumulator {
@@ -1284,20 +1261,11 @@ impl DenoiseState {
             }
             self.direct = direct_now;
         }
-        // 1. The ring, on every frame.
         self.write_ring(samples, channels);
-        // 2. The identity path, fed **unconditionally**.
         self.bypass_scratch[..channels].copy_from_slice(&samples[..channels]);
         self.bypass_delay
             .process(&mut self.bypass_scratch[..channels]);
-        // 3. The block clock, on every frame.
         self.advance_block_clock(direct_now);
-        // 4. The emit. The accumulator frame is always popped — discarded on
-        //    the `direct` branch — and always fed through `output_pad`, so the
-        //    pad holds real reconstruction by the time the switch window ends:
-        //    `window - hop` frames to reach full overlap plus `pad` frames to
-        //    fill the line is 384 + 65 = 449 at 48 kHz, inside the 511-frame
-        //    window rule 41 opens.
         let mut emit = std::mem::take(&mut self.emit_scratch);
         self.pop_accumulator(&mut emit, channels);
         self.output_pad.process(&mut emit[..channels]);
@@ -1442,8 +1410,6 @@ impl DeclickDetector {
         let second_difference = self.previous.mul_add(-2.0, value) + self.previous2;
         self.previous2 = self.previous;
         self.previous = value;
-        // The reference is the window ending at `n - 1`, so it is read before
-        // this sample joins it.
         let flagged = self.reference > 0.0 && second_difference.abs() > ratio * self.reference;
         self.record(second_difference, flagged);
 
@@ -1467,9 +1433,6 @@ impl DeclickDetector {
                 && index >= last + guard
             {
                 self.closed = None;
-                // AU5 §3.5 rule 57: a `ClickReport` counts exactly the spans the
-                // node **would repair** — the length ceiling *and* the guard —
-                // so "what is a click" cannot drift between node and inspector.
                 if lead_ok && last - start < ceiling {
                     repair = Some((start, last));
                 }
@@ -1491,8 +1454,6 @@ impl DeclickDetector {
             self.sum -= evicted * evicted;
             self.unflagged -= 1;
         }
-        // The reference holds its last value while fewer than a quarter of the
-        // window's samples are unflagged.
         if self.unflagged * DECLICK_REFERENCE_MINIMUM_FRACTION >= self.window_frames {
             #[allow(clippy::cast_precision_loss)]
             let count = self.unflagged as f64;
@@ -1752,10 +1713,6 @@ impl AudioEffectRuntime {
                 minimum_gain: 1.0,
             }),
             "audio_true_peak_limiter" => {
-                // AU2 §3.5: `D` is absorbed inside `Lh`, so the node's total
-                // signal delay stays exactly `Lh` whichever detector runs.
-                // `Lh >= D + 1` is required; below that (only at test rates
-                // under about 7 kHz) the node falls back to sample peak.
                 let group_delay = if latency_frames > TRUE_PEAK_GROUP_DELAY_FRAMES {
                     TRUE_PEAK_GROUP_DELAY_FRAMES
                 } else {
@@ -1772,18 +1729,12 @@ impl AudioEffectRuntime {
                     minimum_gain: 1.0,
                 })
             }
-            // AU5 §3.2: the STFT gate. `latency_frames` already comes from the
-            // descriptor (§3.6), so a document that omits `lookahead_milliseconds`
-            // still builds a 512-frame window at 48 kHz rather than a degenerate one.
             "audio_denoise" => AudioEffectState::Denoise(Box::new(DenoiseState::new(
                 effect,
                 channels,
                 sample_rate,
                 latency_frames,
             ))),
-            // AU5 §3.4 rule 48: ten sections from the descriptor **maximum**, the
-            // ones past the stored `harmonic_count` carrying `IDENTITY`, so a live
-            // retune never allocates.
             "audio_hum_removal" => AudioEffectState::HumRemoval(HumState {
                 sections: (0..HUM_SECTIONS)
                     .map(|_| BiquadSection::new(channels))
@@ -1855,12 +1806,7 @@ impl AudioEffectRuntime {
             AudioEffectState::Gate(state) => &mut state.minimum_gain,
             AudioEffectState::Ducking(state) => &mut state.minimum_gain,
             AudioEffectState::TruePeakLimiter(state) => &mut state.minimum_gain,
-            // AU5 §4.4 rule 85: the denoiser's per-block minimum bin gain,
-            // published through the existing `MixPeaks.gain_reduction` slot. No
-            // new `MixerUnit`, no new telemetry field.
             AudioEffectState::Denoise(state) => &mut state.minimum_gain,
-            // Hum removal and de-click are not gain computers and get no bar,
-            // exactly as `has_gain_computer` says in core.
             AudioEffectState::Stateless
             | AudioEffectState::Eq { .. }
             | AudioEffectState::ParametricEq(_)
@@ -1871,9 +1817,6 @@ impl AudioEffectRuntime {
         Some((-20.0 * gain.max(f32::MIN_POSITIVE).log10()).max(0.0))
     }
 
-    // Descriptor bounds keep every integer conversion exactly representable at
-    // audio-control precision; keeping the ordered DSP chain together makes
-    // its execution order auditable.
     #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     fn process_frame(
         &mut self,
@@ -1882,11 +1825,6 @@ impl AudioEffectRuntime {
         project_at: TimeCode,
         sample_rate: u32,
     ) {
-        // AU2 §2.1: `bypass` skips only the node's output multiply. The delay
-        // line is still applied, so bypass never changes a chain's alignment,
-        // and every dynamics node keeps its detector, envelope, window and
-        // release state running, so un-bypassing cannot emit `Lh` frames of
-        // material the gain computer never analysed.
         let bypassed = self.bypassed(project_at);
         let parameter_epoch = self.parameter_epoch;
         match (&*self.effect.name, &mut self.state) {
@@ -1944,8 +1882,6 @@ impl AudioEffectRuntime {
                 if bypassed {
                     return;
                 }
-                // AU2 §3.2: recompute only when the project frame or the
-                // parameter epoch moves.
                 if state.cached != Some((project_at, self.parameter_epoch)) {
                     let settings = ParametricEqSettings::read(&self.effect, project_at);
                     for (section, coefficients) in state
@@ -1958,8 +1894,6 @@ impl AudioEffectRuntime {
                     state.output_gain = db_gain(settings.output_gain_tenth_db);
                     state.cached = Some((project_at, self.parameter_epoch));
                 }
-                // AU2 A26: every section runs whenever the node is active, so
-                // an automated gain crossing zero never throws away a tail.
                 for section in &mut state.sections {
                     section.process(samples);
                 }
@@ -1987,8 +1921,6 @@ impl AudioEffectRuntime {
                     }
                 };
                 let level = if detector == 1 {
-                    // AU2 §3.3: a boxcar running mean of the per-frame mean
-                    // square across channels, on the undelayed input.
                     let channels = samples.len().max(1) as f64;
                     let mean_square = samples
                         .iter()
@@ -2006,8 +1938,6 @@ impl AudioEffectRuntime {
                 let level_db = amplitude_db(level);
                 let threshold_db = threshold_tenth_db as f32 / 10.0;
                 let target = if knee_tenth_db == 0 {
-                    // AU2 §3.3/R24: the AU1 expression, verbatim, so an
-                    // existing-shaped document is bit-identical.
                     if level_db > threshold_db && ratio > 1.0 {
                         10.0_f32.powf(
                             ((threshold_db + (level_db - threshold_db) / ratio) - level_db) / 20.0,
@@ -2041,15 +1971,8 @@ impl AudioEffectRuntime {
                     project_at,
                     0,
                 ));
-                // AU2 §3.3: the detector read the undelayed input above; the
-                // signal path is delayed here, and makeup multiplies after the
-                // envelope, unsmoothed, as it always has.
                 state.delay.process(samples);
                 if bypassed {
-                    // The envelope above kept tracking, so un-bypassing lands
-                    // on a live envelope rather than a stale one; only the
-                    // multiply and the telemetry are skipped, because a
-                    // bypassed node applies no reduction.
                     return;
                 }
                 state.minimum_gain = state.minimum_gain.min(state.envelope.min(1.0));
@@ -2079,13 +2002,9 @@ impl AudioEffectRuntime {
                     state.hold_counter -= 1;
                     0.0
                 } else {
-                    // Downward expansion: `L - T` is negative below the
-                    // threshold, so this falls to the range floor and stops.
                     ((ratio - 1.0) * (level_db - threshold_db)).max(-range_db)
                 };
                 let target = 10.0_f32.powf(target_db / 20.0);
-                // AU2 §3.4: the first time argument is the falling-gain
-                // constant, and a gate's falling gain is its release.
                 smooth_gain(
                     &mut state.envelope,
                     target,
@@ -2121,8 +2040,6 @@ impl AudioEffectRuntime {
                 let sample_peak = samples
                     .iter()
                     .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-                // The history advances every frame so a hold keyframe on
-                // `true_peak` can switch detectors without a warm-up.
                 state.estimator.push(samples);
                 state.sample_peaks.push_back(sample_peak);
                 let delayed_sample_peak = if state.sample_peaks.len() > state.group_delay {
@@ -2130,13 +2047,6 @@ impl AudioEffectRuntime {
                 } else {
                     0.0
                 };
-                // AU2 §3.5: either way the estimate describes frame `i - D`.
-                // The 4x phase grid is offset by an eighth of a sample, so a
-                // lone impulse reads about 0.23 dB *under* its own sample, and
-                // an estimate below the sample peak would let the sample peak
-                // through above the ceiling. Folding the sample peak of the
-                // same frame in keeps the estimate an upper bound on both
-                // (§0 errata).
                 let estimate = if state.group_delay > 0
                     && audio_value(&self.effect, "true_peak", project_at, 1) == 1
                 {
@@ -2151,16 +2061,6 @@ impl AudioEffectRuntime {
                         * sample_rate.max(1) as f32
                         / 1_000.0;
                 let coefficient = (-1.0 / release_samples.max(1.0)).exp();
-                // AU2 A27: the identity short-circuit is structural. Without
-                // it, `c*1 + (1-c)*1` is exactly one only while `c >= 0.5`.
-                // It is two-way: `r <- c*r + (1-c)` has a rounding fixed point
-                // strictly below one — `1 - ulp/(2*(1-c))`, about 7.2e-5 at a
-                // 50 ms release and 48 kHz — so without a downward snap a
-                // limiter that has ever engaged attenuates the rest of the
-                // programme and its gain-reduction slot never returns to
-                // 0 dB. Snapping is only ever reached with `m >= 1`, which
-                // forces `required[d] == 1` for every emitted sample the
-                // boxcar covers, so the ceiling proof is untouched.
                 state.release_gain = if minimum >= 1.0 {
                     if state.release_gain >= 1.0 {
                         1.0
@@ -2182,10 +2082,6 @@ impl AudioEffectRuntime {
                 // `out[i] = x[i - Lh] * g[i]`.
                 state.delay.process(samples);
                 if bypassed {
-                    // The detector, the sliding minimum, the boxcar and the
-                    // release above all kept running, so the frames that
-                    // entered during the bypass window were analysed and
-                    // un-bypassing cannot emit `Lh` frames over the ceiling.
                     return;
                 }
                 state.minimum_gain = state.minimum_gain.min(gain.min(1.0));
@@ -2229,31 +2125,16 @@ impl AudioEffectRuntime {
                     *sample *= envelope;
                 }
             }
-            // AU5 §3.2: the STFT gate. The analysis runs **ahead** of a delay
-            // line on the signal path, so the node's total delay is exactly
-            // `latency_frames` whatever the block clock does — AU2's precedent
-            // (`CompressorState.delay`, `TruePeakLimiterState.delay`) exactly.
             ("audio_denoise", AudioEffectState::Denoise(state)) => {
-                // AU5 §2.2 rule 9: the 31 profile bands and the bin floor table
-                // are re-derived on every epoch bump, which is what makes a
-                // `Learn` audible without a re-cue.
                 if state.derived_epoch != parameter_epoch {
                     state.derive_epoch(&self.effect, sample_rate, parameter_epoch);
                 }
-                // AU5 §0 R71: the three gain-law controls are ordinary keyable
-                // parameters and are read per project frame, on the same cache
-                // `bypass` uses. Rule 41's `direct` predicate is then three
-                // reads of the same vintage: `bypass` and `reduction == 0` per
-                // frame, the all-neutral profile per epoch.
                 if state.cached != Some((project_at, parameter_epoch)) {
                     state.derive_frame(&self.effect, sample_rate, project_at, parameter_epoch);
                 }
                 let direct_now = bypassed || state.profile_neutral || state.reduction_tenth_db == 0;
                 state.step(samples, direct_now);
             }
-            // AU5 §3.4: the peaking cascade. `depth_tenth_db = 0` is a bit-exact
-            // identity — RBJ peaking at `A = 1` gives `b = a` term for term — so
-            // the neutral node is a pass-through sample for sample (rule 49).
             ("audio_hum_removal", AudioEffectState::HumRemoval(state)) => {
                 if bypassed {
                     return;
@@ -2272,10 +2153,6 @@ impl AudioEffectRuntime {
                     section.process(samples);
                 }
             }
-            // AU5 §3.5 rule 56: the detector reads the **undelayed** input and a
-            // repair writes into the delay line's buffer at the span's position.
-            // When nothing is repaired the output is the delayed input bit for
-            // bit, which is what makes `max_click_milliseconds = 0` an identity.
             ("audio_declick", AudioEffectState::Declick(state)) => {
                 let (ratio, ceiling) = match state.cached {
                     Some((at, epoch, ratio, ceiling))
@@ -2284,10 +2161,6 @@ impl AudioEffectRuntime {
                         (ratio, ceiling)
                     }
                     _ => {
-                        // AU5 §2.2 rule 11: `max_click_milliseconds` is a
-                        // threshold, not an allocation, so it is read here and
-                        // not at construction — but on the project-frame cache,
-                        // so a pre-AU5 chunk pays no extra map probe.
                         let threshold = audio_value(
                             &self.effect,
                             "detector_threshold_tenth_db",
@@ -2306,9 +2179,6 @@ impl AudioEffectRuntime {
                 let index = state.index;
                 let guard = state.guard_frames;
                 let channels = samples.len().min(state.detectors.len());
-                // The detector runs on every frame, bypassed or not, exactly as
-                // AU2 §2.1 requires of every node's analysis: bypass skips only
-                // the repair, never the delay line and never the state.
                 for (channel, sample) in samples.iter().enumerate().take(channels) {
                     let Some(span) =
                         state.detectors[channel].push(index, *sample, ratio, guard, ceiling)
@@ -2384,8 +2254,6 @@ pub(crate) fn process_buffer_static(
         runtime.process_frame(&mut frame, &silence, TimeCode::ZERO, sample_rate);
         output.extend_from_slice(&frame);
     }
-    // AU2 §3.5: the node's total signal delay is exactly `Lh` frames, so `Lh`
-    // zero frames flush the last real frame out of the delay line.
     for _ in 0..latency_frames {
         frame.fill(0.0);
         runtime.process_frame(&mut frame, &silence, TimeCode::ZERO, sample_rate);
@@ -2540,8 +2408,6 @@ impl AudioBusRuntime {
             .iter()
             .map(|effect| AudioEffectRuntime::new(effect, channels, sample_rate))
             .collect::<Vec<_>>();
-        // AU2 §3.6: non-negative because the floor function is superadditive
-        // and every node's delay uses the same truncating conversion.
         let node_frames = effects
             .iter()
             .map(|effect| effect.latency_frames)
@@ -2621,9 +2487,6 @@ pub(crate) struct AutomationStep {
 ///
 /// `origin` is the owner's time base — a clip envelope subtracts the clip's
 /// `timeline_start`, every project-frame owner passes [`TimeCode::ZERO`].
-// Rule 68: every boundary above this line is integral; `t` is the intentional
-// integer-to-float conversion and the sample counts it divides are bounded by
-// one project frame.
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn automation_step(
     curve: Option<&AutomationCurve>,
@@ -2633,8 +2496,6 @@ pub(crate) fn automation_step(
     sample_rate: u32,
     project_fps: Rational,
 ) -> AutomationStep {
-    // Rule 41.1: `frame_to_samples` returns 0 for a non-positive frame, so a
-    // negative local frame is clamped *here* and never by it.
     let local = samples_to_frame(project_sample, sample_rate, project_fps)
         .0
         .saturating_sub(origin.0);
@@ -2651,8 +2512,6 @@ pub(crate) fn automation_step(
         sample_rate,
         project_fps,
     );
-    // Rule 41.3 and 41.4: `v1` is **segment-aware**, which is what makes a
-    // `Hold` segment flat.
     let v0 = curve
         .and_then(|curve| curve.value_at(TimeCode(frame)))
         .unwrap_or(static_value);
@@ -2675,11 +2534,6 @@ pub(crate) fn automation_step(
     let declick = curve
         .and_then(|curve| curve.hold_step_at(TimeCode(frame)))
         .and_then(|step| {
-            // Both extra `min` terms are **defensive**: keys are strictly
-            // increasing, so `next_key >= at + 1` and `segment_span >=
-            // s1 - s0` always, and one project frame is 1 600 sample frames at
-            // 30 fps / 48 kHz. They are written down so the formula stays
-            // correct above 200 fps, not because either binds today.
             let segment_span = match step.next_key {
                 Some(next) => frame_to_samples(
                     TimeCode(next.0.saturating_add(origin.0)),
@@ -2860,8 +2714,6 @@ impl GainRamp {
     /// amplitude, because `update_audio_mix` retargets every fader on every mix
     /// edit and an unconditional ramp would modulate faders the editor did not
     /// touch.
-    // The comparison is an exact identity test, not a tolerance question: an
-    // unchanged target must not restart the ramp.
     fn retarget(&mut self, gain_tenth_db: i32, curve: Option<&AutomationCurve>) {
         let unchanged = self.gain_tenth_db == gain_tenth_db && self.curve.as_ref() == curve;
         self.gain_tenth_db = gain_tenth_db;
@@ -2869,18 +2721,7 @@ impl GainRamp {
         if self.curve.as_ref() != curve {
             self.curve = curve.cloned();
         }
-        // AU4 §3.1 rule 46: unconditional, exactly as `AudioEffectNode::retarget`
-        // bumps `parameter_epoch`.
         self.curve_epoch = self.curve_epoch.wrapping_add(1);
-        // AU4 §0 E24: the unchanged arm leaves the ramp **exactly as it is**
-        // rather than forcing `ramp_index = ramp_frames`. AU1's arm could force
-        // it because its condition was `target == self.current`, so settling
-        // was a no-op; under rule 59's document comparison an unchanged owner
-        // caught mid-ramp — every other track when one fader moves — would
-        // freeze at the interpolated value forever, because the settled arm of
-        // `apply` reads `current` and only `advance` ever assigns `target` to
-        // it. Leaving it alone satisfies AU1's rule as written ("an unchanged
-        // target must not **restart** the ramp") and lets the ramp finish.
         if !unchanged {
             self.ramp_start = self.current;
             self.ramp_index = 0;
@@ -2954,8 +2795,6 @@ impl GainRamp {
     /// sample index (§3.5 rule 64), and the automated arm is taken whenever a
     /// curve exists — so the two fast paths below stay bit-identical to pre-AU4
     /// for every curve-free document (A13).
-    // A settled unity gain is an exact identity: `x * 1.0 == x` in IEEE 754, so
-    // a neutral fader stays bit-identical to a pass-through.
     #[allow(clippy::float_cmp)]
     fn apply(
         &mut self,
@@ -3011,13 +2850,9 @@ impl GainRamp {
 /// exported bytes of every pre-AU2 document carrying one of those pans, which
 /// AU2 §5.10(f) and A14 forbid. Centre is the exact identity under it either
 /// way.
-// The pan position is an integer percent and the ratios are bounded by one:
-// the single cast per channel is the intentional analysis-to-mix conversion.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn pan_channel_ratios(law: PanLaw, pan_percent: i32) -> [f32; 2] {
     match law {
-        // AU1 §3.1 balance law: centre is the exact identity, and the law
-        // never boosts.
         PanLaw::Balance => {
             let pan = pan_percent as f32 / 100.0;
             [1.0 - pan.max(0.0), 1.0 + pan.min(0.0)]
@@ -3141,8 +2976,6 @@ impl TrackStageRuntime {
     /// because a law change moves the derived target without moving any
     /// per-track field; omitting it would make a live `Balance` / `ConstantPower`
     /// switch a no-op on every track.
-    // The comparison is an exact identity test, not a tolerance question: an
-    // unchanged target must not restart the ramp.
     fn retarget(&mut self, document: &Document) {
         let (audible, gain, target) = track_stage_parameters(document, self.track, self.channels);
         let mix = document.track_mix(self.track);
@@ -3161,11 +2994,7 @@ impl TrackStageRuntime {
         self.pan_law = pan_law;
         self.gain_curve = mix.gain_curve;
         self.pan_curve = mix.pan_curve;
-        // AU4 §3.1 rule 46: unconditional, exactly as `AudioEffectNode::retarget`
-        // bumps `parameter_epoch`.
         self.curve_epoch = self.curve_epoch.wrapping_add(1);
-        // AU4 §0 E24: see [`GainRamp::retarget`] — the unchanged arm leaves the
-        // ramp running rather than forcing it settled at a stale `current`.
         if !unchanged {
             self.ramp_start = self.current;
             self.ramp_index = 0;
@@ -3340,8 +3169,6 @@ impl TrackStageRuntime {
     /// `ceil(source.len() / channels)`, which equals the `sample_frames` that
     /// [`Self::skip_ramp`] applies to a silent track for both production
     /// callers; keep the two equal for any new caller (AU1 §3.4).
-    // The neutral fast path is an exact identity test: `x * 1.0 == x` in IEEE 754,
-    // so a neutral track stays bit-identical to a pass-through.
     #[allow(clippy::float_cmp)]
     fn apply(
         &mut self,
@@ -3351,15 +3178,7 @@ impl TrackStageRuntime {
         start_sample: u64,
     ) {
         let channels = self.channels.max(1);
-        // AU4 §3.3 rule 56: the automated arm, walked per source frame. The two
-        // neutral fast paths below are taken **only** when both curves are
-        // `None`, so a curve-free document stays bit-identical (A13).
         if self.automated() {
-            // AU1 §3.1 is not a fast path but an invariant: a **gated** track
-            // writes exact zeros. `sample * 0.0` is `-0.0` for a negative
-            // sample, which is a different bit pattern from `fill(0.0)`, so a
-            // silenced automated track would not be byte-identical to a
-            // silenced un-automated one (AU4 §0 E23).
             if !self.audible && self.ramp_index >= ramp_frames {
                 self.current = [0.0, 0.0];
                 destination.fill(0.0);
@@ -3386,8 +3205,6 @@ impl TrackStageRuntime {
             return;
         }
         if self.ramp_index >= ramp_frames {
-            // AU1 §3.1: a gated track writes exact zeros. A settled stage has
-            // `current == target`, and `!audible` targets `[0.0, 0.0]`.
             if !self.audible {
                 destination.fill(0.0);
                 return;
@@ -3476,8 +3293,6 @@ impl AudioMixProcessor {
             })
             .collect();
         let scratch = track_order.iter().map(|_| Vec::new()).collect();
-        // AU2 §3.6: latency is derived from the document once, here, and held
-        // constant for this processor's life. Zero for every pre-AU2 document.
         let lookahead = document.audio_mix.lookahead_milliseconds();
         let bus_stage_frames = stage_latency_frames(lookahead.bus_stage, sample_rate);
         let master_stage_frames = stage_latency_frames(lookahead.master_stage, sample_rate);
@@ -3548,24 +3363,15 @@ impl AudioMixProcessor {
         let ramp_frames = self.ramp_frames;
         let sample_rate = self.sample_rate;
         let project_fps = self.project_fps;
-        // 1. Track stages, which now also fold the document's pan law.
         for stage in &mut self.stages {
             stage.retarget(document);
         }
-        // 2. Routing, recomputed on every update.
         self.routed_tracks = document
             .audio_mix
             .buses
             .iter()
             .flat_map(|bus| bus.tracks.iter().copied())
             .collect();
-        // 3. Buses, in the new document's order. A bus that disappears takes
-        //    its runtime with it; a bus that arrives gets a fresh one.
-        //
-        //    The unrouted path's delay line is deliberately *not* cleared here,
-        //    so when a track moves onto a new bus the old path's `L_bus` tail
-        //    drains while the new chain's line fills and the join has no gap
-        //    (AU2 §5.8, seamless bus creation).
         let bus_stage_frames = self.bus_stage_frames;
         let mut existing = std::mem::take(&mut self.buses);
         self.buses = document
@@ -3588,8 +3394,6 @@ impl AudioMixProcessor {
                         runtime.retarget(bus);
                         runtime
                     }
-                    // 5. The fader is continuous across a chain rebuild: only
-                    //    the chain's own state resets.
                     Some((index, false)) => {
                         let gain = existing.remove(index).gain;
                         let mut runtime = AudioBusRuntime::new(
@@ -3617,7 +3421,6 @@ impl AudioMixProcessor {
                 }
             })
             .collect();
-        // 4. The master chain, by the same rule.
         if chain_structure_matches(&self.master.effects, &document.audio_mix.master.effects) {
             self.master.retarget(&document.audio_mix.master);
         } else {
@@ -3675,22 +3478,15 @@ impl AudioMixProcessor {
         let channels = self.channels.max(1);
         let ramp_frames = self.ramp_frames;
 
-        // Track stage (AU1 §3.1), in document order. Routing, bus, and
-        // sidechain sums read `staged` below, never `track_buffers`.
         for index in 0..self.track_order.len() {
             let track = self.track_order[index];
             let Some(samples) = track_buffers.get(&track) else {
-                // AU1 §3.4: the ramp runs on output frames, so it keeps running
-                // while this track is silent.
                 self.stages[index].skip_ramp(start_sample, sample_frames, ramp_frames);
                 if collect_stems {
                     let staged = &mut self.staged[index];
                     staged.clear();
                     staged.resize(sample_count, 0.0);
                 }
-                // AU1 §4.1 is overwrite semantics: a track that contributes
-                // nothing this chunk reads zero, so its meter falls when its
-                // last clip ends. Recording an empty slice allocates nothing.
                 if let Some(meters) = &self.meters {
                     meters.record_track(track, &[], channels);
                 }
@@ -3700,8 +3496,6 @@ impl AudioMixProcessor {
             {
                 let stage = &mut self.stages[index];
                 let staged = &mut self.staged[index];
-                // `apply` writes every sample of `staged[..length]` exactly once
-                // (AU1 §3.1), so only the tail past the source needs zeroing.
                 staged.resize(sample_count, 0.0);
                 stage.apply(
                     &samples[..length],
@@ -3716,9 +3510,6 @@ impl AudioMixProcessor {
             }
         }
 
-        // AU2 §3.1/§3.6: the unrouted path is a plain delay to `L_bus`, so an
-        // unrouted track stays aligned with every bus. The line is a no-op when
-        // no chain declares lookahead, which is every pre-AU2 document.
         let mut master = vec![0.0_f32; sample_count];
         for (index, track) in self.track_order.iter().enumerate() {
             if !self.routed_tracks.contains(track) && track_buffers.contains_key(track) {
@@ -3762,17 +3553,9 @@ impl AudioMixProcessor {
                     );
                 }
             }
-            // AU2 §5.6: the bus fader sits after the chain and before the pad,
-            // so the bus stem, the bus meter, and the master sum all read the
-            // faded signal. Settled at unity it is an exact pass-through.
             bus.gain
                 .apply(&mut signal, channels, ramp_frames, start_sample);
-            // AU2 §3.6: the alignment pad brings this chain up to `L_bus`, so
-            // the bus stem, the bus meter, and the master sum all see the same
-            // stage latency whatever the chain's own split.
             bus.pad.process_buffer(&mut signal, channels);
-            // AU2 §3.8: once per chunk with overwrite semantics, and never
-            // during seek preroll, where `meters` is `None`.
             for effect in &mut bus.effects {
                 if let Some(reduction) = effect.take_gain_reduction()
                     && let Some(meters) = &self.meters
@@ -3793,9 +3576,6 @@ impl AudioMixProcessor {
             }
         }
 
-        // AU2 §5.6: master sum -> master gain -> master effects in order ->
-        // alignment pad to `L_master`. The callers' +/-1.0 clamp and the master
-        // meter stay exactly where they were, after this.
         {
             let sample_rate = self.sample_rate;
             let project_fps = self.project_fps;
@@ -3805,8 +3585,6 @@ impl AudioMixProcessor {
                 .gain
                 .apply(&mut master, channels, ramp_frames, start_sample);
             if !runtime.effects.is_empty() {
-                // The master carries no sidechain, so `audio_ducking` is
-                // rejected on it (AU2 §5.4) and the tap reads exact zeros.
                 runtime.silence.clear();
                 runtime.silence.resize(frame_channels.max(1), 0.0);
                 for frame in 0..sample_frames {
@@ -3828,8 +3606,6 @@ impl AudioMixProcessor {
                 }
             }
             runtime.pad.process_buffer(&mut master, channels);
-            // AU2 §3.8: `AudioChain::Master` slots, once per chunk with
-            // overwrite semantics and never during seek preroll.
             for effect in &mut runtime.effects {
                 if let Some(reduction) = effect.take_gain_reduction()
                     && let Some(meters) = &self.meters
@@ -4081,18 +3857,12 @@ impl AudioMixer {
             });
         }
         let target_sample = frame_to_samples(project_from, output_rate, document.fps);
-        // AU2 §3.7: the processor holds `latency` sample frames of the mix, so
-        // the mixer runs `latency` frames past the programme end to flush them
-        // and discards `latency` frames past the seek target to fill them. Both
-        // are zero for every pre-AU2 document, which is the point.
         let latency = u64::try_from(graph_latency_frames(
             &document.audio_mix.lookahead_milliseconds(),
             output_rate,
         ))
         .unwrap_or(0);
         let mut mixer = Self {
-            // AU1 §4.1: the peak table is attached after preroll, exactly as
-            // the master meter below is, so preroll chunks are not metered.
             processor: AudioMixProcessor::new(
                 document,
                 output_rate,
@@ -4109,8 +3879,6 @@ impl AudioMixer {
             decode_from,
             output_rate,
         };
-        // AU2 §3.7: unconditional, including a seek to zero, where the loop
-        // body only executes at all once a chain declares lookahead.
         let discard_to = target_sample.saturating_add(latency);
         while mixer.cursor_sample < discard_to {
             let remaining = discard_to - mixer.cursor_sample;
@@ -4184,9 +3952,6 @@ impl AudioMixer {
             let Some(asset) = document.asset(segment.asset) else {
                 return false;
             };
-            // Defence in depth: rule 74 keeps a relink off the live path, and
-            // the worker does not verify the app's predicate, so the layout
-            // check compares the decoded file itself rather than trusting it.
             if asset.path != source.path {
                 return false;
             }
@@ -4389,8 +4154,6 @@ impl AudioRuntime {
             .saturating_mul(LIVE_FILL_MILLISECONDS)
             .saturating_div(1_000)
             .max(1);
-        // AU3 §3.9: the initial fill is the worker's, through `fill(meter)`,
-        // once it has matched its live meter to this stream's rate and layout.
         Ok(Self {
             stream,
             producer,
@@ -5141,8 +4904,6 @@ mod tests {
                 .any(|sample| sample.abs() >= 1.0 - f32::EPSILON),
             "fixture did not exercise the hard-clamp limiter"
         );
-        // Stateful EQ is allowed to ring briefly after the cut at frame 14;
-        // the second half of the gap must settle below -80 dBFS.
         let silence = interleaved_sample_range(15..16, fps, 48_000, 2);
         let silence_peak = exported[silence]
             .iter()
@@ -5258,8 +5019,6 @@ mod tests {
             duration: TimeCode(2),
         }
     }
-
-    // ---------------------------------------------------------------- AU1 §7
 
     fn track_mix(
         track: u64,
@@ -5486,8 +5245,6 @@ mod tests {
             (TrackId(2), [-1.0_f32; 4]),
             (TrackId(3), [1.0e-8_f32; 4]),
         ];
-        // The fixture is only worth anything if the magnitudes really are
-        // order-sensitive in f32.
         assert_ne!(
             (1.0_f32 + 1.0e-8) + -1.0,
             (1.0_f32 + -1.0) + 1.0e-8,
@@ -5605,8 +5362,6 @@ mod tests {
             "the ramp settled during the gap, so the whole clip is muted"
         );
 
-        // A gap shorter than the ramp advances it partway, continuously with
-        // `advance_ramp`: frame 100 of the gap plus frame 0 of the clip is 101.
         let mut partial = AudioMixProcessor::new(&document, 48_000, 1, None);
         partial.update_audio_mix(&muted);
         partial.mix_chunk(&HashMap::new(), 0, 100).unwrap();
@@ -5642,8 +5397,6 @@ mod tests {
         let rising = processor
             .mix_chunk(&HashMap::from([(TrackId(1), vec![1.0_f32; 512])]), 100, 512)
             .unwrap();
-        // Frame 0 continues from the interpolated value, it does not jump to
-        // unity and it does not restart from zero.
         assert_close(rising[0], start + (1.0 - start) * (1.0 / 240.0));
         assert!(
             rising[0] > start && rising[0] < 1.0,
@@ -6168,8 +5921,6 @@ mod tests {
             },
         )
         .unwrap();
-        // The late sine starts at frame 15, so it is absent before frame 10 and
-        // present in 10..20.
         assert_eq!(early.tracks[1].levels.integrated_lufs_hundredths, None);
         assert!(window.tracks[1].levels.integrated_lufs_hundredths.is_some());
         assert_eq!(
@@ -6258,10 +6009,6 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
-    // AU2 Part A (§3.9, A3, A5-A17, A19)
-    // ---------------------------------------------------------------------
-
     /// One bus carrying `effects`, fed by track 1 with track 2 as its sidechain.
     fn chain_bus(effects: Vec<Effect>) -> AudioBus {
         AudioBus {
@@ -6330,8 +6077,6 @@ mod tests {
     /// differ from the input's.
     #[test]
     fn au3_process_buffer_static_preserves_length_and_alignment() {
-        // AU2 §3.5: the node's total delay is exactly `Lh`, which is 240
-        // frames for the export step's 5 ms lookahead at 48 kHz.
         assert_eq!(stage_latency_frames(5, 48_000), 240);
         let limiter = audio_effect(
             1,
@@ -6343,10 +6088,6 @@ mod tests {
                 ("true_peak", 1),
             ],
         );
-        // A 997 Hz tone at 0.5 with a 0.5 impulse on the very first frame:
-        // every sample is under the node's `10^(-30/200) = 0.708` ceiling, so
-        // the limiter is an identity, and the impulse's position is what a
-        // wrong `Lh` drop would move.
         let mut input = Vec::new();
         for sample in tone(997.0, 0.5, 48_000, 48_000) {
             input.push(sample);
@@ -6357,10 +6098,6 @@ mod tests {
         let output = process_buffer_static(&limiter, 48_000, 2, &input)
             .expect("an aligned buffer must run through a static node");
         assert_eq!(output.len(), input.len());
-        // The alignment claim, asserted independently of the identity below:
-        // the tone's own frame 0 is `sin(0) = 0`, so only the impulse can put
-        // 0.5 on the first frame. A buffer still carrying its `Lh` frames of
-        // latency would read the node's silent lookahead priming here.
         assert!(
             (output[0] - 0.5).abs() < f32::EPSILON && (output[1] - 0.5).abs() < f32::EPSILON,
             "the first `Lh` = 240 output frames must have been dropped, leaving the impulse on \
@@ -6521,8 +6258,6 @@ mod tests {
             0.01,
         );
 
-        // Shelves with S = 1 give A = 10^(G/40) at f0 — exactly half the dB
-        // gain — and the full gain at DC or Nyquist.
         let low_shelf = || {
             parametric_eq(
                 2,
@@ -6546,8 +6281,6 @@ mod tests {
         assert_response(high_shelf(), 4_000.0, -4.00, 0.02);
         assert_response(high_shelf(), 20.0, 0.00, 0.02);
 
-        // High-pass: H(e^{jw0}) = jQ exactly for every fc and every rate, so
-        // the corner pin is frequency-independent.
         for corner in [100_u32, 1_000, 8_000] {
             assert_response(
                 parametric_eq(4, &[("high_pass_hertz", i64::from(corner))]),
@@ -6556,9 +6289,6 @@ mod tests {
                 0.01,
             );
         }
-        // The half-corner figure is not frequency-independent: the warped
-        // closed form is r = tan(PI*f/fs)/tan(PI*fc/fs), |H| = r^2/sqrt(1+r^4),
-        // which is -12.322 dB at fc = 1 kHz and -13.53 dB at fc = 8 kHz.
         assert_response(
             parametric_eq(5, &[("high_pass_hertz", 1_000)]),
             500.0,
@@ -6566,8 +6296,6 @@ mod tests {
             0.05,
         );
 
-        // AU2 §6.7: the exported analytic helper the Mixer's EQ well samples
-        // reads the same figures from the same coefficient code.
         for (effect, frequency, expected) in [
             (
                 parametric_eq(
@@ -6700,9 +6428,6 @@ mod tests {
                     ("true_peak", 1),
                 ],
             ),
-            // AU5 §2.1: a learned profile at -10 dB in every band with the full
-            // 40 dB reduction, so the node is off the `direct` branch and the
-            // gate really runs.
             ("audio_denoise", {
                 let mut parameters = vec![
                     ("reduction_tenth_db", 400),
@@ -6863,8 +6588,6 @@ mod tests {
     #[allow(clippy::float_cmp)]
     fn rms_detection_and_the_gate_follow_their_contracts() {
         let rate = 48_000_u32;
-        // A 5 ms burst inside 100 ms of silence: the peak detector sees full
-        // scale, the 10 ms RMS window at most sqrt(240/480) of it.
         let mut burst = vec![0.0_f32; 4_800];
         for sample in &mut burst[2_000..2_240] {
             *sample = 1.0;
@@ -6889,8 +6612,6 @@ mod tests {
             "peak detection ({peak_mode}) must reduce more than RMS ({rms_mode})"
         );
 
-        // The gate's range floor: -60 dBFS at T = -30, R = 4:1 wants -90 dB of
-        // expansion and stops at the -24 dB floor.
         let quiet = vec![0.001_f32; 48_000];
         let gate = |ratio: i64, range: i64| {
             audio_effect(
@@ -6918,9 +6639,6 @@ mod tests {
         assert_eq!(run_effect(gate(100, 240), rate, &quiet), quiet);
         assert_eq!(run_effect(gate(400, 0), rate, &quiet), quiet);
 
-        // The hold count is exact: 10 ms at 48 kHz is 480 sample frames, so a
-        // single loud frame keeps the gate open through frame 480 and no
-        // further.
         let mut held = vec![0.001_f32; 4_800];
         held[0] = 1.0;
         let output = run_effect(
@@ -6996,8 +6714,6 @@ mod tests {
     fn the_true_peak_limiter_holds_its_ceiling_on_synthetic_material() {
         let rate = 48_000_u32;
         let ceiling = 10.0_f32.powf(-1.0 / 20.0);
-        // OPEN-4: this contract's Blackman windowed-sinc reads within about
-        // 0.3 dB of a 16x reference, so the reference is allowed that much.
         let detector_headroom = 10.0_f32.powf(0.3 / 20.0);
         let limiter = |id: u64, lookahead: i64, true_peak: i64, release: i64, ceiling: i64| {
             audio_effect(
@@ -7030,9 +6746,6 @@ mod tests {
             }
         }
 
-        // Broadband material, which is where the 4x Blackman windowed-sinc
-        // under-reads hardest: a tone sits far inside OPEN-4's +0.3 dB budget,
-        // noise does not.
         let broadband = pseudo_random_amplitude(9_600, 1.8);
         let limited_noise = run_effect(limiter(1, 5, 1, 50, -10), rate, &broadband);
         assert!(
@@ -7051,9 +6764,6 @@ mod tests {
             "broadband material read {overshoot_db} dB over the ceiling at 16x"
         );
 
-        // An isolated full-scale impulse with Lh at its minimum for the rate:
-        // the case the detector's group delay would break if D were not
-        // indexed out of the window.
         let mut impulse = vec![0.0_f32; 4_800];
         impulse[1_000] = 1.0;
         let squashed = run_effect(limiter(1, 1, 1, 50, -10), rate, &impulse);
@@ -7068,10 +6778,6 @@ mod tests {
             reference_true_peak(&squashed, 1)
         );
 
-        // An under-ceiling signal is bit-exact after the Lh-frame delay, at
-        // 48 kHz and at rate 1 000 with a 1 ms release, where the release
-        // coefficient drops below 0.5 and only A27's short-circuit saves the
-        // identity.
         let quiet = tone(997.0, 0.4, rate, 4_800);
         let document = chain_document(vec![limiter(1, 5, 1, 50, 0)]);
         let delay = latency_offset(&document, rate);
@@ -7109,9 +6815,6 @@ mod tests {
             "the release reached 1-1/e after {crossing} frames rather than 2 400"
         );
 
-        // The fs/4 pin, on the estimator itself: a 12 kHz sine at 48 kHz
-        // sampled at 45 degrees has a sample peak of -3.010 dBFS and a true
-        // peak of 0 dBFS.
         #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
         let inter_sample = (0..512)
             .map(|frame| {
@@ -7666,9 +7369,6 @@ mod tests {
             );
         }
 
-        // `open` at frame 0, frame 5, and the last frame: the cursor lands
-        // where AU1 says and output frame k still carries project frame
-        // target + k.
         for target in [TimeCode::ZERO, TimeCode(5), TimeCode(19)] {
             let seek_sample = usize::try_from(frame_to_samples(target, 48_000, fps)).unwrap() * 2;
             let mut mixer = AudioMixer::open(&document, target, 48_000, 2, None).unwrap();
@@ -7773,8 +7473,6 @@ mod tests {
             reference_true_peak(after, 1)
         );
 
-        // The impulse case: full-scale impulses that enter *during* the bypass
-        // window and are emitted after the flip.
         let mut impulses = vec![0.0_f32; 48_000];
         impulses[flip_frame - 200] = 1.0;
         impulses[flip_frame - 100] = 1.0;
@@ -7870,8 +7568,6 @@ mod tests {
                 "the limiter must engage at {rate} Hz, read {engaged} dB"
             );
 
-            // One chunk for the release to elapse in, then one settled chunk
-            // whose reported minimum must be exactly unity.
             let mut cursor = u64::try_from(loud_frames).unwrap();
             for frames in [quiet_frames, quiet_frames / 4] {
                 processor
@@ -7978,8 +7674,6 @@ mod tests {
         assert_eq!(covering(end + 4_801), 12);
     }
 
-    // ---- AU2 Part B -------------------------------------------------------
-
     /// One clipless bus routing track 1, with the given chain.
     fn part_b_bus(id: u64, tracks: Vec<u64>, effects: Vec<Effect>) -> AudioBus {
         AudioBus {
@@ -8058,22 +7752,15 @@ mod tests {
         assert!(document.audio_mix.buses.is_empty());
         assert!(needs_seek_preroll(&document, TimeCode(5)));
         assert!(!needs_seek_preroll(&document, TimeCode::ZERO));
-        // `decode_from == TimeCode::ZERO`: the sources are built from frame 0,
-        // not from the seek target, and the discard loop then runs the mix
-        // forward to it.
         let mixer = AudioMixer::open(&document, TimeCode(5), 48_000, 2, None).unwrap();
         assert_eq!(mixer.sources.len(), 1);
         assert_eq!(mixer.sources[0].project_sample_start, 0);
-        // AU2 §3.7: the discard loop runs `L` frames past the target, so output
-        // frame `k` still carries project frame `target + k`.
         assert_eq!(latency_offset(&document, 48_000), 240);
         assert_eq!(
             mixer.cursor_sample,
             frame_to_samples(TimeCode(5), 48_000, fps) + 240
         );
 
-        // The AU1 predicate is untouched for a master that carries only a
-        // fader: a fader has no state to warm.
         let mut faded = document.clone();
         faded.audio_mix.master.effects.clear();
         faded.audio_mix.master.gain_tenth_db = -60;
@@ -8116,8 +7803,6 @@ mod tests {
             (centre_db + 3.0103).abs() <= 0.001,
             "constant-power centre is {centre_db} dB"
         );
-        // `Balance` is bit-identical to AU1's own expression at every integer
-        // position (AU2 §0 E42: 82 of the 201 round differently in f64).
         for pan in TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX {
             #[allow(clippy::cast_precision_loss)]
             let au1 = pan as f32 / 100.0;
@@ -8128,8 +7813,6 @@ mod tests {
             );
         }
 
-        // AU1's channel rules, under both laws: a one-channel device applies no
-        // pan, and channels beyond the first two take the unpanned gain.
         for law in [PanLaw::Balance, PanLaw::ConstantPower] {
             let mut document = mix_document(vec![track_mix(1, 30, -100, false, false)], Vec::new());
             document.audio_mix.pan_law = law;
@@ -8177,8 +7860,6 @@ mod tests {
             }),
         ] {
             let mut processor = AudioMixProcessor::new(&document, 48_000, 1, None);
-            // A freshly built processor is settled, so export and a newly
-            // opened playback mixer never ramp.
             assert!(processor.buses[0].gain.is_settled(ramp_frames));
             assert!(processor.master.gain.is_settled(ramp_frames));
             let settled = part_b_chunk(&mut processor, 1, &ones, ones.len(), 0);
@@ -8216,8 +7897,6 @@ mod tests {
             assert!(held.iter().all(|sample| *sample == target));
         }
 
-        // Export builds a fresh processor per pass and never calls
-        // `update_audio_mix`, so a stored fader is applied from sample zero.
         let mut geared = document.clone();
         geared.audio_mix.buses[0].gain_tenth_db = -60;
         geared.audio_mix.master.gain_tenth_db = 60;
@@ -8356,8 +8035,6 @@ mod tests {
                 master_stage: 5,
             }
         );
-        // AU2 §3.6: the sum of the two truncations, never a truncation of the
-        // sum.
         assert_eq!(latency_offset(&document, 48_000), 480 + 240);
         let exported = crate::export::mix_audio(&document, &settings).unwrap();
         assert_eq!(
@@ -8371,8 +8048,6 @@ mod tests {
     /// AU2 §7 item B11 / A13: a parameter-only edit keeps every filter memory
     /// and is audible on the **next sample frame**, not at the next
     /// project-frame boundary — 100 ms away at this fixture's 10 fps.
-    // The scaling identity is exact: the chain's output gain is the last
-    // multiply, so the two runs differ by exactly one factor.
     #[allow(clippy::float_cmp)]
     #[test]
     fn a_parameter_retarget_preserves_chain_state_and_is_audible_next_sample_frame() {
@@ -8384,8 +8059,6 @@ mod tests {
         );
         let mut updated = document.clone();
         updated.audio_mix.buses[0].effects = vec![part_b_eq(10, -60)];
-        // Both chunks sit inside project frame 0, which spans 4 800 sample
-        // frames at 10 fps.
         let first = tone(440.0, 0.5, 48_000, 480);
         let second = tone(1_000.0, 0.5, 48_000, 480);
 
@@ -8550,8 +8223,6 @@ mod tests {
     #[test]
     fn creating_a_bus_mid_play_drains_the_unrouted_path_without_a_gap() {
         let fps = Rational::new(10, 1).unwrap();
-        // Bus 1 declares 10 ms, so `L_bus` is 480 sample frames at 48 kHz and
-        // the unrouted path track 1 sits on is padded to match.
         let document = processor_document(
             fps,
             30,
@@ -8632,8 +8303,6 @@ mod tests {
             &document,
             Arc::clone(&master_meter),
         ));
-        // AU2 §3.8/§5.6: one slot per node with a gain computer, buses in
-        // document order and then the master chain.
         assert_eq!(
             installed
                 .peaks()
@@ -8701,8 +8370,6 @@ mod tests {
     fn mix_spectrum_measures_every_mix_point_through_the_real_mix_path() {
         crate::initialize_ffmpeg().unwrap();
         let fps = Rational::new(10, 1).unwrap();
-        // Two seconds of a full-scale 1 kHz sine, written by hand so the
-        // amplitude survives exactly.
         #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
         let samples = (0..96_000_usize)
             .flat_map(|frame| {
@@ -8771,8 +8438,6 @@ mod tests {
             );
         }
 
-        // AU2 §5.9/A23: 400 ms is four project frames, 19 200 sample frames,
-        // short of the 24 576 two segments need.
         let rejected = crate::export::measure_mix_spectrum(
             &document,
             &kinewright_core::MixSpectrumRequest {
@@ -8792,8 +8457,6 @@ mod tests {
             "the rejection must be typed, not a formatted string: {rejected}"
         );
     }
-
-    // ---- AU3 Part A -------------------------------------------------------
 
     use crate::{
         engine::{LiveLoudness, WorkerLoudness},
@@ -9079,8 +8742,6 @@ mod tests {
                 required: 19_200,
             }
         );
-        // Exactly one block (12 frames at 30 fps) is not refused: it decodes,
-        // and the decode is what fails.
         let error = crate::export::measure_audio_qc(
             &at_30,
             &AudioQcRequest {
@@ -9215,19 +8876,12 @@ mod tests {
         document.validate().unwrap();
         let mut transport = SimulatedTransport::new(document);
         transport.play(TimeCode::ZERO);
-        // The fill ran a second ahead — 47 whole chunks queued plus the one
-        // `fill_ring` holds pending, all metered; nothing has been heard.
         assert_eq!(
             transport.fed_position(),
             (48_000_u64.div_ceil(1_024) + 1) * 1_024
         );
         assert_eq!(transport.published(), LoudnessSnapshot::default());
 
-        // The fill leads the loudspeaker by the 1 s target plus at most two
-        // 1 024-frame chunks (one over-fill, one pending), and the published
-        // key is a block end up to one sub-block behind the heard position:
-        // the head-to-published lag is therefore under 48 000 + 2 048 + 4 800
-        // frames — eleven whole sub-blocks, well inside the 16-entry ring.
         let lag_bound = 48_000 + 2 * 1_024 + 4_800;
         let mut worst_lag = 0_u64;
         let mut heard = 0_u64;
@@ -9373,8 +9027,6 @@ mod tests {
         }
         assert_eq!(paused.published().programme_seconds, 1);
 
-        // `Playback::reset_loudness` while playing: the origin is the fed
-        // position, so nothing is published until the sound reaches it.
         let fed = paused.fed_position();
         paused.loudness.reset(Some(fed), fps);
         assert_eq!(paused.published(), LoudnessSnapshot::default());
@@ -9428,19 +9080,11 @@ mod tests {
             latency,
             "the mixer reports the graph latency it prerolled"
         );
-        // The mixer prerolled `latency` frames past the seek target, so the
-        // first frame *out* — and the first frame metered — is project sample
-        // zero, exactly where the clock starts.
         assert_eq!(transport.fed_position() + latency, transport.input_cursor());
 
         for _ in 0..250 {
             transport.advance(480);
         }
-        // The expected origin is derived from the input cursor so the final
-        // assertion measures the published key against the audio, not
-        // against `fed_position()` itself; that the graph really trails its
-        // input cursor by `latency` is pinned against an impulse by
-        // `a_lookahead_chain_delays_an_impulse_by_exactly_the_graph_latency`.
         let fed_output = transport.input_cursor() - latency;
         let fed = transport.fed_position();
         assert!(fed > transport.heard, "the fill leads the loudspeaker");
@@ -9449,8 +9093,6 @@ mod tests {
         assert_eq!(transport.published(), LoudnessSnapshot::default());
         assert_eq!(transport.loudness.published_key(), None);
 
-        // A loudspeaker step well under the 480-frame graph latency, so the
-        // quantisation of `heard` cannot hide it.
         let step = 160_u64;
         let mut steps = 0_u64;
         while transport.loudness.published_key().is_none() && steps < 1_000 {
@@ -9591,8 +9233,6 @@ mod tests {
             .channel_balance_lu_hundredths
             .expect("both sides carry energy");
         assert!((balance - 600).abs() <= 5, "Δ read {balance}");
-        // Six LU is outside core's ±300 band, so the Warning is raised with
-        // the measured ratio as its observed value.
         assert_eq!(exception_codes(&report), ["audio_channel_imbalance"]);
         assert_eq!(report.exceptions[0].severity, QaSeverity::Warning);
         assert_eq!(
@@ -9781,8 +9421,6 @@ mod tests {
         assert_eq!(chunked.master, whole.master);
         assert_eq!(chunked.clipping, whole.clipping);
         assert_eq!(chunked.exceptions, whole.exceptions);
-        // Clipping runs also carry across chunk boundaries: a full-scale run
-        // of three samples split 2 + 1 across two callbacks is one run.
         let mut split = QcObserver::new().unwrap();
         let mut first = vec![0.0_f32; 48_000 * 2];
         first[48_000 * 2 - 4] = 1.0;
@@ -9798,10 +9436,6 @@ mod tests {
         assert_eq!(split.clipping.left.clipped_runs, 1);
         assert_eq!(split.clipping.right.clipped_runs, 0);
     }
-
-    // ---------------------------------------------------------------------
-    // AU4 §3 Part A media
-    // ---------------------------------------------------------------------
 
     fn au4_curve(points: &[(i64, i64)], interpolation: KeyframeInterpolation) -> AutomationCurve {
         AutomationCurve {
@@ -9870,8 +9504,6 @@ mod tests {
         assert_eq!(last.t, 1_599.0 / 1_600.0);
         assert!(last.t < 1.0);
 
-        // Rule 41.1: a negative local frame is clamped **before**
-        // `frame_to_samples`, which would return 0 for it.
         let local = automation_step(Some(&curve), 0, TimeCode(10), 0, rate, fps);
         assert_eq!(local.t, 0.0);
         assert_eq!(local.v0, curve.value_at(TimeCode::ZERO).unwrap());
@@ -9882,8 +9514,6 @@ mod tests {
         let degenerate = automation_step(Some(&curve), 0, TimeCode::ZERO, 5, rate, dense);
         assert_eq!(degenerate.t, 0.0);
 
-        // No curve: both anchors are the scalar and nothing declicks, so the
-        // weight is computed but multiplies a zero difference.
         let none = automation_step(None, -123, TimeCode::ZERO, 5 * 1_600 + 400, rate, fps);
         assert_eq!(
             (none.v0, none.v1, none.t, none.declick),
@@ -9960,9 +9590,6 @@ mod tests {
             previous = current;
         }
 
-        // Rule 30/45: the `w >= 1.0` arm returns `target` **exactly**, so the
-        // last declick sample is `to_bits()`-identical to the first undeclicked
-        // one and there is no seam to bound.
         let reached = boundary + 239;
         let exact = boundary + 240;
         let last_declick = automation_step(Some(&curve), 0, TimeCode::ZERO, reached, rate, fps);
@@ -10000,8 +9627,6 @@ mod tests {
         );
         assert_eq!(pan_channel_ratios(PanLaw::Balance, 0), [1.0, 1.0]);
 
-        // `a + (a - a) * t == a` bit-exactly for every finite `t`, under both
-        // laws, which is the property that makes a constant curve cost nothing.
         for anchor in [-600_i64, -237, -1, 0, 37, 120] {
             let amplitude = db_gain(anchor);
             for step_index in 0..=1_000_u32 {
@@ -10026,8 +9651,6 @@ mod tests {
             }
         }
 
-        // Rule 43: at every project frame's first sample `t == 0.0`, so the
-        // automated arm equals `db_gain(value_at(f))` bit-exactly.
         let curve = au4_curve(&[(0, -300), (20, 120)], KeyframeInterpolation::EaseInOut);
         for frame in 0..25_i64 {
             let sample = frame_to_samples(TimeCode(frame), rate, fps);
@@ -10040,8 +9663,6 @@ mod tests {
             );
         }
 
-        // Rule 43: `track_stage_parameters` returns `[gain * pan[0], gain *
-        // pan[1]]`, so the automated arm composes in that order.
         let document = {
             let mut document = processor_document(fps, 30, Vec::new());
             document.audio_mix.pan_law = PanLaw::ConstantPower;
@@ -10059,10 +9680,6 @@ mod tests {
         let pan = pan_channel_ratios(PanLaw::ConstantPower, 41);
         assert_eq!(automated[0].to_bits(), (gain * pan[0]).to_bits());
         assert_eq!(automated[1].to_bits(), (gain * pan[1]).to_bits());
-        // Multiplication is commutative in IEEE 754 but **not associative**,
-        // which is why rule 43 forbids a fused three-way product: the stage
-        // multiplies the sample by the *folded* `gain * pan[ch]`, never by
-        // `gain` and then `pan[ch]`.
         let sample = 0.1_f32;
         assert_ne!(
             (sample * (gain * pan[0])).to_bits(),
@@ -10110,8 +9727,6 @@ mod tests {
                     };
                     let shipped = automated_pan(&step, anchors, PanLaw::ConstantPower);
                     for channel in 0..2 {
-                        // The chord rule 48 bounds: `a + (b - a) * t` over the
-                        // two exact arc endpoints.
                         let chord = exact_anchors[0][channel]
                             + (exact_anchors[1][channel] - exact_anchors[0][channel]) * t;
                         measured = measured.max((chord - exact[channel]).abs());
@@ -10214,9 +9829,6 @@ mod tests {
     /// and a master fader curve.
     fn parity_document_with_automation(voice: &Path, bed: &Path, fps: Rational) -> Document {
         let mut document = parity_document_with_track_mix(voice, bed, fps);
-        // The clip envelope is keyed **clip-local**; clip 4 runs 10 frames from
-        // `timeline_start` 20 and already carries `audio_gain_tenth_db = -60`,
-        // which rule 52 says the curve replaces.
         document.tracks[2].clips[0].audio_gain_curve = Some(au4_curve(
             &[(0, -240), (5, 0), (9, -180)],
             KeyframeInterpolation::Linear,
@@ -10355,10 +9967,6 @@ mod tests {
         let exported = crate::export::mix_audio(&document, &settings).unwrap();
         assert_playback_matches_export(&document, &exported, fps);
 
-        // Rule 67: `mix_pass` always starts its chunk loop at project sample 0
-        // and trims the head afterwards, so a windowed pass keys every
-        // automated owner at the true project frame. Compared bit for bit
-        // against the same window of the full-range mix.
         let window = TimeCode(10)..TimeCode(20);
         let windowed = mix_pass(
             &document,
@@ -10445,8 +10053,6 @@ mod tests {
             fps,
         ));
 
-        // The fast paths still fire: a curve-free stage and a curve-free fader
-        // never take the automated arm.
         let processor = AudioMixProcessor::new(&document, 48_000, 2, None);
         assert!(processor.stages.iter().all(|stage| !stage.automated()));
         assert!(processor.buses.iter().all(|bus| bus.gain.curve.is_none()));
@@ -10462,10 +10068,6 @@ mod tests {
             crate::sha256::sha256_bytes(&bytes)
         );
 
-        // Rule 42's lerp form is what makes this exact: `a + (a - a) * t == a`
-        // bit-exactly for every finite `t`, so replacing every scalar with a
-        // one-key constant curve changes no byte of the export — the automated
-        // arm and the scalar arm agree everywhere.
         let constant = au4_constant_curves(&document);
         constant.validate().unwrap();
         let automated = crate::export::mix_audio(&constant, &settings).unwrap();
@@ -10480,8 +10082,6 @@ mod tests {
             "a constant curve must cost nothing: {differing} samples differ"
         );
 
-        // Rule 51: with no curve the envelope factor is skipped entirely and
-        // `gain_at` is the pre-AU4 product exactly.
         let clip = &document.tracks[2].clips[0];
         let shaping = ClipAudioShaping::new(clip, TimeCode(10), 48_000, fps);
         assert!(shaping.curve.is_none());
@@ -10593,9 +10193,6 @@ mod tests {
                     id,
                     "audio_compressor",
                     &[
-                        // Ratio 1:1 with the threshold at full scale: a pure
-                        // delay, so the probe measures the fader's placement
-                        // and nothing else.
                         ("threshold_tenth_db", 0),
                         ("ratio_hundredths", 100),
                         ("lookahead_milliseconds", declared),
@@ -10628,8 +10225,6 @@ mod tests {
 
             let mut cases: Vec<(&str, Vec<f32>, Document, u64)> = Vec::new();
 
-            // The clip envelope is applied to the raw input chunk **before**
-            // any chain, in both mix paths, so it is probed exactly there.
             let mut clip = audio_clip(1, 1, 0..20, 0);
             clip.audio_gain_curve = Some(step());
             let shaping = ClipAudioShaping::new(&clip, TimeCode(20), rate, fps);
@@ -10677,9 +10272,6 @@ mod tests {
             for (owner, input, document, expected) in cases {
                 let probe = au4_master_at_final_position(&document, rate, &input, frames);
                 let first = au4_first_difference(&reference, &probe, channels);
-                // A curve that became audible *late* must fail loudly here, not
-                // saturate to an offset of 0 that the three zero-offset owners
-                // would accept (review-pass2-media-a F1).
                 assert!(
                     first <= boundary,
                     "{owner} at {declared} ms: the step keyed at sample {boundary} \
@@ -10744,8 +10336,6 @@ mod tests {
             automated_gain(&expected, (db_gain(expected.v0), db_gain(expected.v1))).to_bits()
         );
 
-        // Rule 59: an unchanged document tuple must not **restart** the ramp,
-        // and (AU4 §0 E24) must not cut it short either.
         let running = stage.ramp_index;
         stage.retarget(&edited);
         assert_eq!(
@@ -10840,8 +10430,6 @@ mod tests {
             .unwrap()
             .tracks;
 
-        // Both stages moved: the ramp is running on both, so the very first
-        // frame of the next chunk already differs from the Balance reading.
         for (index, name) in [(0_usize, "automated"), (1, "plain")] {
             assert_ne!(
                 before[index][0].to_bits(),
@@ -10876,8 +10464,6 @@ mod tests {
         assert!(mixer.update_clip_shaping(&gained));
         let after_gain = mixer.next_chunk().unwrap().unwrap();
 
-        // A `SetClipGainEnvelope` on the same clip retargets too, and is
-        // audible: the second chunk differs from the un-edited mixer's.
         let mut enveloped = gained.clone();
         enveloped.tracks[0].clips[0].audio_gain_curve = Some(au4_curve(
             &[(0, -600), (5, 0)],
@@ -10975,10 +10561,6 @@ mod tests {
         assert_eq!(stage.current[0].to_bits(), stage.target[0].to_bits());
     }
 
-    // ---------------------------------------------------------------------
-    // AU5 Part A (§3.1-§3.11, A2, A5, A6, A9, A12, A14)
-    // ---------------------------------------------------------------------
-
     /// AU5 §3.11(c) budget: the RMS-to-RMS error drop the de-click fixture must
     /// clear, in tenth dB.
     ///
@@ -11054,8 +10636,6 @@ mod tests {
         assert!(seen.contains(&("audio_declick", 3)));
         assert!(seen.contains(&("audio_compressor", 0)));
 
-        // A2's second half: an `audio_denoise` whose `lookahead_milliseconds` is
-        // absent from the parameters map still builds a 512-frame window.
         let bare = audio_effect(1, "audio_denoise", &[]);
         let runtime = AudioEffectRuntime::new(&bare, 2, 48_000);
         assert_eq!(runtime.latency_frames, 576);
@@ -11091,10 +10671,6 @@ mod tests {
                     let output = process_buffer_static(&effect, rate, 1, &input)
                         .expect("a repair node must be length-preserving");
                     assert_eq!(output.len(), input.len());
-                    // The impulse lands at frame 0 after the helper's head trim,
-                    // which is the *declared* delay and nothing else: a hum
-                    // cascade is a filter and is allowed to change the impulse's
-                    // amplitude, so what is pinned is where its energy sits.
                     let peak = output
                         .iter()
                         .enumerate()
@@ -11133,8 +10709,6 @@ mod tests {
             let effect = denoise_effect(1, 0, None);
             let latency = stage_latency_frames(node_lookahead_milliseconds(&effect), rate);
             let mut state = DenoiseState::new(&effect, 1, rate, latency);
-            // A second arm: the residual pad after the OLA, the one place the
-            // arithmetic is restated because the impulse cannot reach it.
             assert_eq!(
                 latency - (state.window - 1),
                 expected_pad,
@@ -11150,8 +10724,6 @@ mod tests {
             let mut output = Vec::with_capacity(input.len());
             for sample in &input {
                 let mut frame = [*sample];
-                // The production per-frame path with `direct` clear, but read
-                // **before** `output_pad`, which the declared-delay arm covers.
                 state.step_ola_only(&mut frame);
                 output.push(frame[0]);
             }
@@ -11187,16 +10759,10 @@ mod tests {
     #[test]
     fn au5_the_direct_switch_window_is_window_minus_one_and_never_dips() {
         let rate = 48_000_u32;
-        // A profile 110 dB down leaves the node off the `direct` branch — the
-        // bands are not at the neutral and the reduction is not zero — while
-        // gating essentially nothing, so the OLA path is transparent to about
-        // 1e-5 and any difference from the delayed input is a state bug.
         let reducing = denoise_effect(1, 200, Some(-1_100));
         let relaxed = denoise_effect(1, 0, Some(-1_100));
         let latency = stage_latency_frames(node_lookahead_milliseconds(&reducing), rate);
 
-        // Arm 1: the window opens at `window - 1` and is spent one frame per
-        // emit, so exactly `window - 1` frames come off the delay line.
         let mut state = DenoiseState::new(&reducing, 1, rate, latency);
         assert!(!state.profile_neutral && state.reduction_tenth_db != 0);
         let mut frame = [0.5_f32];
@@ -11231,9 +10797,6 @@ mod tests {
             output.push(frame[0]);
         }
 
-        // Sample-accurate: past the fresh runtime's own OLA warm-up, every
-        // output frame is the input `latency` frames earlier. A starved pad
-        // would put 65 frames of stale noise here after each switch window.
         let settled = latency + window;
         let mut worst = (0_usize, 0.0_f32);
         for index in settled..input.len() {
@@ -11249,8 +10812,6 @@ mod tests {
             worst.0
         );
 
-        // And the level itself never dips across either switch, which is the
-        // sentence rule 41 actually makes.
         for start in [off_at, on_at] {
             for block in 0..((latency + window) / 100) {
                 let range = (start + block * 100)..(start + block * 100 + 100);
@@ -11330,9 +10891,6 @@ mod tests {
             .map(|(start, end)| end - start + 1)
             .sum();
 
-        // The naive window: the same second difference and the same threshold,
-        // with **every** sample in the reference. Written here rather than in
-        // the node because it is the thing the node must not do.
         let ratio = 10.0_f64.powf(240.0 / 200.0);
         let window_frames = stage_latency_frames(DECLICK_REFERENCE_MILLISECONDS, 48_000);
         let mut history = VecDeque::<f64>::with_capacity(window_frames);
@@ -11365,11 +10923,6 @@ mod tests {
             "the naive reference flagged {naive_frames} frames, not fewer than {specified_frames}"
         );
 
-        // The decisive arm: give the naive detector a **perfect** repair of
-        // exactly the frames it flagged — every flagged sample replaced by the
-        // clean one, which no real interpolator could do — and the lane still
-        // fails, because the reference rises as soon as the click enters it and
-        // leaves the middle of every plateau in place.
         let mut naive_repaired = corrupt.clone();
         for (frame, flagged) in naive_flags.iter().enumerate() {
             if *flagged {
@@ -11450,9 +11003,6 @@ mod tests {
             "the de-click margin is only {margin:.2}x"
         );
 
-        // The transient control: a 5 ms exponential burst reports zero clicks
-        // and is returned **unmodified within 1e-6**. It is the **guard**, not
-        // the length test, that rejects it (R41).
         let mut burst = clean.clone();
         for frame in 0..240_usize {
             #[allow(clippy::cast_precision_loss)]
@@ -11490,9 +11040,6 @@ mod tests {
     #[test]
     fn au5_a_keyed_reduction_curve_is_heard() {
         let rate = 48_000_u32;
-        // A profile 10 dB down is far above 0.25-amplitude noise, so the gate
-        // clamps almost every bin to `g_floor` when the reduction is engaged and
-        // is an exact identity when it is not.
         let mut keyed = denoise_effect(1, 0, Some(-100));
         keyed.keyframes.insert(
             "reduction_tenth_db".to_owned(),
@@ -11511,9 +11058,6 @@ mod tests {
                 ],
             },
         );
-        // A curve on all three is legal by construction: none is static, so
-        // `validate_audio_chain_automation` cannot refuse it, and none is
-        // hold-only, so even a `Linear` key is accepted.
         for name in [
             "reduction_tenth_db",
             "floor_offset_tenth_db",
@@ -11530,15 +11074,10 @@ mod tests {
         }
         let document = chain_document(vec![keyed]);
 
-        // 10 fps, so project frame 5 is sample 24 000; the buffer covers frames
-        // 0..10 and the curve steps in the middle of it.
         let latency = stage_latency_frames(12, rate);
         let input = pseudo_random_amplitude(48_000, 0.25);
         let output = run_chain(&document, rate, 1, &input, None);
 
-        // Sample-wise, not RMS: on the `direct` branch the node is bit-exact,
-        // and an aggregate over 19 424 samples would also be satisfied by any
-        // energy-preserving all-pass.
         let worst_identity = output[latency..20_000]
             .iter()
             .zip(&input[0..20_000 - latency])
@@ -11580,10 +11119,6 @@ mod tests {
             assert_eq!(output, input, "a bypassed {name} must be exact");
         }
 
-        // AU5 §3.2 rule 41's `bypass_delay` exists for the **configured** case,
-        // which an all-neutral node can never exercise: a learned, reducing
-        // denoiser with `bypass = 1` must still be the delayed input bit for
-        // bit, and must still declare 12 ms.
         let mut configured = denoise_effect(1, 400, Some(-600));
         assert_ne!(
             process_buffer_static(&configured, 48_000, 1, &input).unwrap(),
@@ -11679,12 +11214,6 @@ mod tests {
             );
         }
 
-        // The absolute arm (AU5 §0 R75): white noise of **known** mean square,
-        // the band levels it must read analytically, and the floor the
-        // conversion derives, against the mean `|X_k|^2` a real Hann-windowed
-        // `forward_fft` of that noise actually produces. This is the only arm
-        // that can see a wrong `sum w^2`: the contract's `window^2 / 4` reads
-        // 1.25 dB high and a finiteness check cannot tell.
         for window in [512_usize, 1_024] {
             let amplitude = 0.25_f32;
             let mean_square = f64::from(amplitude) * f64::from(amplitude) / 3.0;
@@ -11700,8 +11229,6 @@ mod tests {
             }
             let floors = denoise_bin_floor_power(&profile, window, 48_000);
 
-            // The measurement: the same window, the same transform, averaged
-            // over enough blocks that the per-bin chi-square settles.
             let blocks = 200_usize;
             let noise = pseudo_random_amplitude(window * blocks, amplitude);
             let shape = crate::spectrum::hann_window(window);
@@ -11725,18 +11252,6 @@ mod tests {
                 *value /= count;
             }
 
-            // Interior bins only: the very low bands hold too few bins for the
-            // integer `bins_in_band` divisor to be a good approximation of the
-            // continuous bandwidth, and bins above the 20 kHz band's upper edge
-            // belong to no band at all.
-            //
-            // The assertion is on the **mean** error, not the worst: rule 44's
-            // `bins_in_band` is an integer count standing in for a continuous
-            // bandwidth, so each band carries up to about 1.4 dB of quantisation
-            // either way, and that is scattered and zero-mean. A wrong
-            // `sum w^2` is a *bias* on every bin at once, which is exactly what
-            // a mean sees and a worst-case bound cannot separate from the
-            // quantisation. The worst is printed beside it.
             let first = window / 8;
             let last = window * 15 / 32;
             let mut worst: f64 = 0.0;
@@ -11758,16 +11273,10 @@ mod tests {
                  real transform; the sine window's `N/2` in place of a Hann's `3N/8` is +1.25"
             );
         }
-        // The `max(1, ...)` floor: at 512/48 kHz the bin spacing is 93.75 Hz, so
-        // the 20 Hz band holds no bin at all and the floor keeps the conversion
-        // finite rather than dividing by zero.
         let mut low_only = [PROFILE_BAND_NEUTRAL_TENTH_DB; NOISE_PROFILE_BAND_COUNT];
         low_only[0] = 0;
         let floors = denoise_bin_floor_power(&low_only, 512, 48_000);
         assert!(floors[0].is_finite() && floors[0] > 0.0);
-        // About 49 bins in the 20 kHz band at a 512-point window. The divisor
-        // is recovered from the floor through the **same** window factor the
-        // conversion uses, read from the window rather than from a constant.
         let mut high_only = [PROFILE_BAND_NEUTRAL_TENTH_DB; NOISE_PROFILE_BAND_COUNT];
         high_only[NOISE_PROFILE_BAND_COUNT - 1] = 0;
         let floors = denoise_bin_floor_power(&high_only, 512, 48_000);
@@ -11790,19 +11299,6 @@ mod tests {
     /// §2.3 row that leaves exactly 5 ms of the 20 ms budget.
     fn parity_document_with_repair_chain(voice: &Path, bed: &Path, fps: Rational) -> Document {
         let mut document = parity_document(voice, bed, fps);
-        // AU5 §0 R71: the denoiser carries a **keyframe curve** on
-        // `reduction_tenth_db`, stepping 0 -> 200 at project frame 10, so both
-        // `assert_playback_matches_export` arms — chunked playback and the
-        // frame-5 seek — cross the step inside an asserted window. Frame 10,
-        // not the 18..20 window: this bus carries **only** track 2, whose one
-        // clip spans project frames 4..14, so the bus stem is silent after 14
-        // and a step there would change nothing. 10 sits inside "trimmed
-        // source" (6..14), five frames past the seek target, and leaves
-        // 19 200 sample frames of asserted material after rule 41's 511-frame
-        // switch window closes. Crossing the step is a `direct` clear: the
-        // accumulator and smoother are zeroed and the switch window opens, so
-        // the arm pins parity of the *keyed* read, of that transition, and of
-        // the switch window, at 1e-6.
         let mut keyed = denoise_effect(10, 0, Some(-600));
         keyed.keyframes.insert(
             "reduction_tenth_db".to_owned(),
@@ -11873,10 +11369,6 @@ mod tests {
         let exported = crate::export::mix_audio(&document, &settings).unwrap();
         assert_playback_matches_export(&document, &exported, fps);
 
-        // The curve is load-bearing (AU5 §0 R71): strip it and the chain never
-        // leaves the `direct` branch, so the arm above would be pinning the
-        // static read it already pinned. The step must be inside the asserted
-        // 18..20 window, which is what this compares.
         let mut unkeyed = document.clone();
         unkeyed.audio_mix.buses[0].effects[0].keyframes.clear();
         let flat = crate::export::mix_audio(&unkeyed, &settings).unwrap();
@@ -11891,8 +11383,6 @@ mod tests {
             "the keyed reduction must change the mix inside the asserted window, not {difference}"
         );
 
-        // A chain at 15 ms accepts a 5 ms limiter to land at exactly 20; one at
-        // 21 is refused with `AudioBusLookaheadExceeded`.
         let mut at_twenty = document.clone();
         at_twenty.audio_mix.buses[0].effects.push(audio_effect(
             13,
