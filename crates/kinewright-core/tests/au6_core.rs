@@ -79,18 +79,6 @@ fn ratio(numerator: i64, denominator: i64) -> f64 {
     numerator as f64 / denominator as f64
 }
 
-// ---------------------------------------------------------------------------
-// Neighbouring constants AU6 asserts distinctness from (§2.8).
-//
-// Each lives in a crate `kinewright-core` cannot see. **R25:** they used to be
-// twelve `const`s here with their owners named only in a doc comment and
-// nothing comparing them, which meant an AU3 or AU5 budget could move and
-// this file would go on passing while no longer testing what it claimed. The
-// table is now `AU6_NEIGHBOUR_BUDGETS` in `au6_scenarios`, and the media
-// lane — which *can* see `tests/au3_fixtures.rs` and `tests/au5_fixtures.rs` —
-// pins ten of the twelve against the line that declares them.
-// ---------------------------------------------------------------------------
-
 /// One neighbour's value, by its owner's constant name.
 ///
 /// # Panics
@@ -104,10 +92,6 @@ fn au6_neighbour(constant: &str) -> i64 {
         .unwrap_or_else(|| panic!("{constant} is not an AU6_NEIGHBOUR_BUDGETS entry"))
         .value
 }
-
-// ---------------------------------------------------------------------------
-// Base documents, built off `au6_spec` with no §2 literal restated.
-// ---------------------------------------------------------------------------
 
 fn fps(numerator: u32) -> Rational {
     Rational::new(numerator, 1).expect("a positive integer frame rate")
@@ -301,10 +285,6 @@ fn integer_parameter(effect: &kinewright_core::Effect, name: &str) -> Option<i64
     }
 }
 
-// ===========================================================================
-// §11.2.1 — key `geometry`.
-// ===========================================================================
-
 /// §2.3's fps, raster, rate, channels, lengths, the eight ranges,
 /// `AU6_SAMPLES_PER_FRAME == 1 920`, 200 ms = 5 frames.
 ///
@@ -382,8 +362,6 @@ fn au6_scenario_geometry_is_the_contract_table() {
     assert_eq!(AU6_C_GAPS[3].end.0, i64::from(AU6_C_PROGRAMME_FRAMES));
     assert_eq!(AU6_C_GAPS[3].end.0 - AU6_C_GAPS[3].start.0, 37);
     assert_eq!(AU6_C_LEARN_AUTHORED_RANGE, AU6_C_GAPS[3]);
-    // Every authored boundary is a multiple of five frames, so the
-    // whole-programme window vector is sliced by integer index.
     let mut boundaries = AU6_TURNS
         .iter()
         .flat_map(|turn| [turn.start.0, turn.end.0])
@@ -398,9 +376,6 @@ fn au6_scenario_geometry_is_the_contract_table() {
         boundaries,
         vec![0, 50, 75, 125, 150, 160, 175, 200, 225, 275, 300, 312]
     );
-    // (c)'s programme end is NOT on the grid: 312 = 62 windows + 2 frames,
-    // whatever §2.3 says (erratum R12). No (c) gate slices the whole-programme
-    // vector past frame 300: the speech-loss gate reads the four turn ranges.
     assert_eq!(
         i64::from(AU6_C_PROGRAMME_FRAMES) % i64::from(AU6_FRAMES_PER_WINDOW),
         2
@@ -537,9 +512,6 @@ fn au6_scenario_geometry_is_the_contract_table() {
         0,
         "at 30000/1001 a frame is not a whole number of samples"
     );
-    // The contract's own 30 fps example: a frame IS 1 600 samples, but a
-    // 200 ms window IS six whole frames there, so it is not the failing
-    // direction §11.2 item 1 says it is (erratum).
     let samples_at_30 = AU6_SAMPLE_RATE / 30;
     assert_eq!(samples_at_30, 1_600);
     assert_eq!(window_samples % samples_at_30, 0);
@@ -549,10 +521,6 @@ fn au6_scenario_geometry_is_the_contract_table() {
     assert_eq!(AU6_A_DUCK_HOLD_MS * 30 % 1_000, 0);
     assert_eq!(AU6_A_DUCK_RELEASE_MS * 30 % 1_000, 0);
 }
-
-// ===========================================================================
-// §11.2.2 — key `geometry.gating`.
-// ===========================================================================
 
 /// Every `mix_levels` window is ≥ 10 frames at 25 fps, with the 2.5× / 5.0×
 /// margins recorded. *Fails:* a 5-frame window is under the block.
@@ -596,14 +564,8 @@ fn au6_every_measured_window_clears_one_gating_block() {
         ratio(shortest, block),
         ratio(longest, block)
     );
-    // Failing direction: one 200 ms window is under the block, which is why
-    // `mix_window_levels` is not BS.1770 and `mix_levels` never reads it.
     assert!(i64::from(AU6_FRAMES_PER_WINDOW) < block);
 }
-
-// ===========================================================================
-// §11.2.3 — key `geometry.duck`.
-// ===========================================================================
 
 /// A2's arithmetic, in A16's one derivation (S2): `attack 150 + hold 200 +
 /// release 400 = 750 ms`, so a 1 s gap parks the bed for 250 ms — exactly one
@@ -628,9 +590,6 @@ fn au6_the_duck_gap_leaves_exactly_one_unducked_window() {
     assert_eq!(au6_duck_gap_whole_windows(1_000), 1);
     assert_eq!(au6_duck_gap_parked_milliseconds(500), 0);
     assert_eq!(au6_duck_gap_whole_windows(500), 0, "the brief's 500 ms gap");
-    // A16: hold + release sit at the gap's head and the next turn's attack at
-    // its tail, so the parked interval runs 600–850 ms into the gap; the
-    // 600–800 ms window is window 4 (0-based index 3) and lies wholly inside.
     let head = AU6_A_DUCK_HOLD_MS + AU6_A_DUCK_RELEASE_MS;
     let tail = 1_000 - AU6_A_DUCK_ATTACK_MS;
     assert_eq!((head, tail), (600, 850));
@@ -678,9 +637,6 @@ fn au6_the_duck_gap_leaves_exactly_one_unducked_window() {
         assert!(!speech.contains(index));
     }
 
-    // The pinned keys agree with the derivation: inside each interior gap the
-    // parked span (release end .. next attack start) contains window 4 whole
-    // and does not contain window 5.
     assert_eq!(AU6_A_DUCK_KEYFRAMES.len(), AU6_A_DUCK_KEYFRAME_COUNT);
     let keys = AU6_A_DUCK_KEYFRAMES;
     for (gap_index, gap_window) in gap_windows.iter().enumerate().take(3) {
@@ -711,9 +667,6 @@ fn au6_the_duck_gap_leaves_exactly_one_unducked_window() {
     }
     // The tail gap has no following turn: the last key is the release's end.
     assert_eq!(keys[15], (289, 0));
-    // The detected windows the keys were built from, published beside the
-    // authored turns: each opens at or after the authored start and closes
-    // four frames after the authored end.
     for ((open, close), turn) in AU6_A_DUCK_DETECTED_WINDOWS.iter().zip(AU6_TURNS.iter()) {
         assert!(
             *open >= turn.start.0 && *open <= turn.start.0 + 2,
@@ -722,10 +675,6 @@ fn au6_the_duck_gap_leaves_exactly_one_unducked_window() {
         assert_eq!(*close, turn.end.0 + 4, "{turn:?}");
     }
 }
-
-// ===========================================================================
-// §11.2.4 — key `learn`.
-// ===========================================================================
 
 /// `AU6_C_LEARN_PROJECT_RANGE`'s length ≥ `AU6_LEARN_MINIMUM_PROJECT_FRAMES
 /// = 12`, and 12 is re-derived from `ceil(22 528 · 25 / 48 000)`.
@@ -802,10 +751,6 @@ fn au6_the_learn_gap_clears_the_profile_minimum() {
     assert_eq!(AU6_SILENCE_THRESHOLD_RESTATED_DBFS_HUNDREDTHS, -3_500);
     assert_eq!(AU6_LEARN_GAP_BELOW_SILENCE_MIN_HUNDREDTHS, 250);
 }
-
-// ===========================================================================
-// §11.2.5 — key `canonical_documents`.
-// ===========================================================================
 
 /// Each batch through `apply_batch` one operation at a time with
 /// `validate()` after each (A11), and the document each lands.
@@ -1249,10 +1194,6 @@ fn au6_ascending_splits_are_rejected_by_core() {
     assert_eq!(dialogue_cuts, vec![175, 160]);
 }
 
-// ===========================================================================
-// §11.2.6 — key `canonical_documents.clip_ids`.
-// ===========================================================================
-
 /// `AU6_C_RIGHT_CLIP_ID` and `AU6_C_MIDDLE_CLIP_ID` are what core allocates
 /// from the base document's next free id (S17), and the fill's one tile is
 /// the 18-source-frame head of the 44-frame capture.
@@ -1296,8 +1237,6 @@ fn au6_core_allocates_the_pinned_gap_clip_ids() {
     assert_eq!(right.timeline_start, AU6_C_GAP_RANGE.end);
     assert_eq!(right.source_range, TimeCode(175)..TimeCode(312));
     assert_eq!(right.asset, AU6_C_DIALOGUE_ASSET);
-    // S15: the project→source mapping on the surviving clip is the identity,
-    // so the capture's source range is its project range.
     assert_eq!(right.source_range.start, right.timeline_start);
     assert!(right.source_range.start <= AU6_C_LEARN_SOURCE_RANGE.start);
     assert!(AU6_C_LEARN_SOURCE_RANGE.end <= right.source_range.end);
@@ -1340,8 +1279,6 @@ fn au6_core_allocates_the_pinned_gap_clip_ids() {
         "gap (3) + fill (1) + repair (1)"
     );
 
-    // Failing direction: a base whose one clip is id 5 allocates 6 and 7, so
-    // the pinned ids are wrong and the pinned batch deletes a missing clip.
     let mut shifted = base_document(Au6Scenario::LocationDialogue);
     shifted.tracks[0].clips[0].id = ClipId(5);
     shifted.validate().unwrap();
@@ -1394,10 +1331,6 @@ fn au6_core_allocates_the_pinned_gap_clip_ids() {
         );
     }
 }
-
-// ===========================================================================
-// §11.2.7 — key `canonical_documents.delivery`.
-// ===========================================================================
 
 /// (e)'s operations are (a)'s, with the duck curve truncated to the 200-frame
 /// base (B2), and (e)'s document is (a)'s truncated to 200 frames.
@@ -1461,8 +1394,6 @@ fn au6_the_delivery_scenario_reuses_the_interview_document() {
         "the ride ends ducked, as probe-2's rebuilt curve did"
     );
 
-    // (e)'s document is (a)'s truncated: the duration, every clip and the
-    // curve — never the assets, which stay (a)'s 300-frame buffers (B2).
     let mut truncated_interview = canonical_document(Au6Scenario::Interview);
     let end = TimeCode(i64::from(AU6_ENCODE_PROGRAMME_FRAMES));
     truncated_interview.duration = end;
@@ -1508,10 +1439,6 @@ fn au6_the_delivery_scenario_reuses_the_interview_document() {
     apply_in_order(&mut divergent, &batch).unwrap();
     assert_ne!(divergent, delivery_document);
 }
-
-// ===========================================================================
-// §11.2.8 — key `export_jobs`.
-// ===========================================================================
 
 /// §2.7's two rows: a field-by-field comparison **excluding `cancellation`**
 /// on the un-overridden profile settings (S1), whose difference set is
@@ -1632,9 +1559,6 @@ fn au6_export_jobs_differ_only_in_the_job() {
         rendered_streaming.loudness_normalization
     );
 
-    // Failing direction: a whole-struct comparison never holds, even for the
-    // same job built twice, because the cancellation token is compared by
-    // pointer identity.
     let again = au6_export_settings(source_master, &document);
     assert_ne!(
         rendered_master, again,
@@ -1647,10 +1571,6 @@ fn au6_export_jobs_differ_only_in_the_job() {
     );
 }
 
-// ===========================================================================
-// §11.2.9 — key `thresholds.distinctness`.
-// ===========================================================================
-
 /// No AU6 budget equals a neighbouring AU3 or AU5 budget, or a target's own
 /// tolerance, **within its unit** (§2.8). Cross-unit coincidences are
 /// recorded rather than asserted away, CC7's precedent.
@@ -1660,10 +1580,6 @@ fn au6_export_jobs_differ_only_in_the_job() {
 #[allow(clippy::too_many_lines)]
 fn au6_budgets_are_distinct_from_every_neighbouring_constant() {
     let neighbours = AU6_NEIGHBOUR_BUDGETS;
-    // R25: the table is the single restatement, and the two owners it can
-    // reach from core are compared by value here. The ten it cannot reach are
-    // pinned against their owning files by
-    // `au6_neighbour_budgets_agree_with_their_owners` in the media lane.
     let tolerance = au6_neighbour("LoudnessTarget.tolerance_lu_hundredths");
     assert_eq!(
         tolerance,
@@ -1697,8 +1613,6 @@ fn au6_budgets_are_distinct_from_every_neighbouring_constant() {
                 "{name} must not equal {neighbour}: a budget equal to its neighbour in the same unit can be silently substituted for it"
             );
         }
-        // §2.8 / §11.2.9: no LU budget equals a target's own tolerance, which
-        // measures nothing (AU3 §0 E55).
         if unit == Au6Unit::LuHundredths {
             assert_ne!(value, tolerance, "{name}");
         }
@@ -1725,10 +1639,6 @@ fn au6_budgets_are_distinct_from_every_neighbouring_constant() {
         assert_eq!(*value, row.budget, "{}", row.term);
     }
 
-    // The cross-unit coincidences, recorded rather than asserted away: the
-    // true-peak margin is 100 **dBTP** hundredths and the targets' tolerance
-    // is 100 **LU** hundredths; the master passthrough is 50 LU and AU3's AAC
-    // overshoot 50 dBTP. Neither can stand in for the other.
     assert_eq!(
         i64::from(AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS),
         au6_neighbour("LoudnessTarget.tolerance_lu_hundredths")
@@ -1752,10 +1662,6 @@ fn au6_budgets_are_distinct_from_every_neighbouring_constant() {
     });
     assert!(tripped, "a budget of 100 LU would be caught");
 }
-
-// ===========================================================================
-// §11.2.10 — key `budgets`.
-// ===========================================================================
 
 /// §4.1's 22 rows by `Au6BudgetKind`, plus the three source rows: floors
 /// `measured / budget ≥ 2`, ceilings `budget / measured ≥ 2`, exact rows
@@ -1866,8 +1772,6 @@ fn au6_every_budget_carries_the_declared_margin() {
         ],
         "S7: the three source rows"
     );
-    // Every base document starts with a neutral mix, so the canonical batch
-    // is the only mix state the canonical document carries.
     assert!(AudioMix::default().is_empty());
     for scenario in AU6_SCENARIOS {
         assert!(base_document(scenario).audio_mix.is_empty(), "{scenario:?}");
@@ -1982,10 +1886,6 @@ fn au6_every_budget_carries_the_declared_margin() {
         2 * wrong_worst >= 450,
         "the wrong model would need a 45 dB allowance"
     );
-    // The noise-only bands are identical under both models; only the
-    // hum-adjacent bands 3–10 move.
-    // The 240 Hz and 300 Hz partials' main lobes leak into bands 11 and 12,
-    // so the two models agree only from band 13 up.
     for band in 13..NOISE_PROFILE_BAND_COUNT {
         assert_eq!(bound[band], point_mass[band], "band {band}");
     }
@@ -2047,10 +1947,6 @@ fn au6_every_budget_carries_the_declared_margin() {
         "a ceiling measured at zero belongs in MeasuredZero"
     );
 }
-
-// ===========================================================================
-// §11.2.11 — key `review.questions`.
-// ===========================================================================
 
 /// One `?`, no `" and "`, and no leak needle in any entry; `a5a` and `a5b`
 /// carry the same sentence.
@@ -2151,10 +2047,6 @@ fn au6_the_questions_are_one_clause_each() {
     assert!(!AU6_QUESTIONS[4].1.contains("limiting"));
     assert!(!single_clause("Is it good? Is it loud?"));
 }
-
-// ===========================================================================
-// §11.2.12 — key `pins`.
-// ===========================================================================
 
 /// The three §11.0.1 pins each carry a doc comment containing the words
 /// "regression pin" and the run they were transcribed from.

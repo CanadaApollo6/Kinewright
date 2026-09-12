@@ -758,13 +758,9 @@ fn track_strip(
             ..mix.clone()
         });
 
-        // `Edit` shares the mute/solo row. A sixth row of its own put the
-        // plain strip at 246 px; `Reset` + `+ Bus` + `Edit` overflowed the
-        // 72 px column when `Reset` was showing (AU2 §6.5, AU6 §6.2).
         let selected = selection == Some(MixerSelection::Track(track.id));
         ui.horizontal(|ui| {
-            // `M` + `S` + micro `Edit` is 76 px with `space::HALF` gutters;
-            // zero gutter keeps the row inside the 72 px column.
+            // Zero gutter keeps Mute + Solo + Edit inside the 72 px column.
             ui.spacing_mut().item_spacing.x = 0.0;
             for toggle in [MixToggle::Mute, MixToggle::Solo] {
                 if mix_toggle_button(ui, toggle, &mix) {
@@ -5668,9 +5664,6 @@ mod tests {
         let scenario = Au6Scenario::LocationDialogue;
         let mut document = au6_base_document(scenario);
 
-        // The timeline blade, late-to-early, with each clip resolved from the
-        // document the earlier blade left behind, then the interior piece
-        // deleted through the blade's own delete builder.
         let blades = [
             au6_blade(&document, AU6_C_DIALOGUE_TRACK, AU6_C_GAP_RANGE.end),
             au6_blade(&document, AU6_C_DIALOGUE_TRACK, AU6_C_GAP_RANGE.start),
@@ -5795,8 +5788,6 @@ mod tests {
         let mut document = au6_base_document(scenario);
         au6_paint_mixer_writes_nothing(&document, MixerSelection::Track(AU6_D_SCRATCH_1_TRACK));
 
-        // Six blades, each on the clip the document holds at that frame after
-        // the previous blade, and four deletes through the blade's builder.
         let mut batch = Vec::with_capacity(12);
         for track in [AU6_D_ANGLE_1_TRACK, AU6_D_ANGLE_2_TRACK] {
             for at in AU6_D_CUT_FRAMES.iter().rev() {

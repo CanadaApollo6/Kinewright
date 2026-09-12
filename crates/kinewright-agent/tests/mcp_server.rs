@@ -8798,10 +8798,6 @@ async fn au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps() {
     server.shutdown();
 }
 
-// ===========================================================================
-// AU6 §5 — the six scripted agent end-to-end tests.
-// ===========================================================================
-
 use kinewright_core::au6_scenarios::{
     AU6_A_BED_TRACK, AU6_A_DUCK_ATTACK_MS, AU6_A_DUCK_DEPTH_TENTH_DB, AU6_A_DUCK_HOLD_MS,
     AU6_A_DUCK_RELEASE_MS, AU6_A_VOICE_A_TRACK, AU6_A_VOICE_B_TRACK, AU6_B_VOICE_A_TRACK,
@@ -9111,10 +9107,6 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
     }
     assert_eq!(query_document(&core), before);
 
-    // Evidence-only, and *before* the mix/buses commit: after those upserts
-    // the voice tracks already intersect the Voice A / Voice B buses and
-    // `plan_audio_normalization` refuses the intersection. The contract's
-    // "not committed" still holds — neither plan is applied.
     let ebu = invoke_capability(
         &client,
         "plan_audio_normalization",
@@ -9185,9 +9177,6 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
     )
     .await;
 
-    // §5.1(4): the committed document is the canonical one. The two
-    // `plan_audio_normalization` calls were evidence only, so the bus each
-    // would have built is asserted absent by the same equality.
     let mut expected = scene.document.clone();
     apply_batch(
         &mut expected,
@@ -9393,11 +9382,6 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
         "invalid_source_range"
     );
 
-    // (c)'s dialogue asset is 312 frames / 12.5 s; the 60 s cap is
-    // unreachable without leaving the asset, and `to > duration` is
-    // `invalid_source_range` first. Past-end is the reachable failing
-    // direction on this document; `room_tone_capture_too_long` stays
-    // covered by the agent's own unit test at `server.rs:24179`.
     let past_end = invoke_capability(
         &client,
         "capture_room_tone",
@@ -9415,12 +9399,6 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
         "invalid_source_range"
     );
 
-    // §5.1(4): the committed document is (c)'s three-commit ledger — gap,
-    // fill, repair — on top of the capture's own `AddAsset`. That asset's
-    // record is written from a file `au6_scenarios` cannot read (R6), so it
-    // is lifted from the document the server committed and **everything
-    // else** is asserted, including the 31 profile rows the planner learned.
-    // The refusals above are evidence-only, and the same equality proves it.
     let committed = query_document(&core);
     let room_tone = committed
         .media_pool

@@ -573,7 +573,6 @@ fn assert_encode_identical(left: &[u8], right: &[u8], claim: &str) {
     );
 }
 
-
 /// AU3 §7 B6: with the setting off nothing is allocated and `encode_audio`
 /// receives `mix_audio`'s bytes, so two exports of one document deliver a
 /// bit-for-bit identical **audio stream** — and a skipped normalization

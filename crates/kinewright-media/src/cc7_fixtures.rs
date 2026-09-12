@@ -3719,12 +3719,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
                 "rgb_mean_code_millionths",
                 "psnr_db_hundredths",
             ] {
-                // A measured value is a scalar when every supported system
-                // produced it — 44 of these 60 rows did — and an object keyed
-                // by operating system when they disagree. What proves this
-                // system was measured at all is the provenance block below,
-                // which must carry an entry for it; that is the gate a third
-                // operating system would trip, not the scalar rows.
                 match &lane[term]["measured"] {
                     Value::Number(_) => {}
                     Value::Object(per_os) => assert!(
@@ -3742,9 +3736,6 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
                     ),
                 }
                 assert!(lane[term]["budget"].is_number());
-                // The margin follows the measurement it is derived from: one
-                // value where both systems measured the same, one per system
-                // where they did not.
                 let margin = &lane[term]["margin"];
                 let margins: Vec<&Value> = match margin {
                     Value::Object(per_os) => {

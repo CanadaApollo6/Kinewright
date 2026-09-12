@@ -52,10 +52,6 @@ use crate::{
     effect_descriptor,
 };
 
-// ===========================================================================
-// AU6 §2.3: geometry, normative.
-// ===========================================================================
-
 /// AU6 §2.3: the project frame rate. At 25 fps a project frame is exactly
 /// [`AU6_SAMPLES_PER_FRAME`] samples and a 200 ms window exactly
 /// [`AU6_FRAMES_PER_WINDOW`] frames, which is what lets the whole-programme
@@ -101,10 +97,6 @@ pub const AU6_LOUDNESS_GATING_BLOCK_SAMPLE_FRAMES_RESTATED: u32 = 19_200;
 /// [`AU6_LOUDNESS_GATING_BLOCK_SAMPLE_FRAMES_RESTATED`] in project frames.
 pub const AU6_LOUDNESS_GATING_BLOCK_PROJECT_FRAMES: u32 =
     AU6_LOUDNESS_GATING_BLOCK_SAMPLE_FRAMES_RESTATED / AU6_SAMPLES_PER_FRAME;
-
-// ---------------------------------------------------------------------------
-// The authored turn pattern (AU6 §2.3), shared by (a), (b) and (c).
-// ---------------------------------------------------------------------------
 
 /// Which of the two voices owns a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -214,10 +206,6 @@ pub fn au6_turns_of(speaker: Au6Speaker) -> Vec<Range<TimeCode>> {
 pub fn au6_window_index(frame: TimeCode) -> usize {
     usize::try_from(frame.0 / i64::from(AU6_FRAMES_PER_WINDOW)).unwrap_or(0)
 }
-
-// ---------------------------------------------------------------------------
-// The ducking plan (AU6 §2.3, A2/A16, B9) and its committed keys (A12).
-// ---------------------------------------------------------------------------
 
 /// AU6 §2.3 (B9): `plan_audio_ducking`'s attack, pinned equal to today's
 /// default `DEFAULT_DUCKING_ATTACK_MILLISECONDS`
@@ -390,10 +378,6 @@ pub fn au6_duck_gap_window_indices() -> [usize; 4] {
     }
     indices
 }
-
-// ===========================================================================
-// AU6 §2.4: source levels, authored and measured.
-// ===========================================================================
 
 /// AU6 §3.2 rule 1: the Schroeder-phase partial count of each voice carrier.
 pub const AU6_VOICE_PARTIALS: u32 = 64;
@@ -637,10 +621,6 @@ pub fn au6_d_sync_group(angle_assets: [AssetId; 2]) -> SyncGroup {
     }
 }
 
-// ===========================================================================
-// AU6 §2.5: (c)'s learned profile — a regression pin plus a one-sided bound.
-// ===========================================================================
-
 /// REGRESSION PIN, not an analytic expectation (AU6 §2.5(i), §11.0.1). These
 /// are the values `mix_noise_profile` produced over
 /// [`AU6_C_LEARN_PROJECT_RANGE`] at `Bus(Dialogue repair)` on the probe machine at
@@ -811,8 +791,6 @@ fn au6_c_band_bound_tenth_db(band: usize, model: Au6HumLeakageModel) -> i32 {
             }
         }
     }
-    // `SILENCE_POWER` (`spectrum.rs:66`) and `band_level_hundredths`' `P / 0.5`
-    // reference: a full-scale sine carries 0.5 of one-sided power = 0 dBFS.
     let hundredths = if power < 1e-12 {
         None
     } else {
@@ -855,10 +833,6 @@ pub fn au6_c_analytic_mean_band_tenth_db(band: usize) -> i32 {
 pub fn au6_c_point_mass_band_tenth_db_wrong_model(band: usize) -> i32 {
     au6_c_band_bound_tenth_db(band, Au6HumLeakageModel::PointMass)
 }
-
-// ===========================================================================
-// AU6 §2.2: the scenario specs.
-// ===========================================================================
 
 /// The five named audio workflows AU6 proves end to end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1380,8 +1354,6 @@ pub const AU6_SCENARIO_SPECS: [Au6ScenarioSpec; 5] = [
         id: "e",
         title: "Encoded delivery at two loudness targets",
         fps: AU6_SOURCE_FPS,
-        // B2: the 8 s lanes exist by document truncation — (a)'s 300-frame
-        // assets under 200-frame clips.
         frames: AU6_ENCODE_PROGRAMME_FRAMES,
         asset_frames: AU6_PROGRAMME_FRAMES,
         sample_rate: AU6_SAMPLE_RATE,
@@ -1426,10 +1398,6 @@ pub const fn au6_spec(scenario: Au6Scenario) -> &'static Au6ScenarioSpec {
         Au6Scenario::Delivery => &AU6_SCENARIO_SPECS[4],
     }
 }
-
-// ===========================================================================
-// AU6 §2.6: the canonical operations per scenario.
-// ===========================================================================
 
 /// The `audio_parametric_eq` effect name (`effect.rs:2010`), the node that
 /// carries (b)'s high-pass — `audio_eq` has no high-pass row.
@@ -1923,10 +1891,6 @@ pub fn au6_canonical_operations(scenario: Au6Scenario) -> Vec<Operation> {
     }
 }
 
-// ===========================================================================
-// AU6 §2.7: the canonical export jobs.
-// ===========================================================================
-
 /// AU6 §2.7: the streaming lane's profile.
 pub const AU6_STREAMING_PROFILE: DeliveryProfile = DeliveryProfile::Youtube1080p;
 /// AU6 §2.7: the source-master lane's profile.
@@ -1994,15 +1958,6 @@ pub fn au6_export_settings(job: &Au6ExportJob, document: &Document) -> ExportSet
     settings.resolution = document.resolution;
     settings
 }
-
-// ===========================================================================
-// AU6 §2.8: budget constants — budget | measured | margin.
-// ===========================================================================
-//
-// Every threshold AU6 gates on is a `SCREAMING_SNAKE` constant here with its
-// unit in the name. No AU6 gate uses a literal, and no AU6 constant is a
-// float. Values are the probes', adopted by N1.5 and closed by A19 and N3.
-// Floors need `measured / budget ≥ 2`; ceilings `budget / measured ≥ 2`.
 
 /// (a)(1): dialogue over bed, floor. Budget 400 | measured **812** (Dialogue
 /// −2 158, Music −2 970) | 2.03×. Failing direction: the un-ducked document
@@ -2652,10 +2607,6 @@ pub const AU6_THRESHOLD_CONSTANTS: [(&str, i64, Au6Unit); 21] = [
         Au6Unit::Seconds,
     ),
 ];
-
-// ===========================================================================
-// AU6 §8.4: the six questions, verbatim.
-// ===========================================================================
 
 /// AU6 §8.4: one clause each, in the roadmap row's two words — balance and
 /// intelligibility — keyed by base task id. `a5a` and `a5b` carry the same

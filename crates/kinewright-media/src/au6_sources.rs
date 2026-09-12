@@ -68,10 +68,6 @@ use crate::{
     test_support::{GeneratedMedia, pseudo_random_amplitude, tone, wav_f32},
 };
 
-// ===========================================================================
-// Shared arithmetic.
-// ===========================================================================
-
 /// Sample frames per project frame, `48 000 / 25 = 1 920`, as a `usize`.
 const SPF: usize = AU6_SAMPLES_PER_FRAME as usize;
 
@@ -304,10 +300,6 @@ fn utterances(
     mono
 }
 
-// ===========================================================================
-// AU6 §3.1: the PCM generators, all mono.
-// ===========================================================================
-
 /// AU6 §3.2 rule 1: `speaker`'s 64-partial Schroeder carrier under the 4 Hz
 /// raised-cosine syllabic envelope on **the speaker's own turns** of
 /// [`AU6_TURNS`], at `level_dbfs_hundredths` RMS over a turn, `frames` long.
@@ -524,10 +516,6 @@ pub fn au6_scratch_pcm(
     scratch
 }
 
-// ===========================================================================
-// The per-scenario buffers.
-// ===========================================================================
-
 /// The four turns of [`AU6_TURNS`] as project ranges, the turn list (c)'s
 /// single voice speaks on.
 fn all_turns() -> Vec<Range<TimeCode>> {
@@ -668,10 +656,6 @@ pub fn au6_scenario_tracks(scenario: Au6Scenario) -> Vec<(Au6TrackRole, Vec<f32>
     tracks
 }
 
-// ===========================================================================
-// AU6 §3.1: the generated media.
-// ===========================================================================
-
 /// The `.wav` label one track's asset is written under.
 fn track_label(scenario: Au6Scenario, role: Au6TrackRole, track: TrackId) -> String {
     let role = match role {
@@ -789,10 +773,6 @@ pub fn au6_scenario_sources(scenario: Au6Scenario) -> Vec<GeneratedMedia> {
         })
         .collect()
 }
-
-// ---------------------------------------------------------------------------
-// The picture-carrying sources (AU6 §3.3).
-// ---------------------------------------------------------------------------
 
 /// The display code of the flat picture (a)/(e) carry on V1.
 const PICTURE_DISPLAY_CODE: u8 = 118;
@@ -1018,10 +998,6 @@ pub fn au6_muxed_source() -> GeneratedMedia {
     GeneratedMedia::ffmpeg("au6-mux", &arguments, "mkv")
     // Both guards drop here, on success and on a `run_ffmpeg` panic alike.
 }
-
-// ===========================================================================
-// AU6 §3.1: the two arithmetic helpers.
-// ===========================================================================
 
 /// The RMS of `samples` in dBFS hundredths, `round(2000 · log10(rms))` — the
 /// analytic side of §3.2 rule 1, computed on the authored buffer, never on a

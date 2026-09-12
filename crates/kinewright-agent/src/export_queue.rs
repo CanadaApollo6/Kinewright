@@ -2245,13 +2245,7 @@ mod tests {
             NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).unwrap();
-        // `resolve_output_path` records the **canonical** parent, so every
-        // path this module compares against a queue-published one has to be
-        // canonical too. On Linux that is usually a no-op; on Windows
-        // `std::env::temp_dir()` reads `TEMP`, which a GitHub runner sets to
-        // the 8.3 short form `C:\Users\RUNNER~1\…`, while `canonicalize`
-        // returns the verbatim long form `\\?\C:\Users\runneradmin\…` — the
-        // two name one directory and compare unequal.
+        // Windows TEMP is often 8.3; queue paths are the canonical long form.
         path.canonicalize().unwrap()
     }
 

@@ -455,9 +455,7 @@ mod tests {
         let first = hashes.get(&path).unwrap();
 
         fs::write(&path, b"other").unwrap();
-        // `set_modified` needs write access to the handle: Windows refuses it
-        // on a read-only `File::open` with `PermissionDenied`, where unix
-        // happens to allow it.
+        // Windows refuses set_modified on a read-only File::open.
         fs::OpenOptions::new()
             .write(true)
             .open(&path)
