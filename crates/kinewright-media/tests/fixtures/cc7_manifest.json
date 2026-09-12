@@ -1013,15 +1013,27 @@
       "delivery, 8-bit RGB mean": {
         "constant": "DELIVERY_RGB_MEAN_CODE_8BIT_MILLIONTHS",
         "budget": 1750000,
-        "measured": 855810,
-        "margin": 2.0448,
+        "measured": {
+          "linux": 855810,
+          "windows": 787598
+        },
+        "margin": {
+          "linux": 2.0448,
+          "windows": 2.2219
+        },
         "note": "re-pinned from probe-1's pre-A1 499 781 to the worst per-scenario amended-scene measurement, 855 810 on (e). It still clears the 2x bar, by 2.2 percent of the budget, so it stays a ratio row (R4-M2)."
       },
       "delivery, 8-bit PSNR": {
         "constant": "DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_8BIT",
         "budget": 3300,
-        "measured": 4059,
-        "margin": 759,
+        "measured": {
+          "linux": 4059,
+          "windows": 4070
+        },
+        "margin": {
+          "linux": 759,
+          "windows": 770
+        },
         "note": "re-pinned from probe-1's pre-A1 4 148 to the worst per-scenario amended-scene measurement, 4 059 on (e). A floor row: the margin is a code distance, never a ratio (R4-M2)."
       },
       "delivery, 10-bit luma max": {
