@@ -3928,27 +3928,52 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
                 "rgb_mean_code_millionths",
                 "psnr_db_hundredths",
             ] {
-                // A measured column is per operating system, so the shape is
-                // an object keyed by one — and the running system must be in
-                // it, because a row measured only elsewhere would pass here
-                // and gate nothing.
-                let measured = lane[term]["measured"]
-                    .as_object()
-                    .unwrap_or_else(|| panic!("{}/{depth}: {term} must record a measured column keyed by operating system", spec.id));
+                // A measured value is a scalar when every supported system
+                // produced it — 44 of these 60 rows did — and an object keyed
+                // by operating system when they disagree. What proves this
+                // system was measured at all is the provenance block below,
+                // which must carry an entry for it; that is the gate a third
+                // operating system would trip, not the scalar rows.
+                match &lane[term]["measured"] {
+                    Value::Number(_) => {}
+                    Value::Object(per_os) => assert!(
+                        per_os.contains_key(cc7_os()) && per_os.values().all(Value::is_number),
+                        "{}/{depth}: {term} splits its measured column by operating system but \
+                         records no integer for {}; run the delivery gate here and record what \
+                         it measures",
+                        spec.id,
+                        cc7_os()
+                    ),
+                    other => panic!(
+                        "{}/{depth}: {term} must record a measurement, either a scalar both \
+                         systems produced or one integer per system, not {other}",
+                        spec.id
+                    ),
+                }
+                assert!(lane[term]["budget"].is_number());
+                // The margin follows the measurement it is derived from: one
+                // value where both systems measured the same, one per system
+                // where they did not.
+                let margin = &lane[term]["margin"];
+                let margins: Vec<&Value> = match margin {
+                    Value::Object(per_os) => {
+                        assert!(
+                            per_os.contains_key(cc7_os()),
+                            "{}/{depth}: {term} records no margin for {}",
+                            spec.id,
+                            cc7_os()
+                        );
+                        per_os.values().collect()
+                    }
+                    other => vec![other],
+                };
                 assert!(
-                    !measured.is_empty() && measured.values().all(Value::is_number),
-                    "{}/{depth}: {term}'s measured column holds an integer per system",
+                    margins
+                        .iter()
+                        .all(|margin| margin.is_string() || margin.is_number()),
+                    "{}/{depth}: {term}'s margin is a ratio or the zero sentence",
                     spec.id
                 );
-                assert!(
-                    measured.contains_key(cc7_os()),
-                    "{}/{depth}: {term} has no measured column for {}; run the delivery gate \
-                     on this system and record what it measures",
-                    spec.id,
-                    cc7_os()
-                );
-                assert!(lane[term]["budget"].is_number());
-                assert!(lane[term]["margin"].is_string() || lane[term]["margin"].is_number());
             }
         }
     }

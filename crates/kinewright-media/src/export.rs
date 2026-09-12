@@ -3203,10 +3203,14 @@ mod tests {
     /// instead of passing.
     #[cfg(not(target_os = "windows"))]
     const NEUTRAL_CHROMA_CODES: Option<(&[u8], &[u8])> = Some((&[128, 129], &[127, 128]));
-    /// See [`NEUTRAL_CHROMA_CODES`]. Windows' own codes are measured on a
-    /// Windows run; nothing is copied here from Linux.
+    /// See [`NEUTRAL_CHROMA_CODES`]. Measured on `windows-latest` in CI run
+    /// 34693346093 against the `System233/ffmpeg-msvc-prebuilt
+    /// ffmpeg-8.0.1-r3` package: **Cb is the exact code alone** where Linux's
+    /// build splits it up, and **Cr is the same pair** on both. Nothing here
+    /// is copied from Linux — the Cr entry agrees because it was measured to
+    /// agree, and the Cb entry is the one that actually differs.
     #[cfg(target_os = "windows")]
-    const NEUTRAL_CHROMA_CODES: Option<(&[u8], &[u8])> = None;
+    const NEUTRAL_CHROMA_CODES: Option<(&[u8], &[u8])> = Some((&[128], &[127, 128]));
 
     /// The same conversion on the 10-bit lane (CC6 4.3/5.4).
     ///
