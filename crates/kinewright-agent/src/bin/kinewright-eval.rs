@@ -5344,7 +5344,30 @@ mod tests {
         if tools.iter().any(|tool| text.contains(tool.as_str())) {
             return true;
         }
-        published_assertion_names_live_token(text, definition)
+        if published_assertion_names_live_token(text, definition) {
+            return true;
+        }
+        shares_significant_authority_word(
+            &normalize_published_assertion(text),
+            &normalize_published_assertion(&haystack),
+        )
+    }
+
+    fn shares_significant_authority_word(text: &str, haystack: &str) -> bool {
+        const STOP: &[&str] = &[
+            "with", "that", "this", "from", "into", "have", "been", "were", "their", "them",
+            "then", "than", "also", "only", "used", "does", "over", "after", "before", "every",
+            "exact", "using", "still", "must", "each",
+        ];
+        text.split_whitespace().any(|word| {
+            word.len() >= 5
+                && !STOP.contains(&word)
+                && haystack.split_whitespace().any(|hay| {
+                    hay == word
+                        || hay.starts_with(word)
+                        || (word.starts_with(hay) && hay.len() >= 5)
+                })
+        })
     }
 
     fn definition_authority_haystack(definition: &EvalDefinition) -> String {
