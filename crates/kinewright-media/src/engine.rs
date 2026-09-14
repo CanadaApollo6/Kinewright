@@ -322,6 +322,9 @@ pub struct FfmpegMediaEngine {
     /// AU3 §3.9: the live loudness the worker publishes by audible position,
     /// read by `Playback::loudness`.
     loudness: Arc<LiveLoudness>,
+    /// AU6 §13: post-master monitor gain the callback applies. Shared with the
+    /// worker so a hold is heard without a control-channel round trip.
+    monitor_gain_tenth_db: Arc<AtomicI32>,
     next_asset_id: AtomicU64,
     data_dir: PathBuf,
     gpu: GpuContext,
@@ -409,6 +412,8 @@ impl FfmpegMediaEngine {
         let worker_mix_meters = Arc::clone(&mix_meters);
         let loudness = Arc::new(LiveLoudness::default());
         let worker_loudness = Arc::clone(&loudness);
+        let monitor_gain_tenth_db = Arc::new(AtomicI32::new(0));
+        let worker_monitor_gain = Arc::clone(&monitor_gain_tenth_db);
         let frames_drop_rx = frames_rx.clone();
         let events_drop_rx = events_rx.clone();
         let requested = Arc::new(RequestedPositions::default());
@@ -434,6 +439,7 @@ impl FfmpegMediaEngine {
                     worker_requested,
                     worker_gpu,
                     worker_lut_lattices,
+                    worker_monitor_gain,
                 )
                 .run();
             })
@@ -450,6 +456,7 @@ impl FfmpegMediaEngine {
             meter,
             mix_meters,
             loudness,
+            monitor_gain_tenth_db,
             next_asset_id: AtomicU64::new(1),
             data_dir: data_dir_for_self,
             gpu,
@@ -747,6 +754,11 @@ impl Playback for FfmpegMediaEngine {
     /// AU3 §3.9: restart the measurement (`Control::ResetLoudness`).
     fn reset_loudness(&self) {
         let _ = self.control_tx.send(Control::ResetLoudness);
+    }
+
+    fn set_monitor_gain_tenth_db(&self, gain_tenth_db: i32) {
+        self.monitor_gain_tenth_db
+            .store(gain_tenth_db, Ordering::Relaxed);
     }
 }
 
@@ -1613,6 +1625,7 @@ struct Worker {
     audio: Option<AudioRuntime>,
     /// AU3 §3.9: the live meter, ring, and publish state.
     loudness: WorkerLoudness,
+    monitor_gain_tenth_db: Arc<AtomicI32>,
     playing: bool,
     last_position: Option<TimeCode>,
 }
@@ -1636,6 +1649,7 @@ impl Worker {
         requested: Arc<RequestedPositions>,
         gpu: GpuContext,
         lut_lattices: Arc<RwLock<PublishedLattices>>,
+        monitor_gain_tenth_db: Arc<AtomicI32>,
     ) -> Self {
         Self {
             control_rx: channels.control_rx,
@@ -1655,6 +1669,7 @@ impl Worker {
             lut_library: Arc::new(LutLibrary::default()),
             audio: None,
             loudness: WorkerLoudness::new(loudness),
+            monitor_gain_tenth_db,
             playing: false,
             last_position: None,
         }
@@ -1993,6 +2008,7 @@ impl Worker {
             &self.clock.sample_rate,
             Arc::clone(&self.meter),
             mix_meters,
+            Arc::clone(&self.monitor_gain_tenth_db),
         )
     }
 
@@ -2078,7 +2094,10 @@ fn mix_meters_for_update(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::atomic::AtomicUsize};
+    use std::{
+        fs,
+        sync::atomic::{AtomicI32, AtomicUsize},
+    };
 
     use kinewright_core::{
         AutomationCurve, Clip, ClipContent, Effect, Keyframe, KeyframeInterpolation, LutAsset,
@@ -3072,6 +3091,7 @@ mod tests {
             Arc::new(RequestedPositions::default()),
             fallback_gpu().context(),
             Arc::new(RwLock::new(PublishedLattices::default())),
+            Arc::new(AtomicI32::new(0)),
         );
 
         let limiter = |milliseconds: i64| Effect {
@@ -3248,6 +3268,7 @@ mod tests {
             Arc::new(RequestedPositions::default()),
             fallback_gpu().context(),
             Arc::new(RwLock::new(PublishedLattices::default())),
+            Arc::new(AtomicI32::new(0)),
         );
 
         let limiter = |milliseconds: i64| Effect {

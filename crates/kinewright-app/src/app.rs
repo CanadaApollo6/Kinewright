@@ -997,6 +997,7 @@ impl KinewrightApp {
         self.poll_recording(ctx);
         self.poll_media_workflow(ctx);
         self.recover_stranded_ab_hold(ctx);
+        self.release_hidden_monitor_gain();
         if self.poll_lut_workers() {
             ctx.request_repaint();
         }

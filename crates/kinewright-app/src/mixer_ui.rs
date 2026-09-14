@@ -546,6 +546,10 @@ pub(crate) struct MixerFrame {
     /// The `LOUDNESS` section's `Reset` was clicked (AU3 §4.4). Answered with
     /// `Playback::reset_loudness`, never with an operation.
     pub(crate) reset_loudness: bool,
+    /// AU6 §13: the A/B hold's post-master monitor gain this frame, or `0`
+    /// when the section did not paint or the pointer is up. Answered with
+    /// `Playback::set_monitor_gain_tenth_db`, never with an operation.
+    pub(crate) monitor_gain_tenth_db: i32,
     /// AU5 §6.3 rule 126: a denoise card's `Learn profile` was clicked, and
     /// which node on which chain asked.
     ///
@@ -587,11 +591,21 @@ impl KinewrightApp {
         if frame.reset_loudness {
             self.playback.reset_loudness();
         }
+        self.playback
+            .set_monitor_gain_tenth_db(frame.monitor_gain_tenth_db);
         // A request, not an edit: it starts a measurement and writes nothing.
         if let Some((chain, effect)) = frame.learn_noise_profile {
             self.request_noise_profile(chain, effect);
         }
         self.submit_inspector_edits(edits);
+    }
+
+    /// Drop the monitor stage when the Mixer is not the painted tab, so a
+    /// hold cannot linger after the control that owned it is gone.
+    pub(crate) fn release_hidden_monitor_gain(&mut self) {
+        if self.material_tab != crate::app::MaterialTab::Mixer {
+            self.playback.set_monitor_gain_tenth_db(0);
+        }
     }
 }
 
@@ -619,7 +633,8 @@ pub(crate) fn chain_carries_denoise(document: &Document, selection: MixerSelecti
 /// Returns the selection the frame ends with — an `Edit` toggle is a control
 /// like any other and has to be able to change it, and a selection naming a
 /// bus the document no longer has is cleared here rather than left to paint
-/// an empty pane — and whether the loudness `Reset` was clicked (AU3 §4.4).
+/// an empty pane — whether the loudness `Reset` was clicked (AU3 §4.4), and
+/// the A/B hold's monitor gain (AU6 §13).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn mixer_body(
     ui: &mut egui::Ui,
@@ -637,7 +652,7 @@ pub(crate) fn mixer_body(
         other => other,
     };
     let mut requested = selection;
-    let mut reset_loudness = false;
+    let mut pane = mixer_pane_ui::LoudnessSectionFrame::default();
     let mut learn_noise_profile = None;
     let mut chain = MixerChainEdits::default();
     ui.horizontal_top(|ui| {
@@ -667,7 +682,7 @@ pub(crate) fn mixer_body(
                 range: telemetry.noise_learn,
                 requested: &mut learn_noise_profile,
             };
-            reset_loudness = mixer_pane_ui::chain_pane(
+            pane = mixer_pane_ui::chain_pane(
                 ui,
                 document,
                 current,
@@ -683,7 +698,8 @@ pub(crate) fn mixer_body(
     chain.drain_into(document, edits);
     MixerFrame {
         selection: requested,
-        reset_loudness,
+        reset_loudness: pane.reset,
+        monitor_gain_tenth_db: pane.monitor_gain_tenth_db,
         learn_noise_profile,
     }
 }
@@ -2245,6 +2261,8 @@ mod tests {
         rects: Vec<(String, egui::Rect)>,
         /// Whether the last frame's `Reset` was clicked (AU3 §4.4).
         reset_loudness: bool,
+        /// AU6 §13: the A/B hold's monitor gain the last frame reported.
+        monitor_gain_tenth_db: i32,
         /// AU5 §6.3: what the denoise card is told about the learn range.
         noise_learn: mixer_pane_ui::NoiseLearnRange,
         /// AU5 §6.3: the node the last frame's `Learn profile` named.
@@ -2272,6 +2290,7 @@ mod tests {
                 time: 0.0,
                 rects: Vec::new(),
                 reset_loudness: false,
+                monitor_gain_tenth_db: 0,
                 noise_learn: mixer_pane_ui::NoiseLearnRange::default(),
                 learn_noise_profile: None,
             }
@@ -2318,6 +2337,7 @@ mod tests {
             let mut ended_with = MixerFrame {
                 selection,
                 reset_loudness: false,
+                monitor_gain_tenth_db: 0,
                 learn_noise_profile: None,
             };
             let mut edits = InspectorEdits::default();
@@ -2338,6 +2358,7 @@ mod tests {
             });
             self.selection = ended_with.selection;
             self.reset_loudness = ended_with.reset_loudness;
+            self.monitor_gain_tenth_db = ended_with.monitor_gain_tenth_db;
             self.learn_noise_profile = ended_with.learn_noise_profile;
             self.rects = STRIP_RECTS.with(|rects| rects.borrow().clone());
             for operation in edits.operations() {
@@ -4450,6 +4471,7 @@ mod tests {
             "integrated figure as one micro",
             "Monitoring is not delivery: playback is",
             "never normalised",
+            "without moving the master fader",
             "and 210 for the master",
             // AU3 §6.8: Part B's half of the F21 sentence.
             "the export step normalises the file",
@@ -4726,6 +4748,7 @@ mod tests {
             "I -16.0 LUFS · LRA 6.2 LU · TP -1.3 dBTP · 0:42",
             "Reset",
             LOUDNESS_MONITORING_NOTE,
+            mixer_pane_ui::MONITOR_AB_HOLD_LABEL,
             "I -16.0",
         ] {
             assert!(
@@ -4806,6 +4829,53 @@ mod tests {
             !harness.reset_loudness,
             "the flag is one frame's answer, not a latch"
         );
+    }
+
+    /// AU6 §13: hold matches the live integrated figure to the export target
+    /// as a monitor gain, writes no operation, and release returns unity.
+    #[test]
+    fn the_ab_hold_matches_loudness_without_writing_an_operation() {
+        let mut harness =
+            MixerHarness::new(chain_document_with_master()).editing(MixerSelection::Master);
+        harness.loudness = measured_loudness();
+        let _ = harness.frame(Vec::new());
+        assert_eq!(harness.monitor_gain_tenth_db, 0, "idle is unity");
+        let before = harness.document.clone();
+        assert!(harness.has("ab_hold"));
+
+        let hold = harness.rect("ab_hold");
+        let press = harness.frame(vec![moved(hold.center()), pointer(hold.center(), true)]);
+        assert_eq!(
+            harness.monitor_gain_tenth_db, 20,
+            "−16.00 LUFS against the streaming −14.00 target is +2.0 dB"
+        );
+        assert!(
+            press.operations().is_empty(),
+            "the hold is not an operation: {:?}",
+            press.operations()
+        );
+        assert_eq!(harness.document, before);
+
+        let held = harness.frame(vec![moved(hold.center())]);
+        assert_eq!(harness.monitor_gain_tenth_db, 20, "the hold stays matched");
+        assert!(held.operations().is_empty());
+
+        let release = harness.frame(vec![pointer(hold.center(), false)]);
+        assert_eq!(harness.monitor_gain_tenth_db, 0, "release returns unity");
+        assert!(release.operations().is_empty());
+        assert_eq!(harness.document.audio_mix.master.gain_tenth_db, -20);
+    }
+
+    /// AU6 §13: without an integrated figure the hold is offered and does
+    /// nothing, so a press cannot invent a gain.
+    #[test]
+    fn the_ab_hold_is_idle_until_integrated_has_a_figure() {
+        let mut harness =
+            MixerHarness::new(chain_document_with_master()).editing(MixerSelection::Master);
+        let _ = harness.frame(Vec::new());
+        let hold = harness.rect("ab_hold");
+        let _ = harness.frame(vec![moved(hold.center()), pointer(hold.center(), true)]);
+        assert_eq!(harness.monitor_gain_tenth_db, 0);
     }
 
     /// AU4 §7 B7 (rule 109): the rail is disabled and reads the automated

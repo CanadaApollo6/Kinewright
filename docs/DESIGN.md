@@ -449,7 +449,9 @@ against the export dialog's current profile target — success inside the
 target's tolerance, warning above it — and are `text-secondary` below it; quiet
 is never a failure. The master strip carries the integrated figure as one micro
 line under the fader. Monitoring is not delivery: playback is never normalised;
-the export step normalises the file.
+the export step normalises the file. A press-and-hold `A/B` on that section
+applies a monitor gain that matches the live integrated figure to the export
+target without moving the master fader.
 
 Below it, and at the top of a bus pane, sits an `AUTOMATION` section: a combo
 choosing one parameter at a time — the chain's `Fader` plus every node parameter
