@@ -486,7 +486,7 @@ impl Drop for RawFrames {
 /// written to a temp `.yuv` because [`run_ffmpeg`] cannot pipe stdin, and the
 /// tags are set by `setparams` **and** the explicit `-color_*` flags.
 ///
-/// The FFmpeg pass is process-wide per [`Cc7SourceKind::normalized`]: later
+/// The `FFmpeg` pass is process-wide per [`Cc7SourceKind::normalized`]: later
 /// callers receive a byte copy so each [`GeneratedMedia`] still `Drop`s its
 /// own file. `Camera(LogLike)` and [`Cc7SourceKind::Log`] share.
 ///
