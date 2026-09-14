@@ -87,6 +87,10 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- The published v1–v6 eval manifests now run v7's `machine_assertions`
+  string check (non-empty, distinct, names live authority). v5 g3's
+  leftover v9 aftermath window `1285..1345` is refused; the published
+  g3 strings track `music-ground-truth-v10`. No product behavior change.
 - AU6 Part B, audio workflow evaluation: the seventh eval suite
   (`audio-workflow-v7`) runs the five named audio workflows as one
   model turn each, with an audio evidence block, six assertion
