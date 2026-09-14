@@ -124,6 +124,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-10, after AU5 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
 | Served MCP runtime (2026-09-10, after AU6 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 | Served MCP runtime (2026-09-14, after AU6 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-14, after AU6 §13 agent nits) | 138 | 1,540,292 B | 1,397,185 B | 120,458 B |
+| Served MCP runtime (2026-09-14, after AU6 §13 agent nits) | 7 | 5,660 B | 3,510 B | 998 B |
 
 AU6 Part A adds no capability and no operation; the registry is
 unchanged and the served quad is byte-identical at 7 / 5,660 B /
@@ -131,6 +133,26 @@ unchanged and the served quad is byte-identical at 7 / 5,660 B /
 eval suite, its assertion variants and its audio evidence block live
 in `eval.rs` and `kinewright-eval.rs`, neither of which is a
 capability.
+
+The AU6 §13 agent/ledger follow-up still adds no tool and no
+operation. It moves two registry-only bytes that AU6 itself was
+forbidden to touch:
+
+- **−1 B** serialized, `remove_audio_bus` `"destructiveHint":false` →
+  `"true"`, matching `plan_preview`'s destructive list. Descriptions
+  and input schemas do not move: an annotation is not either column.
+- **+29 B** input schema, `QueueExportArgs`' `deny_unknown_fields`
+  emitting `,"additionalProperties":false` on `queue_export` and
+  nothing else. A rustdoc on the struct would have become a schema
+  `description` and spent a further 220 B; the note stays a `//`
+  comment.
+
+That is 29 − 1 = 28 B serialized, 1,540,264 → 1,540,292, and 29 B of
+input schema, 1,397,156 → 1,397,185. Descriptions stay 120,458 B. The
+served quad is byte-identical for the fifteenth consecutive
+measurement at 7 / 5,660 B / 3,510 B / 998 B — neither
+`remove_audio_bus` nor `queue_export` is served — so the reduction
+holds at 99.63%, 5,660 B served against a 1,540,292 B registry.
 
 AU5 Part B's three capabilities, measured one row each (AU5 §5.9 rule 117):
 

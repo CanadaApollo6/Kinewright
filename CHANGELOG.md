@@ -45,6 +45,12 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   whatever is there.
 
 ### Changed
+- `remove_audio_bus` is annotated `destructiveHint: true`, matching
+  `plan_preview`'s destructive list. `queue_export` now denies unknown
+  fields, as the AU5 planners already did. The `-6000..=3600`
+  normalization gain guard is media's published constants; the planner
+  no longer keeps a second copy. Registry 1,540,292 / 1,397,185 /
+  120,458 B; served quad unchanged at 7 / 5,660 / 3,510 / 998.
 - `plan_audio_normalization` now extends a bus that carries only AU5 repair
   nodes instead of refusing it. Before AU5 the planner refused outright as soon
   as the requested tracks intersected any existing bus, so a repaired dialogue
