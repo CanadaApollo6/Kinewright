@@ -5486,7 +5486,7 @@ mod tests {
         assert_eq!(tasks.len(), definitions.len());
         for (task, definition) in tasks.iter().zip(&definitions) {
             let id = task["id"].as_str().expect("v1 tasks carry an id");
-            assert_eq!(id, definition.name.split_whitespace().next());
+            assert_eq!(Some(id), definition.name.split_whitespace().next());
             assert_eq!(task["name"], definition.name[3..].to_owned());
             assert_eq!(task["prompt"], definition.prompts[0]);
             assert_eq!(task["budget"]["turns"], definition.budgets.max_turns);
@@ -5783,7 +5783,7 @@ mod tests {
         assert_eq!(tasks.len(), definitions.len());
         for (task, definition) in tasks.iter().zip(&definitions) {
             let id = task["id"].as_str().expect("v5 tasks carry an id");
-            assert_eq!(id, definition.name.split_whitespace().next());
+            assert_eq!(Some(id), definition.name.split_whitespace().next());
             assert_eq!(task["prompt"], definition.prompts[0]);
             assert_eq!(
                 task["budget"]["tool_calls"],
