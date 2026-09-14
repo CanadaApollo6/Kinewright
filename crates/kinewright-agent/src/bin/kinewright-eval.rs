@@ -5472,10 +5472,10 @@ mod tests {
     fn normalize_published_assertion(text: &str) -> String {
         text.chars()
             .map(|character| {
-                if character == '-' || character == '_' {
-                    ' '
-                } else {
+                if character.is_ascii_alphanumeric() {
                     character.to_ascii_lowercase()
+                } else {
+                    ' '
                 }
             })
             .collect()
