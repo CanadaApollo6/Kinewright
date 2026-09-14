@@ -20,7 +20,7 @@ use kinewright_core::{
     NoiseProfileReport, PROFILE_BAND_NEUTRAL_TENTH_DB, ParamValue, ProgressSink,
     REPAIR_MINIMUM_WINDOWS, REPAIR_WINDOW_MILLISECONDS, TimeCode, TrackId, TrackLevels,
     audio_qc_exceptions, audio_qc_technical_pass, audio_repair_exceptions,
-    delivery_color_mismatches, map_frames_with_rounding,
+    delivery_color_mismatches, hum_excess_hundredths, map_frames_with_rounding,
 };
 
 use crate::{
@@ -1917,100 +1917,6 @@ pub(crate) fn measure_mix_window_levels(
         hop_milliseconds: request.hop_milliseconds,
         windows,
     })
-}
-
-/// AU5 §3.9: the Goertzel block, in sample frames.
-///
-/// **AU5 §0 R64 raised it from 4 800 to 24 000.** R18 fixes the floor at
-/// "≥ 4 800" and the contract's 4 800 is justified only as "enough to resolve 50
-/// from 60 Hz", which it is — but the *shoulders* the excess is measured against
-/// sit at `f * 2^(±1/6)`, only 5.45 and 6.12 Hz from a 50 Hz fundamental. Over
-/// 4 800 rectangular samples those are 0.545 and 0.612 bins away, where a pure
-/// 50 Hz tone still reads -4.8 and -6.2 dB, so the largest excess any hum can
-/// show is about 5 dB — under `REPAIR_HUM_EXCESS_HUNDREDTHS` (600), and the
-/// finding could never fire. At 24 000 frames (500 ms, 2 Hz bins) the same
-/// shoulders read -21 and -34 dB and the measurement means what §2.4 rule 24
-/// says it means.
-const HUM_GOERTZEL_BLOCK_FRAMES: usize = 24_000;
-
-/// AU5 §3.9: how many harmonics of each mains frequency are summed.
-const HUM_HARMONICS: usize = 4;
-
-/// AU5 §3.9: the shoulder offset, a sixth of an octave either side.
-fn sixth_octave_ratio() -> f64 {
-    2.0_f64.powf(1.0 / 6.0)
-}
-
-/// AU5 §3.9: the mean-square power at one frequency, by Goertzel over as many
-/// whole [`HUM_GOERTZEL_BLOCK_FRAMES`] blocks as the range holds.
-///
-/// No FFT and no new dependency. A sine of amplitude `A` exactly on the
-/// analysis frequency gives `|X| = A*N/2`, so the mean-square power is
-/// `2|X|^2/N^2`, which is what this returns, averaged over blocks and channels.
-#[allow(clippy::cast_precision_loss)]
-fn goertzel_power(samples: &[f32], channels: usize, rate: u32, hertz: f64) -> Option<f64> {
-    let channels = channels.max(1);
-    let frames = samples.len() / channels;
-    let block = HUM_GOERTZEL_BLOCK_FRAMES;
-    if frames < block {
-        return None;
-    }
-    let blocks = frames / block;
-    let omega = 2.0 * std::f64::consts::PI * hertz / f64::from(rate);
-    let coefficient = 2.0 * omega.cos();
-    let mut total = 0.0_f64;
-    for index in 0..blocks {
-        for channel in 0..channels {
-            let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
-            for frame in 0..block {
-                let sample = f64::from(samples[(index * block + frame) * channels + channel]);
-                let s0 = coefficient.mul_add(s1, sample) - s2;
-                s2 = s1;
-                s1 = s0;
-            }
-            let real = s1 - s2 * omega.cos();
-            let imaginary = s2 * omega.sin();
-            let magnitude_squared = real.mul_add(real, imaginary * imaginary);
-            total += 2.0 * magnitude_squared / (block as f64 * block as f64);
-        }
-    }
-    Some(total / (blocks * channels) as f64)
-}
-
-/// AU5 §3.9: one harmonic's excess over the **mean of its two sixth-octave
-/// shoulders**, in dB.
-fn harmonic_excess_db(samples: &[f32], channels: usize, rate: u32, hertz: f64) -> Option<f64> {
-    let ratio = sixth_octave_ratio();
-    let level = |hertz: f64| {
-        goertzel_power(samples, channels, rate, hertz)
-            .map(|power| 10.0 * power.max(SILENCE_POWER).log10())
-    };
-    let centre = level(hertz)?;
-    let low = level(hertz / ratio)?;
-    let high = level(hertz * ratio)?;
-    Some(centre - f64::midpoint(low, high))
-}
-
-/// AU5 §3.9: the summed excess over four harmonics, and the four values.
-#[allow(clippy::cast_possible_truncation)]
-fn hum_excess_hundredths(
-    samples: &[f32],
-    channels: usize,
-    rate: u32,
-    fundamental: f64,
-) -> (Option<i32>, Vec<i32>) {
-    let mut per_harmonic = Vec::with_capacity(HUM_HARMONICS);
-    let mut summed = 0.0_f64;
-    for harmonic in 1..=HUM_HARMONICS {
-        #[allow(clippy::cast_precision_loss)]
-        let hertz = fundamental * harmonic as f64;
-        let Some(excess) = harmonic_excess_db(samples, channels, rate, hertz) else {
-            return (None, Vec::new());
-        };
-        per_harmonic.push((excess * 100.0).round() as i32);
-        summed += excess.max(0.0);
-    }
-    (Some((summed * 100.0).round() as i32), per_harmonic)
 }
 
 /// AU5 §3.9 rule 68: measure one mix point for the three repair artefacts —

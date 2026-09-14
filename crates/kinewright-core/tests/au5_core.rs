@@ -1165,6 +1165,11 @@ fn au5_repair_types_round_trip_and_deny_unknown_fields() {
         "severity_desc_code_asc_field_asc"
     );
     assert!(provenance.signal_to_noise.contains("percentile"));
+    assert!(
+        provenance.hum.contains("excluding_notched_neighbours"),
+        "{}",
+        provenance.hum
+    );
 
     let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
     assert_integer_leaves(&value, "report");
