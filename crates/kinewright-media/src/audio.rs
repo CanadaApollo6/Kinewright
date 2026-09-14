@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
     },
 };
 
@@ -4117,6 +4117,7 @@ impl AudioRuntime {
         sample_rate_atomic: &Arc<AtomicU32>,
         meter: Arc<MeterState>,
         mix_meters: Arc<MixMeters>,
+        monitor_gain_tenth_db: Arc<AtomicI32>,
     ) -> Result<Self, MediaError> {
         let host = cpal::default_host();
         let device = host
@@ -4144,6 +4145,7 @@ impl AudioRuntime {
             channels,
             Arc::clone(position_samples),
             Arc::clone(&error_flag),
+            monitor_gain_tenth_db,
         )?;
         let mut mixer =
             AudioMixer::open(document, project_from, sample_rate, channels, Some(meter))?;
@@ -4231,6 +4233,7 @@ impl AudioRuntime {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -4239,23 +4242,43 @@ fn build_stream(
     channels: u16,
     position: Arc<AtomicU64>,
     error_flag: Arc<AtomicBool>,
+    monitor_gain_tenth_db: Arc<AtomicI32>,
 ) -> Result<cpal::Stream, MediaError> {
     match format {
-        cpal::SampleFormat::F32 => {
-            build_typed_stream::<f32>(device, config, consumer, channels, position, error_flag)
-        }
-        cpal::SampleFormat::I16 => {
-            build_typed_stream::<i16>(device, config, consumer, channels, position, error_flag)
-        }
-        cpal::SampleFormat::U16 => {
-            build_typed_stream::<u16>(device, config, consumer, channels, position, error_flag)
-        }
+        cpal::SampleFormat::F32 => build_typed_stream::<f32>(
+            device,
+            config,
+            consumer,
+            channels,
+            position,
+            error_flag,
+            monitor_gain_tenth_db,
+        ),
+        cpal::SampleFormat::I16 => build_typed_stream::<i16>(
+            device,
+            config,
+            consumer,
+            channels,
+            position,
+            error_flag,
+            monitor_gain_tenth_db,
+        ),
+        cpal::SampleFormat::U16 => build_typed_stream::<u16>(
+            device,
+            config,
+            consumer,
+            channels,
+            position,
+            error_flag,
+            monitor_gain_tenth_db,
+        ),
         unsupported => Err(MediaError::Backend(format!(
             "unsupported audio device sample format {unsupported}"
         ))),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_typed_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -4263,6 +4286,7 @@ fn build_typed_stream<T>(
     channels: u16,
     position: Arc<AtomicU64>,
     error_flag: Arc<AtomicBool>,
+    monitor_gain_tenth_db: Arc<AtomicI32>,
 ) -> Result<cpal::Stream, MediaError>
 where
     T: cpal::SizedSample + cpal::Sample + cpal::FromSample<f32>,
@@ -4272,7 +4296,13 @@ where
         .build_output_stream(
             *config,
             move |output: &mut [T], _| {
-                render_output(&mut consumer, output, callback_channels, &position);
+                render_output(
+                    &mut consumer,
+                    output,
+                    callback_channels,
+                    &position,
+                    monitor_gain_tenth_db.load(Ordering::Relaxed),
+                );
             },
             move |_error| {
                 error_flag.store(true, Ordering::Release);
@@ -4282,18 +4312,30 @@ where
         .map_err(backend)
 }
 
+/// Linear multiplier for the post-master monitor stage. Unity is exact `1.0`
+/// so an idle hold is a no-op on the ring.
+fn monitor_linear_gain(tenth_db: i32) -> f32 {
+    if tenth_db == 0 {
+        1.0
+    } else {
+        db_gain(i64::from(tenth_db))
+    }
+}
+
 fn render_output<T>(
     consumer: &mut Consumer<f32>,
     output: &mut [T],
     channels: usize,
     position: &AtomicU64,
+    monitor_gain_tenth_db: i32,
 ) where
     T: cpal::Sample + cpal::FromSample<f32>,
 {
     let sample_frames = output.len() / channels.max(1);
+    let gain = monitor_linear_gain(monitor_gain_tenth_db);
     for destination in output {
         let sample = consumer.pop().unwrap_or(0.0);
-        *destination = T::from_sample(sample);
+        *destination = T::from_sample(sample * gain);
     }
     position.fetch_add(
         u64::try_from(sample_frames).unwrap_or(u64::MAX),
@@ -4730,10 +4772,22 @@ mod tests {
         let position = AtomicU64::new(10);
         let mut output = [1.0_f32; 4];
 
-        render_output(&mut consumer, &mut output, 2, &position);
+        render_output(&mut consumer, &mut output, 2, &position, 0);
 
         assert_eq!(output, [0.25, -0.5, 0.0, 0.0]);
         assert_eq!(position.load(Ordering::Acquire), 12);
+    }
+
+    #[test]
+    fn render_output_applies_monitor_gain_after_the_ring() {
+        let (mut producer, mut consumer) = RingBuffer::new(2);
+        producer.push(0.5).unwrap();
+        producer.push(-0.25).unwrap();
+        let position = AtomicU64::new(0);
+        let mut output = [0.0_f32; 2];
+        render_output(&mut consumer, &mut output, 2, &position, 60);
+        assert_close(output[0], 0.5 * db_gain(60));
+        assert_close(output[1], -0.25 * db_gain(60));
     }
 
     #[test]

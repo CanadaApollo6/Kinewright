@@ -1858,6 +1858,9 @@ pub trait Playback: Send + Sync {
     /// AU3 §2.2: restart the integrated, range, and true-peak measurement at
     /// the audible position. Default: nothing to reset.
     fn reset_loudness(&self) {}
+    /// AU6 §13: monitor-only gain in tenth dB, applied after the master so a
+    /// loudness-matched A/B hold is not a document edit. Default: ignore.
+    fn set_monitor_gain_tenth_db(&self, _gain_tenth_db: i32) {}
 }
 
 pub trait Analysis: Send + Sync {

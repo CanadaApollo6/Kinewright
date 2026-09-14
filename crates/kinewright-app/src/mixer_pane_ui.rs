@@ -143,9 +143,9 @@ impl<'a> MixerChain<'a> {
 /// The chain pane beside the strips (AU2 §6.6).
 ///
 /// `snapshot` and `target` feed the master pane's `LOUDNESS` section (AU3
-/// §4.4); a bus pane ignores them. Returns `true` when that section's `Reset`
-/// was clicked, which the caller answers with `Playback::reset_loudness` —
-/// telemetry, not an operation, so it does not travel through `edits`.
+/// §4.4); a bus pane ignores them. The returned frame names the section's
+/// `Reset` and the A/B hold's monitor gain — both telemetry, not operations,
+/// so neither travels through `edits`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn chain_pane(
     ui: &mut egui::Ui,
@@ -157,7 +157,7 @@ pub(crate) fn chain_pane(
     target: LoudnessTarget,
     edits: &mut MixerChainEdits,
     learn: &mut NoiseLearn<'_>,
-) -> bool {
+) -> LoudnessSectionFrame {
     let column = egui::vec2(size::MIXER_CHAIN_PANE_WIDTH, ui.available_height());
     ui.allocate_ui_with_layout(column, egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.set_min_width(size::MIXER_CHAIN_PANE_WIDTH);
@@ -172,7 +172,7 @@ pub(crate) fn chain_pane(
                         if let Some(bus) = document.audio_mix.bus(id) {
                             bus_pane(ui, document, bus, levels, position, edits, learn);
                         }
-                        false
+                        LoudnessSectionFrame::default()
                     }
                     MixerSelection::Master => master_pane(
                         ui, document, levels, snapshot, position, target, edits, learn,
@@ -190,7 +190,7 @@ pub(crate) fn chain_pane(
                                 edits,
                             );
                         }
-                        false
+                        LoudnessSectionFrame::default()
                     }
                 }
             });
@@ -239,7 +239,7 @@ fn track_pane(
 }
 
 /// The master pane: the `LOUDNESS` section first, then the pan law and the
-/// chain (AU3 §4.4). Returns whether `Reset` was clicked.
+/// chain (AU3 §4.4). Returns that section's frame.
 #[allow(clippy::too_many_arguments)]
 fn master_pane(
     ui: &mut egui::Ui,
@@ -250,17 +250,17 @@ fn master_pane(
     target: LoudnessTarget,
     edits: &mut MixerChainEdits,
     learn: &mut NoiseLearn<'_>,
-) -> bool {
+) -> LoudnessSectionFrame {
     let master = &document.audio_mix.master;
     let chain = MixerChain::Master(master);
     pane_title(ui, "Master");
-    let reset_loudness = loudness_section(ui, snapshot, target);
+    let frame = loudness_section(ui, snapshot, target);
     automation_section(ui, chain, position, document.duration, edits);
     pan_law_rows(ui, document.audio_mix.pan_law, edits);
     ui.separator();
     chain_cards(ui, chain, levels, position, edits, learn);
     add_effect_menu(ui, chain, edits);
-    reset_loudness
+    frame
 }
 
 fn pane_title(ui: &mut egui::Ui, title: &str) {
@@ -466,31 +466,100 @@ pub(crate) const LOUDNESS_NONE: &str = "—";
 pub(crate) const LOUDNESS_MONITORING_NOTE: &str = "monitoring is not delivery: playback is never \
      normalised; the export step normalises the file";
 
+/// Tenth-dB floor of the monitor stage. Matches the master fader's floor so a
+/// hold cannot bury a programme farther than the strip already can.
+pub(crate) const MONITOR_GAIN_MIN_TENTH_DB: i32 = AUDIO_MASTER_GAIN_MIN;
+/// Tenth-dB ceiling. Wider than the master fader so a quiet integrated figure
+/// can still be matched to a streaming target.
+pub(crate) const MONITOR_GAIN_MAX_TENTH_DB: i32 = 240;
+
+/// The A/B control's label. Short so it shares the readout row with `Reset`.
+pub(crate) const MONITOR_AB_HOLD_LABEL: &str = "A/B";
+/// Why the hold exists, and that it is not the master fader.
+pub(crate) const MONITOR_AB_HOLD_TOOLTIP: &str = "Hold to hear the mix at the export target \
+     without moving the master fader. Release returns the monitor to unity.";
+/// Why the hold is offered only once I has a figure.
+pub(crate) const MONITOR_AB_HOLD_UNAVAILABLE: &str =
+    "The integrated meter has nothing to match yet. Play until I has a figure.";
+
+/// One frame of the `LOUDNESS` section: `Reset` and the A/B hold's monitor
+/// gain. Neither is an operation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LoudnessSectionFrame {
+    pub reset: bool,
+    pub monitor_gain_tenth_db: i32,
+}
+
+/// Gain that hears `measured` at `reference`, both LUFS hundredths, in tenth
+/// dB. The stage is not the master fader: this number never writes
+/// `AudioMaster.gain_tenth_db`.
+#[must_use]
+pub(crate) fn monitor_match_gain_tenth_db(
+    measured_hundredths: i32,
+    reference_hundredths: i32,
+) -> i32 {
+    ((reference_hundredths - measured_hundredths) / 10)
+        .clamp(MONITOR_GAIN_MIN_TENTH_DB, MONITOR_GAIN_MAX_TENTH_DB)
+}
+
+/// The hold's monitor gain for one frame: match while the pointer is down and
+/// I has a figure, otherwise unity.
+#[must_use]
+pub(crate) fn monitor_ab_hold_gain(
+    pressed: bool,
+    measured_integrated_hundredths: Option<i32>,
+    reference_hundredths: i32,
+) -> i32 {
+    if !pressed {
+        return 0;
+    }
+    measured_integrated_hundredths.map_or(0, |measured| {
+        monitor_match_gain_tenth_db(measured, reference_hundredths)
+    })
+}
+
 /// The master pane's `LOUDNESS` section (AU3 §4.4): momentary and short-term
 /// as bars against the export dialog's current profile target, then one line
-/// of integrated, range, true peak, and programme time, then `Reset`.
+/// of integrated, range, true peak, and programme time, then `A/B` and
+/// `Reset`.
 ///
-/// Returns `true` when `Reset` was clicked. The caller answers with
-/// `Playback::reset_loudness`; no operation is pushed, because the meter is
-/// telemetry and not document state.
+/// `Reset` is answered with `Playback::reset_loudness`. `A/B` is answered
+/// with `Playback::set_monitor_gain_tenth_db`. Neither is an operation.
 pub(crate) fn loudness_section(
     ui: &mut egui::Ui,
     snapshot: LoudnessSnapshot,
     target: LoudnessTarget,
-) -> bool {
+) -> LoudnessSectionFrame {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = space::HALF;
         ui.spacing_mut().interact_size.y = size::ICON_SM;
         ui.label(theme::caps_label("LOUDNESS", color::TEXT_MUTED));
         loudness_bar_row(ui, "M", snapshot.momentary_lufs_hundredths, target);
         loudness_bar_row(ui, "S", snapshot.short_term_lufs_hundredths, target);
-        let reset = ui
+        let (reset, monitor_gain_tenth_db) = ui
             .horizontal(|ui| {
                 loudness_readout_label(ui, snapshot, target);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let response = ui.small_button("Reset");
-                    record_strip_rect("reset_loudness", response.rect);
-                    response.clicked()
+                    let reset = ui.small_button("Reset");
+                    record_strip_rect("reset_loudness", reset.rect);
+                    let available = snapshot.integrated_lufs_hundredths.is_some();
+                    let hold =
+                        ui.add_enabled(available, egui::Button::new(MONITOR_AB_HOLD_LABEL).small());
+                    record_strip_rect("ab_hold", hold.rect);
+                    let hold = if available {
+                        hold.on_hover_text(MONITOR_AB_HOLD_TOOLTIP)
+                    } else {
+                        hold.on_disabled_hover_text(MONITOR_AB_HOLD_UNAVAILABLE)
+                    };
+                    let pressed = available && hold.is_pointer_button_down_on();
+                    (
+                        reset.clicked(),
+                        monitor_ab_hold_gain(
+                            pressed,
+                            snapshot.integrated_lufs_hundredths,
+                            target.integrated_lufs_hundredths,
+                        ),
+                    )
                 })
                 .inner
             })
@@ -503,7 +572,10 @@ pub(crate) fn loudness_section(
             )
             .wrap(),
         );
-        reset
+        LoudnessSectionFrame {
+            reset,
+            monitor_gain_tenth_db,
+        }
     })
     .inner
 }
@@ -2062,6 +2134,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_monitor_match_is_the_target_minus_integrated_in_tenth_db() {
+        assert_eq!(
+            monitor_match_gain_tenth_db(
+                -1_600,
+                STREAMING_PLATFORM_TARGET.integrated_lufs_hundredths
+            ),
+            20,
+            "−16.00 to −14.00 is +2.0 dB"
+        );
+        assert_eq!(
+            monitor_match_gain_tenth_db(
+                -1_400,
+                STREAMING_PLATFORM_TARGET.integrated_lufs_hundredths
+            ),
+            0
+        );
+        assert_eq!(
+            monitor_match_gain_tenth_db(
+                -2_300,
+                STREAMING_PLATFORM_TARGET.integrated_lufs_hundredths
+            ),
+            90,
+            "−23.00 to −14.00 is +9.0 dB"
+        );
+        assert_eq!(
+            monitor_match_gain_tenth_db(
+                -1_400,
+                EBU_R128_PROGRAMME_TARGET.integrated_lufs_hundredths
+            ),
+            -90,
+            "−14.00 to −23.00 is −9.0 dB"
+        );
+        assert_eq!(
+            monitor_match_gain_tenth_db(-12_000, 0),
+            MONITOR_GAIN_MAX_TENTH_DB
+        );
+        assert_eq!(
+            monitor_match_gain_tenth_db(12_000, 0),
+            MONITOR_GAIN_MIN_TENTH_DB
+        );
+        assert_eq!(monitor_ab_hold_gain(false, Some(-1_600), -1_400), 0);
+        assert_eq!(monitor_ab_hold_gain(true, None, -1_400), 0);
+        assert_eq!(monitor_ab_hold_gain(true, Some(-1_600), -1_400), 20);
+    }
+
     /// AU3 §7 A18: the bar runs −40…0 LUFS, empty for `None`, clamped.
     #[test]
     fn loudness_bar_fill_spans_minus_forty_to_zero_lufs() {
@@ -2251,8 +2369,9 @@ mod tests {
         ] {
             let output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 ui.set_max_width(size::MIXER_CHAIN_PANE_WIDTH);
-                let reset = loudness_section(ui, snapshot, STREAMING_PLATFORM_TARGET);
-                assert_eq!(reset, expect_reset, "nothing was clicked");
+                let frame = loudness_section(ui, snapshot, STREAMING_PLATFORM_TARGET);
+                assert_eq!(frame.reset, expect_reset, "nothing was clicked");
+                assert_eq!(frame.monitor_gain_tenth_db, 0, "nothing was held");
             });
             let painted = theme::painted_text(&output);
             for expected in [
@@ -2261,6 +2380,7 @@ mod tests {
                 "S",
                 momentary,
                 "Reset",
+                MONITOR_AB_HOLD_LABEL,
                 LOUDNESS_MONITORING_NOTE,
             ] {
                 assert!(
@@ -2533,7 +2653,7 @@ mod tests {
                     range: NoiseLearnRange::default(),
                     requested: &mut requested,
                 };
-                let reset = master_pane(
+                let frame = master_pane(
                     ui,
                     document,
                     &levels,
@@ -2543,7 +2663,7 @@ mod tests {
                     &mut edits,
                     &mut learn,
                 );
-                assert!(!reset, "nothing was clicked");
+                assert!(!frame.reset, "nothing was clicked");
                 measured = ui.min_rect().size();
             });
         });
