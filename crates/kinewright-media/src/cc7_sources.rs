@@ -27,8 +27,10 @@
 //! not `×257` (CC6 measured `32 790`), so every CC7 raster is idiom A.
 
 use std::{
+    collections::HashMap,
     fmt::Write as _,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use kinewright_core::cc7_scenarios::{
@@ -128,6 +130,9 @@ impl Cc7SourceKind {
         !matches!(self.normalized(), Self::Tracked)
     }
 }
+
+/// Process-wide FFV1 bytes, keyed on [`Cc7SourceKind::normalized`].
+static CC7_SOURCE_BYTES: OnceLock<Mutex<HashMap<Cc7SourceKind, Arc<[u8]>>>> = OnceLock::new();
 
 /// Which of CC7 §2.3.3's five named regions `(x, y)` falls in.
 ///
@@ -481,12 +486,36 @@ impl Drop for RawFrames {
 /// written to a temp `.yuv` because [`run_ffmpeg`] cannot pipe stdin, and the
 /// tags are set by `setparams` **and** the explicit `-color_*` flags.
 ///
+/// The `FFmpeg` pass is process-wide per [`Cc7SourceKind::normalized`]: later
+/// callers receive a byte copy so each [`GeneratedMedia`] still `Drop`s its
+/// own file. `Camera(LogLike)` and [`Cc7SourceKind::Log`] share.
+///
 /// # Panics
 ///
 /// Panics when the provisioned `FFmpeg` CLI is missing or reports a nonzero
 /// exit, exactly as [`run_ffmpeg`] does.
 #[must_use]
 pub fn cc7_source(kind: Cc7SourceKind) -> GeneratedMedia {
+    GeneratedMedia::from_bytes(kind.label(), "mkv", &cc7_source_bytes(kind))
+}
+
+/// One interned FFV1 payload for `kind`, encoded on the first miss.
+fn cc7_source_bytes(kind: Cc7SourceKind) -> Arc<[u8]> {
+    let kind = kind.normalized();
+    let cache = CC7_SOURCE_BYTES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(hit) = guard.get(&kind) {
+        return Arc::clone(hit);
+    }
+    let bytes: Arc<[u8]> = encode_cc7_mkv(kind).into();
+    guard.insert(kind, Arc::clone(&bytes));
+    bytes
+}
+
+/// One FFV1 mux of `kind`'s authored planes. The file is read and dropped.
+fn encode_cc7_mkv(kind: Cc7SourceKind) -> Vec<u8> {
     let raw = cc7_source_planes(kind);
     assert_eq!(
         raw.len(),
@@ -526,7 +555,13 @@ pub fn cc7_source(kind: Cc7SourceKind) -> GeneratedMedia {
         "-color_range",
         "tv",
     ];
-    GeneratedMedia::ffmpeg(kind.label(), &arguments, "mkv")
+    let encoded = GeneratedMedia::ffmpeg(kind.label(), &arguments, "mkv");
+    std::fs::read(encoded.path()).unwrap_or_else(|error| {
+        panic!(
+            "the interned CC7 encode for {} must be readable: {error}",
+            kind.label()
+        )
+    })
 }
 
 /// CC7 §3.1's `cc7_camera_source`: the 60-frame base scene as one camera.

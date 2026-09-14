@@ -1811,33 +1811,6 @@ fn au6_b_the_programme_stays_inside_its_loudness_range() {
     );
 }
 
-#[test]
-fn au6_b_the_makeup_less_chain_exceeds_the_loudness_range() {
-    let scene = scene(Au6Scenario::Podcast);
-    let mut document = scene.canonical();
-    let bus = document
-        .audio_mix
-        .buses
-        .iter_mut()
-        .find(|bus| bus.id == AU6_B_VOICE_B_BUS)
-        .expect("voice B bus");
-    if let Some(effect) = bus
-        .effects
-        .iter_mut()
-        .find(|effect| effect.name == "audio_compressor")
-    {
-        effect
-            .parameters
-            .insert("makeup_gain_tenth_db".to_owned(), ParamValue::Integer(0));
-    }
-    let lra = cached_audio_qc(&document, &qc_request(AU6_WINDOW_PROGRAMME))
-        .master
-        .loudness_range_lu_hundredths
-        .expect("LRA");
-    println!("AU6 makeup-less LRA={lra}");
-    assert!(lra > AU6_PODCAST_LRA_MAX_LU_HUNDREDTHS);
-}
-
 fn repair_point(document: &Document) -> MixSpectrumPoint {
     if document.audio_mix.bus(AU6_C_REPAIR_BUS).is_some() {
         MixSpectrumPoint::Bus(AU6_C_REPAIR_BUS)
@@ -2454,7 +2427,6 @@ fn run_delivery(
     document: &Document,
     job: &kinewright_core::Au6ExportJob,
     normalize: bool,
-    share: bool,
 ) -> (Option<ExportAudioReport>, DeliveryAudioVerification) {
     #[derive(serde::Serialize)]
     struct DeliveryRequest<'a> {
@@ -2465,42 +2437,37 @@ fn run_delivery(
         job: job.id,
         normalize,
     };
-    let key = render_key("delivery", document, &request);
-    let inflight = share.then(|| inflight_lock(key));
-    let _guard = inflight.as_ref().map(|lock| {
-        lock.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    });
-    if share {
-        if let Some(hit) = render_cache().deliveries.get(&key).cloned() {
-            return hit;
-        }
-    }
-    let directory = TempDirectory::new(&format!("au6-e-{}", job.id));
-    let mut settings = au6_export_settings(job, document);
-    if !normalize {
-        settings.loudness_normalization = None;
-    }
-    let output = directory.path(&format!("{}.mp4", job.id));
-    let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();
-    let audio = engine()
-        .export_document_reporting(
-            std::sync::Arc::new(document.clone()),
-            &output,
-            settings,
-            progress_tx,
-        )
-        .expect("delivery export")
-        .audio;
-    if normalize {
-        assert!(audio.is_some(), "a normalized delivery reports audio");
-    }
-    let verification = engine()
-        .verify_delivery_audio(&output, Some(job.target))
-        .expect("delivery verifies");
-    let value = (audio, verification);
-    render_cache().deliveries.insert(key, value.clone());
-    value
+    cached(
+        "delivery",
+        document,
+        &request,
+        |cache| &mut cache.deliveries,
+        || {
+            let directory = TempDirectory::new(&format!("au6-e-{}", job.id));
+            let mut settings = au6_export_settings(job, document);
+            if !normalize {
+                settings.loudness_normalization = None;
+            }
+            let output = directory.path(&format!("{}.mp4", job.id));
+            let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();
+            let audio = engine()
+                .export_document_reporting(
+                    std::sync::Arc::new(document.clone()),
+                    &output,
+                    settings,
+                    progress_tx,
+                )
+                .expect("delivery export")
+                .audio;
+            if normalize {
+                assert!(audio.is_some(), "a normalized delivery reports audio");
+            }
+            let verification = engine()
+                .verify_delivery_audio(&output, Some(job.target))
+                .expect("delivery verifies");
+            (audio, verification)
+        },
+    )
 }
 
 #[test]
@@ -2510,7 +2477,7 @@ fn au6_e_both_deliveries_land_on_their_targets() {
     let mut measured_deviations = Vec::new();
     let mut measured_margins = Vec::new();
     for job in &AU6_EXPORT_JOBS {
-        let (report, verification) = run_delivery(&document, job, true, true);
+        let (report, verification) = run_delivery(&document, job, true);
         let measured = verification
             .measured
             .integrated_lufs_hundredths
@@ -2551,7 +2518,7 @@ fn au6_e_an_unnormalized_export_misses_the_target() {
     let scene = scene(Au6Scenario::Delivery);
     let document = scene.canonical();
     for job in &AU6_EXPORT_JOBS {
-        let (_report, verification) = run_delivery(&document, job, false, true);
+        let (_report, verification) = run_delivery(&document, job, false);
         let measured = verification.measured.integrated_lufs_hundredths.unwrap();
         let deviation = (measured - job.target.integrated_lufs_hundredths).abs();
         println!("AU6 unnormalized {} deviation={deviation}", job.id);
@@ -2565,7 +2532,7 @@ fn au6_e_the_two_deliveries_separate_by_the_target_difference() {
     let document = scene.canonical();
     let mut integrated = Vec::new();
     for job in &AU6_EXPORT_JOBS {
-        let (_report, verification) = run_delivery(&document, job, true, true);
+        let (_report, verification) = run_delivery(&document, job, true);
         integrated.push(verification.measured.integrated_lufs_hundredths.unwrap());
     }
     let separation = (integrated[0] - integrated[1]).abs();
@@ -2575,24 +2542,6 @@ fn au6_e_the_two_deliveries_separate_by_the_target_difference() {
         term,
         i64::from(AU6_TARGET_SEPARATION_TOLERANCE_LU_HUNDREDTHS),
     );
-}
-
-#[test]
-fn au6_e_two_exports_at_one_profile_do_not_separate() {
-    let scene = scene(Au6Scenario::Delivery);
-    let document = scene.canonical();
-    let job = &AU6_EXPORT_JOBS[0];
-    let a = run_delivery(&document, job, true, true)
-        .1
-        .measured
-        .integrated_lufs_hundredths
-        .unwrap();
-    let b = run_delivery(&document, job, true, false)
-        .1
-        .measured
-        .integrated_lufs_hundredths
-        .unwrap();
-    assert_eq!((a - b).abs(), 0);
 }
 
 #[test]
@@ -2802,23 +2751,28 @@ fn au6_manifest_declares_every_required_fixture_and_constant() {
         );
         assert_eq!(row["reported_not_gated"].as_bool(), Some(false));
     }
-    for name in manifest["budgets"]["cuttable"]
+    assert!(
+        manifest["budgets"]["cuttable"]
+            .as_array()
+            .expect("the cuttable list exists")
+            .is_empty(),
+        "§12's two cuttable fixtures were cut on 2026-09-14; the live list is `cut`"
+    );
+    let cut = manifest["budgets"]["cut"]
         .as_array()
-        .expect("the two cuttable fixtures are named")
-    {
-        let name = name.as_str().expect("a fixture name");
+        .expect("the cut list names the two §12 fixtures");
+    assert_eq!(
+        cut.iter()
+            .map(|name| name.as_str().expect("a fixture name"))
+            .collect::<Vec<_>>(),
+        AU6_CUT_FIXTURES
+    );
+    for name in AU6_CUT_FIXTURES {
         assert!(
-            AU6_MEDIA_TESTS.contains(&name),
-            "a cuttable fixture that is not in the media inventory: {name}"
+            !AU6_MEDIA_TESTS.contains(&name),
+            "a cut fixture must leave the live inventory: {name}"
         );
     }
-    assert!(
-        manifest["budgets"]["cut"]
-            .as_array()
-            .expect("the cut list exists")
-            .is_empty(),
-        "nothing was cut; §12's cut order was not used"
-    );
 
     // --- §2.7: the export jobs are the code's, ids and all ----------------
     let jobs = manifest["export_jobs"]
@@ -2905,6 +2859,13 @@ fn au6_manifest_declares_every_required_fixture_and_constant() {
     assert_eq!(
         required["forbidden_helpers"].as_u64(),
         Some(AU6_FORBIDDEN_HELPERS.len() as u64)
+    );
+    assert!(
+        required["cuttable_kept"]
+            .as_array()
+            .expect("cuttable_kept exists")
+            .is_empty(),
+        "§12's two cuttable fixtures were cut on 2026-09-14"
     );
 
     let self_test = &manifest["manifest_self_test"];
@@ -3182,7 +3143,13 @@ const AU6_INVENTORY_TESTS: [&str; 2] = [
     "au6_declared_test_names_exist_in_their_source_files",
 ];
 
-const AU6_MEDIA_TESTS: [&str; 60] = [
+/// §12's two cuttable fixtures, dropped 2026-09-14. Named in §13.
+const AU6_CUT_FIXTURES: [&str; 2] = [
+    "au6_b_the_makeup_less_chain_exceeds_the_loudness_range",
+    "au6_e_two_exports_at_one_profile_do_not_separate",
+];
+
+const AU6_MEDIA_TESTS: [&str; 58] = [
     "au6_every_authored_level_matches_its_analytic_derivation",
     "au6_the_two_voices_occupy_disjoint_bands",
     "au6_c_every_authored_gap_is_below_the_silence_threshold",
@@ -3210,7 +3177,6 @@ const AU6_MEDIA_TESTS: [&str; 60] = [
     "au6_b_the_raw_trims_do_not_match_the_voices",
     "au6_b_the_bypassed_chain_leaves_the_spread_intact",
     "au6_b_the_programme_stays_inside_its_loudness_range",
-    "au6_b_the_makeup_less_chain_exceeds_the_loudness_range",
     "au6_c_the_repair_chain_moves_the_snr_and_the_hum",
     "au6_c_an_unlearned_profile_moves_no_snr",
     "au6_c_a_chain_without_the_hum_node_leaves_the_mains_alone",
@@ -3237,7 +3203,6 @@ const AU6_MEDIA_TESTS: [&str; 60] = [
     "au6_e_both_deliveries_land_on_their_targets",
     "au6_e_an_unnormalized_export_misses_the_target",
     "au6_e_the_two_deliveries_separate_by_the_target_difference",
-    "au6_e_two_exports_at_one_profile_do_not_separate",
     "au6_e_the_delivery_settings_carry_the_profile_raster_without_rendering_it",
     "au6_the_performance_block_matches_its_code_constants",
     "au6_manifest_declares_every_required_fixture_and_constant",

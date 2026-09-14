@@ -19,6 +19,11 @@ jobs:
           toolchain: stable-x86_64-pc-windows-msvc
           components: rustfmt, clippy
 
+      # Default key includes rustc (host/release/hash) and a hash of every
+      # Cargo.lock / Cargo.toml, so a lockfile or toolchain bump misses.
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
       - name: Install Python
         uses: actions/setup-python@v5
         with:
@@ -35,8 +40,10 @@ jobs:
           # `cargo test` is reported as success.
           $ErrorActionPreference = 'Stop'
           & .\scripts\setup-ffmpeg.ps1
-          cargo build --workspace
-          if ($LASTEXITCODE -ne 0) { throw "cargo build --workspace exited $LASTEXITCODE" }
+          # `cargo test` compiles the workspace with cfg(test). A separate
+          # `cargo build --workspace` on windows-latest is several minutes of
+          # MSVC work the test step then repeats. Linux keeps the extra build
+          # for the readelf soname gate on the non-test binary.
           cargo test --workspace
           if ($LASTEXITCODE -ne 0) { throw "cargo test --workspace exited $LASTEXITCODE" }
           cargo clippy --workspace --all-targets -- -D warnings
@@ -54,6 +61,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      # Default key includes rustc (host/release/hash) and a hash of every
+      # Cargo.lock / Cargo.toml, so a lockfile or toolchain bump misses.
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
 
       - name: Install native build dependencies
         run: ./scripts/install-linux-deps.sh
