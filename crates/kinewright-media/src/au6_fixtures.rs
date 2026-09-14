@@ -24,7 +24,7 @@ use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
     ops::Range,
-    sync::{Mutex, MutexGuard, OnceLock},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -186,7 +186,8 @@ fn engine() -> MutexGuard<'static, FfmpegMediaEngine> {
 /// instrument on the same document reuses the first render; a mutated
 /// document serializes differently and misses. That is the invalidation
 /// rule. Sharing requires interned scenes — otherwise each fixture's
-/// temp paths make every document a unique key.
+/// temp paths make every document a unique key. Same-key misses
+/// single-flight so parallel tests do not pay the render twice.
 struct Au6RenderCache {
     mix_levels: HashMap<u64, MixLevelReport>,
     mix_windows: HashMap<u64, MixWindowLevelReport>,
@@ -196,6 +197,7 @@ struct Au6RenderCache {
     noise_profile: HashMap<u64, NoiseProfileReport>,
     stems: HashMap<u64, MixStems>,
     deliveries: HashMap<u64, (Option<ExportAudioReport>, DeliveryAudioVerification)>,
+    inflight: HashMap<u64, Arc<Mutex<()>>>,
 }
 
 fn render_cache() -> MutexGuard<'static, Au6RenderCache> {
@@ -211,10 +213,19 @@ fn render_cache() -> MutexGuard<'static, Au6RenderCache> {
                 noise_profile: HashMap::new(),
                 stems: HashMap::new(),
                 deliveries: HashMap::new(),
+                inflight: HashMap::new(),
             })
         })
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn inflight_lock(key: u64) -> Arc<Mutex<()>> {
+    render_cache()
+        .inflight
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
 }
 
 fn render_key(kind: &str, document: &Document, request: &impl serde::Serialize) -> u64 {
@@ -237,6 +248,13 @@ fn cached<V: Clone>(
     miss: impl FnOnce() -> V,
 ) -> V {
     let key = render_key(kind, document, request);
+    if let Some(hit) = slot(&mut render_cache()).get(&key).cloned() {
+        return hit;
+    }
+    let inflight = inflight_lock(key);
+    let _guard = inflight
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(hit) = slot(&mut render_cache()).get(&key).cloned() {
         return hit;
     }
@@ -714,6 +732,13 @@ fn stems_of(document: &Document, range: Range<TimeCode>) -> MixStems {
         end: range.end.0,
     };
     let key = render_key("stems", document, &request);
+    if let Some(hit) = render_cache().stems.get(&key) {
+        return clone_stems(hit);
+    }
+    let inflight = inflight_lock(key);
+    let _guard = inflight
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(hit) = render_cache().stems.get(&key) {
         return clone_stems(hit);
     }
@@ -2441,6 +2466,11 @@ fn run_delivery(
         normalize,
     };
     let key = render_key("delivery", document, &request);
+    let inflight = share.then(|| inflight_lock(key));
+    let _guard = inflight.as_ref().map(|lock| {
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    });
     if share {
         if let Some(hit) = render_cache().deliveries.get(&key).cloned() {
             return hit;
