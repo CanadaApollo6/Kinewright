@@ -21,19 +21,22 @@
 #![allow(clippy::used_underscore_binding)]
 
 use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
     ops::Range,
-    sync::{Mutex, MutexGuard, OnceLock},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::{Duration, Instant},
 };
 
 use kinewright_core::{
-    Analysis, AssetId, AudioBus, AudioBusId, AudioQcRequest, AudioRepairReport, AudioRepairRequest,
-    Clip, ClipContent, ClipId, ColorContext, DeliveryProfile, Document, Export, ExportCancellation,
-    ExportSettings, MediaAsset, MediaKind, MixLevelReport, MixLevelRequest, MixNoiseProfileRequest,
-    MixSpectrumPoint, MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest,
-    NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, Operation,
-    PROFILE_BAND_NEUTRAL_TENTH_DB, ParamValue, Rational, SilenceStatus, TimeCode, Track, TrackId,
-    TrackKind, apply_batch,
+    Analysis, AssetId, AudioBus, AudioBusId, AudioQcReport, AudioQcRequest, AudioRepairReport,
+    AudioRepairRequest, Clip, ClipContent, ClipId, ColorContext, DeliveryAudioVerification,
+    DeliveryProfile, Document, Export, ExportAudioReport, ExportCancellation, ExportSettings,
+    MediaAsset, MediaKind, MixLevelReport, MixLevelRequest, MixNoiseProfileRequest,
+    MixSpectrumPoint, MixSpectrumReport, MixSpectrumRequest, MixWindowLevelReport,
+    MixWindowRequest, NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, NoiseProfileReport,
+    Operation, PROFILE_BAND_NEUTRAL_TENTH_DB, ParamValue, Rational, SilenceStatus, TimeCode, Track,
+    TrackId, TrackKind, apply_batch,
     au6_scenarios::{
         AU6_A_BED_LEVEL_DBFS_HUNDREDTHS, AU6_A_BED_TRACK, AU6_A_CLIPS, AU6_A_DIALOGUE_BUS_NAME,
         AU6_A_DUCK_KEYFRAMES, AU6_A_MUSIC_BUS, AU6_A_MUSIC_BUS_NAME,
@@ -179,6 +182,177 @@ fn engine() -> MutexGuard<'static, FfmpegMediaEngine> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Process-wide AU6 render cache. A later fixture that asks for the same
+/// instrument on the same document reuses the first render; a mutated
+/// document serializes differently and misses. That is the invalidation
+/// rule. Sharing requires interned scenes — otherwise each fixture's
+/// temp paths make every document a unique key. Same-key misses
+/// single-flight so parallel tests do not pay the render twice.
+struct Au6RenderCache {
+    mix_levels: HashMap<u64, MixLevelReport>,
+    mix_windows: HashMap<u64, MixWindowLevelReport>,
+    mix_spectrum: HashMap<u64, MixSpectrumReport>,
+    audio_qc: HashMap<u64, AudioQcReport>,
+    audio_repair: HashMap<u64, AudioRepairReport>,
+    noise_profile: HashMap<u64, NoiseProfileReport>,
+    stems: HashMap<u64, MixStems>,
+    deliveries: HashMap<u64, (Option<ExportAudioReport>, DeliveryAudioVerification)>,
+    inflight: HashMap<u64, Arc<Mutex<()>>>,
+}
+
+fn render_cache() -> MutexGuard<'static, Au6RenderCache> {
+    static CACHE: OnceLock<Mutex<Au6RenderCache>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            Mutex::new(Au6RenderCache {
+                mix_levels: HashMap::new(),
+                mix_windows: HashMap::new(),
+                mix_spectrum: HashMap::new(),
+                audio_qc: HashMap::new(),
+                audio_repair: HashMap::new(),
+                noise_profile: HashMap::new(),
+                stems: HashMap::new(),
+                deliveries: HashMap::new(),
+                inflight: HashMap::new(),
+            })
+        })
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn inflight_lock(key: u64) -> Arc<Mutex<()>> {
+    render_cache()
+        .inflight
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn render_key(kind: &str, document: &Document, request: &impl serde::Serialize) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    kind.hash(&mut hasher);
+    serde_json::to_vec(document)
+        .expect("an AU6 document serializes for the render cache")
+        .hash(&mut hasher);
+    serde_json::to_vec(request)
+        .expect("an AU6 request serializes for the render cache")
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+fn cached<V: Clone>(
+    kind: &str,
+    document: &Document,
+    request: &impl serde::Serialize,
+    slot: impl Fn(&mut Au6RenderCache) -> &mut HashMap<u64, V>,
+    miss: impl FnOnce() -> V,
+) -> V {
+    let key = render_key(kind, document, request);
+    if let Some(hit) = slot(&mut render_cache()).get(&key).cloned() {
+        return hit;
+    }
+    let inflight = inflight_lock(key);
+    let _guard = inflight
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(hit) = slot(&mut render_cache()).get(&key).cloned() {
+        return hit;
+    }
+    let value = miss();
+    slot(&mut render_cache()).insert(key, value.clone());
+    value
+}
+
+fn cached_mix_levels(document: &Document, request: &MixLevelRequest) -> MixLevelReport {
+    cached(
+        "mix_levels",
+        document,
+        request,
+        |cache| &mut cache.mix_levels,
+        || engine().mix_levels(document, request).expect("mix_levels"),
+    )
+}
+
+fn cached_mix_window_levels(
+    document: &Document,
+    request: &MixWindowRequest,
+) -> MixWindowLevelReport {
+    cached(
+        "mix_window_levels",
+        document,
+        request,
+        |cache| &mut cache.mix_windows,
+        || {
+            engine()
+                .mix_window_levels(document, request)
+                .expect("mix_window_levels")
+        },
+    )
+}
+
+fn cached_mix_spectrum(document: &Document, request: &MixSpectrumRequest) -> MixSpectrumReport {
+    cached(
+        "mix_spectrum",
+        document,
+        request,
+        |cache| &mut cache.mix_spectrum,
+        || {
+            engine()
+                .mix_spectrum(document, request)
+                .expect("mix_spectrum")
+        },
+    )
+}
+
+fn cached_audio_qc(document: &Document, request: &AudioQcRequest) -> AudioQcReport {
+    cached(
+        "audio_qc",
+        document,
+        request,
+        |cache| &mut cache.audio_qc,
+        || engine().audio_qc(document, request).expect("audio_qc"),
+    )
+}
+
+fn cached_audio_repair(document: &Document, request: &AudioRepairRequest) -> AudioRepairReport {
+    cached(
+        "audio_repair",
+        document,
+        request,
+        |cache| &mut cache.audio_repair,
+        || {
+            engine()
+                .audio_repair(document, request)
+                .expect("audio_repair")
+        },
+    )
+}
+
+fn cached_noise_profile(
+    document: &Document,
+    request: &MixNoiseProfileRequest,
+) -> NoiseProfileReport {
+    cached(
+        "mix_noise_profile",
+        document,
+        request,
+        |cache| &mut cache.noise_profile,
+        || {
+            engine()
+                .mix_noise_profile(document, request)
+                .expect("mix_noise_profile")
+        },
+    )
+}
+
+fn clone_stems(stems: &MixStems) -> MixStems {
+    MixStems {
+        tracks: stems.tracks.clone(),
+        buses: stems.buses.clone(),
+        master: stems.master.clone(),
+    }
+}
+
 fn project_fps() -> Rational {
     Rational::new(AU6_SOURCE_FPS, 1).expect("25 fps")
 }
@@ -287,7 +461,6 @@ fn media_clip(spec: &kinewright_core::Au6ClipSpec) -> Clip {
 /// `GeneratedMedia` values are held for their `Drop`.
 struct Au6Scene {
     _media: Vec<GeneratedMedia>,
-    _room_tone_store: Option<TempDirectory>,
     document: Document,
 }
 
@@ -344,7 +517,6 @@ impl Au6Scene {
             .unwrap_or_else(|error| panic!("{scenario:?}: base document: {error}"));
         Self {
             _media: media,
-            _room_tone_store: None,
             document,
         }
     }
@@ -390,8 +562,29 @@ fn role_name(role: Au6TrackRole) -> &'static str {
     }
 }
 
-fn scene(scenario: Au6Scenario) -> Au6Scene {
-    Au6Scene::base(scenario)
+fn scene(scenario: Au6Scenario) -> &'static Au6Scene {
+    match scenario {
+        Au6Scenario::Interview => {
+            static SCENE: OnceLock<Au6Scene> = OnceLock::new();
+            SCENE.get_or_init(|| Au6Scene::base(Au6Scenario::Interview))
+        }
+        Au6Scenario::Podcast => {
+            static SCENE: OnceLock<Au6Scene> = OnceLock::new();
+            SCENE.get_or_init(|| Au6Scene::base(Au6Scenario::Podcast))
+        }
+        Au6Scenario::LocationDialogue => {
+            static SCENE: OnceLock<Au6Scene> = OnceLock::new();
+            SCENE.get_or_init(|| Au6Scene::base(Au6Scenario::LocationDialogue))
+        }
+        Au6Scenario::Multicam => {
+            static SCENE: OnceLock<Au6Scene> = OnceLock::new();
+            SCENE.get_or_init(|| Au6Scene::base(Au6Scenario::Multicam))
+        }
+        Au6Scenario::Delivery => {
+            static SCENE: OnceLock<Au6Scene> = OnceLock::new();
+            SCENE.get_or_init(|| Au6Scene::base(Au6Scenario::Delivery))
+        }
+    }
 }
 
 fn wait_for_silence(engine: &FfmpegMediaEngine, asset: &MediaAsset) {
@@ -444,32 +637,43 @@ fn room_tone_asset(label: &str) -> (TempDirectory, GeneratedMedia, MediaAsset) {
     (store_root, keep, asset)
 }
 
-fn location_filled_scene() -> (Au6Scene, Document) {
-    let mut scene = scene(Au6Scenario::LocationDialogue);
-    let (store, media, asset) = room_tone_asset("au6-c-fill");
-    let id = asset.id;
-    apply_in_order(
-        &mut scene.document,
-        &[Operation::AddAsset {
-            asset: asset.clone(),
-        }],
-    );
-    scene._room_tone_store = Some(store);
-    scene._media.push(media);
-    let mut ops = au6_c_gap_operations(kinewright_core::au6_scenarios::AU6_C_RIGHT_CLIP_ID);
-    ops.extend(au6_c_fill_operations(id));
-    let document = scene.commit(&ops);
-    (scene, document)
+struct LocationFilled {
+    _store: TempDirectory,
+    _keep: GeneratedMedia,
+    with_room: Document,
+    filled: Document,
+}
+
+fn location_filled_scene() -> (Document, Document) {
+    static FILLED: OnceLock<LocationFilled> = OnceLock::new();
+    let interned = FILLED.get_or_init(|| {
+        let base = scene(Au6Scenario::LocationDialogue);
+        let (store, keep, asset) = room_tone_asset("au6-c-fill");
+        let id = asset.id;
+        let mut with_room = base.document.clone();
+        apply_in_order(
+            &mut with_room,
+            &[Operation::AddAsset {
+                asset: asset.clone(),
+            }],
+        );
+        let mut ops = au6_c_gap_operations(kinewright_core::au6_scenarios::AU6_C_RIGHT_CLIP_ID);
+        ops.extend(au6_c_fill_operations(id));
+        let mut filled = with_room.clone();
+        apply_in_order(&mut filled, &ops);
+        LocationFilled {
+            _store: store,
+            _keep: keep,
+            with_room,
+            filled,
+        }
+    });
+    (interned.with_room.clone(), interned.filled.clone())
 }
 
 /// AU6's own seam helper: a `MeasuredZero` claim, not AU5's budgeted ceiling.
 fn assert_au6_seam(document: &Document, join: Range<TimeCode>) {
-    let stems = mix_audio_stems(
-        document,
-        TimeCode::ZERO..document.duration,
-        &mix_settings(document),
-    )
-    .expect("the filled document mixes stems");
+    let stems = stems_of(document, TimeCode::ZERO..document.duration);
     let mixed = track_stem(&stems, AU6_C_DIALOGUE_TRACK);
     let track = document
         .tracks
@@ -518,7 +722,30 @@ fn assert_au6_seam(document: &Document, join: Range<TimeCode>) {
 }
 
 fn stems_of(document: &Document, range: Range<TimeCode>) -> MixStems {
-    mix_audio_stems(document, range, &mix_settings(document)).expect("the document mixes stems")
+    #[derive(serde::Serialize)]
+    struct StemRequest {
+        start: i64,
+        end: i64,
+    }
+    let request = StemRequest {
+        start: range.start.0,
+        end: range.end.0,
+    };
+    let key = render_key("stems", document, &request);
+    if let Some(hit) = render_cache().stems.get(&key) {
+        return clone_stems(hit);
+    }
+    let inflight = inflight_lock(key);
+    let _guard = inflight
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(hit) = render_cache().stems.get(&key) {
+        return clone_stems(hit);
+    }
+    let value = mix_audio_stems(document, range, &mix_settings(document))
+        .expect("the document mixes stems");
+    render_cache().stems.insert(key, clone_stems(&value));
+    value
 }
 
 fn track_stem<'a>(stems: &'a MixStems, track: TrackId) -> &'a [f32] {
@@ -856,25 +1083,20 @@ fn au6_every_authored_level_matches_its_analytic_derivation() {
 #[test]
 fn au6_the_two_voices_occupy_disjoint_bands() {
     let scene = scene(Au6Scenario::Interview);
-    let engine = engine();
-    let a = engine
-        .mix_spectrum(
-            &scene.document,
-            &MixSpectrumRequest {
-                range: Some(au6_turns_of(Au6Speaker::A)[0].clone()),
-                point: MixSpectrumPoint::Track(AU6_A_VOICE_A_TRACK),
-            },
-        )
-        .expect("voice A spectra");
-    let b = engine
-        .mix_spectrum(
-            &scene.document,
-            &MixSpectrumRequest {
-                range: Some(au6_turns_of(Au6Speaker::B)[0].clone()),
-                point: MixSpectrumPoint::Track(AU6_A_VOICE_B_TRACK),
-            },
-        )
-        .expect("voice B spectra");
+    let a = cached_mix_spectrum(
+        &scene.document,
+        &MixSpectrumRequest {
+            range: Some(au6_turns_of(Au6Speaker::A)[0].clone()),
+            point: MixSpectrumPoint::Track(AU6_A_VOICE_A_TRACK),
+        },
+    );
+    let b = cached_mix_spectrum(
+        &scene.document,
+        &MixSpectrumRequest {
+            range: Some(au6_turns_of(Au6Speaker::B)[0].clone()),
+            point: MixSpectrumPoint::Track(AU6_A_VOICE_B_TRACK),
+        },
+    );
     let peak_a = peak_band(&a);
     let peak_b = peak_band(&b);
     let separation = i64::try_from(peak_a.abs_diff(peak_b)).unwrap();
@@ -886,17 +1108,14 @@ fn au6_the_two_voices_occupy_disjoint_bands() {
         separation,
         i64::from(AU6_VOICE_BAND_SEPARATION_BANDS),
     );
-    let same = engine
-        .mix_spectrum(
-            &scene.document,
-            &MixSpectrumRequest {
-                range: Some(au6_turns_of(Au6Speaker::A)[0].clone()),
-                point: MixSpectrumPoint::Track(AU6_A_VOICE_A_TRACK),
-            },
-        )
-        .expect("second A spectrum");
+    let same = cached_mix_spectrum(
+        &scene.document,
+        &MixSpectrumRequest {
+            range: Some(au6_turns_of(Au6Speaker::A)[0].clone()),
+            point: MixSpectrumPoint::Track(AU6_A_VOICE_A_TRACK),
+        },
+    );
     assert_eq!(peak_band(&same), peak_a);
-    drop(engine);
     let both_a = au6_voice_pcm(
         Au6Speaker::A,
         AU6_A_VOICE_A_LEVEL_DBFS_HUNDREDTHS,
@@ -1223,12 +1442,10 @@ fn au6_restated_constants_agree_with_their_owners() {
     assert_ne!(u64::from(stale), LOUDNESS_GATING_BLOCK_FRAMES);
 }
 
-fn interview_turn_bus_levels(engine: &FfmpegMediaEngine, document: &Document, bus: &str) -> i32 {
+fn interview_turn_bus_levels(document: &Document, bus: &str) -> i32 {
     let mut readings = Vec::new();
     for turn in AU6_TURNS {
-        let report = engine
-            .mix_levels(document, &level_request(turn.range()))
-            .expect("mix_levels over a turn");
+        let report = cached_mix_levels(document, &level_request(turn.range()));
         readings.push(bus_integrated(&report, bus));
     }
     energy_average(&readings)
@@ -1238,9 +1455,8 @@ fn interview_turn_bus_levels(engine: &FfmpegMediaEngine, document: &Document, bu
 fn au6_a_the_interview_clears_the_bed_and_matches_the_voices() {
     let scene = scene(Au6Scenario::Interview);
     let document = scene.canonical();
-    let engine = engine();
-    let dialogue = interview_turn_bus_levels(&engine, &document, AU6_A_DIALOGUE_BUS_NAME);
-    let music = interview_turn_bus_levels(&engine, &document, AU6_A_MUSIC_BUS_NAME);
+    let dialogue = interview_turn_bus_levels(&document, AU6_A_DIALOGUE_BUS_NAME);
+    let music = interview_turn_bus_levels(&document, AU6_A_MUSIC_BUS_NAME);
     let over = i64::from(dialogue - music);
     print_floor(
         "dialogue over bed",
@@ -1250,9 +1466,7 @@ fn au6_a_the_interview_clears_the_bed_and_matches_the_voices() {
     let mut a_levels = Vec::new();
     let mut b_levels = Vec::new();
     for turn in AU6_TURNS {
-        let report = engine
-            .mix_levels(&document, &level_request(turn.range()))
-            .expect("voice match levels");
+        let report = cached_mix_levels(&document, &level_request(turn.range()));
         match turn.speaker {
             Au6Speaker::A => a_levels
                 .push(integrated(&track_levels(&report, AU6_A_VOICE_A_TRACK).levels).unwrap()),
@@ -1273,10 +1487,9 @@ fn au6_a_the_interview_clears_the_bed_and_matches_the_voices() {
 #[test]
 fn au6_a_the_unducked_document_does_not_clear_the_bed() {
     let scene = scene(Au6Scenario::Interview);
-    let document = interview_without_duck(&scene);
-    let engine = engine();
-    let dialogue = interview_turn_bus_levels(&engine, &document, AU6_A_DIALOGUE_BUS_NAME);
-    let music = interview_turn_bus_levels(&engine, &document, AU6_A_MUSIC_BUS_NAME);
+    let document = interview_without_duck(scene);
+    let dialogue = interview_turn_bus_levels(&document, AU6_A_DIALOGUE_BUS_NAME);
+    let music = interview_turn_bus_levels(&document, AU6_A_MUSIC_BUS_NAME);
     let over = dialogue - music;
     println!("AU6 unducked dialogue-over-bed={over}");
     assert!(
@@ -1288,13 +1501,10 @@ fn au6_a_the_unducked_document_does_not_clear_the_bed() {
 #[test]
 fn au6_a_the_untrimmed_voices_are_not_matched() {
     let scene = scene(Au6Scenario::Interview);
-    let engine = engine();
     let mut a_levels = Vec::new();
     let mut b_levels = Vec::new();
     for turn in AU6_TURNS {
-        let report = engine
-            .mix_levels(&scene.document, &level_request(turn.range()))
-            .expect("untrimmed levels");
+        let report = cached_mix_levels(&scene.document, &level_request(turn.range()));
         match turn.speaker {
             Au6Speaker::A => a_levels
                 .push(integrated(&track_levels(&report, AU6_A_VOICE_A_TRACK).levels).unwrap()),
@@ -1320,13 +1530,10 @@ fn au6_a_the_nominal_dbfs_trim_is_worse_than_none() {
         AU6_A_VOICE_B_TRACK,
         AU6_INTERVIEW_NOMINAL_TRIM_TENTH_DB_WRONG_MODEL,
     );
-    let engine = engine();
     let mut a_levels = Vec::new();
     let mut b_levels = Vec::new();
     for turn in AU6_TURNS {
-        let report = engine
-            .mix_levels(&document, &level_request(turn.range()))
-            .expect("nominal trim levels");
+        let report = cached_mix_levels(&document, &level_request(turn.range()));
         match turn.speaker {
             Au6Speaker::A => a_levels
                 .push(integrated(&track_levels(&report, AU6_A_VOICE_A_TRACK).levels).unwrap()),
@@ -1348,13 +1555,10 @@ fn au6_a_the_nominal_dbfs_trim_is_worse_than_none() {
 fn au6_a_the_duck_reaches_its_depth() {
     let scene = scene(Au6Scenario::Interview);
     let document = scene.canonical();
-    let engine = engine();
-    let windows = engine
-        .mix_window_levels(
-            &document,
-            &window_request(MixSpectrumPoint::Bus(AU6_A_MUSIC_BUS), AU6_WINDOW_PROGRAMME),
-        )
-        .expect("duck windows");
+    let windows = cached_mix_window_levels(
+        &document,
+        &window_request(MixSpectrumPoint::Bus(AU6_A_MUSIC_BUS), AU6_WINDOW_PROGRAMME),
+    );
     let speech = window_values(&windows, &au6_duck_speech_window_indices());
     let gap = window_values(&windows, &au6_duck_gap_window_indices());
     let depth = i64::from(*gap.iter().min().unwrap() - *speech.iter().max().unwrap());
@@ -1368,14 +1572,11 @@ fn au6_a_the_duck_reaches_its_depth() {
 #[test]
 fn au6_a_the_unducked_bed_has_no_depth() {
     let scene = scene(Au6Scenario::Interview);
-    let document = interview_without_duck(&scene);
-    let engine = engine();
-    let windows = engine
-        .mix_window_levels(
-            &document,
-            &window_request(MixSpectrumPoint::Bus(AU6_A_MUSIC_BUS), AU6_WINDOW_PROGRAMME),
-        )
-        .expect("unducked windows");
+    let document = interview_without_duck(scene);
+    let windows = cached_mix_window_levels(
+        &document,
+        &window_request(MixSpectrumPoint::Bus(AU6_A_MUSIC_BUS), AU6_WINDOW_PROGRAMME),
+    );
     let speech = window_values(&windows, &au6_duck_speech_window_indices());
     let gap = window_values(&windows, &au6_duck_gap_window_indices());
     let depth = *gap.iter().min().unwrap() - *speech.iter().max().unwrap();
@@ -1386,23 +1587,18 @@ fn au6_a_the_unducked_bed_has_no_depth() {
 #[test]
 fn au6_a_the_duck_depth_is_invisible_at_the_track_point() {
     let scene = scene(Au6Scenario::Interview);
-    let document = interview_with_bus_duck(&scene);
-    let engine = engine();
-    let bus_windows = engine
-        .mix_window_levels(
-            &document,
-            &window_request(MixSpectrumPoint::Bus(AU6_A_MUSIC_BUS), AU6_WINDOW_PROGRAMME),
-        )
-        .expect("bus duck");
-    let track_windows = engine
-        .mix_window_levels(
-            &document,
-            &window_request(
-                MixSpectrumPoint::Track(AU6_A_BED_TRACK),
-                AU6_WINDOW_PROGRAMME,
-            ),
-        )
-        .expect("track duck");
+    let document = interview_with_bus_duck(scene);
+    let bus_windows = cached_mix_window_levels(
+        &document,
+        &window_request(MixSpectrumPoint::Bus(AU6_A_MUSIC_BUS), AU6_WINDOW_PROGRAMME),
+    );
+    let track_windows = cached_mix_window_levels(
+        &document,
+        &window_request(
+            MixSpectrumPoint::Track(AU6_A_BED_TRACK),
+            AU6_WINDOW_PROGRAMME,
+        ),
+    );
     let bus_depth = *window_values(&bus_windows, &au6_duck_gap_window_indices())
         .iter()
         .min()
@@ -1475,7 +1671,6 @@ fn au6_the_three_curve_owners_render_identically() {
 
 #[test]
 fn au6_every_scenario_mix_does_not_clip() {
-    let engine = engine();
     for scenario in [
         Au6Scenario::Interview,
         Au6Scenario::Podcast,
@@ -1485,9 +1680,7 @@ fn au6_every_scenario_mix_does_not_clip() {
     ] {
         let scene = scene(scenario);
         let document = scene.canonical();
-        let report = engine
-            .audio_qc(&document, &qc_request(TimeCode::ZERO..document.duration))
-            .expect("audio_qc");
+        let report = cached_audio_qc(&document, &qc_request(TimeCode::ZERO..document.duration));
         println!(
             "AU6 clipping {scenario:?} left={} right={} pass={}",
             report.clipping.left.clipped_runs,
@@ -1514,9 +1707,7 @@ fn au6_a_a_hot_master_clips_and_says_so() {
             },
         }],
     );
-    let report = engine()
-        .audio_qc(&document, &qc_request(AU6_WINDOW_PROGRAMME))
-        .expect("hot master qc");
+    let report = cached_audio_qc(&document, &qc_request(AU6_WINDOW_PROGRAMME));
     assert!(
         report.clipping.left.clipped_runs + report.clipping.right.clipped_runs > 0
             || !report.technical_pass,
@@ -1524,16 +1715,14 @@ fn au6_a_a_hot_master_clips_and_says_so() {
     );
 }
 
-fn voice_b_spread(engine: &FfmpegMediaEngine, document: &Document) -> i32 {
-    let windows = engine
-        .mix_window_levels(
-            document,
-            &window_request(
-                MixSpectrumPoint::Bus(AU6_B_VOICE_B_BUS),
-                AU6_WINDOW_PROGRAMME,
-            ),
-        )
-        .expect("podcast windows");
+fn voice_b_spread(document: &Document) -> i32 {
+    let windows = cached_mix_window_levels(
+        document,
+        &window_request(
+            MixSpectrumPoint::Bus(AU6_B_VOICE_B_BUS),
+            AU6_WINDOW_PROGRAMME,
+        ),
+    );
     let mut values = Vec::new();
     for turn in AU6_TURNS
         .iter()
@@ -1558,14 +1747,11 @@ fn au6_window_index_local(frame: TimeCode) -> usize {
 fn au6_b_the_chain_matches_the_voices_and_reduces_the_spread() {
     let scene = scene(Au6Scenario::Podcast);
     let document = scene.canonical();
-    let bypassed = podcast_bypassed(&scene);
-    let engine = engine();
+    let bypassed = podcast_bypassed(scene);
     let mut a = Vec::new();
     let mut b = Vec::new();
     for turn in AU6_TURNS {
-        let report = engine
-            .mix_levels(&document, &level_request(turn.range()))
-            .expect("podcast match");
+        let report = cached_mix_levels(&document, &level_request(turn.range()));
         match turn.speaker {
             Au6Speaker::A => a.push(bus_integrated(&report, "Voice A")),
             Au6Speaker::B => b.push(bus_integrated(&report, "Voice B")),
@@ -1576,8 +1762,7 @@ fn au6_b_the_chain_matches_the_voices_and_reduces_the_spread() {
         i64::from((energy_average(&a) - energy_average(&b)).abs()),
         i64::from(AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS),
     );
-    let reduction =
-        i64::from(voice_b_spread(&engine, &bypassed) - voice_b_spread(&engine, &document));
+    let reduction = i64::from(voice_b_spread(&bypassed) - voice_b_spread(&document));
     print_floor(
         "dynamics reduced",
         reduction,
@@ -1588,14 +1773,11 @@ fn au6_b_the_chain_matches_the_voices_and_reduces_the_spread() {
 #[test]
 fn au6_b_the_raw_trims_do_not_match_the_voices() {
     let scene = scene(Au6Scenario::Podcast);
-    let document = podcast_without_trims(&scene);
-    let engine = engine();
+    let document = podcast_without_trims(scene);
     let mut a = Vec::new();
     let mut b = Vec::new();
     for turn in AU6_TURNS {
-        let report = engine
-            .mix_levels(&document, &level_request(turn.range()))
-            .expect("raw podcast");
+        let report = cached_mix_levels(&document, &level_request(turn.range()));
         match turn.speaker {
             Au6Speaker::A => a.push(bus_integrated(&report, "Voice A")),
             Au6Speaker::B => b.push(bus_integrated(&report, "Voice B")),
@@ -1609,9 +1791,8 @@ fn au6_b_the_raw_trims_do_not_match_the_voices() {
 #[test]
 fn au6_b_the_bypassed_chain_leaves_the_spread_intact() {
     let scene = scene(Au6Scenario::Podcast);
-    let bypassed = podcast_bypassed(&scene);
-    let engine = engine();
-    let reduction = voice_b_spread(&engine, &bypassed) - voice_b_spread(&engine, &bypassed);
+    let bypassed = podcast_bypassed(scene);
+    let reduction = voice_b_spread(&bypassed) - voice_b_spread(&bypassed);
     assert_eq!(reduction, 0);
 }
 
@@ -1619,9 +1800,7 @@ fn au6_b_the_bypassed_chain_leaves_the_spread_intact() {
 fn au6_b_the_programme_stays_inside_its_loudness_range() {
     let scene = scene(Au6Scenario::Podcast);
     let document = scene.canonical();
-    let lra = engine()
-        .audio_qc(&document, &qc_request(AU6_WINDOW_PROGRAMME))
-        .expect("podcast lra")
+    let lra = cached_audio_qc(&document, &qc_request(AU6_WINDOW_PROGRAMME))
         .master
         .loudness_range_lu_hundredths
         .expect("an LRA must populate");
@@ -1651,9 +1830,7 @@ fn au6_b_the_makeup_less_chain_exceeds_the_loudness_range() {
             .parameters
             .insert("makeup_gain_tenth_db".to_owned(), ParamValue::Integer(0));
     }
-    let lra = engine()
-        .audio_qc(&document, &qc_request(AU6_WINDOW_PROGRAMME))
-        .expect("makeup-less lra")
+    let lra = cached_audio_qc(&document, &qc_request(AU6_WINDOW_PROGRAMME))
         .master
         .loudness_range_lu_hundredths
         .expect("LRA");
@@ -1669,17 +1846,15 @@ fn repair_point(document: &Document) -> MixSpectrumPoint {
     }
 }
 
-fn repair_at(engine: &FfmpegMediaEngine, document: &Document) -> AudioRepairReport {
+fn repair_at(document: &Document) -> AudioRepairReport {
     let point = repair_point(document);
-    engine
-        .audio_repair(
-            document,
-            &repair_request(
-                point,
-                TimeCode::ZERO..TimeCode(i64::from(AU6_C_PROGRAMME_FRAMES)),
-            ),
-        )
-        .expect("audio_repair")
+    cached_audio_repair(
+        document,
+        &repair_request(
+            point,
+            TimeCode::ZERO..TimeCode(i64::from(AU6_C_PROGRAMME_FRAMES)),
+        ),
+    )
 }
 
 #[test]
@@ -1693,9 +1868,8 @@ fn au6_c_the_repair_chain_moves_the_snr_and_the_hum() {
         ops.extend(au6_c_repair_operations());
         ops
     });
-    let engine = engine();
-    let before = repair_at(&engine, &before_doc);
-    let after = repair_at(&engine, &after_doc);
+    let before = repair_at(&before_doc);
+    let after = repair_at(&after_doc);
     let snr_gain = i64::from(
         after.snr_db_hundredths.expect("snr after") - before.snr_db_hundredths.expect("snr before"),
     );
@@ -1748,9 +1922,8 @@ fn au6_c_an_unlearned_profile_moves_no_snr() {
         [PROFILE_BAND_NEUTRAL_TENTH_DB as i32; NOISE_PROFILE_BAND_COUNT],
     ));
     let after_doc = scene.commit(&ops);
-    let engine = engine();
-    let gain = repair_at(&engine, &after_doc).snr_db_hundredths.unwrap()
-        - repair_at(&engine, &before_doc).snr_db_hundredths.unwrap();
+    let gain = repair_at(&after_doc).snr_db_hundredths.unwrap()
+        - repair_at(&before_doc).snr_db_hundredths.unwrap();
     println!("AU6 unlearned SNR gain={gain}");
     assert!(gain < AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS);
 }
@@ -1764,13 +1937,8 @@ fn au6_c_a_chain_without_the_hum_node_leaves_the_mains_alone() {
     let mut ops = au6_c_gap_operations(kinewright_core::au6_scenarios::AU6_C_RIGHT_CLIP_ID);
     ops.extend(repair_without_hum());
     let after_doc = scene.commit(&ops);
-    let engine = engine();
-    let drop = repair_at(&engine, &before_doc)
-        .hum_60_excess_db_hundredths
-        .unwrap()
-        - repair_at(&engine, &after_doc)
-            .hum_60_excess_db_hundredths
-            .unwrap();
+    let drop = repair_at(&before_doc).hum_60_excess_db_hundredths.unwrap()
+        - repair_at(&after_doc).hum_60_excess_db_hundredths.unwrap();
     println!("AU6 no-hum-node drop={drop}");
     assert!(drop < AU6_HUM_HARMONIC_DROP_MIN_DB_HUNDREDTHS);
 }
@@ -1832,16 +2000,13 @@ fn au6_c_a_chain_without_the_declick_node_keeps_every_click() {
     let mut ops = au6_c_gap_operations(kinewright_core::au6_scenarios::AU6_C_RIGHT_CLIP_ID);
     ops.extend(repair_without_declick());
     let document = scene.commit(&ops);
-    let engine = engine();
-    let report = engine
-        .audio_repair(
-            &document,
-            &repair_request(
-                MixSpectrumPoint::Track(AU6_C_DIALOGUE_TRACK),
-                TimeCode::ZERO..TimeCode(i64::from(AU6_C_PROGRAMME_FRAMES)),
-            ),
-        )
-        .expect("audio_repair");
+    let report = cached_audio_repair(
+        &document,
+        &repair_request(
+            MixSpectrumPoint::Track(AU6_C_DIALOGUE_TRACK),
+            TimeCode::ZERO..TimeCode(i64::from(AU6_C_PROGRAMME_FRAMES)),
+        ),
+    );
     assert_eq!(report.click_count, AU6_C_CLICK_COUNT as u32);
     let bare = stems_of(
         &scene.document,
@@ -1882,22 +2047,17 @@ fn au6_c_the_dialogue_survives_the_repair() {
     let mut ops = au6_c_gap_operations(kinewright_core::au6_scenarios::AU6_C_RIGHT_CLIP_ID);
     ops.extend(au6_c_repair_operations());
     let after_doc = scene.commit(&ops);
-    let engine = engine();
     let mut before_levels = Vec::new();
     let mut after_levels = Vec::new();
     for turn in AU6_TURNS {
-        let before = engine
-            .mix_window_levels(
-                &before_doc,
-                &window_request(repair_point(&before_doc), turn.range()),
-            )
-            .expect("speech before");
-        let after = engine
-            .mix_window_levels(
-                &after_doc,
-                &window_request(repair_point(&after_doc), turn.range()),
-            )
-            .expect("speech after");
+        let before = cached_mix_window_levels(
+            &before_doc,
+            &window_request(repair_point(&before_doc), turn.range()),
+        );
+        let after = cached_mix_window_levels(
+            &after_doc,
+            &window_request(repair_point(&after_doc), turn.range()),
+        );
         let before_vals: Vec<i32> = before.windows.iter().flatten().copied().collect();
         let after_vals: Vec<i32> = after.windows.iter().flatten().copied().collect();
         before_levels.push(*before_vals.iter().max().expect("a turn has a window"));
@@ -1920,22 +2080,17 @@ fn au6_c_an_over_reduced_profile_eats_the_dialogue() {
     let mut ops = au6_c_gap_operations(kinewright_core::au6_scenarios::AU6_C_RIGHT_CLIP_ID);
     ops.extend(repair_with_profile([-200; NOISE_PROFILE_BAND_COUNT]));
     let after_doc = scene.commit(&ops);
-    let engine = engine();
     let mut before_levels = Vec::new();
     let mut after_levels = Vec::new();
     for turn in AU6_TURNS {
-        let before = engine
-            .mix_window_levels(
-                &before_doc,
-                &window_request(repair_point(&before_doc), turn.range()),
-            )
-            .expect("over-reduced before");
-        let after = engine
-            .mix_window_levels(
-                &after_doc,
-                &window_request(repair_point(&after_doc), turn.range()),
-            )
-            .expect("over-reduced after");
+        let before = cached_mix_window_levels(
+            &before_doc,
+            &window_request(repair_point(&before_doc), turn.range()),
+        );
+        let after = cached_mix_window_levels(
+            &after_doc,
+            &window_request(repair_point(&after_doc), turn.range()),
+        );
         before_levels.extend(before.windows.iter().flatten().copied());
         after_levels.extend(after.windows.iter().flatten().copied());
     }
@@ -1946,7 +2101,7 @@ fn au6_c_an_over_reduced_profile_eats_the_dialogue() {
 
 #[test]
 fn au6_c_the_room_tone_fill_closes_the_gap_seamlessly() {
-    let (_scene, document) = location_filled_scene();
+    let (_, document) = location_filled_scene();
     let gaps = document
         .track_gaps(AU6_C_DIALOGUE_TRACK)
         .expect("the dialogue track exists");
@@ -1966,15 +2121,14 @@ fn au6_c_the_room_tone_fill_closes_the_gap_seamlessly() {
 
 #[test]
 fn au6_c_a_one_frame_slip_breaks_the_seam() {
-    let (scene, filled) = location_filled_scene();
-    let room = scene
-        .document
+    let (with_room, filled) = location_filled_scene();
+    let room = with_room
         .media_pool
         .iter()
         .find(|asset| asset.id == AssetId(2))
         .cloned()
         .expect("the room-tone asset is pooled");
-    let mut document = scene.document.clone();
+    let mut document = with_room.clone();
     apply_in_order(
         &mut document,
         &au6_c_gap_operations(kinewright_core::au6_scenarios::AU6_C_RIGHT_CLIP_ID),
@@ -1999,11 +2153,8 @@ fn au6_c_a_one_frame_slip_breaks_the_seam() {
         !gaps.is_empty(),
         "a one-frame slip must leave a gap, not close the seam"
     );
-    let settings = mix_settings(&document);
-    let slipped = mix_audio_stems(&document, TimeCode::ZERO..document.duration, &settings)
-        .expect("the slipped document mixes");
-    let tight = mix_audio_stems(&filled, TimeCode::ZERO..filled.duration, &settings)
-        .expect("the filled document mixes");
+    let slipped = stems_of(&document, TimeCode::ZERO..document.duration);
+    let tight = stems_of(&filled, TimeCode::ZERO..filled.duration);
     assert_ne!(
         track_stem(&slipped, AU6_C_DIALOGUE_TRACK),
         track_stem(&tight, AU6_C_DIALOGUE_TRACK),
@@ -2014,16 +2165,13 @@ fn au6_c_a_one_frame_slip_breaks_the_seam() {
 #[test]
 fn au6_c_the_learned_profile_holds_its_pin_and_its_bound() {
     let scene = scene(Au6Scenario::LocationDialogue);
-    let engine = engine();
-    let learned = engine
-        .mix_noise_profile(
-            &scene.document,
-            &profile_request(
-                MixSpectrumPoint::Track(AU6_C_DIALOGUE_TRACK),
-                AU6_C_LEARN_PROJECT_RANGE,
-            ),
-        )
-        .expect("learned profile");
+    let learned = cached_noise_profile(
+        &scene.document,
+        &profile_request(
+            MixSpectrumPoint::Track(AU6_C_DIALOGUE_TRACK),
+            AU6_C_LEARN_PROJECT_RANGE,
+        ),
+    );
     assert_eq!(learned.bands, AU6_C_LEARNED_PROFILE_TENTH_DB);
     let mut worst_excess = i32::MIN;
     let mut worst_band = 0;
@@ -2052,30 +2200,26 @@ fn au6_c_the_learned_profile_holds_its_pin_and_its_bound() {
 #[test]
 fn au6_c_a_profile_learned_over_speech_is_not_the_noise_profile() {
     let scene = scene(Au6Scenario::LocationDialogue);
-    let learned = engine()
-        .mix_noise_profile(
-            &scene.document,
-            &profile_request(
-                MixSpectrumPoint::Track(AU6_C_DIALOGUE_TRACK),
-                AU6_TURNS[0].range(),
-            ),
-        )
-        .expect("speech profile");
+    let learned = cached_noise_profile(
+        &scene.document,
+        &profile_request(
+            MixSpectrumPoint::Track(AU6_C_DIALOGUE_TRACK),
+            AU6_TURNS[0].range(),
+        ),
+    );
     assert_ne!(learned.bands, AU6_C_LEARNED_PROFILE_TENTH_DB);
 }
 
 #[test]
 fn au6_c_a_one_frame_learn_offset_moves_the_profile() {
     let scene = scene(Au6Scenario::LocationDialogue);
-    let learned = engine()
-        .mix_noise_profile(
-            &scene.document,
-            &profile_request(
-                MixSpectrumPoint::Track(AU6_C_DIALOGUE_TRACK),
-                TimeCode(275)..TimeCode(312),
-            ),
-        )
-        .expect("offset profile");
+    let learned = cached_noise_profile(
+        &scene.document,
+        &profile_request(
+            MixSpectrumPoint::Track(AU6_C_DIALOGUE_TRACK),
+            TimeCode(275)..TimeCode(312),
+        ),
+    );
     assert_eq!(learned.bands[0], AU6_C_ONE_FRAME_OFFSET_BAND0_TENTH_DB);
     let delta = (learned.bands[0] - AU6_C_LEARNED_PROFILE_TENTH_DB[0]).abs();
     assert_eq!(delta, AU6_C_ONE_FRAME_OFFSET_MAX_DELTA_TENTH_DB);
@@ -2111,15 +2255,13 @@ fn au6_c_the_learned_profile_has_the_authored_shape() {
 #[test]
 fn au6_c_the_percentile_floor_lands_on_the_authored_floor() {
     let scene = scene(Au6Scenario::LocationDialogue);
-    let report = engine()
-        .audio_repair(
-            &scene.document,
-            &repair_request(
-                MixSpectrumPoint::Track(AU6_C_DIALOGUE_TRACK),
-                TimeCode::ZERO..TimeCode(i64::from(AU6_C_PROGRAMME_FRAMES)),
-            ),
-        )
-        .expect("percentile floor");
+    let report = cached_audio_repair(
+        &scene.document,
+        &repair_request(
+            MixSpectrumPoint::Track(AU6_C_DIALOGUE_TRACK),
+            TimeCode::ZERO..TimeCode(i64::from(AU6_C_PROGRAMME_FRAMES)),
+        ),
+    );
     let floor = report.noise_floor_dbfs_hundredths.expect("a floor");
     let authored = AU6_MEASURED_C_LEARN_GAP_DBFS_HUNDREDTHS;
     let delta = (i64::from(floor) - authored).abs();
@@ -2215,9 +2357,7 @@ fn au6_d_an_angle_ripple_leaves_the_master_stem_alone() {
 fn au6_d_the_scratch_tracks_contribute_nothing() {
     let scene = scene(Au6Scenario::Multicam);
     let document = scene.canonical();
-    let report = engine()
-        .mix_levels(&document, &level_request(AU6_WINDOW_PROGRAMME))
-        .expect("scratch levels");
+    let report = cached_mix_levels(&document, &level_request(AU6_WINDOW_PROGRAMME));
     for track in [AU6_D_SCRATCH_1_TRACK, AU6_D_SCRATCH_2_TRACK] {
         let levels = track_levels(&report, track);
         assert!(levels.levels.integrated_lufs_hundredths.is_none());
@@ -2231,9 +2371,7 @@ fn au6_d_an_unmuted_scratch_track_reaches_the_mix() {
     let mut document = scene.canonical();
     mute_track(&mut document, AU6_D_SCRATCH_1_TRACK, false);
     mute_track(&mut document, AU6_D_SCRATCH_2_TRACK, false);
-    let report = engine()
-        .mix_levels(&document, &level_request(AU6_WINDOW_PROGRAMME))
-        .expect("unmuted scratch");
+    let report = cached_mix_levels(&document, &level_request(AU6_WINDOW_PROGRAMME));
     for track in [AU6_D_SCRATCH_1_TRACK, AU6_D_SCRATCH_2_TRACK] {
         let levels = track_levels(&report, track);
         assert!(levels.audible);
@@ -2248,16 +2386,11 @@ fn au6_d_the_mix_is_the_master() {
     let mut master_only = scene.document.clone();
     mute_track(&mut master_only, AU6_D_SCRATCH_1_TRACK, true);
     mute_track(&mut master_only, AU6_D_SCRATCH_2_TRACK, true);
-    let engine = engine();
-    let cut_level = engine
-        .mix_levels(&cut, &level_request(AU6_WINDOW_PROGRAMME))
-        .expect("cut mix")
+    let cut_level = cached_mix_levels(&cut, &level_request(AU6_WINDOW_PROGRAMME))
         .master
         .integrated_lufs_hundredths
         .unwrap();
-    let master_level = engine
-        .mix_levels(&master_only, &level_request(AU6_WINDOW_PROGRAMME))
-        .expect("master-only mix")
+    let master_level = cached_mix_levels(&master_only, &level_request(AU6_WINDOW_PROGRAMME))
         .master
         .integrated_lufs_hundredths
         .unwrap();
@@ -2275,16 +2408,11 @@ fn au6_d_the_unmuted_scratch_moves_the_master() {
     let mut master_only = scene.document.clone();
     mute_track(&mut master_only, AU6_D_SCRATCH_1_TRACK, true);
     mute_track(&mut master_only, AU6_D_SCRATCH_2_TRACK, true);
-    let engine = engine();
-    let unmuted_level = engine
-        .mix_levels(&unmuted, &level_request(AU6_WINDOW_PROGRAMME))
-        .unwrap()
+    let unmuted_level = cached_mix_levels(&unmuted, &level_request(AU6_WINDOW_PROGRAMME))
         .master
         .integrated_lufs_hundredths
         .unwrap();
-    let master_level = engine
-        .mix_levels(&master_only, &level_request(AU6_WINDOW_PROGRAMME))
-        .unwrap()
+    let master_level = cached_mix_levels(&master_only, &level_request(AU6_WINDOW_PROGRAMME))
         .master
         .integrated_lufs_hundredths
         .unwrap();
@@ -2323,14 +2451,31 @@ fn au6_d_the_cuts_sit_at_the_authored_frames() {
 }
 
 fn run_delivery(
-    engine: &FfmpegMediaEngine,
     document: &Document,
     job: &kinewright_core::Au6ExportJob,
     normalize: bool,
-) -> (
-    Option<kinewright_core::ExportAudioReport>,
-    kinewright_core::DeliveryAudioVerification,
-) {
+    share: bool,
+) -> (Option<ExportAudioReport>, DeliveryAudioVerification) {
+    #[derive(serde::Serialize)]
+    struct DeliveryRequest<'a> {
+        job: &'a str,
+        normalize: bool,
+    }
+    let request = DeliveryRequest {
+        job: job.id,
+        normalize,
+    };
+    let key = render_key("delivery", document, &request);
+    let inflight = share.then(|| inflight_lock(key));
+    let _guard = inflight.as_ref().map(|lock| {
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    });
+    if share {
+        if let Some(hit) = render_cache().deliveries.get(&key).cloned() {
+            return hit;
+        }
+    }
     let directory = TempDirectory::new(&format!("au6-e-{}", job.id));
     let mut settings = au6_export_settings(job, document);
     if !normalize {
@@ -2338,7 +2483,7 @@ fn run_delivery(
     }
     let output = directory.path(&format!("{}.mp4", job.id));
     let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();
-    let audio = engine
+    let audio = engine()
         .export_document_reporting(
             std::sync::Arc::new(document.clone()),
             &output,
@@ -2350,21 +2495,22 @@ fn run_delivery(
     if normalize {
         assert!(audio.is_some(), "a normalized delivery reports audio");
     }
-    let verification = engine
+    let verification = engine()
         .verify_delivery_audio(&output, Some(job.target))
         .expect("delivery verifies");
-    (audio, verification)
+    let value = (audio, verification);
+    render_cache().deliveries.insert(key, value.clone());
+    value
 }
 
 #[test]
 fn au6_e_both_deliveries_land_on_their_targets() {
     let scene = scene(Au6Scenario::Delivery);
     let document = scene.canonical();
-    let engine = engine();
     let mut measured_deviations = Vec::new();
     let mut measured_margins = Vec::new();
     for job in &AU6_EXPORT_JOBS {
-        let (report, verification) = run_delivery(&engine, &document, job, true);
+        let (report, verification) = run_delivery(&document, job, true, true);
         let measured = verification
             .measured
             .integrated_lufs_hundredths
@@ -2404,9 +2550,8 @@ fn au6_e_both_deliveries_land_on_their_targets() {
 fn au6_e_an_unnormalized_export_misses_the_target() {
     let scene = scene(Au6Scenario::Delivery);
     let document = scene.canonical();
-    let engine = engine();
     for job in &AU6_EXPORT_JOBS {
-        let (_report, verification) = run_delivery(&engine, &document, job, false);
+        let (_report, verification) = run_delivery(&document, job, false, true);
         let measured = verification.measured.integrated_lufs_hundredths.unwrap();
         let deviation = (measured - job.target.integrated_lufs_hundredths).abs();
         println!("AU6 unnormalized {} deviation={deviation}", job.id);
@@ -2418,10 +2563,9 @@ fn au6_e_an_unnormalized_export_misses_the_target() {
 fn au6_e_the_two_deliveries_separate_by_the_target_difference() {
     let scene = scene(Au6Scenario::Delivery);
     let document = scene.canonical();
-    let engine = engine();
     let mut integrated = Vec::new();
     for job in &AU6_EXPORT_JOBS {
-        let (_report, verification) = run_delivery(&engine, &document, job, true);
+        let (_report, verification) = run_delivery(&document, job, true, true);
         integrated.push(verification.measured.integrated_lufs_hundredths.unwrap());
     }
     let separation = (integrated[0] - integrated[1]).abs();
@@ -2438,13 +2582,12 @@ fn au6_e_two_exports_at_one_profile_do_not_separate() {
     let scene = scene(Au6Scenario::Delivery);
     let document = scene.canonical();
     let job = &AU6_EXPORT_JOBS[0];
-    let engine = engine();
-    let a = run_delivery(&engine, &document, job, true)
+    let a = run_delivery(&document, job, true, true)
         .1
         .measured
         .integrated_lufs_hundredths
         .unwrap();
-    let b = run_delivery(&engine, &document, job, true)
+    let b = run_delivery(&document, job, true, false)
         .1
         .measured
         .integrated_lufs_hundredths
