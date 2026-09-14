@@ -403,6 +403,11 @@ impl Recorder {
         })
     }
 
+    /// Drain every queued Core event into the journal.
+    ///
+    /// Tests wait for the worker's acknowledgement with no deadline: the
+    /// work is already bounded by the commands the test sent, and a flat
+    /// two-second timeout is what flakes on a loaded CI box.
     #[cfg(test)]
     fn flush(&self) -> Result<(), String> {
         let (acknowledge, acknowledged) = unbounded();
@@ -410,8 +415,8 @@ impl Recorder {
             .send(RecorderControl::Flush(acknowledge))
             .map_err(|_| "recovery recorder stopped before flush".to_owned())?;
         acknowledged
-            .recv_timeout(CORE_RESPONSE_TIMEOUT)
-            .map_err(|error| format!("recovery recorder did not flush in time: {error}"))
+            .recv()
+            .map_err(|_| "recovery recorder stopped before flush completed".to_owned())
     }
 
     fn shutdown(&mut self) {
@@ -1397,18 +1402,22 @@ mod tests {
     fn stale_journal_from_crashed_child_is_detected_and_replayed() {
         let directory = TestDirectory::new("crash");
         let path = directory.journal();
-        let status = ProcessCommand::new(std::env::current_exe().unwrap())
+        let output = ProcessCommand::new(std::env::current_exe().unwrap())
             .arg("recovery::tests::crash_child_process")
             .arg("--exact")
             .arg("--ignored")
             .arg("--nocapture")
             .env("KINEWRIGHT_TEST_CRASH_JOURNAL", &path)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+            .output()
             .unwrap();
-        assert_eq!(status.code(), Some(73));
+        assert_eq!(
+            output.status.code(),
+            Some(73),
+            "crash child failed: stderr:\n{}\nstdout:\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
 
         let Inspection::Recoverable(report) = inspect_path(&path) else {
             panic!("parent did not detect the stale journal");
