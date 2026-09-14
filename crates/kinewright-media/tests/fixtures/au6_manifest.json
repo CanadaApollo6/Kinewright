@@ -1191,13 +1191,12 @@
     "media": 60,
     "agent": 8,
     "app": 14,
-    "eval": 0,
+    "eval": 12,
     "inventory": 2,
-    "explicit_names": 0,
-    "total": 97,
-    "test_sources": 9,
+    "explicit_names": 1,
+    "total": 109,
+    "test_sources": 11,
     "forbidden_helpers": 3,
-    "eval_deferred_to_part_b": 12,
     "cuttable_kept": [
       "au6_b_the_makeup_less_chain_exceeds_the_loudness_range",
       "au6_e_two_exports_at_one_profile_do_not_separate"

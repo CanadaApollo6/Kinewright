@@ -2446,7 +2446,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          AU4 Part B adds plan_audio_ducking and plan_clip_fades; \
          AU5 Part A adds get_audio_repair; \
          AU5 Part B adds plan_dialogue_repair, capture_room_tone and plan_room_tone_fill; \
-         AU6 §5.4 Part A adds no capability at all"
+         AU6 §5.4 Part A and Part B add no capability at all"
     );
     assert_eq!(
         operations.len(),

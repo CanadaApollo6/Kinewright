@@ -81,6 +81,13 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- AU6 Part B, audio workflow evaluation: the seventh eval suite
+  (`audio-workflow-v7`) runs the five named audio workflows as one
+  model turn each, with an audio evidence block, six assertion
+  variants, a blind review package and a published
+  `benchmarks/auto-edit/v7/` manifest. No MCP tool, operation or
+  effect is added; the served surface is unchanged. Pending a
+  real-harness run. See docs/AU6-WORKFLOW-EVALUATION.md.
 - AU6 Part A, audio workflow gates: five named audio workflows — an interview
   ducked under a music bed, a two-voice podcast matched and normalized, a
   location dialogue clip repaired with its gap filled from captured room tone,

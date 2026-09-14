@@ -3014,8 +3014,25 @@ const AU6_APP_TESTS: [&str; 14] = [
     "au6_d_the_person_ripple_gesture_is_not_the_canonical_cut",
 ];
 
-const AU6_EVAL_TESTS: [&str; 0] = [];
-const AU6_EXPLICIT_TEST_NAMES: [&str; 0] = [];
+const AU6_EVAL_TESTS: [&str; 12] = [
+    "published_v7_manifest_tracks_the_audio_workflow_suite",
+    "au6_audio_workflow_suite_is_a_packaged_benchmark",
+    "au6_audio_evidence_is_computed_where_the_analysis_is_alive",
+    "au6_a_delivery_verification_without_a_deliverable_is_recorded_as_an_error",
+    "au6_only_audio_assertions_emit_audio_measurements",
+    "au6_every_audio_assertion_threshold_is_an_au6_scenarios_constant",
+    "au6_v6_deliverables_are_byte_identical_without_normalization",
+    "au6_the_eval_server_carries_an_exporter",
+    "au6_the_blind_package_discloses_no_machine_provenance",
+    "au6_accepted_requires_every_audio_question_answered",
+    "au6_leak_needles_never_appear_in_a_question",
+    "au6_the_audio_questions_are_keyed_by_base_task_id",
+];
+
+/// The declared names that do **not** carry the `au6_` prefix, and are
+/// therefore named explicitly rather than discovered by the prefix scan.
+const AU6_EXPLICIT_TEST_NAMES: [&str; 1] =
+    ["published_v7_manifest_tracks_the_audio_workflow_suite"];
 
 const AU6_INVENTORY_TESTS: [&str; 2] = [
     "au6_manifest_declares_every_required_fixture_and_constant",
@@ -3190,7 +3207,7 @@ fn au6_neighbour_budgets_agree_with_their_owners() {
     );
 }
 
-const AU6_TEST_SOURCES: [(&str, &str); 9] = [
+const AU6_TEST_SOURCES: [(&str, &str); 11] = [
     (
         "crates/kinewright-media/src/au6_fixtures.rs",
         include_str!("au6_fixtures.rs"),
@@ -3206,6 +3223,14 @@ const AU6_TEST_SOURCES: [(&str, &str); 9] = [
     (
         "crates/kinewright-agent/tests/mcp_server.rs",
         include_str!("../../kinewright-agent/tests/mcp_server.rs"),
+    ),
+    (
+        "crates/kinewright-agent/src/eval.rs",
+        include_str!("../../kinewright-agent/src/eval.rs"),
+    ),
+    (
+        "crates/kinewright-agent/src/bin/kinewright-eval.rs",
+        include_str!("../../kinewright-agent/src/bin/kinewright-eval.rs"),
     ),
     (
         "crates/kinewright-app/src/mixer_ui.rs",
@@ -3307,7 +3332,7 @@ fn au6_inventory_groups() -> [(
     &'static str,
     &'static [&'static str],
     &'static [&'static str],
-); 4] {
+); 5] {
     [
         (
             "MEDIA",
@@ -3338,6 +3363,14 @@ fn au6_inventory_groups() -> [(
             ],
             &AU6_APP_TESTS,
         ),
+        (
+            "EVAL",
+            &[
+                "crates/kinewright-agent/src/eval.rs",
+                "crates/kinewright-agent/src/bin/kinewright-eval.rs",
+            ],
+            &AU6_EVAL_TESTS,
+        ),
     ]
 }
 
@@ -3357,7 +3390,8 @@ fn au6_declared_test_names_exist_in_their_source_files() {
                 .iter()
                 .flat_map(|path| au6_declared_test_names(au6_test_source(path), "au6_")),
         );
-        let named = au6_sorted(expected.iter().map(|name| (*name).to_owned()));
+        let mut named = au6_sorted(expected.iter().map(|name| (*name).to_owned()));
+        named.retain(|name| !AU6_EXPLICIT_TEST_NAMES.contains(&name.as_str()));
         assert_eq!(
             declared, named,
             "AU6_{label}_TESTS and the `au6_*` tests the {label} sources declare disagree"
@@ -3388,20 +3422,23 @@ fn au6_declared_test_names_exist_in_their_source_files() {
         );
         assert!(AU6_MEDIA_TESTS.contains(&name));
     }
-    assert!(
-        AU6_EVAL_TESTS.is_empty(),
-        "Part B declares {} eval test(s): restore `crates/kinewright-agent/src/eval.rs` and \
-         `crates/kinewright-agent/src/bin/kinewright-eval.rs` to AU6_TEST_SOURCES (back to 11) \
-         and the EVAL row to au6_inventory_groups (back to 5) first, or the both-direction scan \
-         cannot see them",
-        AU6_EVAL_TESTS.len()
-    );
-    assert_eq!(AU6_EXPLICIT_TEST_NAMES.len(), 0);
+    for name in AU6_EXPLICIT_TEST_NAMES {
+        assert!(
+            !name.starts_with("au6_"),
+            "{name} carries the prefix and does not need naming explicitly"
+        );
+        assert!(
+            all.iter().any(|declared| declared == name),
+            "{name} is named as an explicit exception but is in no inventory array"
+        );
+    }
 
     for path in [
         "crates/kinewright-media/src/au6_fixtures.rs",
         "crates/kinewright-media/src/au6_sources.rs",
         "crates/kinewright-core/tests/au6_core.rs",
+        "crates/kinewright-agent/src/eval.rs",
+        "crates/kinewright-agent/src/bin/kinewright-eval.rs",
         "crates/kinewright-app/src/mixer_ui.rs",
         "crates/kinewright-app/src/mixer_pane_ui.rs",
         "crates/kinewright-app/src/edit_diff.rs",

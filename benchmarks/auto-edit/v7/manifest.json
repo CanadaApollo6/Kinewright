@@ -1,0 +1,254 @@
+{
+  "schema_version": 7,
+  "benchmark_id": "kinewright-audio-workflow-v7",
+  "title": "Kinewright Audio Workflow v7",
+  "status": "pending_real_harness_run",
+  "runner": "KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- --suite audio-workflow-v7",
+  "implementation": "crates/kinewright-agent/src/bin/kinewright-eval.rs",
+  "contract": "docs/AU6-WORKFLOW-EVALUATION.md",
+  "authority": "kinewright_core::au6_scenarios",
+  "fixture_provenance": {
+    "policy": "AU6 checks in no fixture bytes. Every buffer is authored in Rust from kinewright_core::au6_scenarios' analytic values and written at fixture time, so the benchmark is offline, deterministic, and regenerated per run.",
+    "generator": "kinewright_media::au6_sources",
+    "scene": "320x180 at 25 fps, 48 kHz stereo. (a)/(e) carry a video-only picture plus two voices and a chord bed; (b) two voices; (c) one degraded dialogue track at 312 frames; (d) two video angles, two scratch tracks and one master recorder track.",
+    "project": "a3 writes a saved project so capture_room_tone can resolve a store, and is the only task whose PreparedFixture carries a project_path; without it capture_room_tone refuses project_not_saved and the task is unsatisfiable.",
+    "checked_in_bytes": "none: manifest.json, ground-truth.json and README.md are the only files in this directory."
+  },
+  "score_layers": {
+    "technical_gates": "The five scenario families of AU6 §4, discharged by ordinary cargo test in the default lane on both CI operating systems, with no model and no network. They do not need this suite.",
+    "model_workflow": "This suite: one model turn per task, scored by the machine assertions below plus the shared budget and deliverable checks.",
+    "blind_human_review": {
+      "form": "blind/review-form.json, keyed on blind_id alone. It is the only file the reviewer opens.",
+      "key": "blind-key.json, written to the run root and deliberately outside blind/.",
+      "artefact": "the .mp4 the reviewer listens to. proof.png is a still of a flat 320x180 test raster.",
+      "listening_level": "one listening level for the whole package; there is no loudness-matched A/B hold.",
+      "not_applicable_dimensions": [
+        "story",
+        "pacing",
+        "visual_finish",
+        "captions"
+      ],
+      "rated_dimensions": [
+        "audio_finish",
+        "delivery_readiness"
+      ],
+      "not_blinded": [
+        "scenario_identity"
+      ]
+    }
+  },
+  "acceptance_target": {
+    "samples_per_scenario": 3,
+    "minimum_machine_passes_per_scenario": 3,
+    "minimum_human_accepts_per_scenario": 2,
+    "minimum_mean_human_rating": 4.0,
+    "every_question_answered": true,
+    "note": "One success does not satisfy the slice. N/A dimensions are excluded from the means."
+  },
+  "tasks": [
+    {
+      "id": "a1",
+      "scenario": "a",
+      "name": "Two-person interview with a music bed",
+      "fixture": "fixture_au6_interview",
+      "ground_truth": "benchmarks/auto-edit/v7/ground-truth.json",
+      "prompt": "Tracks 2 and 3 are the two people in this interview and track 4 is the music bed under them. Bring the two voices to one comfortable level, group them so I can ride them together, and get the bed out of the way whenever either of them is talking without making it pump.",
+      "human_question": "Is the dialogue clearly balanced above the music bed?",
+      "delivery": {
+        "profile": "source_master",
+        "delivery_bit_depth": "eight",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 5,
+        "proof_cell_width": 160,
+        "require_audio": true,
+        "normalize_to_profile_target": false
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 16,
+        "operations": 8,
+        "tokens": 60000,
+        "cost_usd": 2.0,
+        "wall_time_ms": 900000,
+        "undos": 8
+      },
+      "machine_assertions": [
+        "the dialogue bus sits at least AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS above the music bus over AU6_WINDOW_A_FIRST_TURN",
+        "AU6_A_VOICE_A_TRACK and AU6_A_VOICE_B_TRACK match within AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS",
+        "get_audio_qc reports technical_pass over AU6_WINDOW_PROGRAMME",
+        "the interview workflow tools were used: plan_audio_normalization, plan_audio_ducking, prepare_edit_plan, commit_edit_plan, get_audio_qc",
+        "undo integrity holds after commit_edit_plan"
+      ]
+    },
+    {
+      "id": "a2",
+      "scenario": "b",
+      "name": "Podcast with uneven voices",
+      "fixture": "fixture_au6_podcast",
+      "ground_truth": "benchmarks/auto-edit/v7/ground-truth.json",
+      "prompt": "This podcast has two guests recorded on different microphones: one is quiet and steady, the other is loud and swings a lot. Bring them to one level, tame the loud one's swing so it stops jumping out, and clean up the hard edit in the middle so it does not click.",
+      "human_question": "Are both voices at one comfortable level?",
+      "delivery": {
+        "profile": "source_master",
+        "delivery_bit_depth": "eight",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 5,
+        "proof_cell_width": 160,
+        "require_audio": true,
+        "normalize_to_profile_target": false
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 16,
+        "operations": 8,
+        "tokens": 60000,
+        "cost_usd": 2.0,
+        "wall_time_ms": 900000,
+        "undos": 8
+      },
+      "machine_assertions": [
+        "AU6_B_VOICE_A_TRACK and AU6_B_VOICE_B_TRACK match within AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS",
+        "get_audio_qc reports technical_pass over AU6_WINDOW_PROGRAMME",
+        "the podcast workflow tools were used: plan_audio_normalization, plan_clip_fades, prepare_edit_plan, commit_edit_plan, get_audio_qc",
+        "undo integrity holds after commit_edit_plan"
+      ]
+    },
+    {
+      "id": "a3",
+      "scenario": "c",
+      "name": "Noisy location dialogue",
+      "fixture": "fixture_au6_location_dialogue",
+      "ground_truth": "benchmarks/auto-edit/v7/ground-truth.json",
+      "prompt": "This location dialogue was recorded next to a generator. There is hiss, a mains hum and some clicks, and a chunk in the middle had to come out. Fill the hole with the room's own tone, then clean the noise, the hum and the clicks off the dialogue without hollowing out the voice.",
+      "human_question": "Is the dialogue intelligible?",
+      "delivery": {
+        "profile": "source_master",
+        "delivery_bit_depth": "eight",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 5,
+        "proof_cell_width": 160,
+        "require_audio": true,
+        "normalize_to_profile_target": false
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 24,
+        "operations": 16,
+        "tokens": 60000,
+        "cost_usd": 2.0,
+        "wall_time_ms": 1500000,
+        "undos": 16
+      },
+      "machine_assertions": [
+        "repair SNR on AU6_C_REPAIR_BUS gains at least AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS",
+        "get_audio_qc reports technical_pass over AU6_C_WINDOW_PROGRAMME",
+        "the repair workflow tools were used: capture_room_tone, plan_room_tone_fill, plan_dialogue_repair, get_audio_repair, prepare_edit_plan, commit_edit_plan",
+        "undo integrity holds after commit_edit_plan"
+      ]
+    },
+    {
+      "id": "a4",
+      "scenario": "d",
+      "name": "Event multicam with a master audio track",
+      "fixture": "fixture_au6_multicam",
+      "ground_truth": "benchmarks/auto-edit/v7/ground-truth.json",
+      "prompt": "This event was shot on two cameras and recorded on a separate audio recorder. Cut between the two angles at the three moments the action changes, mute the cameras' own scratch audio, and leave the recorder's track completely alone.",
+      "human_question": "Is the programme audio at one level across the angle changes?",
+      "delivery": {
+        "profile": "source_master",
+        "delivery_bit_depth": "eight",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 5,
+        "proof_cell_width": 160,
+        "require_audio": true,
+        "normalize_to_profile_target": false
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 24,
+        "operations": 16,
+        "tokens": 60000,
+        "cost_usd": 2.0,
+        "wall_time_ms": 900000,
+        "undos": 16
+      },
+      "machine_assertions": [
+        "AU6_D_SCRATCH_1_TRACK is silent in the mix (integrated is none)",
+        "AU6_D_SCRATCH_2_TRACK is silent in the mix (integrated is none)",
+        "AU6_D_MASTER_TRACK stays ProgramAudioContinuous",
+        "the multicam workflow tools were used: split_clip, delete_clip, set_track_mix, prepare_edit_plan, commit_edit_plan",
+        "undo integrity holds after commit_edit_plan"
+      ]
+    },
+    {
+      "id": "a5a",
+      "scenario": "e",
+      "name": "Encoded delivery at the EBU R128 target",
+      "fixture": "fixture_au6_interview",
+      "ground_truth": "benchmarks/auto-edit/v7/ground-truth.json",
+      "prompt": "Deliver this interview as a broadcast master at the standard programme loudness, and tell me what it measured.",
+      "human_question": "Is this delivery at a comfortable listening level?",
+      "delivery": {
+        "profile": "source_master",
+        "delivery_bit_depth": "eight",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 5,
+        "proof_cell_width": 160,
+        "require_audio": true,
+        "normalize_to_profile_target": true
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 12,
+        "operations": 4,
+        "tokens": 60000,
+        "cost_usd": 2.0,
+        "wall_time_ms": 1500000,
+        "undos": 4
+      },
+      "machine_assertions": [
+        "the source_master encode sits inside AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS and AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS",
+        "queue_export and get_export_jobs were used",
+        "undo integrity holds after queue_export"
+      ]
+    },
+    {
+      "id": "a5b",
+      "scenario": "e",
+      "name": "Encoded delivery at the streaming target",
+      "fixture": "fixture_au6_interview",
+      "ground_truth": "benchmarks/auto-edit/v7/ground-truth.json",
+      "prompt": "Deliver this interview for a streaming platform at that platform's loudness, and tell me what it measured.",
+      "human_question": "Is this delivery at a comfortable listening level?",
+      "delivery": {
+        "profile": "youtube_1080p",
+        "delivery_bit_depth": "eight",
+        "focus_x_percent": 50,
+        "focus_y_percent": 50,
+        "proof_frames": 5,
+        "proof_cell_width": 160,
+        "require_audio": true,
+        "normalize_to_profile_target": true
+      },
+      "budget": {
+        "turns": 1,
+        "tool_calls": 12,
+        "operations": 4,
+        "tokens": 60000,
+        "cost_usd": 2.0,
+        "wall_time_ms": 1500000,
+        "undos": 4
+      },
+      "machine_assertions": [
+        "the youtube_1080p encode sits inside AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS and AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS",
+        "queue_export and get_export_jobs were used",
+        "undo integrity holds after get_export_jobs"
+      ]
+    }
+  ]
+}

@@ -13,12 +13,12 @@ use std::{
 use kinewright_agent::{
     ClaudeCodeDriver, CodexDriver, CursorAcpDriver,
     eval::{
-        BLIND_DIRECTORY_NAME, BLIND_FORM_FILE_NAME, BLIND_KEY_FILE_NAME, BLIND_SCHEMA_VERSION,
-        BlindKeyEntry, BlindKeyFile, BlindReviewForm, COLOR_WORKFLOW_BENCHMARK_ID,
-        ColorEvalRequest, EnvironmentStamp, EvalAssertion, EvalAudioTailSpec, EvalBudgets,
-        EvalDefinition, EvalDeliverableSpec, EvalError, EvalLoudnessSpec, EvalResult,
-        ExpectedSourceClip, ExpectedTimelineClip, FixtureContext, HumanQuestion, HumanReviewFile,
-        PreparedFixture, SourceRangeExclusion, blind_review_form,
+        AUDIO_WORKFLOW_BENCHMARK_ID, AudioEvalRequest, BLIND_DIRECTORY_NAME, BLIND_FORM_FILE_NAME,
+        BLIND_KEY_FILE_NAME, BLIND_SCHEMA_VERSION, BlindKeyEntry, BlindKeyFile, BlindReviewForm,
+        COLOR_WORKFLOW_BENCHMARK_ID, ColorEvalRequest, EnvironmentStamp, EvalAssertion,
+        EvalAudioTailSpec, EvalBudgets, EvalDefinition, EvalDeliverableSpec, EvalError,
+        EvalLoudnessSpec, EvalResult, ExpectedSourceClip, ExpectedTimelineClip, FixtureContext,
+        HumanQuestion, HumanReviewFile, PreparedFixture, SourceRangeExclusion, blind_review_form,
         human_review_template_with_questions, maximum_duration_after_expected_silence_cuts,
         render_jsonl, render_saved_deliverable, render_scoreboard, result_path, run_eval,
         run_eval_with_artifacts, summarize_human_review,
@@ -29,9 +29,20 @@ use kinewright_core::{
     AgentDriver, Analysis, AssetBeats, AssetId, AssetSceneChanges, AssetSilences, AssetTranscript,
     AuthenticationStatus, BeatStatus, CaptionMotion, Clip, ClipContent, ClipId,
     DeliveryEncodeDepth, DeliveryProfile, Document, FrameRounding, MediaAsset, MediaCatalog,
-    NormalizedRoi, Rational, SceneStatus, SilenceStatus, SyncGroup, SyncGroupId, SyncGroupMember,
-    ThreePointMode, TimeCode, TitlePosition, Track, TrackId, TrackKind, TranscriptStatus,
-    TranscriptWord,
+    MixSpectrumPoint, NormalizedRoi, Rational, SceneStatus, SilenceStatus, SyncGroup, SyncGroupId,
+    SyncGroupMember, ThreePointMode, TimeCode, TitlePosition, Track, TrackId, TrackKind,
+    TranscriptStatus, TranscriptWord,
+    au6_scenarios::{
+        AU6_A_DIALOGUE_BUS, AU6_A_MUSIC_BUS, AU6_A_VOICE_A_TRACK, AU6_A_VOICE_B_TRACK,
+        AU6_B_VOICE_A_TRACK, AU6_B_VOICE_B_TRACK, AU6_C_REPAIR_BUS, AU6_C_WINDOW_PROGRAMME,
+        AU6_D_ANGLE_ASSETS, AU6_D_MASTER_TRACK, AU6_D_SCRATCH_1_TRACK, AU6_D_SCRATCH_2_TRACK,
+        AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS, AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS,
+        AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS, AU6_QUESTIONS,
+        AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS, AU6_SOURCE_FPS, AU6_SOURCE_HEIGHT,
+        AU6_SOURCE_MASTER_PROFILE, AU6_SOURCE_WIDTH, AU6_STREAMING_PROFILE,
+        AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS, AU6_WINDOW_A_FIRST_TURN, AU6_WINDOW_B_FIRST_TURN,
+        AU6_WINDOW_PROGRAMME, Au6Scenario, au6_d_sync_group, au6_spec,
+    },
     cc7_scenarios::{
         CC7_C2_SKIN_IN_BAND_REPORTED_BASIS_POINTS, CC7_CANDIDATE_CLIP_ID, CC7_CHART_BAND_ROI,
         CC7_CHART_PATCHES, CC7_DEEP_SHADOW_ROI, CC7_F_KEYFRAMED_PARAMETERS, CC7_LOG_CUBE_SIZE,
@@ -46,6 +57,7 @@ use kinewright_core::{
 };
 use kinewright_media::{
     FfmpegMediaEngine,
+    au6_sources::{au6_scenario_sources, au6_stamp_on_project_grid},
     cc7_sources::{
         cc7_camera_source, cc7_log_source, cc7_tracked_source, write_log_like_inverse_cube,
     },
@@ -237,8 +249,9 @@ fn eval_suite(suite: &str) -> Result<(&'static str, Vec<EvalDefinition>), EvalEr
         }
         "generalization-v5" | "v5" => Ok(("kinewright-generalization-v5", generalization_suite())),
         "color-workflow-v6" | "v6" => Ok((COLOR_WORKFLOW_BENCHMARK_ID, color_workflow_suite())),
+        "audio-workflow-v7" | "v7" => Ok((AUDIO_WORKFLOW_BENCHMARK_ID, audio_workflow_suite())),
         other => Err(EvalError::Agent(format!(
-            "unknown suite {other:?}; expected auto-edit-v1, finished-cut-v2, editorial-cut-v3, dialogue-pacing-v4, generalization-v5, or color-workflow-v6"
+            "unknown suite {other:?}; expected auto-edit-v1, finished-cut-v2, editorial-cut-v3, dialogue-pacing-v4, generalization-v5, color-workflow-v6, or audio-workflow-v7"
         ))),
     }
 }
@@ -254,6 +267,7 @@ fn is_packaged_benchmark(benchmark_id: &str) -> bool {
             | "kinewright-dialogue-pacing-v4"
             | "kinewright-generalization-v5"
             | COLOR_WORKFLOW_BENCHMARK_ID
+            | AUDIO_WORKFLOW_BENCHMARK_ID
     )
 }
 
@@ -358,27 +372,42 @@ fn write_review_package(
 /// `c1`..`c6`, so the blind form carries the matrix's question verbatim and
 /// nothing else. Scenario (c) has none — it is objective-only and the matrix
 /// has no row for log-like input — so `c3` contributes no entry at all rather
-/// than an empty one. Every other suite asks none, which is why the map is
-/// empty for them.
+/// than an empty one. The audio suite keys by the base task id (`a1`..`a5b`)
+/// from [`AU6_QUESTIONS`], and [`HumanQuestion::id`] is that same task id —
+/// `a5a` and `a5b` share a prompt and still carry distinct ids. Every other
+/// suite asks none, which is why the map is empty for them.
 fn review_questions(benchmark_id: &str) -> BTreeMap<String, Vec<HumanQuestion>> {
     let mut questions = BTreeMap::new();
-    if benchmark_id != COLOR_WORKFLOW_BENCHMARK_ID {
+    if benchmark_id == COLOR_WORKFLOW_BENCHMARK_ID {
+        for (index, scenario) in CC7_SCENARIOS.into_iter().enumerate() {
+            let spec = cc7_spec(scenario);
+            let Some(prompt) = spec.human_question else {
+                continue;
+            };
+            questions.insert(
+                format!("c{}", index + 1),
+                vec![HumanQuestion {
+                    id: spec.id.to_owned(),
+                    prompt: prompt.to_owned(),
+                    answer: None,
+                    notes: None,
+                }],
+            );
+        }
         return questions;
     }
-    for (index, scenario) in CC7_SCENARIOS.into_iter().enumerate() {
-        let spec = cc7_spec(scenario);
-        let Some(prompt) = spec.human_question else {
-            continue;
-        };
-        questions.insert(
-            format!("c{}", index + 1),
-            vec![HumanQuestion {
-                id: spec.id.to_owned(),
-                prompt: prompt.to_owned(),
-                answer: None,
-                notes: None,
-            }],
-        );
+    if benchmark_id == AUDIO_WORKFLOW_BENCHMARK_ID {
+        for (task_id, prompt) in AU6_QUESTIONS {
+            questions.insert(
+                task_id.to_owned(),
+                vec![HumanQuestion {
+                    id: task_id.to_owned(),
+                    prompt: prompt.to_owned(),
+                    answer: None,
+                    notes: None,
+                }],
+            );
+        }
     }
     questions
 }
@@ -698,7 +727,7 @@ fn print_usage() {
 /// The usage banner, as one string, so a test can assert the suite list is
 /// complete without capturing stdout.
 fn usage_text() -> &'static str {
-    "Usage: KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4|generalization-v5|color-workflow-v6] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p kinewright-agent --bin kinewright-eval -- --prepare-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --verify-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --score-review PATH\n       cargo run -p kinewright-agent --bin kinewright-eval -- --rerender-document DOCUMENT --artifact-directory DIRECTORY [--delivery-profile vertical_short] [--loudness-contract MIN_LUFS,MAX_LUFS,MAX_PEAK] [--audio-tail-contract TERMINAL_FRAMES,MAX_PEAK,ACTIVITY_FRAMES,MIN_ACTIVE_LUFS,MAX_INACTIVE_FRAMES]"
+    "Usage: KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4|generalization-v5|color-workflow-v6|audio-workflow-v7] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p kinewright-agent --bin kinewright-eval -- --prepare-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --verify-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --score-review PATH\n       cargo run -p kinewright-agent --bin kinewright-eval -- --rerender-document DOCUMENT --artifact-directory DIRECTORY [--delivery-profile vertical_short] [--loudness-contract MIN_LUFS,MAX_LUFS,MAX_PEAK] [--audio-tail-contract TERMINAL_FRAMES,MAX_PEAK,ACTIVITY_FRAMES,MIN_ACTIVE_LUFS,MAX_INACTIVE_FRAMES]"
 }
 
 fn next_option_value(
@@ -829,6 +858,7 @@ fn rerender_document(document_path: &Path, options: &Options) -> Result<bool, Ev
             loudness: options.loudness_contract,
             audio_tail: options.audio_tail_contract,
             delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            normalize_to_profile_target: false,
         },
         &document,
         engine.as_ref(),
@@ -1101,6 +1131,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
             budgets: standard_budget(4, 2),
             deliverable: None,
             color: None,
+            audio: None,
         },
         EvalDefinition {
             name: "e2 silence-gap removal",
@@ -1133,6 +1164,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
             budgets: speech_budget(12, 12),
             deliverable: None,
             color: None,
+            audio: None,
         },
         EvalDefinition {
             name: "e3 filler-word removal",
@@ -1162,6 +1194,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
             budgets: speech_budget(12, 8),
             deliverable: None,
             color: None,
+            audio: None,
         },
         EvalDefinition {
             name: "e4 scene-cut",
@@ -1183,6 +1216,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
             budgets: standard_budget(10, 8),
             deliverable: None,
             color: None,
+            audio: None,
         },
         EvalDefinition {
             name: "e5 effect-and-transition",
@@ -1222,6 +1256,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
             budgets: standard_budget(5, 4),
             deliverable: None,
             color: None,
+            audio: None,
         },
         EvalDefinition {
             name: "e6 ordinal-resolution stress",
@@ -1251,6 +1286,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
             budgets: standard_budget(6, 5),
             deliverable: None,
             color: None,
+            audio: None,
         },
         EvalDefinition {
             name: "e7 flagship rough cut",
@@ -1302,6 +1338,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
             budgets: flagship_budget(),
             deliverable: None,
             color: None,
+            audio: None,
         },
     ]
 }
@@ -1394,8 +1431,10 @@ fn finished_cut_suite() -> Vec<EvalDefinition> {
             loudness: None,
             audio_tail: None,
             delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            normalize_to_profile_target: false,
         }),
         color: None,
+        audio: None,
     }]
 }
 
@@ -1434,8 +1473,10 @@ fn event_multicam_definition() -> EvalDefinition {
             }),
             audio_tail: None,
             delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            normalize_to_profile_target: false,
         }),
         color: None,
+        audio: None,
     }
 }
 
@@ -1574,8 +1615,10 @@ fn music_montage_definition() -> EvalDefinition {
                 maximum_trailing_inactive_frames: TimeCode(truth.maximum_trailing_inactive_frames),
             }),
             delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            normalize_to_profile_target: false,
         }),
         color: None,
+        audio: None,
     }
 }
 
@@ -1873,8 +1916,10 @@ fn editorial_cut_suite() -> Vec<EvalDefinition> {
             loudness: None,
             audio_tail: None,
             delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            normalize_to_profile_target: false,
         }),
         color: None,
+        audio: None,
     }]
 }
 
@@ -1994,8 +2039,10 @@ fn generalization_suite() -> Vec<EvalDefinition> {
                 loudness: None,
                 audio_tail: None,
                 delivery_bit_depth: DeliveryEncodeDepth::Eight,
+                normalize_to_profile_target: false,
             }),
             color: None,
+            audio: None,
         },
         event_multicam_definition(),
         music_montage_definition(),
@@ -2064,6 +2111,7 @@ fn color_workflow_deliverable(depth: DeliveryEncodeDepth) -> EvalDeliverableSpec
         loudness: None,
         audio_tail: None,
         delivery_bit_depth: depth,
+        normalize_to_profile_target: false,
     }
 }
 
@@ -2261,6 +2309,7 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
             budgets: color_workflow_budget(16),
             deliverable: Some(color_workflow_deliverable(DeliveryEncodeDepth::Eight)),
             color: Some(c1_color),
+            audio: None,
         },
         EvalDefinition {
             name: "c2 Wrong white balance and underexposure",
@@ -2271,6 +2320,7 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
             budgets: color_workflow_budget(16),
             deliverable: Some(color_workflow_deliverable(DeliveryEncodeDepth::Eight)),
             color: Some(c2_color),
+            audio: None,
         },
         EvalDefinition {
             name: "c3 Log-like input normalisation",
@@ -2281,6 +2331,7 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
             budgets: color_workflow_budget(16),
             deliverable: Some(color_workflow_deliverable(DeliveryEncodeDepth::Eight)),
             color: Some(c3_color),
+            audio: None,
         },
         EvalDefinition {
             name: "c4 Product and skin secondary",
@@ -2291,6 +2342,7 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
             budgets: color_workflow_budget(16),
             deliverable: Some(color_workflow_deliverable(DeliveryEncodeDepth::Eight)),
             color: Some(c4_color),
+            audio: None,
         },
         EvalDefinition {
             name: "c5 Creative look with a gamut exception",
@@ -2301,6 +2353,7 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
             budgets: color_workflow_budget(16),
             deliverable: Some(color_workflow_deliverable(DeliveryEncodeDepth::Eight)),
             color: Some(c5_color),
+            audio: None,
         },
         EvalDefinition {
             name: "c6 Tracked secondary through an occlusion",
@@ -2317,6 +2370,7 @@ fn color_workflow_suite() -> Vec<EvalDefinition> {
             },
             deliverable: Some(color_workflow_deliverable(DeliveryEncodeDepth::Eight)),
             color: Some(c6_color),
+            audio: None,
         },
     ]
 }
@@ -2507,6 +2561,393 @@ fn required_any(tools: &[&str]) -> EvalAssertion {
         all_of: Vec::new(),
         any_of: aliases(tools),
     }
+}
+
+const AU6_PROMPT_A1: &str = "Tracks 2 and 3 are the two people in this interview and track 4 is the music bed under them. Bring the two voices to one comfortable level, group them so I can ride them together, and get the bed out of the way whenever either of them is talking without making it pump.";
+const AU6_PROMPT_A2: &str = "This podcast has two guests recorded on different microphones: one is quiet and steady, the other is loud and swings a lot. Bring them to one level, tame the loud one's swing so it stops jumping out, and clean up the hard edit in the middle so it does not click.";
+const AU6_PROMPT_A3: &str = "This location dialogue was recorded next to a generator. There is hiss, a mains hum and some clicks, and a chunk in the middle had to come out. Fill the hole with the room's own tone, then clean the noise, the hum and the clicks off the dialogue without hollowing out the voice.";
+const AU6_PROMPT_A4: &str = "This event was shot on two cameras and recorded on a separate audio recorder. Cut between the two angles at the three moments the action changes, mute the cameras' own scratch audio, and leave the recorder's track completely alone.";
+const AU6_PROMPT_A5A: &str = "Deliver this interview as a broadcast master at the standard programme loudness, and tell me what it measured.";
+const AU6_PROMPT_A5B: &str = "Deliver this interview for a streaming platform at that platform's loudness, and tell me what it measured.";
+const AU6_D_MASTER_ALIAS: &str = "au6-master";
+const AU6_LOCATION_PROJECT_FILE_NAME: &str = "au6-location.kinewright";
+
+/// AU6 §7.4's budget: `EvalBudgets`' field set with AU6's own values, not
+/// `standard_budget`'s. The wall time and the operation ceiling are spread
+/// over for `a3` (repair + fill) and the two delivery tasks (the encode).
+fn audio_workflow_budget(max_tool_calls: u32) -> EvalBudgets {
+    EvalBudgets {
+        max_turns: 1,
+        max_tool_calls,
+        max_operations: 8,
+        max_tokens: 60_000,
+        max_cost_usd: Some(2.00),
+        max_wall_time: Duration::from_mins(15),
+        max_undos: 8,
+    }
+}
+
+/// AU6 §7.2: every task carries one deliverable with `require_audio: true`.
+/// `a4` still produces a review artefact; no AU6 assertion reads its loudness.
+fn audio_workflow_deliverable(
+    profile: DeliveryProfile,
+    normalize_to_profile_target: bool,
+) -> EvalDeliverableSpec {
+    EvalDeliverableSpec {
+        profile,
+        focus_x_percent: 50,
+        focus_y_percent: 50,
+        proof_frames: 5,
+        proof_cell_width: 160,
+        require_audio: true,
+        expected_transcript_word_set: None,
+        maximum_word_error_rate_basis_points: 0,
+        maximum_caption_word_error_rate_basis_points: None,
+        loudness: None,
+        audio_tail: None,
+        delivery_bit_depth: DeliveryEncodeDepth::Eight,
+        normalize_to_profile_target,
+    }
+}
+
+#[allow(clippy::too_many_lines, clippy::similar_names)]
+fn audio_workflow_suite() -> Vec<EvalDefinition> {
+    let a1_assertions = vec![
+        EvalAssertion::DialogueOverBedAtLeast {
+            dialogue_bus: AU6_A_DIALOGUE_BUS,
+            music_bus: AU6_A_MUSIC_BUS,
+            window: AU6_WINDOW_A_FIRST_TURN,
+            minimum_lu_hundredths: AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS,
+        },
+        EvalAssertion::VoicesMatchedWithin {
+            first: MixSpectrumPoint::Track(AU6_A_VOICE_A_TRACK),
+            first_window: AU6_WINDOW_A_FIRST_TURN,
+            second: MixSpectrumPoint::Track(AU6_A_VOICE_B_TRACK),
+            second_window: AU6_WINDOW_B_FIRST_TURN,
+            maximum_lu_hundredths: AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS,
+        },
+        EvalAssertion::AudioQcTechnicalPass {
+            range: AU6_WINDOW_PROGRAMME,
+        },
+        required_all(&[
+            "plan_audio_normalization",
+            "plan_audio_ducking",
+            "prepare_edit_plan",
+            "commit_edit_plan",
+            "get_audio_qc",
+        ]),
+        EvalAssertion::UndoIntegrity,
+    ];
+    let a1_audio =
+        AudioEvalRequest::from_assertions(&a1_assertions).expect("a1 gates audio assertions");
+
+    let a2_assertions = vec![
+        EvalAssertion::VoicesMatchedWithin {
+            first: MixSpectrumPoint::Track(AU6_B_VOICE_A_TRACK),
+            first_window: AU6_WINDOW_A_FIRST_TURN,
+            second: MixSpectrumPoint::Track(AU6_B_VOICE_B_TRACK),
+            second_window: AU6_WINDOW_B_FIRST_TURN,
+            maximum_lu_hundredths: AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS,
+        },
+        EvalAssertion::AudioQcTechnicalPass {
+            range: AU6_WINDOW_PROGRAMME,
+        },
+        required_all(&[
+            "plan_audio_normalization",
+            "plan_clip_fades",
+            "prepare_edit_plan",
+            "commit_edit_plan",
+            "get_audio_qc",
+        ]),
+        EvalAssertion::UndoIntegrity,
+    ];
+    let a2_audio =
+        AudioEvalRequest::from_assertions(&a2_assertions).expect("a2 gates audio assertions");
+
+    let a3_assertions = vec![
+        EvalAssertion::RepairSnrGainAtLeast {
+            point: MixSpectrumPoint::Bus(AU6_C_REPAIR_BUS),
+            minimum_db_hundredths: AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS,
+        },
+        EvalAssertion::AudioQcTechnicalPass {
+            range: AU6_C_WINDOW_PROGRAMME,
+        },
+        required_all(&[
+            "capture_room_tone",
+            "plan_room_tone_fill",
+            "plan_dialogue_repair",
+            "get_audio_repair",
+            "prepare_edit_plan",
+            "commit_edit_plan",
+        ]),
+        EvalAssertion::UndoIntegrity,
+    ];
+    let a3_audio =
+        AudioEvalRequest::from_assertions(&a3_assertions).expect("a3 gates audio assertions");
+
+    let a4_assertions = vec![
+        EvalAssertion::TrackSilentInMix {
+            track: AU6_D_SCRATCH_1_TRACK,
+        },
+        EvalAssertion::TrackSilentInMix {
+            track: AU6_D_SCRATCH_2_TRACK,
+        },
+        EvalAssertion::ProgramAudioContinuous {
+            track: AU6_D_MASTER_TRACK,
+            asset_alias: AU6_D_MASTER_ALIAS.to_owned(),
+        },
+        required_all(&[
+            "split_clip",
+            "delete_clip",
+            "set_track_mix",
+            "prepare_edit_plan",
+            "commit_edit_plan",
+        ]),
+        EvalAssertion::UndoIntegrity,
+    ];
+    let a4_audio =
+        AudioEvalRequest::from_assertions(&a4_assertions).expect("a4 gates audio assertions");
+
+    let a5a_assertions = vec![
+        EvalAssertion::DeliveryAudioVerified {
+            profile: AU6_SOURCE_MASTER_PROFILE,
+            maximum_deviation_lu_hundredths: AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS,
+            minimum_true_peak_margin_hundredths: AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS,
+        },
+        required_all(&["queue_export", "get_export_jobs"]),
+        EvalAssertion::UndoIntegrity,
+    ];
+    let a5a_audio =
+        AudioEvalRequest::from_assertions(&a5a_assertions).expect("a5a gates audio assertions");
+
+    let a5b_assertions = vec![
+        EvalAssertion::DeliveryAudioVerified {
+            profile: AU6_STREAMING_PROFILE,
+            maximum_deviation_lu_hundredths: AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS,
+            minimum_true_peak_margin_hundredths: AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS,
+        },
+        required_all(&["queue_export", "get_export_jobs"]),
+        EvalAssertion::UndoIntegrity,
+    ];
+    let a5b_audio =
+        AudioEvalRequest::from_assertions(&a5b_assertions).expect("a5b gates audio assertions");
+
+    vec![
+        EvalDefinition {
+            name: "a1 Two-person interview with a music bed",
+            rationale: "Measures whether the model can match two interview voices, group them, and ride the bed out of the way without pumping.",
+            fixture_builder: fixture_au6_interview,
+            prompts: &[AU6_PROMPT_A1],
+            assertions: a1_assertions,
+            budgets: audio_workflow_budget(16),
+            deliverable: Some(audio_workflow_deliverable(AU6_SOURCE_MASTER_PROFILE, false)),
+            color: None,
+            audio: Some(a1_audio),
+        },
+        EvalDefinition {
+            name: "a2 Podcast with uneven voices",
+            rationale: "Measures whether the model can match two uneven podcast voices, tame the loud one's swing, and clean the hard edit.",
+            fixture_builder: fixture_au6_podcast,
+            prompts: &[AU6_PROMPT_A2],
+            assertions: a2_assertions,
+            budgets: audio_workflow_budget(16),
+            deliverable: Some(audio_workflow_deliverable(AU6_SOURCE_MASTER_PROFILE, false)),
+            color: None,
+            audio: Some(a2_audio),
+        },
+        EvalDefinition {
+            name: "a3 Noisy location dialogue",
+            rationale: "Measures whether the model can fill a cut gap with captured room tone and repair hiss, hum and clicks without hollowing the voice.",
+            fixture_builder: fixture_au6_location_dialogue,
+            prompts: &[AU6_PROMPT_A3],
+            assertions: a3_assertions,
+            budgets: EvalBudgets {
+                max_tool_calls: 24,
+                max_operations: 16,
+                max_undos: 16,
+                max_wall_time: Duration::from_mins(25),
+                ..audio_workflow_budget(24)
+            },
+            deliverable: Some(audio_workflow_deliverable(AU6_SOURCE_MASTER_PROFILE, false)),
+            color: None,
+            audio: Some(a3_audio),
+        },
+        EvalDefinition {
+            name: "a4 Event multicam with a master audio track",
+            rationale: "Measures whether the model can cut two angles, mute the scratch tracks, and leave the recorder's master completely alone.",
+            fixture_builder: fixture_au6_multicam,
+            prompts: &[AU6_PROMPT_A4],
+            assertions: a4_assertions,
+            budgets: EvalBudgets {
+                max_tool_calls: 24,
+                max_operations: 16,
+                max_undos: 16,
+                ..audio_workflow_budget(24)
+            },
+            deliverable: Some(audio_workflow_deliverable(AU6_SOURCE_MASTER_PROFILE, false)),
+            color: None,
+            audio: Some(a4_audio),
+        },
+        EvalDefinition {
+            name: "a5a Encoded delivery at the EBU R128 target",
+            rationale: "Measures whether the model can deliver the interview as a broadcast master at the EBU R128 programme loudness.",
+            fixture_builder: fixture_au6_interview,
+            prompts: &[AU6_PROMPT_A5A],
+            assertions: a5a_assertions,
+            budgets: EvalBudgets {
+                max_tool_calls: 12,
+                max_operations: 4,
+                max_undos: 4,
+                max_wall_time: Duration::from_mins(25),
+                ..audio_workflow_budget(12)
+            },
+            deliverable: Some(audio_workflow_deliverable(AU6_SOURCE_MASTER_PROFILE, true)),
+            color: None,
+            audio: Some(a5a_audio),
+        },
+        EvalDefinition {
+            name: "a5b Encoded delivery at the streaming target",
+            rationale: "Measures whether the model can deliver the interview for a streaming platform at that platform's loudness.",
+            fixture_builder: fixture_au6_interview,
+            prompts: &[AU6_PROMPT_A5B],
+            assertions: a5b_assertions,
+            budgets: EvalBudgets {
+                max_tool_calls: 12,
+                max_operations: 4,
+                max_undos: 4,
+                max_wall_time: Duration::from_mins(25),
+                ..audio_workflow_budget(12)
+            },
+            deliverable: Some(audio_workflow_deliverable(AU6_STREAMING_PROFILE, true)),
+            color: None,
+            audio: Some(a5b_audio),
+        },
+    ]
+}
+
+/// Probe every generated AU6 source, stamp it onto the project grid, and
+/// build the scenario document the same way `au6_agent_scene` does.
+fn au6_fixture_from_sources(
+    media: &Arc<FfmpegMediaEngine>,
+    scenario: Au6Scenario,
+) -> Result<(Document, FixtureContext, Vec<GeneratedMedia>), EvalError> {
+    let spec = au6_spec(scenario);
+    let generated = au6_scenario_sources(scenario);
+    let fps =
+        Rational::new(AU6_SOURCE_FPS, 1).map_err(|error| EvalError::Fixture(error.to_string()))?;
+    let mut context = FixtureContext::default();
+    let media_pool = generated
+        .iter()
+        .zip(spec.tracks)
+        .map(|(source, track)| {
+            let probed = probe_named(media, source.path(), &format!("au6-{}", track.track.0))?;
+            let mut stamped =
+                au6_stamp_on_project_grid(probed, fps, TimeCode(i64::from(spec.asset_frames)));
+            stamped.id = AssetId(track.track.0);
+            if track.track == AU6_D_MASTER_TRACK {
+                context
+                    .asset_aliases
+                    .insert(AU6_D_MASTER_ALIAS.to_owned(), stamped.id);
+            }
+            context
+                .asset_aliases
+                .insert(format!("au6-{}", track.track.0), stamped.id);
+            Ok(stamped)
+        })
+        .collect::<Result<Vec<_>, EvalError>>()?;
+    let tracks = spec
+        .tracks
+        .iter()
+        .map(|track| Track {
+            id: track.track,
+            kind: track.kind,
+            sync_lock: track.sync_lock,
+            clips: spec
+                .clips
+                .iter()
+                .filter(|clip| clip.track == track.track)
+                .map(|clip| Clip {
+                    id: clip.clip,
+                    asset: clip.asset,
+                    source_range: clip.range(),
+                    content: ClipContent::Media,
+                    timeline_start: clip.start,
+                    effects: Vec::new(),
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                    audio_gain_curve: None,
+                })
+                .collect(),
+        })
+        .collect();
+    let mut document = Document {
+        tracks,
+        media_pool,
+        fps,
+        resolution: (AU6_SOURCE_WIDTH, AU6_SOURCE_HEIGHT),
+        duration: TimeCode(i64::from(spec.frames)),
+        ..Document::default()
+    };
+    if scenario == Au6Scenario::Multicam {
+        document
+            .catalog
+            .sync_groups
+            .push(au6_d_sync_group(AU6_D_ANGLE_ASSETS));
+    }
+    Ok((document, context, generated))
+}
+
+fn fixture_au6_from_scenario(scenario: Au6Scenario) -> Result<PreparedFixture, EvalError> {
+    let media = eval_engine();
+    let (document, context, generated) = au6_fixture_from_sources(&media, scenario)?;
+    let resources = generated
+        .into_iter()
+        .map(|source| Box::new(source) as Box<dyn Send>)
+        .collect();
+    PreparedFixture::new(document, media, context, None, resources)
+}
+
+fn fixture_au6_interview() -> Result<PreparedFixture, EvalError> {
+    fixture_au6_from_scenario(Au6Scenario::Interview)
+}
+
+fn fixture_au6_podcast() -> Result<PreparedFixture, EvalError> {
+    fixture_au6_from_scenario(Au6Scenario::Podcast)
+}
+
+/// The one audio fixture that saves a project.
+///
+/// `capture_room_tone` refuses until the server carries a project-path
+/// handle, so a3 saves the document into its own temporary directory —
+/// `fixture_cc7_log_like`'s pattern.
+fn fixture_au6_location_dialogue() -> Result<PreparedFixture, EvalError> {
+    let media = eval_engine();
+    let (document, context, generated) =
+        au6_fixture_from_sources(&media, Au6Scenario::LocationDialogue)?;
+    let temporary = TempDirectory::new("au6-location-project");
+    let project_path = temporary.path(AU6_LOCATION_PROJECT_FILE_NAME);
+    let saved = serde_json::to_vec_pretty(&document)
+        .map_err(|error| EvalError::Fixture(error.to_string()))?;
+    fs::write(&project_path, saved).map_err(|error| {
+        EvalError::Fixture(format!(
+            "the AU6 location project could not be saved at {}: {error}",
+            project_path.display()
+        ))
+    })?;
+    let mut resources = generated
+        .into_iter()
+        .map(|source| Box::new(source) as Box<dyn Send>)
+        .collect::<Vec<_>>();
+    resources.push(Box::new(temporary));
+    PreparedFixture::new(document, media, context, Some(project_path), resources)
+}
+
+fn fixture_au6_multicam() -> Result<PreparedFixture, EvalError> {
+    fixture_au6_from_scenario(Au6Scenario::Multicam)
 }
 
 fn standard_budget(max_operations: u32, max_undos: u32) -> EvalBudgets {
@@ -4718,8 +5159,10 @@ fn render_evals_document(
 #[cfg(test)]
 mod tests {
     use kinewright_agent::eval::{
-        BlindReviewForm, COLOR_WORKFLOW_NOT_APPLICABLE, EvalDeliverableResult, HumanRatings,
+        AUDIO_WORKFLOW_NOT_APPLICABLE, BlindReviewForm, COLOR_WORKFLOW_NOT_APPLICABLE,
+        EvalDeliverableResult, HumanRatings,
     };
+    use kinewright_core::au6_scenarios::{AU6_SCENARIOS, AU6_TASK_IDS, au6_canonical_operations};
     use kinewright_core::{
         apply_batch,
         cc7_scenarios::{
@@ -7184,6 +7627,7 @@ mod tests {
             "dialogue-pacing-v4",
             "generalization-v5",
             "color-workflow-v6",
+            "audio-workflow-v7",
         ] {
             assert!(usage.contains(suite), "the usage banner omits {suite}");
         }
@@ -7497,5 +7941,560 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn au6_task_scenario(id: &str) -> Au6Scenario {
+        match id {
+            "a1" => Au6Scenario::Interview,
+            "a2" => Au6Scenario::Podcast,
+            "a3" => Au6Scenario::LocationDialogue,
+            "a4" => Au6Scenario::Multicam,
+            "a5a" | "a5b" => Au6Scenario::Delivery,
+            other => panic!("unknown AU6 task id {other}"),
+        }
+    }
+
+    fn au6_canonical_parameter_names() -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for scenario in AU6_SCENARIOS {
+            for operation in au6_canonical_operations(scenario) {
+                match operation {
+                    kinewright_core::Operation::SetTrackAutomation { parameter, .. } => {
+                        names.insert(parameter);
+                    }
+                    kinewright_core::Operation::UpsertAudioBus { bus } => {
+                        for effect in bus.effects {
+                            names.extend(effect.parameters.into_keys());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        names
+    }
+
+    fn au6_push_value_needle(values: &mut BTreeSet<String>, value: i64) {
+        let rendered = value.to_string();
+        if rendered.len() >= 3 {
+            values.insert(rendered);
+        }
+    }
+
+    fn au6_leak_value_needles() -> Vec<String> {
+        let mut values = BTreeSet::new();
+        for scenario in AU6_SCENARIOS {
+            for operation in au6_canonical_operations(scenario) {
+                match operation {
+                    kinewright_core::Operation::SetTrackMix { gain_tenth_db, .. } => {
+                        au6_push_value_needle(&mut values, i64::from(gain_tenth_db));
+                    }
+                    kinewright_core::Operation::UpsertAudioBus { bus } => {
+                        for effect in bus.effects {
+                            for parameter in effect.parameters.into_values() {
+                                if let kinewright_core::ParamValue::Integer(value) = parameter {
+                                    au6_push_value_needle(&mut values, value);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        values.into_iter().collect()
+    }
+
+    fn au6_leak_needles(run_id: &str, benchmark_id: &str) -> Vec<String> {
+        let mut needles = Vec::new();
+        needles.push(run_id.to_ascii_lowercase());
+        needles.push(benchmark_id.to_ascii_lowercase());
+        needles.extend(CC7_MACHINE_PROVENANCE_NEEDLES.map(str::to_owned));
+        needles.extend(au6_canonical_parameter_names());
+        for task_id in AU6_TASK_IDS {
+            needles.push(format!("\"task_id\": \"{task_id}\""));
+            needles.push(format!("\"task_id\":\"{task_id}\""));
+        }
+        needles
+    }
+
+    fn au6_leaked_needle(haystack: &str, run_id: &str, benchmark_id: &str) -> Option<String> {
+        let lowered = haystack.to_ascii_lowercase();
+        au6_leak_needles(run_id, benchmark_id)
+            .into_iter()
+            .chain(au6_leak_value_needles())
+            .filter(|needle| {
+                if needle.chars().any(char::is_uppercase) {
+                    haystack.contains(needle.as_str())
+                } else {
+                    lowered.contains(&needle.to_ascii_lowercase())
+                }
+            })
+            .max_by_key(String::len)
+    }
+
+    fn au6_names_authority(text: &str) -> bool {
+        let tools = kinewright_agent::capability_tool_names().expect("the tool list loads");
+        if tools.iter().any(|tool| text.contains(tool)) {
+            return true;
+        }
+        text.contains("AU6_")
+    }
+
+    fn au6_ground_truth_initial_document(scenario: Au6Scenario) -> Document {
+        let spec = au6_spec(scenario);
+        let fps = Rational::new(spec.fps, 1).expect("25 fps");
+        let media_pool = spec
+            .tracks
+            .iter()
+            .map(|track| MediaAsset {
+                id: AssetId(track.track.0),
+                path: PathBuf::from(format!("au6-{}.wav", track.track.0)),
+                name: format!("au6-{}", track.track.0),
+                duration: TimeCode(i64::from(spec.asset_frames)),
+                fps,
+                kind: match track.kind {
+                    TrackKind::Video => kinewright_core::MediaKind::Video,
+                    TrackKind::Audio => kinewright_core::MediaKind::Audio,
+                },
+                resolution: Some((AU6_SOURCE_WIDTH, AU6_SOURCE_HEIGHT)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+                color_description: kinewright_core::ColorContext::sdr_rec709().delivery,
+            })
+            .collect();
+        let tracks = spec
+            .tracks
+            .iter()
+            .map(|track| Track {
+                id: track.track,
+                kind: track.kind,
+                sync_lock: track.sync_lock,
+                clips: spec
+                    .clips
+                    .iter()
+                    .filter(|clip| clip.track == track.track)
+                    .map(|clip| Clip {
+                        id: clip.clip,
+                        asset: clip.asset,
+                        source_range: clip.range(),
+                        content: ClipContent::Media,
+                        timeline_start: clip.start,
+                        effects: Vec::new(),
+                        transition_in: None,
+                        link: None,
+                        audio_gain_tenth_db: 0,
+                        audio_fade_in_frames: TimeCode::ZERO,
+                        audio_fade_out_frames: TimeCode::ZERO,
+                        speed_percent: 100,
+                        audio_gain_curve: None,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let mut document = Document {
+            tracks,
+            media_pool,
+            fps,
+            resolution: (AU6_SOURCE_WIDTH, AU6_SOURCE_HEIGHT),
+            duration: TimeCode(i64::from(spec.frames)),
+            ..Document::default()
+        };
+        if scenario == Au6Scenario::Multicam {
+            document
+                .catalog
+                .sync_groups
+                .push(au6_d_sync_group(AU6_D_ANGLE_ASSETS));
+        }
+        document
+    }
+
+    fn au6_canonical_document(scenario: Au6Scenario) -> serde_json::Value {
+        let mut document = au6_ground_truth_initial_document(scenario);
+        let operations = au6_canonical_operations(scenario);
+        apply_batch(&mut document, &operations)
+            .unwrap_or_else(|error| panic!("{scenario:?}: core must accept the batch: {error}"));
+        serde_json::json!({
+            "tracks": document
+                .tracks
+                .iter()
+                .map(|track| serde_json::json!({
+                    "track_id": track.id.0,
+                    "kind": format!("{:?}", track.kind),
+                    "clips": track.clips.iter().map(|clip| serde_json::json!({
+                        "clip_id": clip.id.0,
+                        "asset": clip.asset.0,
+                        "start": clip.timeline_start.0,
+                        "source_start": clip.source_range.start.0,
+                        "source_end": clip.source_range.end.0,
+                    })).collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
+            "buses": document.audio_mix.buses.len(),
+        })
+    }
+
+    fn au6_expected_measurements(scenario: Au6Scenario) -> serde_json::Value {
+        match scenario {
+            Au6Scenario::Interview => serde_json::json!({
+                "dialogue_over_bed_min_lu_hundredths": AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS,
+                "voice_match_max_lu_hundredths": AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS,
+            }),
+            Au6Scenario::Podcast => serde_json::json!({
+                "voice_match_max_lu_hundredths": AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS,
+            }),
+            Au6Scenario::LocationDialogue => serde_json::json!({
+                "repair_snr_gain_min_hundredths": AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS,
+            }),
+            Au6Scenario::Multicam => serde_json::json!({
+                "scratch_tracks": [AU6_D_SCRATCH_1_TRACK.0, AU6_D_SCRATCH_2_TRACK.0],
+                "master_track": AU6_D_MASTER_TRACK.0,
+            }),
+            Au6Scenario::Delivery => serde_json::json!({
+                "delivery_deviation_max_lu_hundredths": AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS,
+                "delivery_true_peak_margin_min_hundredths": AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS,
+            }),
+        }
+    }
+
+    /// The checked-in ground truth, and the only writer of it.
+    fn au6_ground_truth_json() -> String {
+        let mut scenarios = Vec::new();
+        for scenario in AU6_SCENARIOS {
+            let spec = au6_spec(scenario);
+            scenarios.push(serde_json::json!({
+                "scenario_id": spec.id,
+                "title": spec.title,
+                "fps": spec.fps,
+                "resolution": [AU6_SOURCE_WIDTH, AU6_SOURCE_HEIGHT],
+                "frames": spec.frames,
+                "canonical_document": au6_canonical_document(scenario),
+                "canonical_operations": au6_canonical_operations(scenario),
+                "expected_measurements": au6_expected_measurements(scenario),
+            }));
+        }
+        let document = serde_json::json!({
+            "schema_version": 1,
+            "benchmark_id": AUDIO_WORKFLOW_BENCHMARK_ID,
+            "generator": "au6_ground_truth_json (crates/kinewright-agent/src/bin/kinewright-eval.rs)",
+            "authority": "kinewright_core::au6_scenarios",
+            "note": "Generated, never hand-edited. `published_v7_manifest_tracks_the_audio_workflow_suite` asserts the checked-in bytes equal the generated bytes and prints the generated bytes on a mismatch.",
+            "scenarios": scenarios,
+        });
+        let mut text = serde_json::to_string_pretty(&document).expect("ground truth serialises");
+        text.push('\n');
+        text
+    }
+
+    /// The manifest is the executable suite, written down.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn published_v7_manifest_tracks_the_audio_workflow_suite() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../benchmarks/auto-edit/v7/manifest.json"
+        ))
+        .unwrap();
+        assert_eq!(manifest["schema_version"], 7);
+        assert_eq!(manifest["benchmark_id"], AUDIO_WORKFLOW_BENCHMARK_ID);
+        assert_eq!(
+            manifest["runner"],
+            "KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- --suite audio-workflow-v7"
+        );
+        assert_eq!(
+            manifest["implementation"],
+            "crates/kinewright-agent/src/bin/kinewright-eval.rs"
+        );
+        assert_eq!(manifest["authority"], "kinewright_core::au6_scenarios");
+        let acceptance = manifest["acceptance_target"].as_object().unwrap();
+        assert_eq!(acceptance.len(), 6);
+        assert!(acceptance.contains_key("note"));
+        assert_eq!(acceptance["samples_per_scenario"], 3);
+        assert_eq!(acceptance["minimum_machine_passes_per_scenario"], 3);
+        assert_eq!(acceptance["minimum_human_accepts_per_scenario"], 2);
+        assert_eq!(acceptance["minimum_mean_human_rating"], 4.0);
+        assert_eq!(acceptance["every_question_answered"], true);
+        assert_eq!(
+            manifest["score_layers"]["blind_human_review"]["not_applicable_dimensions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            AUDIO_WORKFLOW_NOT_APPLICABLE.len()
+        );
+
+        let definitions = audio_workflow_suite();
+        let tasks = manifest["tasks"].as_array().unwrap();
+        assert_eq!(definitions.len(), AU6_TASK_IDS.len());
+        assert_eq!(tasks.len(), definitions.len());
+        for (task, definition) in tasks.iter().zip(&definitions) {
+            let mut name = definition.name.splitn(2, ' ');
+            let id = name.next().expect("a task name carries an id");
+            let title = name.next().expect("a task name carries a title");
+            assert_eq!(task["id"].as_str(), Some(id));
+            assert_eq!(task["name"].as_str(), Some(title));
+            assert_eq!(
+                task["scenario"].as_str(),
+                Some(au6_spec(au6_task_scenario(id)).id)
+            );
+            assert_eq!(task["prompt"], definition.prompts[0]);
+            assert_eq!(
+                task["ground_truth"],
+                "benchmarks/auto-edit/v7/ground-truth.json"
+            );
+            assert!(
+                task["fixture"]
+                    .as_str()
+                    .is_some_and(|fixture| fixture.starts_with("fixture_au6_")),
+                "{task:?}"
+            );
+            assert_eq!(task["budget"]["turns"], definition.budgets.max_turns);
+            assert_eq!(
+                task["budget"]["tool_calls"],
+                definition.budgets.max_tool_calls
+            );
+            assert_eq!(
+                task["budget"]["operations"],
+                definition.budgets.max_operations
+            );
+            assert_eq!(task["budget"]["tokens"], definition.budgets.max_tokens);
+            assert_eq!(task["budget"]["undos"], definition.budgets.max_undos);
+            assert_eq!(
+                task["budget"]["cost_usd"],
+                serde_json::json!(definition.budgets.max_cost_usd)
+            );
+            assert_eq!(
+                task["budget"]["wall_time_ms"],
+                serde_json::json!(
+                    u64::try_from(definition.budgets.max_wall_time.as_millis()).unwrap()
+                )
+            );
+            let deliverable = definition.deliverable.expect("every a-task delivers");
+            assert_eq!(task["delivery"]["profile"], deliverable.profile.as_str());
+            assert_eq!(
+                task["delivery"]["delivery_bit_depth"],
+                deliverable.delivery_bit_depth.as_str()
+            );
+            assert_eq!(
+                task["delivery"]["focus_x_percent"],
+                deliverable.focus_x_percent
+            );
+            assert_eq!(
+                task["delivery"]["focus_y_percent"],
+                deliverable.focus_y_percent
+            );
+            assert_eq!(task["delivery"]["proof_frames"], deliverable.proof_frames);
+            assert_eq!(
+                task["delivery"]["proof_cell_width"],
+                deliverable.proof_cell_width
+            );
+            assert_eq!(task["delivery"]["require_audio"], deliverable.require_audio);
+            assert_eq!(
+                task["delivery"]["normalize_to_profile_target"],
+                deliverable.normalize_to_profile_target
+            );
+            let assertions = task["machine_assertions"].as_array().unwrap();
+            assert_eq!(
+                assertions.len(),
+                definition.assertions.len(),
+                "{id} declares a different number of machine assertions than it executes"
+            );
+            let mut seen = BTreeSet::new();
+            for assertion in assertions {
+                let text = assertion.as_str().expect("assertion is a string");
+                assert!(!text.is_empty(), "{id} carries an empty machine assertion");
+                assert!(
+                    seen.insert(text.to_owned()),
+                    "{id} repeats machine assertion {text}"
+                );
+                assert!(
+                    au6_names_authority(text),
+                    "{id} assertion names neither an au6_scenarios constant nor a capability tool: {text}"
+                );
+            }
+            let expected_question = AU6_QUESTIONS
+                .iter()
+                .find(|(task_id, _)| *task_id == id)
+                .map(|(_, prompt)| *prompt);
+            assert_eq!(task["human_question"], serde_json::json!(expected_question));
+        }
+
+        let generated = au6_ground_truth_json();
+        let checked_in = include_str!("../../../../benchmarks/auto-edit/v7/ground-truth.json");
+        assert_eq!(
+            checked_in.replace("\r\n", "\n"),
+            generated,
+            "benchmarks/auto-edit/v7/ground-truth.json is stale. Paste the generated bytes below into that file:\n{generated}"
+        );
+        let ground: serde_json::Value = serde_json::from_str(&generated).unwrap();
+        for scenario in AU6_SCENARIOS {
+            let spec = au6_spec(scenario);
+            let row = ground["scenarios"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["scenario_id"] == spec.id)
+                .unwrap_or_else(|| panic!("ground truth is missing {}", spec.id));
+            assert_eq!(row["canonical_document"], au6_canonical_document(scenario));
+        }
+    }
+
+    #[test]
+    fn au6_audio_workflow_suite_is_a_packaged_benchmark() {
+        assert!(is_packaged_benchmark(AUDIO_WORKFLOW_BENCHMARK_ID));
+        let (benchmark_id, definitions) = eval_suite("audio-workflow-v7").unwrap();
+        assert_eq!(benchmark_id, AUDIO_WORKFLOW_BENCHMARK_ID);
+        assert_eq!(definitions.len(), AU6_TASK_IDS.len());
+        let (alias_id, alias) = eval_suite("v7").unwrap();
+        assert_eq!(alias_id, AUDIO_WORKFLOW_BENCHMARK_ID);
+        assert_eq!(alias.len(), definitions.len());
+        let Err(error) = eval_suite("audio-workflow-v8") else {
+            panic!("an unknown suite must be refused");
+        };
+        let error = error.to_string();
+        assert!(error.contains("audio-workflow-v7"), "{error}");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn au6_the_blind_package_discloses_no_machine_provenance() {
+        let temporary = TempDirectory::new("au6-blind-package");
+        let run_directory = temporary.root();
+        let run_id = "kinewright-eval-20260101T000000Z-claude-code";
+        let results = vec![
+            cc7_packaged_result(
+                "a1 Two-person interview with a music bed",
+                run_directory,
+                &cc7_blind_hash("0f3a1d2e4b5a"),
+            ),
+            cc7_packaged_result(
+                "a5b Encoded delivery at the streaming target",
+                run_directory,
+                &cc7_blind_hash("9e8d7b6a5f40"),
+            ),
+        ];
+        let benchmark_id = AUDIO_WORKFLOW_BENCHMARK_ID;
+        let environment = EnvironmentStamp::capture(None, "claude-code", None);
+        write_review_package(benchmark_id, run_id, run_directory, &environment, &results)
+            .expect("the review package is written");
+
+        let blind_directory = run_directory.join(BLIND_DIRECTORY_NAME);
+        let listing = cc7_blind_listing(&blind_directory);
+        assert_eq!(listing.len(), 5, "{listing:?}");
+        assert!(listing.contains(&BLIND_FORM_FILE_NAME.to_owned()));
+        for name in &listing {
+            if name == BLIND_FORM_FILE_NAME {
+                continue;
+            }
+            assert!(
+                cc7_is_blind_media_name(name),
+                "{name} is not a blind media name"
+            );
+        }
+        assert!(run_directory.join(BLIND_KEY_FILE_NAME).exists());
+        assert!(!blind_directory.join(BLIND_KEY_FILE_NAME).exists());
+
+        for name in &listing {
+            assert_eq!(
+                au6_leaked_needle(name, run_id, benchmark_id),
+                None,
+                "the blind listing discloses provenance in {name}"
+            );
+        }
+        let form_bytes = fs::read_to_string(blind_directory.join(BLIND_FORM_FILE_NAME))
+            .expect("the blind form is readable");
+        assert_eq!(
+            au6_leaked_needle(&form_bytes, run_id, benchmark_id),
+            None,
+            "the blind form discloses provenance: {form_bytes}"
+        );
+
+        fs::write(blind_directory.join("a1-sample-1.mp4"), b"leak").expect("leaked artefact");
+        let leaked_listing = cc7_blind_listing(&blind_directory);
+        assert_eq!(leaked_listing.len(), 6);
+        assert!(
+            leaked_listing
+                .iter()
+                .any(|name| au6_leaked_needle(name, run_id, benchmark_id).is_some()),
+            "the listing scan cannot see a leaked task id"
+        );
+        assert!(
+            leaked_listing
+                .iter()
+                .any(|name| name != BLIND_FORM_FILE_NAME && !cc7_is_blind_media_name(name)),
+            "the name-shape check cannot see a leaked task id"
+        );
+
+        let leaked_form = serde_json::json!({
+            "schema_version": 1,
+            "entries": [{
+                "blind_id": "0f3a1d2e4b5a",
+                "task_id": "a1",
+                "ratings": {},
+                "not_applicable": [],
+                "accepted": null,
+                "notes": null
+            }]
+        });
+        assert!(
+            au6_leaked_needle(&leaked_form.to_string(), run_id, benchmark_id).is_some(),
+            "the byte scan cannot see a leaked task id"
+        );
+
+        let needles = au6_leak_needles(run_id, benchmark_id);
+        assert!(needles.len() > CC7_MACHINE_PROVENANCE_NEEDLES.len());
+        assert!(needles.contains(&run_id.to_ascii_lowercase()));
+        assert!(needles.contains(&benchmark_id.to_ascii_lowercase()));
+        for needle in needles.iter().chain(au6_leak_value_needles().iter()) {
+            assert!(needle.len() >= 2, "{needle} is too short to mean anything");
+            assert_eq!(
+                au6_leaked_needle(&format!(">>>{needle}<<<"), run_id, benchmark_id).as_deref(),
+                Some(needle.as_str()),
+                "the scan cannot see its own needle {needle}"
+            );
+        }
+        for value in au6_leak_value_needles() {
+            assert!(
+                value.len() >= 3,
+                "a value needle shorter than three digits matches any digit pair: {value}"
+            );
+        }
+        for parameter in au6_canonical_parameter_names() {
+            assert!(
+                needles.contains(&parameter),
+                "{parameter} is a canonical parameter the leak scan does not carry"
+            );
+        }
+    }
+
+    #[test]
+    fn au6_leak_needles_never_appear_in_a_question() {
+        let needles = au6_leak_needles(
+            "kinewright-eval-20260101T000000Z-claude-code",
+            AUDIO_WORKFLOW_BENCHMARK_ID,
+        );
+        for (task_id, prompt) in AU6_QUESTIONS {
+            for needle in needles.iter().chain(au6_leak_value_needles().iter()) {
+                assert!(
+                    !prompt
+                        .to_ascii_lowercase()
+                        .contains(&needle.to_ascii_lowercase()),
+                    "needle {needle:?} appears in {task_id}: {prompt}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn au6_the_audio_questions_are_keyed_by_base_task_id() {
+        let questions = review_questions(AUDIO_WORKFLOW_BENCHMARK_ID);
+        assert_eq!(questions.len(), AU6_QUESTIONS.len());
+        for (task_id, prompt) in AU6_QUESTIONS {
+            let asked = questions
+                .get(task_id)
+                .unwrap_or_else(|| panic!("{task_id} is missing from review_questions"));
+            assert_eq!(asked.len(), 1, "{task_id}");
+            assert_eq!(asked[0].id, task_id);
+            assert_eq!(asked[0].prompt, prompt);
+        }
+        let color = review_questions(COLOR_WORKFLOW_BENCHMARK_ID);
+        assert!(color.keys().all(|key| key.starts_with('c')));
     }
 }

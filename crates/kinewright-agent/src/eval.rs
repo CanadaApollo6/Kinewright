@@ -10,17 +10,22 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use kinewright_core::au6_scenarios::{
+    AU6_HOP_MILLISECONDS, AU6_WINDOW_MILLISECONDS, AU6_WINDOW_PROGRAMME,
+};
 use kinewright_core::{
-    AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, AudioLoudness,
+    AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, AudioBusId,
+    AudioLoudness, AudioQcReport, AudioQcRequest, AudioRepairReport, AudioRepairRequest,
     CaptionMotion, Clip, ClipContent, ClipId, ColorQcCheck, ColorQcReport, ColorQcRequest, Command,
-    Core, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile, DeliveryVerification,
-    DeliveryVerificationRequest, Document, EffectId, Event, Export, ExportCancellation,
-    HarnessInfo, MatteCoverageStatistics, MediaKind, NormalizedRoi, Operation, ParamValue,
-    Playback, Query, QueryResult, RgbaImage, SessionConfig, SkinDiagnostics, TimeCode,
-    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track,
-    TrackId, TrackKind, TranscriptStatus, apply_batch, dedup_timeline_words, delivery_conformance,
-    document_for_delivery_profile, map_source_range_to_project, matte_coverage_statistics,
-    measure_color_qc, qa_document,
+    Core, DeliveryAudioVerification, DeliveryConformanceReport, DeliveryEncodeDepth,
+    DeliveryProfile, DeliveryVerification, DeliveryVerificationRequest, Document, EffectId, Event,
+    Export, ExportCancellation, ExportSettings, HarnessInfo, MatteCoverageStatistics, MediaKind,
+    MixLevelReport, MixLevelRequest, MixSpectrumPoint, MixWindowLevelReport, MixWindowRequest,
+    NormalizedRoi, Operation, ParamValue, Playback, Query, QueryResult, RgbaImage, SessionConfig,
+    SkinDiagnostics, TimeCode, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TitlePosition, Track, TrackId, TrackKind, TranscriptStatus, apply_batch, dedup_timeline_words,
+    delivery_conformance, document_for_delivery_profile, map_source_range_to_project,
+    matte_coverage_statistics, measure_color_qc, qa_document,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -100,6 +105,11 @@ pub struct EvalDefinition {
     /// [`ColorEvalRequest::from_assertions`] so the region rectangles are
     /// written down exactly once, on the assertions that gate them.
     pub color: Option<ColorEvalRequest>,
+    /// What the audio evidence block measures for this task.
+    ///
+    /// `None` for every non-audio suite: the runner then records no
+    /// [`AudioEvalEvidence`] and `EvalOutcome::audio` stays `None`.
+    pub audio: Option<AudioEvalRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +132,10 @@ pub struct EvalDeliverableSpec {
     /// every existing literal rather than a wire migration, and a future
     /// field cannot be forgotten silently.
     pub delivery_bit_depth: DeliveryEncodeDepth,
+    /// When true, `export_and_probe` assigns the profile loudness target
+    /// after `export_settings` (which always starts at `None`). Off at every
+    /// pre-v7 literal.
+    pub normalize_to_profile_target: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -507,6 +521,45 @@ pub enum EvalAssertion {
         effect_id: u64,
         frame: i64,
     },
+    /// The written delivery encode's audio verification sits inside these
+    /// integrated and true-peak margins.
+    DeliveryAudioVerified {
+        profile: DeliveryProfile,
+        maximum_deviation_lu_hundredths: i32,
+        minimum_true_peak_margin_hundredths: i32,
+    },
+    /// Dialogue bus integrated loudness exceeds the music bus by at least
+    /// this many LU over one named window. Reads `level_reports`, not
+    /// `window_levels`.
+    DialogueOverBedAtLeast {
+        dialogue_bus: AudioBusId,
+        music_bus: AudioBusId,
+        window: std::ops::Range<TimeCode>,
+        minimum_lu_hundredths: i32,
+    },
+    /// Two mix points match within this many LU. Reads `level_reports`.
+    VoicesMatchedWithin {
+        first: MixSpectrumPoint,
+        first_window: std::ops::Range<TimeCode>,
+        second: MixSpectrumPoint,
+        second_window: std::ops::Range<TimeCode>,
+        maximum_lu_hundredths: i32,
+    },
+    /// The named track's mix-level `integrated` is `None`. Not `!audible`:
+    /// a video-only track reports `audible: true, integrated: None`.
+    TrackSilentInMix {
+        track: TrackId,
+    },
+    /// Repair SNR after the session exceeds the pre-session SNR by this many
+    /// dB hundredths.
+    RepairSnrGainAtLeast {
+        point: MixSpectrumPoint,
+        minimum_db_hundredths: i32,
+    },
+    /// `audio_qc` over the range reports `technical_pass`.
+    AudioQcTechnicalPass {
+        range: std::ops::Range<TimeCode>,
+    },
 }
 
 /// The two-pixel inset every patch statistic is taken on, so that a patch's
@@ -740,6 +793,190 @@ impl ColorEvalEvidence {
     }
 }
 
+/// What one task's audio evidence measures, and where.
+///
+/// Every field is independently optional: the runner measures exactly what
+/// was asked for and leaves the rest of [`AudioEvalEvidence`] `None`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioEvalRequest {
+    pub range: std::ops::Range<TimeCode>,
+    pub window_milliseconds: u32,
+    pub hop_milliseconds: u32,
+    pub level_windows: Vec<(&'static str, std::ops::Range<TimeCode>)>,
+    pub window_points: Vec<(&'static str, MixSpectrumPoint)>,
+    pub repair_point: Option<MixSpectrumPoint>,
+    pub qc_range: Option<std::ops::Range<TimeCode>>,
+    pub delivery_verification: Option<DeliveryProfile>,
+    pub silent_tracks: Vec<TrackId>,
+}
+
+impl Default for AudioEvalRequest {
+    fn default() -> Self {
+        Self {
+            range: AU6_WINDOW_PROGRAMME,
+            window_milliseconds: AU6_WINDOW_MILLISECONDS,
+            hop_milliseconds: AU6_HOP_MILLISECONDS,
+            level_windows: Vec::new(),
+            window_points: Vec::new(),
+            repair_point: None,
+            qc_range: None,
+            delivery_verification: None,
+            silent_tracks: Vec::new(),
+        }
+    }
+}
+
+impl AudioEvalRequest {
+    /// Derive the request from the assertions that gate it, so a window is
+    /// written down once and a non-audio suite gets no request at all.
+    #[must_use]
+    pub fn from_assertions(assertions: &[EvalAssertion]) -> Option<Self> {
+        let mut request = Self::default();
+        let mut asked = false;
+        for assertion in assertions {
+            match assertion {
+                EvalAssertion::DeliveryAudioVerified { profile, .. } => {
+                    asked = true;
+                    request.delivery_verification = Some(*profile);
+                }
+                EvalAssertion::DialogueOverBedAtLeast { window, .. } => {
+                    asked = true;
+                    push_unique_window(&mut request.level_windows, window.clone());
+                }
+                EvalAssertion::VoicesMatchedWithin {
+                    first,
+                    first_window,
+                    second,
+                    second_window,
+                    ..
+                } => {
+                    asked = true;
+                    push_unique_window(&mut request.level_windows, first_window.clone());
+                    push_unique_window(&mut request.level_windows, second_window.clone());
+                    push_unique_point(&mut request.window_points, *first);
+                    push_unique_point(&mut request.window_points, *second);
+                }
+                EvalAssertion::TrackSilentInMix { track } => {
+                    asked = true;
+                    if !request.silent_tracks.contains(track) {
+                        request.silent_tracks.push(*track);
+                    }
+                }
+                EvalAssertion::RepairSnrGainAtLeast { point, .. } => {
+                    asked = true;
+                    request.repair_point = Some(*point);
+                    push_unique_point(&mut request.window_points, *point);
+                }
+                EvalAssertion::AudioQcTechnicalPass { range } => {
+                    asked = true;
+                    request.qc_range = Some(range.clone());
+                    request.range = range.clone();
+                }
+                _ => {}
+            }
+        }
+        asked.then_some(request)
+    }
+}
+
+fn push_unique_window(
+    windows: &mut Vec<(&'static str, std::ops::Range<TimeCode>)>,
+    range: std::ops::Range<TimeCode>,
+) {
+    if windows.iter().any(|(_, existing)| *existing == range) {
+        return;
+    }
+    windows.push((audio_window_label(&range), range));
+}
+
+fn push_unique_point(points: &mut Vec<(&'static str, MixSpectrumPoint)>, point: MixSpectrumPoint) {
+    if points.iter().any(|(_, existing)| *existing == point) {
+        return;
+    }
+    points.push((mix_point_label(point), point));
+}
+
+fn audio_window_label(range: &std::ops::Range<TimeCode>) -> &'static str {
+    match (range.start.0, range.end.0) {
+        (0, 50) => "a_first_turn",
+        (75, 125) => "b_first_turn",
+        (150, 200) => "a_second_turn",
+        (225, 275) => "b_second_turn",
+        (0, 300) => "programme",
+        (0, 312) => "c_programme",
+        (0, 200) => "encode_programme",
+        _ => "custom",
+    }
+}
+
+fn mix_point_label(point: MixSpectrumPoint) -> &'static str {
+    match point {
+        MixSpectrumPoint::Master => "master",
+        MixSpectrumPoint::Bus(AudioBusId(1)) => "bus:1",
+        MixSpectrumPoint::Bus(AudioBusId(2)) => "bus:2",
+        MixSpectrumPoint::Track(TrackId(1)) => "track:1",
+        MixSpectrumPoint::Track(TrackId(2)) => "track:2",
+        MixSpectrumPoint::Track(TrackId(3)) => "track:3",
+        MixSpectrumPoint::Track(TrackId(4)) => "track:4",
+        MixSpectrumPoint::Track(TrackId(5)) => "track:5",
+        MixSpectrumPoint::Bus(_) => "bus:other",
+        MixSpectrumPoint::Track(_) => "track:other",
+    }
+}
+
+/// Everything an audio scenario measured, computed where the `Analysis` and
+/// the exporter were still alive.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AudioEvalEvidence {
+    pub level_reports: BTreeMap<&'static str, MixLevelReport>,
+    /// Keyed by a point label — `master`, `bus:1`, `track:5` — because
+    /// [`MixSpectrumPoint`] derives no `Ord` / `Hash` and AU6 adds no core
+    /// derive.
+    pub window_levels: BTreeMap<&'static str, MixWindowLevelReport>,
+    pub track_levels: BTreeMap<TrackId, (bool, Option<i32>)>,
+    pub repair_before: Option<AudioRepairReport>,
+    pub repair_after: Option<AudioRepairReport>,
+    pub qc: Option<AudioQcReport>,
+    pub verification: Option<DeliveryAudioVerification>,
+    pub errors: Vec<AudioEvidenceError>,
+}
+
+/// The measured quantity an audio evidence error belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AudioEvidenceQuantity {
+    Levels,
+    WindowLevels,
+    TrackLevels,
+    Repair,
+    Qc,
+    DeliveryVerification,
+}
+
+/// One recorded audio measurement failure and the quantity it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioEvidenceError {
+    pub quantity: AudioEvidenceQuantity,
+    pub message: String,
+}
+
+impl AudioEvalEvidence {
+    fn record(&mut self, quantity: AudioEvidenceQuantity, message: String) {
+        self.errors.push(AudioEvidenceError { quantity, message });
+    }
+
+    /// Every recorded reason a quantity could not be measured, joined.
+    #[must_use]
+    pub fn unmeasurable_reason(&self, quantity: AudioEvidenceQuantity) -> Option<String> {
+        let reasons = self
+            .errors
+            .iter()
+            .filter(|error| error.quantity == quantity)
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>();
+        (!reasons.is_empty()).then(|| reasons.join("; "))
+    }
+}
+
 /// One numeric colour claim, so the number reaches `results.jsonl` as data
 /// rather than as free text inside an assertion detail string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -868,6 +1105,10 @@ pub struct EvalOutcome {
     /// `Analysis` and exporter were still alive. `None` for every suite whose
     /// definition carries no [`ColorEvalRequest`].
     pub color: Option<ColorEvalEvidence>,
+    /// Audio measurements taken beside the colour block, before
+    /// `restore_original`. `None` for every suite whose definition carries no
+    /// [`AudioEvalRequest`].
+    pub audio: Option<AudioEvalEvidence>,
     pub final_words: Vec<String>,
     pub final_timeline_words: Vec<TimelineTranscriptWord>,
     pub remaining_silences: Vec<TimelineSilenceSpan>,
@@ -1049,7 +1290,7 @@ pub struct HumanTaskReview {
 /// One creative question put to a blind reviewer, verbatim.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HumanQuestion {
-    /// The scenario letter this question belongs to, such as `a` or `g`.
+    /// The scenario letter (v6) or the base task id (v7).
     pub id: String,
     pub prompt: String,
     pub answer: Option<bool>,
@@ -1367,10 +1608,11 @@ pub fn run_eval_with_artifacts(
     let eval_started = Instant::now();
     let fixture = std::panic::catch_unwind(definition.fixture_builder)
         .map_err(|payload| EvalError::Fixture(panic_message(&payload)))??;
-    let server = McpServer::start(
+    let server = McpServer::start_with_exporter(
         fixture.core.clone(),
         Arc::clone(&fixture.playback),
         Arc::clone(&fixture.analysis),
+        Arc::clone(&fixture.exporter),
     )
     .map_err(|error| EvalError::Server(error.to_string()))?;
     apply_fixture_project_path(&server, &fixture);
@@ -1441,6 +1683,13 @@ pub fn run_eval_with_artifacts(
         &final_document,
         definition.deliverable.zip(deliverable.as_ref()),
     );
+    let audio = measure_audio_block(
+        definition,
+        fixture.analysis.as_ref(),
+        &fixture.original_document,
+        &final_document,
+        definition.deliverable.zip(deliverable.as_ref()),
+    );
     let undo_steps_to_original = restore_original(
         &fixture.core,
         &fixture.original_document,
@@ -1451,6 +1700,7 @@ pub fn run_eval_with_artifacts(
         final_document: (*final_document).clone(),
         original_document: fixture.original_document.clone(),
         color,
+        audio,
         final_words,
         final_timeline_words,
         remaining_silences,
@@ -1505,6 +1755,164 @@ fn measure_color_block(
         .color
         .as_ref()
         .map(|request| measure_color_evidence(request, analysis, final_document, deliverable))
+}
+
+/// The audio block, built exactly where `run_eval_with_artifacts` builds it.
+#[must_use]
+fn measure_audio_block(
+    definition: &EvalDefinition,
+    analysis: &dyn Analysis,
+    original_document: &Document,
+    final_document: &Arc<Document>,
+    deliverable: Option<(EvalDeliverableSpec, &EvalDeliverableResult)>,
+) -> Option<AudioEvalEvidence> {
+    definition.audio.as_ref().map(|request| {
+        measure_audio_evidence(
+            request,
+            analysis,
+            original_document,
+            final_document,
+            deliverable,
+        )
+    })
+}
+
+/// Settings for one eval encode, with the profile target applied only when
+/// [`EvalDeliverableSpec::normalize_to_profile_target`] is set.
+#[must_use]
+pub fn eval_export_settings(spec: EvalDeliverableSpec, document: &Document) -> ExportSettings {
+    let mut settings = spec.profile.export_settings(
+        document,
+        spec.delivery_bit_depth,
+        ExportCancellation::default(),
+    );
+    if spec.normalize_to_profile_target {
+        settings.loudness_normalization = Some(spec.profile.loudness_target());
+    }
+    settings
+}
+
+/// Measure the request against a live `Analysis`. Failures are recorded, never
+/// thrown.
+#[allow(clippy::too_many_lines)]
+pub fn measure_audio_evidence(
+    request: &AudioEvalRequest,
+    analysis: &dyn Analysis,
+    original_document: &Document,
+    final_document: &Arc<Document>,
+    deliverable: Option<(EvalDeliverableSpec, &EvalDeliverableResult)>,
+) -> AudioEvalEvidence {
+    let mut evidence = AudioEvalEvidence::default();
+    for (label, range) in &request.level_windows {
+        match analysis.mix_levels(
+            final_document,
+            &MixLevelRequest {
+                range: Some(range.clone()),
+            },
+        ) {
+            Ok(report) => {
+                evidence.level_reports.insert(*label, report);
+            }
+            Err(error) => evidence.record(AudioEvidenceQuantity::Levels, error.to_string()),
+        }
+    }
+    for (label, point) in &request.window_points {
+        match analysis.mix_window_levels(
+            final_document,
+            &MixWindowRequest {
+                range: Some(request.range.clone()),
+                point: *point,
+                window_milliseconds: request.window_milliseconds,
+                hop_milliseconds: request.hop_milliseconds,
+            },
+        ) {
+            Ok(report) => {
+                evidence.window_levels.insert(*label, report);
+            }
+            Err(error) => evidence.record(AudioEvidenceQuantity::WindowLevels, error.to_string()),
+        }
+    }
+    if !request.silent_tracks.is_empty() {
+        match analysis.mix_levels(
+            final_document,
+            &MixLevelRequest {
+                range: Some(request.range.clone()),
+            },
+        ) {
+            Ok(report) => {
+                for track in &request.silent_tracks {
+                    let found = report
+                        .tracks
+                        .iter()
+                        .find(|entry| entry.track == *track)
+                        .map(|entry| (entry.audible, entry.levels.integrated_lufs_hundredths));
+                    match found {
+                        Some(levels) => {
+                            evidence.track_levels.insert(*track, levels);
+                        }
+                        None => evidence.record(
+                            AudioEvidenceQuantity::TrackLevels,
+                            format!("track {} was not in the mix report", track.0),
+                        ),
+                    }
+                }
+            }
+            Err(error) => evidence.record(AudioEvidenceQuantity::TrackLevels, error.to_string()),
+        }
+    }
+    if let Some(point) = request.repair_point {
+        let repair = AudioRepairRequest {
+            range: Some(request.range.clone()),
+            point,
+        };
+        match analysis.audio_repair(original_document, &repair) {
+            Ok(report) => evidence.repair_before = Some(report),
+            Err(error) => evidence.record(AudioEvidenceQuantity::Repair, error.to_string()),
+        }
+        match analysis.audio_repair(final_document, &repair) {
+            Ok(report) => evidence.repair_after = Some(report),
+            Err(error) => evidence.record(AudioEvidenceQuantity::Repair, error.to_string()),
+        }
+    }
+    if let Some(range) = &request.qc_range {
+        match analysis.audio_qc(
+            final_document,
+            &AudioQcRequest {
+                range: Some(range.clone()),
+                profile: None,
+            },
+        ) {
+            Ok(report) => evidence.qc = Some(report),
+            Err(error) => evidence.record(AudioEvidenceQuantity::Qc, error.to_string()),
+        }
+    }
+    if let Some(profile) = request.delivery_verification {
+        match deliverable {
+            Some((spec, result)) if result.errors.is_empty() && result.output_path.exists() => {
+                match analysis.verify_delivery_audio(
+                    &result.output_path,
+                    spec.normalize_to_profile_target
+                        .then(|| spec.profile.loudness_target())
+                        .or_else(|| Some(profile.loudness_target())),
+                ) {
+                    Ok(report) => evidence.verification = Some(report),
+                    Err(error) => evidence.record(
+                        AudioEvidenceQuantity::DeliveryVerification,
+                        error.to_string(),
+                    ),
+                }
+            }
+            Some((_, result)) if !result.errors.is_empty() => evidence.record(
+                AudioEvidenceQuantity::DeliveryVerification,
+                result.errors.join("; "),
+            ),
+            _ => evidence.record(
+                AudioEvidenceQuantity::DeliveryVerification,
+                "no deliverable".to_owned(),
+            ),
+        }
+    }
+    evidence
 }
 
 fn produce_deliverable(
@@ -2178,11 +2586,7 @@ fn export_and_probe(
         ));
         return;
     }
-    let settings = spec.profile.export_settings(
-        document,
-        spec.delivery_bit_depth,
-        ExportCancellation::default(),
-    );
+    let settings = eval_export_settings(spec, document);
     let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
     if let Err(error) = exporter.export_document(
         Arc::clone(document),
@@ -2704,6 +3108,19 @@ pub const COLOR_WORKFLOW_NOT_APPLICABLE: [HumanRatingDimension; 4] = [
     HumanRatingDimension::Captions,
 ];
 
+/// The audio-workflow benchmark.
+pub const AUDIO_WORKFLOW_BENCHMARK_ID: &str = "kinewright-audio-workflow-v7";
+
+/// The dimensions the audio suite pre-marks not applicable: rating a story,
+/// a pacing, a visual finish or a caption on a listen-to artefact would be
+/// fabrication, so the template says so instead of asking.
+pub const AUDIO_WORKFLOW_NOT_APPLICABLE: [HumanRatingDimension; 4] = [
+    HumanRatingDimension::Story,
+    HumanRatingDimension::Pacing,
+    HumanRatingDimension::VisualFinish,
+    HumanRatingDimension::Captions,
+];
+
 #[must_use]
 pub fn human_review_template(
     benchmark_id: &str,
@@ -2744,6 +3161,8 @@ pub fn human_review_template_with_questions(
         };
         let not_applicable = if benchmark_id == COLOR_WORKFLOW_BENCHMARK_ID {
             COLOR_WORKFLOW_NOT_APPLICABLE.to_vec()
+        } else if benchmark_id == AUDIO_WORKFLOW_BENCHMARK_ID {
+            AUDIO_WORKFLOW_NOT_APPLICABLE.to_vec()
         } else if deliverable.rendered_caption_alignment_required {
             Vec::new()
         } else {
@@ -3599,7 +4018,7 @@ pub fn evaluate(definition: &EvalDefinition, outcome: &EvalOutcome) -> EvalResul
     let mut measurements = definition
         .assertions
         .iter()
-        .filter_map(|assertion| color_measurement(assertion, outcome))
+        .filter_map(|assertion| assertion_measurement(assertion, outcome))
         .collect::<Vec<_>>();
     measurements.extend(ungated_color_measurements(outcome));
     let passed = assertions.iter().all(|assertion| assertion.passed);
@@ -4045,6 +4464,14 @@ fn evaluate_assertion(
         | EvalAssertion::LookBypassMatchesAbsent { .. } => {
             color_assertion_outcome(assertion, outcome).result
         }
+        EvalAssertion::DeliveryAudioVerified { .. }
+        | EvalAssertion::DialogueOverBedAtLeast { .. }
+        | EvalAssertion::VoicesMatchedWithin { .. }
+        | EvalAssertion::TrackSilentInMix { .. }
+        | EvalAssertion::RepairSnrGainAtLeast { .. }
+        | EvalAssertion::AudioQcTechnicalPass { .. } => {
+            audio_assertion_outcome(assertion, outcome).result
+        }
     }
 }
 
@@ -4119,8 +4546,95 @@ const fn is_color_assertion(assertion: &EvalAssertion) -> bool {
         | EvalAssertion::SingleAudioMediaClip { .. }
         | EvalAssertion::ReframeStability { .. }
         | EvalAssertion::QaExportReady
-        | EvalAssertion::UndoIntegrity => false,
+        | EvalAssertion::UndoIntegrity
+        | EvalAssertion::DeliveryAudioVerified { .. }
+        | EvalAssertion::DialogueOverBedAtLeast { .. }
+        | EvalAssertion::VoicesMatchedWithin { .. }
+        | EvalAssertion::TrackSilentInMix { .. }
+        | EvalAssertion::RepairSnrGainAtLeast { .. }
+        | EvalAssertion::AudioQcTechnicalPass { .. } => false,
     }
+}
+
+/// The six audio variants, written as an exhaustive match rather than a
+/// `matches!`.
+const fn is_audio_assertion(assertion: &EvalAssertion) -> bool {
+    match assertion {
+        EvalAssertion::DeliveryAudioVerified { .. }
+        | EvalAssertion::DialogueOverBedAtLeast { .. }
+        | EvalAssertion::VoicesMatchedWithin { .. }
+        | EvalAssertion::TrackSilentInMix { .. }
+        | EvalAssertion::RepairSnrGainAtLeast { .. }
+        | EvalAssertion::AudioQcTechnicalPass { .. } => true,
+        EvalAssertion::TimelineNonEmpty
+        | EvalAssertion::ClipCount { .. }
+        | EvalAssertion::MediaClipCount { .. }
+        | EvalAssertion::AssetOrder { .. }
+        | EvalAssertion::AssetAbsent { .. }
+        | EvalAssertion::Gapless
+        | EvalAssertion::MediaGapless
+        | EvalAssertion::DurationBounds { .. }
+        | EvalAssertion::ExactSourceClips { .. }
+        | EvalAssertion::ExactTrackClips { .. }
+        | EvalAssertion::ExactProjectDuration { .. }
+        | EvalAssertion::ExactTrackMediaCoverage { .. }
+        | EvalAssertion::RequiredAssetsOnTrack { .. }
+        | EvalAssertion::SourceRangesSeparated { .. }
+        | EvalAssertion::SourceRangesChronological { .. }
+        | EvalAssertion::SourceRangesSceneClean { .. }
+        | EvalAssertion::SourceRangesAvoid { .. }
+        | EvalAssertion::ShotCadenceVariation { .. }
+        | EvalAssertion::NoAlternatingShotPattern { .. }
+        | EvalAssertion::BeatAlignedCuts { .. }
+        | EvalAssertion::CutsAlignedToBeatSetAtLeast { .. }
+        | EvalAssertion::MusicFit { .. }
+        | EvalAssertion::MusicSourceEnd { .. }
+        | EvalAssertion::AssetUseMinimum { .. }
+        | EvalAssertion::AssetTemporalSpread { .. }
+        | EvalAssertion::ClipSourceWithin { .. }
+        | EvalAssertion::EdgeShotHolds { .. }
+        | EvalAssertion::WordsRetained { .. }
+        | EvalAssertion::WordsAbsent { .. }
+        | EvalAssertion::CaptionWordsExact { .. }
+        | EvalAssertion::CaptionSentencesCoherent
+        | EvalAssertion::CaptionPresentation { .. }
+        | EvalAssertion::NoSilenceAtLeast { .. }
+        | EvalAssertion::DialoguePauseBounds { .. }
+        | EvalAssertion::SceneChangesAreCuts { .. }
+        | EvalAssertion::RequiredToolUsage { .. }
+        | EvalAssertion::EffectOnAsset { .. }
+        | EvalAssertion::TransitionOnAsset { .. }
+        | EvalAssertion::NoVisualTransitionsEffectsOrRetiming { .. }
+        | EvalAssertion::TitleCard { .. }
+        | EvalAssertion::SourcePhaseArc { .. }
+        | EvalAssertion::StyledCaptions { .. }
+        | EvalAssertion::CaptionSafeArea { .. }
+        | EvalAssertion::AudioPresent
+        | EvalAssertion::ProgramAudioContinuous { .. }
+        | EvalAssertion::SingleAudioMediaClip { .. }
+        | EvalAssertion::ReframeStability { .. }
+        | EvalAssertion::QaExportReady
+        | EvalAssertion::UndoIntegrity
+        | EvalAssertion::ColorQcTechnicalPass { .. }
+        | EvalAssertion::DeliveryVerificationWithinBudgets { .. }
+        | EvalAssertion::NeutralPatchSpreadAtMost { .. }
+        | EvalAssertion::ReferenceClipUntouched { .. }
+        | EvalAssertion::SkinHueWithinBand { .. }
+        | EvalAssertion::MatteContainmentExact { .. }
+        | EvalAssertion::TrackKeyframesMatchExpected { .. }
+        | EvalAssertion::LookBypassMatchesAbsent { .. } => false,
+    }
+}
+
+fn assertion_measurement(
+    assertion: &EvalAssertion,
+    outcome: &EvalOutcome,
+) -> Option<EvalMeasurement> {
+    color_measurement(assertion, outcome).or_else(|| audio_measurement(assertion, outcome))
+}
+
+fn audio_measurement(assertion: &EvalAssertion, outcome: &EvalOutcome) -> Option<EvalMeasurement> {
+    is_audio_assertion(assertion).then(|| audio_assertion_outcome(assertion, outcome).measurement)
 }
 
 /// Every colour assertion emits an `EvalMeasurement` beside its
@@ -4168,6 +4682,408 @@ pub const CHART_LUMA_MEASUREMENT_NAME: &str = "chart luma mean delta";
 
 /// The name the deep-shadow gamut population reaches `results.jsonl` under.
 pub const GAMUT_MEASUREMENT_NAME: &str = "deep shadow out-of-gamut pixels";
+
+struct AudioAssertionOutcome {
+    result: AssertionResult,
+    measurement: EvalMeasurement,
+}
+
+fn audio_outcome(
+    name: &str,
+    passed: bool,
+    detail: String,
+    observed: i64,
+    budget: i64,
+    unit: &str,
+) -> AudioAssertionOutcome {
+    AudioAssertionOutcome {
+        result: assertion_result(name, passed, detail),
+        measurement: EvalMeasurement {
+            name: name.to_owned(),
+            observed,
+            budget,
+            unit: unit.to_owned(),
+            passed,
+        },
+    }
+}
+
+fn audio_not_measured(
+    name: &str,
+    unit: &str,
+    evidence: Option<&AudioEvalEvidence>,
+    quantity: AudioEvidenceQuantity,
+) -> String {
+    evidence.map_or_else(
+        || format!("{name} has no audio evidence block ({unit} not measured)"),
+        |evidence| {
+            evidence.unmeasurable_reason(quantity).map_or_else(
+                || format!("{name} was not measured for this task ({unit})"),
+                |reason| format!("{name} could not be measured: {reason}"),
+            )
+        },
+    )
+}
+
+fn audio_unmeasurable(
+    name: &str,
+    evidence: Option<&AudioEvalEvidence>,
+    quantity: AudioEvidenceQuantity,
+    not_measured: i64,
+    budget: i64,
+    unit: &str,
+) -> Option<AudioAssertionOutcome> {
+    let reason = evidence.and_then(|block| block.unmeasurable_reason(quantity))?;
+    Some(audio_outcome(
+        name,
+        false,
+        format!("{name} could not be measured: {reason}"),
+        not_measured,
+        budget,
+        unit,
+    ))
+}
+
+fn mix_point_integrated(report: &MixLevelReport, point: MixSpectrumPoint) -> Option<i32> {
+    match point {
+        MixSpectrumPoint::Master => report.master.integrated_lufs_hundredths,
+        MixSpectrumPoint::Track(track) => report
+            .tracks
+            .iter()
+            .find(|entry| entry.track == track)
+            .and_then(|entry| entry.levels.integrated_lufs_hundredths),
+        MixSpectrumPoint::Bus(bus) => report
+            .buses
+            .iter()
+            .find(|entry| entry.bus == bus)
+            .and_then(|entry| entry.levels.integrated_lufs_hundredths),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn audio_assertion_outcome(
+    assertion: &EvalAssertion,
+    outcome: &EvalOutcome,
+) -> AudioAssertionOutcome {
+    let evidence = outcome.audio.as_ref();
+    match assertion {
+        EvalAssertion::DeliveryAudioVerified {
+            profile,
+            maximum_deviation_lu_hundredths,
+            minimum_true_peak_margin_hundredths,
+        } => {
+            if let Some(fail) = audio_unmeasurable(
+                "delivery audio",
+                evidence,
+                AudioEvidenceQuantity::DeliveryVerification,
+                0,
+                i64::from(*maximum_deviation_lu_hundredths),
+                "lu_hundredths",
+            ) {
+                return fail;
+            }
+            let Some(verification) = evidence.and_then(|block| block.verification.as_ref()) else {
+                return audio_outcome(
+                    "delivery audio",
+                    false,
+                    audio_not_measured(
+                        "delivery audio",
+                        "lu_hundredths",
+                        evidence,
+                        AudioEvidenceQuantity::DeliveryVerification,
+                    ),
+                    0,
+                    i64::from(*maximum_deviation_lu_hundredths),
+                    "lu_hundredths",
+                );
+            };
+            let target = profile.loudness_target();
+            let Some(integrated) = verification.measured.integrated_lufs_hundredths else {
+                return audio_outcome(
+                    "delivery audio",
+                    false,
+                    "delivery audio measured silent".to_owned(),
+                    0,
+                    i64::from(*maximum_deviation_lu_hundredths),
+                    "lu_hundredths",
+                );
+            };
+            let deviation = (integrated - target.integrated_lufs_hundredths).abs();
+            let peak_margin = verification
+                .measured
+                .true_peak_dbtp_hundredths
+                .map(|peak| target.true_peak_ceiling_dbtp_hundredths - peak);
+            let peak_ok =
+                peak_margin.is_some_and(|margin| margin >= *minimum_true_peak_margin_hundredths);
+            let passed = deviation <= *maximum_deviation_lu_hundredths && peak_ok;
+            audio_outcome(
+                "delivery audio",
+                passed,
+                format!(
+                    "deviation {deviation} (budget {maximum_deviation_lu_hundredths}), true-peak margin {peak_margin:?}"
+                ),
+                i64::from(deviation),
+                i64::from(*maximum_deviation_lu_hundredths),
+                "lu_hundredths",
+            )
+        }
+        EvalAssertion::DialogueOverBedAtLeast {
+            dialogue_bus,
+            music_bus,
+            window,
+            minimum_lu_hundredths,
+        } => {
+            if let Some(fail) = audio_unmeasurable(
+                "dialogue over bed",
+                evidence,
+                AudioEvidenceQuantity::Levels,
+                0,
+                i64::from(*minimum_lu_hundredths),
+                "lu_hundredths",
+            ) {
+                return fail;
+            }
+            let label = audio_window_label(window);
+            let Some(report) = evidence.and_then(|block| block.level_reports.get(label)) else {
+                return audio_outcome(
+                    "dialogue over bed",
+                    false,
+                    audio_not_measured(
+                        "dialogue over bed",
+                        "lu_hundredths",
+                        evidence,
+                        AudioEvidenceQuantity::Levels,
+                    ),
+                    0,
+                    i64::from(*minimum_lu_hundredths),
+                    "lu_hundredths",
+                );
+            };
+            let dialogue = mix_point_integrated(report, MixSpectrumPoint::Bus(*dialogue_bus));
+            let music = mix_point_integrated(report, MixSpectrumPoint::Bus(*music_bus));
+            match (dialogue, music) {
+                (Some(dialogue), Some(music)) => {
+                    let delta = dialogue - music;
+                    audio_outcome(
+                        "dialogue over bed",
+                        delta >= *minimum_lu_hundredths,
+                        format!("dialogue {dialogue} minus bed {music} = {delta}"),
+                        i64::from(delta),
+                        i64::from(*minimum_lu_hundredths),
+                        "lu_hundredths",
+                    )
+                }
+                _ => audio_outcome(
+                    "dialogue over bed",
+                    false,
+                    format!("missing integrated levels dialogue={dialogue:?} music={music:?}"),
+                    0,
+                    i64::from(*minimum_lu_hundredths),
+                    "lu_hundredths",
+                ),
+            }
+        }
+        EvalAssertion::VoicesMatchedWithin {
+            first,
+            first_window,
+            second,
+            second_window,
+            maximum_lu_hundredths,
+        } => {
+            if let Some(fail) = audio_unmeasurable(
+                "voices matched",
+                evidence,
+                AudioEvidenceQuantity::Levels,
+                0,
+                i64::from(*maximum_lu_hundredths),
+                "lu_hundredths",
+            ) {
+                return fail;
+            }
+            let Some(first_level) = evidence.and_then(|block| {
+                block
+                    .level_reports
+                    .get(audio_window_label(first_window))
+                    .and_then(|report| mix_point_integrated(report, *first))
+            }) else {
+                return audio_outcome(
+                    "voices matched",
+                    false,
+                    audio_not_measured(
+                        "voices matched",
+                        "lu_hundredths",
+                        evidence,
+                        AudioEvidenceQuantity::Levels,
+                    ),
+                    0,
+                    i64::from(*maximum_lu_hundredths),
+                    "lu_hundredths",
+                );
+            };
+            let Some(second_level) = evidence.and_then(|block| {
+                block
+                    .level_reports
+                    .get(audio_window_label(second_window))
+                    .and_then(|report| mix_point_integrated(report, *second))
+            }) else {
+                return audio_outcome(
+                    "voices matched",
+                    false,
+                    audio_not_measured(
+                        "voices matched",
+                        "lu_hundredths",
+                        evidence,
+                        AudioEvidenceQuantity::Levels,
+                    ),
+                    0,
+                    i64::from(*maximum_lu_hundredths),
+                    "lu_hundredths",
+                );
+            };
+            let delta = (first_level - second_level).abs();
+            audio_outcome(
+                "voices matched",
+                delta <= *maximum_lu_hundredths,
+                format!("|{first_level} − {second_level}| = {delta}"),
+                i64::from(delta),
+                i64::from(*maximum_lu_hundredths),
+                "lu_hundredths",
+            )
+        }
+        EvalAssertion::TrackSilentInMix { track } => {
+            if let Some(fail) = audio_unmeasurable(
+                "track silent",
+                evidence,
+                AudioEvidenceQuantity::TrackLevels,
+                1,
+                0,
+                "integrated",
+            ) {
+                return fail;
+            }
+            let Some((_, integrated)) = evidence.and_then(|block| block.track_levels.get(track))
+            else {
+                return audio_outcome(
+                    "track silent",
+                    false,
+                    audio_not_measured(
+                        "track silent",
+                        "integrated",
+                        evidence,
+                        AudioEvidenceQuantity::TrackLevels,
+                    ),
+                    1,
+                    0,
+                    "integrated",
+                );
+            };
+            audio_outcome(
+                "track silent",
+                integrated.is_none(),
+                format!("track {} integrated {integrated:?}", track.0),
+                i64::from(i32::from(integrated.is_some())),
+                0,
+                "integrated",
+            )
+        }
+        EvalAssertion::RepairSnrGainAtLeast {
+            minimum_db_hundredths,
+            ..
+        } => {
+            if let Some(fail) = audio_unmeasurable(
+                "repair snr gain",
+                evidence,
+                AudioEvidenceQuantity::Repair,
+                0,
+                i64::from(*minimum_db_hundredths),
+                "db_hundredths",
+            ) {
+                return fail;
+            }
+            let before = evidence.and_then(|block| {
+                block
+                    .repair_before
+                    .as_ref()
+                    .and_then(|report| report.snr_db_hundredths)
+            });
+            let after = evidence.and_then(|block| {
+                block
+                    .repair_after
+                    .as_ref()
+                    .and_then(|report| report.snr_db_hundredths)
+            });
+            match (before, after) {
+                (Some(before), Some(after)) => {
+                    let gain = after - before;
+                    audio_outcome(
+                        "repair snr gain",
+                        gain >= *minimum_db_hundredths,
+                        format!("after {after} minus before {before} = {gain}"),
+                        i64::from(gain),
+                        i64::from(*minimum_db_hundredths),
+                        "db_hundredths",
+                    )
+                }
+                _ => audio_outcome(
+                    "repair snr gain",
+                    false,
+                    audio_not_measured(
+                        "repair snr gain",
+                        "db_hundredths",
+                        evidence,
+                        AudioEvidenceQuantity::Repair,
+                    ),
+                    0,
+                    i64::from(*minimum_db_hundredths),
+                    "db_hundredths",
+                ),
+            }
+        }
+        EvalAssertion::AudioQcTechnicalPass { .. } => {
+            if let Some(fail) = audio_unmeasurable(
+                "audio qc",
+                evidence,
+                AudioEvidenceQuantity::Qc,
+                0,
+                1,
+                "technical_pass",
+            ) {
+                return fail;
+            }
+            let Some(qc) = evidence.and_then(|block| block.qc.as_ref()) else {
+                return audio_outcome(
+                    "audio qc",
+                    false,
+                    audio_not_measured(
+                        "audio qc",
+                        "technical_pass",
+                        evidence,
+                        AudioEvidenceQuantity::Qc,
+                    ),
+                    0,
+                    1,
+                    "technical_pass",
+                );
+            };
+            audio_outcome(
+                "audio qc",
+                qc.technical_pass,
+                format!("technical_pass={}", qc.technical_pass),
+                i64::from(i32::from(qc.technical_pass)),
+                1,
+                "technical_pass",
+            )
+        }
+        _ => audio_outcome(
+            "audio assertion",
+            false,
+            "not an audio assertion".to_owned(),
+            0,
+            0,
+            "none",
+        ),
+    }
+}
 
 fn color_outcome(
     name: &str,
@@ -8423,6 +9339,7 @@ mod tests {
             final_document,
             original_document: Document::default(),
             color: None,
+            audio: None,
             final_words: Vec::new(),
             final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
@@ -9551,11 +10468,13 @@ mod tests {
             budgets: budgets(),
             deliverable: None,
             color: None,
+            audio: None,
         };
         let outcome = EvalOutcome {
             final_document,
             original_document: Document::default(),
             color: None,
+            audio: None,
             final_words: Vec::new(),
             final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
@@ -9616,11 +10535,13 @@ mod tests {
             budgets: budgets(),
             deliverable: None,
             color: None,
+            audio: None,
         };
         let outcome = EvalOutcome {
             final_document: document(),
             original_document: Document::default(),
             color: None,
+            audio: None,
             final_words: vec!["alpha".to_owned(), "bravo".to_owned()],
             final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
@@ -10112,6 +11033,7 @@ mod tests {
             final_document,
             original_document: Document::default(),
             color: None,
+            audio: None,
             final_words: Vec::new(),
             final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
@@ -10200,6 +11122,7 @@ mod tests {
             final_document,
             original_document: Document::default(),
             color: None,
+            audio: None,
             final_words: Vec::new(),
             final_timeline_words: Vec::new(),
             remaining_silences: Vec::new(),
@@ -10365,6 +11288,7 @@ mod tests {
                     maximum_trailing_inactive_frames: TimeCode(30),
                 }),
                 delivery_bit_depth: DeliveryEncodeDepth::Eight,
+                normalize_to_profile_target: false,
             },
             &document(),
             Path::new("artifacts/audio-tail"),
@@ -10399,6 +11323,7 @@ mod tests {
                 maximum_trailing_inactive_frames: TimeCode(30),
             }),
             delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            normalize_to_profile_target: false,
         };
         let document = document();
         let existing_file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
@@ -10475,6 +11400,7 @@ mod tests {
                 loudness: None,
                 audio_tail: None,
                 delivery_bit_depth: DeliveryEncodeDepth::Eight,
+                normalize_to_profile_target: false,
             },
             &document(),
             Path::new("artifacts/f2"),
@@ -10537,6 +11463,7 @@ mod tests {
             budgets: budgets(),
             deliverable: None,
             color: None,
+            audio: None,
         };
         let mut result =
             EvalResult::execution_failure(&definition, &EvalError::Agent("deliberate".to_owned()));
@@ -10583,6 +11510,7 @@ mod tests {
             budgets: budgets(),
             deliverable: None,
             color: None,
+            audio: None,
         };
         let mut result =
             EvalResult::execution_failure(&definition, &EvalError::Agent("unused".to_owned()));
@@ -10600,6 +11528,7 @@ mod tests {
                 loudness: None,
                 audio_tail: None,
                 delivery_bit_depth: DeliveryEncodeDepth::Eight,
+                normalize_to_profile_target: false,
             },
             &document(),
             Path::new("artifacts/f1"),
@@ -11403,6 +12332,81 @@ mod tests {
             Ok(Vec::new())
         }
 
+        fn mix_levels(
+            &self,
+            document: &Document,
+            request: &MixLevelRequest,
+        ) -> Result<MixLevelReport, kinewright_core::MediaError> {
+            Ok(au6_stub_mix_report(document, request.range.clone()))
+        }
+
+        fn audio_qc(
+            &self,
+            _document: &Document,
+            request: &AudioQcRequest,
+        ) -> Result<AudioQcReport, kinewright_core::MediaError> {
+            Ok(AudioQcReport {
+                range: request.range.clone().unwrap_or(AU6_WINDOW_PROGRAMME),
+                master: au6_stub_loudness(Some(-2_300)),
+                channel_balance_lu_hundredths: Some(0),
+                clipping: kinewright_core::AudioClipping::default(),
+                leading_silence_frames: TimeCode::ZERO,
+                trailing_silence_frames: TimeCode::ZERO,
+                target: None,
+                exceptions: Vec::new(),
+                technical_pass: true,
+                evidence_only: true,
+                provenance: kinewright_core::AudioQcProvenance::default(),
+            })
+        }
+
+        fn audio_repair(
+            &self,
+            document: &Document,
+            request: &AudioRepairRequest,
+        ) -> Result<AudioRepairReport, kinewright_core::MediaError> {
+            let snr = if document.audio_mix.buses.is_empty() {
+                100
+            } else {
+                1_200
+            };
+            Ok(au6_stub_repair(request, snr))
+        }
+
+        fn mix_window_levels(
+            &self,
+            _document: &Document,
+            request: &MixWindowRequest,
+        ) -> Result<MixWindowLevelReport, kinewright_core::MediaError> {
+            Ok(MixWindowLevelReport {
+                range: request.range.clone().unwrap_or(AU6_WINDOW_PROGRAMME),
+                point: request.point,
+                sample_rate: 48_000,
+                window_milliseconds: request.window_milliseconds,
+                hop_milliseconds: request.hop_milliseconds,
+                windows: vec![Some(-2_000)],
+            })
+        }
+
+        fn verify_delivery_audio(
+            &self,
+            path: &Path,
+            target: Option<kinewright_core::LoudnessTarget>,
+        ) -> Result<DeliveryAudioVerification, kinewright_core::MediaError> {
+            Ok(DeliveryAudioVerification {
+                output_path: path.to_path_buf(),
+                measured: au6_stub_loudness(Some(
+                    target.map_or(-2_300, |t| t.integrated_lufs_hundredths),
+                )),
+                sample_rate: 48_000,
+                channels: 2,
+                sample_frames: 1,
+                target,
+                exceptions: Vec::new(),
+                technical_pass: true,
+            })
+        }
+
         fn request_waveform(
             &self,
             _asset: kinewright_core::MediaAsset,
@@ -11758,6 +12762,7 @@ mod tests {
             budgets: budgets(),
             deliverable: None,
             color: Some(request.clone()),
+            audio: None,
         };
         let evidence = measure_color_block(&colored, &analysis, &document, None)
             .expect("a definition carrying a colour request measures one");
@@ -11824,6 +12829,7 @@ mod tests {
             budgets: budgets(),
             deliverable: None,
             color: None,
+            audio: None,
         };
         assert_eq!(
             measure_color_block(&uncolored, &analysis, &document, None),
@@ -11899,6 +12905,7 @@ mod tests {
                 loudness: None,
                 audio_tail: None,
                 delivery_bit_depth: DeliveryEncodeDepth::Eight,
+                normalize_to_profile_target: false,
             },
             &document(),
             Path::new("artifacts/c1-sample-1"),
@@ -11944,5 +12951,809 @@ mod tests {
             editorial.tasks[0].not_applicable,
             vec![HumanRatingDimension::Captions]
         );
+    }
+
+    fn au6_stub_loudness(integrated: Option<i32>) -> AudioLoudness {
+        AudioLoudness {
+            integrated_lufs_hundredths: integrated,
+            sample_peak_dbfs_hundredths: Some(-200),
+            sample_rate: 48_000,
+            channels: 2,
+            sample_frames: 1,
+            momentary_max_lufs_hundredths: integrated,
+            short_term_max_lufs_hundredths: integrated,
+            loudness_range_lu_hundredths: Some(50),
+            true_peak_dbtp_hundredths: Some(-204),
+        }
+    }
+
+    fn au6_stub_mix_report(
+        document: &Document,
+        range: Option<std::ops::Range<TimeCode>>,
+    ) -> MixLevelReport {
+        MixLevelReport {
+            range: range.unwrap_or(AU6_WINDOW_PROGRAMME),
+            any_solo: false,
+            tracks: document
+                .tracks
+                .iter()
+                .map(|track| kinewright_core::TrackLevels {
+                    track: track.id,
+                    kind: track.kind,
+                    mix: kinewright_core::TrackMix {
+                        track: track.id,
+                        gain_tenth_db: 0,
+                        pan_percent: 0,
+                        gain_curve: None,
+                        pan_curve: None,
+                        mute: false,
+                        solo: false,
+                    },
+                    audible: track.kind == TrackKind::Video,
+                    bus: None,
+                    levels: au6_stub_loudness(if track.kind == TrackKind::Audio {
+                        Some(-2_300)
+                    } else {
+                        None
+                    }),
+                })
+                .collect(),
+            buses: document
+                .audio_mix
+                .buses
+                .iter()
+                .map(|bus| kinewright_core::BusLevels {
+                    bus: bus.id,
+                    name: bus.name.clone(),
+                    levels: au6_stub_loudness(Some(if bus.id == AudioBusId(1) {
+                        -2_000
+                    } else {
+                        -2_800
+                    })),
+                })
+                .collect(),
+            master: au6_stub_loudness(Some(-2_300)),
+        }
+    }
+
+    fn au6_stub_repair(request: &AudioRepairRequest, snr: i32) -> AudioRepairReport {
+        AudioRepairReport {
+            range: request.range.clone().unwrap_or(AU6_WINDOW_PROGRAMME),
+            point: request.point,
+            sample_rate: 48_000,
+            sample_frames: 1,
+            window_milliseconds: 10,
+            windows: 12,
+            noise_floor_dbfs_hundredths: Some(-4_000),
+            signal_dbfs_hundredths: Some(-4_000 + snr),
+            snr_db_hundredths: Some(snr),
+            hum_50_excess_db_hundredths: None,
+            hum_60_excess_db_hundredths: None,
+            hum_50_harmonic_excess_db_hundredths: Vec::new(),
+            hum_60_harmonic_excess_db_hundredths: Vec::new(),
+            click_count: 0,
+            click_density_per_minute: 0,
+            findings: Vec::new(),
+            evidence_only: true,
+            provenance: kinewright_core::AudioRepairProvenance::default(),
+        }
+    }
+
+    fn au6_audio_document() -> Document {
+        let mut document = document();
+        document.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: Vec::new(),
+        });
+        document.audio_mix.buses.push(kinewright_core::AudioBus {
+            id: AudioBusId(1),
+            name: "Dialogue".to_owned(),
+            tracks: vec![TrackId(2)],
+            gain_tenth_db: 0,
+            gain_curve: None,
+            effects: Vec::new(),
+            ducking_sidechain_tracks: Vec::new(),
+        });
+        document.audio_mix.buses.push(kinewright_core::AudioBus {
+            id: AudioBusId(2),
+            name: "Music".to_owned(),
+            tracks: Vec::new(),
+            gain_tenth_db: 0,
+            gain_curve: None,
+            effects: Vec::new(),
+            ducking_sidechain_tracks: Vec::new(),
+        });
+        document
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn sample_eval_assertions() -> Vec<EvalAssertion> {
+        let range = TimeCode(0)..TimeCode(1);
+        let track = TrackId(1);
+        vec![
+            EvalAssertion::TimelineNonEmpty,
+            EvalAssertion::ClipCount {
+                minimum: 0,
+                maximum: 0,
+            },
+            EvalAssertion::MediaClipCount {
+                track,
+                minimum: 0,
+                maximum: 0,
+                minimum_duration: TimeCode(0),
+                maximum_duration: TimeCode(1),
+                reject_non_media: false,
+            },
+            EvalAssertion::AssetOrder {
+                aliases: Vec::new(),
+                collapse_adjacent: false,
+            },
+            EvalAssertion::AssetAbsent {
+                alias: String::new(),
+            },
+            EvalAssertion::Gapless,
+            EvalAssertion::MediaGapless,
+            EvalAssertion::DurationBounds {
+                bounds: String::new(),
+            },
+            EvalAssertion::ExactSourceClips { clips: Vec::new() },
+            EvalAssertion::ExactTrackClips {
+                track,
+                clips: Vec::new(),
+            },
+            EvalAssertion::ExactProjectDuration {
+                duration: TimeCode(0),
+            },
+            EvalAssertion::ExactTrackMediaCoverage { track, range },
+            EvalAssertion::RequiredAssetsOnTrack {
+                track,
+                aliases: Vec::new(),
+            },
+            EvalAssertion::SourceRangesSeparated {
+                track,
+                minimum_separation_frames: TimeCode(0),
+            },
+            EvalAssertion::SourceRangesChronological {
+                track,
+                minimum_forward_gap_frames: TimeCode(0),
+            },
+            EvalAssertion::SourceRangesSceneClean {
+                track,
+                scene_set: String::new(),
+                allowed_baked_sequence_starts: Vec::new(),
+            },
+            EvalAssertion::SourceRangesAvoid {
+                track,
+                exclusion_set: String::new(),
+            },
+            EvalAssertion::ShotCadenceVariation {
+                track,
+                minimum_duration_buckets: 0,
+                duration_bucket_frames: TimeCode(1),
+                maximum_similar_run: 0,
+                similar_tolerance_frames: TimeCode(0),
+            },
+            EvalAssertion::NoAlternatingShotPattern {
+                track,
+                maximum_repeated_pairs: 0,
+                tolerance_frames: TimeCode(0),
+            },
+            EvalAssertion::BeatAlignedCuts {
+                track,
+                beat_set: String::new(),
+                tolerance_frames: TimeCode(0),
+            },
+            EvalAssertion::CutsAlignedToBeatSetAtLeast {
+                track,
+                beat_set: String::new(),
+                tolerance_frames: TimeCode(0),
+                minimum_aligned_cuts: 0,
+                minimum_aligned_basis_points: 0,
+            },
+            EvalAssertion::MusicFit {
+                track,
+                asset_alias: String::new(),
+                source_beat_set: String::new(),
+                timeline_start: TimeCode(0),
+                timeline_end: TimeCode(1),
+                tolerance_source_frames: TimeCode(0),
+            },
+            EvalAssertion::MusicSourceEnd {
+                track,
+                asset_alias: String::new(),
+                expected_source_end: TimeCode(1),
+                tolerance_source_frames: TimeCode(0),
+            },
+            EvalAssertion::AssetUseMinimum {
+                track,
+                asset_alias: String::new(),
+                minimum_clip_count: 0,
+                minimum_project_frames: TimeCode(0),
+            },
+            EvalAssertion::AssetTemporalSpread {
+                track,
+                asset_alias: String::new(),
+                latest_early_start: TimeCode(0),
+                earliest_late_start: TimeCode(0),
+            },
+            EvalAssertion::ClipSourceWithin {
+                track,
+                timeline_start: TimeCode(0),
+                asset_alias: String::new(),
+                source_window: TimeCode(0)..TimeCode(1),
+            },
+            EvalAssertion::EdgeShotHolds {
+                track,
+                minimum_opening_shot_frames: TimeCode(0),
+                minimum_closing_shot_frames: TimeCode(0),
+            },
+            EvalAssertion::WordsRetained {
+                word_set: String::new(),
+            },
+            EvalAssertion::WordsAbsent {
+                word_set: String::new(),
+            },
+            EvalAssertion::CaptionWordsExact {
+                word_set: String::new(),
+            },
+            EvalAssertion::CaptionSentencesCoherent,
+            EvalAssertion::CaptionPresentation {
+                allowed_positions: Vec::new(),
+                color_token: 0,
+                background_scrim: false,
+            },
+            EvalAssertion::NoSilenceAtLeast {
+                source_frames: TimeCode(0),
+            },
+            EvalAssertion::DialoguePauseBounds {
+                minimum_project_frames: TimeCode(0),
+                maximum_project_frames: TimeCode(1),
+                capitalization_boundary_minimum_frames: TimeCode(0),
+            },
+            EvalAssertion::SceneChangesAreCuts {
+                scene_set: String::new(),
+            },
+            EvalAssertion::RequiredToolUsage {
+                all_of: Vec::new(),
+                any_of: Vec::new(),
+            },
+            EvalAssertion::EffectOnAsset {
+                asset_alias: String::new(),
+                effect_name: String::new(),
+                integer_parameter: None,
+            },
+            EvalAssertion::TransitionOnAsset {
+                asset_alias: String::new(),
+                transition_name: String::new(),
+            },
+            EvalAssertion::NoVisualTransitionsEffectsOrRetiming { track },
+            EvalAssertion::TitleCard {
+                track,
+                timeline_start: TimeCode(0),
+                duration: TimeCode(1),
+                text: String::new(),
+                font_size_token: 0,
+                color_token: 0,
+                position: TitlePosition::Center,
+                background_scrim: false,
+                fade_in_frames: TimeCode(0),
+                fade_out_frames: TimeCode(0),
+            },
+            EvalAssertion::SourcePhaseArc {
+                track,
+                opening_alias: String::new(),
+                pivot_alias: String::new(),
+                pivot_window: TimeCode(0)..TimeCode(1),
+                return_window: TimeCode(0)..TimeCode(1),
+                closing_alias: String::new(),
+                minimum_opening_hold: TimeCode(0),
+                minimum_closing_hold: TimeCode(0),
+            },
+            EvalAssertion::StyledCaptions {
+                minimum_cues: 0,
+                motion: CaptionMotion::None,
+            },
+            EvalAssertion::CaptionSafeArea {
+                profile: DeliveryProfile::SourceMaster,
+            },
+            EvalAssertion::AudioPresent,
+            EvalAssertion::ProgramAudioContinuous {
+                track,
+                asset_alias: String::new(),
+            },
+            EvalAssertion::SingleAudioMediaClip {
+                track,
+                asset_alias: String::new(),
+            },
+            EvalAssertion::ReframeStability {
+                track,
+                minimum_keyframes_per_axis: 0,
+                min_x_percent: 0,
+                max_x_percent: 0,
+                min_y_percent: 0,
+                max_y_percent: 0,
+                maximum_step_percent: 0,
+            },
+            EvalAssertion::QaExportReady,
+            EvalAssertion::UndoIntegrity,
+            EvalAssertion::ColorQcTechnicalPass {
+                clip_id: 1,
+                frame: 0,
+                checks: Vec::new(),
+            },
+            EvalAssertion::DeliveryVerificationWithinBudgets {
+                depth: DeliveryEncodeDepth::Eight,
+            },
+            EvalAssertion::NeutralPatchSpreadAtMost {
+                patch_rois: Vec::new(),
+                maximum_code: 0,
+            },
+            EvalAssertion::ReferenceClipUntouched { clip_id: 1 },
+            EvalAssertion::SkinHueWithinBand {
+                roi: NormalizedRoi::new(0, 0, 1, 1),
+                minimum_in_band_basis_points: 0,
+            },
+            EvalAssertion::MatteContainmentExact {
+                roi: NormalizedRoi::new(0, 0, 1, 1),
+                expected_covered_pixel_count: 0,
+                expected_full_pixel_count: 0,
+                expected_partial_pixel_count: 0,
+            },
+            EvalAssertion::TrackKeyframesMatchExpected {
+                parameter: String::new(),
+                expected_local_frames: Vec::new(),
+                absent_local_frames: Vec::new(),
+            },
+            EvalAssertion::LookBypassMatchesAbsent {
+                clip_id: 1,
+                effect_id: 1,
+                frame: 0,
+            },
+            EvalAssertion::DeliveryAudioVerified {
+                profile: DeliveryProfile::SourceMaster,
+                maximum_deviation_lu_hundredths: 0,
+                minimum_true_peak_margin_hundredths: 0,
+            },
+            EvalAssertion::DialogueOverBedAtLeast {
+                dialogue_bus: AudioBusId(1),
+                music_bus: AudioBusId(2),
+                window: AU6_WINDOW_PROGRAMME,
+                minimum_lu_hundredths: 0,
+            },
+            EvalAssertion::VoicesMatchedWithin {
+                first: MixSpectrumPoint::Master,
+                first_window: AU6_WINDOW_PROGRAMME,
+                second: MixSpectrumPoint::Master,
+                second_window: AU6_WINDOW_PROGRAMME,
+                maximum_lu_hundredths: 0,
+            },
+            EvalAssertion::TrackSilentInMix { track },
+            EvalAssertion::RepairSnrGainAtLeast {
+                point: MixSpectrumPoint::Master,
+                minimum_db_hundredths: 0,
+            },
+            EvalAssertion::AudioQcTechnicalPass {
+                range: AU6_WINDOW_PROGRAMME,
+            },
+        ]
+    }
+
+    #[test]
+    fn au6_audio_evidence_is_computed_where_the_analysis_is_alive() {
+        let analysis = cc7_stub_media();
+        let original = document();
+        let final_document = Arc::new(au6_audio_document());
+        let assertions = vec![
+            EvalAssertion::DialogueOverBedAtLeast {
+                dialogue_bus: AudioBusId(1),
+                music_bus: AudioBusId(2),
+                window: AU6_WINDOW_PROGRAMME,
+                minimum_lu_hundredths: 400,
+            },
+            EvalAssertion::TrackSilentInMix { track: TrackId(1) },
+            EvalAssertion::RepairSnrGainAtLeast {
+                point: MixSpectrumPoint::Bus(AudioBusId(1)),
+                minimum_db_hundredths: 500,
+            },
+            EvalAssertion::AudioQcTechnicalPass {
+                range: AU6_WINDOW_PROGRAMME,
+            },
+        ];
+        let request = AudioEvalRequest::from_assertions(&assertions).expect("audio request");
+        let definition = EvalDefinition {
+            name: "a1 Two-person interview with a music bed",
+            rationale: "exercise the audio plumbing",
+            fixture_builder: unused_fixture,
+            prompts: &["mix it"],
+            assertions,
+            budgets: budgets(),
+            deliverable: None,
+            color: None,
+            audio: Some(request),
+        };
+        let evidence =
+            measure_audio_block(&definition, &analysis, &original, &final_document, None)
+                .expect("a definition carrying an audio request measures one");
+        assert!(evidence.errors.is_empty(), "{:?}", evidence.errors);
+        assert!(evidence.level_reports.contains_key("programme"));
+        assert_eq!(evidence.track_levels.get(&TrackId(1)), Some(&(true, None)));
+        assert_eq!(
+            evidence
+                .repair_before
+                .as_ref()
+                .and_then(|r| r.snr_db_hundredths),
+            Some(100)
+        );
+        assert_eq!(
+            evidence
+                .repair_after
+                .as_ref()
+                .and_then(|r| r.snr_db_hundredths),
+            Some(1_200)
+        );
+        assert!(evidence.qc.as_ref().is_some_and(|qc| qc.technical_pass));
+        assert!(evidence.verification.is_none());
+
+        let outcome = EvalOutcome {
+            audio: Some(evidence),
+            ..outcome_for((*final_document).clone(), FixtureContext::default())
+        };
+        let measurements = evaluate(&definition, &outcome).measurements;
+        assert!(
+            measurements
+                .iter()
+                .any(|row| row.name == "dialogue over bed" && row.passed),
+            "{measurements:?}"
+        );
+
+        let uncolored = EvalDefinition {
+            name: "v5 generalization",
+            rationale: "a suite that is not an audio suite",
+            fixture_builder: unused_fixture,
+            prompts: &["cut it"],
+            assertions: Vec::new(),
+            budgets: budgets(),
+            deliverable: None,
+            color: None,
+            audio: None,
+        };
+        assert_eq!(
+            measure_audio_block(&uncolored, &analysis, &original, &final_document, None),
+            None
+        );
+    }
+
+    #[test]
+    fn au6_a_delivery_verification_without_a_deliverable_is_recorded_as_an_error() {
+        let analysis = cc7_stub_media();
+        let original = document();
+        let shared = Arc::new(original.clone());
+        let request = AudioEvalRequest {
+            delivery_verification: Some(DeliveryProfile::SourceMaster),
+            ..AudioEvalRequest::default()
+        };
+        let evidence = measure_audio_evidence(&request, &analysis, &original, &shared, None);
+        assert_eq!(evidence.verification, None);
+        assert_eq!(evidence.errors.len(), 1);
+        assert_eq!(
+            evidence.errors[0].quantity,
+            AudioEvidenceQuantity::DeliveryVerification
+        );
+        assert!(
+            evidence.errors[0].message.contains("no deliverable"),
+            "{:?}",
+            evidence.errors
+        );
+
+        let outcome = EvalOutcome {
+            audio: Some(evidence),
+            ..outcome_for(original.clone(), FixtureContext::default())
+        };
+        let landed = audio_assertion_outcome(
+            &EvalAssertion::DeliveryAudioVerified {
+                profile: DeliveryProfile::SourceMaster,
+                maximum_deviation_lu_hundredths: 25,
+                minimum_true_peak_margin_hundredths: 100,
+            },
+            &outcome,
+        );
+        assert!(!landed.result.passed);
+        assert!(landed.result.detail.contains("could not be measured"));
+
+        let with_file = measure_audio_evidence(
+            &request,
+            &analysis,
+            &original,
+            &shared,
+            Some((
+                EvalDeliverableSpec {
+                    profile: DeliveryProfile::SourceMaster,
+                    focus_x_percent: 50,
+                    focus_y_percent: 50,
+                    proof_frames: 5,
+                    proof_cell_width: 160,
+                    require_audio: true,
+                    expected_transcript_word_set: None,
+                    maximum_word_error_rate_basis_points: 0,
+                    maximum_caption_word_error_rate_basis_points: None,
+                    loudness: None,
+                    audio_tail: None,
+                    delivery_bit_depth: DeliveryEncodeDepth::Eight,
+                    normalize_to_profile_target: true,
+                },
+                &{
+                    let mut result = deliverable_shell(
+                        EvalDeliverableSpec {
+                            profile: DeliveryProfile::SourceMaster,
+                            focus_x_percent: 50,
+                            focus_y_percent: 50,
+                            proof_frames: 5,
+                            proof_cell_width: 160,
+                            require_audio: true,
+                            expected_transcript_word_set: None,
+                            maximum_word_error_rate_basis_points: 0,
+                            maximum_caption_word_error_rate_basis_points: None,
+                            loudness: None,
+                            audio_tail: None,
+                            delivery_bit_depth: DeliveryEncodeDepth::Eight,
+                            normalize_to_profile_target: true,
+                        },
+                        &original,
+                        Path::new("artifacts/a5a"),
+                    );
+                    result.output_path =
+                        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+                    result
+                },
+            )),
+        );
+        assert!(with_file.verification.is_some());
+        assert!(with_file.errors.is_empty(), "{:?}", with_file.errors);
+    }
+
+    #[test]
+    fn au6_only_audio_assertions_emit_audio_measurements() {
+        let samples = sample_eval_assertions();
+        assert_eq!(samples.len(), 63);
+        let outcome = outcome_for(document(), FixtureContext::default());
+        let mut audio = 0;
+        let mut color = 0;
+        for assertion in &samples {
+            let is_audio = is_audio_assertion(assertion);
+            let is_color = is_color_assertion(assertion);
+            assert!(
+                !(is_audio && is_color),
+                "classifiers overlap on {assertion:?}"
+            );
+            assert_eq!(audio_measurement(assertion, &outcome).is_some(), is_audio);
+            assert_eq!(color_measurement(assertion, &outcome).is_some(), is_color);
+            audio += usize::from(is_audio);
+            color += usize::from(is_color);
+        }
+        assert_eq!(audio, 6);
+        assert_eq!(color, 8);
+    }
+
+    #[test]
+    fn au6_every_audio_assertion_threshold_is_an_au6_scenarios_constant() {
+        use kinewright_core::au6_scenarios::{
+            AU6_A_DIALOGUE_BUS, AU6_A_MUSIC_BUS, AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS,
+            AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS,
+            AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS, AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS,
+            AU6_SOURCE_MASTER_PROFILE, AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS, AU6_WINDOW_A_FIRST_TURN,
+            AU6_WINDOW_B_FIRST_TURN,
+        };
+        let dialogue = EvalAssertion::DialogueOverBedAtLeast {
+            dialogue_bus: AU6_A_DIALOGUE_BUS,
+            music_bus: AU6_A_MUSIC_BUS,
+            window: AU6_WINDOW_A_FIRST_TURN,
+            minimum_lu_hundredths: AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS,
+        };
+        let voices = EvalAssertion::VoicesMatchedWithin {
+            first: MixSpectrumPoint::Track(TrackId(2)),
+            first_window: AU6_WINDOW_A_FIRST_TURN,
+            second: MixSpectrumPoint::Track(TrackId(3)),
+            second_window: AU6_WINDOW_B_FIRST_TURN,
+            maximum_lu_hundredths: AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS,
+        };
+        let repair = EvalAssertion::RepairSnrGainAtLeast {
+            point: MixSpectrumPoint::Bus(AudioBusId(1)),
+            minimum_db_hundredths: AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS,
+        };
+        let delivery = EvalAssertion::DeliveryAudioVerified {
+            profile: AU6_SOURCE_MASTER_PROFILE,
+            maximum_deviation_lu_hundredths: AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS,
+            minimum_true_peak_margin_hundredths: AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS,
+        };
+        match dialogue {
+            EvalAssertion::DialogueOverBedAtLeast {
+                minimum_lu_hundredths,
+                ..
+            } => assert_eq!(
+                minimum_lu_hundredths,
+                AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS
+            ),
+            _ => unreachable!(),
+        }
+        match voices {
+            EvalAssertion::VoicesMatchedWithin {
+                maximum_lu_hundredths,
+                ..
+            } => assert_eq!(maximum_lu_hundredths, AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS),
+            _ => unreachable!(),
+        }
+        match repair {
+            EvalAssertion::RepairSnrGainAtLeast {
+                minimum_db_hundredths,
+                ..
+            } => assert_eq!(minimum_db_hundredths, AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS),
+            _ => unreachable!(),
+        }
+        match delivery {
+            EvalAssertion::DeliveryAudioVerified {
+                maximum_deviation_lu_hundredths,
+                minimum_true_peak_margin_hundredths,
+                ..
+            } => {
+                assert_eq!(
+                    maximum_deviation_lu_hundredths,
+                    AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS
+                );
+                assert_eq!(
+                    minimum_true_peak_margin_hundredths,
+                    AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn au6_v6_deliverables_are_byte_identical_without_normalization() {
+        let spec = EvalDeliverableSpec {
+            profile: DeliveryProfile::SourceMaster,
+            focus_x_percent: 50,
+            focus_y_percent: 50,
+            proof_frames: 5,
+            proof_cell_width: 160,
+            require_audio: false,
+            expected_transcript_word_set: None,
+            maximum_word_error_rate_basis_points: 0,
+            maximum_caption_word_error_rate_basis_points: None,
+            loudness: None,
+            audio_tail: None,
+            delivery_bit_depth: DeliveryEncodeDepth::Eight,
+            normalize_to_profile_target: false,
+        };
+        let document = document();
+        let off = eval_export_settings(spec, &document);
+        let baseline = spec.profile.export_settings(
+            &document,
+            spec.delivery_bit_depth,
+            ExportCancellation::default(),
+        );
+        // `ExportCancellation` compares by Arc identity; the wire settings
+        // (everything serde writes) are what "byte-identical" means here.
+        assert_eq!(
+            serde_json::to_value(&off).expect("export settings serialise"),
+            serde_json::to_value(&baseline).expect("baseline settings serialise")
+        );
+        assert_eq!(off.loudness_normalization, None);
+        let mut on = spec;
+        on.normalize_to_profile_target = true;
+        let normalized = eval_export_settings(on, &document);
+        assert_eq!(
+            normalized.loudness_normalization,
+            Some(spec.profile.loudness_target())
+        );
+        assert_ne!(
+            serde_json::to_value(&normalized).expect("normalized settings serialise"),
+            serde_json::to_value(&baseline).expect("baseline settings serialise")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn au6_the_eval_server_carries_an_exporter() {
+        use rmcp::ServiceExt as _;
+
+        async fn queue_once(server: &McpServer) -> String {
+            let client = ()
+                .serve(rmcp::transport::StreamableHttpClientTransport::from_uri(
+                    server.endpoint(),
+                ))
+                .await
+                .expect("the client connects");
+            let result = client
+                .call_tool(
+                    rmcp::model::CallToolRequestParams::new("invoke_capability").with_arguments(
+                        serde_json::json!({
+                            "name": "queue_export",
+                            "arguments": {
+                                "expected_revision": 0,
+                                "output_path": "/tmp/au6-eval-export.mp4",
+                                "profile": "source_master",
+                            },
+                        })
+                        .as_object()
+                        .expect("the invocation is an object")
+                        .clone(),
+                    ),
+                )
+                .await
+                .expect("the tool call completes");
+            let text = format!("{result:?}");
+            client.cancel().await.expect("the client cancels");
+            text
+        }
+
+        let fixture = PreparedFixture::new(
+            document(),
+            Arc::new(cc7_stub_media()),
+            FixtureContext::default(),
+            None,
+            Vec::new(),
+        )
+        .expect("the fixture builds");
+        let bare = McpServer::start(
+            fixture.core.clone(),
+            Arc::clone(&fixture.playback),
+            Arc::clone(&fixture.analysis),
+        )
+        .expect("the server starts");
+        let refused = queue_once(&bare).await;
+        assert!(refused.contains("no export backend"), "{refused}");
+        bare.shutdown();
+
+        let with_exporter = McpServer::start_with_exporter(
+            fixture.core.clone(),
+            Arc::clone(&fixture.playback),
+            Arc::clone(&fixture.analysis),
+            Arc::clone(&fixture.exporter),
+        )
+        .expect("the server starts");
+        let accepted = queue_once(&with_exporter).await;
+        assert!(!accepted.contains("no export backend"), "{accepted}");
+        with_exporter.shutdown();
+    }
+
+    #[test]
+    fn au6_accepted_requires_every_audio_question_answered() {
+        let mut task = cc7_reviewed_task("a1");
+        task.not_applicable = AUDIO_WORKFLOW_NOT_APPLICABLE.to_vec();
+        task.ratings.visual_finish = None;
+        task.ratings.story = None;
+        task.ratings.pacing = None;
+        task.ratings.captions = None;
+        task.questions = vec![HumanQuestion {
+            id: "a1".to_owned(),
+            prompt: "Is the dialogue clearly balanced above the music bed?".to_owned(),
+            answer: None,
+            notes: None,
+        }];
+        let mut review = HumanReviewFile {
+            schema_version: HUMAN_REVIEW_SCHEMA_VERSION,
+            benchmark_id: AUDIO_WORKFLOW_BENCHMARK_ID.to_owned(),
+            run_id: "run-1".to_owned(),
+            reviewer: None,
+            tasks: vec![task],
+        };
+        let error = summarize_human_review(&review)
+            .expect_err("an unanswered question blocks acceptance")
+            .to_string();
+        assert!(error.contains("question"), "{error}");
+        assert!(error.contains("\"a1\""), "{error}");
+
+        review.tasks[0].questions[0].answer = Some(true);
+        let summary = summarize_human_review(&review).expect("an answered question scores");
+        assert_eq!(summary.tasks_reviewed, 1);
+
+        review.tasks[0].accepted = None;
+        review.tasks[0].ratings = HumanRatings::default();
+        review.tasks[0].questions[0].answer = None;
+        let pending = summarize_human_review(&review).expect("a pending task stays pending");
+        assert_eq!(pending.tasks_pending, 1);
+        assert_eq!(pending.tasks_reviewed, 0);
     }
 }
