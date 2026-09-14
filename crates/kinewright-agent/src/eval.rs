@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use kinewright_core::au6_scenarios::{
+    AU6_HOP_MILLISECONDS, AU6_WINDOW_MILLISECONDS, AU6_WINDOW_PROGRAMME,
+};
 use kinewright_core::{
     AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, AudioBusId,
     AudioLoudness, AudioQcReport, AudioQcRequest, AudioRepairReport, AudioRepairRequest,
@@ -20,12 +23,9 @@ use kinewright_core::{
     MixLevelReport, MixLevelRequest, MixSpectrumPoint, MixWindowLevelReport, MixWindowRequest,
     NormalizedRoi, Operation, ParamValue, Playback, Query, QueryResult, RgbaImage, SessionConfig,
     SkinDiagnostics, TimeCode, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TitlePosition, Track, TrackId, TrackKind, TranscriptStatus, apply_batch,
-    dedup_timeline_words, delivery_conformance, document_for_delivery_profile,
-    map_source_range_to_project, matte_coverage_statistics, measure_color_qc, qa_document,
-};
-use kinewright_core::au6_scenarios::{
-    AU6_HOP_MILLISECONDS, AU6_WINDOW_MILLISECONDS, AU6_WINDOW_PROGRAMME,
+    TitlePosition, Track, TrackId, TrackKind, TranscriptStatus, apply_batch, dedup_timeline_words,
+    delivery_conformance, document_for_delivery_profile, map_source_range_to_project,
+    matte_coverage_statistics, measure_color_qc, qa_document,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -889,10 +889,7 @@ fn push_unique_window(
     windows.push((audio_window_label(&range), range));
 }
 
-fn push_unique_point(
-    points: &mut Vec<(&'static str, MixSpectrumPoint)>,
-    point: MixSpectrumPoint,
-) {
+fn push_unique_point(points: &mut Vec<(&'static str, MixSpectrumPoint)>, point: MixSpectrumPoint) {
     if points.iter().any(|(_, existing)| *existing == point) {
         return;
     }
@@ -4762,7 +4759,10 @@ fn mix_point_integrated(report: &MixLevelReport, point: MixSpectrumPoint) -> Opt
     }
 }
 
-fn audio_assertion_outcome(assertion: &EvalAssertion, outcome: &EvalOutcome) -> AudioAssertionOutcome {
+fn audio_assertion_outcome(
+    assertion: &EvalAssertion,
+    outcome: &EvalOutcome,
+) -> AudioAssertionOutcome {
     let evidence = outcome.audio.as_ref();
     match assertion {
         EvalAssertion::DeliveryAudioVerified {
@@ -4811,7 +4811,8 @@ fn audio_assertion_outcome(assertion: &EvalAssertion, outcome: &EvalOutcome) -> 
                 .measured
                 .true_peak_dbtp_hundredths
                 .map(|peak| target.true_peak_ceiling_dbtp_hundredths - peak);
-            let peak_ok = peak_margin.is_some_and(|margin| margin >= *minimum_true_peak_margin_hundredths);
+            let peak_ok =
+                peak_margin.is_some_and(|margin| margin >= *minimum_true_peak_margin_hundredths);
             let passed = deviation <= *maximum_deviation_lu_hundredths && peak_ok;
             audio_outcome(
                 "delivery audio",
@@ -13370,26 +13371,24 @@ mod tests {
             color: None,
             audio: Some(request),
         };
-        let evidence = measure_audio_block(
-            &definition,
-            &analysis,
-            &original,
-            &final_document,
-            None,
-        )
-        .expect("a definition carrying an audio request measures one");
+        let evidence =
+            measure_audio_block(&definition, &analysis, &original, &final_document, None)
+                .expect("a definition carrying an audio request measures one");
         assert!(evidence.errors.is_empty(), "{:?}", evidence.errors);
         assert!(evidence.level_reports.contains_key("programme"));
+        assert_eq!(evidence.track_levels.get(&TrackId(1)), Some(&(true, None)));
         assert_eq!(
-            evidence.track_levels.get(&TrackId(1)),
-            Some(&(true, None))
-        );
-        assert_eq!(
-            evidence.repair_before.as_ref().and_then(|r| r.snr_db_hundredths),
+            evidence
+                .repair_before
+                .as_ref()
+                .and_then(|r| r.snr_db_hundredths),
             Some(100)
         );
         assert_eq!(
-            evidence.repair_after.as_ref().and_then(|r| r.snr_db_hundredths),
+            evidence
+                .repair_after
+                .as_ref()
+                .and_then(|r| r.snr_db_hundredths),
             Some(1_200)
         );
         assert!(evidence.qc.as_ref().is_some_and(|qc| qc.technical_pass));
@@ -13539,9 +13538,10 @@ mod tests {
     fn au6_every_audio_assertion_threshold_is_an_au6_scenarios_constant() {
         use kinewright_core::au6_scenarios::{
             AU6_A_DIALOGUE_BUS, AU6_A_MUSIC_BUS, AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS,
-            AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS, AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS,
-            AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS, AU6_SOURCE_MASTER_PROFILE, AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS,
-            AU6_WINDOW_A_FIRST_TURN, AU6_WINDOW_B_FIRST_TURN,
+            AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS,
+            AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS, AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS,
+            AU6_SOURCE_MASTER_PROFILE, AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS, AU6_WINDOW_A_FIRST_TURN,
+            AU6_WINDOW_B_FIRST_TURN,
         };
         let dialogue = EvalAssertion::DialogueOverBedAtLeast {
             dialogue_bus: AU6_A_DIALOGUE_BUS,
@@ -13701,10 +13701,7 @@ mod tests {
         )
         .expect("the server starts");
         let refused = queue_once(&bare).await;
-        assert!(
-            refused.contains("no export backend"),
-            "{refused}"
-        );
+        assert!(refused.contains("no export backend"), "{refused}");
         bare.shutdown();
 
         let with_exporter = McpServer::start_with_exporter(
@@ -13715,10 +13712,7 @@ mod tests {
         )
         .expect("the server starts");
         let accepted = queue_once(&with_exporter).await;
-        assert!(
-            !accepted.contains("no export backend"),
-            "{accepted}"
-        );
+        assert!(!accepted.contains("no export backend"), "{accepted}");
         with_exporter.shutdown();
     }
 

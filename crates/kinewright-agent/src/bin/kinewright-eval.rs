@@ -13,9 +13,9 @@ use std::{
 use kinewright_agent::{
     ClaudeCodeDriver, CodexDriver, CursorAcpDriver,
     eval::{
+        AUDIO_WORKFLOW_BENCHMARK_ID, AUDIO_WORKFLOW_NOT_APPLICABLE, AudioEvalRequest,
         BLIND_DIRECTORY_NAME, BLIND_FORM_FILE_NAME, BLIND_KEY_FILE_NAME, BLIND_SCHEMA_VERSION,
         BlindKeyEntry, BlindKeyFile, BlindReviewForm, COLOR_WORKFLOW_BENCHMARK_ID,
-        AudioEvalRequest, AUDIO_WORKFLOW_BENCHMARK_ID, AUDIO_WORKFLOW_NOT_APPLICABLE,
         ColorEvalRequest, EnvironmentStamp, EvalAssertion, EvalAudioTailSpec, EvalBudgets,
         EvalDefinition, EvalDeliverableSpec, EvalError, EvalLoudnessSpec, EvalResult,
         ExpectedSourceClip, ExpectedTimelineClip, FixtureContext, HumanQuestion, HumanReviewFile,
@@ -36,14 +36,13 @@ use kinewright_core::{
     au6_scenarios::{
         AU6_A_DIALOGUE_BUS, AU6_A_MUSIC_BUS, AU6_A_VOICE_A_TRACK, AU6_A_VOICE_B_TRACK,
         AU6_B_VOICE_A_TRACK, AU6_B_VOICE_B_TRACK, AU6_C_REPAIR_BUS, AU6_C_WINDOW_PROGRAMME,
-        AU6_D_ANGLE_ASSETS, AU6_D_MASTER_TRACK, AU6_D_SCRATCH_1_TRACK,
-        AU6_D_SCRATCH_2_TRACK, AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS,
-        AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS, AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS,
-        AU6_QUESTIONS, AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS, AU6_SCENARIOS,
-        AU6_SOURCE_FPS, AU6_SOURCE_HEIGHT, AU6_SOURCE_MASTER_PROFILE, AU6_SOURCE_WIDTH,
-        AU6_STREAMING_PROFILE, AU6_TASK_IDS, AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS,
-        AU6_WINDOW_A_FIRST_TURN, AU6_WINDOW_B_FIRST_TURN, AU6_WINDOW_PROGRAMME, Au6Scenario,
-        au6_canonical_operations, au6_d_sync_group, au6_spec,
+        AU6_D_ANGLE_ASSETS, AU6_D_MASTER_TRACK, AU6_D_SCRATCH_1_TRACK, AU6_D_SCRATCH_2_TRACK,
+        AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS, AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS,
+        AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS, AU6_QUESTIONS,
+        AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS, AU6_SCENARIOS, AU6_SOURCE_FPS, AU6_SOURCE_HEIGHT,
+        AU6_SOURCE_MASTER_PROFILE, AU6_SOURCE_WIDTH, AU6_STREAMING_PROFILE, AU6_TASK_IDS,
+        AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS, AU6_WINDOW_A_FIRST_TURN, AU6_WINDOW_B_FIRST_TURN,
+        AU6_WINDOW_PROGRAMME, Au6Scenario, au6_canonical_operations, au6_d_sync_group, au6_spec,
     },
     cc7_scenarios::{
         CC7_C2_SKIN_IN_BAND_REPORTED_BASIS_POINTS, CC7_CANDIDATE_CLIP_ID, CC7_CHART_BAND_ROI,
@@ -8272,8 +8271,14 @@ mod tests {
                 task["delivery"]["delivery_bit_depth"],
                 deliverable.delivery_bit_depth.as_str()
             );
-            assert_eq!(task["delivery"]["focus_x_percent"], deliverable.focus_x_percent);
-            assert_eq!(task["delivery"]["focus_y_percent"], deliverable.focus_y_percent);
+            assert_eq!(
+                task["delivery"]["focus_x_percent"],
+                deliverable.focus_x_percent
+            );
+            assert_eq!(
+                task["delivery"]["focus_y_percent"],
+                deliverable.focus_y_percent
+            );
             assert_eq!(task["delivery"]["proof_frames"], deliverable.proof_frames);
             assert_eq!(
                 task["delivery"]["proof_cell_width"],
@@ -8439,8 +8444,7 @@ mod tests {
         for needle in needles.iter().chain(au6_leak_value_needles().iter()) {
             assert!(needle.len() >= 2, "{needle} is too short to mean anything");
             assert_eq!(
-                au6_leaked_needle(&format!(">>>{needle}<<<"), run_id, benchmark_id)
-                    .as_deref(),
+                au6_leaked_needle(&format!(">>>{needle}<<<"), run_id, benchmark_id).as_deref(),
                 Some(needle.as_str()),
                 "the scan cannot see its own needle {needle}"
             );
@@ -8468,7 +8472,9 @@ mod tests {
         for (task_id, prompt) in AU6_QUESTIONS {
             for needle in needles.iter().chain(au6_leak_value_needles().iter()) {
                 assert!(
-                    !prompt.to_ascii_lowercase().contains(&needle.to_ascii_lowercase()),
+                    !prompt
+                        .to_ascii_lowercase()
+                        .contains(&needle.to_ascii_lowercase()),
                     "needle {needle:?} appears in {task_id}: {prompt}"
                 );
             }
