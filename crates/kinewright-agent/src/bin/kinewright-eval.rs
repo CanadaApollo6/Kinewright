@@ -13,13 +13,12 @@ use std::{
 use kinewright_agent::{
     ClaudeCodeDriver, CodexDriver, CursorAcpDriver,
     eval::{
-        AUDIO_WORKFLOW_BENCHMARK_ID, AUDIO_WORKFLOW_NOT_APPLICABLE, AudioEvalRequest,
-        BLIND_DIRECTORY_NAME, BLIND_FORM_FILE_NAME, BLIND_KEY_FILE_NAME, BLIND_SCHEMA_VERSION,
-        BlindKeyEntry, BlindKeyFile, BlindReviewForm, COLOR_WORKFLOW_BENCHMARK_ID,
-        ColorEvalRequest, EnvironmentStamp, EvalAssertion, EvalAudioTailSpec, EvalBudgets,
-        EvalDefinition, EvalDeliverableSpec, EvalError, EvalLoudnessSpec, EvalResult,
-        ExpectedSourceClip, ExpectedTimelineClip, FixtureContext, HumanQuestion, HumanReviewFile,
-        PreparedFixture, SourceRangeExclusion, blind_review_form,
+        AUDIO_WORKFLOW_BENCHMARK_ID, AudioEvalRequest, BLIND_DIRECTORY_NAME, BLIND_FORM_FILE_NAME,
+        BLIND_KEY_FILE_NAME, BLIND_SCHEMA_VERSION, BlindKeyEntry, BlindKeyFile, BlindReviewForm,
+        COLOR_WORKFLOW_BENCHMARK_ID, ColorEvalRequest, EnvironmentStamp, EvalAssertion,
+        EvalAudioTailSpec, EvalBudgets, EvalDefinition, EvalDeliverableSpec, EvalError,
+        EvalLoudnessSpec, EvalResult, ExpectedSourceClip, ExpectedTimelineClip, FixtureContext,
+        HumanQuestion, HumanReviewFile, PreparedFixture, SourceRangeExclusion, blind_review_form,
         human_review_template_with_questions, maximum_duration_after_expected_silence_cuts,
         render_jsonl, render_saved_deliverable, render_scoreboard, result_path, run_eval,
         run_eval_with_artifacts, summarize_human_review,
@@ -39,10 +38,10 @@ use kinewright_core::{
         AU6_D_ANGLE_ASSETS, AU6_D_MASTER_TRACK, AU6_D_SCRATCH_1_TRACK, AU6_D_SCRATCH_2_TRACK,
         AU6_DELIVERY_DEVIATION_MAX_LU_HUNDREDTHS, AU6_DELIVERY_TRUE_PEAK_MARGIN_MIN_HUNDREDTHS,
         AU6_INTERVIEW_DIALOGUE_OVER_BED_MIN_LU_HUNDREDTHS, AU6_QUESTIONS,
-        AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS, AU6_SCENARIOS, AU6_SOURCE_FPS, AU6_SOURCE_HEIGHT,
-        AU6_SOURCE_MASTER_PROFILE, AU6_SOURCE_WIDTH, AU6_STREAMING_PROFILE, AU6_TASK_IDS,
+        AU6_REPAIR_SNR_GAIN_MIN_HUNDREDTHS, AU6_SOURCE_FPS, AU6_SOURCE_HEIGHT,
+        AU6_SOURCE_MASTER_PROFILE, AU6_SOURCE_WIDTH, AU6_STREAMING_PROFILE,
         AU6_VOICE_MATCH_MAX_LU_HUNDREDTHS, AU6_WINDOW_A_FIRST_TURN, AU6_WINDOW_B_FIRST_TURN,
-        AU6_WINDOW_PROGRAMME, Au6Scenario, au6_canonical_operations, au6_d_sync_group, au6_spec,
+        AU6_WINDOW_PROGRAMME, Au6Scenario, au6_d_sync_group, au6_spec,
     },
     cc7_scenarios::{
         CC7_C2_SKIN_IN_BAND_REPORTED_BASIS_POINTS, CC7_CANDIDATE_CLIP_ID, CC7_CHART_BAND_ROI,
@@ -2611,7 +2610,7 @@ fn audio_workflow_deliverable(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::similar_names)]
 fn audio_workflow_suite() -> Vec<EvalDefinition> {
     let a1_assertions = vec![
         EvalAssertion::DialogueOverBedAtLeast {
@@ -5160,8 +5159,10 @@ fn render_evals_document(
 #[cfg(test)]
 mod tests {
     use kinewright_agent::eval::{
-        BlindReviewForm, COLOR_WORKFLOW_NOT_APPLICABLE, EvalDeliverableResult, HumanRatings,
+        AUDIO_WORKFLOW_NOT_APPLICABLE, BlindReviewForm, COLOR_WORKFLOW_NOT_APPLICABLE,
+        EvalDeliverableResult, HumanRatings,
     };
+    use kinewright_core::au6_scenarios::{AU6_SCENARIOS, AU6_TASK_IDS, au6_canonical_operations};
     use kinewright_core::{
         apply_batch,
         cc7_scenarios::{

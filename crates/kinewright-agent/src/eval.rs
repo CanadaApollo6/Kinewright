@@ -1794,6 +1794,7 @@ pub fn eval_export_settings(spec: EvalDeliverableSpec, document: &Document) -> E
 
 /// Measure the request against a live `Analysis`. Failures are recorded, never
 /// thrown.
+#[allow(clippy::too_many_lines)]
 pub fn measure_audio_evidence(
     request: &AudioEvalRequest,
     analysis: &dyn Analysis,
@@ -4759,6 +4760,7 @@ fn mix_point_integrated(report: &MixLevelReport, point: MixSpectrumPoint) -> Opt
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn audio_assertion_outcome(
     assertion: &EvalAssertion,
     outcome: &EvalOutcome,
@@ -4818,8 +4820,7 @@ fn audio_assertion_outcome(
                 "delivery audio",
                 passed,
                 format!(
-                    "deviation {deviation} (budget {}), true-peak margin {:?}",
-                    maximum_deviation_lu_hundredths, peak_margin
+                    "deviation {deviation} (budget {maximum_deviation_lu_hundredths}), true-peak margin {peak_margin:?}"
                 ),
                 i64::from(deviation),
                 i64::from(*maximum_deviation_lu_hundredths),
@@ -13067,6 +13068,7 @@ mod tests {
         document
     }
 
+    #[allow(clippy::too_many_lines)]
     fn sample_eval_assertions() -> Vec<EvalAssertion> {
         let range = TimeCode(0)..TimeCode(1);
         let track = TrackId(1);
