@@ -19,10 +19,11 @@
 use std::sync::Arc;
 
 use kinewright_core::{
-    Analysis, AudioBus, AudioBusId, AudioMix, AudioRepairRequest, Clip, ClipContent, ClipId,
-    Document, Effect, EffectId, MediaAsset, MixNoiseProfileRequest, MixSpectrumPoint,
-    MixSpectrumRequest, MixWindowRequest, NOISE_PROFILE_PARAMETER_NAMES, ParamValue, QaSeverity,
-    Rational, TimeCode, Track, TrackId, TrackKind,
+    Analysis, AudioBus, AudioBusId, AudioMix, AudioRepairReport, AudioRepairRequest, Clip,
+    ClipContent, ClipId, Document, Effect, EffectId, MediaAsset, MixNoiseProfileRequest,
+    MixSpectrumPoint, MixSpectrumRequest, MixWindowRequest, NOISE_PROFILE_PARAMETER_NAMES,
+    ParamValue, QaSeverity, REPAIR_HUM_EXCESS_HUNDREDTHS, Rational, TimeCode, Track, TrackId,
+    TrackKind,
 };
 use kinewright_media::{FfmpegMediaEngine, hum_removal_magnitude_db};
 
@@ -713,6 +714,159 @@ fn au5_the_repair_inspector_separates_fifty_from_sixty_hertz() {
         report.findings
     );
     assert_eq!(report.click_count, 0, "the mains fixture carries no click");
+}
+
+/// 2 s of 60 / 120 / 180 Hz over the same broadband floor the 50 Hz inspector
+/// uses. The AU6 cascade notches exactly these three.
+fn sixty_family_fixture() -> Vec<f32> {
+    let mut mono = pseudo_random_amplitude(96_000, 0.010);
+    for (hertz, amplitude) in [(60.0, 0.1000_f32), (120.0, 0.0500), (180.0, 0.0250)] {
+        for (index, sample) in tone(hertz, amplitude, RATE, 96_000).iter().enumerate() {
+            mono[index] += *sample;
+        }
+    }
+    to_stereo(&mono)
+}
+
+/// Both IEC families at once: the 50 Hz inspector's fundamental plus the
+/// 60 Hz cascade's three partials.
+fn both_families_fixture() -> Vec<f32> {
+    let mut mono = pseudo_random_amplitude(96_000, 0.010);
+    for (hertz, amplitude) in [
+        (50.0, 0.1000_f32),
+        (100.0, 0.0500),
+        (150.0, 0.0250),
+        (60.0, 0.1000),
+        (120.0, 0.0500),
+        (180.0, 0.0250),
+    ] {
+        for (index, sample) in tone(hertz, amplitude, RATE, 96_000).iter().enumerate() {
+            mono[index] += *sample;
+        }
+    }
+    to_stereo(&mono)
+}
+
+fn sixty_hertz_cascade() -> Effect {
+    effect(
+        1,
+        "audio_hum_removal",
+        &[
+            ("fundamental_hertz", 60),
+            ("harmonic_count", 3),
+            ("depth_tenth_db", -300),
+            ("notch_q_hundredths", 1_200),
+        ],
+    )
+}
+
+fn repair_at(engine: &FfmpegMediaEngine, document: &Document) -> AudioRepairReport {
+    engine
+        .audio_repair(
+            document,
+            &AudioRepairRequest {
+                range: None,
+                point: MixSpectrumPoint::Bus(AudioBusId(1)),
+            },
+        )
+        .expect("the inspector measures")
+}
+
+/// AU6 §13 / AU5 E7: a 60 Hz cascade must not manufacture a 50 Hz
+/// `mains_hum_present`. The sixth-octave high shoulder at 56.12 Hz sat on
+/// the 60 Hz notch; the estimator now drops that neighbour.
+#[test]
+fn au5_a_sixty_cascade_does_not_manufacture_a_fifty_hertz_finding() {
+    let engine = engine();
+    let media = fixture_media("au5-hum-60", &sixty_family_fixture());
+    let asset = engine.probe(media.path()).expect("the fixture probes");
+    let bare = fixture_document(asset.clone(), Vec::new());
+    let treated = fixture_document(asset, vec![sixty_hertz_cascade()]);
+    let before = repair_at(&engine, &bare);
+    let after = repair_at(&engine, &treated);
+    let hum_50 = after.hum_50_excess_db_hundredths.expect("one whole block");
+    let drop = before.hum_60_excess_db_hundredths.expect("60 before")
+        - after.hum_60_excess_db_hundredths.expect("60 after");
+    println!(
+        "AU5_HUM_E7 hum_50_after={hum_50} hum_60_before={:?} hum_60_after={:?} \
+         drop={drop} findings_after={:?}",
+        before.hum_60_excess_db_hundredths,
+        after.hum_60_excess_db_hundredths,
+        after
+            .findings
+            .iter()
+            .map(|finding| format!(
+                "{}:{}",
+                finding.code,
+                finding.field.as_deref().unwrap_or("-")
+            ))
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        hum_50 <= REPAIR_HUM_EXCESS_HUNDREDTHS,
+        "a 60 Hz-only cascade manufactured a 50 Hz excess of {hum_50}"
+    );
+    assert!(
+        !after.findings.iter().any(|finding| {
+            finding.code == "mains_hum_present"
+                && finding.field.as_deref() == Some("hum_50_excess_db_hundredths")
+        }),
+        "manufactured 50 Hz finding: {:?}",
+        after.findings
+    );
+    assert!(
+        drop >= 2_400,
+        "the 60 Hz drop must still clear AU6's floor, drop={drop}"
+    );
+    for index in 0..3 {
+        let harmonic_drop = before.hum_60_harmonic_excess_db_hundredths[index]
+            - after.hum_60_harmonic_excess_db_hundredths[index];
+        assert!(
+            harmonic_drop >= 500,
+            "harmonic {index} drop={harmonic_drop}"
+        );
+    }
+}
+
+/// The same cascade on a fixture that actually carries 50 Hz must still
+/// raise `mains_hum_present` on `hum_50` — the shoulder rule is not a
+/// 50 Hz mute.
+#[test]
+fn au5_both_families_keep_a_real_fifty_hertz_finding_after_a_sixty_cascade() {
+    let engine = engine();
+    let media = fixture_media("au5-hum-both", &both_families_fixture());
+    let asset = engine.probe(media.path()).expect("the fixture probes");
+    let bare = fixture_document(asset.clone(), Vec::new());
+    let treated = fixture_document(asset, vec![sixty_hertz_cascade()]);
+    let before = repair_at(&engine, &bare);
+    let after = repair_at(&engine, &treated);
+    let hum_50 = after.hum_50_excess_db_hundredths.expect("one whole block");
+    let drop = before.hum_60_excess_db_hundredths.expect("60 before")
+        - after.hum_60_excess_db_hundredths.expect("60 after");
+    println!(
+        "AU5_HUM_BOTH hum_50_after={hum_50} hum_60_drop={drop} findings_after={:?}",
+        after
+            .findings
+            .iter()
+            .map(|finding| finding.code.clone())
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        hum_50 > REPAIR_HUM_EXCESS_HUNDREDTHS,
+        "a real 50 Hz family must survive a 60 Hz cascade, hum_50={hum_50}"
+    );
+    assert!(
+        after.findings.iter().any(|finding| {
+            finding.code == "mains_hum_present"
+                && finding.field.as_deref() == Some("hum_50_excess_db_hundredths")
+        }),
+        "lost the real 50 Hz finding: {:?}",
+        after.findings
+    );
+    assert!(
+        drop >= 2_400,
+        "the 60 Hz drop must still clear AU6's floor, drop={drop}"
+    );
 }
 
 /// AU5 §7 A10 / §2.4 rule 22: below ten energetic windows the three percentile

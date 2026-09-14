@@ -64,9 +64,9 @@ pub use audio_qc::{
 };
 pub use audio_repair::{
     AUDIO_REPAIR_ENGINE, AudioRepairMeasurements, AudioRepairProvenance, AudioRepairReport,
-    AudioRepairRequest, REPAIR_CLICK_DENSITY_PER_MINUTE, REPAIR_HUM_EXCESS_HUNDREDTHS,
-    REPAIR_LOW_SNR_HUNDREDTHS, REPAIR_MINIMUM_WINDOWS, REPAIR_WINDOW_MILLISECONDS,
-    audio_repair_exceptions,
+    AudioRepairRequest, HUM_GOERTZEL_BLOCK_FRAMES, HUM_HARMONICS, REPAIR_CLICK_DENSITY_PER_MINUTE,
+    REPAIR_HUM_EXCESS_HUNDREDTHS, REPAIR_LOW_SNR_HUNDREDTHS, REPAIR_MINIMUM_WINDOWS,
+    REPAIR_WINDOW_MILLISECONDS, audio_repair_exceptions, hum_excess_hundredths, hum_shoulder_hertz,
 };
 pub use automation::{
     AutomationCurve, AutomationCurveError, HoldStep, Keyframe, KeyframeInterpolation,
