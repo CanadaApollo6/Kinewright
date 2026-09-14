@@ -299,15 +299,13 @@ fn export_conformance(
     .map(|report| ExportConformance::from_report(&report))
 }
 
-/// The delivery colour description this dialog's inline `ExportSettings`
-/// carries at one lane (CC6 §8.4, R11).
+/// The delivery colour description this dialog carries at one lane
+/// (CC6 §8.4, R11).
 ///
-/// The dialog keeps its inline construction — routing it through
-/// `DeliveryProfile::export_settings` would derive the resolution from the
-/// profile and the fps from the document, silently disabling the dialog's own
-/// Frame size and FPS controls. Only `bit_depth` moves, and a test asserts
-/// this agrees with `delivery_color_for_depth`, which is the agreement that
-/// actually matters.
+/// Bitrates and this colour come from the profile's `export_settings`. Frame
+/// size and FPS stay the dialog's overlay — routing those through the
+/// profile would silently disable those controls. Only `bit_depth` moves
+/// here, and a test asserts this agrees with `delivery_color_for_depth`.
 #[must_use]
 fn dialog_delivery_color(document: &Document, depth: DeliveryEncodeDepth) -> ColorDescription {
     let mut delivery_color = document.color_context.delivery.clone();
@@ -734,6 +732,29 @@ pub(crate) fn export_loudness_target(
     aspect: Option<DeliveryAspect>,
 ) -> Option<LoudnessTarget> {
     normalize.then(|| export_delivery_profile(aspect).loudness_target())
+}
+
+/// The `ExportSettings` the dialog will encode.
+///
+/// Bitrates, codecs, and `delivery_color` come from the profile's
+/// [`DeliveryProfile::export_settings`]. Frame size, FPS, and the loudness
+/// job-parameter stay the dialog's overlay so those controls keep writing
+/// what they claim.
+#[must_use]
+fn dialog_export_settings(
+    document: &Document,
+    dialog: &ExportDialog,
+    fps: Rational,
+    cancellation: ExportCancellation,
+) -> ExportSettings {
+    let profile = export_delivery_profile(dialog.delivery_aspect);
+    let mut settings = profile.export_settings(document, dialog.delivery_bit_depth, cancellation);
+    settings.fps = fps;
+    settings.resolution = export_frame_size(dialog.delivery_aspect, dialog.width, dialog.height);
+    settings.delivery_color = dialog_delivery_color(document, dialog.delivery_bit_depth);
+    settings.loudness_normalization =
+        export_loudness_target(dialog.normalize_loudness, dialog.delivery_aspect);
+    settings
 }
 
 /// The `Loudness` checkbox's label for one delivery profile (AU3 §6.5).
@@ -1652,20 +1673,8 @@ impl KinewrightApp {
             return;
         };
         let depth = self.export_dialog.delivery_bit_depth;
-        let settings = ExportSettings {
-            fps,
-            resolution: (self.export_dialog.width, self.export_dialog.height),
-            delivery_color: dialog_delivery_color(&document, depth),
-            video_codec: "libx264".to_owned(),
-            audio_codec: "aac".to_owned(),
-            video_bitrate: 8_000_000,
-            audio_bitrate: 192_000,
-            loudness_normalization: export_loudness_target(
-                self.export_dialog.normalize_loudness,
-                self.export_dialog.delivery_aspect,
-            ),
-            cancellation: cancellation.clone(),
-        };
+        let settings =
+            dialog_export_settings(&document, &self.export_dialog, fps, cancellation.clone());
         let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = mpsc::channel();
         let media = Arc::clone(&self.exporter);
@@ -3163,6 +3172,103 @@ mod tests {
             kinewright_core::ColorBitDepth::Eight,
             "and the document keeps declaring its own 8-bit delivery"
         );
+    }
+
+    /// The dialog follows the profile's `export_settings` for bitrates and
+    /// (under a delivery aspect) raster, while Frame size, FPS, and the
+    /// loudness checkbox stay overlays the operator can still write.
+    #[test]
+    fn the_export_dialog_takes_bitrates_and_raster_from_the_profile() {
+        let document = Document {
+            color_context: ColorContext::sdr_rec709(),
+            ..Document::default()
+        };
+        for aspect in std::iter::once(None).chain(DeliveryAspect::ALL.map(Some)) {
+            let profile = export_delivery_profile(aspect);
+            let mut dialog = fresh_export_dialog();
+            dialog.delivery_aspect = aspect;
+            dialog.width = 1_234;
+            dialog.height = 5_678;
+            dialog.normalize_loudness = true;
+            let fps = Rational::new(dialog.fps_numerator, dialog.fps_denominator).unwrap();
+            let settings =
+                dialog_export_settings(&document, &dialog, fps, ExportCancellation::default());
+            let profile_settings = profile.export_settings(
+                &document,
+                dialog.delivery_bit_depth,
+                ExportCancellation::default(),
+            );
+            assert_eq!(
+                settings.video_bitrate, profile_settings.video_bitrate,
+                "{aspect:?}: video bitrate follows the profile"
+            );
+            assert_eq!(
+                settings.audio_bitrate, profile_settings.audio_bitrate,
+                "{aspect:?}: audio bitrate follows the profile"
+            );
+            assert_eq!(
+                settings.delivery_color, profile_settings.delivery_color,
+                "{aspect:?}: delivery colour is the profile's"
+            );
+            assert_eq!(
+                settings.resolution,
+                export_frame_size(aspect, dialog.width, dialog.height),
+                "{aspect:?}: the dialog's frame size still reaches the job"
+            );
+            assert_eq!(
+                settings.loudness_normalization,
+                Some(profile.loudness_target()),
+                "{aspect:?}: the checkbox still writes the profile target"
+            );
+        }
+
+        let widescreen = dialog_export_settings(
+            &document,
+            &ExportDialog {
+                delivery_aspect: Some(DeliveryAspect::Widescreen),
+                ..fresh_export_dialog()
+            },
+            document.fps,
+            ExportCancellation::default(),
+        );
+        assert_eq!(widescreen.resolution, (1_920, 1_080));
+        assert_eq!(widescreen.video_bitrate, 8_000_000);
+        assert_eq!(
+            widescreen.audio_bitrate, 384_000,
+            "youtube_1080p is 384 kb/s, not the dialog's old 192 kb/s hard-code"
+        );
+
+        let mut high_rate = document.clone();
+        high_rate.fps = Rational::new(60, 1).unwrap();
+        let high = dialog_export_settings(
+            &high_rate,
+            &ExportDialog {
+                delivery_aspect: Some(DeliveryAspect::Widescreen),
+                fps_numerator: 60,
+                fps_denominator: 1,
+                ..fresh_export_dialog()
+            },
+            high_rate.fps,
+            ExportCancellation::default(),
+        );
+        assert_eq!(high.video_bitrate, 12_000_000);
+
+        let master = dialog_export_settings(
+            &document,
+            &ExportDialog {
+                width: 640,
+                height: 360,
+                ..fresh_export_dialog()
+            },
+            document.fps,
+            ExportCancellation::default(),
+        );
+        assert_eq!(
+            master.resolution,
+            (640, 360),
+            "a master export keeps the dialog's own frame size"
+        );
+        assert_eq!(master.video_bitrate, 20_000_000);
     }
 
     /// One decoded audio verification of a written file.

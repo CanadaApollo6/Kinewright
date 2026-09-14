@@ -371,7 +371,7 @@ order, a `border-subtle` rule, one per bus (with a second rule only when buses
 exist), then the master strip. Each strip is `size-mixer-strip-width` wide and
 fits in 240 points of height in its tallest state: 232 for a track strip
 carrying its `SILENCED` or `NO AUDIO` line, its button row and its automation
-chip, 215 for a bus strip
+chip, 219 for a bus strip
 whether it holds one node or six, and 210 for the master.
 
 A track strip reads top to bottom: the caption and kind icon at the track
@@ -400,13 +400,16 @@ a control you can drag never lies about what you hear.
 On a fader the editor believes they are riding what they hear, and the first rule
 is invisible there; in a numeric field it is not.
 
-A bus strip reads: name, member tracks, a node count with the full chain as its
-tooltip, one row carrying the meter pair and the vertical gain fader with its dB
-readout, and an `Edit` toggle. The master strip is the label `MASTER`, a node
-count, that same meter-and-fader row fed by the post-limiter master peaks, the
-integrated loudness line, and its own `Edit` toggle. Each track strip carries a
-`+ Bus` button, disabled with its reason when the track has no audio or is
-already routed. Meters read zero whenever nothing is playing.
+A bus strip reads: an inline name the operator can type, member tracks,
+a node count with the full chain as its tooltip, one row carrying the
+meter pair and the vertical gain fader with its dB readout, an `Edit`
+toggle, and the timeline's delete icon, which
+confirms once in `status-warning` before `RemoveAudioBus`. The master
+strip is the label `MASTER`, a node count, that same meter-and-fader
+row fed by the post-limiter master peaks, the integrated loudness
+line, and its own `Edit` toggle. Each track strip carries a
+`+ Bus` button, disabled with its reason when the track has no audio
+or is already routed. Meters read zero whenever nothing is playing.
 
 `Edit` opens the chain pane beside the strips, inside the same dock — the Mixer
 adds no floating surface. The pane carries the chain's routing and sidechain

@@ -4,7 +4,8 @@
 //! The panel is the human half of AU1 §5.1 and AU2 §6.5-§6.8. It reads the
 //! document's `audio_mix` and the engine's `mix_peaks()` and writes
 //! [`Operation::SetTrackMix`], [`Operation::UpsertAudioBus`],
-//! [`Operation::SetAudioMaster`], and [`Operation::SetPanLaw`].
+//! [`Operation::RemoveAudioBus`], [`Operation::SetAudioMaster`], and
+//! [`Operation::SetPanLaw`].
 //!
 //! Bus and master controls never push an operation of their own. They mutate
 //! an edited copy of their chain in [`MixerChainEdits`], and [`mixer_body`]
@@ -311,10 +312,12 @@ pub(crate) const AUDIO_MASTER_COALESCE_KEY: &str = "audio_master";
 /// are whole-chain sets, so a fader that pushed its own value and a card
 /// parameter that pushed its own in the same frame would each carry the other
 /// control's *old* value and the second would clobber the first. They mutate a
-/// copy instead and the fold writes one set carrying both.
+/// copy instead and the fold writes one set carrying both. `RemoveAudioBus`
+/// is a discrete click and travels through [`Self::remove_bus`].
 #[derive(Debug, Default)]
 pub(crate) struct MixerChainEdits {
     buses: BTreeMap<AudioBusId, AudioBus>,
+    removed: Vec<AudioBusId>,
     master: Option<AudioMaster>,
     tracks: BTreeMap<TrackId, TrackMix>,
     /// The pan law is document-level rather than part of any chain, but its
@@ -344,7 +347,16 @@ impl MixerChainEdits {
 
     /// Add a bus the document does not have yet (`+ Bus`, AU2 §6.5).
     fn create_bus(&mut self, bus: AudioBus) {
+        self.removed.retain(|id| *id != bus.id);
         self.buses.insert(bus.id, bus);
+    }
+
+    /// Drop a bus the document already has (`RemoveAudioBus`).
+    fn remove_bus(&mut self, id: AudioBusId) {
+        self.buses.remove(&id);
+        if !self.removed.contains(&id) {
+            self.removed.push(id);
+        }
     }
 
     pub(crate) const fn set_pan_law(&mut self, law: PanLaw) {
@@ -374,6 +386,17 @@ impl MixerChainEdits {
             edits.begin_gesture();
         }
         let live = self.live;
+        for id in self.removed {
+            if document.audio_mix.bus(id).is_none() {
+                continue;
+            }
+            file_chain_edit(
+                edits,
+                false,
+                Operation::RemoveAudioBus { bus: id },
+                MixerSelection::Bus(id).coalesce_key(),
+            );
+        }
         for (id, bus) in self.buses {
             if document.audio_mix.bus(id) == Some(&bus) {
                 continue;
@@ -842,7 +865,8 @@ pub(crate) const NO_AUDIO_REASON: &str = "no audio";
 /// Why `+ Bus` is disabled on a track that already routes to a bus.
 pub(crate) const ALREADY_ROUTED_REASON: &str = "already routed";
 
-/// One bus strip: name, members, node count, meter-and-fader row, `Edit`.
+/// One bus strip: inline name, members, node count, meter-and-fader row,
+/// the timeline delete icon, and `Edit`.
 #[allow(clippy::too_many_arguments)]
 fn bus_strip(
     ui: &mut egui::Ui,
@@ -855,14 +879,7 @@ fn bus_strip(
     chain: &mut MixerChainEdits,
 ) {
     strip(ui, |ui| {
-        ui.label(
-            egui::RichText::new(&bus.name)
-                .font(egui::FontId::new(
-                    type_size::CAPTION,
-                    egui::FontFamily::Proportional,
-                ))
-                .color(color::TEXT_PRIMARY),
-        );
+        bus_name_edit(ui, bus, chain);
         ui.colored_label(
             color::TEXT_MUTED,
             format!("tracks={}", track_caption_list(document, &bus.tracks)),
@@ -886,10 +903,91 @@ fn bus_strip(
             chain.mark_live(is_live_drag(&fader));
         }
 
-        let selected = selection == Some(MixerSelection::Bus(bus.id));
-        let toggle = edit_toggle(ui, selected, MixerSelection::Bus(bus.id), requested);
-        record_keyed_rect("bus_edit", bus.id.0, toggle);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().interact_size.y = size::ICON_SM;
+            ui.spacing_mut().button_padding = egui::vec2(space::HALF, 0.0);
+            ui.spacing_mut().item_spacing.x = space::HALF;
+            bus_remove_button(ui, bus.id, requested, chain);
+            let selected = selection == Some(MixerSelection::Bus(bus.id));
+            let toggle = edit_toggle(ui, selected, MixerSelection::Bus(bus.id), requested);
+            record_keyed_rect("bus_edit", bus.id.0, toggle);
+        });
     });
+}
+
+/// The bus name is an inline text edit so the person path can type the
+/// canonical caption `+ Bus` will not choose.
+fn bus_name_edit(ui: &mut egui::Ui, bus: &AudioBus, chain: &mut MixerChainEdits) {
+    let mut name = chain
+        .buses
+        .get(&bus.id)
+        .map_or_else(|| bus.name.clone(), |edited| edited.name.clone());
+    let response = ui.add(
+        egui::TextEdit::singleline(&mut name)
+            .font(egui::FontId::new(
+                type_size::CAPTION,
+                egui::FontFamily::Proportional,
+            ))
+            .desired_width(ui.available_width())
+            .clip_text(true)
+            .text_color(color::TEXT_PRIMARY),
+    );
+    record_keyed_rect("bus_name", bus.id.0, response.rect);
+    if response.changed() && name != bus.name {
+        chain.bus(bus).name = name;
+    }
+}
+
+/// The timeline's delete icon: first click arms, second click writes
+/// [`Operation::RemoveAudioBus`].
+fn bus_remove_button(
+    ui: &mut egui::Ui,
+    bus: AudioBusId,
+    requested: &mut Option<MixerSelection>,
+    chain: &mut MixerChainEdits,
+) {
+    let memory = bus_remove_confirm_id(bus);
+    let confirming = ui
+        .data(|data| data.get_temp::<bool>(memory))
+        .unwrap_or(false);
+    let tooltip = if confirming {
+        "Click again to remove this bus."
+    } else {
+        "Remove this bus"
+    };
+    let response = ui
+        .add(
+            egui::Button::image(Icon::Delete.image(size::ICON_MD))
+                .image_tint_follows_text_color(true)
+                .min_size(egui::vec2(size::ICON_BUTTON, size::ICON_BUTTON))
+                .corner_radius(radius::SM),
+        )
+        .on_hover_text(tooltip);
+    if confirming {
+        ui.painter().rect_stroke(
+            response.rect,
+            radius::SM,
+            egui::Stroke::new(1.0, color::STATUS_WARNING),
+            egui::StrokeKind::Inside,
+        );
+    }
+    record_keyed_rect("bus_remove", bus.0, response.rect);
+    if !response.clicked() {
+        return;
+    }
+    if confirming {
+        chain.remove_bus(bus);
+        ui.data_mut(|data| data.remove::<bool>(memory));
+        if *requested == Some(MixerSelection::Bus(bus)) {
+            *requested = None;
+        }
+    } else {
+        ui.data_mut(|data| data.insert_temp(memory, true));
+    }
+}
+
+fn bus_remove_confirm_id(bus: AudioBusId) -> egui::Id {
+    egui::Id::new(("mixer-bus-remove", bus.0))
 }
 
 /// The master strip: the post-limiter meter, the master fader, the integrated
@@ -2863,7 +2961,7 @@ mod tests {
     /// AU2 §7 B19 and §6.5's arithmetic: the bus and master strips fit the
     /// same 240 px dock budget the track strip does, in their worst case.
     ///
-    /// Measured on this build: a bus strip is 215 px whether it carries one
+    /// Measured on this build: a bus strip is 219 px whether it carries one
     /// node or six, because the node count is one line either way, and the
     /// master strip is 210 px with AU3 §4.5's integrated line under the fader
     /// (196 before it), whether that line reads `I —` or a figure. The track
@@ -2873,8 +2971,8 @@ mod tests {
     fn a_bus_and_master_strip_fit_the_mixer_dock() {
         const BUDGET: f32 = 240.0;
         const MASTER: f32 = 210.0;
-        // DESIGN.md's `215 for a bus strip`, held the same way.
-        const BUS: f32 = 215.0;
+        // DESIGN.md's `219 for a bus strip`, held the same way.
+        const BUS: f32 = 219.0;
         let mut worst_case = chain_document();
         worst_case.audio_mix.master = AudioMaster {
             gain_tenth_db: -30,
@@ -3470,6 +3568,48 @@ mod tests {
             clicked.operations().is_empty(),
             "a track with no audio cannot be given a bus: {:?}",
             clicked.operations()
+        );
+    }
+
+    /// A typed bus name folds into one `UpsertAudioBus` carrying the new
+    /// caption, discrete, the same way every other non-drag chain edit does.
+    #[test]
+    fn renaming_a_bus_writes_upsert_with_the_typed_name() {
+        let document = mixer_document();
+        let mut chain = MixerChainEdits::default();
+        chain.bus(&document.audio_mix.buses[0]).name = "Voice A".to_owned();
+        let edits = chain.take_operations(&document);
+        assert_eq!(edits.operations().len(), 1);
+        assert_eq!(upserted_bus(&edits.operations()[0]).name, "Voice A");
+        assert_eq!(edits.coalesce_key(), None, "a rename is a typed edit");
+    }
+
+    /// The strip delete is the timeline's icon: first click arms, second
+    /// click writes `RemoveAudioBus`.
+    #[test]
+    fn removing_a_bus_confirms_once_then_writes_remove_audio_bus() {
+        let mut harness = MixerHarness::new(mixer_document());
+        let _ = harness.frame(Vec::new());
+        assert!(harness.has("bus_name:1"));
+        let remove = harness.rect("bus_remove:1");
+        let _ = harness.frame(vec![moved(remove.center()), pointer(remove.center(), true)]);
+        let armed = harness.frame(vec![pointer(remove.center(), false)]);
+        assert!(
+            armed.operations().is_empty(),
+            "the first click only arms: {:?}",
+            armed.operations()
+        );
+
+        let remove = harness.rect("bus_remove:1");
+        let _ = harness.frame(vec![moved(remove.center()), pointer(remove.center(), true)]);
+        let confirmed = harness.frame(vec![pointer(remove.center(), false)]);
+        assert_eq!(
+            confirmed.operations(),
+            [Operation::RemoveAudioBus { bus: AudioBusId(1) }]
+        );
+        assert!(
+            harness.document.audio_mix.bus(AudioBusId(1)).is_none(),
+            "the fold applied RemoveAudioBus"
         );
     }
 
@@ -4242,6 +4382,10 @@ mod tests {
         // The file is hard-wrapped, so each phrase is one that fits a line.
         for expected in [
             "a node count with the full chain as its",
+            "an inline name the operator can type",
+            "timeline's delete icon",
+            "confirms once in `status-warning`",
+            "`RemoveAudioBus`",
             "`+ Bus` button, disabled with its",
             "`Edit` opens the chain pane beside the strips",
             "One card is expanded at a time",
@@ -5341,10 +5485,10 @@ mod tests {
     /// through `MixerChainEdits` exactly as `add_bus_button` drives it.
     ///
     /// **R62.** The button itself names the bus after its track's caption
-    /// (`add_bus_button`, `mixer_ui.rs:863-871`) and the app has no rename
-    /// control (§6.5, §13), so the canonical name is the one value of the
-    /// person path no gesture types. The caller supplies it; the assertion
-    /// below records the gap rather than hiding it.
+    /// (`add_bus_button`); the strip's inline rename is what types the
+    /// canonical name. The caller still supplies that name here so the
+    /// person-path batch stays one fold; the assertion records that `+ Bus`
+    /// would not have chosen it.
     fn au6_person_bus_operations(document: &Document, scenario: Au6Scenario) -> Vec<Operation> {
         let spec = au6_spec(scenario);
         let mut operations = Vec::with_capacity(spec.buses.len());
