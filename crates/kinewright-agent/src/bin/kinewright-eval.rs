@@ -5845,6 +5845,15 @@ mod tests {
             }),
             "g3 must name the v10 title-card resolution"
         );
+        assert!(
+            !published_assertion_names_authority(
+                "the ending inside later aftermath window 1285..1345",
+                &definitions[2],
+                &["MUSIC_"],
+                include_str!("../../../../benchmarks/auto-edit/v5/music-ground-truth-v10.json"),
+            ),
+            "the leftover v9 aftermath window must fail the live g3 haystack"
+        );
         let interview = &definitions[0];
         let deliverable = interview.deliverable.unwrap();
         assert_eq!(deliverable.profile, DeliveryProfile::VerticalShort);
