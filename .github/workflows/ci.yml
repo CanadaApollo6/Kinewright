@@ -19,6 +19,11 @@ jobs:
           toolchain: stable-x86_64-pc-windows-msvc
           components: rustfmt, clippy
 
+      # Default key includes rustc (host/release/hash) and a hash of every
+      # Cargo.lock / Cargo.toml, so a lockfile or toolchain bump misses.
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
       - name: Install Python
         uses: actions/setup-python@v5
         with:
@@ -56,6 +61,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      # Default key includes rustc (host/release/hash) and a hash of every
+      # Cargo.lock / Cargo.toml, so a lockfile or toolchain bump misses.
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
 
       - name: Install native build dependencies
         run: ./scripts/install-linux-deps.sh
