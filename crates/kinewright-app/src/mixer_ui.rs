@@ -4391,6 +4391,7 @@ mod tests {
     /// replacement paragraph calls the EQ well one — so the pin is on the
     /// sentence that was removed, not on the phrase.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn the_design_note_states_the_new_mixer_rules() {
         const DESIGN: &str = include_str!("../../../docs/DESIGN.md");
         let mixer = DESIGN
@@ -4856,9 +4857,9 @@ mod tests {
         );
         assert_eq!(harness.document, before);
 
-        let held = harness.frame(vec![moved(hold.center())]);
+        let still_down = harness.frame(vec![moved(hold.center())]);
         assert_eq!(harness.monitor_gain_tenth_db, 20, "the hold stays matched");
-        assert!(held.operations().is_empty());
+        assert!(still_down.operations().is_empty());
 
         let release = harness.frame(vec![pointer(hold.center(), false)]);
         assert_eq!(harness.monitor_gain_tenth_db, 0, "release returns unity");

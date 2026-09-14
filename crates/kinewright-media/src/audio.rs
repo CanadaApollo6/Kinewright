@@ -4233,6 +4233,7 @@ impl AudioRuntime {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -4277,6 +4278,7 @@ fn build_stream(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_typed_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,

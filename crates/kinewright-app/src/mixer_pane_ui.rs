@@ -513,9 +513,9 @@ pub(crate) fn monitor_ab_hold_gain(
     if !pressed {
         return 0;
     }
-    measured_integrated_hundredths
-        .map(|measured| monitor_match_gain_tenth_db(measured, reference_hundredths))
-        .unwrap_or(0)
+    measured_integrated_hundredths.map_or(0, |measured| {
+        monitor_match_gain_tenth_db(measured, reference_hundredths)
+    })
 }
 
 /// The master pane's `LOUDNESS` section (AU3 §4.4): momentary and short-term
