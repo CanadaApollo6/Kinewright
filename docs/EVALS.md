@@ -326,6 +326,25 @@ answered, and a mean human rating of at least 4.0/5 over the applicable
 dimensions; the scenario identity is not blinded (it is inherent in the
 question), machine provenance is.
 
+The audio workflow contract lives under
+[`benchmarks/auto-edit/v7`](../benchmarks/auto-edit/v7/README.md). It runs the
+five named audio workflows of AU6 — interview with a music bed, uneven podcast,
+noisy location dialogue, event multicam, and encoded delivery at two loudness
+targets — one model turn each. Every prompt names the tracks and the intended
+outcome and never names a parameter or a value. No fixture bytes are checked
+in: every buffer is authored in Rust by `kinewright_media::au6_sources`. The
+same five scenarios are discharged objectively by ordinary `cargo test`
+fixtures that do not need this suite (`docs/AU6-WORKFLOW-EVALUATION.md` §4–§6).
+Run it with:
+
+```bash
+source ./scripts/setup-ffmpeg.sh
+KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- \
+  --suite audio-workflow-v7 \
+  --harness claude-code \
+  --samples 3
+```
+
 ## Seed suite
 
 | Eval | Rationale | USD ceiling |
@@ -373,3 +392,11 @@ packaging, the blind-package leak test, and
 and is `#[ignore]`d because that engine's process-exit teardown raises the
 known SIGSEGV; run it by hand with `--ignored`. No model result is recorded
 yet.
+
+### audio-workflow-v7
+
+Pending real-harness run. CI covers the suite's unit tests — construction,
+packaging, the blind-package leak test, and
+`published_v7_manifest_tracks_the_audio_workflow_suite` — and spends nothing.
+There is no published v6 result either, and this suite does not pretend a v7
+run exists.

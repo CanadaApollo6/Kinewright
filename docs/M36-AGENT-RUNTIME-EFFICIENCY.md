@@ -123,6 +123,14 @@ served by the runtime. The M36 regression test records:
 | Internal capability registry (2026-09-10, after AU5 Part B) | 138 | 1,540,264 B | 1,397,156 B | 120,458 B |
 | Served MCP runtime (2026-09-10, after AU5 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
 | Served MCP runtime (2026-09-10, after AU6 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
+| Served MCP runtime (2026-09-14, after AU6 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
+
+AU6 Part A adds no capability and no operation; the registry is
+unchanged and the served quad is byte-identical at 7 / 5,660 B /
+3,510 B / 998 B (AU6 §5.4). AU6 Part B adds none either: the seventh
+eval suite, its assertion variants and its audio evidence block live
+in `eval.rs` and `kinewright-eval.rs`, neither of which is a
+capability.
 
 AU5 Part B's three capabilities, measured one row each (AU5 §5.9 rule 117):
 

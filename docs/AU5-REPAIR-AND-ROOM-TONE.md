@@ -1307,7 +1307,10 @@ Part B.
   authoritative: the agent-side bound is computed from frames and rounds **down**, so it can only
   reject ranges the store would reject too. **Owed:** media's §8 Part B file list should name `audio.rs`
   by one word, and `lib.rs`'s `au5b_fixtures` doc comment now says "both are `pub(crate)`" of a pair
-  of which one is `pub`; both are outside the agent implementer's reserved files.
+  of which one is `pub`; both are outside the agent implementer's reserved files. (Closed 2026-09-14
+  by AU6 §12.1 item 9(b): §8's Part B media list already names `audio.rs` at the
+  `decode_audio_range` widening, and `lib.rs`'s `au5b_fixtures` comment no longer
+  pairs `mix_audio` with `test_support`.)
 - **R112. A captured room tone earns no background analysis.** `apply_operation` calls
   `request_asset_analysis` for every `AddAsset`, which queues a transcription, a silence detection, a
   scene detection and a beat detection. On a room tone all four are waste and the first is worse than

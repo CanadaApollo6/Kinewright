@@ -670,34 +670,28 @@ audio depth at one star for exactly these reasons.
 | AU5 — Repair and room tone | Broadband noise reduction with a learned profile, hum removal, de-click, room-tone capture and fill for cut gaps, dialogue isolation where the model can measure improvement | Repair is measured on synthetic corruptions with pinned SNR gains; fills are seamless at 1e-4 across the join |
 | AU6 — Workflow evaluation | Two-person interview with music bed, podcast with uneven voices, noisy location dialogue, event/multicam with a master audio track, and encoded delivery at two loudness targets | Technical gates pass independently; blind human review is limited to balance and intelligibility questions |
 
-**Current status (2026-09-10): AU1–AU4 are implemented (AU1 pending its
-hands-on platform smoke, AU3 Part B its hands-on export, AU4 Part B its
-hands-on ride); AU5 lands in two parts on one contract
-(`docs/AU5-REPAIR-AND-ROOM-TONE.md`).** AU5 Part A — repair nodes and
-measurement — delivers the three descriptors, the in-house inverse FFT, the
-denoise / hum-removal / de-click runtimes, three new `Analysis` measurements
-and the `get_audio_repair` inspector, and discharges exit-gate clause 1,
-"repair is measured on synthetic corruptions with pinned SNR gains", on its
-own. AU5 Part B — room tone and repair planners — delivers the room-tone
-store and `capture_room_tone`, `Document::track_gaps` and the fill
-arithmetic, `plan_room_tone_fill`, `plan_dialogue_repair` and its amendment
-to AU3's normalization planner, the three Mixer repair cards with the noise
-well and the `Learn profile` gesture, and the timeline `Room tone` button,
-and discharges clause 2, "fills are seamless at 1e-4 across the join". Part B
-additionally awaits Riel's hands-on session (a profile learned on a noisy
-location interview and heard, a hum notch checked against its comb, one
-`plan_dialogue_repair` committed and listened to). AU4 landed in two parts on
-one contract (`docs/AU4-CLIP-ENVELOPES-AND-AUTOMATION.md`). Part A
-(automation model) delivers the five curve owners, the two operations, the
-survival policy in every clip-moving operation and the shared per-sample
-evaluation, and discharges BOTH exit-gate clauses — "integer-exact and
-identical in both paths" and "survive split/trim/slip/speed under a stated
-policy"; Part B (automation editing) delivers the rubber band on the clip,
-bus and master automation editing in the Mixer, the inspector's envelope
-list, and the `plan_audio_ducking` / `plan_clip_fades` planners. Part B
-additionally awaits Riel's hands-on session (a ride drawn during playback
-without a re-cue, a bus curve edited in the chain pane, one ducking plan
-committed and listened to).
+**Current status (2026-09-14): AU1–AU6 are implemented. The audio
+programme table AU1–AU6 is complete.** AU1–AU4 landed as before
+(AU1 pending its hands-on platform smoke, AU2 Part B its smoke,
+AU3 Part B its hands-on export, AU4 Part B its hands-on ride — a ride
+drawn during playback without a re-cue, a bus curve edited in the
+chain pane, one ducking plan committed and listened to). AU5 landed
+in two parts on one contract (`docs/AU5-REPAIR-AND-ROOM-TONE.md`;
+`4f25cba`, `039cde4`): Part A the repair nodes and measurement,
+Part B the room-tone store, the three planners, the Mixer repair
+cards and the timeline `Room tone` button. AU5 Part B still awaits
+Riel's listening session (a profile learned on a noisy location
+interview and heard, a hum notch checked against its comb, one
+`plan_dialogue_repair` committed and listened to). AU6 landed in two
+parts on one contract (`docs/AU6-WORKFLOW-EVALUATION.md`). Part A
+discharges the five scenarios over the AU1–AU5 surface by ordinary
+`cargo test`. Part B ships the seventh eval suite
+(`audio-workflow-v7`), its audio evidence block and
+`benchmarks/auto-edit/v7/`; the served surface does not move.
+Pending a real-harness run. **What §13 leaves open** is Riel's two
+AU6 sessions (delivery at the profile raster; the five-scenario
+listen) plus the five earlier hands-on sessions named above — not
+another audio slice.
 
 Each slice writes its contract under `docs/AU<n>-<NAME>.md` before implementation
 and records deferrals explicitly, as the colour slices did.
