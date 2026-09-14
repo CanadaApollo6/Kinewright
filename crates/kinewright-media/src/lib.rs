@@ -108,6 +108,7 @@ pub use derived::{
     DerivedAnalysisConfig, SceneDetectionConfig, SilenceDetectionConfig,
 };
 pub use engine::FfmpegMediaEngine;
+pub use export::{NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS, NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS};
 pub use kinewright_core::{
     LutAvailabilityKind, LutAvailabilityStatus, MediaAvailabilityKind, MediaAvailabilityStatus,
     MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,

@@ -358,7 +358,7 @@ fn operation_tool(
         .read_only(false)
         .destructive(matches!(
             name.as_str(),
-            "delete_clip" | "ripple_delete_clip" | "remove_track"
+            "delete_clip" | "ripple_delete_clip" | "remove_track" | "remove_audio_bus"
         ))
         .idempotent(matches!(
             name.as_str(),
@@ -1723,7 +1723,9 @@ audio_true_peak_limiter.",
     }
 
     /// AU2 §7 item B14: the two Part B mutators carry the §6.1 prose and the
-    /// three full-set operations are annotated idempotent and non-destructive.
+    /// three full-set operations are annotated idempotent. AU6 §13 closes the
+    /// `remove_audio_bus` annotation: it is destructive, matching
+    /// `plan_preview`.
     ///
     /// `set_audio_master` and `set_pan_law` replace the whole master chain and
     /// the whole document law respectively, so re-sending one is a no-op; the
@@ -1802,7 +1804,8 @@ audio_true_peak_limiter.",
         );
         assert_eq!(
             serialized["annotations"]["destructiveHint"],
-            serde_json::Value::Bool(false)
+            serde_json::Value::Bool(true),
+            "remove_audio_bus must match plan_preview's destructive list"
         );
     }
 

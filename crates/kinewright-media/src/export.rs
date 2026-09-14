@@ -174,12 +174,12 @@ pub(crate) const NORMALIZATION_SHORT_PROGRAMME_REASON: &str =
 /// AU3 §5.6 step 2: the skip reason for a master with no gated loudness at all.
 pub(crate) const NORMALIZATION_SILENT_REASON: &str = "silent";
 
-/// AU3 §5.6 step 3: the normalization gain range, the planner's guard
-/// (`server.rs` `plan_audio_normalization`) spelled once more on the export
-/// side so a job that asks for an impossible move is skipped rather than
+/// AU3 §5.6 step 3: the normalization gain range, shared with the planner's
+/// guard (`kinewright-agent` `plan_audio_normalization`) so the two cannot
+/// drift. A job that asks for an impossible move is skipped rather than
 /// attempted.
-const NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS: i32 = -6_000;
-const NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS: i32 = 3_600;
+pub const NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS: i32 = -6_000;
+pub const NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS: i32 = 3_600;
 
 /// The `ceiling_tenth_db` descriptor's lower bound (`effect.rs`), so a target
 /// with an implausible ceiling cannot hand the node an out-of-range parameter.

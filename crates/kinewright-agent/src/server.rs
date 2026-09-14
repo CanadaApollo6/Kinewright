@@ -10786,9 +10786,14 @@ fn normalization_bus(
     ceiling_hundredths: i32,
     extends: Option<&ExtendedRepairBus>,
 ) -> Result<AudioBus, String> {
-    if !(-6_000..=3_600).contains(&gain_hundredths) {
+    if !(kinewright_media::NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS
+        ..=kinewright_media::NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS)
+        .contains(&gain_hundredths)
+    {
         return Err(format!(
-            "required normalization gain {gain_hundredths} hundredths dB exceeds the supported -6000..=3600 range"
+            "required normalization gain {gain_hundredths} hundredths dB exceeds the supported {}..={} range",
+            kinewright_media::NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS,
+            kinewright_media::NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS
         ));
     }
     let mut effects = extends.map_or_else(Vec::new, |bus| bus.prefix.clone());
@@ -11444,7 +11449,10 @@ struct DeliveryConformanceArgs {
     delivery_bit_depth: DeliveryEncodeDepth,
 }
 
+// AU6 §13: `deny_unknown_fields` matches the AU5 planners, so a misspelled
+// `normalize_loudness` or an invented raster knob is refused rather than ignored.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct QueueExportArgs {
     /// Exact branch revision whose immutable snapshot should be rendered.
     expected_revision: TimelineRevision,
@@ -21944,6 +21952,54 @@ mod tests {
         assert_eq!(LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, 200);
     }
 
+    /// AU6 §13: the planner's `-6000..=3600` gain guard is media's export
+    /// constants, not a second copy, so the two cannot drift.
+    #[test]
+    fn au6_normalization_gain_guard_is_shared_with_export() {
+        let source = include_str!("server.rs");
+        let defined = source
+            .lines()
+            .filter(|line| {
+                let line = line.trim_start();
+                line.starts_with("const NORMALIZATION_")
+                    || line.starts_with("pub const NORMALIZATION_")
+                    || line.starts_with("pub(crate) const NORMALIZATION_")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            defined.is_empty(),
+            "server.rs must not define its own normalization gain constants: {defined:?}"
+        );
+        assert!(
+            source.contains("NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS"),
+            "the planner reads media's minimum"
+        );
+        assert!(
+            source.contains("NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS"),
+            "the planner reads media's maximum"
+        );
+        assert_eq!(
+            kinewright_media::NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS,
+            -6_000
+        );
+        assert_eq!(
+            kinewright_media::NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS,
+            3_600
+        );
+    }
+
+    /// AU6 §13: `QueueExportArgs` closes like the AU5 planners.
+    #[test]
+    fn au6_queue_export_denies_unknown_fields() {
+        let tools = KinewrightMcp::capability_tools().unwrap();
+        let queue = tools
+            .iter()
+            .find(|tool| tool.name == "queue_export")
+            .expect("queue_export is a registry capability");
+        let schema = serde_json::to_value(queue.input_schema.as_ref()).unwrap();
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+    }
+
     /// AU3 §4.1: what the scripted `audio_qc` answers. A sub-block range is
     /// the typed refusal; a profile earns a hot, clipped, imbalanced report
     /// that raises every severity; anything else is digital silence.
@@ -25429,11 +25485,11 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_540_264, 5_660),
+            (1_540_292, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_397_156,
+            registry_metrics.input_schema_bytes, 1_397_185,
             "registry={registry_metrics:?}"
         );
         assert_eq!(

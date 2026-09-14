@@ -2407,6 +2407,13 @@ async fn cc7_prepare_commit_and_compare(
 /// `crates/kinewright-agent/src/eval.rs` and `src/bin/kinewright-eval.rs`,
 /// neither of which is a capability. The served quad does not move for the
 /// fourteenth consecutive measurement.
+///
+/// AU6 §13's agent/ledger follow-up adds no tool: it flips
+/// `remove_audio_bus`'s `destructiveHint` to true (−1 B serialized) and
+/// closes `QueueExportArgs` with `deny_unknown_fields` (+29 B input schema
+/// on registry-only `queue_export`). The registry moves to 1,540,292 B /
+/// 1,397,185 B / 120,458 B. The served quad does not move for the fifteenth
+/// consecutive measurement.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
