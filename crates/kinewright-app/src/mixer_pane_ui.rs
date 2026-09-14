@@ -2653,7 +2653,7 @@ mod tests {
                     range: NoiseLearnRange::default(),
                     requested: &mut requested,
                 };
-                let reset = master_pane(
+                let frame = master_pane(
                     ui,
                     document,
                     &levels,
@@ -2663,7 +2663,7 @@ mod tests {
                     &mut edits,
                     &mut learn,
                 );
-                assert!(!reset, "nothing was clicked");
+                assert!(!frame.reset, "nothing was clicked");
                 measured = ui.min_rect().size();
             });
         });
