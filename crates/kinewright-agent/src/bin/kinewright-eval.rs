@@ -5374,7 +5374,7 @@ mod tests {
         let mut haystack = definition.prompts.join("\n");
         for assertion in &definition.assertions {
             haystack.push('\n');
-            haystack.push_str(&format!("{assertion:?}"));
+            let _ = write!(haystack, "{assertion:?}");
         }
         haystack
     }
@@ -5409,10 +5409,7 @@ mod tests {
         let normalized = normalize_published_assertion(text);
         for assertion in &definition.assertions {
             let debug = format!("{assertion:?}");
-            let variant = debug
-                .split(|character: char| character == ' ' || character == '{')
-                .next()
-                .unwrap_or(&debug);
+            let variant = debug.split([' ', '{']).next().unwrap_or(&debug);
             let snake = pascal_to_snake(variant);
             let human = snake.replace('_', " ");
             let folded = normalize_published_assertion(&human);
