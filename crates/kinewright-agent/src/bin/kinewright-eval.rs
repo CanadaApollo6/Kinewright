@@ -5281,6 +5281,198 @@ mod tests {
         verify_review_artifact_bindings(&review, &report).unwrap();
     }
 
+    /// The v7 `machine_assertions` string check, reused on the six frozen
+    /// manifests. Every published string must be non-empty, unique inside its
+    /// task, and name live authority — a `capability_tool_names()` tool, a
+    /// suite constant prefix, or a token the executable definition actually
+    /// runs. Integers ≥ 1000 must appear in that same haystack; that is the
+    /// check that would have refused v5 g3's leftover v9 aftermath window
+    /// `1285..1345` (N0.4(d)).
+    fn assert_published_machine_assertions(
+        task_id: &str,
+        assertions: &[serde_json::Value],
+        names_authority: impl Fn(&str) -> bool,
+    ) {
+        assert!(
+            !assertions.is_empty(),
+            "{task_id} publishes no machine assertions"
+        );
+        let mut seen = BTreeSet::new();
+        for assertion in assertions {
+            let text = assertion.as_str().expect("assertion is a string");
+            assert!(
+                !text.is_empty(),
+                "{task_id} carries an empty machine assertion"
+            );
+            assert!(
+                seen.insert(text.to_owned()),
+                "{task_id} repeats machine assertion {text}"
+            );
+            assert!(
+                names_authority(text),
+                "{task_id} assertion names neither an authority constant nor a capability tool: {text}"
+            );
+        }
+    }
+
+    fn published_assertion_values(task: &serde_json::Value) -> &[serde_json::Value] {
+        task.get("machine_assertions")
+            .or_else(|| task.get("assertions"))
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .expect("a published task carries machine_assertions or assertions")
+    }
+
+    fn published_assertion_names_authority(
+        text: &str,
+        definition: &EvalDefinition,
+        prefixes: &[&str],
+        extra_haystack: &str,
+    ) -> bool {
+        let mut haystack = definition_authority_haystack(definition);
+        haystack.push('\n');
+        haystack.push_str(extra_haystack);
+        for value in published_frame_scale_integers(text) {
+            if !haystack.contains(&value.to_string()) {
+                return false;
+            }
+        }
+        if prefixes.iter().any(|prefix| text.contains(prefix)) {
+            return true;
+        }
+        let tools = kinewright_agent::capability_tool_names().expect("the tool list loads");
+        if tools.iter().any(|tool| text.contains(tool.as_str())) {
+            return true;
+        }
+        published_assertion_names_live_token(text, definition)
+    }
+
+    fn definition_authority_haystack(definition: &EvalDefinition) -> String {
+        let mut haystack = definition.prompts.join("\n");
+        for assertion in &definition.assertions {
+            haystack.push('\n');
+            haystack.push_str(&format!("{assertion:?}"));
+        }
+        haystack
+    }
+
+    fn published_frame_scale_integers(text: &str) -> Vec<u64> {
+        let mut values = Vec::new();
+        let mut current = String::new();
+        for character in text.chars() {
+            if character.is_ascii_digit() {
+                current.push(character);
+            } else {
+                push_frame_scale_integer(&mut values, &current);
+                current.clear();
+            }
+        }
+        push_frame_scale_integer(&mut values, &current);
+        values
+    }
+
+    fn push_frame_scale_integer(values: &mut Vec<u64>, digits: &str) {
+        if digits.is_empty() {
+            return;
+        }
+        if let Ok(value) = digits.parse::<u64>()
+            && value >= 1_000
+        {
+            values.push(value);
+        }
+    }
+
+    fn published_assertion_names_live_token(text: &str, definition: &EvalDefinition) -> bool {
+        let normalized = normalize_published_assertion(text);
+        for assertion in &definition.assertions {
+            let debug = format!("{assertion:?}");
+            let variant = debug
+                .split(|character: char| character == ' ' || character == '{')
+                .next()
+                .unwrap_or(&debug);
+            let snake = pascal_to_snake(variant);
+            let human = snake.replace('_', " ");
+            let folded = normalize_published_assertion(&human);
+            if normalized.contains(&snake)
+                || normalized.contains(&folded)
+                || (folded.contains(&normalized) && normalized.chars().count() >= 8)
+            {
+                return true;
+            }
+            if variant_words_named(&normalized, &folded) {
+                return true;
+            }
+        }
+        if definition.deliverable.is_some() {
+            for token in [
+                "delivery",
+                "mp4",
+                "proof",
+                "transcript",
+                "word error",
+                "caption",
+                "artifact",
+                "conformance",
+            ] {
+                if normalized.contains(token) {
+                    return true;
+                }
+            }
+        }
+        for token in [
+            "undo integrity",
+            "required tool",
+            "required capability",
+            "technical qa",
+            "gapless",
+            "duration bounds",
+        ] {
+            if normalized.contains(token) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn variant_words_named(text: &str, variant: &str) -> bool {
+        let words = variant
+            .split_whitespace()
+            .filter(|word| word.len() >= 4)
+            .collect::<Vec<_>>();
+        !words.is_empty()
+            && words.iter().all(|word| {
+                text.split_whitespace()
+                    .any(|hay| hay.starts_with(word) || (word.starts_with(hay) && hay.len() >= 4))
+            })
+    }
+
+    fn normalize_published_assertion(text: &str) -> String {
+        text.chars()
+            .map(|character| {
+                if character == '-' || character == '_' {
+                    ' '
+                } else {
+                    character.to_ascii_lowercase()
+                }
+            })
+            .collect()
+    }
+
+    fn pascal_to_snake(name: &str) -> String {
+        let mut snake = String::new();
+        for (index, character) in name.chars().enumerate() {
+            if character.is_uppercase() {
+                if index > 0 {
+                    snake.push('_');
+                }
+                snake.extend(character.to_lowercase());
+            } else {
+                snake.push(character);
+            }
+        }
+        snake
+    }
+
     #[test]
     fn published_v1_manifest_tracks_the_executable_seed_suite() {
         let manifest: serde_json::Value = serde_json::from_str(include_str!(
@@ -5293,10 +5485,8 @@ mod tests {
         let definitions = seed_suite();
         assert_eq!(tasks.len(), definitions.len());
         for (task, definition) in tasks.iter().zip(&definitions) {
-            assert_eq!(
-                task["id"].as_str(),
-                definition.name.split_whitespace().next()
-            );
+            let id = task["id"].as_str().expect("v1 tasks carry an id");
+            assert_eq!(id, definition.name.split_whitespace().next());
             assert_eq!(task["name"], definition.name[3..].to_owned());
             assert_eq!(task["prompt"], definition.prompts[0]);
             assert_eq!(task["budget"]["turns"], definition.budgets.max_turns);
@@ -5318,6 +5508,9 @@ mod tests {
                 u64::try_from(definition.budgets.max_wall_time.as_millis()).unwrap()
             );
             assert_eq!(task["budget"]["undos"], definition.budgets.max_undos);
+            assert_published_machine_assertions(id, published_assertion_values(task), |text| {
+                published_assertion_names_authority(text, definition, &[], "")
+            });
         }
     }
 
@@ -5386,6 +5579,11 @@ mod tests {
                 u64::try_from(definition.budgets.max_wall_time.as_millis()).unwrap()
             );
             assert_eq!(task["budget"]["undos"], definition.budgets.max_undos);
+            assert_published_machine_assertions(
+                task["id"].as_str().expect("v2 tasks carry an id"),
+                published_assertion_values(task),
+                |text| published_assertion_names_authority(text, definition, &[], ""),
+            );
         }
     }
 
@@ -5438,6 +5636,18 @@ mod tests {
             task["machine_assertions"]
                 .as_array()
                 .is_some_and(|assertions| assertions.len() >= 15)
+        );
+        assert_published_machine_assertions(
+            task["id"].as_str().expect("v3 tasks carry an id"),
+            published_assertion_values(task),
+            |text| {
+                published_assertion_names_authority(
+                    text,
+                    definition,
+                    &[],
+                    include_str!("../../../../benchmarks/auto-edit/v3/ground-truth.json"),
+                )
+            },
         );
 
         let truth: EditorialGroundTruth = serde_json::from_str(include_str!(
@@ -5503,6 +5713,18 @@ mod tests {
                 capitalization_boundary_minimum_frames: TimeCode(4),
             }
         )));
+        assert_published_machine_assertions(
+            task["id"].as_str().expect("v4 tasks carry an id"),
+            published_assertion_values(task),
+            |text| {
+                published_assertion_names_authority(
+                    text,
+                    definition,
+                    &[],
+                    include_str!("../../../../benchmarks/auto-edit/v4/ground-truth.json"),
+                )
+            },
+        );
 
         let truth: EditorialGroundTruth = serde_json::from_str(include_str!(
             "../../../../benchmarks/auto-edit/v4/ground-truth.json"
@@ -5560,17 +5782,46 @@ mod tests {
         assert_eq!(definitions.len(), 3);
         assert_eq!(tasks.len(), definitions.len());
         for (task, definition) in tasks.iter().zip(&definitions) {
-            assert_eq!(
-                task["id"].as_str(),
-                definition.name.split_whitespace().next()
-            );
+            let id = task["id"].as_str().expect("v5 tasks carry an id");
+            assert_eq!(id, definition.name.split_whitespace().next());
             assert_eq!(task["prompt"], definition.prompts[0]);
             assert_eq!(
                 task["budget"]["tool_calls"],
                 definition.budgets.max_tool_calls
             );
             assert_eq!(task["budget"]["tokens"], definition.budgets.max_tokens);
+            assert_published_machine_assertions(id, published_assertion_values(task), |text| {
+                published_assertion_names_authority(
+                    text,
+                    definition,
+                    &["MUSIC_"],
+                    concat!(
+                        include_str!("../../../../benchmarks/auto-edit/v5/ground-truth.json"),
+                        include_str!("../../../../benchmarks/auto-edit/v5/event-ground-truth.json"),
+                        include_str!(
+                            "../../../../benchmarks/auto-edit/v5/music-ground-truth-v10.json"
+                        ),
+                    ),
+                )
+            });
         }
+        let g3_assertions = published_assertion_values(&tasks[2]);
+        assert!(
+            g3_assertions.iter().all(|assertion| {
+                let text = assertion.as_str().unwrap_or_default();
+                !text.contains("1285") && !text.contains("1345")
+            }),
+            "g3 still names the v9 aftermath window 1285..1345"
+        );
+        assert!(
+            g3_assertions.iter().any(|assertion| {
+                let text = assertion.as_str().unwrap_or_default();
+                text.contains("add_title")
+                    || text.contains("TitleCard")
+                    || text.contains("title card")
+            }),
+            "g3 must name the v10 title-card resolution"
+        );
         let interview = &definitions[0];
         let deliverable = interview.deliverable.unwrap();
         assert_eq!(deliverable.profile, DeliveryProfile::VerticalShort);
@@ -7579,6 +7830,9 @@ mod tests {
                 definition.assertions.len(),
                 "{id} declares a different number of machine assertions than it executes"
             );
+            assert_published_machine_assertions(id, published_assertion_values(task), |text| {
+                published_assertion_names_authority(text, definition, &["CC7_"], "")
+            });
             assert_eq!(
                 task["human_question"],
                 serde_json::json!(cc7_spec(scenario).human_question)
@@ -8296,19 +8550,7 @@ mod tests {
                 definition.assertions.len(),
                 "{id} declares a different number of machine assertions than it executes"
             );
-            let mut seen = BTreeSet::new();
-            for assertion in assertions {
-                let text = assertion.as_str().expect("assertion is a string");
-                assert!(!text.is_empty(), "{id} carries an empty machine assertion");
-                assert!(
-                    seen.insert(text.to_owned()),
-                    "{id} repeats machine assertion {text}"
-                );
-                assert!(
-                    au6_names_authority(text),
-                    "{id} assertion names neither an au6_scenarios constant nor a capability tool: {text}"
-                );
-            }
+            assert_published_machine_assertions(id, assertions, au6_names_authority);
             let expected_question = AU6_QUESTIONS
                 .iter()
                 .find(|(task_id, _)| *task_id == id)
