@@ -35,8 +35,10 @@ jobs:
           # `cargo test` is reported as success.
           $ErrorActionPreference = 'Stop'
           & .\scripts\setup-ffmpeg.ps1
-          cargo build --workspace
-          if ($LASTEXITCODE -ne 0) { throw "cargo build --workspace exited $LASTEXITCODE" }
+          # `cargo test` compiles the workspace with cfg(test). A separate
+          # `cargo build --workspace` on windows-latest is several minutes of
+          # MSVC work the test step then repeats. Linux keeps the extra build
+          # for the readelf soname gate on the non-test binary.
           cargo test --workspace
           if ($LASTEXITCODE -ne 0) { throw "cargo test --workspace exited $LASTEXITCODE" }
           cargo clippy --workspace --all-targets -- -D warnings

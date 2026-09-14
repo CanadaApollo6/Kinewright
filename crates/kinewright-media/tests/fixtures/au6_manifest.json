@@ -847,11 +847,11 @@
         "normalization prediction"
       ]
     },
-    "cuttable": [
+    "cuttable": [],
+    "cut": [
       "au6_b_the_makeup_less_chain_exceeds_the_loudness_range",
       "au6_e_two_exports_at_one_profile_do_not_separate"
     ],
-    "cut": [],
     "reported_not_gated": [
       "profile.estimator \u2014 the 20th-percentile floor against the authored floor",
       "declick.contribution_in_chain \u2014 0.5 whole / 17.2 at +-10 ms / 71.6 at +-1 ms",
@@ -859,7 +859,9 @@
       "multicam.angle_ripple \u2014 an angle ripple leaves the master stem bit-identical",
       "delivery.raster_invariance \u2014 the four-raster table",
       "parity.curve_owners \u2014 the three ducking curve owners render identically",
-      "performance.media_lane and performance.agent_lane \u2014 recorded, never gated, never widened"
+      "performance.media_lane and performance.agent_lane \u2014 recorded, never gated, never widened",
+      "programme LRA failing direction 1 274 (makeup-less chain, cut 2026-09-14)",
+      "target separation failing direction 0 (two exports at one profile, cut 2026-09-14)"
     ]
   },
   "export_jobs": [
@@ -1188,19 +1190,16 @@
   },
   "required_fixtures": {
     "core": 13,
-    "media": 60,
+    "media": 58,
     "agent": 8,
     "app": 14,
     "eval": 12,
     "inventory": 2,
     "explicit_names": 1,
-    "total": 109,
+    "total": 107,
     "test_sources": 11,
     "forbidden_helpers": 3,
-    "cuttable_kept": [
-      "au6_b_the_makeup_less_chain_exceeds_the_loudness_range",
-      "au6_e_two_exports_at_one_profile_do_not_separate"
-    ]
+    "cuttable_kept": []
   },
   "manifest_self_test": {
     "top_level_keys": 26,
