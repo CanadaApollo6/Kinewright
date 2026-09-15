@@ -36,6 +36,19 @@ editor, not a near-term slice, and not a reason to thin colour, audio, editorial
 or media work that is already on the board. Do not start After Effects contracts
 or implementation now.
 
+**Power available, expertise not required.** Every power tool stays reachable by
+hand, exactly as a developer can still edit code and run a terminal. But the default
+experience abstracts most of that away: the person states intent and answers
+judgement questions, and the agents carry the technical decisions. That only works
+if the harness gives the agents what they need to decide correctly, quickly, and
+cheaply, so **harness efficiency is a measured product outcome**: tokens, wall time,
+tool calls, and corrections per completed job are gated numbers, not by-products.
+The first smoke session (2026-09-15) set the bar: an untagged WebM produced a typed
+colour rejection whose recovery was one button in the Media panel, and a person
+without colour knowledge had no way to find it. A person must never be asked a
+recovery question; they may be asked a judgement question. The investigator
+programme below is how that rule becomes mechanism.
+
 We are pursuing workflow parity for valuable editing jobs, not copying another
 editor's feature count. A narrower tool that completes an entire job reliably is
 more useful than a wide collection of controls that stop at preview or cannot be
@@ -60,6 +73,7 @@ it.
 | Creative intent and taste | Preserves choices faithfully | May offer alternatives | Owns final judgement |
 | Preview/export agreement | Owns and verifies | May request proofs | Trusts what is shown |
 | Delivery correctness | Owns tags, transforms, and validation | May run QC | Selects and approves output |
+| Recovery from errors and technical dead ends | Types every incident with its safe recoveries and enforces the per-code policy | Investigates, applies safe recoveries visibly, asks only judgement questions | Answers judgement questions; can always act by hand |
 
 Models must not silently make technical assumptions that the application can
 represent explicitly. They may recommend a white-balance change, a cut, or a look;
@@ -154,6 +168,7 @@ Colour begins immediately, while non-colour work continues in parallel.
 | Multicam | Sync groups and agent speaker/angle planning primitives | Angle viewer, live switching and revision, audio-follow policy, explicit master-audio handling |
 | Delivery and performance | Shared render path, H.264/AAC export queue and profiles | Codec/preset breadth, colour/audio tags and QC, cache control, long-project responsiveness, interruption and recovery testing |
 | Creator workflows | Captions, titles, transcript operations, reframing primitives | Caption finishing, reusable packages/templates, aspect-ratio variants, reviewable batch versioning |
+| Agent harness and accessibility | Compact seven-tool runtime, capability directory, prepared plans bound to a revision, confirmation broker, agent branches, token telemetry | Typed incidents, investigator sessions on a default model, per-code recovery policy, task-scoped capability packs, measured token/latency/correction budgets per job |
 
 This table is intentionally broader than the current eval programme. A general
 video editor will not reach practical parity by optimizing montage taste alone.
@@ -320,6 +335,18 @@ regressions.
    (`Ctrl+Shift+M`) and the track-header M/S toggles are the person surface; the
    agent gets the generated `set_track_mix` and the read-only `get_audio_levels`
    over `Analysis::mix_levels`. The contract is `AU1-MANUAL-MIX.md`.
+
+12. **AU2–AU6 — completed 2026-09-14.** The audio programme table is complete;
+   the status paragraph in the audio programme section records what remains
+   owed (hands-on sessions and the real-harness `audio-workflow-v7` run).
+
+13. **IN1 incidents and the investigator — next primary slice (chosen
+   2026-09-15).** The first slice of the investigator and harness programme
+   below: typed incidents replace string errors at the app boundary, a per-code
+   recovery policy lives in core as data, and the untagged-source colour case
+   completes end to end with no recovery question asked of the person. Motion,
+   compositing, and retiming follow as the next capability programme; delivery
+   codec breadth is the bounded secondary lane alongside.
 
 Within that cadence, three workstreams remain active:
 
@@ -711,6 +738,86 @@ and records deferrals explicitly, as the colour slices did.
 Analysis tools do not mutate. Plan tools return the exact operations they intend
 to apply and require the project revision they analyzed.
 
+## Investigator and harness programme
+
+### Product boundary
+
+The investigator and harness programme makes Kinewright usable by a person who has
+not learned an NLE, without taking any power tool away from a person who has. Every
+error, rejection, and technical dead end becomes a typed incident; an investigator
+agent on a default model resolves what is safe to resolve, asks the person only
+when a judgement is genuinely theirs, and explains the rest in plain language. The
+same programme owns the harness itself: what the agents can see, how many tokens a
+decision costs, how fast a job completes, and how often a correction is needed. It
+is not a hosted service, not a replacement for MCP as the interoperability layer,
+and not autonomy that hides changes: every investigator action is a typed
+operation with provenance, an undo entry, and a visible card.
+
+### Current foundation and limits
+
+The foundation is M29's multi-harness control plane (Claude Code, Codex, Cursor
+through one `SessionConfig` and `AgentDriver`), M31's agent branches, M36's
+compact seven-tool runtime with measured schema bytes and provider token
+telemetry, and the MCP server's confirmation broker that already gates destructive
+tools with approve and reject. Core errors are typed where it matters: the colour
+rejection carries a code, the field, observed and allowed values, and a recovery
+action.
+
+The limits are equally clear. The app flattens every error to a source label and a
+string one layer before the person sees it; the error log has thirteen sources and
+about eighty call sites and none of them carries a code or a recovery. No agent can
+read the error log. Nothing consumes errors at all. Only ten agent-facing structured
+error codes exist, and no policy says which recoveries are safe to apply without
+asking. Model choice per harness exists for the chat agent but there is no default
+investigator model, no budget per incident, and no fallback when no harness is
+installed.
+
+### Principles
+
+- **Typed at the boundary.** An incident carries a stable code, a subject, the
+  observed and allowed values, the project revision, a dedup key, and typed
+  recovery actions that are exact operations or tool calls. Strings are for
+  display only.
+- **Policy is data.** Each code has a class — auto-apply, ask first, or explain —
+  and an allowed action set, declared in core and tested without a model. The
+  model decides within the policy; the policy is the guard.
+- **Visible, attributed, reversible.** An auto-applied recovery is a typed
+  operation with its own provenance value, a named undo entry, and a card. This
+  is how a contract rule like CC1's "must not be *silently* treated as Rec.709"
+  is honoured while the person is never asked.
+- **Judgement questions only.** The person is asked when a choice is theirs
+  (which file to relink to, whether to transcode, whether to change a delivery
+  target), never how to recover from a technical state the system understands.
+- **Never below the button.** With the investigator off or no harness installed,
+  every incident still renders its typed recoveries as buttons on the card. The
+  fallback is the same data the investigator uses.
+- **Efficiency is gated.** Every investigator resolution and every eval task
+  records tokens by category, tool calls, wall time, and corrections; each slice
+  pins budgets and the runtime keeps M36's measured surface discipline.
+- **Power stays reachable.** No panel, button, or operation is removed. Cards
+  expose the typed fields on demand.
+
+### Staged implementation
+
+| Stage | Deliverable | Exit gate |
+| --- | --- | --- |
+| IN1 — Incidents and policy | `Incident` and `RecoveryAction` types in core; every app error path routed through one incident log with dedup; per-code policy table as core data with the three classes; a new colour provenance value for agent assumptions; the incident card with fallback buttons; `get_incidents` and `resolve_incident` on the compact runtime; the untagged-source colour case end to end | Every existing `record_error` source emits a typed incident; the policy table is exhaustive over declared codes and tested without a model; importing an untagged BT.709-shaped source and playing it asks the person nothing on both CI operating systems |
+| IN2 — Investigator sessions | A default investigator harness and model in settings with discovery and an off switch; headless sessions started per incident with turn, token, and wall-time budgets, one per project, deduped; auto-apply through the live core, multi-operation fixes on a branch merged on approval; approval cards through the confirmation broker; per-project remembered preferences | Budgets are enforced and reported; a scripted harness resolves the catalogue's auto-apply codes with zero destructive actions; the no-harness fallback resolves the same codes by button |
+| IN3 — Catalogue breadth and harness efficiency | Incident codes for offline and relink, unsupported codecs with a transcode proposal, export and delivery failures, loudness and QC failures, hostile media; task-scoped capability packs so a job loads only the schema it needs; efficiency telemetry on every completed job | Each code has a pinned class and recovery; token, tool-call, and wall-time budgets per job are pinned and green; the M35/M36 delta is published |
+| IN4 — Workflow evaluation | A person with no NLE knowledge completes import, fix, cut, and deliver on unfamiliar footage; the model lane runs the same tasks on each supported harness | Zero recovery questions asked; judgement questions counted and reviewed; efficiency budgets green on every harness |
+
+### Agent surface direction
+
+- `get_incidents`: the open incidents for a project with their typed recoveries
+  and policy classes, revision-stamped.
+- `resolve_incident`: records an outcome (applied, approved, rejected, explained)
+  against an incident and the operation or plan that discharged it.
+- Investigator sessions run the unchanged compact runtime plus these two; they
+  gain no privileged filesystem, shell, or network access.
+
+**Current status (2026-09-15): programme opened; IN1 is the next primary slice.
+Its design brief is in preparation.**
+
 ## Programme scorecard
 
 The roadmap is healthy when all of these improve, not merely the taste score of one
@@ -725,6 +832,10 @@ montage:
 - Playback, scope, and render performance on long realistic projects.
 - Objective eval coverage versus subjective review time.
 - Generalization across footage, edit type, platform, and delivery target.
+- Recovery questions asked of the person per completed job (target: zero) and
+  judgement questions asked, counted separately.
+- Tokens by category, tool calls, wall time, and corrections per completed job,
+  per harness.
 
 Review this plan after each completed vertical slice. Update the portfolio and
 near-term sequence based on observed editor friction, while keeping the outcome,
