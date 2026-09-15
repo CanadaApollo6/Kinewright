@@ -801,7 +801,7 @@ installed.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |
-| IN1 — Incidents and policy | `Incident` and `RecoveryAction` types in core; every app error path routed through one incident log with dedup; per-code policy table as core data with the three classes; a new colour provenance value for agent assumptions; the incident card with fallback buttons; `get_incidents` and `resolve_incident` on the compact runtime; the untagged-source colour case end to end | Every existing `record_error` source emits a typed incident; the policy table is exhaustive over declared codes and tested without a model; importing an untagged BT.709-shaped source and playing it asks the person nothing on both CI operating systems |
+| IN1 — Incidents and policy (contract: `IN1-INCIDENTS-AND-THE-COLOUR-CASE.md`) | `Incident` and `RecoveryAction` types in core; the per-code policy table as core data with the three classes; one incident log with dedup and suppression; `ColorProvenance::AgentAssumption` and `MediaAsset.assumed_from` behind the widened override guard; the incident card as a pure function with fallback buttons; `get_incidents` and `resolve_incident` reachable through the compact runtime's capability dispatcher with the served surface unchanged (serving them as tools would have cost +2 012 B, +35.5 %, of served bytes); the untagged-source colour case end to end. Part A: one error source, `Media` playback, end to end; Part B: the remaining 125 error paths | The policy table is exhaustive over declared codes and tested without a model; importing an untagged BT.709-shaped source and playing it opens zero ask-first incidents, zero recovery questions and exactly one auto-applied incident with a pinned headline on both CI operating systems; the served quad is unchanged in both pin sites; Part B: every existing `record_error` source emits a typed incident |
 | IN2 — Investigator sessions | A default investigator harness and model in settings with discovery and an off switch; headless sessions started per incident with turn, token, and wall-time budgets, one per project, deduped; auto-apply through the live core, multi-operation fixes on a branch merged on approval; approval cards through the confirmation broker; per-project remembered preferences | Budgets are enforced and reported; a scripted harness resolves the catalogue's auto-apply codes with zero destructive actions; the no-harness fallback resolves the same codes by button |
 | IN3 — Catalogue breadth and harness efficiency | Incident codes for offline and relink, unsupported codecs with a transcode proposal, export and delivery failures, loudness and QC failures, hostile media; task-scoped capability packs so a job loads only the schema it needs; efficiency telemetry on every completed job | Each code has a pinned class and recovery; token, tool-call, and wall-time budgets per job are pinned and green; the M35/M36 delta is published |
 | IN4 — Workflow evaluation | A person with no NLE knowledge completes import, fix, cut, and deliver on unfamiliar footage; the model lane runs the same tasks on each supported harness | Zero recovery questions asked; judgement questions counted and reviewed; efficiency budgets green on every harness |
@@ -816,8 +816,9 @@ installed.
   gain no privileged filesystem, shell, or network access.
 
 **Current status (2026-09-15): programme opened; IN1 is the next primary slice.
-Its brief has been criticised and probed and its contract is being drafted; IN1
-lands in two parts on one contract — Part A the incident model, the policy, and
+Its contract is promoted (`IN1-INCIDENTS-AND-THE-COLOUR-CASE.md`, revision 2
+after one brief critique, one contract critique and two probes) and Part A is
+being implemented; IN1 lands in two parts on one contract — Part A the incident model, the policy, and
 the untagged-source colour case end to end (one error source migrated), Part B
 the migration of the remaining 120 literal-labelled call sites, 2 dynamic-source
 sites and 3 direct log writes.** Two programme-level facts recorded by probe-1 that later
