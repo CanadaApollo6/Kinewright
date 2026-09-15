@@ -816,7 +816,15 @@ installed.
   gain no privileged filesystem, shell, or network access.
 
 **Current status (2026-09-15): programme opened; IN1 is the next primary slice.
-Its design brief is in preparation.**
+Its brief has been criticised and probed and its contract is being drafted; IN1
+lands in two parts on one contract — Part A the incident model, the policy, and
+the untagged-source colour case end to end (one error source migrated), Part B
+the migration of the remaining 120 literal-labelled call sites, 2 dynamic-source
+sites and 3 direct log writes.** Two programme-level facts recorded by probe-1 that later
+slices own: the Cursor ACP driver reports no cost categories and the Codex driver
+reports categories but no dollar cost, so IN4's per-harness efficiency gate needs
+driver work that IN3 owns; and the confirmation broker carries only a tool name
+and a description, so approval cards with a typed incident payload are IN2's.
 
 ## Programme scorecard
 
