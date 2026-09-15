@@ -236,6 +236,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let clips = [(1, 0, 0..100), (2, 100, 100..200), (3, 200, 200..300)]
             .into_iter()

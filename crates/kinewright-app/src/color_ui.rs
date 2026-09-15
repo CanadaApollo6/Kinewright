@@ -1,8 +1,8 @@
 use kinewright_core::{
-    COLOR_CONFIDENCE_MAX_BASIS_POINTS, ColorBitDepth, ColorContext, ColorDescription, ColorMatrix,
-    ColorPipelineState, ColorPrimaries, ColorProvenance, ColorRange, ColorSourceError,
-    ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, MediaAsset, MediaKind, Operation,
-    classify_source, classify_source_with_assumption,
+    ColorBitDepth, ColorContext, ColorDescription, ColorMatrix, ColorPipelineState, ColorPrimaries,
+    ColorProvenance, ColorRange, ColorSourceError, ColorSourceProfileAssumption, ColorTransfer,
+    ColorWhitePoint, MediaAsset, MediaKind, Operation, classify_source,
+    classify_source_with_assumption,
 };
 
 pub(crate) const ASSUME_SDR_REC709_TOOLTIP: &str = "This changes metadata only; it does not apply a pixel transform. Ctrl+Z restores the prior probed description.";
@@ -113,28 +113,21 @@ fn color_pipeline_state_label(state: &ColorPipelineState) -> String {
     }
 }
 
+/// The person's Media-panel button, delegating to the core recovery builder
+/// so the button and the router's recovery cannot drift (IN1 §4.5 rule 33).
 #[must_use]
 pub(crate) fn assume_sdr_rec709_operation(asset: &MediaAsset) -> Operation {
-    let range = match &asset.color_description.range {
-        ColorRange::Unknown => ColorRange::Limited,
-        known => known.clone(),
+    let Operation::SetAssetColorDescription {
+        asset: id,
+        mut color_description,
+    } = kinewright_core::assume_rec709_operation(asset.id, &asset.color_description)
+    else {
+        unreachable!("assume_rec709_operation returns SetAssetColorDescription")
     };
-    let bit_depth = match &asset.color_description.bit_depth {
-        ColorBitDepth::Unknown => ColorBitDepth::Eight,
-        known => known.clone(),
-    };
+    color_description.provenance = ColorProvenance::UserOverride;
     Operation::SetAssetColorDescription {
-        asset: asset.id,
-        color_description: ColorDescription {
-            primaries: ColorPrimaries::Bt709,
-            transfer: ColorTransfer::Bt709,
-            matrix: ColorMatrix::Bt709,
-            range,
-            white_point: ColorWhitePoint::D65,
-            bit_depth,
-            confidence_basis_points: COLOR_CONFIDENCE_MAX_BASIS_POINTS,
-            provenance: ColorProvenance::UserOverride,
-        },
+        asset: id,
+        color_description,
     }
 }
 
@@ -236,6 +229,7 @@ fn color_provenance_label(value: &ColorProvenance) -> String {
         ColorProvenance::UserOverride => "user override".to_owned(),
         ColorProvenance::Inferred => "inferred".to_owned(),
         ColorProvenance::ApplicationDefault => "app default".to_owned(),
+        ColorProvenance::AgentAssumption => "agent assumption".to_owned(),
         ColorProvenance::Other(value) => value.clone(),
     }
 }
@@ -250,7 +244,9 @@ fn color_confidence_label(confidence_basis_points: u16) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use kinewright_core::{AssetId, MediaKind, Rational, TimeCode};
+    use kinewright_core::{
+        AssetId, COLOR_CONFIDENCE_MAX_BASIS_POINTS, MediaKind, Rational, TimeCode,
+    };
 
     use super::*;
 
@@ -265,6 +261,7 @@ mod tests {
             resolution: (kind != MediaKind::Audio).then_some((1_920, 1_080)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description,
+            assumed_from: None,
         }
     }
 
@@ -438,6 +435,76 @@ mod tests {
                     },
                 }
             );
+        }
+    }
+
+    /// IN1 §4.5 rule 35: the person's button and the router's recovery differ
+    /// in exactly one field — `provenance` — for the probed description of
+    /// each of the four fixtures, written here as the pinned §3 rule 5 tuples.
+    #[test]
+    fn the_person_button_and_the_router_recovery_differ_only_in_provenance() {
+        let untagged_mp4 = ColorDescription {
+            primaries: ColorPrimaries::Unknown,
+            transfer: ColorTransfer::Unknown,
+            matrix: ColorMatrix::Unknown,
+            range: ColorRange::Unknown,
+            white_point: ColorWhitePoint::Unknown,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 2_000,
+            provenance: ColorProvenance::Inferred,
+        };
+        let tagged = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: ColorMatrix::Bt709,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::Unknown,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::StreamMetadata,
+        };
+        let untagged_webm = ColorDescription {
+            range: ColorRange::Limited,
+            confidence_basis_points: 4_000,
+            provenance: ColorProvenance::StreamMetadata,
+            ..untagged_mp4.clone()
+        };
+        for (name, probed) in [
+            ("in1_untagged.mp4", untagged_mp4),
+            ("in1_tagged.mp4", tagged.clone()),
+            ("in1_untagged_vp9.webm", untagged_webm),
+            ("in1_tagged_vp9.webm", tagged),
+        ] {
+            let user = assume_sdr_rec709_operation(&asset(MediaKind::Video, probed.clone()));
+            let router = kinewright_core::assume_rec709_operation(AssetId(7), &probed);
+            let Operation::SetAssetColorDescription {
+                asset: user_asset,
+                color_description: user_description,
+            } = user
+            else {
+                panic!("{name}: the person button builds a colour override");
+            };
+            let Operation::SetAssetColorDescription {
+                asset: router_asset,
+                color_description: router_description,
+            } = router
+            else {
+                panic!("{name}: the router recovery builds a colour override");
+            };
+            assert_eq!(user_asset, router_asset, "{name}");
+            assert_eq!(
+                user_description.provenance,
+                ColorProvenance::UserOverride,
+                "{name}"
+            );
+            assert_eq!(
+                router_description.provenance,
+                ColorProvenance::AgentAssumption,
+                "{name}"
+            );
+            let mut flipped = router_description.clone();
+            flipped.provenance = ColorProvenance::UserOverride;
+            assert_eq!(user_description, flipped, "{name}: one field differs");
         }
     }
 

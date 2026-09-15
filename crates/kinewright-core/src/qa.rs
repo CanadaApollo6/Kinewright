@@ -739,6 +739,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription::default(),
+            assumed_from: None,
         };
         let document = Document {
             tracks: vec![Track {
@@ -811,6 +812,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription::default(),
+            assumed_from: None,
         };
         let media_clip = |id| Clip {
             id: ClipId(id),
@@ -872,6 +874,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription::unknown(),
+            assumed_from: None,
         };
         let document = Document {
             media_pool: vec![asset],
@@ -914,6 +917,7 @@ mod tests {
                 confidence_basis_points: 10_000,
                 provenance: ColorProvenance::StreamMetadata,
             },
+            assumed_from: None,
         };
         let document = Document {
             media_pool: vec![asset],
@@ -946,6 +950,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description,
+            assumed_from: None,
         };
         let document = Document {
             media_pool: vec![asset],

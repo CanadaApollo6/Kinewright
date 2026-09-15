@@ -128,6 +128,7 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
         resolution,
         source_fingerprint,
         color_description,
+        assumed_from: None,
     })
 }
 
@@ -1078,12 +1079,13 @@ impl VideoDecoder {
         description: &ColorDescription,
         assumption: Option<ColorSourceProfileAssumption>,
     ) -> Result<Self, MediaError> {
-        let source = classify_source_with_assumption(description, assumption).map_err(|error| {
-            MediaError::Backend(format!(
-                "managed source profile rejected for {} (assumption={assumption:?}): {error}",
-                path.display()
-            ))
-        })?;
+        // IN1 §4.2 rule 8: the typed refusal leaves the decoder intact. The
+        // contextual sentence this site used to build by hand is rebuilt by
+        // `SourceColorRefusal`'s `#[error(...)]` template once
+        // `contextual_managed_decode_error` has added the asset and the path,
+        // so no caller sees a different string.
+        let source = classify_source_with_assumption(description, assumption)
+            .map_err(MediaError::SourceColor)?;
         let _ = source;
         let _declared_depth = declared_integer_depth(description).map_err(|error| {
             unsupported_decoder_format(

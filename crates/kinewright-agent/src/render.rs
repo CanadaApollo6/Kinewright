@@ -1209,6 +1209,7 @@ mod tests {
                 resolution: Some((1_920, 1_080)),
                 source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
                 color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
             }],
             markers: vec![Marker {
                 id: MarkerId(3),

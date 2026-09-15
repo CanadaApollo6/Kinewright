@@ -25,6 +25,7 @@ mod creator;
 mod delivery;
 mod editorial;
 mod effect;
+mod incident;
 mod journal;
 mod media;
 mod model;
@@ -176,6 +177,13 @@ pub use effect::{
     managed_color_node_count, matte_capable, matte_parameter_names, matte_parameters,
     matte_window_parameter_names, matte_window_parameters,
 };
+pub use incident::{
+    Incident, IncidentCode, IncidentEvidence, IncidentId, IncidentLog, IncidentObservation,
+    IncidentOutcome, IncidentSeverity, IncidentState, IncidentSubject, IncidentTelemetry, Observed,
+    POLICY, PolicyClass, PolicyEntry, PolicyPredicate, RecoveryAction, RecoveryKind,
+    SourceColorIncident, assume_rec709_operation, policy_class, policy_recovery, rec709_compatible,
+    recovery_description,
+};
 pub use journal::JournalCommand;
 pub use media::{
     Analysis, AnalysisJobStatus, AnalysisKind, AnalysisPhase, AssetBeats, AssetSceneChanges,
@@ -191,11 +199,11 @@ pub use media::{
     MixLevelRequest, MixNoiseProfileRequest, MixPeaks, MixSpectrumPoint, MixSpectrumReport,
     MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest, MonitorProof, MonitorProofMetadata,
     MonitorProofRenderKind, NoiseProfileReport, Playback, PlaybackState, ProgressSink, RgbaImage,
-    SceneChange, SceneStatus, SilenceSpan, SilenceStatus, SpectrumBand, ThumbnailFrame,
-    ThumbnailKey, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
-    TrackLevels, TranscriptStatus, TranscriptWord, VisualAssetResult, VisualRequestKind,
-    WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WaveformData, WaveformPeak, WorkingProof,
-    WorkingProofMetadata, export_lut_preflight_with, export_media_preflight,
+    SceneChange, SceneStatus, SilenceSpan, SilenceStatus, SourceColorRefusal, SpectrumBand,
+    ThumbnailFrame, ThumbnailKey, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, TrackLevels, TranscriptStatus, TranscriptWord, VisualAssetResult,
+    VisualRequestKind, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WaveformData, WaveformPeak,
+    WorkingProof, WorkingProofMetadata, export_lut_preflight_with, export_media_preflight,
     matte_coverage_statistics,
 };
 pub use model::{

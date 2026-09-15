@@ -2211,6 +2211,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: fingerprint,
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         }
     }
 

@@ -1661,6 +1661,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         }
     }
 
@@ -5417,6 +5418,7 @@ mod tests {
                 resolution: Some((AU6_SOURCE_WIDTH, AU6_SOURCE_HEIGHT)),
                 source_fingerprint: MediaSourceFingerprint::unknown(),
                 color_description: ColorDescription::default(),
+                assumed_from: None,
             })
             .collect();
         let tracks = spec
@@ -5915,6 +5917,7 @@ mod tests {
             resolution: None,
             source_fingerprint: MediaSourceFingerprint::unknown(),
             color_description: ColorDescription::default(),
+            assumed_from: None,
         };
         apply_batch(
             &mut document,

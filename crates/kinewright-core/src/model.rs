@@ -142,6 +142,19 @@ pub struct MediaAsset {
     #[serde(default)]
     #[schemars(default)]
     pub color_description: ColorDescription,
+    // Set by the recovery, never supplied: written by a
+    // `SetAssetColorDescription` whose provenance is `AgentAssumption`,
+    // cleared by the revert that restores it, and refused outright on
+    // `AddAsset` (IN1 §4.4 rule 26). Absent in every project written before
+    // IN1 and omitted when `None`, so no existing project file changes byte.
+    //
+    // Only the one-line doc comment below reaches the JSON schema. `MediaAsset`
+    // is inlined into 55 registry schemas, so every schema-visible byte here is
+    // paid 55 times by an agent reading `add_asset` (IN1 §6.6 rule 27).
+    /// The description an agent assumption replaced, when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub assumed_from: Option<ColorDescription>,
 }
 
 /// Probed replacement metadata supplied to the filesystem-owning media layer

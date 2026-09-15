@@ -1831,6 +1831,7 @@ mod tests {
             resolution: Some((160, 90)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let duration = map_source_range_to_project(
             TimeCode(10)..TimeCode(40),

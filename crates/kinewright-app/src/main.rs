@@ -10,6 +10,7 @@ mod edit_diff;
 mod error_ui;
 mod export_ui;
 mod icons;
+mod incident_ui;
 mod inspector_ui;
 mod keys;
 mod look_browser_ui;

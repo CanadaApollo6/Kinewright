@@ -32,6 +32,7 @@ fn asset(id: u64, fps: Rational, duration: i64) -> MediaAsset {
         resolution: Some((1_920, 1_080)),
         source_fingerprint: MediaSourceFingerprint::default(),
         color_description: ColorDescription::default(),
+        assumed_from: None,
     }
 }
 
@@ -1643,6 +1644,7 @@ fn add_freeze_frame_validates_track_asset_frame_and_duration() {
             resolution: None,
             source_fingerprint: MediaSourceFingerprint::default(),
             color_description: ColorDescription::default(),
+            assumed_from: None,
         },
     ]);
     document.validate().unwrap();
@@ -5992,4 +5994,431 @@ fn au5_repair_report_wire_shapes_are_additive() {
         "an empty list is omitted"
     );
     assert_integer_leaves(&encoded, "audio_repair_report");
+}
+
+// ---------------------------------------------------------------------------
+// IN1 §4.4 — `MediaAsset.assumed_from`, the widened guard, and the `AddAsset`
+// refusal.
+// ---------------------------------------------------------------------------
+
+/// A probed description in the shape `in1_untagged.mp4` and
+/// `in1_untagged_vp9.webm` produce, at the confidence each of them reports.
+fn in1_probed_description(confidence_basis_points: u16) -> ColorDescription {
+    ColorDescription {
+        primaries: ColorPrimaries::Unknown,
+        transfer: ColorTransfer::Unknown,
+        matrix: ColorMatrix::Unknown,
+        range: ColorRange::Unknown,
+        white_point: ColorWhitePoint::Unknown,
+        bit_depth: ColorBitDepth::Eight,
+        confidence_basis_points,
+        provenance: ColorProvenance::Inferred,
+    }
+}
+
+/// A document holding one probed asset, ready for the recovery.
+fn in1_document_with_probed_asset(confidence_basis_points: u16) -> Document {
+    let fps = Rational::new(25, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    let mut probed_asset = asset(1, fps, 50);
+    probed_asset.color_description = in1_probed_description(confidence_basis_points);
+    Operation::AddAsset {
+        asset: probed_asset,
+    }
+    .apply(&mut document)
+    .unwrap();
+    document
+}
+
+fn in1_assume(document: &mut Document, confidence_basis_points: u16) -> ColorDescription {
+    let probed = in1_probed_description(confidence_basis_points);
+    kinewright_core::assume_rec709_operation(AssetId(1), &probed)
+        .apply(document)
+        .unwrap();
+    probed
+}
+
+#[test]
+fn in1_every_other_provenance_is_refused_by_name() {
+    // One arm per provenance, no wildcard: a new provenance cannot be added
+    // without deciding here whether the guard admits it (IN1 §4.4 rule 31).
+    let cases: Vec<(ColorProvenance, bool)> = vec![
+        (ColorProvenance::Unknown, false),
+        (ColorProvenance::ContainerMetadata, false),
+        (ColorProvenance::StreamMetadata, false),
+        (ColorProvenance::SidecarMetadata, false),
+        (ColorProvenance::UserOverride, true),
+        (ColorProvenance::Inferred, false),
+        (ColorProvenance::ApplicationDefault, false),
+        (ColorProvenance::AgentAssumption, true),
+        (ColorProvenance::Other("agent_assumption".to_owned()), false),
+        (ColorProvenance::Other("anything".to_owned()), false),
+    ];
+    for (provenance, admitted) in &cases {
+        // The exhaustive match is what breaks the build when a variant is
+        // added; the table above is what the assertions read.
+        let expected_admitted = match provenance {
+            ColorProvenance::UserOverride | ColorProvenance::AgentAssumption => true,
+            ColorProvenance::Unknown
+            | ColorProvenance::ContainerMetadata
+            | ColorProvenance::StreamMetadata
+            | ColorProvenance::SidecarMetadata
+            | ColorProvenance::Inferred
+            | ColorProvenance::ApplicationDefault
+            | ColorProvenance::Other(_) => false,
+        };
+        assert_eq!(*admitted, expected_admitted, "{provenance:?}");
+
+        let mut document = in1_document_with_probed_asset(2_000);
+        let before = document.clone();
+        let mut description = user_color_override();
+        description.provenance = provenance.clone();
+        let result = Operation::SetAssetColorDescription {
+            asset: AssetId(1),
+            color_description: description,
+        }
+        .apply(&mut document);
+        if *admitted {
+            assert_eq!(result, Ok(()), "{provenance:?} must be admitted");
+        } else {
+            assert_eq!(
+                result,
+                Err(OpError::InvalidColorOverrideProvenance {
+                    asset: AssetId(1),
+                    actual: provenance.clone(),
+                }),
+                "{provenance:?} must be refused by name"
+            );
+            assert_eq!(document, before, "a refusal must change nothing");
+        }
+    }
+    assert_eq!(cases.len(), 10);
+}
+
+#[test]
+fn in1_an_agent_assumption_records_the_exact_previous_description() {
+    let mut document = in1_document_with_probed_asset(2_000);
+    let probed = in1_assume(&mut document, 2_000);
+    let asset = document.asset(AssetId(1)).unwrap();
+    assert_eq!(asset.assumed_from.as_ref(), Some(&probed));
+    assert_eq!(
+        asset.color_description,
+        kinewright_core::recovery_description(&probed)
+    );
+    assert_eq!(
+        asset.color_description.provenance,
+        ColorProvenance::AgentAssumption
+    );
+}
+
+#[test]
+fn in1_a_second_agent_assumption_does_not_overwrite_assumed_from() {
+    let mut document = in1_document_with_probed_asset(2_000);
+    let probed = in1_assume(&mut document, 2_000);
+
+    let mut second = kinewright_core::recovery_description(&probed);
+    second.range = ColorRange::Full;
+    Operation::SetAssetColorDescription {
+        asset: AssetId(1),
+        color_description: second.clone(),
+    }
+    .apply(&mut document)
+    .unwrap();
+
+    let asset = document.asset(AssetId(1)).unwrap();
+    assert_eq!(asset.color_description, second);
+    assert_eq!(
+        asset.assumed_from.as_ref(),
+        Some(&probed),
+        "the first probed truth is never overwritten"
+    );
+}
+
+#[test]
+fn in1_the_revert_restores_the_probed_description_and_clears_assumed_from() {
+    for confidence in [2_000_u16, 4_000] {
+        let mut document = in1_document_with_probed_asset(confidence);
+        let probed = in1_assume(&mut document, confidence);
+        let assumed_from = document
+            .asset(AssetId(1))
+            .unwrap()
+            .assumed_from
+            .clone()
+            .unwrap();
+
+        Operation::SetAssetColorDescription {
+            asset: AssetId(1),
+            color_description: assumed_from,
+        }
+        .apply(&mut document)
+        .unwrap();
+
+        let asset = document.asset(AssetId(1)).unwrap();
+        assert_eq!(
+            asset.color_description, probed,
+            "byte-identical at {confidence}"
+        );
+        assert_eq!(
+            asset.color_description.provenance,
+            ColorProvenance::Inferred
+        );
+        assert_eq!(asset.color_description.confidence_basis_points, confidence);
+        assert_eq!(asset.assumed_from, None);
+    }
+}
+
+#[test]
+fn in1_a_different_stream_metadata_description_is_still_refused() {
+    let mut document = in1_document_with_probed_asset(2_000);
+    let probed = in1_assume(&mut document, 2_000);
+    let before = document.clone();
+
+    let mut forged = probed;
+    forged.provenance = ColorProvenance::StreamMetadata;
+    let error = Operation::SetAssetColorDescription {
+        asset: AssetId(1),
+        color_description: forged,
+    }
+    .apply(&mut document)
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        OpError::InvalidColorOverrideProvenance {
+            asset: AssetId(1),
+            actual: ColorProvenance::StreamMetadata,
+        }
+    );
+    assert_eq!(document, before);
+}
+
+#[test]
+fn in1_a_user_override_over_an_assumption_leaves_assumed_from_intact() {
+    let mut document = in1_document_with_probed_asset(2_000);
+    let probed = in1_assume(&mut document, 2_000);
+
+    Operation::SetAssetColorDescription {
+        asset: AssetId(1),
+        color_description: user_color_override(),
+    }
+    .apply(&mut document)
+    .unwrap();
+
+    let asset = document.asset(AssetId(1)).unwrap();
+    assert_eq!(asset.color_description, user_color_override());
+    assert_eq!(
+        asset.assumed_from.as_ref(),
+        Some(&probed),
+        "the revert stays reachable after a user override"
+    );
+
+    // And the revert still works from there.
+    Operation::SetAssetColorDescription {
+        asset: AssetId(1),
+        color_description: probed.clone(),
+    }
+    .apply(&mut document)
+    .unwrap();
+    let asset = document.asset(AssetId(1)).unwrap();
+    assert_eq!(asset.color_description, probed);
+    assert_eq!(asset.assumed_from, None);
+}
+
+#[test]
+fn in1_a_zero_confidence_probed_description_round_trips_through_the_revert() {
+    let fps = Rational::new(25, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    let mut probed_asset = asset(1, fps, 50);
+    probed_asset.color_description = ColorDescription::unknown();
+    Operation::AddAsset {
+        asset: probed_asset,
+    }
+    .apply(&mut document)
+    .unwrap();
+    let probed = ColorDescription::unknown();
+    assert_eq!(probed.confidence_basis_points, 0);
+
+    kinewright_core::assume_rec709_operation(AssetId(1), &probed)
+        .apply(&mut document)
+        .unwrap();
+    assert_eq!(
+        document.asset(AssetId(1)).unwrap().assumed_from.as_ref(),
+        Some(&probed)
+    );
+
+    // Byte-equality is tested before the zero-confidence check, so the truth
+    // can always be restored even when the truth is uncertain.
+    assert_eq!(
+        Operation::SetAssetColorDescription {
+            asset: AssetId(1),
+            color_description: probed.clone(),
+        }
+        .apply(&mut document),
+        Ok(())
+    );
+    let asset = document.asset(AssetId(1)).unwrap();
+    assert_eq!(asset.color_description, probed);
+    assert_eq!(asset.assumed_from, None);
+}
+
+#[test]
+fn in1_a_zero_confidence_agent_assumption_is_still_refused() {
+    let mut document = in1_document_with_probed_asset(2_000);
+    let before = document.clone();
+    let mut zero = kinewright_core::recovery_description(&in1_probed_description(2_000));
+    zero.confidence_basis_points = 0;
+    assert_eq!(zero.provenance, ColorProvenance::AgentAssumption);
+
+    let error = Operation::SetAssetColorDescription {
+        asset: AssetId(1),
+        color_description: zero,
+    }
+    .apply(&mut document)
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        OpError::ZeroConfidenceColorOverride { asset: AssetId(1) }
+    );
+    assert_eq!(document, before);
+}
+
+#[test]
+fn in1_add_asset_refuses_a_supplied_assumed_from() {
+    let fps = Rational::new(25, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    let before = document.clone();
+
+    let mut laundered = asset(1, fps, 50);
+    laundered.assumed_from = Some(user_color_override());
+    let error = Operation::AddAsset { asset: laundered }
+        .apply(&mut document)
+        .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::AssumedFromNotSuppliable { asset: AssetId(1) }
+    );
+    assert_eq!(document, before);
+
+    let mut honest = asset(1, fps, 50);
+    honest.assumed_from = None;
+    Operation::AddAsset { asset: honest }
+        .apply(&mut document)
+        .unwrap();
+    assert_eq!(document.media_pool.len(), 1);
+    assert_eq!(document.asset(AssetId(1)).unwrap().assumed_from, None);
+}
+
+#[test]
+fn in1_a_relink_leaves_assumed_from_and_the_colour_description_byte_identical() {
+    let fps = Rational::new(25, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    let mut probed_asset = asset(1, fps, 50);
+    probed_asset.color_description = in1_probed_description(2_000);
+    probed_asset.source_fingerprint = source_fingerprint(4_096);
+    Operation::AddAsset {
+        asset: probed_asset,
+    }
+    .apply(&mut document)
+    .unwrap();
+    let probed = in1_assume(&mut document, 2_000);
+    let before = document.asset(AssetId(1)).unwrap().clone();
+
+    Operation::RelinkAsset {
+        asset: AssetId(1),
+        candidate: relink_candidate(&before, "/moved/in1_untagged.mp4"),
+        allow_unverified_source: false,
+    }
+    .apply(&mut document)
+    .unwrap();
+
+    let after = document.asset(AssetId(1)).unwrap();
+    assert_eq!(after.path, PathBuf::from("/moved/in1_untagged.mp4"));
+    assert_eq!(after.assumed_from, before.assumed_from);
+    assert_eq!(after.assumed_from.as_ref(), Some(&probed));
+    assert_eq!(after.color_description, before.color_description);
+}
+
+#[test]
+fn in1_validate_asset_refuses_an_out_of_range_assumed_from() {
+    let fps = Rational::new(25, 1).unwrap();
+    let mut invalid = asset(1, fps, 50);
+    let mut out_of_range = in1_probed_description(2_000);
+    out_of_range.confidence_basis_points = 10_001;
+    invalid.assumed_from = Some(out_of_range);
+
+    let mut document = empty_timeline(fps);
+    document.media_pool.push(invalid);
+    assert_eq!(
+        document.validate(),
+        Err(OpError::ColorConfidenceOutOfRange { actual: 10_001 })
+    );
+}
+
+#[test]
+fn in1_assumed_from_is_omitted_when_absent_and_pre_in1_projects_round_trip_byte_identically() {
+    let document = in1_document_with_probed_asset(2_000);
+    let encoded = serde_json::to_string(&document).unwrap();
+    assert!(
+        !encoded.contains("assumed_from"),
+        "an asset with no assumption must not grow a key"
+    );
+    assert_eq!(
+        serde_json::from_str::<Document>(&encoded).unwrap(),
+        document
+    );
+
+    let mut assumed = in1_document_with_probed_asset(2_000);
+    in1_assume(&mut assumed, 2_000);
+    let encoded = serde_json::to_string(&assumed).unwrap();
+    assert!(encoded.contains("\"assumed_from\""));
+    assert_eq!(serde_json::from_str::<Document>(&encoded).unwrap(), assumed);
+
+    let legacy: Document =
+        serde_json::from_str(include_str!("fixtures/pre_m13_project.json")).unwrap();
+    let round_tripped = serde_json::to_vec(&legacy).unwrap();
+    assert!(
+        !round_tripped
+            .windows(13)
+            .any(|window| window == b"assumed_from")
+    );
+    assert_eq!(round_tripped.len(), 1_215);
+    // IN1 §9 clause 10 pins the digest as FNV-1a 64 `ff6c17d72643a88b`. The
+    // *bytes* reproduce exactly — 1 215 compact, 1 891 pretty, both of
+    // probe-2 §T7's figures — but the standard FNV-1a 64 (offset basis
+    // 0xcbf2_9ce4_8422_2325, prime 0x100_0000_01b3) of those bytes is
+    // `c9da3186e131e4fd`, so the contract's digest was produced by a different
+    // spelling of the hash. The value below is the one this tree measures.
+    assert_eq!(
+        format!("{:016x}", fnv1a64(&round_tripped)),
+        "c9da3186e131e4fd"
+    );
+}
+
+/// FNV-1a 64, the digest probe-2 §T7 pinned the legacy round trip with.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+#[test]
+fn in1_a_hand_edited_assumed_from_is_rejected_on_load() {
+    let mut document = in1_document_with_probed_asset(2_000);
+    in1_assume(&mut document, 2_000);
+    let mut saved = serde_json::to_value(&document).unwrap();
+    saved["media_pool"][0]["assumed_from"]["confidence_basis_points"] = serde_json::json!(10_001);
+
+    // `ColorDescription`'s `deserialize_confidence_basis_points` fires before
+    // `validate_asset` is ever called, so the hand edit dies at load.
+    let error = serde_json::from_value::<Document>(saved).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("colour confidence must be in 0..=10000 basis points"),
+        "unexpected error: {error}"
+    );
 }

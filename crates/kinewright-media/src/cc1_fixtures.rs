@@ -54,6 +54,7 @@ use crate::{
     frame::WorkingFrame,
     gpu_test_support::HARDWARE_GPU_OPT_IN_ENV,
     initialize_ffmpeg,
+    render::contextual_managed_decode_error,
     sha256::Sha256,
     test_support::{TempDirectory, ffmpeg_executable},
     timeline::TransitionRenderParams,
@@ -1809,6 +1810,7 @@ fn cc1_core_migration_fixture_preserves_effect_order_and_parameters() {
         resolution: Some((16, 16)),
         source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
         color_description: ColorDescription::default(),
+        assumed_from: None,
     };
     let add_asset = Operation::AddAsset {
         asset: migration_asset.clone(),
@@ -2943,6 +2945,9 @@ fn assert_typed_source_error(
 
 #[test]
 fn cc1_source_profile_classification_is_typed_and_actionable() {
+    // The decoder cases call `VideoDecoder` directly, with no asset in play,
+    // so the production wrap gets the same asset id the test probes below.
+    const CC1_EVIDENCE_ASSET: AssetId = AssetId(7);
     const PRIMARIES_ALLOWED: &str = "bt709 or srgb in a supported CC1 profile";
     const TRANSFER_ALLOWED: &str = "bt709, bt1886, or srgb in a matching profile";
     const MATRIX_ALLOWED: &str = "bt709/rgb or rgb/identity in a matching profile";
@@ -3133,9 +3138,24 @@ fn cc1_source_profile_classification_is_typed_and_actionable() {
         None,
     ) {
         Ok(_) => panic!("unknown source metadata must block managed decode"),
-        Err(error) => error,
+        // IN1 §4.2 rules 8 and 9: the classifier refusal now leaves the decoder
+        // typed, and the renderer is what adds the asset and the path. These
+        // fixtures call the decoder directly, so they apply the same wrap the
+        // production path applies (`render.rs:511-518`) — otherwise the
+        // evidence JSON below would silently lose the path and the assumption
+        // it has recorded since CC1.
+        Err(error) => contextual_managed_decode_error(
+            CC1_EVIDENCE_ASSET,
+            &actual_path,
+            &unknown_description,
+            None,
+            error,
+        ),
     };
-    assert!(matches!(unknown_decode_error, MediaError::Backend(_)));
+    assert!(matches!(
+        unknown_decode_error,
+        MediaError::SourceColorForAsset(_)
+    ));
 
     let mut partial_description = rec709_description(8, ColorRange::Limited, ColorTransfer::Bt709);
     partial_description.bit_depth = ColorBitDepth::Unknown;
@@ -3158,9 +3178,18 @@ fn cc1_source_profile_classification_is_typed_and_actionable() {
         None,
     ) {
         Ok(_) => panic!("partial source metadata must block managed decode"),
-        Err(error) => error,
+        Err(error) => contextual_managed_decode_error(
+            CC1_EVIDENCE_ASSET,
+            &actual_path,
+            &partial_description,
+            None,
+            error,
+        ),
     };
-    assert!(matches!(partial_decode_error, MediaError::Backend(_)));
+    assert!(matches!(
+        partial_decode_error,
+        MediaError::SourceColorForAsset(_)
+    ));
 
     // High confidence does not make an unsupported tuple supported.
     let mut confident_hlg = rec709_description(8, ColorRange::Limited, ColorTransfer::Bt709);
@@ -3193,9 +3222,15 @@ fn cc1_source_profile_classification_is_typed_and_actionable() {
             Some(ColorSourceProfileAssumption::D65),
         ) {
             Ok(_) => panic!("actual source with unsupported transfer must block managed decode"),
-            Err(error) => error,
+            Err(error) => contextual_managed_decode_error(
+                CC1_EVIDENCE_ASSET,
+                &actual_path,
+                &description,
+                Some(ColorSourceProfileAssumption::D65),
+                error,
+            ),
         };
-        assert!(matches!(decoder_error, MediaError::Backend(_)));
+        assert!(matches!(decoder_error, MediaError::SourceColorForAsset(_)));
         decoder_cases.push(json!({
             "transfer": transfer,
             "code": error.code(),
@@ -3216,9 +3251,15 @@ fn cc1_source_profile_classification_is_typed_and_actionable() {
             Some(ColorSourceProfileAssumption::D65),
         ) {
             Ok(_) => panic!("unsupported integer depth must block managed decode"),
-            Err(error) => error,
+            Err(error) => contextual_managed_decode_error(
+                CC1_EVIDENCE_ASSET,
+                &actual_path,
+                &description,
+                Some(ColorSourceProfileAssumption::D65),
+                error,
+            ),
         };
-        assert!(matches!(decoder_error, MediaError::Backend(_)));
+        assert!(matches!(decoder_error, MediaError::SourceColorForAsset(_)));
         decoder_cases.push(json!({
             "bit_depth": depth,
             "managed_decode_blocked": true,

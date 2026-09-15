@@ -111,6 +111,7 @@ fn asset(id: AssetId, kind: MediaKind, rate: u32, frames: i64) -> MediaAsset {
         },
         source_fingerprint: MediaSourceFingerprint::default(),
         color_description: ColorDescription::default(),
+        assumed_from: None,
     }
 }
 

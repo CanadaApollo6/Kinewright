@@ -420,6 +420,7 @@ mod tests {
                 resolution: Some((1920, 1080)),
                 source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                 color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
             }],
             fps,
             resolution: (1920, 1080),
@@ -638,6 +639,7 @@ mod tests {
                 resolution: Some((CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT)),
                 source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                 color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
             }],
             tracks: vec![Track {
                 id: TrackId(1),

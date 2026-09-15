@@ -40,6 +40,21 @@ impl ErrorLog {
         self.entries.len()
     }
 
+    /// Count entries written under one source label.
+    ///
+    /// Test-only: IN1 §5.2 rule 15's two-counts test asserts the number of
+    /// `"Incident"`-source entries rather than `len()`, because the log may
+    /// also hold an environment-dependent audio line. The production log
+    /// exposes no per-source read, and Part A changes nothing about how the
+    /// log works (IN1 §4.6 rule 41); this accessor ships in no build.
+    #[cfg(test)]
+    pub(crate) fn count_with_source(&self, source: &str) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.source == source)
+            .count()
+    }
+
     fn clear(&mut self) {
         self.entries.clear();
     }

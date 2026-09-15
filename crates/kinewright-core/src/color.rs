@@ -149,6 +149,7 @@ color_tag! {
         UserOverride => "user_override",
         Inferred => "inferred",
         ApplicationDefault => "application_default",
+        AgentAssumption => "agent_assumption",
     }
 }
 

@@ -161,6 +161,7 @@ fn document_with_one_clip() -> Document {
             resolution: None,
             source_fingerprint: MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         },
     }
     .apply(&mut doc)
@@ -1251,6 +1252,7 @@ fn gap_corpus_assets() -> Vec<MediaAsset> {
         resolution: None,
         source_fingerprint: MediaSourceFingerprint::default(),
         color_description: kinewright_core::ColorDescription::default(),
+        assumed_from: None,
     };
     let video = MediaAsset {
         id: AssetId(2),
@@ -1262,6 +1264,7 @@ fn gap_corpus_assets() -> Vec<MediaAsset> {
         resolution: Some((1_920, 1_080)),
         source_fingerprint: MediaSourceFingerprint::default(),
         color_description: kinewright_core::ColorDescription::default(),
+        assumed_from: None,
     };
     vec![audio, video]
 }
@@ -1696,6 +1699,7 @@ fn au5_a_fill_built_from_the_inverse_has_the_gaps_exact_duration() {
             resolution: None,
             source_fingerprint: MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         },
     }
     .apply(&mut doc)

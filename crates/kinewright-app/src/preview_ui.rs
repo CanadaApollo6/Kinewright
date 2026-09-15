@@ -1671,6 +1671,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         }];
         document.tracks[0].clips = vec![kinewright_core::Clip {
             id: CLIP,

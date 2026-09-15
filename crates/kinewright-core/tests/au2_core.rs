@@ -363,6 +363,7 @@ fn document_with_one_clip() -> Document {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         },
     }
     .apply(&mut doc)

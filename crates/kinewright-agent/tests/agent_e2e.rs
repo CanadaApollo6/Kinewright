@@ -538,6 +538,7 @@ fn fixture_document() -> Document {
         resolution: Some((320, 180)),
         source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
         color_description: kinewright_core::ColorDescription::default(),
+        assumed_from: None,
     };
     Document {
         catalog: kinewright_core::MediaCatalog::default(),

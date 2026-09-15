@@ -1984,6 +1984,7 @@ mod tests {
                 provenance: ColorProvenance::UserOverride,
                 ..ColorContext::sdr_rec709().delivery
             },
+            assumed_from: None,
         };
         Document {
             tracks: vec![Track {
@@ -2298,6 +2299,7 @@ mod tests {
                 resolution: Some((1920, 1080)),
                 source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                 color_description: ColorDescription::default(),
+                assumed_from: None,
             }],
             fps: Rational::new(24, 1).expect("valid fps"),
             resolution: (1920, 1080),

@@ -1287,6 +1287,21 @@ pub struct HumanTaskReview {
     pub notes: Option<String>,
 }
 
+/// What kind of question a human was asked (IN1 §8 rules 1-3).
+///
+/// `Recovery` is what IN4's "zero recovery questions asked" gate counts. IN1
+/// adds the kind and asks no recovery question of its own; it pins no budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionKind {
+    /// "Which of these fixes should Kinewright apply?" -- a question about a
+    /// classified failure, which a good investigator never has to ask.
+    Recovery,
+    /// "Does this cut work?" -- a creative judgement no machine may make.
+    #[default]
+    Judgement,
+}
+
 /// One creative question put to a blind reviewer, verbatim.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HumanQuestion {
@@ -1296,6 +1311,12 @@ pub struct HumanQuestion {
     pub answer: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Absent in every `human-review.json` written before IN1, and resolving
+    /// to [`QuestionKind::Judgement`] when it is, because every question asked
+    /// before IN1 was a creative judgement question and none was a recovery
+    /// question (IN1 §8 rule 2).
+    #[serde(default)]
+    pub kind: QuestionKind,
 }
 
 /// The schema of `blind/review-form.json` and `blind-key.json`.
@@ -9300,6 +9321,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         Document {
             catalog: kinewright_core::MediaCatalog::default(),
@@ -9412,6 +9434,7 @@ mod tests {
             resolution: None,
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         final_document.media_pool.push(audio_asset);
         final_document.tracks.push(Track {
@@ -9901,6 +9924,7 @@ mod tests {
             resolution: None,
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         exact_document.media_pool.push(audio_asset);
         exact_document.tracks.push(Track {
@@ -10010,6 +10034,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let closing_asset = MediaAsset {
             id: AssetId(3),
@@ -10021,6 +10046,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         final_document
             .media_pool
@@ -10623,6 +10649,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         final_document.media_pool.push(second_asset);
         let mut second_clip = final_document.tracks[0].clips[0].clone();
@@ -12115,6 +12142,8 @@ mod tests {
             prompt: "Does the match preserve natural and intentional differences?".to_owned(),
             answer: Some(true),
             notes: None,
+            // IN1 §8: every question this harness asks is a creative judgement.
+            kind: QuestionKind::Judgement,
         }];
         let review = HumanReviewFile {
             schema_version: HUMAN_REVIEW_SCHEMA_VERSION,
@@ -12145,6 +12174,36 @@ mod tests {
         );
     }
 
+    /// IN1 §8 rules 1-3: the new `kind` is additive. Every `human-review.json`
+    /// written before IN1 loads unchanged, and resolves to `Judgement` --
+    /// because every question asked before IN1 *was* a creative judgement
+    /// question and none was a recovery question.
+    #[test]
+    fn in1_a_question_without_a_kind_is_a_judgement_question() {
+        let v6_era = serde_json::json!({
+            "id": "a",
+            "prompt": "Does the match preserve natural and intentional differences?",
+            "answer": null
+        });
+        let question: HumanQuestion =
+            serde_json::from_value(v6_era).expect("a v6-era question still loads");
+        assert_eq!(question.kind, QuestionKind::Judgement);
+        assert_eq!(QuestionKind::default(), QuestionKind::Judgement);
+
+        // IN1 asks no recovery question, but the kind round-trips so IN4's
+        // "zero recovery questions asked" gate has something to count.
+        let recovery = HumanQuestion {
+            kind: QuestionKind::Recovery,
+            ..question
+        };
+        let body = serde_json::to_string(&recovery).expect("a question serialises");
+        assert!(body.contains(r#""kind":"recovery""#), "{body}");
+        assert_eq!(
+            serde_json::from_str::<HumanQuestion>(&body).expect("it reads back"),
+            recovery
+        );
+    }
+
     /// Acceptance requires every question answered, in both directions.
     #[test]
     fn cc7_accepted_requires_every_question_answered() {
@@ -12154,6 +12213,8 @@ mod tests {
             prompt: "Does the look support the story?".to_owned(),
             answer: None,
             notes: None,
+            // IN1 §8: every question this harness asks is a creative judgement.
+            kind: QuestionKind::Judgement,
         }];
         let mut review = HumanReviewFile {
             schema_version: HUMAN_REVIEW_SCHEMA_VERSION,
@@ -12920,6 +12981,8 @@ mod tests {
                 prompt: "Does the match preserve natural and intentional differences?".to_owned(),
                 answer: None,
                 notes: None,
+                // IN1 §8: every question this harness asks is a creative judgement.
+                kind: QuestionKind::Judgement,
             }],
         )]);
         let review = human_review_template_with_questions(
@@ -13731,6 +13794,8 @@ mod tests {
             prompt: "Is the dialogue clearly balanced above the music bed?".to_owned(),
             answer: None,
             notes: None,
+            // IN1 §8: every question this harness asks is a creative judgement.
+            kind: QuestionKind::Judgement,
         }];
         let mut review = HumanReviewFile {
             schema_version: HUMAN_REVIEW_SCHEMA_VERSION,

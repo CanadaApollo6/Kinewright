@@ -18,12 +18,13 @@ use base64::{
 };
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
 use kinewright_core::{
-    Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioBus, AudioBusId,
-    AudioLoudness, AutomationCurve, BeatMontageCadenceContract, BeatMontageSelect, BeatStatus,
-    CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, ColorNodeKind,
-    ColorSourceError, Command, Core, DeliveryAspect, DeliveryEncodeDepth, DeliveryProfile,
-    DeliveryVariant, Document, Effect, EffectId, Event, Export, ExportCancellation, Keyframe,
-    KeyframeInterpolation, LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, LutAsset,
+    AgentEvent, Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioBus,
+    AudioBusId, AudioLoudness, AutomationCurve, BeatMontageCadenceContract, BeatMontageSelect,
+    BeatStatus, CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, ColorNodeKind,
+    ColorProvenance, ColorSourceError, Command, Core, DeliveryAspect, DeliveryEncodeDepth,
+    DeliveryProfile, DeliveryVariant, Document, Effect, EffectId, Event, Export,
+    ExportCancellation, Incident, IncidentId, IncidentLog, IncidentOutcome, IncidentTelemetry,
+    Keyframe, KeyframeInterpolation, LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, LutAsset,
     MUSIC_STRUCTURE_DEFAULT_METER_BEATS, MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId,
     MediaAsset, MediaAvailabilityKind, MediaCacheFamily, MediaCacheInventory, MediaKind,
     MixLevelRequest, MixSpectrumPoint, MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest,
@@ -277,6 +278,16 @@ pub enum McpServerError {
     Schema(#[from] SchemaError),
 }
 
+/// The one [`IncidentLog`] a project session shares with every MCP server it
+/// owns, in the shape the saved-project-path handle already uses (IN1 §5.1
+/// rule 2).
+///
+/// The application hands each of a project's servers **that project's** handle
+/// and no other's, so the agent in the chat panel reads exactly the incidents
+/// the person sees. Every constructor that does not take one defaults to a
+/// fresh empty log, so no existing call site changes (IN1 §5.1 rule 3).
+pub type IncidentLogHandle = Arc<RwLock<IncidentLog>>;
+
 pub struct McpServer {
     endpoint: String,
     confirmations: ConfirmationBroker,
@@ -289,6 +300,9 @@ pub struct McpServer {
     /// the `color_nodes` manifests, and the export preflight resolve a look's
     /// bytes. Shared with the export queue so both see the same project.
     project_path: Arc<RwLock<Option<PathBuf>>>,
+    /// The session's incident log, shared with every server in the same
+    /// project session (IN1 §6.5 rule 22).
+    incidents: IncidentLogHandle,
     tool_surface_metrics: ToolSurfaceMetrics,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
@@ -327,6 +341,7 @@ impl McpServer {
             ConfirmationBroker::default(),
             true,
             Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(IncidentLog::default())),
         )
     }
 
@@ -386,6 +401,7 @@ impl McpServer {
             ConfirmationBroker::default(),
             false,
             project_path,
+            Arc::new(RwLock::new(IncidentLog::default())),
         )
     }
 
@@ -433,6 +449,41 @@ impl McpServer {
             ConfirmationBroker::default(),
             false,
             project_path,
+            Arc::new(RwLock::new(IncidentLog::default())),
+        )
+    }
+
+    /// Start a branch-scoped MCP server with branch-snapshot exports that
+    /// shares **both** the project session's saved-project-path handle and its
+    /// [`IncidentLog`] (IN1 §5.1 rule 3).
+    ///
+    /// This is the one constructor that takes an incident log. Every other
+    /// constructor keeps its signature and defaults the handle to a fresh
+    /// empty log, so no existing call site changes; a caller that owns a
+    /// project session passes the session's own handle here, and the agent in
+    /// that session's chat panel then reads exactly the incidents the person
+    /// sees — and no other project's.
+    ///
+    /// # Errors
+    ///
+    /// Returns an MCP server error when the listener, export worker, or server thread cannot start.
+    pub fn start_isolated_with_exporter_project_path_and_incidents(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        exporter: Arc<dyn Export>,
+        project_path: Arc<RwLock<Option<PathBuf>>>,
+        incidents: IncidentLogHandle,
+    ) -> Result<Self, McpServerError> {
+        Self::start_configured(
+            core,
+            playback,
+            analysis,
+            Some(exporter),
+            ConfirmationBroker::default(),
+            false,
+            project_path,
+            incidents,
         )
     }
 
@@ -450,9 +501,14 @@ impl McpServer {
             confirmations,
             true,
             Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(IncidentLog::default())),
         )
     }
 
+    /// One more argument than clippy's default, because the eighth is the
+    /// session's incident log and every public constructor above still takes
+    /// at most six (IN1 §5.1 rule 3).
+    #[allow(clippy::too_many_arguments)]
     fn start_configured(
         core: Core,
         playback: Arc<dyn Playback>,
@@ -461,6 +517,7 @@ impl McpServer {
         confirmations: ConfirmationBroker,
         publish_to_playback: bool,
         project_path: Arc<RwLock<Option<PathBuf>>>,
+        incidents: IncidentLogHandle,
     ) -> Result<Self, McpServerError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .map_err(McpServerError::Bind)?;
@@ -488,6 +545,7 @@ impl McpServer {
             confirmations.clone(),
             publish_to_playback,
             Arc::clone(&project_path),
+            Arc::clone(&incidents),
         );
         let server_thread = thread::Builder::new()
             .name("kinewright-mcp".to_owned())
@@ -497,6 +555,7 @@ impl McpServer {
             endpoint,
             confirmations,
             project_path,
+            incidents,
             tool_surface_metrics,
             shutdown: Some(shutdown),
             thread: Some(server_thread),
@@ -524,6 +583,16 @@ impl McpServer {
     #[must_use]
     pub fn project_path_handle(&self) -> Arc<RwLock<Option<PathBuf>>> {
         Arc::clone(&self.project_path)
+    }
+
+    /// The shared [`IncidentLog`] this server answers `get_incidents` from.
+    ///
+    /// `get_incidents` reads this log and never re-classifies the document's
+    /// assets, which is what stops it reporting a white-point incident for
+    /// every correctly tagged source (IN1 §6.5 rule 24).
+    #[must_use]
+    pub fn incident_log_handle(&self) -> IncidentLogHandle {
+        Arc::clone(&self.incidents)
     }
 
     /// Publish (or clear) the saved project file path for this session.
@@ -595,6 +664,8 @@ struct KinewrightMcp {
     prepared_plans: Arc<Mutex<PreparedPlanStore>>,
     /// See [`McpServer::project_path_handle`].
     project_path: Arc<RwLock<Option<PathBuf>>>,
+    /// See [`McpServer::incident_log_handle`].
+    incidents: IncidentLogHandle,
 }
 
 impl KinewrightMcp {
@@ -613,9 +684,13 @@ impl KinewrightMcp {
             confirmations,
             true,
             Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(IncidentLog::default())),
         )
     }
 
+    /// One more argument than clippy's default, for the reason
+    /// [`McpServer::start_configured`] carries.
+    #[allow(clippy::too_many_arguments)]
     fn configured(
         core: Core,
         playback: Arc<dyn Playback>,
@@ -624,6 +699,7 @@ impl KinewrightMcp {
         confirmations: ConfirmationBroker,
         publish_to_playback: bool,
         project_path: Arc<RwLock<Option<PathBuf>>>,
+        incidents: IncidentLogHandle,
     ) -> Self {
         Self {
             core,
@@ -634,6 +710,7 @@ impl KinewrightMcp {
             publish_to_playback,
             prepared_plans: Arc::new(Mutex::new(PreparedPlanStore::default())),
             project_path,
+            incidents,
         }
     }
 
@@ -795,6 +872,16 @@ impl KinewrightMcp {
                         args.plan_id
                     ))
                 })
+            }
+            // IN1 §6.1 rule 1: both are reached only through
+            // `invoke_capability`, which re-enters this dispatcher by name.
+            "get_incidents" => {
+                let args: GetIncidentsArgs = decode_args("get_incidents", arguments)?;
+                self.get_incidents(&args)
+            }
+            "resolve_incident" => {
+                let args: ResolveIncidentArgs = decode_args("resolve_incident", arguments)?;
+                self.resolve_incident(&args)
             }
             "get_timeline_state" => {
                 let (revision, document) = self.snapshot()?;
@@ -1207,6 +1294,109 @@ impl KinewrightMcp {
                 None,
             )),
         }
+    }
+
+    /// The session incident log, for reading.
+    fn incident_log(&self) -> Result<std::sync::RwLockReadGuard<'_, IncidentLog>, McpError> {
+        self.incidents
+            .read()
+            .map_err(|_| McpError::internal_error("the incident log stopped", None))
+    }
+
+    /// The session incident log, for recording an outcome.
+    fn incident_log_mut(&self) -> Result<std::sync::RwLockWriteGuard<'_, IncidentLog>, McpError> {
+        self.incidents
+            .write()
+            .map_err(|_| McpError::internal_error("the incident log stopped", None))
+    }
+
+    /// IN1 §6.2: the open incidents of this project at one exact revision.
+    ///
+    /// The incidents come from the session's own [`IncidentLog`] and are never
+    /// derived by re-classifying the document's assets: that is the bare
+    /// classifier IN1 §2.4 rule 32 forbids, and it would report a white-point
+    /// incident for every correctly tagged source (IN1 §6.5 rule 24).
+    fn get_incidents(&self, args: &GetIncidentsArgs) -> Result<CallToolResult, McpError> {
+        let (revision, _) = self.snapshot()?;
+        if let Some(expected) = args.expected_revision {
+            let expected = TimelineRevision(expected);
+            if expected != revision {
+                return Ok(revision_conflict_text(expected, revision));
+            }
+        }
+        let log = self.incident_log()?;
+        let incidents = if args.include_resolved {
+            log.all().collect::<Vec<_>>()
+        } else {
+            log.open().collect::<Vec<_>>()
+        };
+        Ok(success_structured(
+            format!(
+                "{} incident(s) at timeline_revision={revision}",
+                incidents.len()
+            ),
+            serde_json::json!({
+                "timeline_revision": revision,
+                "incidents": incidents,
+                "open_count": log.open_count(),
+                "next": IN1_INCIDENTS_NEXT,
+            }),
+        ))
+    }
+
+    /// IN1 §6.3: record the outcome of work the caller already did.
+    ///
+    /// This capability **never** applies an operation itself. It records an
+    /// outcome against an edit the caller made through `prepare_edit_plan` and
+    /// `commit_edit_plan` or through the application's own router, which keeps
+    /// the single mutation path -- `Command::Do*` through the core actor --
+    /// and keeps this handler free of the edit-plan machinery
+    /// (IN1 §6.3 rule 18).
+    fn resolve_incident(&self, args: &ResolveIncidentArgs) -> Result<CallToolResult, McpError> {
+        let (revision, document) = self.snapshot()?;
+        let expected = TimelineRevision(args.expected_revision);
+        // IN1 §6.3 rule 15: `expected_revision` is not optional and a stale
+        // call must not touch the log.
+        if expected != revision {
+            return Ok(revision_conflict_text(expected, revision));
+        }
+        let id = IncidentId(args.incident_id);
+        let mut log = self.incident_log_mut()?;
+        let Some(incident) = log.get(id).cloned() else {
+            return Ok(incident_error(
+                "incident_not_found",
+                &format!("no incident {id} is open or resolved in this session"),
+                "incident_id",
+                &args.incident_id.to_string(),
+                "an incident id returned by get_incidents",
+                "Call get_incidents at the current timeline_revision and resolve one of the ids it returns.",
+            ));
+        };
+        if let Some(refusal) = verify_claimed_outcome(&incident, &document, args.outcome) {
+            return Ok(refusal);
+        }
+        log.resolve(id, args.outcome.outcome());
+        // IN1 §2.3 rule 20 erratum: `telemetry_mut` is the single write path
+        // for an incident's telemetry. The resolving call is itself the one
+        // tool call this slice can honestly count; `resolved_after` stays the
+        // router's to stamp, because the session origin lives inside the log
+        // (IN1 §5.2 rule 12).
+        if let Some(telemetry) = log.telemetry_mut(id) {
+            telemetry.tool_calls = telemetry.tool_calls.saturating_add(1);
+        }
+        let resolved = log.get(id).cloned();
+        Ok(success_structured(
+            format!(
+                "recorded incident {id} as {} at timeline_revision={revision}",
+                args.outcome.as_str()
+            ),
+            serde_json::json!({
+                "timeline_revision": revision,
+                "incident": resolved,
+                "open_count": log.open_count(),
+                "note": args.note,
+            }),
+        ))
     }
 
     fn media_status(&self) -> Result<CallToolResult, McpError> {
@@ -10972,6 +11162,71 @@ struct DiscardEditPlanArgs {
     plan_id: PreparedPlanId,
 }
 
+// IN1 §6.2 rule 5. The field doc comments below are normative bytes: they are
+// measured into `get_incidents`' 493 B input schema and therefore into the
+// registry pin, and `expected_revision`'s comment stays on *two* source lines
+// because schemars joins them with a literal `\n` that is one of the 493
+// (IN1 §6.7 rule 34). This comment is deliberately not a doc comment: schemars
+// would publish it as the schema's own `description` and move the pin.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GetIncidentsArgs {
+    /// Only incidents observed at this exact revision are returned; omit to
+    /// read every open incident at the current revision.
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    /// Include incidents already resolved this session.
+    #[serde(default)]
+    include_resolved: bool,
+}
+
+// IN1 §6.3 rule 14. The four field doc comments below are normative bytes too
+// -- 204 B of the measured 809 B input schema. Not a doc comment, for the
+// reason `GetIncidentsArgs` carries.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ResolveIncidentArgs {
+    /// Exact incident id returned by `get_incidents`.
+    incident_id: u64,
+    /// The same exact revision the incident was observed at.
+    expected_revision: u64,
+    /// Outcome the caller already produced through the ordinary edit path.
+    outcome: ResolveIncidentOutcome,
+    /// Optional note recorded beside the outcome.
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ResolveIncidentOutcome {
+    Applied,
+    Reverted,
+    Explained,
+}
+
+impl ResolveIncidentOutcome {
+    // The core outcome this wire value records. `Approved` and `Rejected` are
+    // not IN1 outcomes; they arrive with IN2, which owns the typed broker
+    // (IN1 §6.3 rule 17).
+    const fn outcome(self) -> IncidentOutcome {
+        match self {
+            Self::Applied => IncidentOutcome::Applied,
+            Self::Reverted => IncidentOutcome::Reverted,
+            Self::Explained => IncidentOutcome::Explained,
+        }
+    }
+
+    // The stable wire spelling, used in the refusal and success text.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Reverted => "reverted",
+            Self::Explained => "explained",
+        }
+    }
+}
+
 fn search_capability_queries(
     tools: &[Tool],
     args: &CapabilitySearchArgs,
@@ -12225,6 +12480,32 @@ fn inspector_tools() -> Vec<Tool> {
             .open_world(false)
     };
     vec![
+        // IN1 §6.4 rule 20: both descriptions are normative bytes, measured at
+        // 492 B and 365 B, with self-contained first sentences because
+        // `first_sentence` is what `search_capabilities` and `get_capability`
+        // publish.
+        Tool::new(
+            "get_incidents",
+            "Return the open incidents for this project at one exact timeline revision, each with its stable code, severity, subject, observed and allowed values, the probed source description, and the typed recovery actions its policy class allows. An incident of class auto_apply has already been applied by the application; revert it by sending its probed description back through set_asset_color_description. Pass expected_revision to gate the read, include_resolved to see this session's resolutions.",
+            schema_object::<GetIncidentsArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
+            "resolve_incident",
+            "Record the outcome of one incident at the exact revision it was observed at, after applying or reverting its recovery through the ordinary edit path. Outcomes are applied, reverted, or explained; the server verifies the document matches the claimed outcome and refuses with a typed code when it does not. This records an outcome and never edits the document itself.",
+            schema_object::<ResolveIncidentArgs>(),
+        )
+        // IN1 §6.3 rule 13: `destructive(false)` is deliberate. The destructive
+        // list that drives the confirmation broker does not contain
+        // `SetAssetColorDescription`, so `destructive(true)` would advertise a
+        // broker gate that does not exist.
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
         Tool::new(
             "get_timeline_state",
             "Return the compact live project state and its exact timeline_revision. Every mutation must send that revision as expected_revision; inspect again after a conflict.",
@@ -16044,6 +16325,208 @@ fn state_delta(
     }
 }
 
+/// IN1 §8 rule 5: mirror one `AgentEvent::Cost` into an incident's telemetry.
+///
+/// The six token categories are the same six the event reports, each
+/// `Option`-wrapped here because IN1 records no session: a category nobody
+/// reported stays honestly absent rather than silently zero. They are *not* a
+/// one-for-one mirror of the event's types — `input_tokens` and
+/// `output_tokens` are plain `u64` on the event and `Option<u64>` on the
+/// telemetry — and `cost_usd` is stored as **millionths of a dollar**, because
+/// core carries no `f64` in a stored record and because a dollar figure is a
+/// currency amount rather than a measurement.
+///
+/// The one write path into an [`kinewright_core::Incident`]'s telemetry is
+/// `IncidentLog::telemetry_mut`, so a caller reaches this function with the
+/// `&mut` that accessor hands out and cannot reach any other field of the
+/// record.
+///
+/// Any other [`AgentEvent`] leaves the telemetry untouched.
+pub fn mirror_agent_cost(telemetry: &mut IncidentTelemetry, event: &AgentEvent) {
+    let AgentEvent::Cost {
+        input_tokens,
+        cached_input_tokens,
+        cache_creation_input_tokens,
+        output_tokens,
+        reasoning_output_tokens,
+        cost_usd,
+    } = event
+    else {
+        return;
+    };
+    telemetry.input_tokens = Some(*input_tokens);
+    telemetry.cached_input_tokens = *cached_input_tokens;
+    telemetry.cache_creation_input_tokens = *cache_creation_input_tokens;
+    telemetry.output_tokens = Some(*output_tokens);
+    telemetry.reasoning_output_tokens = *reasoning_output_tokens;
+    telemetry.cost_usd_millionths = cost_usd.and_then(dollars_to_millionths);
+}
+
+/// A reported dollar cost as whole millionths, or `None` when the provider
+/// reported something no `i64` can hold.
+///
+/// The cast is bounded by the finite-range test immediately above it, which is
+/// why the truncation lint is allowed here and nowhere else.
+#[allow(clippy::cast_possible_truncation)]
+fn dollars_to_millionths(cost_usd: f64) -> Option<i64> {
+    let millionths = (cost_usd * 1_000_000.0).round();
+    if millionths.is_finite() && millionths.abs() < 9.0e18 {
+        Some(millionths as i64)
+    } else {
+        None
+    }
+}
+
+/// IN1 §6.2 rule 9: the exact serialised size of the **largest** fixture
+/// incident, the untagged-`WebM` one, asserted with `assert_eq!`.
+///
+/// A budget with slack is not a budget. This is the shape every other M36 pin
+/// in this repository uses and the only shape that fails the day a field is
+/// added to [`kinewright_core::Incident`].
+///
+/// The named fixture is `in1_untagged_vp9.webm`'s incident, and the reason it
+/// is the largest of the four is measured rather than argued: probe-2 §T2.1
+/// measured the two untagged incidents at 1 269 B (MP4) and 1 276 B (`WebM`) on
+/// the draft's shape, and the whole 7 B difference is
+/// `evidence.probed.provenance` — `"stream_metadata"` (15 B) against
+/// `"inferred"` (8 B). Their `observed` and `allowed` are equal.
+pub const IN1_INCIDENT_SERIALIZED_BYTES: usize = 819;
+
+/// IN1 §6.2 rule 9: the ceiling every incident this policy table can produce
+/// stays under, asserted `<=` over all twelve codes on one synthetic subject.
+///
+/// Set to the smallest power of two above the measured worst. The ceiling
+/// gates the population the migration will grow, not the fixture alone: the
+/// worst of the twelve is `unsupported_source_combination`, because its
+/// `observed()` is the only formatted tuple in the set.
+pub const IN1_INCIDENT_SERIALIZED_CEILING_BYTES: usize = 1_024;
+
+/// IN1 §6.2 rule 11: the one sentence that stops a model inventing a second
+/// round trip, in the voice of the existing `search_capabilities` and
+/// `get_capability` responses.
+const IN1_INCIDENTS_NEXT: &str = "Apply a recovery through prepare_edit_plan and commit_edit_plan, then record the outcome with resolve_incident at the same revision.";
+
+/// One typed `resolve_incident` refusal in the CC1/CC2
+/// `code`/`field`/`observed`/`allowed`/`recovery_action` shape
+/// (IN1 §6.3 rule 19).
+///
+/// The three codes IN1 adds to the agent-facing set are exactly
+/// `incident_not_found`, `incident_not_applied` and `incident_not_reverted`.
+fn incident_error(
+    code: &str,
+    message: &str,
+    field: &str,
+    observed: &str,
+    allowed: &str,
+    recovery_action: &str,
+) -> CallToolResult {
+    error_structured(
+        format!("resolve_incident rejected: {message}"),
+        serde_json::json!({
+            "code": code,
+            "field": field,
+            "observed": observed,
+            "allowed": allowed,
+            "recovery_action": recovery_action,
+        }),
+    )
+}
+
+/// The wire spelling of a colour provenance, so a refusal quotes the same
+/// string the document serialises rather than a second Rust-shaped rendering.
+fn color_provenance_label(provenance: &ColorProvenance) -> String {
+    serde_json::to_value(provenance)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unserializable".to_owned())
+}
+
+/// IN1 §6.3 rule 16: verify the document actually matches the claimed outcome.
+///
+/// Returns the typed refusal when it does not, and `None` when the claim
+/// holds. `explained` carries no document check, because nothing was applied.
+fn verify_claimed_outcome(
+    incident: &Incident,
+    document: &Document,
+    outcome: ResolveIncidentOutcome,
+) -> Option<CallToolResult> {
+    if matches!(outcome, ResolveIncidentOutcome::Explained) {
+        return None;
+    }
+    let kinewright_core::IncidentSubject::Asset(asset_id) = incident.subject;
+    let code = match outcome {
+        ResolveIncidentOutcome::Applied => "incident_not_applied",
+        ResolveIncidentOutcome::Reverted => "incident_not_reverted",
+        ResolveIncidentOutcome::Explained => unreachable!("explained returned above"),
+    };
+    let Some(asset) = document
+        .media_pool
+        .iter()
+        .find(|asset| asset.id == asset_id)
+    else {
+        return Some(incident_error(
+            code,
+            &format!("asset {asset_id} is no longer in the media pool"),
+            "asset",
+            &asset_id.to_string(),
+            "an asset that is still in the media pool",
+            "Call get_timeline_state, then resolve the incident against an asset the project still holds.",
+        ));
+    };
+    let probed = incident.evidence.probed();
+    match outcome {
+        // The caller applied the recovery: the asset must now carry the
+        // agent's assumption and must remember what it replaced.
+        ResolveIncidentOutcome::Applied => {
+            if asset.color_description.provenance == ColorProvenance::AgentAssumption
+                && asset.assumed_from.is_some()
+            {
+                return None;
+            }
+            Some(incident_error(
+                code,
+                &format!("asset {asset_id} does not carry the incident's recovery"),
+                "color_description",
+                &format!(
+                    "provenance={}, assumed_from={}",
+                    color_provenance_label(&asset.color_description.provenance),
+                    if asset.assumed_from.is_some() {
+                        "present"
+                    } else {
+                        "absent"
+                    }
+                ),
+                "provenance=agent_assumption with assumed_from present",
+                "Apply the incident's recovery through prepare_edit_plan and commit_edit_plan, then resolve it as applied at the same revision.",
+            ))
+        }
+        // The caller reverted it: the probed bytes must be back, provenance
+        // included, and nothing may be left to revert.
+        ResolveIncidentOutcome::Reverted => {
+            if asset.assumed_from.is_none() && asset.color_description == *probed {
+                return None;
+            }
+            Some(incident_error(
+                code,
+                &format!("asset {asset_id} does not carry the incident's probed description"),
+                "color_description",
+                &format!(
+                    "provenance={}, assumed_from={}",
+                    color_provenance_label(&asset.color_description.provenance),
+                    if asset.assumed_from.is_some() {
+                        "present"
+                    } else {
+                        "absent"
+                    }
+                ),
+                "the incident's evidence.probed description with assumed_from cleared",
+                "Send the asset's assumed_from description back through prepare_edit_plan and commit_edit_plan, then resolve it as reverted at the same revision.",
+            ))
+        }
+        ResolveIncidentOutcome::Explained => unreachable!("explained returned above"),
+    }
+}
+
 fn revision_conflict_text(expected: TimelineRevision, actual: TimelineRevision) -> CallToolResult {
     error_text(format!(
         "timeline revision conflict: expected {expected}, actual {actual}; call get_timeline_state and re-plan against the current revision"
@@ -16294,6 +16777,10 @@ mod tests {
     use kinewright_core::{
         AudioRepairProvenance, AudioRepairReport, AudioRepairRequest, MixNoiseProfileRequest,
         MixWindowLevelReport, MixWindowRequest, NoiseProfileReport,
+    };
+    use kinewright_core::{
+        ColorSourceError, IncidentEvidence, IncidentObservation, IncidentState, IncidentSubject,
+        Observed, POLICY, SourceColorIncident,
     };
     use serde_json::json;
     use std::{
@@ -16790,6 +17277,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let document = Document {
             catalog: kinewright_core::MediaCatalog::default(),
@@ -16934,6 +17422,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint,
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         }
     }
 
@@ -17020,6 +17509,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let music = MediaAsset {
             id: AssetId(9),
@@ -17031,6 +17521,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let document = Document {
             tracks: vec![
@@ -17086,6 +17577,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let music = MediaAsset {
             id: AssetId(9),
@@ -17097,6 +17589,7 @@ mod tests {
             resolution: None,
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let media_clip = |id, asset, track_start| Clip {
             id: ClipId(id),
@@ -17154,6 +17647,7 @@ mod tests {
             resolution: None,
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let document = Document {
             tracks: vec![Track {
@@ -17431,6 +17925,7 @@ mod tests {
             ConfirmationBroker::default(),
             false,
             Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(IncidentLog::default())),
         );
         let proof = service.frame_at(TimeCode(1)).unwrap();
         assert_eq!(proof.is_error, Some(false));
@@ -21178,6 +21673,7 @@ mod tests {
             resolution: Some((TRACKED_SHOT_WIDTH, TRACKED_SHOT_HEIGHT)),
             source_fingerprint: MediaSourceFingerprint::default(),
             color_description: ColorDescription::default(),
+            assumed_from: None,
         };
         let document = Document {
             catalog: kinewright_core::MediaCatalog::default(),
@@ -21791,7 +22287,8 @@ mod tests {
                 "{name} must be read-only"
             );
         }
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 84);
+        // IN1 §6.6: get_incidents and resolve_incident join the registry.
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 86);
 
         for name in [
             "plan_primary_correction",
@@ -22161,6 +22658,7 @@ mod tests {
             resolution: None,
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let room_tone = MediaAsset {
             id: AssetId(2),
@@ -22172,6 +22670,7 @@ mod tests {
             resolution: None,
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let clip = |id: u64, at: i64| Clip {
             id: ClipId(id),
@@ -23276,6 +23775,7 @@ mod tests {
             resolution: None,
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         });
         document.media_pool.push(MediaAsset {
             id: AssetId(9),
@@ -23287,6 +23787,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         });
         let core = Core::spawn(document).unwrap();
         let playback: Arc<dyn Playback> = Arc::new(NoopMedia::default());
@@ -23301,6 +23802,7 @@ mod tests {
             Arc::new(RwLock::new(Some(PathBuf::from(
                 "/tmp/kinewright-au5b/show.kinewright",
             )))),
+            Arc::new(RwLock::new(IncidentLog::default())),
         );
         let call = |arguments: serde_json::Value| {
             saved
@@ -25460,6 +25962,296 @@ mod tests {
         assert!(schema.contains("operations"));
     }
 
+    /// IN1 §3 rule 5 row 3: `in1_untagged_vp9.webm`'s pinned probed tuple.
+    ///
+    /// The Matroska/`WebM` muxer always writes a `Colour/Range` element, so the
+    /// untagged `WebM` differs from the untagged MP4 in three of eight fields
+    /// and produces the **largest** of the four fixture incidents.
+    fn in1_untagged_webm_probe() -> ColorDescription {
+        ColorDescription {
+            primaries: ColorPrimaries::Unknown,
+            transfer: ColorTransfer::Unknown,
+            matrix: ColorMatrix::Unknown,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::Unknown,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 4_000,
+            provenance: ColorProvenance::StreamMetadata,
+        }
+    }
+
+    /// One observation built the way IN1 §2.3b rule 24 requires: every string
+    /// comes from a core accessor and none is formatted here.
+    fn in1_observation(error: &ColorSourceError, probed: &ColorDescription) -> IncidentObservation {
+        let incident =
+            SourceColorIncident::from_source_error(error).expect("the fixture code is an incident");
+        IncidentObservation {
+            code: kinewright_core::IncidentCode::SourceColor(incident),
+            subject: IncidentSubject::Asset(AssetId(1)),
+            observed: error.observed(),
+            allowed: Some(error.allowed_values().to_owned()),
+            evidence: IncidentEvidence::SourceColor {
+                probed: probed.clone(),
+                assumption: None,
+            },
+            revision: TimelineRevision(1),
+        }
+    }
+
+    /// Every classifier variant, so a ceiling measured over "all twelve codes"
+    /// cannot quietly skip one.
+    fn in1_every_source_error() -> Vec<ColorSourceError> {
+        vec![
+            ColorSourceError::UnknownPrimaries,
+            ColorSourceError::UnknownTransfer,
+            ColorSourceError::UnknownMatrix,
+            ColorSourceError::UnknownRange,
+            ColorSourceError::UnknownBitDepth,
+            ColorSourceError::UnsupportedPrimaries(ColorPrimaries::Bt2020),
+            ColorSourceError::UnsupportedTransfer(ColorTransfer::Smpte2084),
+            ColorSourceError::UnsupportedMatrix(ColorMatrix::Bt2020Ncl),
+            ColorSourceError::UnsupportedRange(ColorRange::Other("weird".to_owned())),
+            ColorSourceError::UnsupportedWhitePoint(ColorWhitePoint::D50),
+            ColorSourceError::UnsupportedBitDepth(ColorBitDepth::Float32),
+            ColorSourceError::UnsupportedCombination {
+                primaries: ColorPrimaries::Bt709,
+                transfer: ColorTransfer::Srgb,
+                matrix: ColorMatrix::Bt709,
+                range: ColorRange::Limited,
+            },
+        ]
+    }
+
+    /// IN1 §6.1 rules 1–3, §6.3 rule 13, §6.4 rule 20 and §6.7 rule 33: both
+    /// capabilities are registry-only, classified without an override, and
+    /// cost exactly the bytes probe-2 measured on these schemas.
+    #[test]
+    fn in1_the_two_capabilities_are_registry_only_and_cost_their_measured_bytes() {
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        let catalog = capabilities(&registry);
+
+        for (name, kind, serialized, input_schema, description, first_sentence_length) in [
+            (
+                "get_incidents",
+                CapabilityKind::Inspector,
+                1_145,
+                493,
+                492,
+                236,
+            ),
+            (
+                "resolve_incident",
+                CapabilityKind::Action,
+                1_339,
+                809,
+                365,
+                149,
+            ),
+        ] {
+            let tool = registry
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered"));
+            let metrics = ToolSurfaceMetrics::measure(std::slice::from_ref(tool));
+            assert_eq!(
+                (
+                    metrics.serialized_bytes,
+                    metrics.input_schema_bytes,
+                    metrics.description_bytes
+                ),
+                (serialized, input_schema, description),
+                "{name} moved off IN1 §6.7 rule 33's measurement: {metrics:?}"
+            );
+            let published = tool.description.as_deref().unwrap_or_default();
+            assert_eq!(
+                crate::runtime::first_sentence(published).chars().count(),
+                first_sentence_length,
+                "{name}'s first sentence is what search_capabilities publishes"
+            );
+
+            // No `CAPABILITY_KIND_OVERRIDES` entry is needed, and a future
+            // rename cannot silently reclassify either capability.
+            let descriptor = catalog
+                .iter()
+                .find(|capability| capability.name == name)
+                .unwrap_or_else(|| panic!("{name} must be discoverable"));
+            assert_eq!(descriptor.kind, kind, "{name}");
+
+            // Registry-only: invocable through the dispatcher, never served.
+            assert!(is_invocable_capability(name), "{name}");
+            assert!(
+                crate::schema::INSPECTOR_TOOL_NAMES.contains(&name),
+                "{name}"
+            );
+            assert!(
+                !crate::runtime::COMPACT_TOOL_NAMES.contains(&name),
+                "{name} must not join the served surface"
+            );
+        }
+
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 86);
+        // IN1 §6.1 rule 3: nothing the dispatcher accepted before is now
+        // refused, and no generated operation tool became invocable.
+        let stranded = crate::schema::INSPECTOR_TOOL_NAMES
+            .into_iter()
+            .filter(|name| {
+                !is_invocable_capability(name) && !crate::runtime::COMPACT_TOOL_NAMES.contains(name)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stranded, ["apply_edit_plan"]);
+        assert_eq!(
+            operation_tools()
+                .unwrap()
+                .iter()
+                .filter(|definition| is_invocable_capability(&definition.tool.name))
+                .count(),
+            0
+        );
+
+        let get_incidents = registry
+            .iter()
+            .find(|tool| tool.name == "get_incidents")
+            .unwrap();
+        let annotations = get_incidents.annotations.as_ref().unwrap();
+        assert_eq!(annotations.read_only_hint, Some(true));
+        assert_eq!(annotations.destructive_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(true));
+        assert_eq!(annotations.open_world_hint, Some(false));
+
+        let resolve_incident = registry
+            .iter()
+            .find(|tool| tool.name == "resolve_incident")
+            .unwrap();
+        let annotations = resolve_incident.annotations.as_ref().unwrap();
+        assert_eq!(annotations.read_only_hint, Some(false));
+        // IN1 §6.3 rule 13: `SetAssetColorDescription` is not on the broker's
+        // destructive list, so `destructive(true)` would advertise a gate that
+        // does not exist.
+        assert_eq!(annotations.destructive_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(false));
+        assert_eq!(annotations.open_world_hint, Some(false));
+    }
+
+    /// IN1 §6.2 rule 9 and §9 clause 14: the two token-budget assertions that
+    /// can fail.
+    #[test]
+    fn in1_the_fixture_incident_is_pinned_and_every_code_fits_the_ceiling() {
+        // The named largest fixture incident, built deterministically: the
+        // untagged-`WebM` observation fed twice so `count` is 2 without an
+        // engine, and read while still `Open` so no `Duration` reaches the wire.
+        let probed = in1_untagged_webm_probe();
+        let mut log = IncidentLog::with_start(Instant::now());
+        let Observed::Opened(id) = log.observe(in1_observation(
+            &ColorSourceError::UnknownPrimaries,
+            &probed,
+        )) else {
+            panic!("the first observation must open an incident");
+        };
+        assert_eq!(
+            log.observe(in1_observation(
+                &ColorSourceError::UnknownPrimaries,
+                &probed
+            )),
+            Observed::Deduped(id)
+        );
+        let incident = log.get(id).unwrap();
+        assert_eq!(incident.count, 2);
+        assert_eq!(incident.state, IncidentState::Open);
+        assert_eq!(
+            serde_json::to_vec(incident).unwrap().len(),
+            IN1_INCIDENT_SERIALIZED_BYTES,
+            "the fixture incident moved off its pinned budget"
+        );
+
+        // The ceiling gates the whole policy table, not the fixture alone.
+        let mut worst = 0;
+        let mut measured = 0;
+        for error in in1_every_source_error() {
+            let mut log = IncidentLog::with_start(Instant::now());
+            let Observed::Opened(id) = log.observe(in1_observation(&error, &probed)) else {
+                panic!("a fresh log must open {}", error.code());
+            };
+            let bytes = serde_json::to_vec(log.get(id).unwrap()).unwrap().len();
+            assert!(
+                bytes <= IN1_INCIDENT_SERIALIZED_CEILING_BYTES,
+                "{} serialises to {bytes} B, over the ceiling",
+                error.code()
+            );
+            worst = worst.max(bytes);
+            measured += 1;
+        }
+        assert_eq!(measured, POLICY.len());
+        println!("in1 worst-of-twelve incident = {worst} B");
+        assert!(
+            worst > IN1_INCIDENT_SERIALIZED_CEILING_BYTES / 2,
+            "the ceiling is the smallest power of two above the measured worst of {worst} B"
+        );
+    }
+
+    /// IN1 §8 rules 4–5: the six categories mirror, `cost_usd` lands as whole
+    /// millionths, and a category nobody reported stays honestly absent.
+    #[test]
+    fn in1_an_agent_cost_event_mirrors_into_incident_telemetry() {
+        let mut telemetry = IncidentTelemetry::default();
+        mirror_agent_cost(
+            &mut telemetry,
+            &AgentEvent::Cost {
+                input_tokens: 1_200,
+                cached_input_tokens: Some(400),
+                cache_creation_input_tokens: None,
+                output_tokens: 300,
+                reasoning_output_tokens: Some(64),
+                cost_usd: Some(0.012_345_6),
+            },
+        );
+        assert_eq!(telemetry.input_tokens, Some(1_200));
+        assert_eq!(telemetry.cached_input_tokens, Some(400));
+        assert_eq!(telemetry.cache_creation_input_tokens, None);
+        assert_eq!(telemetry.output_tokens, Some(300));
+        assert_eq!(telemetry.reasoning_output_tokens, Some(64));
+        assert_eq!(telemetry.cost_usd_millionths, Some(12_346));
+        assert_eq!(telemetry.tool_calls, 0);
+
+        // A harness that reports no dollar figure -- Codex -- leaves it absent
+        // rather than zero.
+        let mut telemetry = IncidentTelemetry::default();
+        mirror_agent_cost(
+            &mut telemetry,
+            &AgentEvent::Cost {
+                input_tokens: 1,
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                output_tokens: 2,
+                reasoning_output_tokens: None,
+                cost_usd: None,
+            },
+        );
+        assert_eq!(telemetry.cost_usd_millionths, None);
+
+        // Every other event leaves the telemetry untouched.
+        let mut telemetry = IncidentTelemetry::default();
+        mirror_agent_cost(&mut telemetry, &AgentEvent::Done);
+        assert_eq!(telemetry, IncidentTelemetry::default());
+    }
+
+    /// IN1 §6.6 rule 26: the served quad does **not** move for the sixteenth
+    /// consecutive measurement, because `get_incidents` and `resolve_incident`
+    /// are registry-only capabilities and `served_tools()` filters
+    /// `capability_tools()` by `COMPACT_TOOL_NAMES`, which IN1 does not touch.
+    ///
+    /// The registry sextuple does move, and is re-pinned to IN1 §6.6 rule 27's
+    /// measured `140 / 54 / 86 / 1 551 301 / 1 407 012 / 121 315`. The two
+    /// capabilities are exactly probe-2's `+2 484 / +1 302 / +857`, pinned one
+    /// by one in
+    /// `in1_the_two_capabilities_are_registry_only_and_cost_their_measured_bytes`;
+    /// the rest of the growth is `MediaAsset::assumed_from`'s `+8 525`.
+    ///
+    /// **`assumed_from` is the larger cost by a factor of three and a half, and
+    /// every schema-visible byte of it is paid 55 times**: `MediaAsset`'s
+    /// `JsonSchema` is inlined into the 54 generated operation tools and into
+    /// `apply_edit_plan`. That is why the field carries a one-sentence doc
+    /// comment with its reasoning in `//` comments beside it, and why this pin
+    /// is the thing that fails if the sentence ever grows.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -25485,15 +26277,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_540_292, 5_660),
+            (1_551_301, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_397_185,
+            registry_metrics.input_schema_bytes, 1_407_012,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 120_458,
+            registry_metrics.description_bytes, 121_315,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -25531,6 +26323,7 @@ mod tests {
             ConfirmationBroker::default(),
             true,
             Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(IncidentLog::default())),
         );
         let prepared = service
             .call_blocking(
@@ -25607,6 +26400,7 @@ mod tests {
             ConfirmationBroker::default(),
             true,
             Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(IncidentLog::default())),
         );
         let opened = service
             .call_blocking(
@@ -25796,6 +26590,7 @@ mod tests {
                 resolution: None,
                 source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
                 color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
             },
         }))
         .unwrap();
@@ -26370,6 +27165,7 @@ mod tests {
                 resolution: None,
                 source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
                 color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
             },
         }))
         .unwrap();
@@ -26668,6 +27464,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let transcript = AssetTranscript {
             asset: asset.id,
@@ -26742,6 +27539,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let transcript = AssetTranscript {
             asset: asset.id,
@@ -26798,6 +27596,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let transcript = AssetTranscript {
             asset: asset.id,
@@ -26858,6 +27657,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let transcript = AssetTranscript {
             asset: asset.id,
@@ -27214,6 +28014,7 @@ mod tests {
             broker,
             true,
             Arc::new(RwLock::new(project_path)),
+            Arc::new(RwLock::new(IncidentLog::default())),
         )
     }
 
@@ -27371,6 +28172,7 @@ mod tests {
             broker,
             true,
             Arc::new(RwLock::new(project_path)),
+            Arc::new(RwLock::new(IncidentLog::default())),
         )
     }
 
@@ -27778,6 +28580,7 @@ mod tests {
             ConfirmationBroker::default(),
             true,
             Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(IncidentLog::default())),
         );
 
         let listed = service.list_look_assets().unwrap();
@@ -28851,6 +29654,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: MediaSourceFingerprint::default(),
             color_description: ColorDescription::default(),
+            assumed_from: None,
         };
         let clip = |id: u64| Clip {
             id: ClipId(id),
@@ -29033,6 +29837,7 @@ mod tests {
             ConfirmationBroker::default(),
             false,
             Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(IncidentLog::default())),
         )
     }
 
@@ -29680,6 +30485,7 @@ mod tests {
             resolution: Some((320, 180)),
             source_fingerprint: MediaSourceFingerprint::default(),
             color_description: ColorDescription::default(),
+            assumed_from: None,
         });
         document.tracks.push(Track {
             id: TrackId(3),

@@ -7,7 +7,7 @@ use std::{
 
 use kinewright_agent::{ClaudeCodeDriver, CursorAcpDriver};
 use kinewright_core::{
-    AgentDriver, Analysis, AssetId, ClipId, Core, Document, Event, Export, LutAssetId,
+    AgentDriver, Analysis, AssetId, ClipId, Core, Document, Event, Export, IncidentLog, LutAssetId,
     LutAvailabilityKind, LutAvailabilityStatus, MarkerId, MediaKind, Playback, TimeCode,
     TimelineRevision, TrackId, TrackKind,
 };
@@ -206,6 +206,10 @@ pub(crate) fn unavailable_lut_assets(
 /// becomes visible to every agent thread at once.
 pub(crate) type ProjectPathHandle = std::sync::Arc<std::sync::RwLock<Option<PathBuf>>>;
 
+/// The incident log handle a session shares with every MCP server it owns, in
+/// the shape `ProjectPathHandle` already uses (IN1 §5.1 rule 2).
+pub(crate) type IncidentLogHandle = std::sync::Arc<std::sync::RwLock<IncidentLog>>;
+
 /// One independently editable project and all UI/agent state that must follow it.
 pub(crate) struct ProjectSession {
     pub(crate) id: u64,
@@ -231,6 +235,9 @@ pub(crate) struct ProjectSession {
     /// resolves exactly the store the live server does, with no window in
     /// which its look tools report `project_not_saved` on a saved project.
     pub(crate) agent_project_path: ProjectPathHandle,
+    /// The incident log every MCP server in this session shares, in the shape
+    /// `agent_project_path` already uses (CC4 §2.2).
+    pub(crate) incidents: IncidentLogHandle,
     /// Runtime, never-serialized LUT availability, one entry per document
     /// asset, refreshed whenever the library is rebuilt (CC4 §2.3).
     pub(crate) lut_availability: BTreeMap<LutAssetId, LutAvailabilityStatus>,
@@ -329,6 +336,8 @@ impl ProjectSession {
         let (library, statuses) = LutLibrary::build(&document.lut_assets, lut_store.as_ref());
         let agent_project_path: ProjectPathHandle =
             std::sync::Arc::new(std::sync::RwLock::new(project_path.clone()));
+        let incidents: IncidentLogHandle =
+            std::sync::Arc::new(std::sync::RwLock::new(IncidentLog::default()));
         let session = Self {
             id,
             name,
@@ -340,6 +349,7 @@ impl ProjectSession {
             lut_store,
             lut_store_error,
             agent_project_path: std::sync::Arc::clone(&agent_project_path),
+            incidents: std::sync::Arc::clone(&incidents),
             lut_availability: statuses.into_iter().collect(),
             lut_library: Arc::new(library),
             saved_document: None,
@@ -354,6 +364,7 @@ impl ProjectSession {
                 analysis,
                 exporter,
                 &agent_project_path,
+                &incidents,
             )?],
             active_thread: 0,
             next_thread_number: 2,
@@ -882,6 +893,7 @@ mod tests {
                 resolution: Some((1920, 1080)),
                 source_fingerprint: MediaSourceFingerprint::default(),
                 color_description: ColorDescription::default(),
+                assumed_from: None,
             }],
             ..Document::default()
         }
@@ -985,6 +997,7 @@ mod tests {
                 resolution: Some((1920, 1080)),
                 source_fingerprint: MediaSourceFingerprint::default(),
                 color_description: ColorDescription::default(),
+                assumed_from: None,
             }],
             fps: Rational::new(24, 1).expect("valid fps"),
             resolution: (1920, 1080),
@@ -1160,6 +1173,8 @@ mod tests {
         let playback: Arc<dyn Playback> = Arc::new(StubMedia);
         let analysis: Arc<dyn Analysis> = Arc::new(StubMedia);
         let exporter: Arc<dyn Export> = Arc::new(StubMedia);
+        let incidents: IncidentLogHandle =
+            std::sync::Arc::new(std::sync::RwLock::new(IncidentLog::default()));
         let thread = AgentThread::new(
             "Thread 1",
             AgentHarnessChoice::Codex,
@@ -1170,6 +1185,7 @@ mod tests {
             &analysis,
             &exporter,
             &handle,
+            &incidents,
         )
         .expect("the branch builds");
         let served = thread
@@ -1207,6 +1223,54 @@ mod tests {
             derive_lut_store(served.read().expect("readable").as_deref())
                 .expect("no path is not a failure"),
             None
+        );
+
+        if let Some(server) = thread.mcp_server {
+            server.shutdown();
+        }
+    }
+
+    /// IN1 §5.1 rule 3: every MCP server a session owns shares that session's
+    /// incident log handle, so the agent in the chat panel reads exactly the
+    /// incidents the person sees — and no other project's.
+    ///
+    /// Driven through the real `AgentThread::new` seam, mirroring the project
+    /// path handle test above: only the server's own `incident_log_handle`
+    /// can witness that it was started *with the session's handle*.
+    #[test]
+    fn every_branch_server_shares_the_session_incident_handle() {
+        let handle: ProjectPathHandle = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let incidents: IncidentLogHandle =
+            std::sync::Arc::new(std::sync::RwLock::new(IncidentLog::default()));
+        let document = Arc::new(Document::default());
+        let playback: Arc<dyn Playback> = Arc::new(StubMedia);
+        let analysis: Arc<dyn Analysis> = Arc::new(StubMedia);
+        let exporter: Arc<dyn Export> = Arc::new(StubMedia);
+        let thread = AgentThread::new(
+            "Thread 1",
+            AgentHarnessChoice::Codex,
+            Vec::new(),
+            TimelineRevision::default(),
+            &document,
+            &playback,
+            &analysis,
+            &exporter,
+            &handle,
+            &incidents,
+        )
+        .expect("the branch builds");
+        let served = thread
+            .mcp_server
+            .as_ref()
+            .expect("the branch server starts")
+            .incident_log_handle();
+        assert!(
+            std::sync::Arc::ptr_eq(&served, &incidents),
+            "a branch server must be started with the session's own incident handle, not a copy"
+        );
+        assert!(
+            served.read().expect("readable").is_empty(),
+            "a fresh session opens no incident"
         );
 
         if let Some(server) = thread.mcp_server {

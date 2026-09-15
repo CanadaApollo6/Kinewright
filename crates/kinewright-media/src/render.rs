@@ -8,7 +8,7 @@ use kinewright_core::{
     AssetId, ClipId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
     ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document, Effect,
     EffectId, FrameTexture, LinearRgbaImage, MatteProofError, MediaError, MediaSourceFingerprint,
-    Rational, TimeCode, Title, classify_source_with_assumption,
+    Rational, SourceColorRefusal, TimeCode, Title, classify_source_with_assumption,
 };
 
 use crate::{
@@ -676,14 +676,13 @@ fn managed_source_color_status(
     }
 }
 
-fn contextual_managed_decode_error(
+pub(crate) fn contextual_managed_decode_error(
     asset: AssetId,
     path: &Path,
     description: &ColorDescription,
     assumption: Option<ColorSourceProfileAssumption>,
     error: MediaError,
 ) -> MediaError {
-    let status = managed_source_color_status(description, assumption);
     match error {
         MediaError::UnsupportedDecoderFormat {
             path: error_path,
@@ -697,13 +696,32 @@ fn contextual_managed_decode_error(
             declared_bit_depth,
             decoder_bit_depth,
             reason: format!(
-                "managed decode for asset {asset} ({}) failed: {reason} [{status}, assumption={assumption:?}, description={description:?}]. Recovery: apply an explicit supported source-colour override, transcode to a supported integer format, or relink to compatible media.",
-                path.display()
+                "managed decode for asset {asset} ({}) failed: {reason} [{}, assumption={assumption:?}, description={description:?}]. Recovery: apply an explicit supported source-colour override, transcode to a supported integer format, or relink to compatible media.",
+                path.display(),
+                managed_source_color_status(description, assumption)
             ),
         },
+        // IN1 §4.2 rule 9. Placed before the catch-all so the typed refusal
+        // keeps its type: carrying `description` and `assumption` on the
+        // variant is what lets the app build the incident without re-probing
+        // and without parsing (§5.2 rule 5), and what lets
+        // `SourceColorRefusal`'s template render the same `[source_color=…]`
+        // tail from the variant alone rather than by re-running the classifier
+        // — which is why `managed_source_color_status` is now called inside the
+        // two arms that need it rather than once above the `match`.
+        MediaError::SourceColor(error) => {
+            MediaError::SourceColorForAsset(Box::new(SourceColorRefusal {
+                asset,
+                path: path.to_path_buf(),
+                error,
+                description: description.clone(),
+                assumption,
+            }))
+        }
         error => MediaError::Backend(format!(
-            "managed decode for asset {asset} ({}) failed: {error} [{status}, assumption={assumption:?}, description={description:?}]. Recovery: apply an explicit supported source-colour override, transcode to a supported integer format, or relink to compatible media.",
-            path.display()
+            "managed decode for asset {asset} ({}) failed: {error} [{}, assumption={assumption:?}, description={description:?}]. Recovery: apply an explicit supported source-colour override, transcode to a supported integer format, or relink to compatible media.",
+            path.display(),
+            managed_source_color_status(description, assumption)
         )),
     }
 }
@@ -757,7 +775,9 @@ fn working_bytes(resolution: (u32, u32)) -> usize {
     rgba_bytes(resolution).saturating_mul(2)
 }
 
-fn d65_assumption(description: &ColorDescription) -> Option<ColorSourceProfileAssumption> {
+pub(crate) fn d65_assumption(
+    description: &ColorDescription,
+) -> Option<ColorSourceProfileAssumption> {
     (matches!(description.primaries, ColorPrimaries::Bt709)
         && matches!(
             description.white_point,
@@ -1327,12 +1347,24 @@ mod tests {
 
     #[test]
     fn managed_decode_error_names_asset_field_observed_allowed_and_recovery() {
+        // IN1 §4.2 rule 10, nit 5: the input is the typed refusal the decoder
+        // now raises. The old `MediaError::Backend("managed source profile
+        // rejected")` still lands in the `error =>` catch-all after rule 9 and
+        // still produces a `Backend`, so the two new assertions below could
+        // not hold on it.
         let error = contextual_managed_decode_error(
             AssetId(7),
             Path::new("/media/hdr-master.mov"),
             &unsupported_source(),
             None,
-            MediaError::Backend("managed source profile rejected".to_owned()),
+            MediaError::SourceColor(kinewright_core::ColorSourceError::UnsupportedPrimaries(
+                ColorPrimaries::Bt2020,
+            )),
+        );
+        assert_eq!(error.recovery_code(), Some("unsupported_source_primaries"));
+        assert!(
+            matches!(error, MediaError::SourceColorForAsset(_)),
+            "the typed refusal must keep its type through the contextual wrap"
         );
         let message = error.to_string();
         assert!(message.contains("asset 7"), "{message}");

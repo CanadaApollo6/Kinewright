@@ -1503,6 +1503,7 @@ fn fixture_asset() -> MediaAsset {
         resolution: Some((1_920, 1_080)),
         source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
         color_description: ColorContext::sdr_rec709().delivery,
+        assumed_from: None,
     }
 }
 

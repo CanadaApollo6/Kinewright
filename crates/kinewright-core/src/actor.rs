@@ -508,6 +508,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription::default(),
+            assumed_from: None,
         }
     }
 
@@ -1092,6 +1093,7 @@ mod tests {
                 resolution: Some((1_920, 1_080)),
                 source_fingerprint: crate::MediaSourceFingerprint::default(),
                 color_description: crate::ColorDescription::default(),
+                assumed_from: None,
             }],
             markers: Vec::new(),
             fps: Rational::new(30, 1).unwrap(),

@@ -92,6 +92,7 @@ fn asset(id: u64, fps: Rational, kind: MediaKind) -> MediaAsset {
         resolution: Some((1_920, 1_080)),
         source_fingerprint: MediaSourceFingerprint::default(),
         color_description: ColorDescription::default(),
+        assumed_from: None,
     }
 }
 

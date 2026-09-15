@@ -854,6 +854,7 @@ fn cc5_asset() -> kinewright_core::MediaAsset {
         resolution: Some(CC5_RESOLUTION),
         source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
         color_description: kinewright_core::ColorDescription::default(),
+        assumed_from: None,
     }
 }
 

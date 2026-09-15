@@ -4,8 +4,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use kinewright_agent::McpServer;
 use kinewright_core::{
     Analysis, AssetId, Clip, ClipId, Command, Core, Document, Effect, EffectId, Event, Marker,
-    MarkerId, MediaAsset, MediaKind, ParamValue, Query, QueryResult, Rational, TimeCode, Track,
-    TrackId, TrackKind,
+    MarkerId, MediaAsset, MediaError, MediaEvent, MediaKind, ParamValue, Playback, Query,
+    QueryResult, Rational, TimeCode, Track, TrackId, TrackKind,
 };
 use kinewright_media::{
     FfmpegMediaEngine,
@@ -1897,6 +1897,7 @@ fn edit_plan_document() -> Document {
         resolution: Some((320, 180)),
         source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
         color_description: kinewright_core::ColorDescription::default(),
+        assumed_from: None,
     };
     Document {
         catalog: kinewright_core::MediaCatalog::default(),
@@ -2414,6 +2415,13 @@ async fn cc7_prepare_commit_and_compare(
 /// on registry-only `queue_export`). The registry moves to 1,540,292 B /
 /// 1,397,185 B / 120,458 B. The served quad does not move for the fifteenth
 /// consecutive measurement.
+///
+/// IN1 Part A adds two **internal capabilities**, `get_incidents` and
+/// `resolve_incident`, reached only through `invoke_capability`. The registry
+/// therefore moves to 140 tools, of which `INSPECTOR_TOOL_NAMES` is 86, and
+/// the served quad does not move for the sixteenth consecutive measurement,
+/// because `served_tools()` filters `capability_tools()` by
+/// `COMPACT_TOOL_NAMES` and IN1 touches neither that list nor `Operation`.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
@@ -2440,12 +2448,12 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 138 tools, of which `INSPECTOR_TOOL_NAMES` is 84.
+    // The internal registry: 140 tools, of which `INSPECTOR_TOOL_NAMES` is 86.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        138,
+        140,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
@@ -2453,7 +2461,8 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          AU4 Part B adds plan_audio_ducking and plan_clip_fades; \
          AU5 Part A adds get_audio_repair; \
          AU5 Part B adds plan_dialogue_repair, capture_room_tone and plan_room_tone_fill; \
-         AU6 §5.4 Part A and Part B add no capability at all"
+         AU6 §5.4 Part A and Part B add no capability at all; \
+         IN1 Part A adds get_incidents and resolve_incident as internal capabilities"
     );
     assert_eq!(
         operations.len(),
@@ -2462,7 +2471,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          AU4 Part A generates two more; AU4 Part B generates none; \
          AU5 Part A generates none, because it adds no Operation variant; \
          AU5 Part B generates none either, because capture_room_tone submits an ordinary AddAsset; \
-         AU6 adds no Operation variant"
+         AU6 adds no Operation variant; IN1 Part A adds none either"
     );
     for name in [
         "set_track_mix",
@@ -2484,12 +2493,13 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     }
     assert_eq!(
         registry.len() - operations.len(),
-        84,
+        86,
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector; \
          AU4 Part A adds no inspector; AU4 Part B adds the two planners; \
          AU5 Part A adds get_audio_repair; AU5 Part B adds all three of its capabilities; \
-         AU6 §5.4 Part A and Part B add none"
+         AU6 §5.4 Part A and Part B add none; \
+         IN1 Part A adds get_incidents and resolve_incident"
     );
     let spectrum = registry
         .iter()
@@ -9723,4 +9733,681 @@ async fn au6_the_four_planners_prose_is_pinned_by_exact_string() {
     assert_eq!(AU6_CLIP_FADES_NOTHING_TO_PROPOSE, "nothing to propose");
     assert!(AU6_ROOM_TONE_NO_ASSET_REFUSAL.contains("capture_room_tone"));
     assert!(AU6_REPAIR_ALREADY_REPAIRED_REFUSAL.contains("AU5 repair prefix"));
+}
+
+// ---------------------------------------------------------------------------
+// IN1 §7 — the scripted agent tests.
+//
+// Every document below is built from a real IN1 §3 fixture through the
+// ordinary probe path (§7 rule 2), and the one test §7 rules 3 and 4 name
+// takes its typed error from a real managed decode over the live `Playback`.
+// The four tests that exercise `resolve_incident`'s outcome verification need
+// an *open* incident rather than a *decode*, so they open theirs by feeding
+// `IncidentLog::observe` an observation built from the pinned §3 rule 5
+// tuple — the same eight fields the decoder reports, with `observed` and
+// `allowed` read from the core accessors rather than written out. No
+// `Incident` is hand-built anywhere, and no `MediaError` is hand-constructed
+// anywhere.
+// ---------------------------------------------------------------------------
+
+use kinewright_media::in1_sources::{In1Source, in1_source};
+
+/// IN1 §3 rule 5 row 1: `in1_untagged.mp4`'s pinned probed tuple.
+fn in1_untagged_mp4_probe() -> kinewright_core::ColorDescription {
+    kinewright_core::ColorDescription {
+        primaries: kinewright_core::ColorPrimaries::Unknown,
+        transfer: kinewright_core::ColorTransfer::Unknown,
+        matrix: kinewright_core::ColorMatrix::Unknown,
+        range: kinewright_core::ColorRange::Unknown,
+        white_point: kinewright_core::ColorWhitePoint::Unknown,
+        bit_depth: kinewright_core::ColorBitDepth::Eight,
+        confidence_basis_points: 2_000,
+        provenance: kinewright_core::ColorProvenance::Inferred,
+    }
+}
+
+/// IN1 §3 rule 5 row 2: `in1_tagged.mp4`'s pinned probed tuple, the twin that
+/// proves the negative.
+fn in1_tagged_mp4_probe() -> kinewright_core::ColorDescription {
+    kinewright_core::ColorDescription {
+        primaries: kinewright_core::ColorPrimaries::Bt709,
+        transfer: kinewright_core::ColorTransfer::Bt709,
+        matrix: kinewright_core::ColorMatrix::Bt709,
+        range: kinewright_core::ColorRange::Limited,
+        white_point: kinewright_core::ColorWhitePoint::Unknown,
+        bit_depth: kinewright_core::ColorBitDepth::Eight,
+        confidence_basis_points: 10_000,
+        provenance: kinewright_core::ColorProvenance::StreamMetadata,
+    }
+}
+
+/// IN1 §7 rule 2: the document every `in1_` test drives, built from the real
+/// fixture through the ordinary probe path, so the asset carries §3 rule 5's
+/// probed tuple and not one field of it is hand-written.
+///
+/// The asset id is **1**, because §9 clause 11's template pins `asset 1` and a
+/// fresh [`FfmpegMediaEngine`] hands out asset ids from one; a second probe on
+/// the same engine is asset 2, which is why the tagged twin gets its own.
+///
+/// The returned [`GeneratedMedia`] is the fixture's `Drop` guard (IN1 §3 rule
+/// 11): hold it for as long as the document is in use, or the file is removed
+/// from under the decoder.
+fn in1_document(media: &FfmpegMediaEngine, source: In1Source) -> (GeneratedMedia, Document) {
+    let generated = in1_source(source);
+    let asset = media
+        .probe(generated.path())
+        .unwrap_or_else(|error| panic!("{} must probe: {error}", source.file_name()));
+    (generated, single_clip_document(asset))
+}
+
+/// IN1 §7 rule 13: the deadline every `in1_` test that waits for a
+/// `MediaEvent` uses, and the **only** one.
+///
+/// Ten seconds, against probe-2's recommended one, and the ruling's reason is
+/// recorded here rather than in the report: a deadline of this kind is a hang
+/// detector that fires only when the test has already failed, a cold Windows
+/// CI runner loading the `FFmpeg` DLLs for its first decode is not bounded by a
+/// warm Linux figure, and a tighter bound buys nothing on the passing path.
+/// The measured figure — `Playback::set_document` to the first
+/// `MediaEvent::Error`, five fresh engines on the lavapipe software lane, **max
+/// 0.0754 s**, min 0.0602 s — is what the margin is measured against, not the
+/// bound (IN1 §11.1).
+const IN1_DECODE_EVENT_DEADLINE: Duration = Duration::from_secs(10);
+
+/// IN1 §7 rule 14: the one wait every `in1_` test shares, in the shape of
+/// [`au5_invoke_when_silence_is_ready`].
+///
+/// Drains `playback.events()` until a [`MediaEvent::Error`] arrives or
+/// `deadline` expires; it never loops forever, and no test spells the loop
+/// itself. On expiry it prints every event it did see, which `libtest`
+/// replays with the caller's panic — so a hang is reported with the fixture
+/// name from the caller and the event trail from here (rule 13).
+///
+/// `None` is a real answer rather than a failure: the tagged twin decodes, so
+/// the negative half of §7 rule 3 is exactly this function returning `None`.
+async fn in1_await_media_error(playback: &dyn Playback, deadline: Duration) -> Option<MediaError> {
+    let events = playback.events();
+    let expiry = std::time::Instant::now() + deadline;
+    let mut seen: Vec<String> = Vec::new();
+    loop {
+        while let Ok(event) = events.try_recv() {
+            if let MediaEvent::Error(error) = event {
+                return Some(error);
+            }
+            seen.push(format!("{event:?}"));
+        }
+        if std::time::Instant::now() >= expiry {
+            println!("IN1: no MediaEvent::Error within {deadline:?}; events seen: {seen:?}");
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The observation the managed decode of `in1_untagged.mp4` produces, with
+/// every string from a core accessor (IN1 §2.3b rule 24).
+fn in1_untagged_observation(revision: u64) -> kinewright_core::IncidentObservation {
+    let error = kinewright_core::ColorSourceError::UnknownPrimaries;
+    let incident = kinewright_core::SourceColorIncident::from_source_error(&error)
+        .expect("unknown_source_primaries is an incident");
+    kinewright_core::IncidentObservation {
+        code: kinewright_core::IncidentCode::SourceColor(incident),
+        subject: kinewright_core::IncidentSubject::Asset(AssetId(1)),
+        observed: error.observed(),
+        allowed: Some(error.allowed_values().to_owned()),
+        evidence: kinewright_core::IncidentEvidence::SourceColor {
+            probed: in1_untagged_mp4_probe(),
+            assumption: None,
+        },
+        revision: kinewright_core::TimelineRevision(revision),
+    }
+}
+
+/// Open the fixture's incident in a server's own log and return its id.
+fn in1_open_incident(server: &McpServer, revision: u64) -> u64 {
+    let handle = server.incident_log_handle();
+    let mut log = handle.write().unwrap();
+    let kinewright_core::Observed::Opened(id) = log.observe(in1_untagged_observation(revision))
+    else {
+        panic!("a fresh log must open the fixture's incident");
+    };
+    id.0
+}
+
+/// The `set_asset_color_description` plan operation carried by an incident's
+/// one recovery, in the compact `{"op": ...}` shape `prepare_edit_plan` takes.
+fn in1_recovery_plan_operation(incident: &serde_json::Value) -> serde_json::Value {
+    let recovery = &incident["recoveries"][0];
+    assert_eq!(recovery["label"], "Assume Rec.709 for this source");
+    let operation = &recovery["kind"]["operation"]["SetAssetColorDescription"];
+    json!({
+        "op": "set_asset_color_description",
+        "asset": operation["asset"],
+        "color_description": operation["color_description"],
+    })
+}
+
+/// IN1 §7 rules 3 and 4 and §9 clauses 4(a) and 5: the untagged source opens
+/// exactly one incident, and its correctly tagged twin opens none -- one test,
+/// both fixtures, one log, one process, so an always-empty `get_incidents`
+/// fails on the first half rather than passing the negative.
+///
+/// Both halves take their verdict from the **real** decoder over a live
+/// `Playback`: `set_document` plus one `request_frame`, and **never** `play`
+/// (§7 rule 3 -- probe-2 §R5.3 measured an ALSA `snd_pcm_pause` failure
+/// arriving nondeterministically on a box with no audio device, and the two
+/// calls are enough to produce the refusal). The typed error reaches the
+/// shared log only through `IncidentObservation::from_media_error`;
+/// hand-building a `MediaError::SourceColorForAsset` would let this test pass
+/// with §4.2's plumbing entirely absent (§7 rule 4).
+///
+/// The twin is decoded on its **own** engine so that a second refusal still
+/// queued from the untagged half -- `set_document` and `request_frame` each
+/// present once, so the untagged half emits two -- can never be mistaken for
+/// the twin's verdict. The log, the server, the client and the process are the
+/// same ones, which is what rule 3 asks for.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn in1_the_untagged_source_opens_one_incident_and_the_tagged_twin_opens_none() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let (_untagged_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
+    assert_eq!(
+        document.media_pool[0].color_description,
+        in1_untagged_mp4_probe(),
+        "the fixture must probe IN1 §3 rule 5's tuple"
+    );
+    let core = Core::spawn(document.clone()).unwrap();
+    let server = McpServer::start(core, media.clone(), media.clone()).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    // The real managed decode: one document, one frame request, no `play`.
+    media.set_document(Arc::new(document));
+    media.request_frame(TimeCode::ZERO);
+    let error = in1_await_media_error(media.as_ref(), IN1_DECODE_EVENT_DEADLINE)
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "in1_untagged.mp4 must refuse its managed decode within \
+                 {IN1_DECODE_EVENT_DEADLINE:?}; the events it did see are printed above"
+            )
+        });
+    let observation = kinewright_core::IncidentObservation::from_media_error(
+        &error,
+        kinewright_core::TimelineRevision(0),
+    )
+    .unwrap_or_else(|| panic!("the decoder's refusal must carry an incident code: {error}"));
+    let id = {
+        let handle = server.incident_log_handle();
+        let mut log = handle.write().unwrap();
+        let kinewright_core::Observed::Opened(id) = log.observe(observation) else {
+            panic!("a fresh log must open the fixture's incident");
+        };
+        id.0
+    };
+
+    let read = invoke_capability(&client, "get_incidents", json!({})).await;
+    assert_eq!(read.is_error, Some(false));
+    let payload = read.structured_content.as_ref().unwrap();
+    assert_eq!(payload["timeline_revision"], 0);
+    assert_eq!(payload["open_count"], 1);
+    assert!(
+        payload["next"]
+            .as_str()
+            .unwrap()
+            .contains("resolve_incident at the same revision"),
+        "{payload}"
+    );
+    let incidents = payload["incidents"].as_array().unwrap();
+    assert_eq!(incidents.len(), 1, "{payload}");
+    let incident = &incidents[0];
+    assert_eq!(incident["id"], id);
+    assert_eq!(incident["code"], "unknown_source_primaries");
+    assert_eq!(incident["class"], "auto_apply");
+    assert_eq!(incident["field"], "primaries");
+    assert_eq!(incident["observed"], "unknown");
+    assert_eq!(incident["severity"], "blocks");
+    assert_eq!(incident["state"], "open");
+    assert_eq!(incident["subject"]["asset"], 1);
+    assert!(incident["count"].as_u64().unwrap() >= 1, "{incident}");
+    let recoveries = incident["recoveries"].as_array().unwrap();
+    assert_eq!(recoveries.len(), 1);
+    assert!(
+        recoveries[0]["kind"]["operation"]["SetAssetColorDescription"].is_object(),
+        "{incident}"
+    );
+
+    // The tagged twin, decoded the same way and offered the same log.
+    let twin = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let (_tagged_fixture, tagged) = in1_document(&twin, In1Source::TaggedMp4);
+    assert_eq!(
+        tagged.media_pool[0].color_description,
+        in1_tagged_mp4_probe(),
+        "the twin must probe IN1 §3 rule 5's second tuple"
+    );
+    twin.set_document(Arc::new(tagged));
+    twin.request_frame(TimeCode::ZERO);
+    assert!(
+        in1_await_media_error(twin.as_ref(), IN1_DECODE_EVENT_DEADLINE)
+            .await
+            .is_none(),
+        "in1_tagged.mp4 decodes managed and raises nothing at all"
+    );
+    assert!(
+        twin.frames().try_recv().is_ok(),
+        "the twin did not merely stay quiet: it produced a frame"
+    );
+    // And the fact behind IN1 §2.2 rule 6: the bare classifier refuses the
+    // tagged twin on its unknown white point, which is why that code is not an
+    // incident and why incidents are never raised by re-classifying an asset.
+    let probed = in1_tagged_mp4_probe();
+    assert_eq!(
+        kinewright_core::classify_source_with_assumption(
+            &probed,
+            Some(kinewright_core::ColorSourceProfileAssumption::D65)
+        ),
+        Ok(kinewright_core::ColorSourceProfile::Rec709Video)
+    );
+    assert_eq!(
+        kinewright_core::classify_source_with_assumption(&probed, None),
+        Err(kinewright_core::ColorSourceError::UnknownWhitePoint)
+    );
+
+    let again = invoke_capability(&client, "get_incidents", json!({})).await;
+    let payload = again.structured_content.as_ref().unwrap();
+    let incidents = payload["incidents"].as_array().unwrap();
+    assert_eq!(incidents.len(), 1, "the tagged twin opens no incident");
+    assert_eq!(incidents[0]["id"], id, "and no new id");
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// IN1 §7 rule 5: the agent applies the incident's own recovery through the
+/// ordinary edit path, then records the outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn in1_the_agent_applies_the_recovery_and_records_the_outcome() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let id = in1_open_incident(&server, 0);
+    let read = invoke_capability(&client, "get_incidents", json!({"expected_revision": 0})).await;
+    let payload = read.structured_content.as_ref().unwrap();
+    let operation = in1_recovery_plan_operation(&payload["incidents"][0]);
+
+    let prepared = prepare_plan(&client, 0, json!([operation])).await;
+    assert_eq!(prepared.is_error, Some(false));
+    let committed = client
+        .call_tool(commit_request(0, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false));
+
+    // The revision advanced and the asset reads IN1 §3 rule 8's tuple.
+    let document = query_document(&core);
+    let asset = &document.media_pool[0];
+    assert_eq!(
+        asset.color_description,
+        kinewright_core::recovery_description(&in1_untagged_mp4_probe())
+    );
+    assert_eq!(asset.assumed_from.as_ref(), Some(&in1_untagged_mp4_probe()));
+    assert_eq!(
+        asset.color_description.provenance,
+        kinewright_core::ColorProvenance::AgentAssumption
+    );
+    assert_eq!(asset.color_description.confidence_basis_points, 10_000);
+
+    let recorded = invoke_capability(
+        &client,
+        "resolve_incident",
+        json!({"incident_id": id, "expected_revision": 1, "outcome": "applied"}),
+    )
+    .await;
+    assert_eq!(recorded.is_error, Some(false), "{recorded:?}");
+
+    let after =
+        invoke_capability(&client, "get_incidents", json!({"include_resolved": true})).await;
+    let payload = after.structured_content.as_ref().unwrap();
+    assert_eq!(payload["open_count"], 0);
+    let incident = &payload["incidents"][0];
+    assert_eq!(incident["state"], "resolved");
+    assert_eq!(incident["outcome"], "applied");
+    // The resolving call is the one tool call this slice can honestly count.
+    assert_eq!(incident["telemetry"]["tool_calls"], 1);
+    // A resolved incident is filtered out of the default read.
+    let open_only = invoke_capability(&client, "get_incidents", json!({})).await;
+    let payload = open_only.structured_content.as_ref().unwrap();
+    assert_eq!(payload["incidents"].as_array().unwrap().len(), 0);
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// IN1 §6.3 rule 15 and §7 rule 6: a stale `resolve_incident` is refused and
+/// changes nothing, in the shape of `cc7_assert_stale_revision`.
+#[tokio::test(flavor = "multi_thread")]
+async fn in1_a_stale_resolve_is_refused_and_changes_nothing() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let id = in1_open_incident(&server, 0);
+    let before = query_document(&core);
+
+    let stale = invoke_capability(
+        &client,
+        "resolve_incident",
+        json!({"incident_id": id, "expected_revision": 3, "outcome": "explained"}),
+    )
+    .await;
+    assert_eq!(stale.is_error, Some(true));
+    assert!(
+        stale.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("timeline revision conflict: expected 3, actual 0"),
+        "{stale:?}"
+    );
+
+    // The log is unchanged and the document is unchanged.
+    let read = invoke_capability(&client, "get_incidents", json!({})).await;
+    let payload = read.structured_content.as_ref().unwrap();
+    assert_eq!(payload["open_count"], 1);
+    assert_eq!(payload["incidents"][0]["state"], "open");
+    assert_eq!(query_document(&core), before);
+
+    // The read side is gated by the same refusal.
+    let stale_read =
+        invoke_capability(&client, "get_incidents", json!({"expected_revision": 9})).await;
+    assert_eq!(stale_read.is_error, Some(true));
+    assert!(
+        stale_read.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("timeline revision conflict: expected 9, actual 0")
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// IN1 §7 rule 7 and §9 clause 8: the revert restores the probed description
+/// byte for byte, provenance included, and clears the record.
+#[tokio::test(flavor = "multi_thread")]
+async fn in1_the_revert_restores_the_probed_description_and_clears_the_record() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let id = in1_open_incident(&server, 0);
+    let read = invoke_capability(&client, "get_incidents", json!({})).await;
+    let payload = read.structured_content.as_ref().unwrap();
+    let operation = in1_recovery_plan_operation(&payload["incidents"][0]);
+
+    let prepared = prepare_plan(&client, 0, json!([operation])).await;
+    client
+        .call_tool(commit_request(0, &prepared))
+        .await
+        .unwrap();
+
+    // The card's control: send `assumed_from`'s bytes back through the
+    // ordinary edit path. No second `Operation` variant is involved.
+    let assumed_from = query_document(&core).media_pool[0]
+        .assumed_from
+        .clone()
+        .expect("the auto-apply records what it replaced");
+    let revert = json!({
+        "op": "set_asset_color_description",
+        "asset": 1,
+        "color_description": serde_json::to_value(&assumed_from).unwrap(),
+    });
+    let prepared = prepare_plan(&client, 1, json!([revert])).await;
+    assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+    let committed = client
+        .call_tool(commit_request(1, &prepared))
+        .await
+        .unwrap();
+    assert_eq!(committed.is_error, Some(false));
+
+    let asset = query_document(&core).media_pool[0].clone();
+    assert_eq!(asset.color_description, in1_untagged_mp4_probe());
+    assert_eq!(
+        asset.color_description.provenance,
+        kinewright_core::ColorProvenance::Inferred,
+        "byte-identical means the provenance came back too"
+    );
+    assert_eq!(asset.assumed_from, None);
+
+    let recorded = invoke_capability(
+        &client,
+        "resolve_incident",
+        json!({"incident_id": id, "expected_revision": 2, "outcome": "reverted"}),
+    )
+    .await;
+    assert_eq!(recorded.is_error, Some(false), "{recorded:?}");
+    let payload = recorded.structured_content.as_ref().unwrap();
+    assert_eq!(payload["incident"]["state"], "resolved");
+    assert_eq!(payload["incident"]["outcome"], "reverted");
+    assert_eq!(payload["open_count"], 0);
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// IN1 §6.3 rule 16 and §7 rule 8: the server verifies the document against the
+/// claimed outcome and refuses by typed code when the two disagree.
+#[tokio::test(flavor = "multi_thread")]
+async fn in1_a_wrong_outcome_claim_is_refused_by_code() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    let id = in1_open_incident(&server, 0);
+
+    // Nothing has been applied yet, so `applied` is refused.
+    let premature = invoke_capability(
+        &client,
+        "resolve_incident",
+        json!({"incident_id": id, "expected_revision": 0, "outcome": "applied"}),
+    )
+    .await;
+    assert_eq!(premature.is_error, Some(true));
+    let details = premature.structured_content.as_ref().unwrap();
+    assert_eq!(details["code"], "incident_not_applied");
+    assert_eq!(details["field"], "color_description");
+    assert_eq!(
+        details["allowed"],
+        "provenance=agent_assumption with assumed_from present"
+    );
+    assert!(
+        details["recovery_action"]
+            .as_str()
+            .unwrap()
+            .contains("prepare_edit_plan")
+    );
+
+    // An unknown id is its own code.
+    let missing = invoke_capability(
+        &client,
+        "resolve_incident",
+        json!({"incident_id": 99, "expected_revision": 0, "outcome": "explained"}),
+    )
+    .await;
+    assert_eq!(missing.is_error, Some(true));
+    assert_eq!(
+        missing.structured_content.as_ref().unwrap()["code"],
+        "incident_not_found"
+    );
+
+    // Now apply it, then claim the opposite.
+    let read = invoke_capability(&client, "get_incidents", json!({})).await;
+    let payload = read.structured_content.as_ref().unwrap();
+    let operation = in1_recovery_plan_operation(&payload["incidents"][0]);
+    let prepared = prepare_plan(&client, 0, json!([operation])).await;
+    client
+        .call_tool(commit_request(0, &prepared))
+        .await
+        .unwrap();
+
+    let wrong = invoke_capability(
+        &client,
+        "resolve_incident",
+        json!({"incident_id": id, "expected_revision": 1, "outcome": "reverted"}),
+    )
+    .await;
+    assert_eq!(wrong.is_error, Some(true));
+    assert_eq!(
+        wrong.structured_content.as_ref().unwrap()["code"],
+        "incident_not_reverted"
+    );
+
+    // And nothing changed: the incident is still open and still auto_apply.
+    let read = invoke_capability(&client, "get_incidents", json!({})).await;
+    let payload = read.structured_content.as_ref().unwrap();
+    assert_eq!(payload["open_count"], 1);
+    assert_eq!(payload["incidents"][0]["state"], "open");
+    assert_eq!(payload["incidents"][0]["telemetry"]["tool_calls"], 0);
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// IN1 §6.1 rule 3 and §7 rule 9: neither capability is callable as a tool.
+#[tokio::test(flavor = "multi_thread")]
+async fn in1_neither_capability_is_callable_as_a_tool() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core, media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    for (name, arguments) in [
+        ("get_incidents", json!({})),
+        (
+            "resolve_incident",
+            json!({"incident_id": 1, "expected_revision": 0, "outcome": "explained"}),
+        ),
+    ] {
+        let direct = client
+            .call_tool(
+                CallToolRequestParams::new(name)
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(direct.is_error, Some(true), "{name}");
+        let text = &direct.content[0].as_text().unwrap().text;
+        assert!(
+            text.contains("is an internal capability, not an MCP tool"),
+            "{name}: {text}"
+        );
+        assert!(text.contains("invoke_capability"), "{name}: {text}");
+    }
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// IN1 §6.6 and §9 clause 13: two capabilities, no tool.
+///
+/// The registry sextuple is `140 / 54 / 86 / 1 551 301 / 1 407 012 / 121 315`,
+/// pinned byte for byte in
+/// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
+/// this test pins the three counts and the served quad over the live endpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn in1_the_agent_surface_grows_by_two_capabilities_and_no_tool() {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
+    let core = Core::spawn(document).unwrap();
+    let server = McpServer::start(core, media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    // The served surface does not move: both capabilities are registry-only.
+    let tools = client.list_tools(None).await.unwrap().tools;
+    assert_eq!(tools.len(), 7, "IN1 adds no served tool");
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<Vec<_>>(),
+        kinewright_agent::compact_tool_names()
+    );
+    for name in ["get_incidents", "resolve_incident"] {
+        assert!(
+            !tools.iter().any(|tool| tool.name == name),
+            "{name} must not be served"
+        );
+    }
+
+    let registry = kinewright_agent::capability_tool_names().unwrap();
+    let operations = kinewright_agent::operation_tools().unwrap();
+    assert_eq!(registry.len(), 140, "IN1 adds exactly two capabilities");
+    assert_eq!(operations.len(), 54, "IN1 adds no Operation variant");
+    assert_eq!(registry.len() - operations.len(), 86);
+    let state = registry
+        .iter()
+        .position(|entry| entry == "get_timeline_state")
+        .unwrap();
+    assert_eq!(
+        registry.get(state + 1).map(String::as_str),
+        Some("get_incidents"),
+        "IN1 §6.1: get_incidents is registered directly after get_timeline_state"
+    );
+    assert_eq!(
+        registry.get(state + 2).map(String::as_str),
+        Some("resolve_incident")
+    );
+
+    let metrics = server.tool_surface_metrics();
+    assert_eq!(
+        (
+            metrics.tool_count,
+            metrics.serialized_bytes,
+            metrics.input_schema_bytes,
+            metrics.description_bytes
+        ),
+        (7, 5_660, 3_510, 998),
+        "the served quad does not move for the sixteenth consecutive measurement: {metrics:?}"
+    );
+
+    // IN1 §6.2 rule 9: the two token budgets are real constants, not adjectives.
+    assert_eq!(kinewright_agent::IN1_INCIDENT_SERIALIZED_BYTES, 819);
+    assert_eq!(
+        kinewright_agent::IN1_INCIDENT_SERIALIZED_CEILING_BYTES,
+        1_024
+    );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
 }

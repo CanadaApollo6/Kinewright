@@ -3446,6 +3446,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let clip = |id, track_start| Clip {
             id: ClipId(id),
@@ -3740,6 +3741,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         });
         document.tracks.push(Track {
             id: TrackId(1),
@@ -4623,6 +4625,7 @@ mod tests {
             resolution: None,
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let tone = MediaAsset {
             id: AssetId(2),
@@ -4634,6 +4637,7 @@ mod tests {
             resolution: None,
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let clip = |id: u64, at: i64, source_start: i64, source_end: i64| Clip {
             id: ClipId(id),
@@ -4922,6 +4926,7 @@ mod tests {
             resolution: None,
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let tone = MediaAsset {
             id: AssetId(2),

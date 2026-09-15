@@ -36,6 +36,7 @@ fn managed_document() -> Document {
         resolution: Some((1_920, 1_080)),
         source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
         color_description: supported_source_description(),
+        assumed_from: None,
     };
     Document {
         tracks: vec![Track {

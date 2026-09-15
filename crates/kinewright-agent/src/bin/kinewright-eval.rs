@@ -18,10 +18,10 @@ use kinewright_agent::{
         COLOR_WORKFLOW_BENCHMARK_ID, ColorEvalRequest, EnvironmentStamp, EvalAssertion,
         EvalAudioTailSpec, EvalBudgets, EvalDefinition, EvalDeliverableSpec, EvalError,
         EvalLoudnessSpec, EvalResult, ExpectedSourceClip, ExpectedTimelineClip, FixtureContext,
-        HumanQuestion, HumanReviewFile, PreparedFixture, SourceRangeExclusion, blind_review_form,
-        human_review_template_with_questions, maximum_duration_after_expected_silence_cuts,
-        render_jsonl, render_saved_deliverable, render_scoreboard, result_path, run_eval,
-        run_eval_with_artifacts, summarize_human_review,
+        HumanQuestion, HumanReviewFile, PreparedFixture, QuestionKind, SourceRangeExclusion,
+        blind_review_form, human_review_template_with_questions,
+        maximum_duration_after_expected_silence_cuts, render_jsonl, render_saved_deliverable,
+        render_scoreboard, result_path, run_eval, run_eval_with_artifacts, summarize_human_review,
     },
     fixture_pack::{FixturePackManifest, fixture_cache_root},
 };
@@ -391,6 +391,8 @@ fn review_questions(benchmark_id: &str) -> BTreeMap<String, Vec<HumanQuestion>> 
                     prompt: prompt.to_owned(),
                     answer: None,
                     notes: None,
+                    // IN1 §8: every question this harness asks is a creative judgement.
+                    kind: QuestionKind::Judgement,
                 }],
             );
         }
@@ -405,6 +407,8 @@ fn review_questions(benchmark_id: &str) -> BTreeMap<String, Vec<HumanQuestion>> 
                     prompt: prompt.to_owned(),
                     answer: None,
                     notes: None,
+                    // IN1 §8: every question this harness asks is a creative judgement.
+                    kind: QuestionKind::Judgement,
                 }],
             );
         }
@@ -5219,6 +5223,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let exclusions = [SourceRangeExclusion {
             asset: asset.id,
@@ -7581,6 +7586,7 @@ mod tests {
                 resolution: Some((CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT)),
                 source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
                 color_description: kinewright_core::ColorContext::sdr_rec709().delivery,
+                assumed_from: None,
             })
             .collect::<Vec<_>>();
         cc7_timeline_document(assets).expect("the CC7 clip layout builds")
@@ -8343,6 +8349,7 @@ mod tests {
                 resolution: Some((AU6_SOURCE_WIDTH, AU6_SOURCE_HEIGHT)),
                 source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
                 color_description: kinewright_core::ColorContext::sdr_rec709().delivery,
+                assumed_from: None,
             })
             .collect();
         let tracks = spec

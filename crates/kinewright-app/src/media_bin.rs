@@ -1,7 +1,10 @@
 use std::{sync::Arc, thread};
 
 use eframe::egui;
-use kinewright_core::{AssetId, ClipId, MediaKind, Operation, TimeCode, Track, TrackId, TrackKind};
+use kinewright_core::{
+    AssetId, ClipId, IncidentId, IncidentOutcome, IncidentState, IncidentSubject, MediaKind,
+    Operation, RecoveryKind, TimeCode, Track, TrackId, TrackKind,
+};
 
 use crate::{
     app::KinewrightApp,
@@ -10,6 +13,7 @@ use crate::{
         source_color_display,
     },
     icons::{self, Icon},
+    incident_ui::{card_action_outcome, incident_card, show_incident_card},
     media_workflow::{paint_source_status, source_display_state},
     theme::{self, color, radius, size, space, type_size},
     timeline_ui::format_timecode,
@@ -389,6 +393,10 @@ impl KinewrightApp {
                     self.send_operation(assume_sdr_rec709_operation(&asset));
                 }
             }
+            // IN1 §5.3 rule 33: the incident card sits beside the asset, under
+            // the source-colour line. Placement is untested; the pure view is
+            // the tested thing.
+            self.show_asset_incidents(ui, asset.id);
             let session = self.focused();
             let video_route = session
                 .source_video_target
@@ -409,6 +417,54 @@ impl KinewrightApp {
             );
         });
         ui.add_space(space::ONE);
+    }
+
+    /// Draw the focused project's live incident cards for one asset and send
+    /// the recovery the person presses (IN1 §5.3 rule 33, §5.4 rule 34).
+    ///
+    /// Only incidents with something left to say are drawn: open ones, and
+    /// applied ones offering **Revert to probed description**. A reverted or
+    /// explained incident's story is over — its outcome is recorded and its
+    /// audit line is in the log — so it takes no more wall space. At most one
+    /// press is sent per frame.
+    fn show_asset_incidents(&mut self, ui: &mut egui::Ui, asset_id: AssetId) {
+        let pressed = {
+            let handle = Arc::clone(&self.focused().incidents);
+            let log = handle
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut pressed: Option<(IncidentId, Operation, IncidentOutcome)> = None;
+            for incident in log.all().filter(|incident| {
+                incident.subject == IncidentSubject::Asset(asset_id)
+                    && matches!(
+                        incident.state,
+                        IncidentState::Open | IncidentState::Resolved(IncidentOutcome::Applied)
+                    )
+            }) {
+                let assumed_from_present = self
+                    .focused()
+                    .document
+                    .asset(asset_id)
+                    .is_some_and(|asset| asset.assumed_from.is_some());
+                let view = incident_card(incident, assumed_from_present);
+                if let Some(index) = show_incident_card(ui, &view) {
+                    let action = &view.actions[index];
+                    if let RecoveryKind::Operation(operation) = &action.recovery.kind {
+                        pressed = Some((
+                            incident.id,
+                            operation.clone(),
+                            card_action_outcome(incident, action),
+                        ));
+                        break;
+                    }
+                }
+            }
+            pressed
+        };
+        if let Some((id, operation, outcome)) = pressed {
+            let project_index = self.focused_project;
+            self.send_incident_recovery(project_index, id, operation, outcome);
+        }
     }
 }
 
@@ -541,6 +597,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         };
         let document = Document {
             catalog: kinewright_core::MediaCatalog::default(),

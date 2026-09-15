@@ -31,6 +31,7 @@ fn asset(id: u64, name: &str, duration: i64, rate: Rational) -> MediaAsset {
         resolution: Some((1_920, 1_080)),
         source_fingerprint: MediaSourceFingerprint::default(),
         color_description: kinewright_core::ColorDescription::default(),
+        assumed_from: None,
     }
 }
 

@@ -1466,6 +1466,7 @@ fn cc7_asset() -> MediaAsset {
         resolution: Some((CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT)),
         source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
         color_description: ColorContext::sdr_rec709().delivery,
+        assumed_from: None,
     }
 }
 

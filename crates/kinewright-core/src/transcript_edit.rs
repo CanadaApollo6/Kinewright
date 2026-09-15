@@ -202,6 +202,7 @@ mod tests {
                 resolution: None,
                 source_fingerprint: crate::MediaSourceFingerprint::default(),
                 color_description: crate::ColorDescription::default(),
+                assumed_from: None,
             };
             clips.push(Clip {
                 id: ClipId(*id),

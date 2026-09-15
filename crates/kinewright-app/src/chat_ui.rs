@@ -21,7 +21,7 @@ use serde::Serialize;
 use crate::{
     app::KinewrightApp,
     icons::Icon,
-    project::{ProjectPathHandle, ProjectSession, index_after_close},
+    project::{IncidentLogHandle, ProjectPathHandle, ProjectSession, index_after_close},
     theme::{self, color, radius, size, space, type_size},
 };
 
@@ -237,16 +237,18 @@ impl AgentThread {
         analysis: &Arc<dyn Analysis>,
         exporter: &Arc<dyn Export>,
         project_path: &ProjectPathHandle,
+        incidents: &IncidentLogHandle,
     ) -> Result<Self, String> {
         let name = name.into();
         let branch = TimelineBranch::new(name.clone(), base_revision, Arc::clone(base_document))
             .map_err(|error| error.to_string())?;
-        let mcp_server = match McpServer::start_isolated_with_exporter_and_project_path(
+        let mcp_server = match McpServer::start_isolated_with_exporter_project_path_and_incidents(
             branch.core(),
             Arc::clone(playback),
             Arc::clone(analysis),
             Arc::clone(exporter),
             Arc::clone(project_path),
+            Arc::clone(incidents),
         ) {
             Ok(server) => Some(server),
             Err(error) => {
@@ -276,6 +278,7 @@ impl AgentThread {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn replace_branch(
         &mut self,
         base_revision: TimelineRevision,
@@ -284,6 +287,7 @@ impl AgentThread {
         analysis: Arc<dyn Analysis>,
         exporter: Arc<dyn Export>,
         project_path: &ProjectPathHandle,
+        incidents: &IncidentLogHandle,
     ) -> Result<(), String> {
         if let Some(confirmations) = &self.confirmations {
             confirmations.reject_all("the agent branch was replaced");
@@ -292,12 +296,13 @@ impl AgentThread {
         self.selected_operations.clear();
         let branch = TimelineBranch::new(self.name.clone(), base_revision, base_document)
             .map_err(|error| error.to_string())?;
-        let server = McpServer::start_isolated_with_exporter_and_project_path(
+        let server = McpServer::start_isolated_with_exporter_project_path_and_incidents(
             branch.core(),
             playback,
             analysis,
             exporter,
             Arc::clone(project_path),
+            Arc::clone(incidents),
         )
         .map_err(|error| error.to_string())?;
         self.confirmations = Some(server.confirmations());
@@ -530,6 +535,7 @@ impl KinewrightApp {
         document: Arc<Document>,
     ) -> bool {
         let project_path = Arc::clone(&self.projects[project_index].agent_project_path);
+        let incidents = Arc::clone(&self.projects[project_index].incidents);
         let result = self.projects[project_index].threads[thread_index].replace_branch(
             revision,
             document,
@@ -537,6 +543,7 @@ impl KinewrightApp {
             Arc::clone(&self.analysis),
             Arc::clone(&self.exporter),
             &project_path,
+            &incidents,
         );
         if let Err(error) = result {
             self.record_error("Agent branch", error);
@@ -917,6 +924,7 @@ impl KinewrightApp {
         let base_revision = self.projects[project_index].revision;
         let base_document = Arc::clone(&self.projects[project_index].document);
         let project_path = Arc::clone(&self.projects[project_index].agent_project_path);
+        let incidents = Arc::clone(&self.projects[project_index].incidents);
         let thread = AgentThread::new(
             format!("Thread {next_number}"),
             harness,
@@ -927,6 +935,7 @@ impl KinewrightApp {
             &self.analysis,
             &self.exporter,
             &project_path,
+            &incidents,
         );
         let Ok(thread) = thread else {
             self.record_error("Agent branch", "Could not create an isolated agent branch");

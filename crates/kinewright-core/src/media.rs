@@ -1687,6 +1687,54 @@ pub struct AnalysisJobStatus {
     pub error: Option<String>,
 }
 
+/// One CC1 source-colour refusal, with everything the incident layer needs to
+/// classify it without re-probing and without parsing a rendered string
+/// (IN1 §4.1 rule 2).
+///
+/// The `#[error]` attribute carries the **entire** historical sentence the two
+/// nested formats used to build, including its two `media backend error: `
+/// fragments and the path twice, so a log reader, a screenshot and a prose
+/// assertion see no change on the day the type changed underneath them
+/// (IN1 §4.1 rules 2–3). The leading fragment is the old `Backend` wrapper's
+/// own prefix and is vestigial on purpose; dropping it is a visible-text change
+/// and belongs elsewhere (§13 D16). The status fields are derived from the
+/// carried [`crate::ColorSourceError`] accessors as trailing format arguments,
+/// never by re-running the classifier.
+///
+/// It lives behind a `Box` in [`MediaError::SourceColorForAsset`] so
+/// `MediaError` stays small enough for every `Result<_, MediaError>` in the
+/// workspace; the box is what keeps `clippy::result_large_err` quiet without an
+/// allow.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error(
+    "media backend error: managed decode for asset {asset} ({}) failed: \
+media backend error: managed source profile rejected for {} (assumption={assumption:?}): \
+{error} [source_color={}, field={}, observed={}, allowed={}, recovery={}, \
+assumption={assumption:?}, description={description:?}]. Recovery: apply an explicit \
+supported source-colour override, transcode to a supported integer format, or relink to \
+compatible media.",
+    path.display(),
+    path.display(),
+    error.code(),
+    error.field(),
+    error.observed(),
+    error.allowed_values(),
+    error.recovery_action()
+)]
+pub struct SourceColorRefusal {
+    /// The asset whose managed decode was refused.
+    pub asset: AssetId,
+    /// The source path involved in the refused managed decode.
+    pub path: PathBuf,
+    /// The typed CC1 refusal.
+    pub error: crate::ColorSourceError,
+    /// The exact probed description at the moment of refusal. The incident's
+    /// `evidence.probed` is this value; the revert restores these bytes.
+    pub description: ColorDescription,
+    /// The explicit profile assumption in force at the refusal.
+    pub assumption: Option<crate::ColorSourceProfileAssumption>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MediaError {
     #[error("media operation is not implemented")]
@@ -1750,6 +1798,24 @@ pub enum MediaError {
     /// entirely — silent — and nothing else.
     #[error("mix loudness needs at least {required} sample frames; got {sample_frames}")]
     MixLoudnessRangeTooShort { sample_frames: u64, required: u64 },
+    /// CC1's typed source rejection, carried intact out of the decoder.
+    ///
+    /// Its `Display` is never observed on the production path: every
+    /// `SourceColor` becomes a [`Self::SourceColorForAsset`] before it leaves
+    /// `kinewright-media` (IN1 §4.2 rule 6), so this text may be short.
+    #[error("managed source profile rejected: {0}")]
+    SourceColor(#[from] crate::ColorSourceError),
+    /// The same refusal with the asset, the path, the probed description and
+    /// the assumption `contextual_managed_decode_error` exists to add.
+    ///
+    /// Boxed. The payload is 300-odd bytes of probed description and typed
+    /// refusal; inline it would put every `Result<_, MediaError>` signature in
+    /// the workspace over `clippy::result_large_err`'s 128-byte threshold, and
+    /// `MediaError` is this workspace's universal media return type. The
+    /// rendered sentence is unaffected: `Display` forwards through the box to
+    /// [`SourceColorRefusal`], which owns the template.
+    #[error("{0}")]
+    SourceColorForAsset(Box<SourceColorRefusal>),
     #[error("media backend error: {0}")]
     Backend(String),
 }
@@ -1763,6 +1829,8 @@ impl MediaError {
             Self::DeliveryColor(error) => Some(error.code()),
             Self::DeliveryVerification(error) => Some(error.code()),
             Self::ColorQc(error) => Some(error.code()),
+            Self::SourceColor(error) => Some(error.code()),
+            Self::SourceColorForAsset(refusal) => Some(refusal.error.code()),
             Self::NotImplemented
             | Self::Cancelled
             | Self::MixSpectrumRangeTooShort { .. }
@@ -2523,7 +2591,130 @@ pub trait Export: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Clip, ClipContent, MediaKind, Rational, Track, TrackKind};
+    use crate::{Clip, ClipContent, ColorSourceError, MediaKind, Rational, Track, TrackKind};
+
+    /// IN1 §9 clause 11's template: the rendered `Display` of the managed-decode
+    /// failure on `in1_untagged.mp4` at `c3a5814`, with the per-run temp path
+    /// replaced by `{path}` at both of its two occurrences. A rendered literal
+    /// is undischargeable — every IN1 fixture lives under a unique temp stem,
+    /// so the path differs per run and per operating system — and the `replace`
+    /// form pins every byte that is not the path.
+    const IN1_MANAGED_DECODE_REFUSAL: &str = concat!(
+        r#"media backend error: managed decode for asset 1 ({path}) failed: media backend "#,
+        r#"error: managed source profile rejected for {path} (assumption=None): source colour "#,
+        r#"primaries are unknown [source_color=unknown_source_primaries, field=primaries, "#,
+        r#"observed=unknown, allowed=bt709 or srgb in a supported CC1 profile, recovery=Apply "#,
+        r#"an explicit supported source-colour override or relink to compatible media., "#,
+        r#"assumption=None, description=ColorDescription { primaries: Unknown, transfer: "#,
+        r#"Unknown, matrix: Unknown, range: Unknown, white_point: Unknown, bit_depth: Eight, "#,
+        r#"confidence_basis_points: 2000, provenance: Inferred }]. Recovery: apply an explicit "#,
+        r#"supported source-colour override, transcode to a supported integer format, or relink"#,
+        r#" to compatible media."#,
+    );
+
+    fn in1_untagged_mp4_probe() -> ColorDescription {
+        ColorDescription {
+            primaries: crate::ColorPrimaries::Unknown,
+            transfer: crate::ColorTransfer::Unknown,
+            matrix: crate::ColorMatrix::Unknown,
+            range: crate::ColorRange::Unknown,
+            white_point: crate::ColorWhitePoint::Unknown,
+            bit_depth: crate::ColorBitDepth::Eight,
+            confidence_basis_points: 2_000,
+            provenance: crate::ColorProvenance::Inferred,
+        }
+    }
+
+    fn in1_every_source_colour_error() -> Vec<ColorSourceError> {
+        vec![
+            ColorSourceError::UnknownPrimaries,
+            ColorSourceError::UnsupportedPrimaries(crate::ColorPrimaries::Bt2020),
+            ColorSourceError::UnknownTransfer,
+            ColorSourceError::UnsupportedTransfer(crate::ColorTransfer::Smpte2084),
+            ColorSourceError::UnknownMatrix,
+            ColorSourceError::UnsupportedMatrix(crate::ColorMatrix::Bt2020Ncl),
+            ColorSourceError::UnknownRange,
+            ColorSourceError::UnsupportedRange(crate::ColorRange::Other("weird".to_owned())),
+            ColorSourceError::UnknownWhitePoint,
+            ColorSourceError::UnsupportedWhitePoint(crate::ColorWhitePoint::D50),
+            ColorSourceError::UnknownBitDepth,
+            ColorSourceError::UnsupportedBitDepth(crate::ColorBitDepth::Float32),
+            ColorSourceError::UnsupportedCombination {
+                primaries: crate::ColorPrimaries::Bt709,
+                transfer: crate::ColorTransfer::Srgb,
+                matrix: crate::ColorMatrix::Bt709,
+                range: crate::ColorRange::Limited,
+            },
+        ]
+    }
+
+    #[test]
+    fn in1_typed_source_colour_errors_carry_their_recovery_code_through_media_error() {
+        let errors = in1_every_source_colour_error();
+        assert_eq!(errors.len(), 13);
+        for error in errors {
+            assert_eq!(
+                MediaError::SourceColor(error.clone()).recovery_code(),
+                Some(error.code())
+            );
+            assert_eq!(
+                MediaError::from(error.clone()).recovery_code(),
+                Some(error.code()),
+                "`#[from]` must build the same variant"
+            );
+            assert_eq!(
+                MediaError::SourceColorForAsset(Box::new(SourceColorRefusal {
+                    asset: AssetId(1),
+                    path: PathBuf::from("in1_untagged.mp4"),
+                    error: error.clone(),
+                    description: in1_untagged_mp4_probe(),
+                    assumption: None,
+                }))
+                .recovery_code(),
+                Some(error.code())
+            );
+        }
+    }
+
+    #[test]
+    fn in1_the_asset_scoped_refusal_renders_the_historical_sentence() {
+        let path = PathBuf::from("/tmp/kinewright-in1/in1_untagged.mp4");
+        let error = MediaError::SourceColorForAsset(Box::new(SourceColorRefusal {
+            asset: AssetId(1),
+            path: path.clone(),
+            error: ColorSourceError::UnknownPrimaries,
+            description: in1_untagged_mp4_probe(),
+            assumption: None,
+        }));
+        let message = error.to_string();
+        assert_eq!(
+            message.matches(&path.display().to_string()).count(),
+            2,
+            "the historical sentence interpolates the path twice"
+        );
+        assert_eq!(
+            message.replace(&path.display().to_string(), "{path}"),
+            IN1_MANAGED_DECODE_REFUSAL
+        );
+        assert_eq!(IN1_MANAGED_DECODE_REFUSAL.len(), 750);
+    }
+
+    #[test]
+    fn in1_the_boxed_refusal_keeps_media_error_small_enough_to_return_by_value() {
+        // IN1 §4.1 rule 2's payload is 300-odd bytes. Boxing it is what keeps
+        // every `Result<_, MediaError>` in the workspace under
+        // `clippy::result_large_err`'s 128-byte threshold without an allow.
+        assert!(
+            std::mem::size_of::<MediaError>() <= 128,
+            "MediaError is {} bytes",
+            std::mem::size_of::<MediaError>()
+        );
+        // A deliberate 64-bit-only pin: the figure is pointer-width dependent,
+        // and the inequality above is the assertion that discharges the rule.
+        // It is kept so that a regrowth of the enum is reported as a number
+        // rather than as a silent approach to the threshold.
+        assert_eq!(std::mem::size_of::<MediaError>(), 96);
+    }
 
     fn asset(id: u64, kind: MediaKind) -> MediaAsset {
         MediaAsset {
@@ -2536,6 +2727,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: MediaSourceFingerprint::unknown(),
             color_description: ColorDescription::default(),
+            assumed_from: None,
         }
     }
 

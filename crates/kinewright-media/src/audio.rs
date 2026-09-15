@@ -5066,6 +5066,7 @@ mod tests {
                 resolution: Some((64, 64)),
                 source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                 color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
             }],
             markers: Vec::new(),
             fps,
@@ -6023,6 +6024,7 @@ mod tests {
             resolution: None,
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         }
     }
 

@@ -41,6 +41,13 @@ pub mod cc7_sources;
 #[cfg(any(test, feature = "test-util"))]
 pub mod au6_sources;
 
+/// IN1 §3's source generators, gated exactly as [`cc7_sources`] is and for the
+/// same reason (IN1 §3 rule 15): every fixture is encoded through
+/// `test_support`'s `GeneratedMedia`, which is itself behind this feature, and
+/// the agent's `tests/mcp_server.rs` reads the module across a crate boundary.
+#[cfg(any(test, feature = "test-util"))]
+pub mod in1_sources;
+
 #[cfg(test)]
 mod media_matrix_tests;
 
@@ -78,6 +85,13 @@ mod au5b_fixtures;
 /// public surface to reach them.
 #[cfg(test)]
 mod au6_fixtures;
+
+/// IN1 §3 rule 13's nine media gates. In `src/` for the reason every
+/// `ccN_fixtures.rs` is: they drive `VideoDecoder::open_scaled_managed` and
+/// `contextual_managed_decode_error`, which are `pub(crate)` seams, and IN1
+/// widens no public surface to reach them.
+#[cfg(test)]
+mod in1_fixtures;
 
 #[cfg(test)]
 mod gpu_test_support;

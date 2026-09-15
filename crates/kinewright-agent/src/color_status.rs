@@ -5412,6 +5412,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: MediaSourceFingerprint::default(),
             color_description: description(),
+            assumed_from: None,
         };
         Document {
             tracks: vec![Track {
@@ -5479,6 +5480,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: MediaSourceFingerprint::default(),
             color_description: ColorDescription::unknown(),
+            assumed_from: None,
         });
         document.media_pool[0].color_description = ColorDescription::unknown();
         let value = color_context_value(TimelineRevision(0), &document);

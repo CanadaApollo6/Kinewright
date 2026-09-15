@@ -1264,6 +1264,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription::default(),
+            assumed_from: None,
         }
     }
 

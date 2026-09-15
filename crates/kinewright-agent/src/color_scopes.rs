@@ -2205,6 +2205,7 @@ mod tests {
             resolution: Some((2, 1)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
             color_description: managed_color(),
+            assumed_from: None,
         };
         let first = asset(1);
         let second = asset(2);

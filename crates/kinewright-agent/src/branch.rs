@@ -218,6 +218,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
             color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
         }
     }
 

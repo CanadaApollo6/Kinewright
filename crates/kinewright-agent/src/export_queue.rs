@@ -2178,6 +2178,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: MediaSourceFingerprint::unknown(),
             color_description: ColorContext::sdr_rec709().delivery,
+            assumed_from: None,
         }
     }
 

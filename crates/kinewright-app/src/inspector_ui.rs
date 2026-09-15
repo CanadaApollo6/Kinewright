@@ -5003,6 +5003,7 @@ mod tests {
                     resolution: Some((1920, 1080)),
                     source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                     color_description: kinewright_core::ColorDescription::default(),
+                    assumed_from: None,
                 },
                 MediaAsset {
                     id: AssetId(2),
@@ -5014,6 +5015,7 @@ mod tests {
                     resolution: None,
                     source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                     color_description: kinewright_core::ColorDescription::default(),
+                    assumed_from: None,
                 },
             ],
             tracks: vec![
@@ -5847,6 +5849,7 @@ mod tests {
                 resolution: Some((1920, 1080)),
                 source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                 color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
             }],
             tracks: vec![Track {
                 id: TrackId(1),
@@ -7946,6 +7949,7 @@ mod tests {
                 resolution: Some((CC7_SOURCE_WIDTH, CC7_SOURCE_HEIGHT)),
                 source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
                 color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
             });
             clips.push(Clip {
                 id: ClipId(clip.clip_id),

@@ -1465,6 +1465,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: ColorContext::sdr_rec709().delivery,
+            assumed_from: None,
         };
         Document {
             tracks: vec![Track {
@@ -1731,6 +1732,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: ColorContext::sdr_rec709().delivery,
+            assumed_from: None,
         });
 
         let report = delivery_conformance(
@@ -1987,6 +1989,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription::unknown(),
+            assumed_from: None,
         });
         document.media_pool[0].color_description = crate::ColorDescription::unknown();
 
@@ -2024,6 +2027,7 @@ mod tests {
             resolution: Some((1920, 1080)),
             source_fingerprint: crate::MediaSourceFingerprint::default(),
             color_description: crate::ColorDescription::unknown(),
+            assumed_from: None,
         });
         document.tracks.push(Track {
             id: TrackId(2),

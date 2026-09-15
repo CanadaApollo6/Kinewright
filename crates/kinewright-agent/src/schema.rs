@@ -13,8 +13,12 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 84] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 86] = [
     "get_timeline_state",
+    // IN1 §6.1 rule 1: two internal capabilities, reached only through
+    // `invoke_capability` and never added to `COMPACT_TOOL_NAMES`.
+    "get_incidents",
+    "resolve_incident",
     "search_capabilities",
     "get_capability",
     "invoke_capability",

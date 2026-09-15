@@ -738,11 +738,15 @@ pub enum OpError {
     ColorConfidenceOutOfRange { actual: u16 },
     #[error("asset {asset} color override must have positive confidence")]
     ZeroConfidenceColorOverride { asset: AssetId },
-    #[error("asset {asset} color override requires user_override provenance, got {actual:?}")]
+    #[error(
+        "asset {asset} color override requires user_override or agent_assumption provenance, got {actual:?}"
+    )]
     InvalidColorOverrideProvenance {
         asset: AssetId,
         actual: ColorProvenance,
     },
+    #[error("asset {asset} assumed_from is written by the colour recovery, never supplied on add")]
+    AssumedFromNotSuppliable { asset: AssetId },
     #[error("document resolution must be non-zero")]
     InvalidResolution,
     #[error("document duration {actual:?} does not match calculated duration {expected:?}")]
@@ -1534,6 +1538,14 @@ fn add_asset(doc: &mut Document, asset: MediaAsset) -> Result<(), OpError> {
     if doc.asset(asset.id).is_some() {
         return Err(OpError::DuplicateAsset(asset.id));
     }
+    // IN1 §4.4 rule 26: `assumed_from` is visible in the `add_asset` input
+    // schema, so an agent that supplied one and then "reverted" into it would
+    // set an arbitrary description through the guard's byte-equality case. The
+    // check lives here and not in `validate_asset`, which also runs on load,
+    // where a saved project with a live assumption legitimately carries it.
+    if asset.assumed_from.is_some() {
+        return Err(OpError::AssumedFromNotSuppliable { asset: asset.id });
+    }
     validate_asset(&asset)?;
     doc.media_pool.push(asset);
     Ok(())
@@ -1647,14 +1659,36 @@ fn set_asset_color_description(
         .position(|asset| asset.id == asset_id)
         .ok_or(OpError::MissingAsset(asset_id))?;
     validate_color_description(&color_description)?;
-    if color_description.confidence_basis_points == 0 {
-        return Err(OpError::ZeroConfidenceColorOverride { asset: asset_id });
-    }
-    if color_description.provenance != ColorProvenance::UserOverride {
+    // IN1 §4.4 rule 21: the ordering is normative — `validate_color_description`
+    // first, then the three-way admission, then the zero-confidence check.
+    // Putting the admission first is what lets a revert to a legitimately
+    // zero-confidence probed description succeed instead of stranding the
+    // asset; every explicit actor override is still refused at zero.
+    let current = &doc.media_pool[index];
+    let is_actor = matches!(
+        color_description.provenance,
+        ColorProvenance::UserOverride | ColorProvenance::AgentAssumption
+    );
+    let is_revert = current.assumed_from.as_ref() == Some(&color_description);
+    if !is_actor && !is_revert {
         return Err(OpError::InvalidColorOverrideProvenance {
             asset: asset_id,
             actual: color_description.provenance,
         });
+    }
+    if is_actor && color_description.confidence_basis_points == 0 {
+        return Err(OpError::ZeroConfidenceColorOverride { asset: asset_id });
+    }
+    // `assumed_from` is recorded only when it is `None`, so a second assumption
+    // can never overwrite the first probed truth and a user override applied
+    // over an assumption leaves the revert reachable (IN1 §4.4 rule 25).
+    if color_description.provenance == ColorProvenance::AgentAssumption {
+        if doc.media_pool[index].assumed_from.is_none() {
+            doc.media_pool[index].assumed_from =
+                Some(doc.media_pool[index].color_description.clone());
+        }
+    } else if is_revert {
+        doc.media_pool[index].assumed_from = None;
     }
     doc.media_pool[index].color_description = color_description;
     Ok(())
@@ -3758,6 +3792,12 @@ fn validate_asset(asset: &MediaAsset) -> Result<(), OpError> {
     }
     validate_source_fingerprint(asset.id, &asset.source_fingerprint)?;
     validate_color_description(&asset.color_description)?;
+    // IN1 §4.4 rule 30: guards the programmatic path, for the same reason the
+    // line above it exists. A hand-edited project file is caught one layer
+    // earlier, at `deserialize_confidence_basis_points`.
+    if let Some(assumed_from) = &asset.assumed_from {
+        validate_color_description(assumed_from)?;
+    }
     Ok(())
 }
 

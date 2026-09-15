@@ -2071,6 +2071,7 @@ mod tests {
             resolution: Some((1_920, 1_080)),
             source_fingerprint: fingerprint,
             color_description: ColorDescription::default(),
+            assumed_from: None,
         }
     }
 
@@ -2649,6 +2650,7 @@ mod tests {
                 resolution: Some((1920, 1080)),
                 source_fingerprint: MediaSourceFingerprint::unknown(),
                 color_description: ColorDescription::default(),
+                assumed_from: None,
             }],
             fps,
             resolution: (1920, 1080),
