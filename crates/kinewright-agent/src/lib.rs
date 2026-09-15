@@ -9,6 +9,12 @@ mod color_scopes;
 mod color_status;
 mod cursor;
 mod drivers;
+/// The eval harness. Gated with the fixture data it consumes: `eval.rs`
+/// imports `kinewright_core::au6_scenarios` at module scope, which only
+/// exists under core's `test-util`, so a build of this crate with
+/// `default-features = false` (the app's) cannot compile the module and has
+/// no caller for it. `kinewright-eval` keeps the default feature and sees it.
+#[cfg(feature = "eval-harness")]
 pub mod eval;
 pub mod export_queue;
 pub mod fixture_pack;

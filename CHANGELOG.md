@@ -9,6 +9,14 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Fixed
+- `cargo build -p kinewright-app` (the release workflow's build) failed on
+  `main` after AU6 Part B: `kinewright-agent`'s `eval` module imported
+  `kinewright_core::au6_scenarios` at module scope, which only exists under
+  core's `test-util` feature, and the app takes the agent with
+  `default-features = false`. Workspace-wide `cargo build`, `test` and
+  `clippy` never saw it because the agent's default `eval-harness` feature
+  unifies the gate on. The `eval` module is now gated with the fixture data
+  it consumes; `kinewright-eval` keeps the default feature and is unchanged.
 - A split no longer slides the right half's clip-local automation curves; both
   halves evaluate to the same values at the same project frames as the original.
 - Shortening a project no longer rejects the edit when a bus or master effect
