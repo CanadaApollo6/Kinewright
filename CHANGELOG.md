@@ -95,6 +95,18 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- IN1 Part A, incidents and the colour case: a typed `Incident` model in core
+  with a per-code policy table (auto-apply / ask-first / explain), one
+  session incident log with dedup and suppression, `ColorProvenance::
+  AgentAssumption` and `MediaAsset.assumed_from` behind a widened override
+  guard, and the untagged-source colour case end to end — importing an
+  untagged BT.709-shaped source and pressing play now opens exactly one
+  auto-applied incident with a card beside the asset, and one button or
+  Ctrl+Z restores the probed description. The agent reads the same
+  incident through `get_incidents` and records outcomes through
+  `resolve_incident`, dispatched as capabilities so the served tool surface
+  is unchanged. One error source (`Media` playback) is migrated; the rest
+  is Part B. See docs/IN1-INCIDENTS-AND-THE-COLOUR-CASE.md.
 - The published v1–v6 eval manifests now run v7's `machine_assertions`
   string check (non-empty, distinct, names live authority). v5 g3's
   leftover v9 aftermath window `1285..1345` is refused; the published
