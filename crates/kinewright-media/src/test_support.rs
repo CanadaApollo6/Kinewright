@@ -378,11 +378,22 @@ fn mux_speech(wav: &Path, output: &Path) {
 }
 
 fn unique_stem(label: &str) -> String {
+    // The wall clock alone is not unique: Windows reports `SystemTime` at a
+    // coarse granularity, so two test threads creating a directory for the
+    // same label in one tick got the same path, and the first to finish
+    // removed the other's directory mid-export ("export directory does not
+    // exist", the AU6 delivery fixtures on the Windows lane). A process-wide
+    // counter makes every stem distinct regardless of the clock.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock should follow the Unix epoch")
         .as_nanos();
-    format!("kinewright-{label}-{}-{nonce}", std::process::id())
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "kinewright-{label}-{}-{nonce}-{sequence}",
+        std::process::id()
+    )
 }
 
 /// A mono tone of `frames` samples. **Mono**, and it returns a bare sample
@@ -458,4 +469,16 @@ pub fn wav_f32(samples: &[f32], rate: u32, channels: u16) -> Vec<u8> {
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
     bytes
+}
+
+#[cfg(test)]
+mod unique_stem_tests {
+    use super::unique_stem;
+
+    #[test]
+    fn two_stems_for_one_label_never_collide_even_within_one_clock_tick() {
+        let stems: std::collections::BTreeSet<String> =
+            (0..64).map(|_| unique_stem("same-label")).collect();
+        assert_eq!(stems.len(), 64, "every call yields a distinct stem");
+    }
 }
