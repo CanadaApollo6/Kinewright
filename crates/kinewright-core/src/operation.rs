@@ -5285,16 +5285,37 @@ mod tests {
     /// `OpError`'s 154 and `Operation`'s 57 variants, but it cannot be asked
     /// how many names each arm groups, and building 154 payload-carrying
     /// rejections to count them would be a fixture, not a measurement.
-    fn single_fn_impl_body(signature: &str) -> &'static str {
-        const SOURCE: &str = include_str!("operation.rs");
-        let start = SOURCE
+    fn single_fn_impl_body(signature: &str) -> String {
+        single_fn_impl_body_in(include_str!("operation.rs"), signature)
+    }
+
+    /// [`single_fn_impl_body`] over a caller-supplied source text. Line
+    /// endings are normalised first: a Windows checkout hands `include_str!`
+    /// CRLF text, and the `"\n    }\n}"` needle below found nothing there
+    /// (CI on the stage A commit, four failures in this module).
+    fn single_fn_impl_body_in(source: &str, signature: &str) -> String {
+        let source = source.replace("\r\n", "\n");
+        let start = source
             .find(signature)
             .expect("the accessor is declared in this file");
-        let rest = &SOURCE[start..];
+        let rest = &source[start..];
         let end = rest
             .find("\n    }\n}")
             .expect("the accessor is the only item in its impl block");
-        &rest[..end]
+        rest[..end].to_owned()
+    }
+
+    #[test]
+    fn in1b_the_source_readers_are_line_ending_agnostic() {
+        const SOURCE: &str = include_str!("operation.rs");
+        let signature = "pub const fn incident_family(&self) -> IncidentFamily {";
+        let lf = single_fn_impl_body_in(SOURCE, signature);
+        let crlf = single_fn_impl_body_in(&SOURCE.replace('\n', "\r\n"), signature);
+        assert_eq!(
+            lf, crlf,
+            "a CRLF checkout must read the same body as an LF one"
+        );
+        assert!(!lf.is_empty());
     }
 
     /// Group the `Self::Variant` names of one grouped match by the arm they
@@ -5583,7 +5604,7 @@ mod tests {
     #[test]
     fn in1b_every_op_error_variant_has_a_family() {
         let body = single_fn_impl_body("pub const fn incident_family(&self) -> IncidentFamily {");
-        let grouped = arms_by_result(body, "IncidentFamily");
+        let grouped = arms_by_result(&body, "IncidentFamily");
 
         // Per variant, both ways: what the accessor groups must equal what
         // Appendix A declares, name for name. Counting alone would let two
@@ -5760,7 +5781,7 @@ mod tests {
     #[test]
     fn in1b_the_two_lut_asset_variants_are_the_only_per_variant_codes() {
         let body = single_fn_impl_body("pub const fn incident_code(&self) -> IncidentCode {");
-        let overrides = arms_by_result(body, "IncidentCode");
+        let overrides = arms_by_result(&body, "IncidentCode");
         assert_eq!(
             overrides.get("LutAssetPolicy").map(Vec::len),
             Some(2),
@@ -5816,7 +5837,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn in1b_every_operation_names_its_incident_subject() {
         let body = single_fn_impl_body("pub const fn incident_subject(&self) -> IncidentSubject {");
-        let grouped = arms_by_result(body, "IncidentSubject");
+        let grouped = arms_by_result(&body, "IncidentSubject");
 
         // Per variant, both ways, for the same reason the family test is
         // (review-2 S4): a variant that answered `Project` where it should

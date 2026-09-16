@@ -1,0 +1,3 @@
+# Rust sources are read back by tests through include_str! and compared
+# against LF-written patterns; keep them LF on every platform.
+*.rs text eol=lf

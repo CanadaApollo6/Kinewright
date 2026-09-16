@@ -4851,7 +4851,7 @@ pub(crate) mod in1_tests {
 
     /// This file's production half, for the source-shape assertions the
     /// unreachable arms use (review-app-1 B1, review-app-2 S3).
-    fn in1b_app_source() -> &'static str {
+    fn in1b_app_source() -> String {
         in1b_production_half(include_str!("app.rs"))
     }
 
@@ -4864,10 +4864,26 @@ pub(crate) mod in1_tests {
     /// in the idiom `au5_a_room_tone_refusal_is_not_filed_under_look` already
     /// uses: the code it queues and the fact that no bare string survives
     /// beside it (`IN1b` §10's limit, review-app-2 S3).
-    fn in1b_production_half(source: &'static str) -> &'static str {
+    fn in1b_production_half(source: &'static str) -> String {
+        // Line endings are normalised first: a Windows checkout hands
+        // `include_str!` CRLF text, and the multi-line source shapes the
+        // `include_str!` assertions look for are written with `\n`.
+        let source = source.replace("\r\n", "\n");
         source
             .split_once("\n#[cfg(test)]")
-            .map_or(source, |(before, _)| before)
+            .map_or(source.clone(), |(before, _)| before.to_owned())
+    }
+
+    #[test]
+    fn in1b_the_production_half_reader_is_line_ending_agnostic() {
+        const SOURCE: &str = include_str!("app.rs");
+        let lf = in1b_production_half(SOURCE);
+        let crlf = in1b_production_half(Box::leak(SOURCE.replace('\n', "\r\n").into_boxed_str()));
+        assert_eq!(
+            lf, crlf,
+            "a CRLF checkout must read the same half as an LF one"
+        );
+        assert!(lf.contains("fn route_incidents"));
     }
 
     /// [`in1b_route_one`] for a test that opened a second project, which the
@@ -5747,9 +5763,7 @@ pub(crate) mod in1_tests {
         // provoke, which `IN1b` §9's terms exclude; this is the same shape
         // `au5_a_room_tone_refusal_is_not_filed_under_look` uses for the same
         // reason.
-        let chat = include_str!("chat_ui.rs")
-            .split_once("\n#[cfg(test)]")
-            .map_or(include_str!("chat_ui.rs"), |(before, _)| before);
+        let chat = in1b_production_half(include_str!("chat_ui.rs"));
         assert_eq!(
             chat.matches("BranchApplyOutcome::Conflict { expected, actual }")
                 .count(),
