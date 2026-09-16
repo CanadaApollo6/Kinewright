@@ -945,9 +945,10 @@ impl IncidentLog {
     /// records an outcome (IN1 §6.3 rule 16). `resolved_after` is stamped by
     /// [`Self::resolve`], because only the log holds the session clock it is
     /// measured against. Everything else about an
-    /// [`Incident`] is written by [`Self::observe`] and [`Self::resolve`], so
-    /// handing out one narrowly typed `&mut` keeps the record's identity,
-    /// classification and state owned by this type.
+    /// [`Incident`] is written by [`Self::observe`], [`Self::resolve`] and
+    /// [`Self::refresh_revision`], so handing out one narrowly typed `&mut`
+    /// keeps the record's identity, classification and state owned by this
+    /// type.
     pub fn telemetry_mut(&mut self, id: IncidentId) -> Option<&mut IncidentTelemetry> {
         self.entries
             .iter_mut()
@@ -987,6 +988,35 @@ impl IncidentLog {
         };
         let key = (incident.code, incident.subject);
         self.suppressed.insert(key);
+        true
+    }
+
+    /// Point an open incident at the revision it is now stated against.
+    ///
+    /// The third narrowly typed writer, beside [`Self::telemetry_mut`] and
+    /// [`Self::note_auto_applied`], and like them it writes exactly one thing:
+    /// `revision`, and only on an `Open` entry. `count`, `suppressed`, `state`,
+    /// `opened_at` and telemetry are untouched. Returns `false`, changing
+    /// nothing, for an unknown id or a `Resolved` entry.
+    ///
+    /// It exists because [`Self::observe`] cannot do this job. IN1 §5.2 rule 10
+    /// says a stale router auto-apply that core refuses on the revision leaves
+    /// the incident `Open` with its `revision` refreshed and is not re-sent, and
+    /// §9 clause 9 asserts that state. But by then the router has already called
+    /// [`Self::note_auto_applied`], so the incident's `(code, subject)` pair is
+    /// in the suppression set and rule 19's check at the top of `observe`
+    /// returns [`Observed::Suppressed`] before the dedup arm that would have
+    /// refreshed `revision` can run — by design, because that check is what
+    /// makes a session auto-apply at most once. Refreshing therefore needs its
+    /// own writer rather than a weakening of rule 19.
+    pub fn refresh_revision(&mut self, id: IncidentId, revision: TimelineRevision) -> bool {
+        let Some(incident) = self.entries.iter_mut().find(|incident| incident.id == id) else {
+            return false;
+        };
+        if incident.state != IncidentState::Open {
+            return false;
+        }
+        incident.revision = revision;
         true
     }
 
@@ -1431,6 +1461,51 @@ mod tests {
             IncidentState::Resolved(IncidentOutcome::Reverted)
         );
         assert!(!log.note_auto_applied(IncidentId(99)));
+    }
+
+    #[test]
+    fn in1_refresh_revision_moves_only_the_revision_of_an_open_incident() {
+        let probed = untagged_mp4_probe();
+        let mut log = IncidentLog::with_start(Instant::now());
+        let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+            panic!("the first observation must open an incident");
+        };
+        // The router's suppression is already in place, which is why `observe`
+        // cannot do this (IN1 §2.3 rule 19, §5.2 rule 10).
+        assert!(log.note_auto_applied(id));
+        assert_eq!(
+            log.observe(unknown_primaries_observation(&probed)),
+            Observed::Suppressed
+        );
+
+        let before = log.get(id).unwrap().clone();
+        assert_eq!(before.revision, TimelineRevision(1));
+        assert!(log.refresh_revision(id, TimelineRevision(9)));
+
+        let after = log.get(id).unwrap().clone();
+        assert_eq!(after.revision, TimelineRevision(9));
+        // Everything else about the record is byte-identical: comparing the
+        // whole `Incident` with only `revision` normalised is what proves
+        // `count`, `state`, `opened_at` and telemetry were not touched.
+        let mut expected = before.clone();
+        expected.revision = TimelineRevision(9);
+        assert_eq!(after, expected);
+        assert_eq!(after.count, before.count);
+        assert_eq!(after.state, IncidentState::Open);
+        assert_eq!(after.opened_at, before.opened_at);
+        assert_eq!(after.telemetry, before.telemetry);
+        assert_eq!(log.open_count(), 1);
+
+        // A resolved entry refuses and is unchanged.
+        assert!(log.resolve(id, IncidentOutcome::Applied));
+        let resolved = log.get(id).unwrap().clone();
+        assert!(!log.refresh_revision(id, TimelineRevision(11)));
+        assert_eq!(log.get(id).unwrap(), &resolved);
+        assert_eq!(log.get(id).unwrap().revision, TimelineRevision(9));
+
+        // An unknown id refuses.
+        assert!(!log.refresh_revision(IncidentId(99), TimelineRevision(11)));
+        assert_eq!(log.len(), 1);
     }
 
     #[test]

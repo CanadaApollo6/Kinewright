@@ -1546,6 +1546,18 @@ fn add_asset(doc: &mut Document, asset: MediaAsset) -> Result<(), OpError> {
     if asset.assumed_from.is_some() {
         return Err(OpError::AssumedFromNotSuppliable { asset: asset.id });
     }
+    // The same door, one field over (core review pass-2 S1): `color_description`
+    // is in that schema too, and §4.3 rule 12 has just added `AgentAssumption`
+    // to it, so an added asset could arrive claiming Kinewright assumed its
+    // colour when Kinewright did nothing of the sort. That is an attribution lie
+    // the QC report and the Media panel read as evidence, and it is the entry
+    // point to B1's absorbing state. The variant is reused deliberately: both
+    // refusals say the same thing — the colour recovery writes this, an add
+    // never supplies it — and `OpError` stays at 154 variants, the count
+    // §4.4 rule 26 pins (§4.6 rule 36 is about `Operation`, not `OpError`).
+    if asset.color_description.provenance == ColorProvenance::AgentAssumption {
+        return Err(OpError::AssumedFromNotSuppliable { asset: asset.id });
+    }
     validate_asset(&asset)?;
     doc.media_pool.push(asset);
     Ok(())
@@ -1679,16 +1691,23 @@ fn set_asset_color_description(
     if is_actor && color_description.confidence_basis_points == 0 {
         return Err(OpError::ZeroConfidenceColorOverride { asset: asset_id });
     }
-    // `assumed_from` is recorded only when it is `None`, so a second assumption
-    // can never overwrite the first probed truth and a user override applied
-    // over an assumption leaves the revert reachable (IN1 §4.4 rule 25).
-    if color_description.provenance == ColorProvenance::AgentAssumption {
-        if doc.media_pool[index].assumed_from.is_none() {
-            doc.media_pool[index].assumed_from =
-                Some(doc.media_pool[index].color_description.clone());
-        }
-    } else if is_revert {
+    // The revert is tested first, and the order is load-bearing: a write can be
+    // both an actor write and a revert, because the recorded bytes may
+    // themselves carry `AgentAssumption` provenance. The old order let the
+    // assumption arm win in that case, so `assumed_from` was never cleared and
+    // the asset entered an absorbing state — clearing it afterwards would need
+    // a write whose bytes equal the recorded description *and* whose provenance
+    // is not `AgentAssumption`, which byte-equality makes impossible (core
+    // review pass-2 B1's three-step reproduction; IN1 §4.4 rule 24 erratum).
+    // Otherwise `assumed_from` is recorded only when it is `None`, so a second
+    // assumption can never overwrite the first probed truth and a user override
+    // applied over an assumption leaves the revert reachable (IN1 §4.4 rule 25).
+    if is_revert {
         doc.media_pool[index].assumed_from = None;
+    } else if color_description.provenance == ColorProvenance::AgentAssumption
+        && doc.media_pool[index].assumed_from.is_none()
+    {
+        doc.media_pool[index].assumed_from = Some(doc.media_pool[index].color_description.clone());
     }
     doc.media_pool[index].color_description = color_description;
     Ok(())

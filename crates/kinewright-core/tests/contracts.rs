@@ -6284,6 +6284,70 @@ fn in1_a_zero_confidence_agent_assumption_is_still_refused() {
 }
 
 #[test]
+fn in1_a_revert_into_an_agent_assumption_still_clears_assumed_from() {
+    // Core review pass-2 B1 (IN1 §4.4 rule 24 erratum): a write can be both an
+    // actor write and a revert, because the recorded bytes may themselves carry
+    // `AgentAssumption` provenance. The old branch order let the assumption arm
+    // win and `assumed_from` was never cleared, leaving an absorbing state.
+    //
+    // Step 1's shape — an `AgentAssumption` description with `assumed_from`
+    // `None` — is no longer reachable through `AddAsset` (rule 26's erratum
+    // refuses it), but a project saved after an auto-apply and hand-edited to
+    // drop the `#[serde(default)]` `assumed_from` key loads in exactly this
+    // shape, so the document is built in memory.
+    let fps = Rational::new(25, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    let probed = in1_probed_description(2_000);
+    let mut stranded = asset(1, fps, 50);
+    stranded.color_description = kinewright_core::recovery_description(&probed);
+    stranded.assumed_from = None;
+    document.media_pool.push(stranded);
+    assert_eq!(
+        document
+            .asset(AssetId(1))
+            .unwrap()
+            .color_description
+            .provenance,
+        ColorProvenance::AgentAssumption
+    );
+    assert_eq!(document.asset(AssetId(1)).unwrap().assumed_from, None);
+
+    // Step 2: another `AgentAssumption` description records the step-1
+    // description — itself an assumption — as `assumed_from`.
+    let mut second = kinewright_core::recovery_description(&probed);
+    second.range = ColorRange::Full;
+    Operation::SetAssetColorDescription {
+        asset: AssetId(1),
+        color_description: second.clone(),
+    }
+    .apply(&mut document)
+    .unwrap();
+    let recorded = document
+        .asset(AssetId(1))
+        .unwrap()
+        .assumed_from
+        .clone()
+        .unwrap();
+    assert_eq!(recorded.provenance, ColorProvenance::AgentAssumption);
+    assert_eq!(
+        document.asset(AssetId(1)).unwrap().color_description,
+        second
+    );
+
+    // Step 3: reverting into exactly those recorded bytes clears
+    // `assumed_from`, even though the bytes are an assumption.
+    Operation::SetAssetColorDescription {
+        asset: AssetId(1),
+        color_description: recorded.clone(),
+    }
+    .apply(&mut document)
+    .unwrap();
+    let asset = document.asset(AssetId(1)).unwrap();
+    assert_eq!(asset.assumed_from, None, "the revert must clear it");
+    assert_eq!(asset.color_description, recorded);
+}
+
+#[test]
 fn in1_add_asset_refuses_a_supplied_assumed_from() {
     let fps = Rational::new(25, 1).unwrap();
     let mut document = empty_timeline(fps);
@@ -6307,6 +6371,35 @@ fn in1_add_asset_refuses_a_supplied_assumed_from() {
         .unwrap();
     assert_eq!(document.media_pool.len(), 1);
     assert_eq!(document.asset(AssetId(1)).unwrap().assumed_from, None);
+}
+
+#[test]
+fn in1_add_asset_refuses_an_agent_assumption_description() {
+    // Core review pass-2 S1 (IN1 §4.4 rule 26 erratum): `color_description` is
+    // in the `add_asset` input schema too, and an added asset must not arrive
+    // claiming Kinewright assumed its colour. The existing variant is reused,
+    // so `OpError` stays at the 154 variants §4.4 rule 26 pins.
+    let fps = Rational::new(25, 1).unwrap();
+    let mut document = empty_timeline(fps);
+    let before = document.clone();
+
+    let probed = in1_probed_description(2_000);
+    let mut claiming = asset(1, fps, 50);
+    claiming.color_description = kinewright_core::recovery_description(&probed);
+    assert_eq!(
+        claiming.color_description.provenance,
+        ColorProvenance::AgentAssumption
+    );
+    assert_eq!(claiming.assumed_from, None);
+
+    let error = Operation::AddAsset { asset: claiming }
+        .apply(&mut document)
+        .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::AssumedFromNotSuppliable { asset: AssetId(1) }
+    );
+    assert_eq!(document, before);
 }
 
 #[test]

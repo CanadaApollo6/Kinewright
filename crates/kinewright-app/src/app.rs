@@ -63,6 +63,12 @@ pub(crate) enum MaterialTab {
 struct RouterConflict {
     project_index: usize,
     expected: TimelineRevision,
+    /// The revision core reported as current when it refused. It is the
+    /// revision the matched incident is refreshed to (IN1 §5.2 rule 10): the
+    /// only evidence the router holds about where the document actually is,
+    /// carried from the event rather than re-read from the live project so the
+    /// refresh is the revision core refused against and is deterministic.
+    actual: TimelineRevision,
 }
 
 /// One incident recovery the router sent and is still waiting to hear back
@@ -971,22 +977,29 @@ impl KinewrightApp {
     /// document shows its bytes ([`router_apply_accepted`]), the same way
     /// `resolve_incident` verifies a claim (IN1 §6.3 rule 16).
     ///
-    /// ## Where the revision refresh went
+    /// ## How the revision refresh works
     ///
-    /// IN1 §5.2 rule 10 asks the router to "re-observe — refresh the
-    /// incident's revision" on a conflict. That half is unimplementable
-    /// against the shipped `IncidentLog`: the router calls
-    /// `note_auto_applied` at send time (rule 9), which suppresses the
-    /// incident's `(code, subject)` pair, and `observe` returns
-    /// `Observed::Suppressed` for a suppressed key without touching the
-    /// entry (`crates/kinewright-core/src/incident.rs:879-885`), so a
-    /// re-observe can never reach the dedup arm that refreshes the revision;
-    /// and the log offers no revision setter (§2.3 rule 20). What the router
-    /// does instead is the other two halves of rule 10, which are the
-    /// load-bearing ones: the incident stays `Open` and nothing is re-sent.
-    /// The stale revision is never reused — a send happens only for a newly
-    /// opened incident — and a card press always reads the live revision, so
-    /// the person can still apply or revert from the card.
+    /// IN1 §5.2 rule 10 asks the router, on a conflict, to leave the incident
+    /// `Open`, refresh its `revision`, and not re-send. The refresh runs in
+    /// [`Self::reconcile_router_sends`]: `RouterConflict` carries `actual`,
+    /// the revision core reported as current when it refused, and a conflict
+    /// matched to an outstanding `RouterApply` calls
+    /// `IncidentLog::refresh_revision(apply.incident, conflict.actual)` before
+    /// dropping that send. `actual` is used rather than the live project
+    /// revision because it is the evidence core itself handed back, and it is
+    /// deterministic in tests.
+    ///
+    /// It is a dedicated writer rather than a re-observe because `observe`
+    /// cannot do it: the router calls `note_auto_applied` at send time
+    /// (rule 9), which suppresses the incident's `(code, subject)` pair, and
+    /// `observe` returns `Observed::Suppressed` for a suppressed key before
+    /// reaching the dedup arm that would refresh `revision` — rule 19 by
+    /// design. Core therefore gained `refresh_revision` as its third narrowly
+    /// typed writer beside `telemetry_mut` and `note_auto_applied`
+    /// (§2.3 rule 20 erratum); it writes `revision` and nothing else, and only
+    /// on an `Open` entry. Nothing is re-sent — a send happens only for a
+    /// newly opened incident — and a card press always reads the live
+    /// revision, so the person can still apply or revert from the card.
     pub(crate) fn route_incidents(&mut self) {
         let observations = std::mem::take(&mut self.pending_observations);
         let conflicts = std::mem::take(&mut self.pending_router_conflicts);
@@ -1089,13 +1102,64 @@ impl KinewrightApp {
     /// in flight (IN1 §5.2 rules 9-10, 12).
     fn reconcile_router_sends(&mut self, conflicts: &[RouterConflict]) {
         for conflict in conflicts {
-            // A conflicted send is dropped; the incident stays `Open` and
-            // nothing is re-sent (rule 10).
-            if let Some(position) = self.pending_router_applies.iter().position(|apply| {
-                apply.project_index == conflict.project_index && apply.expected == conflict.expected
-            }) {
-                self.pending_router_applies.remove(position);
-            }
+            // All three halves of rule 10: the incident stays `Open`, its
+            // `revision` is refreshed to the revision core reported when it
+            // refused, and the send is dropped rather than re-sent.
+            //
+            // `Event::RevisionConflict` carries no send identity, and within
+            // one project several router applies can share `expected` — two
+            // incidents opened in the same frame carry the same
+            // `observation.revision`, so both are sent against it. At most one
+            // of them can have landed (the actor is serial, and the first to
+            // land moves the revision the others were gated on), so the
+            // refused send is preferentially one the live document does
+            // **not** already show as landed. Matching on `(project,
+            // expected)` alone would consume the send that succeeded, leaving
+            // it unresolved and refreshing the wrong incident.
+            //
+            // The fallback matters and is not a fudge: `router_apply_accepted`
+            // reads the *document*, not the send, so a person who made the
+            // same edit by hand before the router's send makes it true for an
+            // apply that core nonetheless refused — which is exactly §9
+            // clause 9's case. When no candidate is outstanding-and-unlanded
+            // the conflict is therefore matched to the first candidate, which
+            // is the behaviour that clause pins. An incident id the log no
+            // longer knows is never a candidate.
+            let handle = Arc::clone(&self.projects[conflict.project_index].incidents);
+            let position = {
+                let log = handle
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let document = &self.projects[conflict.project_index].document;
+                let candidate = |apply: &RouterApply| {
+                    apply.project_index == conflict.project_index
+                        && apply.expected == conflict.expected
+                        && log.get(apply.incident).is_some()
+                };
+                let landed = |apply: &RouterApply| {
+                    log.get(apply.incident).is_some_and(|incident| {
+                        router_apply_accepted(document, incident, apply.outcome)
+                    })
+                };
+                self.pending_router_applies
+                    .iter()
+                    .position(|apply| candidate(apply) && !landed(apply))
+                    .or_else(|| self.pending_router_applies.iter().position(candidate))
+            };
+            let Some(position) = position else {
+                continue;
+            };
+            let incident = self.pending_router_applies[position].incident;
+            // `refresh_revision` is core's third narrowly typed writer and the
+            // only way to do this: the router called `note_auto_applied` at
+            // send time, so `observe` returns `Suppressed` before it could
+            // refresh anything (IN1 §2.3 rules 19-20, §5.2 rule 10). The read
+            // guard above is gone before this write is taken.
+            handle
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .refresh_revision(incident, conflict.actual);
+            self.pending_router_applies.remove(position);
         }
         if self.pending_router_applies.is_empty() {
             return;
@@ -1528,6 +1592,7 @@ impl KinewrightApp {
                     self.pending_router_conflicts.push(RouterConflict {
                         project_index,
                         expected,
+                        actual,
                     });
                     let name = &self.projects[project_index].name;
                     self.record_error(
@@ -4218,10 +4283,11 @@ mod in1_tests {
                     app.projects[project_index].document = doc;
                     app.projects[project_index].revision = revision;
                 }
-                Event::RevisionConflict { expected, .. } => {
+                Event::RevisionConflict { expected, actual } => {
                     app.pending_router_conflicts.push(RouterConflict {
                         project_index,
                         expected,
+                        actual,
                     });
                 }
                 _ => {}
@@ -4250,15 +4316,22 @@ mod in1_tests {
         }
     }
 
-    /// Drain until at least one core event arrives, or panic on a hang. The
-    /// channel is cleared first so a stale subscribe-time snapshot cannot
-    /// satisfy the wait.
-    fn in1_drain_until_event(app: &mut KinewrightApp, project_index: usize) {
-        in1_drain_core(app, project_index);
+    /// Drain until the drain has noted a router conflict, or panic on a hang.
+    ///
+    /// Like [`in1_drain_until_revision`], this waits on the effect, not on the
+    /// event count, so a conflict that landed before the call is never missed.
+    /// Waiting for "one more event to arrive" is what made this test flaky: the
+    /// opening drain could consume the conflict itself, after which no further
+    /// event was ever coming.
+    fn in1_drain_until_conflict(app: &mut KinewrightApp, project_index: usize) {
         let expiry = Instant::now() + IN1_APP_DEADLINE;
         loop {
-            if !app.projects[project_index].core_events.is_empty() {
-                in1_drain_core(app, project_index);
+            in1_drain_core(app, project_index);
+            if app
+                .pending_router_conflicts
+                .iter()
+                .any(|conflict| conflict.project_index == project_index)
+            {
                 return;
             }
             assert!(
@@ -4426,9 +4499,10 @@ mod in1_tests {
 
     /// IN1 §9 clause 9 through the real router and a real `Core` actor: a
     /// router auto-apply issued against a stale revision produces
-    /// `Event::RevisionConflict` and the incident stays `Open` with no
-    /// second apply. The observation is stale on purpose — a person's edit
-    /// lands between the drain that observed it and the tick that sends
+    /// `Event::RevisionConflict` and the incident stays `Open`, with its
+    /// `revision` refreshed to the one core reported and no second apply
+    /// (IN1 §5.2 rule 10). The observation is stale on purpose — a person's
+    /// edit lands between the drain that observed it and the tick that sends
     /// it — and the error itself is a real decode refusal.
     #[test]
     fn in1_a_stale_router_apply_leaves_the_incident_open_without_reapplying() {
@@ -4445,12 +4519,9 @@ mod in1_tests {
             .core
             .send(Command::Do(advance))
             .expect("the actor takes commands");
-        in1_drain_until_event(&mut app, 0);
-        assert_ne!(
-            app.projects[0].revision,
-            TimelineRevision::default(),
-            "the person's edit landed first"
-        );
+        // The wait itself is the assertion that the person's edit landed
+        // first: it returns only once the revision has moved off the default.
+        in1_drain_until_revision(&mut app, 0, TimelineRevision::default());
         let stale = TimelineRevision::default();
         let observation = IncidentObservation::from_media_error(&error, stale)
             .expect("the typed refusal is an incident");
@@ -4461,7 +4532,7 @@ mod in1_tests {
             1,
             "the router still sends once against the stale revision"
         );
-        in1_drain_until_event(&mut app, 0);
+        in1_drain_until_conflict(&mut app, 0);
         assert!(
             !app.pending_router_conflicts.is_empty(),
             "the actor refused the stale send"
@@ -4479,6 +4550,17 @@ mod in1_tests {
         assert_eq!(log.len(), 1);
         let incident = log.all().next().expect("one incident");
         assert_eq!(incident.state, IncidentState::Open);
+        // Rule 10's remaining half: the conflict carried `actual`, and
+        // `refresh_revision` moved the incident onto it. It no longer states
+        // itself against the stale revision the send was planned for.
+        assert_eq!(
+            incident.revision, app.projects[0].revision,
+            "the incident is refreshed to the revision core reported"
+        );
+        assert_ne!(
+            incident.revision, stale,
+            "the stale revision is not left on the record"
+        );
         assert_eq!(app.error_log.count_with_source("Incident"), 1);
         drop(log);
         // And the suppressed re-observe is what makes "no second apply" a
@@ -4496,6 +4578,108 @@ mod in1_tests {
         app.route_incidents();
         assert!(app.pending_router_applies.is_empty());
         assert_eq!(app.error_log.count_with_source("Incident"), 1);
+        in1_shutdown(&mut app);
+    }
+
+    /// IN1 §5.2 rule 10 when **two** auto-applies go out at the same expected
+    /// revision in one project: the conflict core reports belongs to the send
+    /// it refused, never to the send that landed.
+    ///
+    /// Two incidents opened in the same frame carry the same
+    /// `observation.revision`, so both `RouterApply`s carry the same
+    /// `expected` and `(project, expected)` does not identify a send. The
+    /// actor is serial: the first command lands and moves the revision, the
+    /// second is refused against it. Matching on `(project, expected)` alone
+    /// would consume the landed send — never resolving it, and refreshing the
+    /// wrong incident's `revision` — so the match also requires that the live
+    /// document does not already show the send as landed.
+    ///
+    /// The second asset is a second pool entry over the same untagged fixture
+    /// (same probed description, its own `AssetId`, no clip of its own), and
+    /// the second observation is the first one with its subject changed: the
+    /// engine emits one refusal per played clip, and what this test needs is
+    /// two `AutoApply` incidents at one revision, not two decodes.
+    #[test]
+    fn in1_a_conflict_is_matched_to_the_refused_send_not_the_landed_one() {
+        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let (_fixture, mut document) = in1_untagged(&probe_engine);
+        let first_asset = document.media_pool.first().expect("one asset").clone();
+        let second_id = kinewright_core::AssetId(first_asset.id.0 + 1);
+        let mut second_asset = first_asset.clone();
+        second_asset.id = second_id;
+        document.media_pool.push(second_asset);
+        let (mut app, engine) = in1_harness(document);
+        let document = app.projects[0].document.as_ref().clone();
+        let error = in1_playback_error(&engine, &document);
+
+        let revision = app.projects[0].revision;
+        let first_observation = IncidentObservation::from_media_error(&error, revision)
+            .expect("the typed refusal is an incident");
+        assert_eq!(
+            first_observation.subject,
+            IncidentSubject::Asset(first_asset.id)
+        );
+        let mut second_observation = first_observation.clone();
+        second_observation.subject = IncidentSubject::Asset(second_id);
+        app.pending_observations.push(first_observation);
+        app.pending_observations.push(second_observation);
+
+        app.route_incidents();
+        assert_eq!(
+            app.pending_router_applies.len(),
+            2,
+            "both incidents are AutoApply and both are sent"
+        );
+        assert!(
+            app.pending_router_applies
+                .iter()
+                .all(|apply| apply.expected == revision),
+            "both sends are gated on the one revision the observations carried"
+        );
+
+        // The actor applies the first and refuses the second.
+        in1_drain_until_conflict(&mut app, 0);
+        assert_ne!(
+            app.projects[0].revision, revision,
+            "the first send landed and moved the revision"
+        );
+        let actual = app.pending_router_conflicts[0].actual;
+        app.route_incidents();
+        assert!(
+            app.pending_router_applies.is_empty(),
+            "the refused send is dropped and the landed one is resolved"
+        );
+
+        let handle = Arc::clone(&app.projects[0].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(log.len(), 2);
+        let landed = log
+            .all()
+            .find(|incident| incident.subject == IncidentSubject::Asset(first_asset.id))
+            .expect("the first incident");
+        let refused = log
+            .all()
+            .find(|incident| incident.subject == IncidentSubject::Asset(second_id))
+            .expect("the second incident");
+        assert_eq!(
+            landed.state,
+            IncidentState::Resolved(IncidentOutcome::Applied),
+            "the send that landed is resolved, not consumed by the conflict"
+        );
+        assert_eq!(
+            landed.revision, revision,
+            "the landed incident's revision is not the one refreshed"
+        );
+        assert_eq!(refused.state, IncidentState::Open);
+        assert_eq!(
+            refused.revision, app.projects[0].revision,
+            "the refused incident is refreshed to the revision core reported"
+        );
+        assert_eq!(refused.revision, actual);
+        assert_ne!(refused.revision, revision);
+        drop(log);
         in1_shutdown(&mut app);
     }
 
@@ -4549,11 +4733,15 @@ mod in1_tests {
         let error = in1_playback_error(&engine, &document);
         let id = in1_auto_apply(&mut app, &error);
         assert_eq!(app.error_log.count_with_source("Incident"), 1);
+        let before_undo = app.projects[0].revision;
         app.projects[0]
             .core
             .send(Command::Undo)
             .expect("the actor takes commands");
-        in1_drain_until_event(&mut app, 0);
+        // `Command::Undo` answers with `DocumentChanged` carrying the actor's
+        // next revision (`actor.rs:402-410`), so the revision move is the
+        // condition to wait on.
+        in1_drain_until_revision(&mut app, 0, before_undo);
         let incident = in1_incident(&app, id);
         let IncidentSubject::Asset(asset_id) = incident.subject;
         let asset = app.projects[0]
