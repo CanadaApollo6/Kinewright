@@ -146,6 +146,41 @@ impl TimelineBranch {
         })
     }
 
+    /// The same lineage, with the branch core's revision counter **seeded at
+    /// the live revision** (IN2 §3.3 rules 15–16).
+    ///
+    /// [`Self::new`] spawns at `TimelineRevision::default()`, so a branch's
+    /// counter is independent of live's and `BranchComparison.branch_revision`
+    /// counts edits rather than naming a revision. That is the right shape for
+    /// the chat panel and is left exactly as it is: `new` is unchanged and no
+    /// chat-panel assertion moves. An investigator session needs the other
+    /// shape, because the operations it proves on the branch are proved
+    /// against the document an approval will apply them to, and its proposal's
+    /// `base_revision` must be a **live** revision a reader can compare with
+    /// `ProjectSession.revision`.
+    ///
+    /// Its limit, stated: the seed is live's revision at *session start*,
+    /// which equals the incident's own revision only if live has not moved
+    /// since the incident opened. IN2 §4.4's single retry is what handles the
+    /// case where it has.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the base document is invalid.
+    pub fn new_at(
+        name: impl Into<Arc<str>>,
+        base_revision: TimelineRevision,
+        base_document: Arc<Document>,
+    ) -> Result<Self, BranchError> {
+        let core = Core::spawn_at((*base_document).clone(), base_revision)?;
+        Ok(Self {
+            name: name.into(),
+            base_revision,
+            base_document,
+            core,
+        })
+    }
+
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -244,7 +279,24 @@ impl TimelineBranch {
     }
 }
 
-fn apply_to_live(
+/// Apply `operations` to `live` as one optimistic, revision-gated transaction.
+///
+/// Public since IN2 §4.4 rule 16: it is already the single application path
+/// for both merge and cherry-pick, and the application's approve-a-proposal
+/// path is the third caller of exactly the same transaction. It stays
+/// **synchronous**, so the caller that holds the `IncidentId` holds the
+/// answer, and it returns a `Result` rather than an outcome by value because
+/// `live.request` can fail and `BranchError::{CoreDisconnected,
+/// UnexpectedResponse}` is a real arm an approval path must handle.
+///
+/// The whole batch becomes **one** core history entry, which is the undo entry
+/// a person gets for pressing Approve once.
+///
+/// # Errors
+///
+/// Returns an error if the live actor has stopped or answers something this
+/// transaction cannot be.
+pub fn apply_to_live(
     live: &Core,
     expected: TimelineRevision,
     operations: Vec<Operation>,
@@ -448,5 +500,55 @@ mod tests {
         let (_, document) = live_snapshot(&live);
         assert_eq!(document.media_pool.len(), 1);
         assert_eq!(document.media_pool[0].id, AssetId(2));
+    }
+
+    /// IN2 §3.3 rule 16 and reviewers' S5: `new_at` seeds the branch core at
+    /// the **live** revision, and `new` is unchanged.
+    ///
+    /// The branch-side twin of core's `in2_a_core_spawned_at_a_revision_reports_that_revision`.
+    /// What it adds over core's is the wrapper's two consequences: the struct
+    /// records `base_revision`, and `compare()`'s `branch_revision` reads the
+    /// **seeded** counter rather than a private one starting at zero — which is
+    /// exactly the difference the chat panel must not see and the investigator
+    /// must.
+    #[test]
+    fn in2_a_branch_spawned_at_a_revision_reports_the_seed_and_leaves_new_alone() {
+        const SEED: TimelineRevision = TimelineRevision(41);
+        let live = Core::spawn(Document::default()).unwrap();
+        let (_, document) = live_snapshot(&live);
+
+        let seeded = TimelineBranch::new_at("investigator", SEED, Arc::clone(&document)).unwrap();
+        assert_eq!(seeded.base_revision(), SEED);
+        let before = seeded.compare().unwrap();
+        assert_eq!(before.base_revision, SEED);
+        assert_eq!(
+            before.branch_revision, SEED,
+            "the branch counter starts at live's, not at zero"
+        );
+        assert!(
+            before.operations.is_empty(),
+            "spawn_at starts with an empty op_log, so 'since spawn_at' is the whole list"
+        );
+
+        seeded
+            .core()
+            .request(Command::Do(Operation::AddAsset { asset: asset(7) }))
+            .unwrap();
+        let after = seeded.compare().unwrap();
+        assert_eq!(after.branch_revision, TimelineRevision(42));
+        assert_eq!(
+            after.base_revision, SEED,
+            "the seed does not move with an edit"
+        );
+        assert_eq!(after.operations.len(), 1);
+
+        // `TimelineBranch::new` is untouched, so no chat-panel assertion moves.
+        let plain = TimelineBranch::new("Agent 1", SEED, document).unwrap();
+        assert_eq!(plain.base_revision(), SEED);
+        assert_eq!(
+            plain.compare().unwrap().branch_revision,
+            TimelineRevision::default(),
+            "new still counts edits from zero"
+        );
     }
 }

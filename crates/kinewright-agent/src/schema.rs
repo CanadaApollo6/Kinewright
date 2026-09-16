@@ -13,12 +13,16 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 86] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 87] = [
     "get_timeline_state",
     // IN1 §6.1 rule 1: two internal capabilities, reached only through
     // `invoke_capability` and never added to `COMPACT_TOOL_NAMES`.
     "get_incidents",
     "resolve_incident",
+    // IN2 §4.1 rule 2: the third, registered directly after
+    // `resolve_incident`, exactly as IN1 placed `get_incidents` after
+    // `get_timeline_state`. Registry-only: the served quad does not move.
+    "propose_fix",
     "search_capabilities",
     "get_capability",
     "invoke_capability",
@@ -360,9 +364,22 @@ fn operation_tool(
     let name = camel_to_snake(variant);
     let annotations = ToolAnnotations::new()
         .read_only(false)
+        // IN2 §6 rule 5: the broker gate covers all seven destructive
+        // `Operation` variants, so every generated tool that raises a
+        // confirmation must advertise the hint. Without the three names added
+        // here, `remove_bin`, `remove_string_out` and `remove_sync_group`
+        // would raise a confirmation while advertising `destructiveHint:
+        // false` — a fourth disagreeing population. `destructiveHint` goes
+        // 12 -> 15 across the registry.
         .destructive(matches!(
             name.as_str(),
-            "delete_clip" | "ripple_delete_clip" | "remove_track" | "remove_audio_bus"
+            "delete_clip"
+                | "ripple_delete_clip"
+                | "remove_track"
+                | "remove_bin"
+                | "remove_string_out"
+                | "remove_sync_group"
+                | "remove_audio_bus"
         ))
         .idempotent(matches!(
             name.as_str(),

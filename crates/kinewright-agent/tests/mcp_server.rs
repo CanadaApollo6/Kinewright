@@ -2424,10 +2424,12 @@ async fn cc7_prepare_commit_and_compare(
 /// because `served_tools()` filters `capability_tools()` by
 /// `COMPACT_TOOL_NAMES` and IN1 touches neither that list nor `Operation`.
 ///
-/// **Pin site 2 of 3 (`IN1b` §6.4 rules 7–8, erratum `IN1b`-R3).** It does not
-/// move for the seventeenth measurement either: `IN1b` adds no served tool, no
-/// capability and no schema field, and its growth is output-only — more codes,
-/// subjects and evidence variants inside a `get_incidents` response body.
+/// **Pin site 2 of 3 (`IN1b` §6.4 rules 7–8, erratum `IN1b`-R3).** The served
+/// quad does not move for the **eighteenth** measurement: `IN1b` added no
+/// served tool, no capability and no schema field, and IN2 Part A adds one
+/// **registry-only** capability, `propose_fix`, which `served_tools()`'s
+/// `COMPACT_TOOL_NAMES` filter never publishes. The registry sextuple does
+/// move, to `141 / 54 / 87`, which is the two assertions below.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
@@ -2459,7 +2461,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        140,
+        141,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
@@ -2499,13 +2501,14 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     }
     assert_eq!(
         registry.len() - operations.len(),
-        86,
+        87,
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector; \
          AU4 Part A adds no inspector; AU4 Part B adds the two planners; \
          AU5 Part A adds get_audio_repair; AU5 Part B adds all three of its capabilities; \
          AU6 §5.4 Part A and Part B add none; \
-         IN1 Part A adds get_incidents and resolve_incident"
+         IN1 Part A adds get_incidents and resolve_incident; \
+         IN2 Part A adds propose_fix"
     );
     let spectrum = registry
         .iter()
@@ -10343,28 +10346,27 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
     server.shutdown();
 }
 
-/// IN1 §6.6 and §9 clause 13, and `IN1b` §6.4 rules 7–8 and §9 clause 17: two
-/// capabilities, no tool, for the **seventeenth** consecutive measurement.
+/// IN1 §6.6 and §9 clause 13, `IN1b` §6.4 rules 7–8 and §9 clause 17, and IN2
+/// §6.4 rules 12–13 and §9 clause 19: **three** registry-only capabilities, no
+/// served tool, for the **eighteenth** consecutive measurement.
 ///
-/// The registry sextuple is `140 / 54 / 86 / 1 551 301 / 1 407 012 / 121 315`,
-/// pinned byte for byte in
+/// The registry sextuple is `141 / 54 / 87 / 1 552 431 / 1 407 446 / 121 854`,
+/// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
 /// this test pins the three counts and the served quad over the live endpoint.
 ///
 /// **Pin site 3 of 3, and the site that carries the counter** (`IN1b` §6.4
 /// rule 7). IN1 §6.6 rule 25 and §9 clause 13 say "both pin sites"; there are
-/// three, and erratum `IN1b`-R3 corrects them. The quad did not move because
-/// Part B adds no served tool and no capability — both incident capabilities
-/// were already registry-only and `served_tools()` filters by
-/// `COMPACT_TOOL_NAMES` — and because Part B's entire growth is output-only:
-/// 67 codes, seven subject shapes and eleven evidence variants change what a
-/// response body says, never what either input schema declares.
+/// three, and erratum `IN1b`-R3 corrects them. The quad does not move because
+/// IN2 adds no served tool — `propose_fix` is registry-only and
+/// `served_tools()` filters by `COMPACT_TOOL_NAMES`, the same argument IN1 §6.6
+/// and `IN1b` §6.4 made for `get_incidents` and `resolve_incident`.
 ///
-/// Renamed from `in1_the_agent_surface_grows_by_two_capabilities_and_no_tool`
-/// to `IN1b` §7 item 32's name (erratum `IN1b`-D-R62); every IN1 assertion in
-/// it is unchanged.
+/// Renamed from `in1b_the_served_quad_does_not_move_for_the_seventeenth_measurement`
+/// to IN2 §9.1 item 33's name; every IN1 and `IN1b` assertion in it is
+/// unchanged except the two registry counts and the ceiling.
 #[tokio::test(flavor = "multi_thread")]
-async fn in1b_the_served_quad_does_not_move_for_the_seventeenth_measurement() {
+async fn in2_the_served_quad_does_not_move_for_the_eighteenth_measurement() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
@@ -10376,7 +10378,7 @@ async fn in1b_the_served_quad_does_not_move_for_the_seventeenth_measurement() {
 
     // The served surface does not move: both capabilities are registry-only.
     let tools = client.list_tools(None).await.unwrap().tools;
-    assert_eq!(tools.len(), 7, "IN1 adds no served tool");
+    assert_eq!(tools.len(), 7, "IN2 adds no served tool");
     assert_eq!(
         tools
             .iter()
@@ -10384,7 +10386,7 @@ async fn in1b_the_served_quad_does_not_move_for_the_seventeenth_measurement() {
             .collect::<Vec<_>>(),
         kinewright_agent::compact_tool_names()
     );
-    for name in ["get_incidents", "resolve_incident"] {
+    for name in ["get_incidents", "resolve_incident", "propose_fix"] {
         assert!(
             !tools.iter().any(|tool| tool.name == name),
             "{name} must not be served"
@@ -10393,9 +10395,13 @@ async fn in1b_the_served_quad_does_not_move_for_the_seventeenth_measurement() {
 
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
-    assert_eq!(registry.len(), 140, "IN1 adds exactly two capabilities");
-    assert_eq!(operations.len(), 54, "IN1 adds no Operation variant");
-    assert_eq!(registry.len() - operations.len(), 86);
+    assert_eq!(
+        registry.len(),
+        141,
+        "IN1 adds two capabilities and IN2 Part A adds propose_fix"
+    );
+    assert_eq!(operations.len(), 54, "IN2 adds no Operation variant");
+    assert_eq!(registry.len() - operations.len(), 87);
     let state = registry
         .iter()
         .position(|entry| entry == "get_timeline_state")
@@ -10409,6 +10415,11 @@ async fn in1b_the_served_quad_does_not_move_for_the_seventeenth_measurement() {
         registry.get(state + 2).map(String::as_str),
         Some("resolve_incident")
     );
+    assert_eq!(
+        registry.get(state + 3).map(String::as_str),
+        Some("propose_fix"),
+        "IN2 §4.1 rule 2: propose_fix is registered directly after resolve_incident"
+    );
 
     let metrics = server.tool_surface_metrics();
     assert_eq!(
@@ -10419,20 +10430,95 @@ async fn in1b_the_served_quad_does_not_move_for_the_seventeenth_measurement() {
             metrics.description_bytes
         ),
         (7, 5_660, 3_510, 998),
-        "the served quad does not move for the seventeenth consecutive measurement: {metrics:?}"
+        "the served quad does not move for the eighteenth consecutive measurement: {metrics:?}"
     );
 
-    // IN1 §6.2 rule 9 and `IN1b` §3.11 rule 43: the two token budgets are real
-    // constants, not adjectives. 819 does not move — Part A's incident
-    // serialises byte for byte after Part B — and the ceiling moves to the
-    // smallest power of two above [probe-2c]'s measured worst of 1 351 B over
-    // 67 codes x seven subject shapes (erratum `IN1b`-R10).
+    // IN1 §6.2 rule 9, `IN1b` §3.11 rule 43 and IN2 §4.2 rule 11: the two
+    // token budgets are real constants, not adjectives. 819 does not move —
+    // every field IN2 adds carries a `skip_serializing_if` — and the ceiling
+    // moves to the smallest power of two above the worst of the 8 576 shapes
+    // `server::tests::in2_every_code_fits_the_re_measured_ceiling` measures.
     assert_eq!(kinewright_agent::IN1_INCIDENT_SERIALIZED_BYTES, 819);
     assert_eq!(
         kinewright_agent::IN1_INCIDENT_SERIALIZED_CEILING_BYTES,
-        2_048
+        4_096
     );
 
     client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// IN2 §9 clause 17 and §9.1 item 21, from **outside** the crate: the scripted
+/// driver and the session pump are ordinary public surface.
+///
+/// The property clause 17 needs is that `ScriptedDriver` is reachable from a
+/// test that is not inside `kinewright-agent` — which is the whole reason it is
+/// production code rather than `eval.rs`'s `#[cfg(test)]` fake. The
+/// application's own tests take this crate with `default-features = false` and
+/// reach exactly this surface.
+#[tokio::test(flavor = "multi_thread")]
+async fn in2_the_scripted_driver_and_the_pump_are_public_surface() {
+    use std::sync::atomic::AtomicBool;
+
+    use kinewright_agent::{
+        ConfirmationPolicy, ScriptedCall, ScriptedDriver, ScriptedTurn, SessionLimits, SessionStop,
+        SharedCounters, pump_session,
+    };
+    use kinewright_core::{AgentDriver, SessionConfig};
+
+    let core = Core::spawn(Document::default()).unwrap();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let server = McpServer::start(core, media.clone(), media).unwrap();
+
+    let call = |tool: &str| ScriptedCall {
+        tool: tool.to_owned(),
+        arguments: json!({}),
+    };
+    let driver = ScriptedDriver::new(vec![
+        ScriptedTurn::new(vec![call("get_timeline_state")], "read the cut"),
+        ScriptedTurn::new(vec![call("get_timeline_state")], "read it again"),
+    ]);
+    let endpoint = server.endpoint().to_owned();
+    let (stop, counters) = tokio::task::spawn_blocking(move || {
+        let mut session = driver
+            .start_session(SessionConfig {
+                mcp_url: Some(endpoint),
+                tool_names: Some(
+                    kinewright_agent::INVESTIGATOR_TOOL_NAMES
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect(),
+                ),
+                ..SessionConfig::default()
+            })
+            .expect("the scripted session starts");
+        let events = session.events();
+        let mut prompts = ["first".to_owned(), "second".to_owned()].into_iter();
+        let shared = Arc::new(SharedCounters::default());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut observer = kinewright_agent::QuietObserver;
+        pump_session(
+            session.as_mut(),
+            &events,
+            &mut prompts,
+            None,
+            ConfirmationPolicy::RejectAndStop,
+            &SessionLimits {
+                max_turns: 6,
+                max_wall_time: Duration::from_secs(30),
+                max_tokens: None,
+            },
+            &shared,
+            &cancel,
+            &mut observer,
+        )
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(stop, SessionStop::Completed);
+    assert_eq!(counters.turns, 2, "{counters:?}");
+    assert_eq!(counters.tool_calls, 2, "two real calls, one per turn");
+    assert_eq!(kinewright_agent::INVESTIGATOR_TOOL_NAMES.len(), 6);
     server.shutdown();
 }

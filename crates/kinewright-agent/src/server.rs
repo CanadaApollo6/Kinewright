@@ -23,26 +23,28 @@ use kinewright_core::{
     BeatStatus, CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, ColorNodeKind,
     ColorProvenance, ColorSourceError, Command, Core, DeliveryAspect, DeliveryEncodeDepth,
     DeliveryProfile, DeliveryVariant, Document, Effect, EffectId, Event, Export,
-    ExportCancellation, Incident, IncidentId, IncidentLog, IncidentOutcome, IncidentTelemetry,
-    Keyframe, KeyframeInterpolation, LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, LutAsset,
-    MUSIC_STRUCTURE_DEFAULT_METER_BEATS, MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId,
-    MediaAsset, MediaAvailabilityKind, MediaCacheFamily, MediaCacheInventory, MediaKind,
-    MixLevelRequest, MixSpectrumPoint, MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest,
-    Operation, ParamValue, Playback, Query, QueryResult, ReframeFocusBounds, RelinkCandidate,
-    SceneStatus, SilenceStatus, SpeakerAngleAssignment, SpeakerMulticamSettings,
-    SubjectCenterBasisPointSample, SubjectFocusBasisPointConstraint, SubjectReframeSettings,
-    SyncGroupId, TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
-    ThreePointMode, TimeCode, TimelineBeat, TimelineBeatAnalysisState, TimelineRevision,
-    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track,
-    TrackId, TrackKind, TranscriptStatus, animated_caption_operations_at, apply_batch,
-    authored_caption_cues, beat_montage_plan, beat_montage_plan_near_anchors_with_report,
-    beat_montage_plan_with_anchors, beat_pacing_plan, caption_cues, dedup_timeline_words,
-    delivery_conformance, document_for_delivery_profile, document_for_delivery_variant,
-    is_filler_word, map_source_range_to_project, music_fit_plan_with_end_anchor,
-    music_structure_analysis, plan_speaker_multicam,
-    plan_subject_reframe_basis_points_with_containment, qa_document,
+    ExportCancellation, INVESTIGATOR_EXPLANATION_CEILING_BYTES,
+    INVESTIGATOR_MAX_PROPOSAL_OPERATIONS, Incident, IncidentId, IncidentLog, IncidentOutcome,
+    IncidentProposal, IncidentState, IncidentTelemetry, Keyframe, KeyframeInterpolation,
+    LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, LutAsset, MUSIC_STRUCTURE_DEFAULT_METER_BEATS,
+    MUSIC_STRUCTURE_DEFAULT_PHRASE_BARS, Marker, MarkerId, MediaAsset, MediaAvailabilityKind,
+    MediaCacheFamily, MediaCacheInventory, MediaKind, MixLevelRequest, MixSpectrumPoint,
+    MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest, Operation, ParamValue, Playback,
+    Query, QueryResult, ReframeFocusBounds, RelinkCandidate, SceneStatus, SilenceStatus,
+    SpeakerAngleAssignment, SpeakerMulticamSettings, SubjectCenterBasisPointSample,
+    SubjectFocusBasisPointConstraint, SubjectReframeSettings, SyncGroupId,
+    TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, ThreePointMode, TimeCode,
+    TimelineBeat, TimelineBeatAnalysisState, TimelineRevision, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TitlePosition, Track, TrackId, TrackKind,
+    TranscriptStatus, animated_caption_operations_at, apply_batch, authored_caption_cues,
+    beat_montage_plan, beat_montage_plan_near_anchors_with_report, beat_montage_plan_with_anchors,
+    beat_pacing_plan, caption_cues, dedup_timeline_words, delivery_conformance,
+    document_for_delivery_profile, document_for_delivery_variant, is_filler_word,
+    map_source_range_to_project, music_fit_plan_with_end_anchor, music_structure_analysis,
+    plan_speaker_multicam, plan_subject_reframe_basis_points_with_containment, qa_document,
     validate_beat_montage_plan_cadence,
 };
+use kinewright_core::{RecordProposalError, truncate_to_serialized_bytes};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     model::{
@@ -114,6 +116,124 @@ const DEFAULT_MAXIMUM_CUT_SECONDARY_CHANGE_BASIS_POINTS: u16 = 1_200;
 const STORYBOARD_COLUMNS: u32 = 4;
 const STORYBOARD_GUTTER: u32 = 4;
 const DEFAULT_CONFIRMATION_TIMEOUT: Duration = Duration::from_mins(1);
+/// The investigator broker's deadline (IN2 §4.6 rule 28).
+pub const INVESTIGATOR_BROKER_TIMEOUT: Duration = Duration::from_secs(5);
+/// The Tokio worker count an investigator server's runtime is built with
+/// (IN2 §3.3 rule 13, §10 figure 5).
+///
+/// Probe-2 measured the marginal cost of one more `McpServer` at **+22 OS
+/// threads** on a 20-CPU machine — `new_multi_thread`'s default one worker per
+/// CPU, plus the runtime driver, plus the branch `Core` actor. The scaling
+/// term is threads and it is proportional to the CPU count, so the answer is
+/// to bound the runtime rather than to lower the concurrent-session cap: two
+/// workers cut about eighteen of the twenty-two and make the cap of two a
+/// policy choice instead of a resource one.
+pub const INVESTIGATOR_WORKER_THREADS: usize = 2;
+
+/// How long a server asked to stop waits for a client that is still connected
+/// (erratum D-R67).
+///
+/// `axum`'s graceful shutdown otherwise waits for the connection to close on
+/// its own, which for a streamable-HTTP MCP client nobody closed was measured
+/// at **300 s** — five minutes of a blocked [`McpServer::shutdown`] on
+/// whatever thread called it. Two seconds is long enough for an in-flight
+/// `tools/call` to land and short enough that a mis-ordered teardown is a
+/// hiccup rather than a hang.
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The registry capabilities an investigator session may not invoke, derived
+/// from a complete side-effect inventory (IN2 §6 rule 2).
+///
+/// `SessionConfig.tool_names` is an allowlist passed to the harness **CLI**,
+/// while the server applies one global filter for everybody
+/// (`Self::served_tools`), so a CLI allowlist alone leaves every registry
+/// capability reachable *through* `invoke_capability`. This list is consulted
+/// beside the existing `is_invocable_capability` check, and it is a field on
+/// the handler rather than a predicate because `is_invocable_capability` is a
+/// free function with no session context.
+///
+/// **The inventory it is derived from, printed so it can be checked rather
+/// than trusted.** The question, for every capability a session can reach:
+/// *does its effect land outside the branch document?*
+///
+/// | capability | effect outside the branch document | denied? |
+/// | --- | --- | :-: |
+/// | `clear_media_cache` | deletes the shared media cache | **yes** |
+/// | `import_lut_asset` | copies bytes under the project directory | **yes** (also brokered) |
+/// | `convert_legacy_look` | copies bytes under the project directory | **yes** (also brokered) |
+/// | `capture_room_tone` | writes 48 kHz samples under the project directory | **yes** (also brokered) |
+/// | `queue_export` | writes or overwrites an output file | **yes** (also brokered on `overwrite`) |
+/// | `resolve_incident` | writes the person's live incident log | **yes** |
+/// | `cancel_export` | cancels the person's **running** export job | **yes** |
+/// | `cancel_analysis` | cancels the person's **running** analysis | **yes** |
+/// | `request_analysis` | starts analysis work on the shared engine | **yes** |
+/// | `import_media` / `relink_media` | probes a filesystem path and **enqueues four analysis jobs on the live engine** (`Self::request_asset_analysis`); the document effect is branch-local | **no** — deliberately allowed, bounded by the session's wall-time budget |
+/// | `render_color_proof`, `get_frame_at`, `get_video_scopes*`, `track_*` and about a dozen `get_*` readers | decode work, shared-cache writes, CPU, and the same opportunistic analysis requests | **no** — deliberately allowed, bounded by the session's wall-time budget |
+/// | `apply_edit_plan` and the four generated destructive operation tools | — | **no entry needed**: `is_invocable_capability` already refuses all five |
+///
+/// The last three of the nine are the ones a shorter list misses: they are
+/// registry capabilities, they pass `is_invocable_capability`, they are not
+/// `Operation`s so the proposal's destructive check never sees them, they are
+/// not brokered so the broker never sees them, and an investigator server is
+/// handed *the project's own* `Arc<dyn Export>` and `Arc<dyn Analysis>` — so
+/// without them an investigator session could cancel the person's running
+/// export.
+///
+/// **Erratum D-R66 — what denying `request_analysis` does and does not buy.**
+/// IN2 §6 rule 2's printed inventory calls `import_media`/`relink_media`
+/// *"read-only"*, and that is false in this crate: `import_media` reaches
+/// `Self::apply_operation_analyzing(.., true)`, which on a successful
+/// `Operation::AddAsset` calls `Self::request_asset_analysis`, which fires
+/// transcription, silence, scene and beat detection on the **shared** engine;
+/// `relink_media` does the same, and about a dozen `get_*` readers request
+/// analysis opportunistically. So denying `request_analysis` bounds the
+/// **explicit** request and not the implicit ones.
+///
+/// The answer is deliberately **not** to widen the denylist. Reading the
+/// project is the whole purpose of a session; analysis is idempotent, is
+/// cancellable, and is bounded by the session's wall-time budget, and a
+/// session that cannot read a transcript cannot investigate an audio
+/// incident. What changes is the two rows above, which now say what actually
+/// happens rather than claiming a purity the code does not have.
+///
+/// The rows marked **yes** are parsed straight out of this comment by
+/// `in2_the_denylist_refuses_nine_capabilities_through_invoke_capability`, so
+/// a capability added to the inventory and forgotten in the list below fails
+/// that test rather than passing silently.
+pub const INVESTIGATOR_CAPABILITY_DENYLIST: [&str; 9] = [
+    "clear_media_cache",   // destructiveHint, not a carrier
+    "import_lut_asset",    // destructiveHint, not a carrier
+    "convert_legacy_look", // destructiveHint, not a carrier
+    "capture_room_tone",   // destructiveHint, not a carrier
+    "queue_export",        // destructiveHint, not a carrier
+    "resolve_incident",    // IN2 §4.5 rule 23: only the app records an outcome
+    "cancel_export",       // acts on the live application's queue, not the branch
+    "cancel_analysis",     // acts on the live application's engine, not the branch
+    "request_analysis",    // starts work on the live application's engine
+];
+
+/// What an investigator server knows about the incident it belongs to.
+///
+/// **Erratum D-R62.** IN2 §3.3 rule 13 gives `start_investigator_session` the
+/// six arguments of `start_isolated_with_exporter_project_path_and_incidents`
+/// plus a denylist and a worker count, and then has it build
+/// `ConfirmationBroker::for_incident(…, incident)` — naming no argument the
+/// incident id could come from. `propose_fix` needs one thing more: §4.2
+/// rule 9's `base_revision` is *the live revision `spawn_at` seeded the branch
+/// at*, which the branch core does not remember and which its current counter
+/// is not (an edit moves the counter and not the seed). Both are facts the
+/// application already holds — it built the branch with
+/// `TimelineBranch::new_at(name, base_revision, document)` — so they travel
+/// together in one argument rather than as two loose ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvestigatorSessionContext {
+    /// The incident this session is working on. Every
+    /// [`ConfirmationRequest`] this server's broker raises carries it.
+    pub incident: IncidentId,
+    /// The **live** revision the branch core was spawned at.
+    pub base_revision: TimelineRevision,
+}
+
 const DEFAULT_MINIMUM_SILENCE_FRAMES: i64 = 6;
 const DEFAULT_SCENE_CONFIDENCE_BASIS_POINTS: u16 = 1_000;
 const DEFAULT_BEAT_STRENGTH_BASIS_POINTS: u16 = 1_000;
@@ -141,6 +261,16 @@ pub struct ConfirmationRequest {
     pub id: u64,
     pub tool_name: String,
     pub description: String,
+    /// The incident an investigator session is working on, when this broker
+    /// belongs to one. `None` for every chat-panel and eval broker
+    /// (IN2 §4.6 rule 24).
+    ///
+    /// **The broker stamps it and the six `confirm(` sites do not change.**
+    /// Attributing a request to its incident at the one place that constructs
+    /// requests is route (a) of IN1 §13 D6 executed at one site instead of
+    /// eight, and it is why the 97 test constructions of
+    /// [`ConfirmationBroker`] do not move either.
+    pub incident: Option<IncidentId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +286,8 @@ pub struct ConfirmationBroker {
     pending: Arc<Mutex<HashMap<u64, crossbeam_channel::Sender<ConfirmationDecision>>>>,
     next_id: Arc<AtomicU64>,
     timeout: Duration,
+    /// See [`ConfirmationRequest::incident`]. Set once, at construction.
+    incident: Option<IncidentId>,
 }
 
 impl Default for ConfirmationBroker {
@@ -167,6 +299,24 @@ impl Default for ConfirmationBroker {
 impl ConfirmationBroker {
     #[must_use]
     pub fn with_timeout(timeout: Duration) -> Self {
+        Self::build(timeout, None)
+    }
+
+    /// A broker whose every request is attributed to one incident
+    /// (IN2 §4.6 rule 25).
+    ///
+    /// The investigator's broker is built with a **5 s** timeout rather than
+    /// the 60 s default, so a pump that has stopped cannot hold an MCP handler
+    /// thread for a minute. Nothing a person sees is behind this broker — it
+    /// is drained by the session's own pump and rendered nowhere — so no
+    /// person-facing deadline is created, and the session's wall-time budget
+    /// stays the only clock on a session.
+    #[must_use]
+    pub fn for_incident(timeout: Duration, incident: IncidentId) -> Self {
+        Self::build(timeout, Some(incident))
+    }
+
+    fn build(timeout: Duration, incident: Option<IncidentId>) -> Self {
         let (requests_tx, requests_rx) = crossbeam_channel::unbounded();
         Self {
             requests_tx,
@@ -174,7 +324,14 @@ impl ConfirmationBroker {
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU64::new(1)),
             timeout,
+            incident,
         }
+    }
+
+    /// The incident every request from this broker is attributed to.
+    #[must_use]
+    pub const fn incident(&self) -> Option<IncidentId> {
+        self.incident
     }
 
     #[must_use]
@@ -227,7 +384,12 @@ impl ConfirmationBroker {
         sender.is_some_and(|sender| sender.send(decision).is_ok())
     }
 
-    fn confirm(&self, tool_name: &str, description: String) -> Result<(), String> {
+    /// Raise one confirmation and block until it is answered, rejected or
+    /// times out.
+    ///
+    /// `pub(crate)` since IN2 so the session pump's own tests can raise a real
+    /// request on a real broker rather than mime one (IN2 §9.1 items 17–18).
+    pub(crate) fn confirm(&self, tool_name: &str, description: String) -> Result<(), String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (decision_tx, decision_rx) = crossbeam_channel::bounded(1);
         self.pending
@@ -240,6 +402,7 @@ impl ConfirmationBroker {
                 id,
                 tool_name: tool_name.to_owned(),
                 description,
+                incident: self.incident,
             })
             .is_err()
         {
@@ -343,6 +506,8 @@ impl McpServer {
             true,
             Arc::new(RwLock::new(None)),
             Arc::new(RwLock::new(IncidentLog::default())),
+            &[],
+            None,
         )
     }
 
@@ -403,6 +568,8 @@ impl McpServer {
             false,
             project_path,
             Arc::new(RwLock::new(IncidentLog::default())),
+            &[],
+            None,
         )
     }
 
@@ -451,6 +618,8 @@ impl McpServer {
             false,
             project_path,
             Arc::new(RwLock::new(IncidentLog::default())),
+            &[],
+            None,
         )
     }
 
@@ -485,6 +654,57 @@ impl McpServer {
             false,
             project_path,
             incidents,
+            &[],
+            None,
+        )
+    }
+
+    /// Start the **investigator** server for one incident: a branch-scoped
+    /// server that shares the project's saved-project-path handle and its
+    /// [`IncidentLog`], refuses the nine denied capabilities, attributes every
+    /// confirmation to `incident`, and runs on a bounded Tokio runtime
+    /// (IN2 §3.3 rule 13).
+    ///
+    /// The eighth public constructor. It exists rather than two more arguments
+    /// on [`Self::start_isolated_with_exporter_project_path_and_incidents`]
+    /// because that one is called from two chat-panel sites that must not gain
+    /// arguments they would always pass empty.
+    ///
+    /// The broker is built with [`INVESTIGATOR_BROKER_TIMEOUT`] rather than
+    /// the 60 s default, so a pump that has stopped cannot hold an MCP handler
+    /// thread for a minute; nothing a person sees is behind it.
+    ///
+    /// `investigator` is the ninth argument and not one of IN2 §3.3 rule 13's
+    /// eight; see [`InvestigatorSessionContext`] and erratum D-R62.
+    ///
+    /// # Errors
+    ///
+    /// Returns an MCP server error when the listener, export worker, or server
+    /// thread cannot start.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_investigator_session(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        exporter: Arc<dyn Export>,
+        project_path: Arc<RwLock<Option<PathBuf>>>,
+        incidents: IncidentLogHandle,
+        capability_denylist: &'static [&'static str],
+        worker_threads: usize,
+        investigator: InvestigatorSessionContext,
+    ) -> Result<Self, McpServerError> {
+        Self::start_configured_for_investigator(
+            core,
+            playback,
+            analysis,
+            Some(exporter),
+            ConfirmationBroker::for_incident(INVESTIGATOR_BROKER_TIMEOUT, investigator.incident),
+            false,
+            project_path,
+            incidents,
+            capability_denylist,
+            Some(worker_threads),
+            Some(investigator),
         )
     }
 
@@ -503,12 +723,18 @@ impl McpServer {
             true,
             Arc::new(RwLock::new(None)),
             Arc::new(RwLock::new(IncidentLog::default())),
+            &[],
+            None,
         )
     }
 
-    /// One more argument than clippy's default, because the eighth is the
-    /// session's incident log and every public constructor above still takes
-    /// at most six (IN1 §5.1 rule 3).
+    /// Two more arguments than clippy's default: the eighth is the session's
+    /// incident log (IN1 §5.1 rule 3) and the ninth and tenth are the
+    /// investigator's capability denylist and its Tokio worker count
+    /// (IN2 §3.3 rule 13). Every public constructor above still takes at most
+    /// six, defaults the denylist to `&[]` and leaves the worker count at
+    /// Tokio's own — the rule IN1 already stated for the incident handle,
+    /// extended by two rather than reopened.
     #[allow(clippy::too_many_arguments)]
     fn start_configured(
         core: Core,
@@ -519,6 +745,46 @@ impl McpServer {
         publish_to_playback: bool,
         project_path: Arc<RwLock<Option<PathBuf>>>,
         incidents: IncidentLogHandle,
+        capability_denylist: &'static [&'static str],
+        worker_threads: Option<usize>,
+    ) -> Result<Self, McpServerError> {
+        Self::start_configured_for_investigator(
+            core,
+            playback,
+            analysis,
+            exporter,
+            confirmations,
+            publish_to_playback,
+            project_path,
+            incidents,
+            capability_denylist,
+            worker_threads,
+            None,
+        )
+    }
+
+    /// [`Self::start_configured`] with the one field only an investigator
+    /// server has.
+    ///
+    /// Eleven arguments: [`Self::start_configured`]'s ten plus
+    /// `investigator`. It is private and has exactly two callers — the public
+    /// `start_configured` passing `None`, and `start_investigator_session`
+    /// passing `Some` — so the thing a reader needs to see is which of the two
+    /// differs, which a struct would hide (IN2 §0.4 o's argument, one level
+    /// down).
+    #[allow(clippy::too_many_arguments)]
+    fn start_configured_for_investigator(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        exporter: Option<Arc<dyn Export>>,
+        confirmations: ConfirmationBroker,
+        publish_to_playback: bool,
+        project_path: Arc<RwLock<Option<PathBuf>>>,
+        incidents: IncidentLogHandle,
+        capability_denylist: &'static [&'static str],
+        worker_threads: Option<usize>,
+        investigator: Option<InvestigatorSessionContext>,
     ) -> Result<Self, McpServerError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .map_err(McpServerError::Bind)?;
@@ -547,10 +813,12 @@ impl McpServer {
             publish_to_playback,
             Arc::clone(&project_path),
             Arc::clone(&incidents),
-        );
+        )
+        .with_capability_denylist(capability_denylist)
+        .with_investigator_context(investigator);
         let server_thread = thread::Builder::new()
             .name("kinewright-mcp".to_owned())
-            .spawn(move || run_server(listener, handler, shutdown_rx))
+            .spawn(move || run_server(listener, handler, shutdown_rx, worker_threads))
             .map_err(McpServerError::Thread)?;
         Ok(Self {
             endpoint,
@@ -608,6 +876,23 @@ impl McpServer {
         self.tool_surface_metrics
     }
 
+    /// Stop the server and join its thread.
+    ///
+    /// **Close every client of this endpoint first** (erratum D-R67). `axum`'s
+    /// graceful shutdown waits for live connections, and a streamable-HTTP MCP
+    /// client holds one open for as long as it is connected — measured at
+    /// **300 s** against an un-closed [`crate::ScriptedSession`] before this
+    /// slice bounded it. The wait is now capped at
+    /// [`GRACEFUL_SHUTDOWN_TIMEOUT`], so the worst case is two seconds and one
+    /// connection abandoned mid-flight rather than a five-minute freeze on the
+    /// thread that called this.
+    ///
+    /// The designed order, which the application must keep (IN2 §3.7 rule 37):
+    /// `pump_session` returns → it has already called
+    /// `AgentSession::interrupt`, which closes the scripted session's own MCP
+    /// client → the session is dropped → **then** the branch's `McpServer` is
+    /// shut down. [`Drop`] only signals and does not join, so a server dropped
+    /// out of order leaks its thread rather than blocking the dropper.
     pub fn shutdown(mut self) {
         self.signal_shutdown();
         if let Some(thread) = self.thread.take() {
@@ -630,10 +915,21 @@ impl Drop for McpServer {
     }
 }
 
-fn run_server(listener: TcpListener, handler: KinewrightMcp, shutdown: oneshot::Receiver<()>) {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("kinewright-mcp-worker")
+fn run_server(
+    listener: TcpListener,
+    handler: KinewrightMcp,
+    shutdown: oneshot::Receiver<()>,
+    worker_threads: Option<usize>,
+) {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().thread_name("kinewright-mcp-worker");
+    // IN2 §3.3 rule 13: an investigator server bounds its runtime instead of
+    // taking `new_multi_thread`'s default of one worker per CPU. Every other
+    // server passes `None` and is byte-for-byte unchanged.
+    if let Some(workers) = worker_threads {
+        builder.worker_threads(workers);
+    }
+    let runtime = builder
         .build()
         .expect("Kinewright MCP Tokio runtime must start");
     runtime.block_on(async move {
@@ -646,11 +942,31 @@ fn run_server(listener: TcpListener, handler: KinewrightMcp, shutdown: oneshot::
                 StreamableHttpServerConfig::default(),
             );
         let router = axum::Router::new().nest_service("/mcp", service);
-        let _ = axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown.await;
-            })
-            .await;
+        // Erratum D-R67: `with_graceful_shutdown` begins draining when its
+        // future resolves and then waits for every live connection to close on
+        // its own — measured at 300 s against a streamable-HTTP MCP client
+        // nobody closed. Delaying the drain does not bound it; **racing** it
+        // does. `drained` fires at the same moment the drain begins, and the
+        // arm below abandons the serve future `GRACEFUL_SHUTDOWN_TIMEOUT`
+        // later. The runtime is dropped immediately after this block, so an
+        // abandoned connection is torn down rather than leaked.
+        let (drain_started, drain_begun) = oneshot::channel::<()>();
+        let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
+            let _ = shutdown.await;
+            let _ = drain_started.send(());
+        });
+        tokio::select! {
+            () = async { let _ = serve.await; } => {}
+            () = async move {
+                if drain_begun.await.is_ok() {
+                    tokio::time::sleep(GRACEFUL_SHUTDOWN_TIMEOUT).await;
+                } else {
+                    // The drain never began, which means the serve future is
+                    // finishing on its own; let the other arm win.
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+        }
     });
 }
 
@@ -667,6 +983,13 @@ struct KinewrightMcp {
     project_path: Arc<RwLock<Option<PathBuf>>>,
     /// See [`McpServer::incident_log_handle`].
     incidents: IncidentLogHandle,
+    /// See [`INVESTIGATOR_CAPABILITY_DENYLIST`]. Empty for every server but an
+    /// investigator's, which is what leaves every other server byte-for-byte
+    /// unchanged (IN2 §6 rule 2).
+    capability_denylist: &'static [&'static str],
+    /// See [`InvestigatorSessionContext`]. `None` for every server but an
+    /// investigator's, and `propose_fix` refuses without it.
+    investigator: Option<InvestigatorSessionContext>,
 }
 
 impl KinewrightMcp {
@@ -712,7 +1035,29 @@ impl KinewrightMcp {
             prepared_plans: Arc::new(Mutex::new(PreparedPlanStore::default())),
             project_path,
             incidents,
+            capability_denylist: &[],
+            investigator: None,
         }
+    }
+
+    /// The same handler, refusing every capability in `denylist` through
+    /// `invoke_capability`.
+    ///
+    /// A builder rather than a ninth constructor argument, so the nine
+    /// existing `configured` call sites keep their shape and a server that
+    /// does not ask for a denylist cannot accidentally be given one.
+    fn with_capability_denylist(mut self, denylist: &'static [&'static str]) -> Self {
+        self.capability_denylist = denylist;
+        self
+    }
+
+    /// The same handler, answering `propose_fix` for one incident.
+    fn with_investigator_context(
+        mut self,
+        investigator: Option<InvestigatorSessionContext>,
+    ) -> Self {
+        self.investigator = investigator;
+        self
     }
 
     fn capability_tools() -> Result<Vec<Tool>, SchemaError> {
@@ -777,6 +1122,15 @@ impl KinewrightMcp {
                 if !is_invocable_capability(&args.name) {
                     return Ok(error_text(format!(
                         "capability {} cannot be invoked through the compact dispatcher; edit operations must be prepared and committed atomically",
+                        args.name
+                    )));
+                }
+                // IN2 §6 rule 2: the one chokepoint that exists. The CLI
+                // allowlist is the harness's; this is the server's, and it is
+                // what stops a session cancelling the person's running export.
+                if self.capability_denylist.contains(&args.name.as_str()) {
+                    return Ok(error_text(format!(
+                        "capability {} is not available to an investigator session: its effect lands outside this session's branch document",
                         args.name
                     )));
                 }
@@ -883,6 +1237,12 @@ impl KinewrightMcp {
             "resolve_incident" => {
                 let args: ResolveIncidentArgs = decode_args("resolve_incident", arguments)?;
                 self.resolve_incident(&args)
+            }
+            // IN2 §4.1 rule 2: the third registry-only incident capability,
+            // reached only through `invoke_capability`.
+            "propose_fix" => {
+                let args: ProposeFixArgs = decode_args("propose_fix", arguments)?;
+                self.propose_fix(&args)
             }
             "get_timeline_state" => {
                 let (revision, document) = self.snapshot()?;
@@ -1263,7 +1623,34 @@ impl KinewrightMcp {
                     ))
                 }
             }
-            _ => None,
+            // IN2 §6 rule 5: the gate is widened from three variants to all
+            // **seven** `is_destructive_operation` names. Before this, these
+            // four passed ungated and destroyed a bin, a string-out, a sync
+            // group or a bus with no confirmation at all.
+            Operation::RemoveBin { bin } => Some(format!(
+                "The agent wants to remove bin {bin} and unfile its assets. This edit can be undone."
+            )),
+            Operation::RemoveStringOut { string_out } => Some(format!(
+                "The agent wants to remove string-out {string_out}. This edit can be undone."
+            )),
+            Operation::RemoveSyncGroup { sync_group } => Some(format!(
+                "The agent wants to remove sync group {sync_group}. This edit can be undone."
+            )),
+            Operation::RemoveAudioBus { bus } => Some(format!(
+                "The agent wants to remove audio bus {bus} and its routing. This edit can be undone."
+            )),
+            // IN2 §6 rule 3's *"cannot drift"* made true by construction: the
+            // arms above and `is_destructive_operation` are two spellings of
+            // one list, and an eighth destructive variant added to the
+            // predicate but not here would otherwise be destroyed with no
+            // confirmation while the whole suite stayed green.
+            other => {
+                debug_assert!(
+                    !crate::runtime::is_destructive_operation(other),
+                    "{other:?} is destructive but has no confirmation sentence (IN2 §6 rule 3)"
+                );
+                None
+            }
         }
     }
 
@@ -1398,6 +1785,160 @@ impl KinewrightMcp {
                 "note": args.note,
             }),
         ))
+    }
+
+    /// IN2 §4.1: record this session's branch as a typed proposal for one
+    /// incident.
+    ///
+    /// **The branch *is* the proposal.** The session edits its branch through
+    /// the ordinary `prepare_edit_plan` / `commit_edit_plan` path, and this
+    /// handler snapshots `Query::AppliedOperations` — the operations still
+    /// represented by the branch's undo stack, so an edit the session undid is
+    /// not proposed, and, because the branch was spawned with an empty
+    /// `op_log`, "since `spawn_at`" is the whole list. It is the same list
+    /// `TimelineBranch::compare` reads and the same one `apply_to_live`
+    /// replays.
+    ///
+    /// **It does not resolve the incident, it does not change its state, and
+    /// it does not block on a person.** No MCP handler in this contract blocks
+    /// on a person: the application applies an approved proposal and the
+    /// application records every outcome.
+    ///
+    /// The six refusals, in order: `incident_not_found`,
+    /// `incident_not_investigating`, `proposal_empty`, `proposal_too_large`,
+    /// `proposal_destructive` and `proposal_already_recorded`. Three of them
+    /// are core's own [`kinewright_core::RecordProposalError`] variants mapped
+    /// one-to-one, so the handler answers them from the writer's return rather
+    /// than re-deriving them; the cap, the empty refusal and the destructive
+    /// check are this handler's, run over the branch's applied list **before**
+    /// anything is recorded (IN2 §4.1 rule 6, erratum A-R7).
+    fn propose_fix(&self, args: &ProposeFixArgs) -> Result<CallToolResult, McpError> {
+        let Some(investigator) = self.investigator else {
+            // The seventh refusal IN2 §4.1 rule 6 does not count, given the
+            // same shape as the six so an agent can branch on it (erratum
+            // D-R62, reviewers' N1/N2). It is unreachable from an investigator
+            // server by construction and fail-closed on every other one.
+            return Ok(propose_fix_error(
+                "investigator_context_missing",
+                "this server is not an investigator session",
+                "incident_id",
+                &args.incident_id.to_string(),
+                "a call made on a server started by McpServer::start_investigator_session",
+                "Nothing here can record a proposal; report what you found and stop.",
+            ));
+        };
+        let id = IncidentId(args.incident_id);
+        // Refusals 1 and 2 are read under a read guard that is dropped before
+        // any core request: IN2 §4.4 rule 18's lock discipline holds on this
+        // side of the seam too, because the user-interface thread reads this
+        // same lock every frame.
+        {
+            let log = self.incident_log()?;
+            let Some(incident) = log.get(id) else {
+                return Ok(record_proposal_refusal(RecordProposalError::NotFound, id));
+            };
+            if incident.state != IncidentState::Investigating {
+                return Ok(record_proposal_refusal(
+                    RecordProposalError::NotInvestigating,
+                    id,
+                ));
+            }
+        }
+
+        let operations = self.applied_branch_operations()?;
+        if operations.is_empty() {
+            return Ok(propose_fix_error(
+                "proposal_empty",
+                "this session's branch carries no applied operation",
+                "operations",
+                "0",
+                &format!("1..={INVESTIGATOR_MAX_PROPOSAL_OPERATIONS}"),
+                "Commit the edits that fix the incident to this session's branch with prepare_edit_plan and commit_edit_plan, then call propose_fix once.",
+            ));
+        }
+        if operations.len() > INVESTIGATOR_MAX_PROPOSAL_OPERATIONS {
+            return Ok(propose_fix_error(
+                "proposal_too_large",
+                &format!(
+                    "this session's branch carries {} operations, more than a proposal may hold",
+                    operations.len()
+                ),
+                "operations",
+                &operations.len().to_string(),
+                &format!("1..={INVESTIGATOR_MAX_PROPOSAL_OPERATIONS}"),
+                "Undo the branch edits that are not part of the smallest fix, then call propose_fix again.",
+            ));
+        }
+        // IN2 §6 rule 3, check (ii): the second net behind the branch server's
+        // own broker, run before anything is recorded.
+        if let Some(destructive) = operations
+            .iter()
+            .find(|operation| crate::runtime::is_destructive_operation(operation))
+        {
+            return Ok(propose_fix_error(
+                "proposal_destructive",
+                "an investigator session may not propose a destructive operation",
+                "operations",
+                operation_tool_name(destructive),
+                "an operation outside the seven destructive variants",
+                "Undo the destructive branch edit and propose a fix that does not remove a clip, track, bin, string-out, sync group or audio bus.",
+            ));
+        }
+
+        let summary = truncate_to_serialized_bytes(
+            &proposal_summary(&operations),
+            INVESTIGATOR_EXPLANATION_CEILING_BYTES,
+        );
+        let explanation =
+            truncate_to_serialized_bytes(&args.explanation, INVESTIGATOR_EXPLANATION_CEILING_BYTES);
+        let proposal = IncidentProposal {
+            operation_count: operations.len(),
+            operations: (*operations).clone(),
+            summary: summary.clone(),
+            explanation,
+            base_revision: investigator.base_revision,
+            stale: false,
+        };
+        let operation_count = proposal.operation_count;
+        let mut log = self.incident_log_mut()?;
+        if let Err(error) = log.record_proposal(id, proposal) {
+            return Ok(record_proposal_refusal(error, id));
+        }
+        // IN1 §2.3 rule 20 erratum: `telemetry_mut` is the single write path
+        // for an incident's telemetry, and this call is the one tool call the
+        // handler can honestly count.
+        if let Some(telemetry) = log.telemetry_mut(id) {
+            telemetry.tool_calls = telemetry.tool_calls.saturating_add(1);
+        }
+        Ok(success_structured(
+            format!(
+                "recorded a {operation_count}-operation proposal for incident {id} at base revision {}",
+                investigator.base_revision
+            ),
+            serde_json::json!({
+                "incident_id": args.incident_id,
+                "operation_count": operation_count,
+                "base_revision": investigator.base_revision,
+                "summary": summary,
+                "next": IN2_PROPOSAL_NEXT,
+            }),
+        ))
+    }
+
+    /// The branch's applied operations: the proposal, exactly as
+    /// `apply_to_live` would replay it.
+    fn applied_branch_operations(&self) -> Result<Arc<Vec<Operation>>, McpError> {
+        match self
+            .core
+            .request(Command::Query(Query::AppliedOperations))
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?
+        {
+            Event::QueryResult(QueryResult::AppliedOperations(operations)) => Ok(operations),
+            _ => Err(McpError::internal_error(
+                "Core returned the wrong applied-operations query result",
+                None,
+            )),
+        }
     }
 
     fn media_status(&self) -> Result<CallToolResult, McpError> {
@@ -11201,6 +11742,23 @@ struct ResolveIncidentArgs {
     note: Option<String>,
 }
 
+// IN2 §4.1 rule 3: the `propose_fix` input schema, normative, and **two**
+// fields. The branch's own applied-operation list is the proposal, so there is
+// nothing to pass and no revision to gate: the session's happy path commits an
+// edit plan on its branch first, which advances the branch core's revision, and
+// a gate against that revision would refuse every proposal the workflow
+// produces. The two field doc comments below are normative bytes of the
+// measured input schema, for the reason `GetIncidentsArgs` carries; this
+// comment is deliberately not a doc comment.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProposeFixArgs {
+    /// The incident this proposal is for, from `get_incidents`.
+    incident_id: u64,
+    /// One sentence a person can act on. Truncated to 240 bytes of JSON.
+    explanation: String,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum ResolveIncidentOutcome {
@@ -12503,6 +13061,25 @@ fn inspector_tools() -> Vec<Tool> {
         // list that drives the confirmation broker does not contain
         // `SetAssetColorDescription`, so `destructive(true)` would advertise a
         // broker gate that does not exist.
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
+        // IN2 §4.1 rule 2: registered directly after `resolve_incident`, the
+        // placement IN1 §6.1 used for `get_incidents`. Registry-only, so the
+        // served quad does not move; the registry sextuple does.
+        Tool::new(
+            "propose_fix",
+            "Record a typed fix for one incident this session is investigating: this session's branch, exactly as you have edited it, becomes the proposal. Commit your edits to the branch through prepare_edit_plan and commit_edit_plan first, then call this once with one sentence a person can act on. It records a proposal and never edits the live project and never resolves the incident; the person approves or rejects it on the incident card. At most eight branch operations, none of them destructive, and an explanation of at most 240 bytes of JSON.",
+            schema_object::<ProposeFixArgs>(),
+        )
+        // The proposal is a record, not an edit: nothing it writes reaches the
+        // live document, so `destructive(true)` would advertise a broker gate
+        // that does not exist, exactly as IN1 §6.3 rule 13 argued for
+        // `resolve_incident`.
         .with_annotations(
             ToolAnnotations::new()
                 .read_only(false)
@@ -16405,41 +16982,44 @@ fn dollars_to_millionths(cost_usd: f64) -> Option<i64> {
 /// `"inferred"` (8 B). Their `observed` and `allowed` are equal.
 pub const IN1_INCIDENT_SERIALIZED_BYTES: usize = 819;
 
-/// `IN1b` §3.11 rule 43 and §9 clause 16: the ceiling every incident this
-/// policy table can produce stays under, asserted `<=` over all **67** codes
-/// across all **seven** subject shapes — 469 pairs.
+/// IN2 §4.2 rule 11: the ceiling every incident this policy table can produce
+/// stays under, asserted `<=` over all **67** codes across all **eight**
+/// subject shapes, **two** probes, {no proposal, a proposal at the cap} and
+/// four state-and-telemetry shapes — **8 576** measurements.
 ///
-/// Set to the smallest power of two above the measured worst, which this
-/// crate's own loop measures at **1 358 B** over 536 pairs, on
-/// `unsupported_decoder_format` x `Chain(Bus(u64::MAX))`: the widest
-/// `observed`, the widest evidence and the widest subject in one incident.
-/// Core's [probe-2c] reads **1 351 B** on the same pair; the 7 B is the
-/// synthetic `allowed`, which this loop widened from a round 70 B to
-/// `ColorQcError::NodeRemovalRejected`'s real 77 B literal (agent review 2
-/// N-3). Both figures are of the same shape and neither moves the constant.
+/// **Moved from 2 048 to 4 096, and the cause is the proposal alone.** The
+/// worst shape without either new telemetry field already measures over 2 048,
+/// so the two optional telemetry keys are not what forced it; a recorded
+/// [`kinewright_core::IncidentProposal`] with both of its 240 B strings at the
+/// cap is. `IN1_INCIDENT_SERIALIZED_BYTES` does **not** move with it: the
+/// pinned fixture incident is `Open`, carries no proposal and no filled
+/// telemetry, and every field IN2 adds carries a `skip_serializing_if`, so its
+/// serialisation is byte-identical.
 ///
-/// **The shape that figure is measured on, stated because the headroom depends
-/// on it.** The loop measures an **`Open`** incident, whose `telemetry` renders
-/// as the one-key `{"tool_calls":0}` shape every `skip_serializing_if` leaves
-/// (§8 rule 2 says the ceiling is taken on the skipped shape). 690 B (34 %) is
-/// therefore the headroom of *that* shape, against Part A's 203 B (20 %). `get_incidents` with
-/// `include_resolved: true` serialises `log.all()`, so the widest body that can
-/// actually reach the wire is a **resolved** incident with `"outcome"` and all
-/// eight telemetry values present: agent review 2 measured that at **1 737 B**,
-/// 311 B (15 %) of headroom, against the same 2 048. Nothing in either shape
-/// breaches the ceiling.
+/// **The pin is the loop, not a remembered number** (IN2 probe-2
+/// disagreement 4). `in2_every_code_fits_the_re_measured_ceiling` in this
+/// file's test module measures the whole product and asserts its own worst
+/// against this constant and the `worst > CEILING / 2` divisor; it asserts no
+/// intermediate byte figure, because the figure is a measurement over chosen
+/// realistic inputs and `observed` is not bounded by the type system
+/// (`IN1b` §3.11 rule 44). Core's
+/// `in2_every_code_fits_the_re_measured_ceiling_on_every_subject_shape` is the
+/// twin, over the same product.
 ///
-/// Part A's 1 024 was measured over twelve colour codes on one synthetic
-/// subject and is superseded by erratum `IN1b`-R10: the migration's own
-/// population is 67 codes, and the ceiling gates that population rather than
-/// the fixture alone. `IN1_INCIDENT_SERIALIZED_BYTES` does not move with it,
-/// because `IN1b` §3.11 rule 41's byte-identity is structural.
-pub const IN1_INCIDENT_SERIALIZED_CEILING_BYTES: usize = 2_048;
+/// **The divisor is the assertion worth naming in advance.** One more optional
+/// string on [`kinewright_core::Incident`] and the *divisor* fails while the
+/// ceiling assertion still passes; the printed `IN2_CEILING` line is what a
+/// reader re-reads when that happens.
+pub const IN1_INCIDENT_SERIALIZED_CEILING_BYTES: usize = 4_096;
 
 /// IN1 §6.2 rule 11: the one sentence that stops a model inventing a second
 /// round trip, in the voice of the existing `search_capabilities` and
 /// `get_capability` responses.
 const IN1_INCIDENTS_NEXT: &str = "Apply a recovery through prepare_edit_plan and commit_edit_plan, then record the outcome with resolve_incident at the same revision.";
+
+/// IN2 §4.1 rule 4: the one sentence that stops a session inventing a second
+/// round trip after it has proposed, in the voice of [`IN1_INCIDENTS_NEXT`].
+const IN2_PROPOSAL_NEXT: &str = "The proposal is recorded and a person will approve or reject it; stop here rather than editing the branch again or recording an outcome.";
 
 /// One typed `resolve_incident` refusal in the CC1/CC2
 /// `code`/`field`/`observed`/`allowed`/`recovery_action` shape
@@ -16455,8 +17035,92 @@ fn incident_error(
     allowed: &str,
     recovery_action: &str,
 ) -> CallToolResult {
+    capability_incident_error(
+        "resolve_incident",
+        code,
+        message,
+        field,
+        observed,
+        allowed,
+        recovery_action,
+    )
+}
+
+/// One typed `propose_fix` refusal in the same shape (IN2 §4.1 rule 6).
+fn propose_fix_error(
+    code: &str,
+    message: &str,
+    field: &str,
+    observed: &str,
+    allowed: &str,
+    recovery_action: &str,
+) -> CallToolResult {
+    capability_incident_error(
+        "propose_fix",
+        code,
+        message,
+        field,
+        observed,
+        allowed,
+        recovery_action,
+    )
+}
+
+/// Core's [`RecordProposalError`] as one of `propose_fix`'s six refusals.
+///
+/// The three variants map one-to-one onto codes 1, 2 and 6, which is why core
+/// returns a typed error rather than a `bool`: a handler that must answer
+/// `incident_not_found`, `incident_not_investigating` and
+/// `proposal_already_recorded` separately cannot do it from one `false`
+/// (IN2 erratum A-R7).
+fn record_proposal_refusal(error: RecordProposalError, id: IncidentId) -> CallToolResult {
+    match error {
+        RecordProposalError::NotFound => propose_fix_error(
+            "incident_not_found",
+            &format!("no incident {id} is open or resolved in this session"),
+            "incident_id",
+            &id.0.to_string(),
+            "an incident id returned by get_incidents",
+            "Call get_incidents and propose a fix for one of the ids it returns.",
+        ),
+        RecordProposalError::NotInvestigating => propose_fix_error(
+            "incident_not_investigating",
+            &format!("incident {id} is not under investigation"),
+            "incident_id",
+            "an incident that is not investigating",
+            "an incident whose state is investigating",
+            "The person or the application resolved this incident already; stop and explain what you found.",
+        ),
+        RecordProposalError::AlreadyRecorded => propose_fix_error(
+            "proposal_already_recorded",
+            &format!("incident {id} already carries a proposal"),
+            "incident_id",
+            &id.0.to_string(),
+            "an incident with no proposal recorded against it",
+            "The person has a proposal to approve or reject already; stop rather than replacing it.",
+        ),
+    }
+}
+
+/// The shared body of the two, so the six-field shape lives in one place and
+/// `resolve_incident`'s own refusal text is byte-identical to Part A's.
+///
+/// Seven arguments because the refusal shape IN1 §6.3 rule 19 fixed has six
+/// fields and this serves two capabilities: collapsing them into a struct
+/// would add a type whose only purpose is to be destructured one line later,
+/// at every one of the call sites this exists to keep identical.
+#[allow(clippy::too_many_arguments)]
+fn capability_incident_error(
+    capability: &str,
+    code: &str,
+    message: &str,
+    field: &str,
+    observed: &str,
+    allowed: &str,
+    recovery_action: &str,
+) -> CallToolResult {
     error_structured(
-        format!("resolve_incident rejected: {message}"),
+        format!("{capability} rejected: {message}"),
         serde_json::json!({
             "code": code,
             "field": field,
@@ -16465,6 +17129,29 @@ fn incident_error(
             "recovery_action": recovery_action,
         }),
     )
+}
+
+/// One line per operation: the capability name a reader can look up, and the
+/// operation's own subject as the incident log spells it (IN2 §4.3 rule 14).
+///
+/// The same rendering `IncidentProposal.summary` carries on the wire and the
+/// card renders, so the two cannot disagree. **This function caps nothing**:
+/// its only caller refuses more than `INVESTIGATOR_MAX_PROPOSAL_OPERATIONS`
+/// operations first (`proposal_too_large`) and truncates the result to 240
+/// bytes of JSON after, so the bound is upstream and downstream of here and
+/// not inside it.
+fn proposal_summary(operations: &[Operation]) -> String {
+    operations
+        .iter()
+        .map(|operation| {
+            format!(
+                "{} {}",
+                operation_tool_name(operation),
+                serde_json::to_string(&operation.incident_subject()).unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The wire spelling of a colour provenance, so a refusal quotes the same
@@ -16746,10 +17433,67 @@ fn render_timeline_beats(
     output
 }
 
+/// The plan-level twin of [`KinewrightMcp::confirmation_description`], widened
+/// to all **seven** destructive variants (IN2 §6 rule 5).
+///
+/// **The clip-and-track clause is always emitted, and that is a decision.** A
+/// plan that removes only a bin therefore reads, verbatim:
+///
+/// > `"Plan removes 0 clips and 0 tracks, and 1 bin - approve?"`
+///
+/// A second sentence shape for the no-clip-no-track case would make the pinned
+/// sentence one of two branches, which is a worse property than one slightly
+/// wooden sentence that is always the same shape — and the sentence a person
+/// reads is still true. The pinned clip-and-track sentence is emitted
+/// unchanged (IN2 §6 rule 6).
 fn plan_confirmation_description(document: &Document, operations: &[Operation]) -> Option<String> {
+    let (removed_clips, removed_tracks, extras) = plan_removal_counts(document, operations)?;
+    if removed_clips == 0 && removed_tracks == 0 && extras.iter().all(|(count, _, _)| *count == 0) {
+        return None;
+    }
+    let mut description = format!(
+        "Plan removes {removed_clips} {} and {removed_tracks} {}",
+        if removed_clips == 1 { "clip" } else { "clips" },
+        if removed_tracks == 1 {
+            "track"
+        } else {
+            "tracks"
+        },
+    );
+    for (count, singular, plural) in extras {
+        if count > 0 {
+            let _ = write!(
+                description,
+                ", and {count} {}",
+                if count == 1 { singular } else { plural }
+            );
+        }
+    }
+    description.push_str(" - approve?");
+    Some(description)
+}
+
+/// One removable kind's count and its singular and plural nouns, for the four
+/// kinds IN2 §6 rule 5 adds beside clips and tracks.
+type PlanRemovalExtras = [(usize, &'static str, &'static str); 4];
+
+/// What `operations` would remove from `document`, replayed operation by
+/// operation so each count is taken against the document as it stands at that
+/// point in the plan.
+///
+/// `None` when the plan does not apply, which is the caller's "raise nothing"
+/// answer: a plan that cannot land cannot destroy anything.
+fn plan_removal_counts(
+    document: &Document,
+    operations: &[Operation],
+) -> Option<(usize, usize, PlanRemovalExtras)> {
     let mut candidate = document.clone();
     let mut removed_clips = 0_usize;
     let mut removed_tracks = 0_usize;
+    let mut removed_bins = 0_usize;
+    let mut removed_string_outs = 0_usize;
+    let mut removed_sync_groups = 0_usize;
+    let mut removed_buses = 0_usize;
     for operation in operations {
         match operation {
             Operation::DeleteClip { clip } | Operation::RippleDeleteClip { clip }
@@ -16767,23 +17511,71 @@ fn plan_confirmation_description(document: &Document, operations: &[Operation]) 
                     removed_clips = removed_clips.saturating_add(existing.clips.len());
                 }
             }
-            _ => {}
+            Operation::RemoveBin { bin }
+                if candidate.catalog.bins.iter().any(|entry| entry.id == *bin) =>
+            {
+                removed_bins = removed_bins.saturating_add(1);
+            }
+            Operation::RemoveStringOut { string_out }
+                if candidate
+                    .catalog
+                    .string_outs
+                    .iter()
+                    .any(|entry| entry.id == *string_out) =>
+            {
+                removed_string_outs = removed_string_outs.saturating_add(1);
+            }
+            Operation::RemoveSyncGroup { sync_group }
+                if candidate
+                    .catalog
+                    .sync_groups
+                    .iter()
+                    .any(|entry| entry.id == *sync_group) =>
+            {
+                removed_sync_groups = removed_sync_groups.saturating_add(1);
+            }
+            Operation::RemoveAudioBus { bus }
+                if candidate
+                    .audio_mix
+                    .buses
+                    .iter()
+                    .any(|entry| entry.id == *bus) =>
+            {
+                removed_buses = removed_buses.saturating_add(1);
+            }
+            // The same guard the per-operation gate carries (IN2 §6 rule 3).
+            // Every arm above is guarded on the subject still existing, so a
+            // destructive operation whose subject is already gone falls
+            // through legitimately and is not counted; what this asserts is
+            // that no destructive **variant** is unknown to this match.
+            other => debug_assert!(
+                !crate::runtime::is_destructive_operation(other)
+                    || matches!(
+                        other,
+                        Operation::DeleteClip { .. }
+                            | Operation::RippleDeleteClip { .. }
+                            | Operation::RemoveTrack { .. }
+                            | Operation::RemoveBin { .. }
+                            | Operation::RemoveStringOut { .. }
+                            | Operation::RemoveSyncGroup { .. }
+                            | Operation::RemoveAudioBus { .. }
+                    ),
+                "{other:?} is destructive but this plan gate does not count it (IN2 §6 rule 3)"
+            ),
         }
         if operation.apply(&mut candidate).is_err() {
             return None;
         }
     }
-    if removed_clips == 0 && removed_tracks == 0 {
-        return None;
-    }
-    Some(format!(
-        "Plan removes {removed_clips} {} and {removed_tracks} {} - approve?",
-        if removed_clips == 1 { "clip" } else { "clips" },
-        if removed_tracks == 1 {
-            "track"
-        } else {
-            "tracks"
-        },
+    Some((
+        removed_clips,
+        removed_tracks,
+        [
+            (removed_bins, "bin", "bins"),
+            (removed_string_outs, "string-out", "string-outs"),
+            (removed_sync_groups, "sync group", "sync groups"),
+            (removed_buses, "audio bus", "audio buses"),
+        ],
     ))
 }
 
@@ -22379,8 +23171,9 @@ mod tests {
                 "{name} must be read-only"
             );
         }
-        // IN1 §6.6: get_incidents and resolve_incident join the registry.
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 86);
+        // IN1 §6.6: get_incidents and resolve_incident join the registry;
+        // IN2 §4.1 rule 2 adds propose_fix beside them.
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
 
         for name in [
             "plan_primary_correction",
@@ -26184,7 +26977,7 @@ mod tests {
             );
         }
 
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 86);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
         // IN1 §6.1 rule 3: nothing the dispatcher accepted before is now
         // refused, and no generated operation tool became invocable.
         let stranded = crate::schema::INSPECTOR_TOOL_NAMES
@@ -26227,24 +27020,46 @@ mod tests {
         assert_eq!(annotations.open_world_hint, Some(false));
     }
 
-    /// IN1 §6.2 rule 9 and `IN1b` §3.11 rule 43, §9 clause 16: the two
+    /// IN1 §6.2 rule 9, `IN1b` §3.11 rule 43 and IN2 §4.2 rule 11: the two
     /// token-budget assertions that can fail.
     ///
-    /// The rewrite of Part A's
-    /// `in1_the_fixture_incident_is_pinned_and_every_code_fits_the_ceiling`
-    /// (erratum `IN1b`-R10). The fixture pin is unchanged and still
-    /// `assert_eq!`-exact at 819 B, because `IN1b` §3.11 rule 41's
-    /// byte-identity is structural; the ceiling loop is quantified over the
-    /// whole declared code set and all **eight** subject shapes — 536 pairs
-    /// after erratum `IN1b`-A-R13 — at 2 048 B, because that is the population
-    /// the migration produces.
+    /// The agent twin of core's
+    /// `in2_every_code_fits_the_re_measured_ceiling_on_every_subject_shape`,
+    /// grown from `IN1b`'s 536 pairs to IN2's product: the **67** declared
+    /// codes times the **eight** subject variants of `IN1b` §3.3 rule 17 as
+    /// amended by erratum `IN1b`-A-R13, times **two probes**, times
+    /// {no proposal, a proposal at the cap}, times {open, investigating,
+    /// resolved with all telemetry, resolved without the two new fields} —
+    /// **8 576** shapes.
+    ///
+    /// **The probe is an axis, and erratum A-R9 is why.** The wire body's
+    /// `recoveries` array is the one thing IN2 §7 rule 1 changed about the
+    /// record, putting a **second** action on three of the sixty-seven rows. A
+    /// Rec.709-incompatible probe demotes every predicated row to `Explain`
+    /// and builds no operation at all, so a loop with that probe alone
+    /// re-pins the ceiling over a population that cannot see the slice's own
+    /// change. This loop measures both probes and asserts a positive count of
+    /// shapes whose recoveries carried a `RecoveryKind::Operation`, bounding
+    /// that sub-population's worst in its own right.
+    ///
+    /// The fixture pin is unchanged and still `assert_eq!`-exact at 819 B,
+    /// because `IN1b` §3.11 rule 41's byte-identity is structural and every
+    /// field IN2 adds — `proposal`, `turns`, `resolver` — carries a
+    /// `skip_serializing_if`.
+    ///
+    /// **The pin is the loop, not a remembered number** (IN2 probe-2
+    /// disagreement 4): nothing below asserts an intermediate byte figure.
     ///
     /// The code set is read off [`POLICY`] rather than transcribed, so a code
     /// added to the enum without a policy row cannot slip past the loop: `IN1b`
     /// §9 clause 2's core test is what proves the table is exhaustive over the
     /// enum, and this test inherits that proof rather than repeating it.
     #[test]
-    fn in1b_every_code_fits_the_measured_ceiling() {
+    // The loop is five nested axes over 8 576 shapes plus the pinned fixture;
+    // splitting it would put the measurement and its assertions in different
+    // functions, which is exactly what makes a pin easy to weaken by accident.
+    #[allow(clippy::too_many_lines)]
+    fn in2_every_code_fits_the_re_measured_ceiling() {
         // The named largest fixture incident, built deterministically: the
         // untagged-`WebM` observation fed twice so `count` is 2 without an
         // engine, and read while still `Open` so no `Duration` reaches the wire.
@@ -26272,43 +27087,91 @@ mod tests {
             "the fixture incident moved off its pinned budget"
         );
 
-        // The ceiling gates the whole 67-code population the migration opens,
-        // not the fixture alone, and on every subject shape it can open it on.
-        let mut worst = 0;
-        let mut worst_pair = String::new();
-        let mut measured = 0;
+        let mut worst = 0_usize;
+        let mut worst_shape = String::new();
+        let mut with_operation_worst = 0_usize;
+        let mut with_operation_shape = String::new();
+        let mut with_operation = 0_usize;
+        let mut measured = 0_usize;
         for entry in POLICY {
             for subject in in1b_every_subject_shape() {
-                let mut log = IncidentLog::with_start(Instant::now());
-                let Observed::Opened(id) = log.observe(in1b_worst_observation(entry.code, subject))
-                else {
-                    panic!("a fresh log must open {}", entry.code.code());
-                };
-                // The widest id and count this session can reach, so the
-                // measurement is not an artefact of a one-incident log.
-                let mut widest = log.get(id).unwrap().clone();
-                widest.id = IncidentId(u64::MAX);
-                widest.count = u32::MAX;
-                let bytes = serde_json::to_vec(&widest).unwrap().len();
-                assert!(
-                    bytes <= IN1_INCIDENT_SERIALIZED_CEILING_BYTES,
-                    "{} on {subject:?} serialises to {bytes} B, over the ceiling",
-                    entry.code.code()
-                );
-                if bytes > worst {
-                    worst = bytes;
-                    worst_pair = format!("{} / {subject:?}", entry.code.code());
+                for probe in [in1b_worst_probe(), in2_rec709_compatible_worst_probe()] {
+                    let mut log = IncidentLog::with_start(Instant::now());
+                    let Observed::Opened(id) =
+                        log.observe(in1b_worst_observation(entry.code, subject, &probe))
+                    else {
+                        panic!("a fresh log must open {}", entry.code.code());
+                    };
+                    let opened = log.get(id).unwrap().clone();
+                    let carries_operation = opened.recoveries.iter().any(|action| {
+                        matches!(action.kind, kinewright_core::RecoveryKind::Operation(_))
+                    });
+                    for proposal in [None, Some(in2_widest_proposal())] {
+                        for (shape, state, telemetry) in [
+                            ("open", IncidentState::Open, IncidentTelemetry::default()),
+                            (
+                                "investigating",
+                                IncidentState::Investigating,
+                                IncidentTelemetry::default(),
+                            ),
+                            (
+                                "resolved+turns+resolver",
+                                IncidentState::Resolved(IncidentOutcome::Explained),
+                                in2_widest_telemetry(true),
+                            ),
+                            (
+                                "resolved",
+                                IncidentState::Resolved(IncidentOutcome::Explained),
+                                in2_widest_telemetry(false),
+                            ),
+                        ] {
+                            // The widest id and count this session can reach,
+                            // so the measurement is not an artefact of a
+                            // one-incident log.
+                            let mut widest = opened.clone();
+                            widest.id = IncidentId(u64::MAX);
+                            widest.count = u32::MAX;
+                            widest.state = state;
+                            widest.telemetry = telemetry;
+                            widest.proposal = proposal.clone();
+                            let bytes = serde_json::to_vec(&widest).unwrap().len();
+                            measured += 1;
+                            assert!(
+                                bytes <= IN1_INCIDENT_SERIALIZED_CEILING_BYTES,
+                                "{} on {subject:?} / {shape} serialises to {bytes} B, over the ceiling",
+                                entry.code.code()
+                            );
+                            let label = format!(
+                                "{} / {subject:?} / {shape} / recoveries={} / proposal={}",
+                                entry.code.code(),
+                                widest.recoveries.len(),
+                                proposal.is_some()
+                            );
+                            if bytes > worst {
+                                worst = bytes;
+                                worst_shape = label.clone();
+                            }
+                            if carries_operation {
+                                with_operation += 1;
+                                if bytes > with_operation_worst {
+                                    with_operation_worst = bytes;
+                                    with_operation_shape = label;
+                                }
+                            }
+                        }
+                    }
                 }
-                measured += 1;
             }
         }
-        // 67 codes x eight subject shapes, after erratum `IN1b`-A-R13 added
-        // `IncidentSubject::LutAsset`. Core's [probe-2c] measures 536 pairs at
-        // a worst of 1 351 B on `unsupported_decoder_format` x
-        // `Chain(Bus(u64::MAX))`; this loop measures the same pair at 1 358 B,
-        // the 7 B being the real 77 B `allowed` accessor string it uses in
-        // place of core's round 70 B synthetic one.
-        assert_eq!(measured, 67 * 8);
+        println!("IN2_CEILING measured={measured} worst={worst} shape={worst_shape}");
+        println!(
+            "IN2_CEILING with_operation={with_operation} worst={with_operation_worst} shape={with_operation_shape}"
+        );
+        assert_eq!(
+            measured,
+            67 * 8 * 2 * 2 * 4,
+            "IN2 §4.2 rule 11's shapes, with the probe axis erratum A-R9 adds"
+        );
         assert_eq!(POLICY.len(), 67);
         // Part A's thirteen classifier variants are thirteen of the 67 rows
         // after erratum `IN1b`-R4, and the loop above measured every one of
@@ -26321,11 +27184,91 @@ mod tests {
                 .count(),
             in1_every_source_error().len()
         );
-        println!("IN1B_PROBE2C measured={measured} worst={worst} pair={worst_pair}");
+        // The one thing IN2 changes about the wire body's `recoveries` array is
+        // §7 rule 1's second action, and a loop that never builds an operation
+        // cannot see it (erratum A-R9).
+        assert!(
+            with_operation > 0,
+            "the population must include shapes whose recoveries carry an Operation"
+        );
+        assert!(
+            with_operation_worst <= IN1_INCIDENT_SERIALIZED_CEILING_BYTES,
+            "the worst shape carrying an Operation ({with_operation_worst}) exceeds the ceiling ({with_operation_shape})"
+        );
         assert!(
             worst > IN1_INCIDENT_SERIALIZED_CEILING_BYTES / 2,
-            "the ceiling is the smallest power of two above the measured worst of {worst} B ({worst_pair})"
+            "the ceiling is the smallest power of two above the measured worst of {worst} B ({worst_shape})"
         );
+    }
+
+    /// A proposal at [`INVESTIGATOR_MAX_PROPOSAL_OPERATIONS`] with both strings
+    /// at the 240 B serialised cap and a saturated `base_revision`.
+    ///
+    /// The operations are `#[serde(skip)]` and therefore cost nothing on the
+    /// wire, which is the whole point of IN2 §4.2 rule 8.
+    fn in2_widest_proposal() -> IncidentProposal {
+        let filler = "a".repeat(INVESTIGATOR_EXPLANATION_CEILING_BYTES);
+        assert_eq!(
+            kinewright_core::json_escaped_len(&filler),
+            INVESTIGATOR_EXPLANATION_CEILING_BYTES
+        );
+        IncidentProposal {
+            operations: vec![
+                Operation::DeleteClip {
+                    clip: ClipId(u64::MAX)
+                };
+                INVESTIGATOR_MAX_PROPOSAL_OPERATIONS
+            ],
+            operation_count: INVESTIGATOR_MAX_PROPOSAL_OPERATIONS,
+            summary: filler.clone(),
+            explanation: filler,
+            base_revision: TimelineRevision(u64::MAX),
+            stale: true,
+        }
+    }
+
+    /// Every telemetry field filled at its widest. `turns` and `resolver` are
+    /// the two IN2 adds; the `false` arm is the pre-IN2 shape, so the loop
+    /// measures both columns. The resolver's three strings are the widest
+    /// **real** ones: a harness id, a model id and IN2 §3.7 rule 38's longest
+    /// stop sentence.
+    fn in2_widest_telemetry(with_session: bool) -> IncidentTelemetry {
+        IncidentTelemetry {
+            resolved_after: Some(Duration::MAX),
+            tool_calls: u32::MAX,
+            input_tokens: Some(u64::MAX),
+            cached_input_tokens: Some(u64::MAX),
+            cache_creation_input_tokens: Some(u64::MAX),
+            output_tokens: Some(u64::MAX),
+            reasoning_output_tokens: Some(u64::MAX),
+            cost_usd_millionths: Some(i64::MIN),
+            turns: with_session.then_some(u32::MAX),
+            resolver: with_session.then(|| kinewright_core::IncidentResolver::Session {
+                harness: "claude-code".to_owned(),
+                model: Some("claude-opus-4-1-20250805".to_owned()),
+                stop: "the session asked for a confirmation".to_owned(),
+            }),
+        }
+    }
+
+    /// The widest **Rec.709-compatible** probe, so the loop measures the rows
+    /// whose recoveries carry a `RecoveryKind::Operation` (erratum A-R9).
+    ///
+    /// [`in1b_worst_probe`]'s `ColorRange::Other(_)` is refused by core's
+    /// `rec709_compatible`, which admits `range` only in
+    /// `Unknown | Limited | Full`, so that probe builds no operation at all.
+    /// The same shape core's own loop uses, so the two figures are comparable.
+    fn in2_rec709_compatible_worst_probe() -> ColorDescription {
+        ColorDescription {
+            primaries: kinewright_core::ColorPrimaries::Unknown,
+            transfer: kinewright_core::ColorTransfer::Unknown,
+            matrix: kinewright_core::ColorMatrix::Unknown,
+            range: kinewright_core::ColorRange::Limited,
+            white_point: kinewright_core::ColorWhitePoint::Unknown,
+            bit_depth: kinewright_core::ColorBitDepth::Sixteen,
+            confidence_basis_points: u16::MAX,
+            provenance: ColorProvenance::Other("stream_metadata_container".to_owned()),
+        }
     }
 
     /// The **eight** subject shapes of `IN1b` §3.3 rule 17 as amended by
@@ -26359,6 +27302,7 @@ mod tests {
     fn in1b_worst_observation(
         code: kinewright_core::IncidentCode,
         subject: IncidentSubject,
+        probed: &ColorDescription,
     ) -> IncidentObservation {
         IncidentObservation {
             code,
@@ -26371,7 +27315,7 @@ mod tests {
                 "an effect the document model permits removing from the clip it is attached to"
                     .to_owned(),
             ),
-            evidence: in1b_worst_evidence(code),
+            evidence: in1b_worst_evidence(code, probed),
             revision: TimelineRevision(u64::MAX),
         }
     }
@@ -26450,11 +27394,14 @@ mod tests {
         "Source verification did not confirm the original online source; no edit was applied";
 
     /// The widest evidence each code's own rule allows (`IN1b` §3.4 rule 24).
-    fn in1b_worst_evidence(code: kinewright_core::IncidentCode) -> IncidentEvidence {
+    fn in1b_worst_evidence(
+        code: kinewright_core::IncidentCode,
+        probed: &ColorDescription,
+    ) -> IncidentEvidence {
         use kinewright_core::{IncidentCode as Code, IncidentFamily, RejectionIncident};
         match code {
             Code::SourceColor(_) => IncidentEvidence::SourceColor {
-                probed: in1b_worst_probe(),
+                probed: probed.clone(),
                 assumption: Some(kinewright_core::ColorSourceProfileAssumption::D65),
             },
             Code::Media(_)
@@ -26805,13 +27752,31 @@ mod tests {
     /// is the thing that fails if the sentence ever grows.
     ///
     /// **Pin site 1 of 3 (`IN1b` §6.4 rules 7–8, erratum `IN1b`-R3).** Part B
-    /// moves neither the quad nor the sextuple for the **seventeenth**
-    /// consecutive measurement: it adds no served tool, no capability, no
-    /// `Operation` variant and no schema field, and its whole growth is on the
-    /// **output** side of `get_incidents` — more codes, more subjects and more
-    /// evidence variants in a response body, none of which is schema-visible.
+    /// moved neither the quad nor the sextuple; **IN2 Part A moves the
+    /// sextuple and not the quad**, for the **eighteenth** consecutive
+    /// measurement of the served surface. IN2 adds no served tool, no
+    /// `Operation` variant and no `Document`-bearing schema, and
     /// `served_tools()` still filters `capability_tools()` by
-    /// `COMPACT_TOOL_NAMES`, which Part B does not touch.
+    /// `COMPACT_TOOL_NAMES`, which IN2 does not touch — so `7 / 5 660 /
+    /// 3 510 / 998` is unchanged below.
+    ///
+    /// **The sextuple is re-pinned to `141 / 54 / 87 / 1 552 431 / 1 407 446 /
+    /// 121 854`, and it carries its decomposition** (IN2 §0.4 n, §6.4
+    /// rule 11), because the three byte figures are a function of description
+    /// text the contract deliberately does not fix. Measured against `IN1b`'s
+    /// `1 551 301 / 1 407 012 / 121 315`, the whole move is
+    /// **+1 130 / +434 / +539**:
+    ///
+    /// - **+434 B** of generated `ProposeFixArgs` input schema — two fields,
+    ///   because the branch **is** the proposal and there is nothing to pass;
+    /// - **+539 B** of `propose_fix` description text;
+    /// - **+157 B** of fixed cost, which is IN2 §6.4's `+160 B` envelope — the
+    ///   name, the annotations and the JSON punctuation — **less 3 B** for
+    ///   §6 rule 5's three `destructive(true)` flips, each of which replaces
+    ///   `false` with `true` and is one byte shorter.
+    ///
+    /// 157 + 434 + 539 = 1 130, which is the whole of the growth: nothing else
+    /// in the registry moved.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -26837,15 +27802,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_551_301, 5_660),
+            (1_552_431, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_407_012,
+            registry_metrics.input_schema_bytes, 1_407_446,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 121_315,
+            registry_metrics.description_bytes, 121_854,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -31725,5 +32690,1393 @@ mod tests {
              longer than the window can still hold none of them: {fades}"
         );
         assert!(fades.contains("per-clip reason"), "{fades}");
+    }
+
+    // ---- IN2 §9.1 items 24-31 and 34: the investigator server ----
+
+    /// The live revision an investigator branch is seeded at in these tests.
+    ///
+    /// Deliberately not zero, so a `base_revision` that came from the branch's
+    /// own counter rather than from the seed would be visible.
+    const IN2_BASE_REVISION: TimelineRevision = TimelineRevision(41);
+
+    /// An investigator server: a branch core spawned at [`IN2_BASE_REVISION`],
+    /// the project's shared incident log carrying one `Investigating`
+    /// incident, the nine-name denylist, and a broker stamped with that
+    /// incident (IN2 §3.3 rule 13).
+    fn in2_investigator_service() -> (KinewrightMcp, IncidentLogHandle, IncidentId) {
+        let (live, playback, analysis) = fixture();
+        let Event::QueryResult(QueryResult::Document(document)) =
+            live.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("the fixture core answers a document query");
+        };
+        let branch = Core::spawn_at((*document).clone(), IN2_BASE_REVISION).unwrap();
+        let incidents: IncidentLogHandle =
+            Arc::new(RwLock::new(IncidentLog::with_start(Instant::now())));
+        let id = {
+            let mut log = incidents.write().unwrap();
+            let Observed::Opened(id) = log.observe(in1b_worst_observation(
+                kinewright_core::INVESTIGATOR_ALLOWLIST[0],
+                IncidentSubject::Project,
+                &in1b_worst_probe(),
+            )) else {
+                panic!("a fresh log must open the first allowlisted code");
+            };
+            assert!(log.begin_investigation(id));
+            id
+        };
+        let service = KinewrightMcp::configured(
+            branch,
+            playback,
+            analysis,
+            None,
+            ConfirmationBroker::for_incident(INVESTIGATOR_BROKER_TIMEOUT, id),
+            false,
+            Arc::new(RwLock::new(None)),
+            Arc::clone(&incidents),
+        )
+        .with_capability_denylist(&INVESTIGATOR_CAPABILITY_DENYLIST)
+        .with_investigator_context(Some(InvestigatorSessionContext {
+            incident: id,
+            base_revision: IN2_BASE_REVISION,
+        }));
+        (service, incidents, id)
+    }
+
+    /// Commit one edit plan on the branch, the way a session does.
+    fn in2_commit(service: &KinewrightMcp, operations: &serde_json::Value) {
+        let (revision, _) = service.snapshot().unwrap();
+        let prepared = service
+            .call_blocking(
+                CallToolRequestParams::new("prepare_edit_plan").with_arguments(
+                    json!({"expected_revision": revision, "operations": operations})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+        let plan_id = prepared.structured_content.unwrap()["plan_id"]
+            .as_u64()
+            .expect("a prepared plan id");
+        let committed = service
+            .call_blocking(
+                CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                    json!({"plan_id": plan_id, "expected_revision": revision})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(committed.is_error, Some(false), "{committed:?}");
+    }
+
+    fn in2_propose(service: &KinewrightMcp, arguments: &serde_json::Value) -> CallToolResult {
+        service
+            .call_blocking(
+                CallToolRequestParams::new("propose_fix")
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            )
+            .unwrap()
+    }
+
+    fn in2_refusal_code(result: &CallToolResult) -> String {
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        result.structured_content.as_ref().unwrap()["code"]
+            .as_str()
+            .expect("every refusal carries a code")
+            .to_owned()
+    }
+
+    /// IN2 §9.1 item 24, §4.1 rule 4 and §4.2 rule 8: `propose_fix` records the
+    /// **branch's own** operations and returns without blocking.
+    ///
+    /// The branch is the proposal: two commits on the branch produce a
+    /// two-operation proposal whose `operations` are exactly
+    /// `Query::AppliedOperations`, whose `base_revision` is the live revision
+    /// `spawn_at` seeded the branch at — **not** the branch's own counter,
+    /// which two commits have already moved — and which leaves the incident
+    /// still `Investigating`, because the application resolves incidents and
+    /// no MCP handler blocks on a person.
+    #[test]
+    fn in2_propose_fix_records_the_branchs_operations_and_returns_without_blocking() {
+        let (service, incidents, id) = in2_investigator_service();
+        in2_commit(
+            &service,
+            &json!([{"op": "split_clip", "clip": 1, "at": 20}]),
+        );
+        in2_commit(
+            &service,
+            &json!([{"op": "split_clip", "clip": 1, "at": 10}]),
+        );
+        let (branch_revision, _) = service.snapshot().unwrap();
+        assert!(
+            branch_revision > IN2_BASE_REVISION,
+            "two commits moved the branch's own counter"
+        );
+
+        let started = Instant::now();
+        let result = in2_propose(
+            &service,
+            &json!({"incident_id": id.0, "explanation": "split the clip where the take changes"}),
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "propose_fix never blocks on a person"
+        );
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        let body = result.structured_content.unwrap();
+        assert_eq!(body["operation_count"], 2);
+        assert_eq!(body["base_revision"], IN2_BASE_REVISION.0);
+
+        let applied = service.applied_branch_operations().unwrap();
+        let log = incidents.read().unwrap();
+        let incident = log.get(id).unwrap();
+        let proposal = incident.proposal.as_ref().expect("a recorded proposal");
+        assert_eq!(proposal.operations, *applied);
+        assert_eq!(proposal.operation_count, 2);
+        assert_eq!(proposal.base_revision, IN2_BASE_REVISION);
+        assert!(!proposal.stale);
+        assert_eq!(
+            proposal.explanation,
+            "split the clip where the take changes"
+        );
+        assert!(
+            proposal.summary.contains("split_clip"),
+            "one line per operation: {}",
+            proposal.summary
+        );
+        assert_eq!(
+            incident.state,
+            IncidentState::Investigating,
+            "propose_fix does not resolve the incident or change its state"
+        );
+        assert_eq!(incident.telemetry.tool_calls, 1);
+    }
+
+    /// IN2 §9.1 item 25, §4.1 rule 6 and §9 clause 9: **six** named refusals.
+    ///
+    /// Three of them are core's own `RecordProposalError` variants mapped
+    /// one-to-one (erratum A-R7); the cap, the empty refusal and the
+    /// destructive check are the handler's, run over the branch's applied list
+    /// before anything is recorded.
+    #[test]
+    fn in2_propose_fix_refuses_each_of_its_six_codes() {
+        let mut codes = Vec::new();
+
+        // 3 — `proposal_empty`: a branch with nothing applied.
+        let (service, _incidents, id) = in2_investigator_service();
+        codes.push(in2_refusal_code(&in2_propose(
+            &service,
+            &json!({"incident_id": id.0, "explanation": "nothing yet"}),
+        )));
+
+        // 1 — `incident_not_found`: an id no log holds.
+        codes.push(in2_refusal_code(&in2_propose(
+            &service,
+            &json!({"incident_id": u64::MAX, "explanation": "who?"}),
+        )));
+
+        // 4 — `proposal_too_large`: nine operations on the branch.
+        for at in 1..=(INVESTIGATOR_MAX_PROPOSAL_OPERATIONS + 1) {
+            let at = i64::try_from(at).unwrap();
+            in2_commit(
+                &service,
+                &json!([{
+                    "op": "add_marker",
+                    "marker": {"id": at, "position": at, "label": "x", "color_token": 0},
+                }]),
+            );
+        }
+        codes.push(in2_refusal_code(&in2_propose(
+            &service,
+            &json!({"incident_id": id.0, "explanation": "too much"}),
+        )));
+
+        // 6 — `proposal_already_recorded`: a live proposal is not replaced.
+        let (service, incidents, id) = in2_investigator_service();
+        in2_commit(
+            &service,
+            &json!([{"op": "split_clip", "clip": 1, "at": 20}]),
+        );
+        assert_eq!(
+            in2_propose(
+                &service,
+                &json!({"incident_id": id.0, "explanation": "the first proposal"}),
+            )
+            .is_error,
+            Some(false)
+        );
+        codes.push(in2_refusal_code(&in2_propose(
+            &service,
+            &json!({"incident_id": id.0, "explanation": "the second proposal"}),
+        )));
+
+        // 2 — `incident_not_investigating`: the person got there first.
+        incidents
+            .write()
+            .unwrap()
+            .resolve(id, IncidentOutcome::Rejected);
+        codes.push(in2_refusal_code(&in2_propose(
+            &service,
+            &json!({"incident_id": id.0, "explanation": "too late"}),
+        )));
+
+        // 5 — `proposal_destructive`: the second net behind the broker.
+        let (service, _incidents, id) = in2_investigator_service();
+        let (revision, _) = service.snapshot().unwrap();
+        assert!(matches!(
+            service
+                .core
+                .request(Command::DoBatchIfRevision {
+                    expected: revision,
+                    operations: vec![
+                        Operation::UpsertBin {
+                            bin: kinewright_core::MediaBin {
+                                id: kinewright_core::BinId(1),
+                                name: "dailies".to_owned(),
+                                parent: None,
+                                assets: Vec::new(),
+                            },
+                        },
+                        Operation::RemoveBin {
+                            bin: kinewright_core::BinId(1),
+                        },
+                    ],
+                })
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        codes.push(in2_refusal_code(&in2_propose(
+            &service,
+            &json!({"incident_id": id.0, "explanation": "remove the bin"}),
+        )));
+
+        codes.sort();
+        assert_eq!(
+            codes,
+            [
+                "incident_not_found",
+                "incident_not_investigating",
+                "proposal_already_recorded",
+                "proposal_destructive",
+                "proposal_empty",
+                "proposal_too_large",
+            ],
+            "the six refusal codes of IN2 §4.1 rule 6"
+        );
+    }
+
+    /// IN2 §9.1 item 26, §6 rule 3 and §9 clause 3: a destructive branch is
+    /// refused **before anything is recorded**.
+    ///
+    /// Script S7. The refusal names the offending variant by its capability
+    /// name, which is what the application puts on telemetry when it returns
+    /// the incident to `Open`.
+    ///
+    /// **The branch is built with a direct `Command::DoBatchIfRevision` on
+    /// purpose.** The ordinary `prepare_edit_plan`/`commit_edit_plan` path for
+    /// a `RemoveBin` reaches the broker, which is
+    /// `in2_a_remove_bin_plan_raises_exactly_one_stamped_request`'s business;
+    /// routing this test through it would buy nothing and cost a five-second
+    /// broker timeout. What this test is about is the **second net**: check
+    /// (ii) at `propose_fix`, over whatever the branch happens to hold.
+    #[test]
+    fn in2_a_destructive_branch_is_refused_before_anything_is_recorded() {
+        let (service, incidents, id) = in2_investigator_service();
+        let (revision, _) = service.snapshot().unwrap();
+        assert!(matches!(
+            service
+                .core
+                .request(Command::DoBatchIfRevision {
+                    expected: revision,
+                    operations: vec![
+                        Operation::UpsertBin {
+                            bin: kinewright_core::MediaBin {
+                                id: kinewright_core::BinId(1),
+                                name: "dailies".to_owned(),
+                                parent: None,
+                                assets: Vec::new(),
+                            },
+                        },
+                        Operation::RemoveBin {
+                            bin: kinewright_core::BinId(1),
+                        },
+                    ],
+                })
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let result = in2_propose(
+            &service,
+            &json!({"incident_id": id.0, "explanation": "remove the bin"}),
+        );
+        assert_eq!(in2_refusal_code(&result), "proposal_destructive");
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["observed"],
+            "remove_bin",
+            "the refusal names the offending variant"
+        );
+        let log = incidents.read().unwrap();
+        let incident = log.get(id).unwrap();
+        assert!(
+            incident.proposal.is_none(),
+            "nothing is recorded when check (ii) fires"
+        );
+        assert_eq!(incident.state, IncidentState::Investigating);
+        assert_eq!(incident.telemetry.tool_calls, 0);
+    }
+
+    /// IN2 §9.1 item 27, §6 rule 2 and §9 clause 10: the denylist refuses
+    /// **nine** capabilities through `invoke_capability`, and the same nine
+    /// succeed on a server with an empty denylist.
+    ///
+    /// The test runs in both directions: every denied name exists in
+    /// `INSPECTOR_TOOL_NAMES`, so a rename cannot silently empty the list, and
+    /// every capability the §6 rule 2 inventory marks **yes** is on the list,
+    /// so a capability added to the inventory cannot be forgotten.
+    #[test]
+    // Nine capabilities x two servers x two directions, plus the
+    // source read of the inventory: splitting it would put the nine
+    // refusals and the list they are taken from in different functions,
+    // which is the drift this test exists to catch.
+    #[allow(clippy::too_many_lines)]
+    fn in2_the_denylist_refuses_nine_capabilities_through_invoke_capability() {
+        let (denied_service, _incidents, _id) = in2_investigator_service();
+        let (core, playback, analysis) = fixture();
+        let open_service =
+            KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+
+        // One set of arguments per denied capability that the ordinary
+        // server's own decoder accepts, so the second direction really does
+        // reach the capability rather than stopping at its schema.
+        let arguments = |name: &str| match name {
+            "clear_media_cache" => json!({"family": "preview_memory"}),
+            "import_lut_asset" => {
+                json!({"expected_revision": 0, "path": "/nonexistent/look.cube"})
+            }
+            "convert_legacy_look" => {
+                json!({"expected_revision": 0, "clip_id": 1, "effect_id": 1})
+            }
+            "capture_room_tone" => json!({
+                "expected_revision": 0,
+                "asset_id": 1,
+                "source_start_frame": 0,
+                "source_end_frame": 1,
+            }),
+            "queue_export" => json!({
+                "expected_revision": 0,
+                "output_path": "/nonexistent/out.mp4",
+                "profile": "youtube1080p",
+            }),
+            "resolve_incident" => {
+                json!({"incident_id": 1, "expected_revision": 0, "outcome": "explained"})
+            }
+            "cancel_export" => json!({"job_id": 1}),
+            "cancel_analysis" => json!({"asset_id": 1, "kind": "transcript"}),
+            "request_analysis" => json!({"asset_id": 1, "kinds": ["transcript"]}),
+            other => panic!("{other} needs arguments the ordinary server accepts"),
+        };
+
+        let mut refused = 0_usize;
+        for name in INVESTIGATOR_CAPABILITY_DENYLIST {
+            assert!(
+                crate::schema::INSPECTOR_TOOL_NAMES.contains(&name),
+                "{name} must exist in the registry, or the denylist is silently empty"
+            );
+            assert!(
+                is_invocable_capability(name),
+                "{name} would be refused by the dispatcher anyway, and needs no denylist entry"
+            );
+            let invoke = |service: &KinewrightMcp| {
+                service
+                    .call_blocking(
+                        CallToolRequestParams::new("invoke_capability").with_arguments(
+                            json!({"name": name, "arguments": arguments(name)})
+                                .as_object()
+                                .unwrap()
+                                .clone(),
+                        ),
+                    )
+                    .unwrap()
+            };
+            let denied = invoke(&denied_service);
+            assert_eq!(denied.is_error, Some(true), "{name}: {denied:?}");
+            let text = denied.content[0].as_text().unwrap().text.clone();
+            assert!(
+                text.contains(name) && text.contains("investigator session"),
+                "{name}: {text}"
+            );
+            refused += 1;
+
+            // The same call on a server with an empty denylist reaches the
+            // capability: whatever it answers, it is not this refusal.
+            let open = invoke(&open_service);
+            let open_text = open
+                .content
+                .first()
+                .and_then(|content| content.as_text().map(|text| text.text.clone()))
+                .unwrap_or_default();
+            assert!(
+                !open_text.contains("investigator session"),
+                "{name} must not be denied on an ordinary server: {open_text}"
+            );
+        }
+        assert_eq!(refused, 9, "IN2 §6 rule 2's nine");
+
+        // **Erratum D-R65**: the denylist is checked at the chokepoint, before
+        // the capability's own `decode_args`. A denied name called with
+        // arguments its schema would reject must still answer the denylist
+        // refusal, never a decode error — otherwise the refusal would be a
+        // property of the arguments rather than of the session.
+        let invalid = denied_service
+            .call_blocking(
+                CallToolRequestParams::new("invoke_capability").with_arguments(
+                    json!({"name": "clear_media_cache", "arguments": {"not_a_field": true}})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .expect("the denylist answers before decode_args, so this is not an McpError");
+        assert_eq!(invalid.is_error, Some(true));
+        let invalid_text = invalid.content[0].as_text().unwrap().text.clone();
+        assert!(
+            invalid_text.contains("clear_media_cache")
+                && invalid_text.contains("investigator session"),
+            "refused before argument decoding: {invalid_text}"
+        );
+        assert!(
+            !invalid_text.contains("missing field"),
+            "a decode error would mean the denylist ran too late: {invalid_text}"
+        );
+        // The same arguments on an ordinary server **do** reach the decoder,
+        // which is what makes the assertion above discriminating.
+        assert!(
+            open_service
+                .call_blocking(
+                    CallToolRequestParams::new("invoke_capability").with_arguments(
+                        json!({"name": "clear_media_cache", "arguments": {"not_a_field": true}})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
+                )
+                .is_err(),
+            "an ordinary server reaches clear_media_cache's own schema"
+        );
+
+        // **The other direction, read out of the inventory rather than
+        // re-typed** (N2.5/B9, reviewers' S2). A hand-written copy of the const
+        // pins nothing: a capability added to the inventory table and forgotten
+        // in the list would change nothing a copy can see. This parses the
+        // `**yes**` rows out of the doc comment that sits immediately above
+        // `INVESTIGATOR_CAPABILITY_DENYLIST` in this very file, CRLF-normalised
+        // for the Windows lane.
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/server.rs"))
+            .expect("this crate's own source is readable")
+            .replace("\r\n", "\n");
+        let declaration = source
+            .find("pub const INVESTIGATOR_CAPABILITY_DENYLIST")
+            .expect("the const is declared in this file");
+        let doc_block = source[..declaration]
+            .lines()
+            .rev()
+            .take_while(|line| line.trim_start().starts_with("///"))
+            .collect::<Vec<_>>();
+        assert!(
+            doc_block.len() > 20,
+            "the inventory must be the const's own doc comment, not another item's: {} lines",
+            doc_block.len()
+        );
+        let mut inventory = doc_block
+            .iter()
+            .filter(|line| line.trim_start().starts_with("/// | ") && line.contains("**yes**"))
+            .map(|line| {
+                line.split('`')
+                    .nth(1)
+                    .unwrap_or_else(|| panic!("an inventory row names a capability: {line}"))
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        inventory.sort();
+        assert_eq!(
+            inventory.len(),
+            9,
+            "the inventory's **yes** rows, parsed from the doc comment: {inventory:?}"
+        );
+        let mut declared = INVESTIGATOR_CAPABILITY_DENYLIST
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        declared.sort();
+        assert_eq!(
+            inventory, declared,
+            "every capability the inventory marks yes is on the list, and nothing else is"
+        );
+    }
+
+    /// IN2 §9.1 item 28, §6 rule 5 and §9 clause 12: the broker gate covers
+    /// **all seven** destructive variants.
+    ///
+    /// Four of the seven passed ungated before this and destroyed a bin, a
+    /// string-out, a sync group or a bus with no confirmation at all. The four
+    /// new sentences are pinned verbatim; the three existing ones are
+    /// unchanged, including `RemoveTrack`'s empty-track `None`.
+    #[test]
+    fn in2_the_broker_gate_covers_all_seven_destructive_variants() {
+        let (core, _playback, _analysis) = fixture();
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("the fixture core answers a document query");
+        };
+        let describe =
+            |operation: &Operation| KinewrightMcp::confirmation_description(&document, operation);
+
+        assert_eq!(
+            describe(&Operation::DeleteClip { clip: ClipId(1) }).unwrap(),
+            "The agent wants to delete clip 1. This edit can be undone."
+        );
+        assert_eq!(
+            describe(&Operation::RippleDeleteClip { clip: ClipId(1) }).unwrap(),
+            "The agent wants to delete clip 1. This edit can be undone."
+        );
+        assert_eq!(
+            describe(&Operation::RemoveTrack { track: TrackId(1) }).unwrap(),
+            "The agent wants to remove track 1 and its 1 clip(s). This edit can be undone."
+        );
+        assert_eq!(
+            describe(&Operation::RemoveBin {
+                bin: kinewright_core::BinId(3)
+            })
+            .unwrap(),
+            "The agent wants to remove bin 3 and unfile its assets. This edit can be undone."
+        );
+        assert_eq!(
+            describe(&Operation::RemoveStringOut {
+                string_out: kinewright_core::StringOutId(4)
+            })
+            .unwrap(),
+            "The agent wants to remove string-out 4. This edit can be undone."
+        );
+        assert_eq!(
+            describe(&Operation::RemoveSyncGroup {
+                sync_group: SyncGroupId(5)
+            })
+            .unwrap(),
+            "The agent wants to remove sync group 5. This edit can be undone."
+        );
+        assert_eq!(
+            describe(&Operation::RemoveAudioBus { bus: AudioBusId(6) }).unwrap(),
+            "The agent wants to remove audio bus 6 and its routing. This edit can be undone."
+        );
+
+        // An empty track still returns `None`, and is still not one of the five
+        // decided sites: the gate asks about destruction, not about the
+        // variant's name.
+        let mut empty = (*document).clone();
+        empty.tracks[0].clips.clear();
+        assert_eq!(
+            KinewrightMcp::confirmation_description(
+                &empty,
+                &Operation::RemoveTrack { track: TrackId(1) }
+            ),
+            None
+        );
+
+        // At least three non-destructive variants stay ungated.
+        for operation in [
+            Operation::SplitClip {
+                clip: ClipId(1),
+                at: TimeCode(10),
+            },
+            Operation::SetClipAudio {
+                clip: ClipId(1),
+                gain_tenth_db: 0,
+                fade_in_frames: TimeCode::ZERO,
+                fade_out_frames: TimeCode::ZERO,
+            },
+            Operation::AddMarker {
+                marker: Marker {
+                    id: MarkerId(1),
+                    position: TimeCode(1),
+                    label: "x".to_owned(),
+                    color_token: 0,
+                },
+            },
+        ] {
+            assert_eq!(describe(&operation), None, "{operation:?}");
+            assert!(!crate::runtime::is_destructive_operation(&operation));
+        }
+
+        // The predicate and the gate read one list.
+        for operation in [
+            Operation::DeleteClip { clip: ClipId(1) },
+            Operation::RippleDeleteClip { clip: ClipId(1) },
+            Operation::RemoveTrack { track: TrackId(1) },
+            Operation::RemoveBin {
+                bin: kinewright_core::BinId(3),
+            },
+            Operation::RemoveStringOut {
+                string_out: kinewright_core::StringOutId(4),
+            },
+            Operation::RemoveSyncGroup {
+                sync_group: SyncGroupId(5),
+            },
+            Operation::RemoveAudioBus { bus: AudioBusId(6) },
+        ] {
+            assert!(crate::runtime::is_destructive_operation(&operation));
+        }
+    }
+
+    /// IN2 §9.1 item 29 and §6 rule 6: the pinned plan sentence is unchanged
+    /// and the bin-only sentence is pinned **as written**.
+    ///
+    /// The clip-and-track clause is always emitted, so a plan that removes only
+    /// a bin reads slightly woodenly and always reads the same way. A second
+    /// sentence shape would make the pinned sentence one of two branches.
+    #[test]
+    fn in2_the_plan_confirmation_sentence_is_unchanged_and_the_bin_only_sentence_is_pinned() {
+        let (core, _playback, _analysis) = fixture();
+        let Event::QueryResult(QueryResult::Document(document)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("the fixture core answers a document query");
+        };
+
+        // The one pinned description string in `crates/`, unmoved.
+        assert_eq!(
+            plan_confirmation_description(
+                &document,
+                &[Operation::RemoveTrack { track: TrackId(1) }]
+            )
+            .unwrap(),
+            "Plan removes 1 clip and 1 track - approve?"
+        );
+
+        let mut with_bin = (*document).clone();
+        with_bin.catalog.bins.push(kinewright_core::MediaBin {
+            id: kinewright_core::BinId(1),
+            name: "dailies".to_owned(),
+            parent: None,
+            assets: Vec::new(),
+        });
+        assert_eq!(
+            plan_confirmation_description(
+                &with_bin,
+                &[Operation::RemoveBin {
+                    bin: kinewright_core::BinId(1)
+                }]
+            )
+            .unwrap(),
+            "Plan removes 0 clips and 0 tracks, and 1 bin - approve?"
+        );
+
+        // A plan that destroys nothing still raises nothing.
+        assert_eq!(
+            plan_confirmation_description(
+                &document,
+                &[Operation::SplitClip {
+                    clip: ClipId(1),
+                    at: TimeCode(10)
+                }]
+            ),
+            None
+        );
+    }
+
+    /// IN2 §9.1 item 30, §6 rule 5 and critic S6: every one of the seven
+    /// destructive variants' tools advertises `destructiveHint: true`, and the
+    /// registry's count of them is **15**.
+    ///
+    /// Widening the gate without the annotation would create a fourth
+    /// disagreeing population: a tool that raises a confirmation while
+    /// advertising `destructiveHint: false`.
+    #[test]
+    fn in2_the_seven_destructive_variants_all_advertise_the_hint() {
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        for operation in [
+            Operation::DeleteClip { clip: ClipId(1) },
+            Operation::RippleDeleteClip { clip: ClipId(1) },
+            Operation::RemoveTrack { track: TrackId(1) },
+            Operation::RemoveBin {
+                bin: kinewright_core::BinId(1),
+            },
+            Operation::RemoveStringOut {
+                string_out: kinewright_core::StringOutId(1),
+            },
+            Operation::RemoveSyncGroup {
+                sync_group: SyncGroupId(1),
+            },
+            Operation::RemoveAudioBus { bus: AudioBusId(1) },
+        ] {
+            let name = operation_tool_name(&operation);
+            let tool = registry
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered"));
+            assert_eq!(
+                tool.annotations.as_ref().unwrap().destructive_hint,
+                Some(true),
+                "{name} raises a confirmation and must advertise the hint"
+            );
+        }
+        assert_eq!(
+            registry
+                .iter()
+                .filter(|tool| tool
+                    .annotations
+                    .as_ref()
+                    .is_some_and(|annotations| annotations.destructive_hint == Some(true)))
+                .count(),
+            15,
+            "destructiveHint goes 12 -> 15 with the three generated tools of IN2 §6 rule 5"
+        );
+    }
+
+    /// IN2 §9.1 item 31, §4.6 rule 25 and §9 clause 14: a request from an
+    /// investigator broker carries its incident, and a chat-panel one carries
+    /// `None`.
+    ///
+    /// The broker stamps it, so none of the six `confirm(` sites changes and
+    /// none of the 97 test constructions of `ConfirmationBroker` moves.
+    #[test]
+    fn in2_a_request_from_an_investigator_broker_carries_its_incident() {
+        let incident = IncidentId(12);
+        for (broker, expected) in [
+            (
+                ConfirmationBroker::for_incident(INVESTIGATOR_BROKER_TIMEOUT, incident),
+                Some(incident),
+            ),
+            (
+                ConfirmationBroker::with_timeout(Duration::from_millis(200)),
+                None,
+            ),
+        ] {
+            assert_eq!(broker.incident(), expected);
+            let raising = broker.clone();
+            let raised = std::thread::spawn(move || {
+                raising.confirm("apply_edit_plan", "remove a bin?".to_owned())
+            });
+            let mut requests = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while requests.is_empty() && Instant::now() < deadline {
+                requests = broker.pending_requests();
+            }
+            assert_eq!(requests.len(), 1, "{expected:?}");
+            assert_eq!(requests[0].incident, expected);
+            assert_eq!(requests[0].tool_name, "apply_edit_plan");
+            broker.reject(requests[0].id, "no");
+            assert_eq!(raised.join().unwrap(), Err("no".to_owned()));
+        }
+    }
+
+    /// IN2 §9.1 item 34, §6.4 rule 11 and §9 clause 19: the registry grows by
+    /// exactly one capability, and `propose_fix` is registered directly after
+    /// `resolve_incident`.
+    ///
+    /// The three **counts** are pinned hard. The three **byte** figures are
+    /// pinned in
+    /// `served_surface_is_small_and_keeps_the_internal_registry_discoverable`
+    /// with their decomposition, because they are a function of description
+    /// text this contract deliberately does not fix.
+    #[test]
+    fn in2_the_registry_grows_by_one_capability() {
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 141);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
+        assert_eq!(operation_tools().unwrap().len(), 54);
+
+        let names = crate::schema::INSPECTOR_TOOL_NAMES;
+        let resolve = names
+            .iter()
+            .position(|name| *name == "resolve_incident")
+            .unwrap();
+        assert_eq!(names.get(resolve + 1), Some(&"propose_fix"));
+
+        // Registry-only: invocable through the dispatcher, never served.
+        assert!(is_invocable_capability("propose_fix"));
+        assert!(!crate::runtime::COMPACT_TOOL_NAMES.contains(&"propose_fix"));
+        let tool = registry
+            .iter()
+            .find(|tool| tool.name == "propose_fix")
+            .expect("propose_fix must be registered");
+        let annotations = tool.annotations.as_ref().unwrap();
+        assert_eq!(annotations.read_only_hint, Some(false));
+        assert_eq!(annotations.destructive_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(false));
+        assert_eq!(annotations.open_world_hint, Some(false));
+        assert_eq!(
+            capabilities(&registry)
+                .iter()
+                .find(|capability| capability.name == "propose_fix")
+                .unwrap()
+                .kind,
+            CapabilityKind::Action,
+            "no CAPABILITY_KIND_OVERRIDES entry is needed"
+        );
+
+        // A direct call is refused: the capability is reached only through
+        // `invoke_capability`.
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let direct = service
+            .call_exposed_blocking(
+                CallToolRequestParams::new("propose_fix").with_arguments(
+                    json!({"incident_id": 1, "explanation": "x"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(direct.is_error, Some(true));
+        assert!(
+            direct.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("internal capability")
+        );
+    }
+
+    /// IN2 §3.3 rule 19 and §6 rule 1: `INVESTIGATOR_TOOL_NAMES` is a strict
+    /// six-name subset of the served surface, and it drops `discard_edit_plan`.
+    #[test]
+    fn in2_the_investigator_tool_allowlist_is_a_strict_subset_of_the_served_surface() {
+        assert_eq!(crate::runtime::INVESTIGATOR_TOOL_NAMES.len(), 6);
+        for name in crate::runtime::INVESTIGATOR_TOOL_NAMES {
+            assert!(
+                crate::runtime::COMPACT_TOOL_NAMES.contains(&name),
+                "{name} must be served at all"
+            );
+        }
+        assert!(
+            !crate::runtime::INVESTIGATOR_TOOL_NAMES.contains(&"discard_edit_plan"),
+            "nothing in a session's path needs it, and a smaller surface is a smaller surface"
+        );
+        // The two carriers stay: without them a session cannot dispatch a
+        // capability or commit a branch plan, and so cannot build a proposal.
+        for carrier in ["invoke_capability", "commit_edit_plan"] {
+            assert!(crate::runtime::INVESTIGATOR_TOOL_NAMES.contains(&carrier));
+        }
+    }
+
+    /// An `Export` double for the one constructor that requires one.
+    ///
+    /// `queue_export` is on the denylist, so an investigator session can never
+    /// reach it; the exporter exists only because
+    /// [`McpServer::start_investigator_session`] takes the project's own, and
+    /// a test that passed a different one would not be testing the wiring.
+    struct NoopExporter;
+
+    impl kinewright_core::Export for NoopExporter {
+        fn export(
+            &self,
+            _out: &Path,
+            _settings: kinewright_core::ExportSettings,
+            _progress: kinewright_core::ProgressSink,
+        ) -> Result<(), MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+    }
+
+    /// One branch core seeded at [`IN2_BASE_REVISION`], one shared log holding
+    /// one `Investigating` incident, and the context that names both.
+    fn in2_investigator_parts() -> (
+        Core,
+        Arc<dyn Playback>,
+        Arc<dyn Analysis>,
+        IncidentLogHandle,
+        IncidentId,
+    ) {
+        let (live, playback, analysis) = fixture();
+        let Event::QueryResult(QueryResult::Document(document)) =
+            live.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("the fixture core answers a document query");
+        };
+        let branch = Core::spawn_at((*document).clone(), IN2_BASE_REVISION).unwrap();
+        let incidents: IncidentLogHandle =
+            Arc::new(RwLock::new(IncidentLog::with_start(Instant::now())));
+        let id = {
+            let mut log = incidents.write().unwrap();
+            let Observed::Opened(id) = log.observe(in1b_worst_observation(
+                kinewright_core::INVESTIGATOR_ALLOWLIST[0],
+                IncidentSubject::Project,
+                &in1b_worst_probe(),
+            )) else {
+                panic!("a fresh log must open the first allowlisted code");
+            };
+            assert!(log.begin_investigation(id));
+            id
+        };
+        (branch, playback, analysis, incidents, id)
+    }
+
+    /// IN2 §9.1 items 24–27 and §3.3 rule 13, through the **real** eighth
+    /// constructor (reviewers' S4).
+    ///
+    /// Every other investigator test builds the handler in process with
+    /// `KinewrightMcp::configured(…).with_capability_denylist(…)
+    /// .with_investigator_context(…)`, which re-implements by hand exactly the
+    /// wiring `start_investigator_session` is responsible for: if the
+    /// constructor dropped the denylist, or built a `ConfirmationBroker::default()`
+    /// instead of `for_incident`, or passed `None` for the worker count, the
+    /// whole suite would still pass. This test drives the constructor's own
+    /// server over loopback with a `ScriptedDriver` session and the pump, and
+    /// asserts the four things the constructor is for: the endpoint serves,
+    /// the denylist refuses, the broker is stamped, and `propose_fix` records
+    /// against the shared log at the seeded `base_revision`.
+    ///
+    /// **What it does not assert, and why.** The runtime really is built with
+    /// [`INVESTIGATOR_WORKER_THREADS`], but a worker count is a thread-count
+    /// measurement (§10 figure 5) and not a `cargo test` assertion — the
+    /// process runs many servers in parallel. What a bounded runtime risks is
+    /// **liveness**, and that is what four real round trips through it prove.
+    #[test]
+    // One end-to-end session: build the branch, start the real server,
+    // drive four round trips through the pump and read the shared log.
+    // Every step is a precondition of the next, so there is nothing to
+    // split out that would still be a test of the constructor.
+    #[allow(clippy::too_many_lines)]
+    fn in2_a_session_proposes_a_fix_through_the_real_constructor() {
+        use std::sync::atomic::AtomicBool;
+
+        use kinewright_core::{AgentDriver, SessionConfig};
+
+        use kinewright_core::AgentEvent;
+
+        use crate::{
+            ConfirmationPolicy, ScriptedCall, ScriptedDriver, ScriptedTurn, SessionCounters,
+            SessionFlow, SessionLimits, SessionObserver, SessionStop, SharedCounters, pump_session,
+        };
+
+        /// Keeps every tool result, so the assertions below read what the
+        /// **server** answered rather than what the script asked for.
+        #[derive(Default)]
+        struct Results(Vec<(String, String)>);
+
+        impl SessionObserver for Results {
+            fn on_event(&mut self, event: &AgentEvent) -> SessionFlow {
+                if let AgentEvent::ToolResult { name, result } = event {
+                    self.0.push((name.clone(), result.clone()));
+                }
+                SessionFlow::Continue
+            }
+
+            fn on_tick(&mut self, _counters: &SessionCounters) -> SessionFlow {
+                SessionFlow::Continue
+            }
+        }
+
+        let (branch, playback, analysis, incidents, id) = in2_investigator_parts();
+        // One edit on the branch, so `propose_fix` has a proposal to record.
+        // The ordinary path for this is `prepare_edit_plan` + `commit_edit_plan`,
+        // which a static script cannot drive because the plan id is only known
+        // after the first call; the proposal's content is item 24's business
+        // and what this test is about is the constructor's wiring.
+        let (revision, _) = {
+            let Event::QueryResult(QueryResult::Snapshot { revision, document }) =
+                branch.request(Command::Query(Query::Snapshot)).unwrap()
+            else {
+                panic!("the branch answers a snapshot query");
+            };
+            (revision, document)
+        };
+        assert_eq!(revision, IN2_BASE_REVISION);
+        assert!(matches!(
+            branch
+                .request(Command::DoBatchIfRevision {
+                    expected: revision,
+                    operations: vec![Operation::SplitClip {
+                        clip: ClipId(1),
+                        at: TimeCode(20),
+                    }],
+                })
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+
+        let server = McpServer::start_investigator_session(
+            branch,
+            playback,
+            analysis,
+            Arc::new(NoopExporter),
+            Arc::new(RwLock::new(None)),
+            Arc::clone(&incidents),
+            &INVESTIGATOR_CAPABILITY_DENYLIST,
+            INVESTIGATOR_WORKER_THREADS,
+            InvestigatorSessionContext {
+                incident: id,
+                base_revision: IN2_BASE_REVISION,
+            },
+        )
+        .expect("the investigator server starts");
+
+        // The broker the constructor built is stamped and is the short one.
+        assert_eq!(server.confirmations().incident(), Some(id));
+        assert_eq!(INVESTIGATOR_BROKER_TIMEOUT, Duration::from_secs(5));
+
+        let call = |tool: &str, arguments: serde_json::Value| ScriptedCall {
+            tool: tool.to_owned(),
+            arguments,
+        };
+        let driver = ScriptedDriver::new(vec![ScriptedTurn::new(
+            vec![
+                call("get_timeline_state", json!({})),
+                call(
+                    "invoke_capability",
+                    json!({"name": "get_incidents", "arguments": {}}),
+                ),
+                // Denied, over the wire, on the constructor's own server.
+                call(
+                    "invoke_capability",
+                    json!({"name": "cancel_export", "arguments": {"job_id": 1}}),
+                ),
+                call(
+                    "invoke_capability",
+                    json!({
+                        "name": "propose_fix",
+                        "arguments": {
+                            "incident_id": id.0,
+                            "explanation": "split the clip where the take changes",
+                        },
+                    }),
+                ),
+            ],
+            "proposed",
+        )]);
+        let mut session = driver
+            .start_session(SessionConfig {
+                mcp_url: Some(server.endpoint().to_owned()),
+                tool_names: Some(
+                    crate::runtime::INVESTIGATOR_TOOL_NAMES
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect(),
+                ),
+                ..SessionConfig::default()
+            })
+            .expect("the scripted session starts");
+        let events = session.events();
+        let mut prompts = std::iter::once("investigate".to_owned());
+        let shared = Arc::new(SharedCounters::default());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut observer = Results::default();
+        let (stop, spent) = pump_session(
+            session.as_mut(),
+            &events,
+            &mut prompts,
+            Some(&server.confirmations()),
+            ConfirmationPolicy::RejectAndStop,
+            &SessionLimits {
+                max_turns: 4,
+                max_wall_time: Duration::from_secs(30),
+                max_tokens: None,
+            },
+            &shared,
+            &cancel,
+            &mut observer,
+        );
+        drop(session);
+
+        assert_eq!(stop, SessionStop::Completed, "{spent:?}");
+        assert_eq!(spent.tool_calls, 4, "four real round trips: {spent:?}");
+
+        // Every assertion below reads the **server's** answer. Four results,
+        // all through `invoke_capability` except the first.
+        let results = observer.0;
+        assert_eq!(results.len(), 4, "{results:?}");
+        let bodies = results
+            .iter()
+            .map(|(_, result)| result.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            bodies[0].contains("timeline_revision="),
+            "the real dispatcher answered get_timeline_state: {}",
+            bodies[0]
+        );
+        assert!(
+            bodies[1].contains("incident"),
+            "get_incidents reached the shared log: {}",
+            bodies[1]
+        );
+        // **The denylist, over the wire, on the constructor's own server.**
+        // This is what fails if `start_investigator_session` ever stops
+        // passing `capability_denylist` through (reviewers' S4).
+        assert!(
+            bodies[2].contains("cancel_export") && bodies[2].contains("investigator session"),
+            "cancel_export must be denied by the constructor's own denylist: {}",
+            bodies[2]
+        );
+        assert!(
+            !bodies[3].contains("rejected"),
+            "propose_fix succeeded: {}",
+            bodies[3]
+        );
+
+        // The proposal reached the project's own log, at the seeded revision.
+        {
+            let log = incidents.read().unwrap();
+            let incident = log.get(id).unwrap();
+            let proposal = incident
+                .proposal
+                .as_ref()
+                .expect("propose_fix recorded through the real endpoint");
+            assert_eq!(proposal.operation_count, 1);
+            assert_eq!(proposal.base_revision, IN2_BASE_REVISION);
+            assert!(!proposal.stale);
+            assert_eq!(
+                incident.state,
+                IncidentState::Investigating,
+                "the handler does not resolve the incident"
+            );
+        }
+        // Nothing the session did raised a confirmation (IN2 §9 clause 3's
+        // measured zero, on the population that can be non-zero).
+        assert!(server.confirmations().pending_requests().is_empty());
+        server.shutdown();
+    }
+
+    /// IN2 §4.6 rule 27's **premise**, asserted rather than assumed
+    /// (reviewers' S8).
+    ///
+    /// Rule 27 says the session's only brokered path is `commit_edit_plan` →
+    /// `apply_edit_plan`, and that it fires only for an operation the
+    /// proposal's destructive check already refuses. Both pump-side broker
+    /// tests raise the request by hand, which proves what the pump does with
+    /// one and not that anything reachable can produce one. This drives the
+    /// real path: a `RemoveBin` plan committed on the investigator service
+    /// raises **exactly one** request, carrying the incident, and the commit
+    /// is refused so the branch keeps its bin.
+    #[test]
+    fn in2_a_remove_bin_plan_raises_exactly_one_stamped_request() {
+        let (service, incidents, id) = in2_investigator_service();
+        let broker = service.confirmations.clone();
+        assert_eq!(broker.incident(), Some(id));
+
+        // A bin to remove, applied directly so the plan path is exercised only
+        // by the destructive half.
+        let (revision, _) = service.snapshot().unwrap();
+        assert!(matches!(
+            service
+                .core
+                .request(Command::DoBatchIfRevision {
+                    expected: revision,
+                    operations: vec![Operation::UpsertBin {
+                        bin: kinewright_core::MediaBin {
+                            id: kinewright_core::BinId(1),
+                            name: "dailies".to_owned(),
+                            parent: None,
+                            assets: Vec::new(),
+                        },
+                    }],
+                })
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+
+        let (revision, _) = service.snapshot().unwrap();
+        let prepared = service
+            .call_blocking(
+                CallToolRequestParams::new("prepare_edit_plan").with_arguments(
+                    json!({
+                        "expected_revision": revision,
+                        "operations": [{"op": "remove_bin", "bin": 1}],
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(prepared.is_error, Some(false), "{prepared:?}");
+        let plan_id = prepared.structured_content.unwrap()["plan_id"]
+            .as_u64()
+            .expect("a prepared plan id");
+
+        // `commit_edit_plan` blocks on the broker, so it runs on its own
+        // thread while this one plays the pump's part.
+        let committing = {
+            let service = service.clone();
+            std::thread::spawn(move || {
+                service
+                    .call_blocking(
+                        CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                            json!({"plan_id": plan_id, "expected_revision": revision})
+                                .as_object()
+                                .unwrap()
+                                .clone(),
+                        ),
+                    )
+                    .unwrap()
+            })
+        };
+
+        let mut requests = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while requests.is_empty() && Instant::now() < deadline {
+            requests = broker.pending_requests();
+        }
+        assert_eq!(
+            requests.len(),
+            1,
+            "commit_edit_plan -> apply_edit_plan raises exactly one request"
+        );
+        assert_eq!(requests[0].tool_name, "apply_edit_plan");
+        assert_eq!(
+            requests[0].incident,
+            Some(id),
+            "IN2 §4.6 rule 25: the broker stamps every request it raises"
+        );
+        assert!(
+            requests[0].description.contains("1 bin"),
+            "the widened plan sentence: {}",
+            requests[0].description
+        );
+        assert!(broker.reject(requests[0].id, crate::INVESTIGATOR_CONFIRMATION_REFUSAL));
+
+        let committed = committing.join().unwrap();
+        assert_eq!(committed.is_error, Some(true), "{committed:?}");
+        let (_, document) = service.snapshot().unwrap();
+        assert_eq!(
+            document.catalog.bins.len(),
+            1,
+            "a refused confirmation leaves the branch untouched"
+        );
+        assert!(
+            incidents
+                .read()
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .proposal
+                .is_none()
+        );
+    }
+
+    /// IN2 §4.1 rule 5 and §9.1 item 10's agent half: **both** proposal strings
+    /// are capped on their serialised length, and nothing else in this crate
+    /// pins them (reviewers' S3).
+    ///
+    /// Both caps are mutation-killing: dropping either
+    /// `truncate_to_serialized_bytes` call in `propose_fix` fails this test
+    /// and nothing else. JSON escaping is not length-preserving, so the raw
+    /// input here is deliberately control characters and multi-byte text —
+    /// capping the raw length would be a bet on which 240 bytes arrive.
+    #[test]
+    fn in2_both_proposal_strings_are_capped_on_their_serialised_length() {
+        let (service, incidents, id) = in2_investigator_service();
+        // Eight operations whose rendered lines comfortably exceed the cap.
+        // Applied straight on the branch core: the proposal is the branch's
+        // applied list however the edits got there, and the plan path is
+        // item 24's business.
+        for step in 1..=INVESTIGATOR_MAX_PROPOSAL_OPERATIONS {
+            let (revision, _) = service.snapshot().unwrap();
+            // CC1: an explicit override must declare itself a user override.
+            let color_description = kinewright_core::ColorDescription {
+                confidence_basis_points: u16::try_from(step).unwrap(),
+                provenance: ColorProvenance::UserOverride,
+                ..kinewright_core::ColorDescription::default()
+            };
+            let landed = service
+                .core
+                .request(Command::DoBatchIfRevision {
+                    expected: revision,
+                    operations: vec![Operation::SetAssetColorDescription {
+                        asset: AssetId(1),
+                        color_description,
+                    }],
+                })
+                .unwrap();
+            assert!(
+                matches!(landed, Event::DocumentChanged { .. }),
+                "branch edit {step} must land: {landed:?}"
+            );
+        }
+        let raw_summary = proposal_summary(&service.applied_branch_operations().unwrap());
+        assert!(
+            kinewright_core::json_escaped_len(&raw_summary)
+                > INVESTIGATOR_EXPLANATION_CEILING_BYTES,
+            "the population must exceed the cap, or this test proves nothing: {} B",
+            kinewright_core::json_escaped_len(&raw_summary)
+        );
+
+        // Control characters escape to six bytes each, and emoji to four.
+        let explanation = format!(
+            "{}{}{}",
+            "\u{1}\n\"\\".repeat(200),
+            "日本語のテイク".repeat(200),
+            "🎬".repeat(200)
+        );
+        assert!(explanation.chars().count() > 2_000);
+        let result = in2_propose(
+            &service,
+            &json!({"incident_id": id.0, "explanation": explanation}),
+        );
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+
+        let log = incidents.read().unwrap();
+        let proposal = log.get(id).unwrap().proposal.as_ref().unwrap();
+        for (field, text) in [
+            ("explanation", &proposal.explanation),
+            ("summary", &proposal.summary),
+        ] {
+            let serialised = serde_json::to_string(text).unwrap().len() - 2;
+            assert!(
+                serialised <= INVESTIGATOR_EXPLANATION_CEILING_BYTES,
+                "{field} serialises to {serialised} B, over the 240 B cap"
+            );
+            assert_eq!(
+                serialised,
+                kinewright_core::json_escaped_len(text),
+                "{field}: core's escaped-length accounting is what the cap uses"
+            );
+            // Truncation lands on a `char` boundary: the string is valid UTF-8
+            // by construction, and re-serialising it is idempotent.
+            assert_eq!(serde_json::to_string(text).unwrap().len() - 2, serialised);
+        }
+        assert!(
+            proposal.summary.len() < raw_summary.len(),
+            "the summary really was truncated"
+        );
+        assert_eq!(
+            proposal.operation_count,
+            INVESTIGATOR_MAX_PROPOSAL_OPERATIONS
+        );
+    }
+
+    /// IN2 erratum D-R62 and the reviewers' N1/N2: the seventh refusal carries
+    /// a code, in the same shape as the six.
+    ///
+    /// It is unreachable from an investigator server by construction — the
+    /// context is what the constructor supplies — and fail-closed on every
+    /// other one, which is what this asserts.
+    #[test]
+    fn in2_propose_fix_on_an_ordinary_server_refuses_with_a_code() {
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let result = in2_propose(
+            &service,
+            &json!({"incident_id": 1, "explanation": "not an investigator"}),
+        );
+        assert_eq!(in2_refusal_code(&result), "investigator_context_missing");
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["field"],
+            "incident_id"
+        );
+        assert!(
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .starts_with("propose_fix rejected:"),
+            "{result:?}"
+        );
     }
 }

@@ -24,6 +24,25 @@ pub const COMPACT_TOOL_NAMES: [&str; 7] = [
     "discard_edit_plan",
 ];
 
+/// The six served tools an investigator session is given, a strict subset of
+/// [`COMPACT_TOOL_NAMES`] (IN2 §3.3 rule 19, §6 rule 1).
+///
+/// `discard_edit_plan` is dropped because nothing in a session's path needs it
+/// and a smaller surface is a smaller surface. The two `destructiveHint`
+/// **carriers** stay — `invoke_capability`, because `get_incidents` and
+/// `propose_fix` are reachable only through it, and `commit_edit_plan`,
+/// because the branch **is** the proposal and this is how a session writes one.
+/// Every non-carrier `destructiveHint` tool is unreachable by construction:
+/// none of them is served at all.
+pub const INVESTIGATOR_TOOL_NAMES: [&str; 6] = [
+    "get_timeline_state",
+    "search_capabilities",
+    "get_capability",
+    "invoke_capability",
+    "prepare_edit_plan",
+    "commit_edit_plan",
+];
+
 const META_CAPABILITY_NAMES: [&str; 7] = [
     "apply_edit_plan",
     "search_capabilities",
@@ -190,6 +209,30 @@ pub(crate) fn first_sentence(description: &str) -> String {
     description[..end].to_owned()
 }
 
+/// The **seven** destructive `Operation` variants, in one place.
+///
+/// Three readers, one list (IN2 §6 rule 3): [`EditPlanPreview`]'s reporting
+/// filter, `propose_fix`'s check (ii) over a branch's applied operations, and
+/// the confirmation broker's gate in both description functions. Before IN2
+/// the broker matched three of the seven inline and `EditPlanPreview` matched
+/// all seven separately, so `RemoveBin`, `RemoveStringOut`, `RemoveSyncGroup`
+/// and `RemoveAudioBus` destroyed a bin, a string-out, a sync group or a bus
+/// with no confirmation at all. A named predicate is what stops the two lists
+/// drifting apart again.
+#[must_use]
+pub fn is_destructive_operation(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::DeleteClip { .. }
+            | Operation::RippleDeleteClip { .. }
+            | Operation::RemoveTrack { .. }
+            | Operation::RemoveBin { .. }
+            | Operation::RemoveStringOut { .. }
+            | Operation::RemoveSyncGroup { .. }
+            | Operation::RemoveAudioBus { .. }
+    )
+}
+
 #[must_use]
 pub fn is_invocable_capability(name: &str) -> bool {
     INSPECTOR_TOOL_NAMES.contains(&name)
@@ -348,18 +391,8 @@ fn plan_preview(
         after_duration_frames: after.duration.0,
         destructive_operations: operations
             .iter()
-            .filter_map(|operation| match operation {
-                Operation::DeleteClip { .. }
-                | Operation::RippleDeleteClip { .. }
-                | Operation::RemoveTrack { .. }
-                | Operation::RemoveBin { .. }
-                | Operation::RemoveStringOut { .. }
-                | Operation::RemoveSyncGroup { .. }
-                | Operation::RemoveAudioBus { .. } => {
-                    Some(crate::schema::operation_tool_name(operation).to_owned())
-                }
-                _ => None,
-            })
+            .filter(|operation| is_destructive_operation(operation))
+            .map(|operation| crate::schema::operation_tool_name(operation).to_owned())
             .collect(),
     }
 }

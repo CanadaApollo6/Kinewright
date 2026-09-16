@@ -24,10 +24,17 @@ mod protocol;
 mod render;
 mod runtime;
 mod schema;
+/// The production scripted driver (IN2 §8). Not feature-gated: the
+/// application's own tests reach it under `default-features = false`.
+mod scripted;
 mod server;
+/// The session pump (IN2 §3.5). Not feature-gated, for the same reason.
+mod session;
 mod silence;
 
-pub use branch::{BranchApplyOutcome, BranchComparison, BranchError, TimelineBranch};
+pub use branch::{
+    BranchApplyOutcome, BranchComparison, BranchError, TimelineBranch, apply_to_live,
+};
 pub use cursor::{CURSOR_SANDBOX_NOTICE, CursorAcpDriver, cursor_models};
 pub use drivers::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
 pub use models::{
@@ -38,14 +45,24 @@ pub use render::{
     render_asset_transcript, render_clip_info, render_timeline_state, render_timeline_transcript,
 };
 pub use runtime::{
-    CapabilityDescriptor, CapabilityKind, EditPlanPreview, PreparedPlanId, ToolSurfaceMetrics,
-    compact_tool_names,
+    CapabilityDescriptor, CapabilityKind, EditPlanPreview, INVESTIGATOR_TOOL_NAMES, PreparedPlanId,
+    ToolSurfaceMetrics, compact_tool_names, is_destructive_operation,
 };
 pub use schema::{capability_tool_names, operation_tools};
+pub use scripted::{
+    SCRIPTED_HARNESS_ID, ScriptedCall, ScriptedCost, ScriptedDriver, ScriptedSession, ScriptedTurn,
+};
 pub use server::{
     ConfirmationBroker, ConfirmationRequest, IN1_INCIDENT_SERIALIZED_BYTES,
-    IN1_INCIDENT_SERIALIZED_CEILING_BYTES, IncidentLogHandle, MIX_MEASUREMENT_SAMPLE_RATE,
-    McpServer, McpServerError, mirror_agent_cost,
+    IN1_INCIDENT_SERIALIZED_CEILING_BYTES, INVESTIGATOR_BROKER_TIMEOUT,
+    INVESTIGATOR_CAPABILITY_DENYLIST, INVESTIGATOR_WORKER_THREADS, IncidentLogHandle,
+    InvestigatorSessionContext, MIX_MEASUREMENT_SAMPLE_RATE, McpServer, McpServerError,
+    mirror_agent_cost,
+};
+pub use session::{
+    BudgetKind, CANCELLED_BY_OWNER, ConfirmationPolicy, INVESTIGATOR_CONFIRMATION_REFUSAL,
+    QuietObserver, SessionCost, SessionCounters, SessionFlow, SessionLimits, SessionObserver,
+    SessionStop, SharedCounters, StopReason, pump_session,
 };
 pub use silence::{
     shrink_silence_span_for_cutting, shrink_silence_span_for_cutting_with_transcript,

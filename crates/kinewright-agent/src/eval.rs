@@ -5,7 +5,7 @@ use std::{
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -31,8 +31,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ConfirmationBroker, McpServer, compact_tool_names,
+    BudgetKind, ConfirmationBroker, ConfirmationPolicy, McpServer, SessionCounters, SessionFlow,
+    SessionLimits, SessionObserver, SessionStop, SharedCounters, StopReason, compact_tool_names,
     pacing::dialogue_pacing_gaps,
+    pump_session,
     render::cuttable_timeline_silences,
     server::{ReframeSubjectProvenance, TrackedSubjectBounds, decode_reframe_subject_provenance},
     shrink_silence_span_for_cutting_with_transcript,
@@ -3834,178 +3836,257 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     )
 }
 
+/// The eval harness's half of the session loop: the four budgets
+/// [`pump_session`] deliberately does not own (IN2 §3.5 rule 30).
+///
+/// `max_turns` and `max_wall_time` are the pump's; `max_operations`,
+/// `max_tool_calls`, `max_cost_usd` and the auto-approval bookkeeping are the
+/// harness's and live here. `max_tokens` and `max_undos` are still scored after
+/// the fact, exactly as they were, so `EvalBudgets`' seven fields keep their
+/// meanings across the rewrite (IN2 §3.5 rule 31).
+struct EvalSessionObserver<'a, F> {
+    metrics: SessionMetrics,
+    budgets: &'a EvalBudgets,
+    operation_count: F,
+    /// The one error `SessionFlow::Stop(String)` cannot carry, stashed here and
+    /// re-raised by [`collect_session`] (IN2 §3.5 rule 29).
+    operation_error: Option<EvalError>,
+    cost_is_complete: bool,
+    saw_usage: bool,
+    trace_events: bool,
+}
+
+impl<F> EvalSessionObserver<'_, F>
+where
+    F: FnMut() -> Result<usize, EvalError>,
+{
+    /// Record `reason` the way the pre-IN2 loop did — on `metrics.errors` —
+    /// and ask the pump to stop.
+    fn stop(&mut self, reason: String) -> SessionFlow {
+        self.metrics.errors.push(reason.clone());
+        SessionFlow::Stop(reason)
+    }
+}
+
+impl<F> SessionObserver for EvalSessionObserver<'_, F>
+where
+    F: FnMut() -> Result<usize, EvalError>,
+{
+    fn on_event(&mut self, event: &AgentEvent) -> SessionFlow {
+        match event {
+            AgentEvent::Error(error) => self.metrics.errors.push(error.clone()),
+            AgentEvent::ToolCall { name, arguments } => {
+                if self.trace_events {
+                    eprintln!("EVAL TRACE tool_call {name}: {}", bounded_trace(arguments));
+                }
+                let count = self.metrics.tool_calls.entry(name.clone()).or_default();
+                *count = count.saturating_add(1);
+                if self.metrics.tool_call_count() > self.budgets.max_tool_calls {
+                    return self.stop(format!(
+                        "tool-call budget exceeded ({} > {})",
+                        self.metrics.tool_call_count(),
+                        self.budgets.max_tool_calls
+                    ));
+                }
+            }
+            AgentEvent::Cost {
+                input_tokens,
+                cached_input_tokens,
+                cache_creation_input_tokens,
+                output_tokens,
+                reasoning_output_tokens,
+                cost_usd,
+            } => {
+                self.saw_usage = true;
+                self.metrics.input_tokens = self.metrics.input_tokens.saturating_add(*input_tokens);
+                accumulate_optional_tokens(
+                    &mut self.metrics.cached_input_tokens,
+                    *cached_input_tokens,
+                );
+                accumulate_optional_tokens(
+                    &mut self.metrics.cache_creation_input_tokens,
+                    *cache_creation_input_tokens,
+                );
+                self.metrics.output_tokens =
+                    self.metrics.output_tokens.saturating_add(*output_tokens);
+                accumulate_optional_tokens(
+                    &mut self.metrics.reasoning_output_tokens,
+                    *reasoning_output_tokens,
+                );
+                match cost_usd {
+                    Some(cost) if self.cost_is_complete => {
+                        let total = self.metrics.cost_usd.get_or_insert(0.0);
+                        *total += *cost;
+                        let total = *total;
+                        if self
+                            .budgets
+                            .max_cost_usd
+                            .is_some_and(|maximum| total > maximum)
+                        {
+                            return self.stop(format!(
+                                "cost ceiling exceeded (${total:.4} > ${:.2})",
+                                self.budgets.max_cost_usd.unwrap_or_default()
+                            ));
+                        }
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.cost_is_complete = false;
+                        self.metrics.cost_usd = None;
+                    }
+                }
+            }
+            AgentEvent::Text(text) => {
+                if self.trace_events {
+                    eprintln!("EVAL TRACE agent_text: {}", bounded_trace(text));
+                }
+            }
+            AgentEvent::ToolResult { name, result } => {
+                if self.trace_events {
+                    eprintln!("EVAL TRACE tool_result {name}: {}", bounded_trace(result));
+                }
+            }
+            AgentEvent::Done => {}
+        }
+        SessionFlow::Continue
+    }
+
+    fn on_tick(&mut self, _counters: &SessionCounters) -> SessionFlow {
+        let observed_operations = match (self.operation_count)() {
+            Ok(observed) => observed,
+            Err(error) => {
+                self.operation_error = Some(error);
+                return SessionFlow::Stop("operation-budget probe failed".to_owned());
+            }
+        };
+        if observed_operations > usize::try_from(self.budgets.max_operations).unwrap_or(usize::MAX)
+        {
+            return self.stop(format!(
+                "operation budget exceeded ({observed_operations} > {})",
+                self.budgets.max_operations
+            ));
+        }
+        SessionFlow::Continue
+    }
+
+    fn on_confirmation_error(&mut self, message: String) {
+        self.metrics.errors.push(message);
+    }
+}
+
 /// Run prompt turns through an `AgentDriver`, including a fake driver in unit tests.
+///
+/// **The loop itself is [`pump_session`]'s** (IN2 §3.5 rule 30): this function
+/// supplies the prompts, the eval-specific [`SessionObserver`] above and
+/// `ConfirmationPolicy::ApproveAll`, and translates the pump's stop back into
+/// the `SessionMetrics` shape every caller already reads. Its behaviour does
+/// not change.
 ///
 /// # Errors
 ///
 /// Returns driver setup/protocol failures or an operation-budget probe failure.
-#[allow(clippy::too_many_lines)]
 pub fn collect_session<F>(
     driver: &dyn AgentDriver,
     config: SessionConfig,
     prompts: &[&str],
     budgets: &EvalBudgets,
     confirmations: Option<&ConfirmationBroker>,
-    mut operation_count: F,
+    operation_count: F,
 ) -> Result<SessionMetrics, EvalError>
 where
     F: FnMut() -> Result<usize, EvalError>,
 {
+    // The wall clock starts **before** `start_session`, exactly where it did
+    // before the pump rewrite: for `ClaudeCodeDriver` and `CodexDriver` that is
+    // a real process spawn and handshake, and `metrics.wall_time_ms` has always
+    // included it (§3.5 rule 31, §9 regression R-B). The pump's own clock,
+    // which the budget is measured against, necessarily starts after the
+    // harness exists — that shift is erratum D-R69 and it is a loosening of
+    // nothing: a session cannot be interrupted before it has started.
     let started = Instant::now();
     let mut session = driver
         .start_session(config)
         .map_err(|error| EvalError::Agent(error.to_string()))?;
     let events = session.events();
-    let mut metrics = SessionMetrics {
-        cost_usd: Some(0.0),
-        cached_input_tokens: Some(0),
-        cache_creation_input_tokens: Some(0),
-        reasoning_output_tokens: Some(0),
-        ..SessionMetrics::default()
+    let mut observer = EvalSessionObserver {
+        metrics: SessionMetrics {
+            cost_usd: Some(0.0),
+            cached_input_tokens: Some(0),
+            cache_creation_input_tokens: Some(0),
+            reasoning_output_tokens: Some(0),
+            ..SessionMetrics::default()
+        },
+        budgets,
+        operation_count,
+        operation_error: None,
+        cost_is_complete: true,
+        saw_usage: false,
+        trace_events: std::env::var_os("KINEWRIGHT_EVAL_TRACE").is_some(),
     };
-    let mut cost_is_complete = true;
-    let mut saw_usage = false;
-    let trace_events = std::env::var_os("KINEWRIGHT_EVAL_TRACE").is_some();
-    for prompt in prompts {
-        if metrics.turns >= budgets.max_turns {
+    let limits = SessionLimits {
+        max_turns: budgets.max_turns,
+        max_wall_time: budgets.max_wall_time,
+        // `EvalBudgets::max_tokens` is scored after the fact and was never
+        // enforced mid-flight; the rewrite does not start enforcing it.
+        max_tokens: None,
+    };
+    let counters = Arc::new(SharedCounters::default());
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut prompts = prompts.iter().map(|prompt| (*prompt).to_owned());
+    let (stop, spent) = pump_session(
+        session.as_mut(),
+        &events,
+        &mut prompts,
+        confirmations,
+        ConfirmationPolicy::ApproveAll,
+        &limits,
+        &counters,
+        &cancel,
+        &mut observer,
+    );
+    if let Some(error) = observer.operation_error {
+        return Err(error);
+    }
+    let mut metrics = observer.metrics;
+    metrics.turns = spent.turns;
+    match stop {
+        SessionStop::Completed => {}
+        SessionStop::Budget(BudgetKind::Turns) => {
             metrics.errors.push(format!(
                 "turn budget exceeded before prompt {}",
                 metrics.turns.saturating_add(1)
             ));
             metrics.interrupted = true;
-            session.interrupt();
-            break;
         }
-        session
-            .send_user_message((*prompt).to_owned())
-            .map_err(|error| EvalError::Agent(error.to_string()))?;
-        metrics.turns = metrics.turns.saturating_add(1);
-        let mut turn_done = false;
-        while !turn_done {
-            if let Some(broker) = confirmations {
-                for request in broker.pending_requests() {
-                    if !broker.approve(request.id) {
-                        metrics.errors.push(format!(
-                            "confirmation {} disappeared before approval",
-                            request.id
-                        ));
-                    }
-                }
-            }
-            if started.elapsed() > budgets.max_wall_time {
-                metrics.errors.push(format!(
-                    "wall-time budget exceeded ({:.1}s)",
-                    budgets.max_wall_time.as_secs_f64()
-                ));
-                metrics.interrupted = true;
-                session.interrupt();
-                break;
-            }
-            let observed_operations = operation_count()?;
-            if observed_operations > usize::try_from(budgets.max_operations).unwrap_or(usize::MAX) {
-                metrics.errors.push(format!(
-                    "operation budget exceeded ({observed_operations} > {})",
-                    budgets.max_operations
-                ));
-                metrics.interrupted = true;
-                session.interrupt();
-                break;
-            }
-            match events.recv_timeout(Duration::from_millis(100)) {
-                Ok(AgentEvent::Error(error)) => metrics.errors.push(error),
-                Ok(AgentEvent::ToolCall { name, arguments }) => {
-                    if trace_events {
-                        eprintln!("EVAL TRACE tool_call {name}: {}", bounded_trace(&arguments));
-                    }
-                    let count = metrics.tool_calls.entry(name).or_default();
-                    *count = count.saturating_add(1);
-                    if metrics.tool_call_count() > budgets.max_tool_calls {
-                        metrics.errors.push(format!(
-                            "tool-call budget exceeded ({} > {})",
-                            metrics.tool_call_count(),
-                            budgets.max_tool_calls
-                        ));
-                        metrics.interrupted = true;
-                        session.interrupt();
-                        break;
-                    }
-                }
-                Ok(AgentEvent::Cost {
-                    input_tokens,
-                    cached_input_tokens,
-                    cache_creation_input_tokens,
-                    output_tokens,
-                    reasoning_output_tokens,
-                    cost_usd,
-                }) => {
-                    saw_usage = true;
-                    metrics.input_tokens = metrics.input_tokens.saturating_add(input_tokens);
-                    accumulate_optional_tokens(
-                        &mut metrics.cached_input_tokens,
-                        cached_input_tokens,
-                    );
-                    accumulate_optional_tokens(
-                        &mut metrics.cache_creation_input_tokens,
-                        cache_creation_input_tokens,
-                    );
-                    metrics.output_tokens = metrics.output_tokens.saturating_add(output_tokens);
-                    accumulate_optional_tokens(
-                        &mut metrics.reasoning_output_tokens,
-                        reasoning_output_tokens,
-                    );
-                    match cost_usd {
-                        Some(cost) if cost_is_complete => {
-                            let total = metrics.cost_usd.get_or_insert(0.0);
-                            *total += cost;
-                            if budgets.max_cost_usd.is_some_and(|maximum| *total > maximum) {
-                                metrics.errors.push(format!(
-                                    "cost ceiling exceeded (${total:.4} > ${:.2})",
-                                    budgets.max_cost_usd.unwrap_or_default()
-                                ));
-                                metrics.interrupted = true;
-                                session.interrupt();
-                                break;
-                            }
-                        }
-                        Some(_) => {}
-                        None => {
-                            cost_is_complete = false;
-                            metrics.cost_usd = None;
-                        }
-                    }
-                }
-                Ok(AgentEvent::Done) => turn_done = true,
-                Ok(AgentEvent::Text(text)) => {
-                    if trace_events {
-                        eprintln!("EVAL TRACE agent_text: {}", bounded_trace(&text));
-                    }
-                }
-                Ok(AgentEvent::ToolResult { name, result }) => {
-                    if trace_events {
-                        eprintln!("EVAL TRACE tool_result {name}: {}", bounded_trace(&result));
-                    }
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    metrics
-                        .errors
-                        .push("agent event stream disconnected".to_owned());
-                    metrics.interrupted = true;
-                    break;
-                }
-            }
+        SessionStop::Budget(BudgetKind::WallTime) => {
+            metrics.errors.push(format!(
+                "wall-time budget exceeded ({:.1}s)",
+                budgets.max_wall_time.as_secs_f64()
+            ));
+            metrics.interrupted = true;
         }
-        if metrics.interrupted {
-            break;
+        SessionStop::Disconnected => {
+            metrics
+                .errors
+                .push("agent event stream disconnected".to_owned());
+            metrics.interrupted = true;
         }
+        SessionStop::Cancelled(StopReason::Harness(message)) => {
+            return Err(EvalError::Agent(message));
+        }
+        // The observer already recorded its own reason on `metrics.errors`.
+        // `Budget(Tokens)` cannot arrive with `max_tokens: None`, and
+        // `PolicyViolation` cannot arrive under `ApproveAll`.
+        SessionStop::Budget(BudgetKind::Tokens)
+        | SessionStop::Cancelled(_)
+        | SessionStop::PolicyViolation => metrics.interrupted = true,
     }
-    if !saw_usage {
+    if !observer.saw_usage {
         metrics.cached_input_tokens = None;
         metrics.cache_creation_input_tokens = None;
         metrics.reasoning_output_tokens = None;
     }
     metrics.wall_time_ms = duration_millis(started.elapsed());
-    session.interrupt();
     Ok(metrics)
 }
 
