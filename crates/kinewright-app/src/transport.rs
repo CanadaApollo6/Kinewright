@@ -1,5 +1,5 @@
 use eframe::egui;
-use kinewright_core::TimeCode;
+use kinewright_core::{IncidentSubject, LabelIncident, TimeCode};
 
 use crate::{
     app::KinewrightApp,
@@ -11,7 +11,12 @@ use crate::{
 impl KinewrightApp {
     pub(crate) fn toggle_playback(&mut self) {
         if self.focused().document.duration <= TimeCode::ZERO {
-            self.record_error("Media", "Add a clip to the timeline before playing");
+            // Appendix B row 132.
+            self.note_label(
+                LabelIncident::Media,
+                IncidentSubject::Project,
+                "Add a clip to the timeline before playing",
+            );
             return;
         }
         if self.playing {

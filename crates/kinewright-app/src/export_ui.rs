@@ -12,10 +12,10 @@ use kinewright_core::{
     DeliveryProfile, DeliveryVariant, DeliveryVariantError, DeliveryVerification,
     DeliveryVerificationRequest, Document, ExportAudioReport, ExportCancellation,
     ExportLutPreflightReport, ExportMediaPreflightReport, ExportProgress, ExportReport,
-    ExportSettings, LoudnessTarget, LutAsset, LutAssetSource, LutAvailabilityKind,
-    LutAvailabilityStatus, MediaError, Operation, QaIssue, QaSeverity, Rational, TimeCode,
-    delivery_conformance, document_for_delivery_variant, export_lut_preflight_with,
-    export_media_preflight, srt, vtt,
+    ExportSettings, IncidentObservation, IncidentSubject, LabelIncident, LoudnessTarget, LutAsset,
+    LutAssetSource, LutAvailabilityKind, LutAvailabilityStatus, MediaError, Operation, QaIssue,
+    QaSeverity, Rational, TimeCode, delivery_conformance, document_for_delivery_variant,
+    export_lut_preflight_with, export_media_preflight, srt, vtt,
 };
 use kinewright_media::{BuiltinLook, LutStore, LutStoreError, LutStoreErrorCode};
 
@@ -1539,15 +1539,17 @@ impl KinewrightApp {
                 self.export_dialog.focus_y_percent,
             ) {
                 Ok(variant) => variant,
+                // Appendix B row 49.
                 Err(error) => {
-                    self.record_error("Export", error.to_string());
+                    self.note_delivery_variant_refusal(&error);
                     return None;
                 }
             };
             match document_for_delivery_variant(&self.focused().document, variant) {
                 Ok(document) => Arc::new(document),
+                // Appendix B row 50.
                 Err(error) => {
-                    self.record_error("Export", error.to_string());
+                    self.note_delivery_variant_refusal(&error);
                     return None;
                 }
             }
@@ -1562,18 +1564,21 @@ impl KinewrightApp {
             self.export_dialog.focus_y_percent,
         ) {
             Ok(conformance) => conformance,
+            // Appendix B row 51.
             Err(error) => {
-                self.record_error("Export", error.to_string());
+                self.note_delivery_variant_refusal(&error);
                 return None;
             }
         };
         if !conformance.export_ready() {
-            self.record_error("Export", conformance.summary());
+            // Appendix B row 52.
+            self.note_export_refusal(conformance.summary());
             return None;
         }
         let media_preflight = export_media_preflight(&document, self.analysis.as_ref());
         if !media_preflight.export_ready() {
-            self.record_error("Export", media_preflight.summary());
+            // Appendix B row 53.
+            self.note_export_refusal(media_preflight.summary());
             return None;
         }
         let lut_preflight = export_lut_preflight(
@@ -1582,10 +1587,31 @@ impl KinewrightApp {
             self.focused().lut_store_error.as_deref(),
         );
         if !lut_preflight.export_ready() {
-            self.record_error("Export", lut_preflight.summary());
+            // Appendix B row 54.
+            self.note_export_refusal(lut_preflight.summary());
             return None;
         }
         Some(document)
+    }
+
+    /// Appendix B rows 52-59: an `export_unclassified` refusal.
+    ///
+    /// The subject is `ExportJob` and carries no id: the app runs one export at
+    /// a time, and eleven of the thirteen `Export` rows fire from
+    /// `export_delivery_document()` and the preflight **before** `export_job`
+    /// is assigned, so there is no job in existence to name (`IN1b` §3.3
+    /// rule 18). One export attempt is one problem, not one per check it runs.
+    fn note_export_refusal(&mut self, observed: impl Into<String>) {
+        self.note_label(LabelIncident::Export, IncidentSubject::ExportJob, observed);
+    }
+
+    /// Appendix B rows 49-51: a [`DeliveryVariantError`], whose code and
+    /// evidence core resolves together (`IN1b` §3.4 rule 24) —
+    /// `InvalidDocument` delegates to the inner rejection's own family and the
+    /// other two answer `delivery_variant_rejected`.
+    fn note_delivery_variant_refusal(&mut self, error: &DeliveryVariantError) {
+        let revision = self.focused().revision;
+        self.note_observation(error.incident_observation(IncidentSubject::ExportJob, revision));
     }
 
     /// Keep the dialog's frame size equal to the raster the delivery gate
@@ -1640,13 +1666,13 @@ impl KinewrightApp {
         }
         self.lock_frame_size_to_delivery_aspect();
         if self.focused().document.duration <= TimeCode::ZERO {
-            self.record_error("Export", "Add a clip to the timeline before exporting");
+            self.note_export_refusal("Add a clip to the timeline before exporting");
             return;
         }
         if !self.export_dialog.width.is_multiple_of(2)
             || !self.export_dialog.height.is_multiple_of(2)
         {
-            self.record_error("Export", "H.264 export width and height must be even");
+            self.note_export_refusal("H.264 export width and height must be even");
             return;
         }
         let fps = match Rational::new(
@@ -1655,13 +1681,13 @@ impl KinewrightApp {
         ) {
             Ok(fps) => fps,
             Err(error) => {
-                self.record_error("Export", format!("Invalid export frame rate: {error}"));
+                self.note_export_refusal(format!("Invalid export frame rate: {error}"));
                 return;
             }
         };
         let mut output = PathBuf::from(self.export_dialog.output.trim());
         if output.as_os_str().is_empty() {
-            self.record_error("Export", "Choose an export output path");
+            self.note_export_refusal("Choose an export output path");
             return;
         }
         if output.extension().is_none() {
@@ -1741,7 +1767,7 @@ impl KinewrightApp {
                 });
             });
         if let Err(error) = spawn {
-            self.record_error("Export", format!("Could not start export: {error}"));
+            self.note_export_refusal(format!("Could not start export: {error}"));
             return;
         }
         self.status = format!("Exporting {}…", output.display());
@@ -1778,8 +1804,11 @@ impl KinewrightApp {
         };
         match std::fs::write(&path, contents) {
             Ok(()) => self.status = format!("Saved captions to {}", path.display()),
-            Err(error) => self.record_error(
-                "Captions",
+            // Appendix B row 60: a `std::fs::write` of a caption sidecar, not
+            // an export job.
+            Err(error) => self.note_label(
+                LabelIncident::Captions,
+                IncidentSubject::Project,
                 format!("Could not save {}: {error}", path.display()),
             ),
         }
@@ -1849,7 +1878,17 @@ impl KinewrightApp {
                 Err(MediaError::Cancelled) => {
                     "Export cancelled".clone_into(&mut self.status);
                 }
-                Err(error) => self.record_error("Export", format!("Export failed: {error}")),
+                // Appendix B row 61: the code comes from
+                // `MediaError::recovery_code()` at run time (`IN1b` §3.2
+                // rule 14), and the evidence follows it.
+                Err(error) => {
+                    let revision = self.focused().revision;
+                    self.note_observation(IncidentObservation::from_media_error(
+                        &error,
+                        IncidentSubject::ExportJob,
+                        revision,
+                    ));
+                }
             }
         }
     }

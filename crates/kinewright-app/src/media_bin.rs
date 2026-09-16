@@ -2,8 +2,8 @@ use std::{sync::Arc, thread};
 
 use eframe::egui;
 use kinewright_core::{
-    AssetId, ClipId, IncidentId, IncidentOutcome, IncidentState, IncidentSubject, MediaKind,
-    Operation, RecoveryKind, TimeCode, Track, TrackId, TrackKind,
+    AssetId, ClipId, IncidentId, IncidentOutcome, IncidentState, IncidentSubject, LabelIncident,
+    MediaKind, Operation, RecoveryKind, TimeCode, Track, TrackId, TrackKind,
 };
 
 use crate::{
@@ -83,7 +83,11 @@ impl KinewrightApp {
             return;
         };
         let Some(asset) = project.document.asset(asset_id).cloned() else {
-            self.record_error("Operations", format!("Asset {asset_id} no longer exists"));
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Asset(asset_id),
+                format!("Asset {asset_id} no longer exists"),
+            );
             return;
         };
         let clip_start = project.document.duration;
@@ -101,8 +105,9 @@ impl KinewrightApp {
             .find(|track| asset.kind.supports(track.kind))
             .map(|track| track.id)
         else {
-            self.record_error(
-                "Operations",
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Asset(asset_id),
                 format!("No compatible track exists for {}", asset.name),
             );
             return;
@@ -118,7 +123,10 @@ impl KinewrightApp {
             .send(kinewright_core::Command::Do(operation))
             .is_err()
         {
-            self.record_error("Operations", "Core actor stopped while adding media");
+            self.note_actor_stopped(
+                IncidentSubject::Asset(asset_id),
+                "Core actor stopped while adding media",
+            );
         }
         self.projects[project_index].position = clip_start;
         self.projects[project_index].cue_source_asset(asset_id);
@@ -136,14 +144,21 @@ impl KinewrightApp {
                     .send(kinewright_core::Command::DoBatch(operations))
                     .is_err()
                 {
-                    self.record_error("Operations", "Core actor stopped while adding A/V media");
+                    self.note_actor_stopped(
+                        IncidentSubject::Asset(asset.id),
+                        "Core actor stopped while adding A/V media",
+                    );
                     false
                 } else {
                     true
                 }
             }
             Err(error) => {
-                self.record_error("Operations", error);
+                self.note_label(
+                    LabelIncident::Operations,
+                    IncidentSubject::Asset(asset.id),
+                    error,
+                );
                 false
             }
         }
@@ -434,6 +449,13 @@ impl KinewrightApp {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut pressed: Option<(IncidentId, Operation, IncidentOutcome)> = None;
+            // `IN1b` §5.5 rule 31: the `==` is deliberate and stays. After
+            // Part B every subject kind opens incidents, and the Media panel
+            // shows exactly the ones that belong beside an asset; every other
+            // subject reaches the person through the badge-anchored Incidents
+            // panel, which lists them all. The compiler cannot ask about this
+            // comparison — it still compiles against a seven-variant
+            // `IncidentSubject` — so the filter says so in words.
             for incident in log.all().filter(|incident| {
                 incident.subject == IncidentSubject::Asset(asset_id)
                     && matches!(
@@ -441,12 +463,15 @@ impl KinewrightApp {
                         IncidentState::Open | IncidentState::Resolved(IncidentOutcome::Applied)
                     )
             }) {
-                let assumed_from_present = self
+                // `IN1b` §5.5 rule 28: colour is the one code that ships a
+                // revert, and its condition is the asset still carrying the
+                // assumption the revert would take back.
+                let revert_available = self
                     .focused()
                     .document
                     .asset(asset_id)
                     .is_some_and(|asset| asset.assumed_from.is_some());
-                let view = incident_card(incident, assumed_from_present);
+                let view = incident_card(incident, revert_available);
                 if let Some(index) = show_incident_card(ui, &view) {
                     let action = &view.actions[index];
                     if let RecoveryKind::Operation(operation) = &action.recovery.kind {

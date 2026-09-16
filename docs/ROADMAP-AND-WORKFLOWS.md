@@ -801,7 +801,7 @@ installed.
 
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |
-| IN1 — Incidents and policy (contract: `IN1-INCIDENTS-AND-THE-COLOUR-CASE.md`) | `Incident` and `RecoveryAction` types in core; the per-code policy table as core data with the three classes; one incident log with dedup and suppression; `ColorProvenance::AgentAssumption` and `MediaAsset.assumed_from` behind the widened override guard; the incident card as a pure function with fallback buttons; `get_incidents` and `resolve_incident` reachable through the compact runtime's capability dispatcher with the served surface unchanged (serving them as tools would have cost +2 012 B, +35.5 %, of served bytes); the untagged-source colour case end to end. Part A: one error source, `Media` playback, end to end; Part B: every `record_error` path and three log-bypassing sinks emit a typed incident through one writer; `OpError::incident_family()` over 154 variants; seven incident subjects; a correlation token on revision-gated commands (contract: `IN1B-ERROR-MIGRATION.md`) | The policy table is exhaustive over declared codes and tested without a model; importing an untagged BT.709-shaped source and playing it opens zero ask-first incidents, zero recovery questions and exactly one auto-applied incident with a pinned headline on both CI operating systems; the served quad is unchanged in both pin sites; Part B: the four sink-gate counts read 0 / 0 / 1 / 1, `POLICY` is exhaustive over the measured code set, the badge counts open incidents, one test per label (17), both size constants re-measured, served quad unchanged in three pin sites |
+| IN1 — Incidents and policy (contract: `IN1-INCIDENTS-AND-THE-COLOUR-CASE.md`) | `Incident` and `RecoveryAction` types in core; the per-code policy table as core data with the three classes; one incident log with dedup and suppression; `ColorProvenance::AgentAssumption` and `MediaAsset.assumed_from` behind the widened override guard; the incident card as a pure function with fallback buttons; `get_incidents` and `resolve_incident` reachable through the compact runtime's capability dispatcher with the served surface unchanged (serving them as tools would have cost +2 012 B, +35.5 %, of served bytes); the untagged-source colour case end to end. Part A: one error source, `Media` playback, end to end; Part B: every `record_error` path and three log-bypassing sinks emit a typed incident through one writer; `OpError::incident_family()` over 154 variants; eight incident subjects; a correlation token on revision-gated commands (contract: `IN1B-ERROR-MIGRATION.md`) | The policy table is exhaustive over declared codes and tested without a model; importing an untagged BT.709-shaped source and playing it opens zero ask-first incidents, zero recovery questions and exactly one auto-applied incident with a pinned headline on both CI operating systems; the served quad is unchanged in both pin sites; Part B: the four sink-gate counts read 0 / 0 / 1 / 1, `POLICY` is exhaustive over the measured code set, the badge counts open incidents, one test per label (17), both size constants re-measured, served quad unchanged in three pin sites |
 | IN2 — Investigator sessions | A default investigator harness and model in settings with discovery and an off switch; headless sessions started per incident with turn, token, and wall-time budgets, one per project, deduped; auto-apply through the live core, multi-operation fixes on a branch merged on approval; approval cards through the confirmation broker; per-project remembered preferences | Budgets are enforced and reported; a scripted harness resolves the catalogue's auto-apply codes with zero destructive actions; the no-harness fallback resolves the same codes by button |
 | IN3 — Catalogue breadth and harness efficiency | Incident codes for offline and relink, unsupported codecs with a transcode proposal, export and delivery failures, loudness and QC failures, hostile media; task-scoped capability packs so a job loads only the schema it needs; efficiency telemetry on every completed job | Each code has a pinned class and recovery; token, tool-call, and wall-time budgets per job are pinned and green; the M35/M36 delta is published |
 | IN4 — Workflow evaluation | A person with no NLE knowledge completes import, fix, cut, and deliver on unfamiliar footage; the model lane runs the same tasks on each supported harness | Zero recovery questions asked; judgement questions counted and reviewed; efficiency budgets green on every harness |
@@ -815,15 +815,19 @@ installed.
 - Investigator sessions run the unchanged compact runtime plus these two; they
   gain no privileged filesystem, shell, or network access.
 
-**Current status (2026-09-15): programme opened; IN1 is the next primary slice.
-Its contract is promoted (`IN1-INCIDENTS-AND-THE-COLOUR-CASE.md`, revision 2
-after one brief critique, one contract critique and two probes) and Part A
-landed (29fad67, d4ed8eb); IN1 lands in two parts on two contracts, IN1b
+**Current status (2026-09-16): programme opened; IN1 is complete on both
+contracts. Its contract is promoted (`IN1-INCIDENTS-AND-THE-COLOUR-CASE.md`,
+revision 2 after one brief critique, one contract critique and two probes) and
+Part A landed (29fad67, d4ed8eb); IN1 lands in two parts on two contracts, IN1b
 (`IN1B-ERROR-MIGRATION.md`) discharging IN1 §10 — Part A the incident model, the
 policy, and the untagged-source colour case end to end (one error source
 migrated), Part B the migration of the measured 129 error paths (124
 literal-labelled call sites over 17 labels, 2 dynamic-source sites, 3 direct log
-writes) plus 3 log-bypassing sinks.** Two programme-level facts recorded by probe-1 that later
+writes) plus 3 log-bypassing sinks. Part B landed 2026-09-16: 131 error paths
+migrated through one writer with `record_error` deleted and the sink gate reading
+0 / 0 / 1 / 1, 67 incident codes over 11 `OpError` families and 8 incident
+subjects, and the served quad unchanged for the seventeenth consecutive
+measurement in all three pin sites.** Two programme-level facts recorded by probe-1 that later
 slices own: the Cursor ACP driver reports no cost categories and the Codex driver
 reports categories but no dollar cost, so IN4's per-harness efficiency gate needs
 driver work that IN3 owns; and the confirmation broker carries only a tool name

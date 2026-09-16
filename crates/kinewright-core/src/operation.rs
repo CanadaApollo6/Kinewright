@@ -5153,15 +5153,25 @@ impl OpError {
 impl Operation {
     /// The narrowest subject this operation addresses (`IN1b` §3.3 rule 20).
     ///
-    /// The precedence is `Clip` -> `Asset` -> `Track` -> `Chain` -> `Project`,
-    /// and `Project` where the operation addresses none of them. The subject is
+    /// The precedence is
+    /// `Clip` -> `Asset` -> `LutAsset` -> `Track` -> `Chain` -> `Project`, and
+    /// `Project` where the operation addresses none of them. The subject is
     /// derived from the operation rather than chosen by the caller so that two
     /// refusals about one clip share a dedup axis whoever raised them.
     ///
     /// An operation that addresses a *set* of clips — [`Self::LinkClips`] and
     /// [`Self::UnlinkClips`] — has no single narrowest id and therefore answers
-    /// `Project`. Bins, string-outs, sync groups, markers, LUT assets and the
-    /// pan law are not subject kinds, so they answer `Project` too.
+    /// `Project`. Bins, string-outs, sync groups, markers and the pan law are
+    /// not subject kinds, so they answer `Project` too.
+    ///
+    /// [`IncidentSubject::LutAsset`] sits after `Asset` (ruling N5), which is
+    /// where the enum declares it. Its position discriminates nothing on the
+    /// tree: no `Operation` variant carries both an `AssetId` and a
+    /// `LutAssetId`, and the one that carries a `LutAssetId` beside a `ClipId`
+    /// — [`Self::ConvertLegacyLook`] — answers `Clip`, because a legacy-look
+    /// conversion is a refusal about the clip it is converting. The rung is
+    /// therefore a statement of where a future variant would land rather than a
+    /// tie-break the current 57 exercise.
     ///
     /// `IN1b` §0.3 D3 names **five** variants that address a track and nothing
     /// narrower; applying the precedence, there are **seven** — D3's
@@ -5211,6 +5221,9 @@ impl Operation {
             | Self::ThreePointEdit { asset, .. }
             | Self::PatchedThreePointEdit { asset, .. }
             | Self::AddFreezeFrame { asset, .. } => IncidentSubject::Asset(*asset),
+            // LutAsset: one look in the project's store, on its own id space.
+            Self::AddLutAsset { asset } => IncidentSubject::LutAsset(asset.id),
+            Self::RemoveLutAsset { lut_asset } => IncidentSubject::LutAsset(*lut_asset),
             // Track: no clip and no asset, but one track. Seven variants, not
             // the five `IN1b` §0.3 D3 names: `AddTitle` and `RippleInsertGap`
             // address a track and nothing narrower too (erratum `IN1b`-A-R11).
@@ -5239,8 +5252,6 @@ impl Operation {
             | Self::AddMarker { .. }
             | Self::RemoveMarker { .. }
             | Self::MoveMarker { .. }
-            | Self::AddLutAsset { .. }
-            | Self::RemoveLutAsset { .. }
             | Self::SetMarkerParam { .. } => IncidentSubject::Project,
         }
     }
@@ -5554,8 +5565,8 @@ mod tests {
         ("SetEffectKeyframes", "Clip"),
         ("ClearEffectKeyframes", "Clip"),
         ("ConvertLegacyLook", "Clip"),
-        ("AddLutAsset", "Project"),
-        ("RemoveLutAsset", "Project"),
+        ("AddLutAsset", "LutAsset"),
+        ("RemoveLutAsset", "LutAsset"),
         ("SetTitleParam", "Clip"),
         ("SetClipAudio", "Clip"),
         ("SetClipGainEnvelope", "Clip"),
@@ -5838,7 +5849,11 @@ mod tests {
                 "{variant} answers but is not in the declared table"
             );
         }
-        assert_eq!(grouped.len(), 5, "all five subject kinds are reachable");
+        assert_eq!(
+            grouped.len(),
+            6,
+            "all six operation-reachable subject kinds are reachable"
+        );
 
         // The precedence itself, on values (`IN1b` §7 item 4).
         assert_eq!(
@@ -5951,6 +5966,29 @@ mod tests {
             .incident_subject(),
             IncidentSubject::Project
         );
+        // The LUT-asset rung (ruling N5). `AddLutAsset` carries the whole
+        // `LutAsset`, so its id comes off the payload; `RemoveLutAsset` names
+        // the id directly. `ConvertLegacyLook` carries a `LutAssetId` too and
+        // still answers `Clip`, because `Clip` is the narrower rung.
+        assert_eq!(
+            Operation::RemoveLutAsset {
+                lut_asset: LutAssetId(5),
+            }
+            .incident_subject(),
+            IncidentSubject::LutAsset(LutAssetId(5))
+        );
+        assert_eq!(
+            Operation::ConvertLegacyLook {
+                clip: ClipId(8),
+                effect: EffectId(1),
+                lut_asset: LutAssetId(5),
+                mix_basis_points: 10_000,
+            }
+            .incident_subject(),
+            IncidentSubject::Clip(ClipId(8)),
+            "`Clip` outranks `LutAsset`"
+        );
+
         // A set of clips has no single narrowest id.
         assert_eq!(
             Operation::LinkClips {

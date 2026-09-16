@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use kinewright_core::{
-    CaptionCue, CaptionPreset, ClipContent, Document, Operation, Rational, TimelineTranscriptWord,
-    TranscriptStatus, caption_cues, caption_title_operations as core_caption_title_operations,
+    CaptionCue, CaptionPlanError, CaptionPreset, ClipContent, Document, IncidentSubject,
+    LabelIncident, Operation, Rational, TimelineTranscriptWord, TranscriptStatus, caption_cues,
+    caption_title_operations as core_caption_title_operations,
 };
 
 use crate::{app::KinewrightApp, transcript_edit::dedup_linked_timeline_words};
@@ -52,13 +53,24 @@ impl KinewrightApp {
         let cues = match self.timeline_caption_cues() {
             Ok(cues) => cues,
             Err(error) => {
-                self.record_error("Captions", error);
+                // Appendix B row 32: the cue scan reads the whole timeline.
+                self.note_label(LabelIncident::Captions, IncidentSubject::Project, error);
                 return;
             }
         };
         match caption_title_operations(&self.focused().document, &cues) {
             Ok(operations) => self.send_operations(operations),
-            Err(error) => self.record_error("Captions", error),
+            // Appendix B row 33: `caption_plan_rejected`, or
+            // `operation_internal` for the two id-exhaustion variants, both
+            // through `CaptionPlanError::incident_code()` (`IN1b` §3.10
+            // rule 39). The code is resolved at run time and its evidence
+            // follows it.
+            Err(error) => {
+                let revision = self.focused().revision;
+                self.note_observation(
+                    error.incident_observation(IncidentSubject::Project, revision),
+                );
+            }
         }
     }
 }
@@ -71,12 +83,17 @@ pub(crate) fn caption_cues_from_words(
     caption_cues(&words, fps)
 }
 
+/// The app's caption plan, keeping core's typed refusal.
+///
+/// `IN1b` §3.10 rule 38: the wrapper used to return `Result<_, String>` and
+/// throw the [`CaptionPlanError`] away, which is why the `Captions` label had
+/// no code of its own. It is the only one of the crate's seven
+/// `Result<_, String>` helpers whose inner error is already a core enum.
 pub(crate) fn caption_title_operations(
     document: &Document,
     cues: &[CaptionCue],
-) -> Result<Vec<Operation>, String> {
+) -> Result<Vec<Operation>, CaptionPlanError> {
     core_caption_title_operations(document, cues, CaptionPreset::Clean)
-        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

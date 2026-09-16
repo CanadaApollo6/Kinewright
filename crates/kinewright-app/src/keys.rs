@@ -3,7 +3,8 @@ use std::collections::HashSet;
 
 use eframe::egui;
 use kinewright_core::{
-    FrameRounding, TimeCode, map_frames_with_rounding, map_source_range_to_project,
+    FrameRounding, IncidentSubject, LabelIncident, TimeCode, map_frames_with_rounding,
+    map_source_range_to_project,
 };
 
 use crate::app::{KinewrightApp, MaterialTab};
@@ -341,19 +342,27 @@ impl KinewrightApp {
 
     fn trim_selected_at_playhead(&mut self, set_in: bool) {
         let Some(clip_id) = self.focused().selected_clip else {
-            self.record_error(
-                "Operations",
+            // Appendix B row 65: the site fires because nothing is selected,
+            // so it names no clip.
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Project,
                 "Select a clip before setting an in or out point",
             );
             return;
         };
         let Some(clip) = self.focused().document.clip(clip_id).cloned() else {
-            self.record_error("Operations", format!("Clip {clip_id} no longer exists"));
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Clip(clip_id),
+                format!("Clip {clip_id} no longer exists"),
+            );
             return;
         };
         let Some(asset) = self.focused().document.asset(clip.asset).cloned() else {
-            self.record_error(
-                "Operations",
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Clip(clip_id),
                 format!("Asset {} no longer exists", clip.asset),
             );
             return;
@@ -363,14 +372,19 @@ impl KinewrightApp {
             asset.fps,
             self.focused().document.fps,
         ) else {
-            self.record_error("Operations", "Could not map the selected clip time base");
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Clip(clip_id),
+                "Could not map the selected clip time base",
+            );
             return;
         };
         let project_end = clip.timeline_start.0.saturating_add(project_duration.0);
         let position = self.focused().position;
         if position < clip.timeline_start || position.0 > project_end {
-            self.record_error(
-                "Operations",
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Clip(clip_id),
                 "Move the playhead onto the selected clip first",
             );
             return;
@@ -382,7 +396,11 @@ impl KinewrightApp {
             asset.fps,
             FrameRounding::Nearest,
         ) else {
-            self.record_error("Operations", "Could not map the playhead to source frames");
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Clip(clip_id),
+                "Could not map the playhead to source frames",
+            );
             return;
         };
         let source_at = TimeCode(
@@ -394,8 +412,9 @@ impl KinewrightApp {
         );
         let new_source = if set_in {
             if source_at >= clip.source_range.end {
-                self.record_error(
-                    "Operations",
+                self.note_label(
+                    LabelIncident::Operations,
+                    IncidentSubject::Clip(clip_id),
                     "The in point must be before the clip out point",
                 );
                 return;
@@ -403,8 +422,9 @@ impl KinewrightApp {
             source_at..clip.source_range.end
         } else {
             if source_at <= clip.source_range.start {
-                self.record_error(
-                    "Operations",
+                self.note_label(
+                    LabelIncident::Operations,
+                    IncidentSubject::Clip(clip_id),
                     "The out point must be after the clip in point",
                 );
                 return;

@@ -153,8 +153,22 @@ impl std::fmt::Display for LutStoreError {
 impl std::error::Error for LutStoreError {}
 
 impl From<LutStoreError> for MediaError {
+    /// Carried typed rather than flattened into `MediaError::Backend`
+    /// (`IN1b` §6.2 rule 4, ruling N4/CR-D1), so the LUT store's own code reaches
+    /// `MediaError::recovery_code()` as data instead of being reconstructed
+    /// from the rendered text at the agent surface.
+    ///
+    /// `message` is the store's own rendering and carries no label: the
+    /// `media backend error: ` prefix lives in `MediaError::Store`'s template,
+    /// exactly where `MediaError::Backend` kept it, so the rendered text is
+    /// byte-identical and every caller that read `Backend`'s `String` reads
+    /// `message` the same way. Dropping the label is `IN1b` §13 D-B4, owned by
+    /// IN2.
     fn from(error: LutStoreError) -> Self {
-        Self::Backend(error.to_string())
+        Self::Store {
+            code: error.code().as_str(),
+            message: error.to_string(),
+        }
     }
 }
 
@@ -565,7 +579,15 @@ impl LutStore {
 
     fn copy_one(&self, other: &Self, asset: &LutAsset) -> Result<(), MediaError> {
         self.copy_one_file(other, asset).map_err(|error| {
-            let MediaError::Backend(reason) = &error else {
+            // `IN1b` N4/CR-D1: a store refusal crosses as `MediaError::Store`
+            // now, and as `MediaError::Backend` only when it came from
+            // somewhere other than this module's own `From` impl. Both carry
+            // the rendered reason this wrapper quotes back under `observed`.
+            let (MediaError::Store {
+                message: reason, ..
+            }
+            | MediaError::Backend(reason)) = &error
+            else {
                 return error;
             };
             LutStoreError::new(
@@ -585,13 +607,16 @@ impl LutStore {
         let source = self.path_for(&asset.sha256)?;
         let destination = other.path_for(&asset.sha256)?;
         let bytes = read_regular_file(&source).map_err(|error| {
-            MediaError::Backend(
+            // Built typed and converted, rather than rendered into a
+            // `MediaError::Backend` string by hand, so the code reaches
+            // `recovery_code()` like every other store refusal
+            // (`IN1b` N4/CR-D1).
+            MediaError::from(
                 LutStoreError::new(
                     LutStoreErrorCode::MissingLutAsset,
                     format!("could not read {} for Save As: {error}", source.display()),
                 )
-                .with_allowed(&asset.sha256)
-                .to_string(),
+                .with_allowed(&asset.sha256),
             )
         })?;
         let observed = sha256_bytes(&bytes);
@@ -1449,8 +1474,8 @@ LUT_3D_SIZE 2
     #[test]
     fn store_root_rejects_a_path_with_no_project_file() {
         let error = LutStore::for_project(Path::new("/")).unwrap_err();
-        let MediaError::Backend(message) = error else {
-            panic!("store failures cross as MediaError::Backend");
+        let MediaError::Store { message, .. } = error else {
+            panic!("store failures cross as MediaError::Store");
         };
         assert!(
             message.starts_with("lut_store_root_invalid: "),
@@ -1509,8 +1534,8 @@ LUT_3D_SIZE 2
             String::new(),
         ] {
             let error = store.path_for(&rejected).unwrap_err();
-            let MediaError::Backend(message) = error else {
-                panic!("store failures cross as MediaError::Backend");
+            let MediaError::Store { message, .. } = error else {
+                panic!("store failures cross as MediaError::Store");
             };
             assert!(
                 message.starts_with("invalid_lut_asset_hash: "),
@@ -1624,9 +1649,14 @@ LUT_3D_SIZE 2
         let temporary = TempDirectory::new("lut-store-reject");
         let store = store_for(&temporary, "project.kinewright");
         let source = write_source(&temporary, "one-d.cube", "LUT_1D_SIZE 2\n0 0 0\n1 1 1\n");
-        let MediaError::Backend(message) = store.import_lut_asset(&source).unwrap_err() else {
-            panic!("import failures cross as MediaError::Backend");
+        // A *parse* rejection rather than a store one, and typed too since
+        // `IN1b` CR-D2: `import_lut_asset` parses the file it imports, so this
+        // is the path that reaches the agent's `import_lut_asset` result.
+        let MediaError::Store { code, message } = store.import_lut_asset(&source).unwrap_err()
+        else {
+            panic!("parse failures cross as MediaError::Store");
         };
+        assert_eq!(code, "unsupported_lut_format");
         assert!(
             message.starts_with("unsupported_lut_format: "),
             "message should lead with the parse code: {message}"
@@ -1636,9 +1666,10 @@ LUT_3D_SIZE 2
             "a rejected import writes no store file"
         );
 
-        let MediaError::Backend(message) = store.import_lut_asset(temporary.root()).unwrap_err()
+        let MediaError::Store { message, .. } =
+            store.import_lut_asset(temporary.root()).unwrap_err()
         else {
-            panic!("import failures cross as MediaError::Backend");
+            panic!("import failures cross as MediaError::Store");
         };
         assert!(
             message.starts_with("unreadable_lut_asset: "),
@@ -1818,8 +1849,8 @@ LUT_3D_SIZE 2
         );
 
         let other = write_source(&temporary, "other.cube", OTHER_CUBE);
-        let MediaError::Backend(message) = store.restore(&asset, &other).unwrap_err() else {
-            panic!("restore failures cross as MediaError::Backend");
+        let MediaError::Store { message, .. } = store.restore(&asset, &other).unwrap_err() else {
+            panic!("restore failures cross as MediaError::Store");
         };
         assert!(
             message.starts_with("lut_relink_hash_mismatch: "),
@@ -1876,8 +1907,8 @@ LUT_3D_SIZE 2
         let second = TempDirectory::new("lut-store-copy-second");
         let third = store_for(&second, "third.kinewright");
         let results = store.copy_to(&third, &[imported]);
-        let MediaError::Backend(message) = results[0].1.as_ref().unwrap_err() else {
-            panic!("copy failures cross as MediaError::Backend");
+        let MediaError::Store { message, .. } = results[0].1.as_ref().unwrap_err() else {
+            panic!("copy failures cross as MediaError::Store");
         };
         assert!(
             message.starts_with("lut_store_copy_failed: "),
@@ -2395,8 +2426,8 @@ DOMAIN_MAX 1 1 1
         assert!(library.is_empty());
         assert_eq!(statuses[0].1.kind, LutAvailabilityKind::Missing);
 
-        let MediaError::Backend(message) = store.restore(&asset, &source).unwrap_err() else {
-            panic!("store failures cross as MediaError::Backend");
+        let MediaError::Store { message, .. } = store.restore(&asset, &source).unwrap_err() else {
+            panic!("store failures cross as MediaError::Store");
         };
         assert!(
             message.starts_with("lut_store_root_invalid: "),
@@ -2417,8 +2448,8 @@ DOMAIN_MAX 1 1 1
             return;
         }
         let source = write_source(&temporary, "sample.cube", SAMPLE_CUBE);
-        let MediaError::Backend(message) = store.import_lut_asset(&source).unwrap_err() else {
-            panic!("store failures cross as MediaError::Backend");
+        let MediaError::Store { message, .. } = store.import_lut_asset(&source).unwrap_err() else {
+            panic!("store failures cross as MediaError::Store");
         };
         assert!(
             message.starts_with("lut_store_root_invalid: "),
@@ -2444,8 +2475,8 @@ DOMAIN_MAX 1 1 1
             b"not a directory",
         )
         .unwrap();
-        let MediaError::Backend(message) = LutStore::for_project(&project).unwrap_err() else {
-            panic!("store failures cross as MediaError::Backend");
+        let MediaError::Store { message, .. } = LutStore::for_project(&project).unwrap_err() else {
+            panic!("store failures cross as MediaError::Store");
         };
         assert!(
             message.starts_with("lut_store_root_invalid: "),
@@ -2486,8 +2517,8 @@ DOMAIN_MAX 1 1 1
             store.import_lut_asset(&huge).map(|_| ()),
             store.restore(&asset, &huge).map(|_| ()),
         ] {
-            let MediaError::Backend(message) = result.unwrap_err() else {
-                panic!("store failures cross as MediaError::Backend");
+            let MediaError::Store { message, .. } = result.unwrap_err() else {
+                panic!("store failures cross as MediaError::Store");
             };
             assert!(
                 message.starts_with("lut_file_too_large: "),
@@ -2547,5 +2578,58 @@ DOMAIN_MAX 1 1 1
             fs::read(store.path_for(&import.sha256).unwrap()).unwrap(),
             source.as_bytes()
         );
+    }
+
+    /// `IN1b` §6.2 rule 4 and ruling N4/CR-D1: the lut store's own code
+    /// reaches `MediaError::recovery_code()` as **data**, and the rendered text
+    /// is byte-identical to the `MediaError::Backend` string it replaced, so
+    /// IN1 §9 clause 11's 750 B template and the agent's pinned served text do
+    /// not move (`IN1b` §13 D-B4).
+    #[test]
+    fn in1b_the_lut_store_refusal_reaches_media_error_typed() {
+        let error = LutStoreError::new(
+            LutStoreErrorCode::LutAssetMetadataMismatch,
+            "the stored entry does not match the project".to_owned(),
+        )
+        .with_observed("3x3")
+        .with_allowed("33x33");
+        let rendered = error.to_string();
+        assert!(
+            rendered.starts_with("lut_asset_metadata_mismatch: "),
+            "the code is the first token: {rendered}"
+        );
+
+        // What the `From` impl produced before the addendum, spelled out rather
+        // than referenced, so the byte-identity is asserted against a literal
+        // and not against the code under test.
+        let before = MediaError::Backend(rendered.clone());
+        let after = MediaError::from(error.clone());
+
+        assert_eq!(
+            after,
+            MediaError::Store {
+                code: "lut_asset_metadata_mismatch",
+                message: rendered.clone(),
+            }
+        );
+        assert_eq!(after.recovery_code(), Some("lut_asset_metadata_mismatch"));
+        assert_eq!(after.recovery_code(), Some(error.code().as_str()));
+        assert_eq!(
+            after.to_string(),
+            before.to_string(),
+            "the rendered text must not move"
+        );
+        assert!(after.to_string().starts_with("media backend error: "));
+        // `message` is the payload, not the whole rendering: the label lives in
+        // `MediaError::Store`'s template, where `Backend` kept it.
+        let MediaError::Store { message, .. } = &after else {
+            unreachable!("just constructed")
+        };
+        assert_eq!(message, &rendered);
+        assert!(!message.starts_with("media backend error: "));
+
+        // `Backend` still answers `None`, which is what makes the typed path
+        // visible to `media_refusal_code` at the agent surface.
+        assert_eq!(before.recovery_code(), None);
     }
 }

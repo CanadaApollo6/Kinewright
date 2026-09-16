@@ -15,10 +15,11 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    AssetId, ClipContent, ClipId, ColorStage, Command, Document, EffectId, LutAsset, LutAssetId,
+    AssetId, ClipContent, ClipId, ColorStage, Command, Document, EffectId, IncidentCode,
+    IncidentEvidence, IncidentObservation, IncidentSubject, LabelIncident, LutAsset, LutAssetId,
     MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult,
     MediaCacheFamily, MediaCacheFamilyStatus, MediaError, MediaSourceFingerprint, Operation,
-    RelinkCandidate, ThreePointMode, TimeCode, TimelineRevision, TrackId,
+    RejectionIncident, RelinkCandidate, ThreePointMode, TimeCode, TimelineRevision, TrackId,
 };
 use kinewright_media::{LutAssetImport, LutStore};
 
@@ -163,6 +164,46 @@ impl SourceEditRejection {
             }
         }
     }
+
+    /// The incident code a Source-monitor refusal carries
+    /// (`IN1b` §2.2 rule 8).
+    const fn incident_code(self) -> IncidentCode {
+        match self {
+            Self::SupersededResponse
+            | Self::SourceNoLongerVerified
+            | Self::SourceMissing
+            | Self::SessionChanged
+            | Self::SourceSelectionChanged
+            | Self::AssetIdentityChanged
+            | Self::RevisionChanged
+            | Self::TimelinePositionChanged
+            | Self::SourcePositionChanged
+            | Self::SourceMarksChanged
+            | Self::SourceRoutesChanged => IncidentCode::Rejection(RejectionIncident::SourceEdit),
+        }
+    }
+
+    /// An observation from this refusal, with the caller's subject.
+    ///
+    /// Evidence is `SourceEdit { reason }` over the same `&'static str` the
+    /// message is, so nothing is restated: every one of the eleven messages
+    /// ends "no edit was applied", which is what `Blocks` means here.
+    fn incident_observation(
+        self,
+        subject: IncidentSubject,
+        revision: TimelineRevision,
+    ) -> IncidentObservation {
+        IncidentObservation {
+            code: self.incident_code(),
+            subject,
+            observed: self.message().to_owned(),
+            allowed: None,
+            evidence: IncidentEvidence::SourceEdit {
+                reason: self.message(),
+            },
+            revision,
+        }
+    }
 }
 
 /// Create the single Core command that may follow a completed Source
@@ -293,11 +334,32 @@ pub(crate) struct RelinkRevisionConflict {
 }
 
 impl RelinkRevisionConflict {
-    fn message(self, project_name: &str) -> String {
-        format!(
-            "Relink cancelled in {project_name}: the project changed while the replacement was being checked (expected timeline revision {}, current revision is {}). Choose Relink again.",
-            self.expected, self.actual
-        )
+    /// The incident code a relink revision gate carries (`IN1b` §2.2 rule 8).
+    ///
+    /// Declared in the app crate, which owns the trigger; the code and the
+    /// class stay core's (IN1 §2.1 rule 2).
+    #[allow(
+        clippy::unused_self,
+        reason = "`IN1b` §2.2 rule 8 declares the accessor on the value, not as \
+                  an associated function; this one is a struct with no variants \
+                  to match on, and the uniform shape is what lets the four \
+                  out-of-core enums be read the same way"
+    )]
+    pub(crate) const fn incident_code(self) -> IncidentCode {
+        IncidentCode::EditRevisionConflict
+    }
+
+    /// An observation from this refusal, with the caller's subject.
+    ///
+    /// The constructor is core's `revision_conflict`, so the evidence is
+    /// `Revision { expected, actual }` and the incident is stated against the
+    /// revision the document is actually on — the one the person must make the
+    /// edit against now.
+    pub(crate) fn incident_observation(self, subject: IncidentSubject) -> IncidentObservation {
+        IncidentObservation {
+            code: self.incident_code(),
+            ..IncidentObservation::revision_conflict(subject, self.expected, self.actual)
+        }
     }
 }
 
@@ -330,6 +392,34 @@ pub(crate) enum RelinkRejection {
 }
 
 impl RelinkRejection {
+    /// The incident code a relink refusal carries (`IN1b` §2.2 rule 8).
+    pub(crate) const fn incident_code(&self) -> IncidentCode {
+        match self {
+            Self::CandidateUnverified | Self::FingerprintMismatch { .. } => {
+                IncidentCode::Rejection(RejectionIncident::Relink)
+            }
+        }
+    }
+
+    /// An observation from this refusal, against the asset it refused to
+    /// replace — one media file that keeps refusing is one problem.
+    pub(crate) fn incident_observation(
+        &self,
+        asset: AssetId,
+        revision: TimelineRevision,
+    ) -> IncidentObservation {
+        IncidentObservation {
+            code: self.incident_code(),
+            subject: IncidentSubject::Asset(asset),
+            observed: self.message(asset),
+            allowed: None,
+            evidence: IncidentEvidence::Relink {
+                reason: self.message(asset),
+            },
+            revision,
+        }
+    }
+
     pub(crate) fn message(&self, asset: AssetId) -> String {
         match self {
             Self::CandidateUnverified => format!(
@@ -853,7 +943,12 @@ fn format_bytes(bytes: u64) -> String {
 impl KinewrightApp {
     pub(crate) fn choose_relink_for_asset(&mut self, asset_id: AssetId) {
         let Some(asset) = self.focused().document.asset(asset_id).cloned() else {
-            self.record_error("Media", format!("Asset {asset_id} no longer exists"));
+            // Appendix B row 79.
+            self.note_label(
+                LabelIncident::Media,
+                IncidentSubject::Asset(asset_id),
+                format!("Asset {asset_id} no longer exists"),
+            );
             return;
         };
         let Some(path) = rfd::FileDialog::new()
@@ -990,8 +1085,19 @@ impl KinewrightApp {
 
     pub(crate) fn refresh_media_statuses_for_focused_project(&mut self) {
         let session_id = self.focused().id;
+        // Appendix B row 80: the cancelled edit's own asset, read before the
+        // cancel takes it.
+        let cancelled_asset = self
+            .pending_source_edit
+            .as_ref()
+            .map(|pending| pending.asset_id);
         if cancel_pending_source_edit_for_session(&mut self.pending_source_edit, session_id) {
-            self.record_error("Source monitor", SOURCE_EDIT_REFRESH_CANCELED_MESSAGE);
+            let subject = cancelled_asset.map_or(IncidentSubject::Project, IncidentSubject::Asset);
+            self.note_label(
+                LabelIncident::SourceMonitor,
+                subject,
+                SOURCE_EDIT_REFRESH_CANCELED_MESSAGE,
+            );
         }
         let assets = self
             .focused()
@@ -1066,7 +1172,12 @@ impl KinewrightApp {
             .is_some_and(|pending| pending.matches_response(response))
         {
             self.pending_source_edit = None;
-            self.record_error("Source monitor", message);
+            // Appendix B row 81.
+            self.note_label(
+                LabelIncident::SourceMonitor,
+                IncidentSubject::Asset(response.asset_id),
+                message,
+            );
         }
     }
 
@@ -1081,12 +1192,25 @@ impl KinewrightApp {
             current.as_ref(),
         ) {
             Ok(None) => {}
-            Err(rejection) => self.record_error("Source monitor", rejection.message()),
+            // Appendix B row 82: the one typed `Source monitor` site.
+            Err(rejection) => {
+                let revision = self.focused().revision;
+                self.note_observation(
+                    rejection
+                        .incident_observation(IncidentSubject::Asset(response.asset_id), revision),
+                );
+            }
             Ok(Some(intent)) => {
+                // `Operation::incident_subject()` answers for the patch the
+                // intent carries, which is the narrowest id either refusal
+                // below can name (`IN1b` §3.3 rule 20).
+                let subject = intent.operation.incident_subject();
                 let Some(project_index) = session_index_by_id(intent.session_id, &self.projects)
                 else {
-                    self.record_error(
-                        "Source monitor",
+                    // Appendix B row 83.
+                    self.note_label(
+                        LabelIncident::SourceMonitor,
+                        subject,
                         "Project session closed while Source was being verified",
                     );
                     return;
@@ -1096,13 +1220,16 @@ impl KinewrightApp {
                     .send(Command::DoIfRevision {
                         expected: intent.expected_revision,
                         operation: intent.operation,
-                        // `IN1b` §4 rule 3: this send does not correlate yet.
+                        // `IN1b` §4 rule 3: a foreign send, which does not
+                        // correlate — the router's identity match leaves every
+                        // outstanding apply alone when this one conflicts.
                         token: None,
                     })
                     .is_err()
                 {
-                    self.record_error(
-                        "Operations",
+                    // Appendix B row 84.
+                    self.note_actor_stopped(
+                        subject,
                         "Core actor stopped while applying patched source edit",
                     );
                 } else {
@@ -1193,12 +1320,19 @@ impl KinewrightApp {
         let Some(project_index) = session_index_by_id(response.session_id, &self.projects) else {
             return;
         };
-        let project_name = self.projects[project_index].name.clone();
         if let Err(conflict) = validate_relink_revision(
             response.expected_revision,
             self.projects[project_index].revision,
         ) {
-            self.record_error("Relink", conflict.message(&project_name));
+            // Appendix B row 85: `edit_revision_conflict` with `Revision`
+            // evidence, stated against the asset the relink was for. The
+            // project's name leaves the message with the sentence it was
+            // interpolated into: an incident is stated against its subject,
+            // and the incident log is per-project by construction
+            // (IN1 §5.1 rule 1).
+            self.note_observation(
+                conflict.incident_observation(IncidentSubject::Asset(response.asset_id)),
+            );
             return;
         }
         let Some(target) = self.projects[project_index]
@@ -1230,13 +1364,19 @@ impl KinewrightApp {
                             asset_name: target.name,
                         });
                     }
+                    // Appendix B row 86.
                     Err(rejection) => {
-                        self.record_error("Relink", rejection.message(response.asset_id));
+                        let revision = self.projects[project_index].revision;
+                        self.note_observation(
+                            rejection.incident_observation(response.asset_id, revision),
+                        );
                     }
                 }
             }
-            Err(error) => self.record_error(
-                "Relink",
+            // Appendix B row 87.
+            Err(error) => self.note_label(
+                LabelIncident::Relink,
+                IncidentSubject::Asset(response.asset_id),
                 format!("Could not read replacement for {}: {error}", target.name),
             ),
         }
@@ -1276,8 +1416,11 @@ impl KinewrightApp {
                     self.media_cache_clear_result = Some(result);
                     self.media_cache_inventory = Some(self.analysis.cache_inventory());
                 }
-                Err(error) => self.record_error(
-                    "Media cache",
+                // Appendix B row 88: the cache is the project's, not an
+                // asset's.
+                Err(error) => self.note_label(
+                    LabelIncident::MediaCache,
+                    IncidentSubject::Project,
                     format!("Could not clear {family:?} cache: {error}"),
                 ),
             }
@@ -1299,7 +1442,8 @@ impl KinewrightApp {
         if let Err(conflict) =
             validate_relink_revision(expected_revision, self.projects[project_index].revision)
         {
-            self.record_error("Relink", conflict.message(&project_name));
+            // Appendix B row 89.
+            self.note_observation(conflict.incident_observation(IncidentSubject::Asset(asset_id)));
             return;
         }
         let operation = Operation::RelinkAsset {
@@ -1317,8 +1461,9 @@ impl KinewrightApp {
             })
             .is_err()
         {
-            self.record_error(
-                "Relink",
+            // Appendix B row 90.
+            self.note_actor_stopped(
+                IncidentSubject::Asset(asset_id),
                 format!("Core actor stopped while relinking in {project_name}"),
             );
         } else {
@@ -1368,12 +1513,14 @@ impl KinewrightApp {
         if confirm {
             self.pending_legacy_relink = None;
             if let Some(project_index) = session_index_by_id(pending.session_id, &self.projects) {
-                let project_name = self.projects[project_index].name.clone();
                 if let Err(conflict) = validate_relink_revision(
                     pending.expected_revision,
                     self.projects[project_index].revision,
                 ) {
-                    self.record_error("Relink", conflict.message(&project_name));
+                    // Appendix B row 91.
+                    self.note_observation(
+                        conflict.incident_observation(IncidentSubject::Asset(pending.asset_id)),
+                    );
                     return;
                 }
                 let Some(target) = self.projects[project_index]
@@ -1381,7 +1528,12 @@ impl KinewrightApp {
                     .asset(pending.asset_id)
                     .cloned()
                 else {
-                    self.record_error("Relink", "The selected asset no longer exists");
+                    // Appendix B row 92.
+                    self.note_label(
+                        LabelIncident::Relink,
+                        IncidentSubject::Asset(pending.asset_id),
+                        "The selected asset no longer exists",
+                    );
                     return;
                 };
                 match preflight_relink(&target, &pending.candidate) {
@@ -1399,8 +1551,12 @@ impl KinewrightApp {
                         pending.candidate,
                         false,
                     ),
+                    // Appendix B row 93.
                     Err(rejection) => {
-                        self.record_error("Relink", rejection.message(pending.asset_id));
+                        let revision = self.projects[project_index].revision;
+                        self.note_observation(
+                            rejection.incident_observation(pending.asset_id, revision),
+                        );
                     }
                 }
             }
@@ -1592,6 +1748,9 @@ pub(crate) struct LutImportResponse {
 #[derive(Debug)]
 pub(crate) struct LutRestoreResponse {
     pub(crate) session_id: u64,
+    /// The look being restored, so Appendix B row 104's refusal can be stated
+    /// against it rather than against the whole project (stage A addendum 2).
+    pub(crate) lut_asset: LutAssetId,
     pub(crate) title: String,
     pub(crate) candidate: PathBuf,
     pub(crate) result: Result<PathBuf, MediaError>,
@@ -1851,15 +2010,42 @@ impl KinewrightApp {
         self.start_lut_import(path, LutImportIntent::ConvertLegacy { clip, effect });
     }
 
+    /// Appendix B rows 99 and 104: a `look_unclassified` observation whose
+    /// evidence keeps the typed [`MediaError`] the LUT store handed back.
+    ///
+    /// One incident carries one code (erratum `IN1b`-A-R1): the evidence's
+    /// `code` is the incident's own, and the engine's rendered reason survives
+    /// in `observed`. The day cut item 2 lands the per-variant
+    /// `LutStoreErrorCode` codes, this is the one place the code changes.
+    fn lut_media_observation(
+        &self,
+        subject: IncidentSubject,
+        observed: String,
+        error: &MediaError,
+    ) -> IncidentObservation {
+        let code = IncidentCode::Label(LabelIncident::Look);
+        IncidentObservation {
+            code,
+            subject,
+            observed,
+            allowed: None,
+            evidence: IncidentEvidence::MediaError {
+                code: code.code(),
+                message: error.to_string(),
+            },
+            revision: self.focused().revision,
+        }
+    }
+
     /// Parse, hash, and store one `.cube` on a named worker thread (CC4 §7).
     pub(crate) fn start_lut_import(&mut self, path: PathBuf, intent: LutImportIntent) {
         let Some(store) = self.focused().lut_store.clone() else {
-            self.record_error(
-                "Look",
-                self.focused()
-                    .lut_store_unavailable_reason()
-                    .unwrap_or_else(|| PROJECT_NOT_SAVED_MESSAGE.to_owned()),
-            );
+            // Appendix B row 94: the store root is the project's.
+            let reason = self
+                .focused()
+                .lut_store_unavailable_reason()
+                .unwrap_or_else(|| PROJECT_NOT_SAVED_MESSAGE.to_owned());
+            self.note_label(LabelIncident::Look, IncidentSubject::Project, reason);
             return;
         };
         let session_id = self.focused().id;
@@ -1880,14 +2066,26 @@ impl KinewrightApp {
             });
         if let Err(error) = spawn {
             self.lut_worker_pending = self.lut_worker_pending.saturating_sub(1);
-            self.record_error("Look", format!("Could not start the look import: {error}"));
+            // Appendix B row 95.
+            self.note_label(
+                LabelIncident::Look,
+                IncidentSubject::Project,
+                format!("Could not start the look import: {error}"),
+            );
         }
     }
 
     /// `Locate file…`: pick a candidate and hash-check it into the store.
     pub(crate) fn choose_lut_restore(&mut self, lut_asset: LutAssetId) {
         let Some(asset) = self.focused().document.lut_asset(lut_asset).cloned() else {
-            self.record_error("Look", format!("LUT asset {lut_asset} no longer exists"));
+            // Appendix B row 96: one look that keeps refusing is one
+            // problem, and `IncidentSubject::LutAsset` is the axis that says
+            // so (stage A addendum 2; erratum `IN1b`-C-R42 is withdrawn).
+            self.note_label(
+                LabelIncident::Look,
+                IncidentSubject::LutAsset(lut_asset),
+                format!("LUT asset {lut_asset} no longer exists"),
+            );
             return;
         };
         let Some(candidate) = choose_lut_file() else {
@@ -1903,15 +2101,16 @@ impl KinewrightApp {
     /// document state, does not dirty the project, and needs no revision gate.
     pub(crate) fn start_lut_restore(&mut self, asset: &LutAsset, candidate: PathBuf) {
         let Some(store) = self.focused().lut_store.clone() else {
-            self.record_error(
-                "Look",
-                self.focused()
-                    .lut_store_unavailable_reason()
-                    .unwrap_or_else(|| PROJECT_NOT_SAVED_MESSAGE.to_owned()),
-            );
+            // Appendix B row 97.
+            let reason = self
+                .focused()
+                .lut_store_unavailable_reason()
+                .unwrap_or_else(|| PROJECT_NOT_SAVED_MESSAGE.to_owned());
+            self.note_label(LabelIncident::Look, IncidentSubject::Project, reason);
             return;
         };
         let session_id = self.focused().id;
+        let lut_asset = asset.id;
         let title = asset.title.clone();
         let asset = asset.clone();
         let result_tx = self.lut_restore_tx.clone();
@@ -1923,6 +2122,7 @@ impl KinewrightApp {
                 let result = store.restore(&asset, &candidate);
                 let _ = result_tx.send(LutRestoreResponse {
                     session_id,
+                    lut_asset,
                     title,
                     candidate,
                     result,
@@ -1930,7 +2130,12 @@ impl KinewrightApp {
             });
         if let Err(error) = spawn {
             self.lut_worker_pending = self.lut_worker_pending.saturating_sub(1);
-            self.record_error("Look", format!("Could not start the look restore: {error}"));
+            // Appendix B row 98.
+            self.note_label(
+                LabelIncident::Look,
+                IncidentSubject::Project,
+                format!("Could not start the look restore: {error}"),
+            );
         }
     }
 
@@ -1941,8 +2146,19 @@ impl KinewrightApp {
         };
         let import = match response.result {
             Ok(import) => import,
+            // Appendix B row 99, amended by erratum `IN1b`-C-R52: the import
+            // that would have minted a `LutAssetId` is the thing that failed,
+            // so there is no look to state this against and the store root is
+            // the project's. `MediaError` evidence, and `look_unclassified`
+            // until cut item 2 lands the per-variant `LutStoreErrorCode` codes
+            // (`IN1b` §12).
             Err(error) => {
-                self.record_error("Look", lut_failure_message(&response.path, &error));
+                let observation = self.lut_media_observation(
+                    IncidentSubject::Project,
+                    lut_failure_message(&response.path, &error),
+                    &error,
+                );
+                self.note_observation(observation);
                 return;
             }
         };
@@ -1953,8 +2169,10 @@ impl KinewrightApp {
             &response.intent,
         ) {
             Ok(batch) => batch,
+            // Appendix B row 100, amended by erratum `IN1b`-C-R52: the plan
+            // that mints the id is the thing that was refused.
             Err(error) => {
-                self.record_error("Look", error);
+                self.note_label(LabelIncident::Look, IncidentSubject::Project, error);
                 return;
             }
         };
@@ -1966,8 +2184,16 @@ impl KinewrightApp {
             store_unavailable.as_deref(),
             &batch.asset,
         );
+        // From here the batch names the look it registers, so every refusal
+        // below is that look's (Appendix B rows 101-103).
+        let lut_asset = batch.asset.id;
         if let Some(message) = realignment {
-            self.record_error("Look", message);
+            // Appendix B row 101.
+            self.note_label(
+                LabelIncident::Look,
+                IncidentSubject::LutAsset(lut_asset),
+                message,
+            );
             return;
         }
         if self.projects[project_index]
@@ -1975,7 +2201,11 @@ impl KinewrightApp {
             .send(Command::DoBatch(batch.operations))
             .is_err()
         {
-            self.record_error("Look", "Core actor stopped while registering the look");
+            // Appendix B row 102.
+            self.note_actor_stopped(
+                IncidentSubject::LutAsset(lut_asset),
+                "Core actor stopped while registering the look",
+            );
             return;
         }
         self.lut_import_reservation = Some(LutImportReservation {
@@ -1983,8 +2213,12 @@ impl KinewrightApp {
             asset: batch.asset.id,
         });
         if let Some(lost) = batch.target_lost {
-            self.record_error(
-                "Look",
+            // Appendix B row 103: `look_incomplete`, because the look **was**
+            // registered and only its application is missing — a degraded
+            // result, not a blocked one.
+            self.note_label(
+                LabelIncident::LookIncomplete,
+                IncidentSubject::LutAsset(lut_asset),
                 format!(
                     "Imported {title}, but {lost}, so it was registered without being applied. \
                      Apply it from the look browser."
@@ -2007,14 +2241,19 @@ impl KinewrightApp {
                 }
                 self.status = format!("Restored look {}", response.title);
             }
-            Err(error) => self.record_error(
-                "Look",
-                format!(
-                    "Could not restore {}: {}",
-                    response.title,
-                    lut_failure_message(&response.candidate, &error)
-                ),
-            ),
+            // Appendix B row 104.
+            Err(error) => {
+                let observation = self.lut_media_observation(
+                    IncidentSubject::LutAsset(response.lut_asset),
+                    format!(
+                        "Could not restore {}: {}",
+                        response.title,
+                        lut_failure_message(&response.candidate, &error)
+                    ),
+                    &error,
+                );
+                self.note_observation(observation);
+            }
         }
     }
 
@@ -2503,9 +2742,25 @@ mod tests {
             .expect_err("a changed project must reject the relink");
         assert_eq!(conflict.expected, TimelineRevision(8));
         assert_eq!(conflict.actual, TimelineRevision(9));
-        let message = conflict.message("Demo");
-        assert!(message.contains("expected timeline revision 8"));
-        assert!(message.contains("current revision is 9"));
+        // `IN1b` §5.1 step 3: the rendered "Relink cancelled in {project}…"
+        // sentence is gone and the same two revisions reach the person through
+        // the incident instead — `allowed` is the revision the send was
+        // planned against and `observed` is the one the document is on, which
+        // is the one they must make the edit against now.
+        let observation = conflict.incident_observation(IncidentSubject::Asset(AssetId(4)));
+        assert_eq!(observation.code, IncidentCode::EditRevisionConflict);
+        assert_eq!(observation.code.code(), "edit_revision_conflict");
+        assert_eq!(observation.subject, IncidentSubject::Asset(AssetId(4)));
+        assert_eq!(observation.allowed.as_deref(), Some("8"));
+        assert_eq!(observation.observed, "9");
+        assert_eq!(observation.revision, TimelineRevision(9));
+        assert_eq!(
+            observation.evidence,
+            IncidentEvidence::Revision {
+                expected: TimelineRevision(8),
+                actual: TimelineRevision(9),
+            }
+        );
     }
 
     #[test]

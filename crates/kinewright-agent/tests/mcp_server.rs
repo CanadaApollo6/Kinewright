@@ -2422,6 +2422,11 @@ async fn cc7_prepare_commit_and_compare(
 /// the served quad does not move for the sixteenth consecutive measurement,
 /// because `served_tools()` filters `capability_tools()` by
 /// `COMPACT_TOOL_NAMES` and IN1 touches neither that list nor `Operation`.
+///
+/// **Pin site 2 of 3 (`IN1b` §6.4 rules 7–8, erratum `IN1b`-R3).** It does not
+/// move for the seventeenth measurement either: `IN1b` adds no served tool, no
+/// capability and no schema field, and its growth is output-only — more codes,
+/// subjects and evidence variants inside a `get_incidents` response body.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
@@ -10337,14 +10342,28 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
     server.shutdown();
 }
 
-/// IN1 §6.6 and §9 clause 13: two capabilities, no tool.
+/// IN1 §6.6 and §9 clause 13, and `IN1b` §6.4 rules 7–8 and §9 clause 17: two
+/// capabilities, no tool, for the **seventeenth** consecutive measurement.
 ///
 /// The registry sextuple is `140 / 54 / 86 / 1 551 301 / 1 407 012 / 121 315`,
 /// pinned byte for byte in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
 /// this test pins the three counts and the served quad over the live endpoint.
+///
+/// **Pin site 3 of 3, and the site that carries the counter** (`IN1b` §6.4
+/// rule 7). IN1 §6.6 rule 25 and §9 clause 13 say "both pin sites"; there are
+/// three, and erratum `IN1b`-R3 corrects them. The quad did not move because
+/// Part B adds no served tool and no capability — both incident capabilities
+/// were already registry-only and `served_tools()` filters by
+/// `COMPACT_TOOL_NAMES` — and because Part B's entire growth is output-only:
+/// 67 codes, seven subject shapes and eleven evidence variants change what a
+/// response body says, never what either input schema declares.
+///
+/// Renamed from `in1_the_agent_surface_grows_by_two_capabilities_and_no_tool`
+/// to `IN1b` §7 item 32's name (erratum `IN1b`-D-R62); every IN1 assertion in
+/// it is unchanged.
 #[tokio::test(flavor = "multi_thread")]
-async fn in1_the_agent_surface_grows_by_two_capabilities_and_no_tool() {
+async fn in1b_the_served_quad_does_not_move_for_the_seventeenth_measurement() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
@@ -10399,14 +10418,18 @@ async fn in1_the_agent_surface_grows_by_two_capabilities_and_no_tool() {
             metrics.description_bytes
         ),
         (7, 5_660, 3_510, 998),
-        "the served quad does not move for the sixteenth consecutive measurement: {metrics:?}"
+        "the served quad does not move for the seventeenth consecutive measurement: {metrics:?}"
     );
 
-    // IN1 §6.2 rule 9: the two token budgets are real constants, not adjectives.
+    // IN1 §6.2 rule 9 and `IN1b` §3.11 rule 43: the two token budgets are real
+    // constants, not adjectives. 819 does not move — Part A's incident
+    // serialises byte for byte after Part B — and the ceiling moves to the
+    // smallest power of two above [probe-2c]'s measured worst of 1 351 B over
+    // 67 codes x seven subject shapes (erratum `IN1b`-R10).
     assert_eq!(kinewright_agent::IN1_INCIDENT_SERIALIZED_BYTES, 819);
     assert_eq!(
         kinewright_agent::IN1_INCIDENT_SERIALIZED_CEILING_BYTES,
-        1_024
+        2_048
     );
 
     client.cancel().await.unwrap();

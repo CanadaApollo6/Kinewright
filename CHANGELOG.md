@@ -95,6 +95,22 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- IN1 Part B, the error migration: every error path that reaches the person
+  through the app's log, status bar or chat transcript is now a typed
+  incident — 128 `record_error` sites, 3 direct log writes and 3 log-bypassing
+  sinks migrated, `record_error` deleted, one writer left. Core classifies all
+  154 `OpError` variants into 11 families with a written recovery sentence
+  each, grows the incident codes from 12 to 67 with a policy class and a
+  severity per code, and gives incidents eight subject kinds (asset, LUT,
+  clip, track, audio chain, export job, project, agent). Revision-gated
+  commands carry a correlation token echoed on their outcome, so the router
+  matches a refused apply by identity rather than by revision. The toolbar
+  badge counts open incidents; an Incidents panel lists them for non-asset
+  subjects; the audit log keeps every line. The agent's three string parsers
+  of `media backend error:` read the typed recovery code instead, and the LUT
+  and room-tone stores' codes travel typed. No MCP tool, operation or schema
+  byte is added; the served surface is unchanged for the seventeenth
+  consecutive measurement. See docs/IN1B-ERROR-MIGRATION.md.
 - IN1 Part A, incidents and the colour case: a typed `Incident` model in core
   with a per-code policy table (auto-apply / ask-first / explain), one
   session incident log with dedup and suppression, `ColorProvenance::

@@ -206,8 +206,22 @@ impl std::fmt::Display for RoomToneStoreError {
 impl std::error::Error for RoomToneStoreError {}
 
 impl From<RoomToneStoreError> for MediaError {
+    /// Carried typed rather than flattened into `MediaError::Backend`
+    /// (`IN1b` §6.2 rule 4, ruling N4/CR-D1), so the room-tone store's own code reaches
+    /// `MediaError::recovery_code()` as data instead of being reconstructed
+    /// from the rendered text at the agent surface.
+    ///
+    /// `message` is the store's own rendering and carries no label: the
+    /// `media backend error: ` prefix lives in `MediaError::Store`'s template,
+    /// exactly where `MediaError::Backend` kept it, so the rendered text is
+    /// byte-identical and every caller that read `Backend`'s `String` reads
+    /// `message` the same way. Dropping the label is `IN1b` §13 D-B4, owned by
+    /// IN2.
     fn from(error: RoomToneStoreError) -> Self {
-        Self::Backend(error.to_string())
+        Self::Store {
+            code: error.code().as_str(),
+            message: error.to_string(),
+        }
     }
 }
 
@@ -561,7 +575,7 @@ impl RoomToneStore {
             return missing(&path, "the store path is not a regular file");
         }
         if metadata.len() > ROOM_TONE_MAX_FILE_BYTES {
-            return unreadable(Some(path), &too_large(metadata.len()));
+            return unreadable(Some(path), &too_large(metadata.len()).to_string());
         }
         match fs::read(&path) {
             Ok(bytes) => {
@@ -773,7 +787,7 @@ fn read_store_file(path: &Path) -> Result<Vec<u8>, MediaError> {
         .into());
     }
     if metadata.len() > ROOM_TONE_MAX_FILE_BYTES {
-        return Err(MediaError::Backend(too_large(metadata.len())));
+        return Err(too_large(metadata.len()).into());
     }
     fs::read(path).map_err(|error| {
         MediaError::from(
@@ -787,14 +801,15 @@ fn read_store_file(path: &Path) -> Result<Vec<u8>, MediaError> {
 }
 
 /// The one `room_tone_file_too_large` sentence, spelled once.
-fn too_large(observed: u64) -> String {
+/// Returns the typed refusal rather than its rendering, so the caller's `into()`
+/// reaches the one `From` impl and the code travels as data (`IN1b` N4/CR-D1).
+fn too_large(observed: u64) -> RoomToneStoreError {
     RoomToneStoreError::new(
         RoomToneStoreErrorCode::RoomToneFileTooLarge,
         "the room-tone file is larger than the room-tone file limit".to_owned(),
     )
     .with_observed(&observed.to_string())
     .with_allowed(&ROOM_TONE_MAX_FILE_BYTES.to_string())
-    .to_string()
 }
 
 /// Refuse a store root or sub-directory that is a symlink or not a directory.
@@ -933,8 +948,8 @@ mod tests {
     }
 
     fn backend_message(error: MediaError) -> String {
-        let MediaError::Backend(message) = error else {
-            panic!("room-tone store failures cross as MediaError::Backend");
+        let MediaError::Store { message, .. } = error else {
+            panic!("room-tone store failures cross as MediaError::Store");
         };
         message
     }
@@ -1489,5 +1504,58 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("the store file is a symlink"), "{message}");
+    }
+
+    /// `IN1b` §6.2 rule 4 and ruling N4/CR-D1: the room-tone store's own code
+    /// reaches `MediaError::recovery_code()` as **data**, and the rendered text
+    /// is byte-identical to the `MediaError::Backend` string it replaced, so
+    /// IN1 §9 clause 11's 750 B template and the agent's pinned served text do
+    /// not move (`IN1b` §13 D-B4).
+    #[test]
+    fn in1b_the_room_tone_store_refusal_reaches_media_error_typed() {
+        let error = RoomToneStoreError::new(
+            RoomToneStoreErrorCode::RoomToneStoreWriteFailed,
+            "the stored entry does not match the project".to_owned(),
+        )
+        .with_observed("3x3")
+        .with_allowed("33x33");
+        let rendered = error.to_string();
+        assert!(
+            rendered.starts_with("room_tone_store_write_failed: "),
+            "the code is the first token: {rendered}"
+        );
+
+        // What the `From` impl produced before the addendum, spelled out rather
+        // than referenced, so the byte-identity is asserted against a literal
+        // and not against the code under test.
+        let before = MediaError::Backend(rendered.clone());
+        let after = MediaError::from(error.clone());
+
+        assert_eq!(
+            after,
+            MediaError::Store {
+                code: "room_tone_store_write_failed",
+                message: rendered.clone(),
+            }
+        );
+        assert_eq!(after.recovery_code(), Some("room_tone_store_write_failed"));
+        assert_eq!(after.recovery_code(), Some(error.code().as_str()));
+        assert_eq!(
+            after.to_string(),
+            before.to_string(),
+            "the rendered text must not move"
+        );
+        assert!(after.to_string().starts_with("media backend error: "));
+        // `message` is the payload, not the whole rendering: the label lives in
+        // `MediaError::Store`'s template, where `Backend` kept it.
+        let MediaError::Store { message, .. } = &after else {
+            unreachable!("just constructed")
+        };
+        assert_eq!(message, &rendered);
+        assert!(!message.starts_with("media backend error: "));
+
+        // `Backend` still answers `None`, which is what makes the typed path
+        // visible to `media_refusal_code` at the agent surface.
+        assert_eq!(before.recovery_code(), None);
     }
 }

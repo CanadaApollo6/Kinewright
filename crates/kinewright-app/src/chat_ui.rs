@@ -13,8 +13,8 @@ use kinewright_agent::{
 };
 use kinewright_core::{
     AgentDriver, AgentEvent, AgentSession, Analysis, AuthenticationStatus, Command, Document,
-    Event, Export, HarnessInfo, Playback, QaSeverity, SessionConfig, TimeCode, TimelineRevision,
-    qa_document,
+    Event, Export, HarnessInfo, IncidentObservation, IncidentSubject, LabelIncident, Playback,
+    QaSeverity, SessionConfig, TimeCode, TimelineRevision, qa_document,
 };
 use serde::Serialize;
 
@@ -388,7 +388,12 @@ impl KinewrightApp {
             .as_ref()
             .map(|server| server.endpoint().to_owned())
         else {
-            self.record_error("Agent", "The Kinewright agent server is unavailable");
+            // Appendix B row 34.
+            self.note_label(
+                LabelIncident::Agent,
+                IncidentSubject::Agent,
+                "The Kinewright agent server is unavailable",
+            );
             return;
         };
         let harness = self.projects[project_index].threads[thread_index].harness;
@@ -398,8 +403,10 @@ impl KinewrightApp {
             AgentHarnessChoice::Cursor => self.cursor_info.as_ref(),
         };
         if harness_info.is_none() {
-            self.record_error(
-                "Agent",
+            // Appendix B row 35.
+            self.note_label(
+                LabelIncident::Agent,
+                IncidentSubject::Agent,
                 format!("{} is not installed on PATH", harness.label()),
             );
             return;
@@ -440,8 +447,10 @@ impl KinewrightApp {
                     self.projects[project_index].threads[thread_index].session = Some(session);
                 }
                 Err(error) => {
-                    self.record_error(
-                        "Agent",
+                    // Appendix B row 36.
+                    self.note_label(
+                        LabelIncident::Agent,
+                        IncidentSubject::Agent,
                         format!("Could not start {}: {error}", harness.label()),
                     );
                     return;
@@ -474,7 +483,12 @@ impl KinewrightApp {
                 self.status = format!("{} is editing the timeline", harness.label());
             }
             Err(error) => {
-                self.record_error("Agent", format!("Could not send agent message: {error}"));
+                // Appendix B row 37.
+                self.note_label(
+                    LabelIncident::Agent,
+                    IncidentSubject::Agent,
+                    format!("Could not send agent message: {error}"),
+                );
             }
         }
     }
@@ -546,7 +560,8 @@ impl KinewrightApp {
             &incidents,
         );
         if let Err(error) = result {
-            self.record_error("Agent branch", error);
+            // Appendix B row 38.
+            self.note_label(LabelIncident::AgentBranch, IncidentSubject::Agent, error);
             false
         } else {
             true
@@ -627,19 +642,41 @@ impl KinewrightApp {
             Ok(BranchApplyOutcome::NoChanges) => {
                 "The agent branch has no edits".clone_into(&mut self.status);
             }
+            // Appendix B row 39, the first of `IN1b` §5.7's three
+            // log-bypassing sinks: the arm used to write a bare sentence into
+            // `self.status` and nowhere else that could be counted. The
+            // transcript entry **stays** — the chat is the thread's own record
+            // — and `self.status` is now written by `note_incident`, not here.
             Ok(BranchApplyOutcome::Conflict { expected, actual }) => {
                 let message = format!(
                     "Branch merge stopped: it was based on live revision {expected}, but live is now {actual}. Review and cherry-pick compatible operations or discard the branch."
                 );
                 self.projects[project_index].threads[thread_index]
                     .chat
-                    .push(ChatEntry::Text(message.clone()));
-                self.status = message;
+                    .push(ChatEntry::Text(message));
+                self.note_observation(IncidentObservation::revision_conflict(
+                    IncidentSubject::Agent,
+                    expected,
+                    actual,
+                ));
             }
-            Ok(BranchApplyOutcome::Rejected { error, .. }) => {
-                self.record_error("Agent branch", format!("Branch merge rejected: {error}"));
+            // Appendix B row 40: a `BatchError`, whose code and evidence core
+            // resolves together — `Empty` is `edit_plan_rejected`, and
+            // `OperationFailed` delegates to the inner rejection's family.
+            Ok(BranchApplyOutcome::Rejected { operations, error }) => {
+                let revision = self.projects[project_index].revision;
+                let subject = crate::app::batch_incident_subject(&operations);
+                self.note_observation(IncidentObservation::from_batch_error(
+                    &error, subject, revision,
+                ));
             }
-            Err(error) => self.record_error("Agent branch", error.to_string()),
+            // Appendix B row 41: a `BranchError`. `InvalidBase` delegates its
+            // code to the inner rejection; the subject stays `Agent`, because
+            // the operation the base was rejected for is not in scope here.
+            Err(error) => {
+                let revision = self.projects[project_index].revision;
+                self.note_observation(error.incident_observation(IncidentSubject::Agent, revision));
+            }
         }
     }
 
@@ -650,8 +687,10 @@ impl KinewrightApp {
             .clone();
         let comparison = match branch.compare() {
             Ok(comparison) => comparison,
+            // Appendix B row 42.
             Err(error) => {
-                self.record_error("Agent branch", error.to_string());
+                let revision = self.projects[project_index].revision;
+                self.note_observation(error.incident_observation(IncidentSubject::Agent, revision));
                 return;
             }
         };
@@ -718,15 +757,28 @@ impl KinewrightApp {
             Ok(BranchApplyOutcome::NoChanges) => {
                 "Select at least one branch operation".clone_into(&mut self.status);
             }
+            // Appendix B row 43, the second of `IN1b` §5.7's three sinks: the
+            // arm wrote `self.status` and nothing else at all.
             Ok(BranchApplyOutcome::Conflict { expected, actual }) => {
-                self.status = format!(
-                    "Cherry-pick stopped: expected live revision {expected}, actual {actual}"
-                );
+                self.note_observation(IncidentObservation::revision_conflict(
+                    IncidentSubject::Agent,
+                    expected,
+                    actual,
+                ));
             }
-            Ok(BranchApplyOutcome::Rejected { error, .. }) => {
-                self.record_error("Agent branch", format!("Cherry-pick rejected: {error}"));
+            // Appendix B row 44.
+            Ok(BranchApplyOutcome::Rejected { operations, error }) => {
+                let revision = self.projects[project_index].revision;
+                let subject = crate::app::batch_incident_subject(&operations);
+                self.note_observation(IncidentObservation::from_batch_error(
+                    &error, subject, revision,
+                ));
             }
-            Err(error) => self.record_error("Agent branch", error.to_string()),
+            // Appendix B row 45.
+            Err(error) => {
+                let revision = self.projects[project_index].revision;
+                self.note_observation(error.incident_observation(IncidentSubject::Agent, revision));
+            }
         }
     }
 
@@ -794,7 +846,16 @@ impl KinewrightApp {
                     );
                 self.status = format!("Reviewing isolated branch frame {}", at.0);
             }
-            Err(error) => self.record_error("Branch preview", error.to_string()),
+            // Appendix B row 46: the code comes from
+            // `MediaError::recovery_code()` at run time.
+            Err(error) => {
+                let revision = self.projects[project_index].revision;
+                self.note_observation(IncidentObservation::from_media_error(
+                    &error,
+                    IncidentSubject::Agent,
+                    revision,
+                ));
+            }
         }
     }
 
@@ -846,7 +907,12 @@ impl KinewrightApp {
                         .chat
                         .push(ChatEntry::Text(error.clone()));
                     let project_name = self.projects[project_index].name.clone();
-                    self.record_error("Agent", format!("{project_name}: {error}"));
+                    // Appendix B row 47.
+                    self.note_label(
+                        LabelIncident::Agent,
+                        IncidentSubject::Agent,
+                        format!("{project_name}: {error}"),
+                    );
                 }
                 AgentEvent::ToolCall { name, arguments } => {
                     let kind = if name == "get_frame_at" || name.contains("storyboard") {
@@ -938,7 +1004,12 @@ impl KinewrightApp {
             &incidents,
         );
         let Ok(thread) = thread else {
-            self.record_error("Agent branch", "Could not create an isolated agent branch");
+            // Appendix B row 48.
+            self.note_label(
+                LabelIncident::AgentBranch,
+                IncidentSubject::Agent,
+                "Could not create an isolated agent branch",
+            );
             return;
         };
         self.projects[project_index].threads.push(thread);

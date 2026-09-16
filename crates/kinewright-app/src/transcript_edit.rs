@@ -1,7 +1,7 @@
 use kinewright_core::{
-    Clip, ClipId, Document, FrameRounding, Operation, TimeCode, TimelineTranscriptWord, TrackId,
-    TranscriptCutRange, TranscriptStatus, is_filler_word, map_frames_with_rounding,
-    transcript_cut_ranges, transcript_cut_ranges_for_indices,
+    Clip, ClipId, Document, FrameRounding, IncidentSubject, LabelIncident, Operation, TimeCode,
+    TimelineTranscriptWord, TrackId, TranscriptCutRange, TranscriptStatus, is_filler_word,
+    map_frames_with_rounding, transcript_cut_ranges, transcript_cut_ranges_for_indices,
 };
 
 use crate::{app::KinewrightApp, transcript_ui::TranscriptSelection};
@@ -55,19 +55,34 @@ impl KinewrightApp {
         {
             Ok(words) => dedup_linked_timeline_words(words),
             Err(error) => {
-                self.record_error("Transcript edit", error.to_string());
+                // Appendix B row 125: the scan runs over the whole timeline
+                // with `None`, so the refusal is the project's.
+                self.note_label(
+                    LabelIncident::TranscriptEdit,
+                    IncidentSubject::Project,
+                    error.to_string(),
+                );
                 return;
             }
         };
         match selected_transcript_word_cut_operations(&self.focused().document, &words, selection) {
             Ok(operations) if operations.is_empty() => {
-                self.record_error(
-                    "Transcript edit",
+                // Appendix B row 126.
+                let subject =
+                    selected_transcript_cut_subject(&self.focused().document, &words, selection);
+                self.note_label(
+                    LabelIncident::TranscriptEdit,
+                    subject,
                     "The selected words contain no cuttable frames",
                 );
             }
             Ok(operations) => self.send_operations(operations),
-            Err(error) => self.record_error("Transcript edit", error),
+            Err(error) => {
+                // Appendix B row 127.
+                let subject =
+                    selected_transcript_cut_subject(&self.focused().document, &words, selection);
+                self.note_label(LabelIncident::TranscriptEdit, subject, error);
+            }
         }
     }
 
@@ -92,7 +107,13 @@ impl KinewrightApp {
         {
             Ok(words) => dedup_linked_timeline_words(words),
             Err(error) => {
-                self.record_error("Transcript edit", error.to_string());
+                // Appendix B row 128, amended by erratum `IN1b`-C-R41: the
+                // scan failed, so no cut range and therefore no clip exists.
+                self.note_label(
+                    LabelIncident::TranscriptEdit,
+                    IncidentSubject::Project,
+                    error.to_string(),
+                );
                 return;
             }
         };
@@ -105,22 +126,57 @@ impl KinewrightApp {
             } else {
                 "There are no filler words available to remove"
             };
-            self.record_error("Transcript edit", message);
+            // Appendix B row 129, amended by erratum `IN1b`-C-R41: the site
+            // fires because nothing was selected, so it names no clip.
+            self.note_label(
+                LabelIncident::TranscriptEdit,
+                IncidentSubject::Project,
+                message,
+            );
             return;
         }
         let cuts =
             transcript_cut_ranges_for_indices(&self.focused().document, &words, &selected_indices);
+        // Appendix B rows 130-131: the plan names its clips, so the incident
+        // is stated against the first of them.
+        let subject = transcript_cut_subject(&cuts);
         match transcript_word_cut_operations(&self.focused().document, &cuts) {
             Ok(operations) if operations.is_empty() => {
-                self.record_error(
-                    "Transcript edit",
+                self.note_label(
+                    LabelIncident::TranscriptEdit,
+                    subject,
                     "The filler words contain no cuttable frames",
                 );
             }
             Ok(operations) => self.send_operations(operations),
-            Err(error) => self.record_error("Transcript edit", error),
+            Err(error) => self.note_label(LabelIncident::TranscriptEdit, subject, error),
         }
     }
+}
+
+/// The clip a transcript cut plan is about, for the incident's dedup axis.
+///
+/// `Project` when the plan names none: a refusal with no clip to blame is a
+/// document-wide one, and two spellings of "no clip" must not become two
+/// problems (`IN1b` §3.3 rule 17).
+fn transcript_cut_subject(cuts: &[TranscriptCutRange]) -> IncidentSubject {
+    cuts.first().map_or(IncidentSubject::Project, |cut| {
+        IncidentSubject::Clip(cut.clip)
+    })
+}
+
+/// [`transcript_cut_subject`] for a selection, resolved on the error path
+/// only (Appendix B rows 126-127).
+fn selected_transcript_cut_subject(
+    document: &Document,
+    words: &[TimelineTranscriptWord],
+    selection: TranscriptSelection,
+) -> IncidentSubject {
+    selection
+        .indices(words)
+        .map_or(IncidentSubject::Project, |selected| {
+            transcript_cut_subject(&transcript_cut_ranges(document, words, selected))
+        })
 }
 
 fn selected_transcript_word_cut_operations(

@@ -13,9 +13,10 @@
 
 use eframe::egui;
 use kinewright_core::{
-    Incident, IncidentCode, IncidentOutcome, IncidentSeverity, IncidentState, IncidentSubject,
-    Operation, PolicyClass, RecoveryAction, RecoveryKind, SourceColorIncident, explain_body,
-    recovery_description,
+    ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, Incident, IncidentCode,
+    IncidentFamily, IncidentOutcome, IncidentSeverity, IncidentState, IncidentSubject,
+    LabelIncident, MediaIncident, Operation, PolicyClass, RecoveryAction, RecoveryKind,
+    RejectionIncident, SourceColorIncident, recovery_description,
 };
 
 use crate::theme::{self, color, space, type_size};
@@ -65,19 +66,29 @@ pub(crate) struct CardAction {
 
 /// Build the card for one incident.
 ///
-/// `assumed_from_present` is the one document fact the card needs and the
-/// incident cannot carry: whether the subject asset still has something to
-/// revert to. Passing it keeps this function pure and egui-free.
+/// `revert_available` is the one document fact the card needs and the incident
+/// cannot carry: whether the subject still has something to revert to. Passing
+/// it keeps this function pure and egui-free.
+///
+/// `IN1b` §5.5 rule 28 split it out of Part A's `assumed_from_present`, which
+/// was doing two jobs — gating the revert button *and* gating a `details` row
+/// that prints the description the recovery wrote — under a name that only
+/// described the second. The flag now means one thing, and the `assumed` row
+/// moves behind the evidence: [`card_details`] prints it when the evidence
+/// carries a probed description **and** a revert is available, which is
+/// exactly the condition that made it true before and is now readable.
+/// Colour supplies `asset.assumed_from.is_some()`; every other code supplies
+/// `false` until it ships a revert of its own.
 #[must_use]
-pub(crate) fn incident_card(incident: &Incident, assumed_from_present: bool) -> IncidentCardView {
+pub(crate) fn incident_card(incident: &Incident, revert_available: bool) -> IncidentCardView {
     IncidentCardView {
         severity: incident.severity,
         class: incident.class,
         subject_label: incident.subject.label(),
         headline: incident_headline(incident.code, incident.class),
         state_label: state_label(incident.state),
-        actions: card_actions(incident, assumed_from_present),
-        details: card_details(incident, assumed_from_present),
+        actions: card_actions(incident, revert_available),
+        details: card_details(incident, revert_available),
     }
 }
 
@@ -110,21 +121,43 @@ pub(crate) fn card_action_outcome(incident: &Incident, action: &CardAction) -> I
 /// both containers" a type-level fact rather than a hope. The asset identity
 /// lives in `subject_label` and the probed tuple in `details`.
 ///
-/// The table has **fifteen** rows for twelve codes because the three
+/// The table has **seventy** rows for sixty-seven codes because the three
 /// `Rec709Compatible` codes are reachable under both `AutoApply` and `Explain`;
-/// the other nine are reachable only as `Explain`. The match carries no
-/// wildcard arm in either position, so a new code or a new class breaks the
-/// build (IN1 §5.3 rules 25–27).
+/// the other sixty-four are reachable only as `Explain` (`IN1b` §5.5 rule 30).
+/// The match carries no wildcard arm in either position, so a new code or a new
+/// class breaks the build (IN1 §5.3 rules 25–27).
+///
+/// A headline says **what happened**. `kinewright_core::explain_body` says
+/// what the person must change, and the two are never the same string:
+/// `in1b_every_headline_row_is_distinct_and_covers_the_whole_table` asserts
+/// that row by row, which is what stops a shim that returns the body from
+/// passing the distinctness test for the wrong reason (erratum `IN1b`-A-R10).
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one arm per (code, class) row; `IN1b` §5.5 rule 30 requires the \
+              table be exhaustive with no wildcard in either position, so the \
+              length is the contract's and splitting it would hide the \
+              exhaustiveness the type system is checking"
+)]
 pub(crate) fn incident_headline(code: IncidentCode, class: PolicyClass) -> &'static str {
-    // `IN1b` §3.8 break 4: `IncidentCode` has 67 variants after Part B and the
-    // 70-row table of `IN1b` §5.5 rule 30 is implementer C's. Until it lands,
-    // a non-colour code takes core's own written body, which is a
-    // `&'static str` that names what must change; Part A's fifteen colour rows
-    // below are unchanged byte for byte, so IN1 §9 clause 3's pinned headline
-    // still holds.
-    let IncidentCode::SourceColor(incident) = code else {
-        return explain_body(code);
+    let incident = match code {
+        IncidentCode::SourceColor(incident) => incident,
+        IncidentCode::Media(incident) => return media_headline(incident),
+        IncidentCode::DeliveryColor(incident) => return delivery_color_headline(incident),
+        IncidentCode::DeliveryVerification(incident) => {
+            return delivery_verification_headline(incident);
+        }
+        IncidentCode::ColorQc(incident) => return color_qc_headline(incident),
+        IncidentCode::Operation(family) => return operation_headline(family),
+        IncidentCode::LutAssetPolicy => {
+            return "This LUT is not the file the project recorded for it.";
+        }
+        IncidentCode::EditRevisionConflict => {
+            return "The timeline moved between planning this edit and sending it, so nothing was applied.";
+        }
+        IncidentCode::Rejection(incident) => return rejection_headline(incident),
+        IncidentCode::Label(incident) => return label_headline(incident),
     };
     match (incident, class) {
         (SourceColorIncident::UnknownPrimaries, PolicyClass::AutoApply) => {
@@ -191,6 +224,179 @@ pub(crate) fn incident_headline(code: IncidentCode, class: PolicyClass) -> &'sta
     }
 }
 
+/// The two non-colour `Media` rows (`IN1b` §5.5 rule 30).
+const fn media_headline(incident: MediaIncident) -> &'static str {
+    match incident {
+        MediaIncident::UnsupportedDecoderFormat => {
+            "This file's pixel format is not one the managed renderer can prove it may decode."
+        }
+        MediaIncident::BackendUnclassified => {
+            "The media engine refused this work and gave no code Kinewright can act on."
+        }
+    }
+}
+
+/// The four managed-delivery colour rows.
+const fn delivery_color_headline(incident: DeliveryColorIncident) -> &'static str {
+    match incident {
+        DeliveryColorIncident::UnsupportedCodec => {
+            "This export's video codec cannot carry managed delivery colour tags."
+        }
+        DeliveryColorIncident::UnsupportedField => {
+            "One of this export's delivery colour fields is outside the managed set."
+        }
+        DeliveryColorIncident::PixelFormatDepthMismatch => {
+            "The negotiated pixel format does not carry the bit depth this export declared."
+        }
+        DeliveryColorIncident::EncoderPixelFormatUnavailable => {
+            "This build's encoder does not offer the pixel format the export needs."
+        }
+    }
+}
+
+/// The five delivery-verification rows. Every one is a **degraded** result:
+/// the file was written and only the measurement is missing.
+const fn delivery_verification_headline(incident: DeliveryVerificationIncident) -> &'static str {
+    match incident {
+        DeliveryVerificationIncident::NotFullResolution => {
+            "The export was written, but its verification sampled a reduced-resolution render."
+        }
+        DeliveryVerificationIncident::PlaneOutOfContainer => {
+            "The export was written, but a sampled plane does not fit the container it declared."
+        }
+        DeliveryVerificationIncident::FrameCountMismatch => {
+            "The export was written, but it holds a different number of frames than the timeline."
+        }
+        DeliveryVerificationIncident::FrameCountOutOfRange => {
+            "The export was written, but the number of frames asked for is outside the sampling range."
+        }
+        DeliveryVerificationIncident::BudgetLaneMismatch => {
+            "The export was written, but its verification was asked for against another lane's budgets."
+        }
+    }
+}
+
+/// The six colour-QC rows. Each is a refused measurement that mutated nothing.
+const fn color_qc_headline(incident: ColorQcIncident) -> &'static str {
+    match incident {
+        ColorQcIncident::ProxyProofRefused => {
+            "A proxy picture was offered as the reference for a delivery measurement, and refused."
+        }
+        ColorQcIncident::RasterLengthMismatch => {
+            "The picture handed to the scope does not hold as many samples as its size says."
+        }
+        ColorQcIncident::EmptyPopulation => {
+            "The region this measurement was asked for covers no pixels."
+        }
+        ColorQcIncident::NodeBudgetExceeded => {
+            "More colour nodes were asked for in one measurement than the budget allows."
+        }
+        ColorQcIncident::MatteRegionRasterMismatch => {
+            "The coverage picture does not match the region it was measured against."
+        }
+        ColorQcIncident::NodeRemovalRejected => {
+            "The temporary node this measurement added could not be taken out again."
+        }
+    }
+}
+
+/// The eleven `OpError` family rows. Each says what **kind** of thing the
+/// edit got wrong; the message itself names which one.
+const fn operation_headline(family: IncidentFamily) -> &'static str {
+    match family {
+        IncidentFamily::Bounds => {
+            "This edit was refused: a value it carries is outside the range the edit allows."
+        }
+        IncidentFamily::Malformed => {
+            "This edit was refused: one of the fields it carries is missing, empty or the wrong kind."
+        }
+        IncidentFamily::Duplicate => {
+            "This edit was refused: something with the same identity is already in the project."
+        }
+        IncidentFamily::Placement => {
+            "This edit was refused: it was aimed at the wrong kind of thing."
+        }
+        IncidentFamily::Missing => {
+            "This edit was refused: the thing it names is not in the project any more."
+        }
+        IncidentFamily::Structure => {
+            "This edit was refused: something else in the project has to change first."
+        }
+        IncidentFamily::Relink => {
+            "This edit was refused: the replacement media could not be matched to the clip it replaces."
+        }
+        IncidentFamily::Unrepresentable => {
+            "This edit was refused: it cannot be expressed on this project's whole-frame grid."
+        }
+        IncidentFamily::UnknownName => {
+            "This edit was refused: Kinewright knows nothing by the name it used."
+        }
+        IncidentFamily::Internal => {
+            "Kinewright itself stopped part-way through this edit. Nothing you did caused it."
+        }
+        IncidentFamily::ColorPolicy => {
+            "This colour override was refused: it is not one Kinewright will write."
+        }
+    }
+}
+
+/// The seven typed-rejection rows.
+const fn rejection_headline(incident: RejectionIncident) -> &'static str {
+    match incident {
+        RejectionIncident::EditPlan => {
+            "This edit plan was refused as a whole, so nothing in it was applied."
+        }
+        RejectionIncident::DeliveryVariant => {
+            "The delivery variant could not be built from this project."
+        }
+        RejectionIncident::AgentBranch => "The isolated agent branch refused this request.",
+        RejectionIncident::SourceEdit => {
+            "Something the Source edit depended on changed while the source was being verified."
+        }
+        RejectionIncident::Relink => "This file cannot stand in for the asset it would replace.",
+        RejectionIncident::ProjectSave => {
+            "The project file could not be written, so this project is still only in memory."
+        }
+        RejectionIncident::CaptionPlan => "The caption track could not be planned from these cues.",
+    }
+}
+
+/// The seventeen source-label rows. Fifteen are placeholders — the label's
+/// failures carry no typed payload yet — and `look_incomplete` and
+/// `media_incomplete` are not: their work finished with something missing,
+/// which is why they are declared apart from their labels' blocking twins.
+const fn label_headline(incident: LabelIncident) -> &'static str {
+    match incident {
+        LabelIncident::Operations => "This edit was not applied.",
+        LabelIncident::Look => "The look or LUT could not be imported, restored or applied.",
+        LabelIncident::LookIncomplete => {
+            "The project was saved or opened, but not every look came with it."
+        }
+        LabelIncident::Export => "The export did not start, or did not finish.",
+        LabelIncident::SourceMonitor => {
+            "No edit was applied: the Source monitor could not act on what is loaded."
+        }
+        LabelIncident::Relink => "The relink could not go ahead.",
+        LabelIncident::AgentBranch => {
+            "The isolated branch this agent thread edits in could not be created or used."
+        }
+        LabelIncident::TranscriptEdit => "The transcript edit produced no change.",
+        LabelIncident::Media => {
+            "Playback, import or capture stopped, or there was nothing to play."
+        }
+        LabelIncident::MediaIncomplete => {
+            "The project opened, but some of its media or its timeline pictures did not come with it."
+        }
+        LabelIncident::Agent => "The agent harness could not be reached, started, or spoken to.",
+        LabelIncident::Recording => "The recording did not start, or stopped before it finished.",
+        LabelIncident::Project => "The project could not be opened, created, read, or restored.",
+        LabelIncident::Captions => "The captions could not be generated or saved.",
+        LabelIncident::Mixer => "The mixer could not do what was asked.",
+        LabelIncident::MediaCache => "The media cache could not be cleared.",
+        LabelIncident::Timeline => "The timeline gesture did not complete.",
+    }
+}
+
 /// `Open`, `Applied`, `Reverted` or `Explained`, from the state alone.
 const fn state_label(state: IncidentState) -> &'static str {
     match state {
@@ -207,7 +413,7 @@ const fn state_label(state: IncidentState) -> &'static str {
 /// back. Everything else offers exactly what `policy_recovery` returned, one
 /// `CardAction` per entry, in order, enabled for an operation and disabled for
 /// an explanation (IN1 §5.3 rules 29–30).
-fn card_actions(incident: &Incident, assumed_from_present: bool) -> Vec<CardAction> {
+fn card_actions(incident: &Incident, revert_available: bool) -> Vec<CardAction> {
     // `IN1b` §3.8 break 3: only an asset-scoped incident carrying a probed
     // description has something to revert to; every other incident falls
     // through to the `policy_recovery` branch below.
@@ -218,7 +424,7 @@ fn card_actions(incident: &Incident, assumed_from_present: bool) -> Vec<CardActi
     {
         return vec![CardAction {
             label: REVERT_LABEL,
-            enabled: assumed_from_present,
+            enabled: revert_available,
             recovery: RecoveryAction {
                 label: REVERT_LABEL,
                 kind: RecoveryKind::Operation(Operation::SetAssetColorDescription {
@@ -245,24 +451,97 @@ fn card_actions(incident: &Incident, assumed_from_present: bool) -> Vec<CardActi
 /// `recovery_description` of the probed tuple by construction: it is the only
 /// honest "after" to set beside the `probed` "before", and the card has no
 /// document to read the live description from.
-fn card_details(incident: &Incident, assumed_from_present: bool) -> Vec<(&'static str, String)> {
+fn card_details(incident: &Incident, revert_available: bool) -> Vec<(&'static str, String)> {
     let mut details = vec![
         ("code", incident.code.code().to_owned()),
         ("field", incident.field.to_owned()),
         ("observed", incident.observed.clone()),
         ("allowed", incident.allowed.clone().unwrap_or_default()),
     ];
-    // `IN1b` §3.4 rule 25 row 7: the `probed` and `assumed` rows exist only
-    // where the evidence carries a probed description.
+    // `IN1b` §3.4 rule 25 row 7 and §5.5 rule 28: the `probed` and `assumed`
+    // rows exist only where the evidence carries a probed description, and the
+    // `assumed` row additionally needs a revert to be available — it is the
+    // description the revert would take back.
     if let Some(probed) = incident.evidence.probed() {
         details.push(("probed", format!("{probed:?}")));
-        if assumed_from_present {
+        if revert_available {
             details.push(("assumed", format!("{:?}", recovery_description(probed))));
         }
     }
     details.push(("revision", incident.revision.to_string()));
     details.push(("seen", incident.count.to_string()));
     details
+}
+
+/// Whether the toolbar badge is drawn, and the number it shows
+/// (erratum `IN1b`-C-R49).
+///
+/// The number is always the **open** count — problems currently unresolved,
+/// never lines ever written (`IN1b` §5.4 rule 25). What the audit log's size
+/// decides is only whether the badge is *there*: before C-R49 the badge
+/// vanished the moment the last incident resolved, and with it the only way
+/// back to the audit view, which still had every line of the session in it.
+/// So the badge renders whenever either quantity is non-zero, still showing
+/// the open count — which is honestly `0` on a session whose problems are all
+/// fixed — and the Incidents panel it opens carries the **Audit log** button
+/// that reaches the other view.
+///
+/// `audit_entries` is the whole `ErrorLog`'s length rather than a count of
+/// `"Incident"`-source lines, and after Part B those are the same number:
+/// `KinewrightApp::note_incident` is the crate's only writer and it writes
+/// that one source, which the sink gate's counts 2 and 3 prove
+/// (review-final nit 6).
+///
+/// Pure on purpose: this is the whole of the badge's rule, and
+/// `in1b_the_badge_is_reachable_while_the_audit_view_has_anything_to_show`
+/// is its test. Where it is drawn is not tested (`IN1b` §10 limit 1).
+#[must_use]
+pub(crate) const fn incident_badge(open_count: usize, audit_entries: usize) -> Option<usize> {
+    if open_count > 0 || audit_entries > 0 {
+        Some(open_count)
+    } else {
+        None
+    }
+}
+
+/// One incident's card, and the subject needed to send what it offers.
+///
+/// The Incidents panel builds this list under the log's read guard, then draws
+/// it after the guard is gone, so the paint never holds the lock.
+pub(crate) struct IncidentPanelRow {
+    /// Which incident the row is about.
+    pub(crate) id: kinewright_core::IncidentId,
+    /// The pure view, exactly as the Media panel's card is built.
+    pub(crate) view: IncidentCardView,
+}
+
+/// Every incident the badge counts, as cards, in the order the log keeps them.
+///
+/// Pure, and the tested half of the Incidents panel (`IN1b` §5.5 rule 31):
+/// `show_incidents_panel` places it and is untested by design (IN1 §11.1
+/// limit 2, `IN1b` §10 limit 1).
+///
+/// The Media panel shows only asset-subject incidents, deliberately
+/// (`media_bin.rs`'s `==` filter). Everything else — a refused trim on a clip,
+/// a refused mix on a bus, a failed save on the project, a branch conflict on
+/// the agent — has no surface of its own without this list, which is why
+/// `IN1b` §12 records that cutting the panel leaves those incidents nowhere to
+/// appear.
+///
+/// `revert_available` is `false` for every row: colour's revert is the only one
+/// `IN1b` ships and it is offered beside its asset, where the document fact
+/// that gates it can be read (`IN1b` §5.5 rule 28).
+#[must_use]
+pub(crate) fn incident_panel_rows<'a>(
+    incidents: impl Iterator<Item = &'a Incident>,
+) -> Vec<IncidentPanelRow> {
+    incidents
+        .filter(|incident| incident.state == IncidentState::Open)
+        .map(|incident| IncidentPanelRow {
+            id: incident.id,
+            view: incident_card(incident, false),
+        })
+        .collect()
 }
 
 /// Paint one card and report which action the person pressed.
@@ -312,6 +591,83 @@ pub(crate) fn show_incident_card(ui: &mut egui::Ui, view: &IncidentCardView) -> 
     pressed
 }
 
+/// Draw the badge-anchored Incidents panel (`IN1b` §5.5 rule 31).
+///
+/// The same window shape the error-log window already has, listing every open
+/// incident's card whatever its subject. Untested by design, exactly as
+/// [`show_incident_card`] is: the tested thing is
+/// [`incident_panel_rows`], which needs no `egui::Ui` at all.
+pub(crate) fn show_incidents_panel(app: &mut crate::app::KinewrightApp, ctx: &egui::Context) {
+    if !app.incidents_open {
+        return;
+    }
+    let rows = {
+        let handle = std::sync::Arc::clone(&app.focused().incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        incident_panel_rows(log.all())
+    };
+    let mut pressed = None;
+    let mut open = app.incidents_open;
+    let mut show_audit = false;
+    let audit_entries = app.error_log.len();
+    egui::Window::new("Incidents")
+        .open(&mut open)
+        .default_width(620.0)
+        .default_height(320.0)
+        .show(ctx, |ui| {
+            // Erratum `IN1b`-C-R49: the audit view's way back. The badge is
+            // the Incidents panel's anchor, so the panel is where the other
+            // view has to be reachable from.
+            ui.horizontal(|ui| {
+                ui.label(format!("{} open problem(s)", rows.len()));
+                if ui
+                    .add_enabled(audit_entries > 0, egui::Button::new("Audit log"))
+                    .on_hover_text("Every incident this session opened, in order")
+                    .on_disabled_hover_text("Nothing has been recorded this session")
+                    .clicked()
+                {
+                    show_audit = true;
+                }
+            });
+            ui.separator();
+            if rows.is_empty() {
+                ui.colored_label(color::TEXT_MUTED, "Nothing is outstanding.");
+                return;
+            }
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for row in &rows {
+                    if let Some(index) = show_incident_card(ui, &row.view) {
+                        let action = &row.view.actions[index];
+                        if let RecoveryKind::Operation(operation) = &action.recovery.kind {
+                            pressed = Some((row.id, operation.clone(), action.clone()));
+                        }
+                    }
+                    ui.add_space(space::ONE);
+                }
+            });
+        });
+    app.incidents_open = open;
+    if show_audit {
+        app.error_log_open = true;
+    }
+    if let Some((id, operation, action)) = pressed {
+        let project_index = app.focused_project;
+        let outcome = {
+            let handle = std::sync::Arc::clone(&app.projects[project_index].incidents);
+            let log = handle
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            log.get(id)
+                .map(|incident| card_action_outcome(incident, &action))
+        };
+        if let Some(outcome) = outcome {
+            app.send_incident_recovery(project_index, id, operation, outcome);
+        }
+    }
+}
+
 /// The colour one severity paints its headline in.
 const fn severity_color(severity: IncidentSeverity) -> egui::Color32 {
     match severity {
@@ -326,7 +682,7 @@ mod tests {
     use kinewright_core::{
         AssetId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
         ColorRange, ColorTransfer, ColorWhitePoint, IncidentEvidence, IncidentLog,
-        IncidentObservation, Observed, POLICY, TimelineRevision, policy_recovery,
+        IncidentObservation, Observed, POLICY, TimelineRevision, explain_body, policy_recovery,
     };
 
     use super::*;
@@ -431,8 +787,24 @@ mod tests {
         );
     }
 
+    /// `IN1b` §5.5 rule 30 and §9 clause 18: the headline table is **seventy**
+    /// rows over sixty-seven codes, every row distinct, and every row is a
+    /// headline rather than a body.
+    ///
+    /// The last clause is what erratum `IN1b`-A-R10 asks for. Stage A left a
+    /// shim at `incident_headline` returning `explain_body(code)` for every
+    /// non-colour code, and core already proves the 54 non-colour bodies
+    /// pairwise distinct — so the distinctness half passed for the wrong
+    /// reason on 54 of its 70 rows. Asserting
+    /// `incident_headline(code, class) != explain_body(code)` row by row fails
+    /// against the shim and passes against the table, which is the only
+    /// difference between the two that a test can see.
+    ///
+    /// A headline says what happened; a body says what the person must change.
+    /// Part A's fifteen colour rows are unchanged byte for byte, so IN1 §9
+    /// clause 3's pinned headline still holds.
     #[test]
-    fn in1_every_headline_row_is_distinct_and_covers_the_whole_table() {
+    fn in1b_every_headline_row_is_distinct_and_covers_the_whole_table() {
         let mut headlines = Vec::new();
         for entry in POLICY {
             headlines.push(incident_headline(entry.code, PolicyClass::Explain));
@@ -440,16 +812,181 @@ mod tests {
                 headlines.push(incident_headline(entry.code, PolicyClass::AutoApply));
             }
         }
-        // Seventy rows for 67 codes, because the three `Rec709Compatible` codes
-        // are reachable under both classes (`IN1b` §5.5 rule 30). Part A's
-        // fifteen colour rows are unchanged; the other 54 take core's written
-        // body through `incident_headline`'s shim until implementer C writes
-        // the per-code headline table.
+        assert_eq!(POLICY.len(), 67, "sixty-seven declared codes");
         assert_eq!(headlines.len(), 70, "seventy rows for sixty-seven codes");
         let mut sorted = headlines.clone();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), headlines.len(), "every headline is distinct");
+        for entry in POLICY {
+            for class in [
+                PolicyClass::AutoApply,
+                PolicyClass::AskFirst,
+                PolicyClass::Explain,
+            ] {
+                let headline = incident_headline(entry.code, class);
+                assert_ne!(
+                    headline,
+                    explain_body(entry.code),
+                    "{}: the headline must say what happened, not what to change",
+                    entry.code.code()
+                );
+                assert!(
+                    !headline.is_empty(),
+                    "{}: every row says something",
+                    entry.code.code()
+                );
+            }
+        }
+    }
+
+    /// Erratum `IN1b`-C-R49: the badge is reachable while the audit view has
+    /// anything to show, and the number it shows is always the open count.
+    ///
+    /// Before C-R49 the badge rendered on `open_count() > 0` alone, so the
+    /// moment the last incident resolved it vanished — and with it the only
+    /// affordance that reopened the audit window, which still held every line
+    /// of the session. The first row below is that case.
+    #[test]
+    fn in1b_the_badge_is_reachable_while_the_audit_view_has_anything_to_show() {
+        assert_eq!(
+            incident_badge(0, 1),
+            Some(0),
+            "nothing open and one audit line: the badge is there, reading zero"
+        );
+        assert_eq!(
+            incident_badge(0, 0),
+            None,
+            "nothing open and nothing recorded: no badge at all"
+        );
+        assert_eq!(
+            incident_badge(3, 0),
+            Some(3),
+            "open problems put their own count on the badge"
+        );
+        assert_eq!(
+            incident_badge(2, 7),
+            Some(2),
+            "and the audit view's size never changes the number, only the visibility"
+        );
+    }
+
+    /// `IN1b` §7 item 26: a non-colour incident's card offers the written
+    /// `Explain` body and exactly one thing, which is not a button.
+    ///
+    /// `revert_available` is `false` for every non-colour code until one ships
+    /// a revert (`IN1b` §5.5 rule 28), and `policy_recovery` returns a single
+    /// `Explain` recovery for every `Explain` row, so the card is one
+    /// unpressable sentence — which is the whole visible difference between an
+    /// incident and the scrolling log line it replaced.
+    #[test]
+    fn in1b_a_non_colour_card_offers_the_explain_body_and_nothing_to_press() {
+        let code = IncidentCode::Operation(IncidentFamily::Bounds);
+        let mut log = IncidentLog::default();
+        let Observed::Opened(id) = log.observe(IncidentObservation::plain(
+            code,
+            IncidentSubject::Clip(kinewright_core::ClipId(4)),
+            "split at project frame 900 is outside clip 4",
+            TimelineRevision(2),
+        )) else {
+            panic!("a fresh log opens the first observation");
+        };
+        let incident = log.get(id).expect("the log keeps what it opened");
+        let view = incident_card(incident, false);
+
+        assert_eq!(view.class, PolicyClass::Explain);
+        assert_eq!(view.severity, IncidentSeverity::Blocks);
+        assert_eq!(view.subject_label, "Clip 4");
+        assert_eq!(view.headline, incident_headline(code, PolicyClass::Explain));
+        assert_ne!(view.headline, explain_body(code));
+        assert_eq!(view.actions.len(), 1, "one explanation and nothing else");
+        assert!(!view.actions[0].enabled, "there is nothing to press");
+        assert_eq!(
+            view.actions[0].recovery.kind,
+            RecoveryKind::Explain(explain_body(code)),
+            "the body below the card is core's written sentence, verbatim"
+        );
+        assert_eq!(
+            view.actions
+                .iter()
+                .map(|action| action.recovery.clone())
+                .collect::<Vec<_>>(),
+            policy_recovery(code, incident.subject, &incident.evidence),
+            "the card builds no recovery of its own"
+        );
+        // And the evidence rows the colour card carries are simply absent.
+        let keys: Vec<&str> = view.details.iter().map(|(key, _)| *key).collect();
+        assert!(!keys.contains(&"probed"));
+        assert!(!keys.contains(&"assumed"));
+    }
+
+    /// `IN1b` §7 item 27 and §5.5 rule 28: the `assumed` detail row needs
+    /// **both** a probed description in the evidence and a revert to be
+    /// available.
+    ///
+    /// Part A gated it on one flag called `assumed_from_present`, which was
+    /// also gating the revert button — one name for two questions. Splitting
+    /// it makes the row's condition readable, and this test pins all four
+    /// corners so a later pass cannot quietly drop half of it.
+    #[test]
+    fn in1b_the_assumed_detail_row_needs_both_a_probe_and_a_revert() {
+        let probed = untagged_mp4_probe();
+        let (colour_log, colour_id) = opened(
+            IncidentCode::SourceColor(SourceColorIncident::UnknownPrimaries),
+            &probed,
+        );
+        let colour = colour_log.get(colour_id).expect("open");
+        assert!(colour.evidence.probed().is_some());
+
+        let with_revert: Vec<&str> = incident_card(colour, true)
+            .details
+            .iter()
+            .map(|(key, _)| *key)
+            .collect();
+        assert!(with_revert.contains(&"probed"));
+        assert!(
+            with_revert.contains(&"assumed"),
+            "a probe and a revert together print the description the revert takes back"
+        );
+
+        let without_revert: Vec<&str> = incident_card(colour, false)
+            .details
+            .iter()
+            .map(|(key, _)| *key)
+            .collect();
+        assert!(
+            without_revert.contains(&"probed"),
+            "the probe is evidence and stays"
+        );
+        assert!(
+            !without_revert.contains(&"assumed"),
+            "with nothing to revert to there is no `assumed` description to name"
+        );
+
+        // The other axis: no probe at all, both ways round.
+        let mut log = IncidentLog::default();
+        let Observed::Opened(id) = log.observe(IncidentObservation::plain(
+            IncidentCode::Rejection(kinewright_core::RejectionIncident::ProjectSave),
+            IncidentSubject::Project,
+            "could not write the project file",
+            TimelineRevision(1),
+        )) else {
+            panic!("a fresh log opens the first observation");
+        };
+        let plain = log.get(id).expect("open");
+        assert!(plain.evidence.probed().is_none());
+        for revert_available in [false, true] {
+            let keys: Vec<&str> = incident_card(plain, revert_available)
+                .details
+                .iter()
+                .map(|(key, _)| *key)
+                .collect();
+            assert!(!keys.contains(&"probed"));
+            assert!(
+                !keys.contains(&"assumed"),
+                "a revert flag alone cannot conjure a description that was never probed"
+            );
+        }
     }
 
     #[test]

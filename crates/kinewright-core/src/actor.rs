@@ -117,6 +117,17 @@ pub enum Event {
     OpRejected {
         op: Operation,
         error: OpError,
+        /// The token of the `DoIfRevision` whose operation core rejected, when
+        /// it carried one (`IN1b` erratum A-R15).
+        ///
+        /// A revision-gated send can end three ways, and before this field two
+        /// of them were correlatable and one was not: the gate refuses
+        /// (`RevisionConflict`), the operation lands (`DocumentChanged`), or
+        /// the gate passes and `Document::apply` rejects the operation — this
+        /// event. A router that matches by identity could therefore never
+        /// learn that its send had been answered, and left it outstanding for
+        /// the rest of the session.
+        token: Option<CommandToken>,
     },
     BatchRejected {
         operations: Vec<Operation>,
@@ -466,9 +477,13 @@ fn execute_operation(
             journal_command: Some(JournalCommand::Do(operation)),
             token,
         },
+        // The sender's token, echoed and never invented: `Command::Do` passes
+        // `None` into this function, so the plain path answers `None` without
+        // a special case (`IN1b` §4 rule 5, as widened by erratum A-R15).
         Err(error) => Event::OpRejected {
             op: operation,
             error,
+            token,
         },
     }
 }
@@ -663,7 +678,7 @@ mod tests {
         core.send(Command::Do(operation.clone())).unwrap();
         assert!(matches!(
             events.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Event::OpRejected { op, error: OpError::DuplicateAsset(AssetId(1)) } if op == operation
+            Event::OpRejected { op, error: OpError::DuplicateAsset(AssetId(1)), token: None } if op == operation
         ));
         core.send(Command::Query(Query::OpLog)).unwrap();
         let Event::QueryResult(QueryResult::OpLog(log)) =
@@ -732,7 +747,8 @@ mod tests {
             }
         );
         // The actor invents a token nowhere: every other command path that
-        // produces a `DocumentChanged` or a `RevisionConflict` emits `None`.
+        // produces a `DocumentChanged`, a `RevisionConflict` or an
+        // `OpRejected` emits `None`.
         let plain = core
             .request(Command::Do(Operation::AddAsset { asset: asset(3) }))
             .unwrap();
@@ -785,6 +801,57 @@ mod tests {
                 }
             ),
             "the initial snapshot must not carry a token"
+        );
+    }
+
+    /// Erratum `IN1b`-A-R15: the **third** way a revision-gated send can end.
+    ///
+    /// A `DoIfRevision` ends as a `RevisionConflict` (the gate refused), a
+    /// `DocumentChanged` (it landed), or an `OpRejected` — the gate passed and
+    /// `Document::apply` refused the operation. Before this field the third
+    /// case carried no identity, so a router matching by token could never
+    /// learn its send had been answered and left it outstanding for the rest of
+    /// the session, at one log read and one document read per tick
+    /// (`impl-app.md` §3's residue). The token is echoed, never invented.
+    #[test]
+    fn in1b_a_correlation_token_is_echoed_on_a_rejection() {
+        let core = Core::spawn(Document::default()).unwrap();
+        core.request(Command::Do(Operation::AddAsset { asset: asset(1) }))
+            .unwrap();
+        let Event::QueryResult(QueryResult::Snapshot { revision, .. }) =
+            core.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("expected revisioned snapshot");
+        };
+
+        // The revision is current, so the gate passes; `asset(1)` is already in
+        // the pool, so `Document::apply` refuses.
+        let rejected = core
+            .request(Command::DoIfRevision {
+                expected: revision,
+                operation: Operation::AddAsset { asset: asset(1) },
+                token: Some(CommandToken(13)),
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                rejected,
+                Event::OpRejected {
+                    error: OpError::DuplicateAsset(AssetId(1)),
+                    token: Some(CommandToken(13)),
+                    ..
+                }
+            ),
+            "a rejected revision-gated send echoes its token: {rejected:?}"
+        );
+
+        // The plain path invents none.
+        let plain = core
+            .request(Command::Do(Operation::AddAsset { asset: asset(1) }))
+            .unwrap();
+        assert!(
+            matches!(plain, Event::OpRejected { token: None, .. }),
+            "`Command::Do` carries no token to echo: {plain:?}"
         );
     }
 

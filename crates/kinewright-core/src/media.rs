@@ -1844,12 +1844,42 @@ pub enum MediaError {
     /// [`Self::MatteProof`] is.
     #[error(transparent)]
     MatteCoverage(MatteCoverageError),
+    /// A LUT-store or room-tone-store failure, carried with the store's own
+    /// stable code (`IN1b` §6.2 rule 4, ruling N4/CR-D1).
+    ///
+    /// `LutStoreErrorCode`'s eleven codes and `RoomToneStoreErrorCode`'s ten
+    /// live in `kinewright-media` and used to reach this crate flattened into
+    /// [`Self::Backend`], which is why the agent surface reconstructed them by
+    /// hand from the rendered text (`IN1b` §12 cut item 2). This variant is the
+    /// typed path: the code travels as data and
+    /// [`Self::recovery_code`] answers with it.
+    ///
+    /// The template keeps [`Self::Backend`]'s `media backend error: ` label, so
+    /// the rendered text is byte-identical to the string this variant replaces
+    /// and IN1 §9 clause 11's 750 B template, its two pinned literals and the
+    /// agent's served text do not move. `message` is therefore the **payload**
+    /// and not the whole rendering, which is what lets every existing caller
+    /// read it the way it read `Backend`'s `String`. Dropping the label is
+    /// `IN1b` §13 D-B4, owned by IN2, and it stays a one-line template edit.
+    #[error("media backend error: {message}")]
+    Store {
+        /// The store's own stable code, from `LutStoreErrorCode::as_str` or
+        /// `RoomToneStoreErrorCode::as_str`.
+        code: &'static str,
+        /// The store's own rendered refusal, without the label.
+        message: String,
+    },
     #[error("media backend error: {0}")]
     Backend(String),
 }
 
 impl MediaError {
     /// Return the machine-readable recovery code, when this error has one.
+    ///
+    /// `Some` for **9 of 14** variants after `IN1b` §3.9 rule 36 and the
+    /// N4/CR-D1 addendum: the five that answer `None` are `NotImplemented`,
+    /// `Cancelled`, the two mix-range refusals and `Backend`, and `IN1b` §5.1
+    /// rule 11 step 1 routes those to `media_backend_unclassified`.
     #[must_use]
     pub const fn recovery_code(&self) -> Option<&'static str> {
         match self {
@@ -1861,6 +1891,7 @@ impl MediaError {
             Self::SourceColorForAsset(refusal) => Some(refusal.error.code()),
             Self::MatteProof(error) => Some(error.code()),
             Self::MatteCoverage(error) => Some(error.code()),
+            Self::Store { code, .. } => Some(code),
             Self::NotImplemented
             | Self::Cancelled
             | Self::MixSpectrumRangeTooShort { .. }
@@ -3071,11 +3102,12 @@ mod tests {
         }
     }
 
-    /// `IN1b` §9 clause 15: `recovery_code()` is `Some` for **8 of 13**
-    /// variants, both matte enums survive their `From` impls typed, and the
-    /// rendered text keeps the same code token it carried as a `Backend`
-    /// string — the one visible change being the lost
-    /// `media backend error: ` prefix (`IN1b` §3.9 rule 36).
+    /// `IN1b` §9 clause 15: `recovery_code()` is `Some` for **9 of 14**
+    /// variants after the N4/CR-D1 addendum added `Store`, both matte enums
+    /// survive their `From` impls typed, and the rendered text keeps the same
+    /// code token it carried as a `Backend` string — the one visible change
+    /// being the lost `media backend error: ` prefix (`IN1b` §3.9 rule 36).
+    /// The clause's own figure of 8 of 13 is amended by erratum `IN1b`-A-R12.
     #[test]
     fn in1b_matte_failures_keep_their_code_through_media_error() {
         let proof = MatteProofError::NoMatte;
@@ -3142,15 +3174,19 @@ mod tests {
             })),
             MediaError::MatteProof(proof),
             MediaError::MatteCoverage(coverage),
+            MediaError::Store {
+                code: "lut_store_root_invalid",
+                message: String::new(),
+            },
             MediaError::Backend(String::new()),
         ];
-        assert_eq!(every_variant.len(), 13);
+        assert_eq!(every_variant.len(), 14);
         assert_eq!(
             every_variant
                 .iter()
                 .filter(|error| error.recovery_code().is_some())
                 .count(),
-            8
+            9
         );
     }
 }

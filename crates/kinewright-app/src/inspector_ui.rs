@@ -6,15 +6,16 @@ use kinewright_core::{
     COLOR_CURVE_MAX_POINTS, COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS,
     COLOR_NODE_BYPASS_PARAMETER, Clip, ClipContent, ClipId, ColorCurveChannel, ColorNodeKind,
     ColorStage, ColorWheelChannel, ColorWheelControl, ColorWheelControlSet, ColorWheelsParams,
-    Document, EFFECT_DESCRIPTORS, Effect, EffectId, Keyframe, KeyframeInterpolation,
-    LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER, LUT_MIX_BASIS_POINTS_MAX,
-    LUT_MIX_PARAMETER, LutAsset, LutAssetId, LutAssetSource, LutAvailabilityKind,
-    LutAvailabilityStatus, LutNodeParams, MARKER_COLOR_TOKEN_COUNT, MATTE_MIX_BASIS_POINTS_MAX,
-    MATTE_WINDOW_LIMIT, Marker, MarkerId, MatteParams, MatteQualifierParams, MatteWindowParams,
-    MediaKind, Operation, ParamValue, ResolvedCurves, TITLE_COLORS, TITLE_FONT_SIZES,
-    TRANSITION_DESCRIPTORS, TimeCode, Title, TitlePosition, Transition, color_node_inactive_reason,
-    effect_compatibility_stage, envelope_coalesce_key, is_audio_effect, is_legacy_display_effect,
-    is_lut_color_node, is_matte_capable_color_node, is_matte_parameter,
+    Document, EFFECT_DESCRIPTORS, Effect, EffectId, IncidentCode, IncidentSubject, Keyframe,
+    KeyframeInterpolation, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER,
+    LUT_MIX_BASIS_POINTS_MAX, LUT_MIX_PARAMETER, LabelIncident, LutAsset, LutAssetId,
+    LutAssetSource, LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams,
+    MARKER_COLOR_TOKEN_COUNT, MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, Marker, MarkerId,
+    MatteParams, MatteQualifierParams, MatteWindowParams, MediaKind, Operation, ParamValue,
+    ResolvedCurves, TITLE_COLORS, TITLE_FONT_SIZES, TRANSITION_DESCRIPTORS, TimeCode, Title,
+    TitlePosition, Transition, color_node_inactive_reason, effect_compatibility_stage,
+    envelope_coalesce_key, is_audio_effect, is_legacy_display_effect, is_lut_color_node,
+    is_matte_capable_color_node, is_matte_parameter,
 };
 use kinewright_media::BuiltinLook;
 
@@ -30,11 +31,14 @@ use crate::{
 
 const INSPECTOR_MAX_HEIGHT: f32 = 360.0;
 
-/// Where a refused inspector action lands in the error log.
+/// The incident code a refused inspector action carries.
 ///
-/// The default, and the only category before AU5: every caller of
-/// [`InspectorEdits::push_error`] was a look card.
-pub(crate) const LOOK_ERROR_CATEGORY: &str = "Look";
+/// The default, and the only code before AU5: every caller of
+/// [`InspectorEdits::push_error`] was a look card. `IN1b` §5.4 rule 27 types
+/// this at the producer rather than at the sink, which is what turns *n*
+/// refusals under one category into *n* observations the incident key can
+/// collapse.
+pub(crate) const LOOK_INCIDENT_CODE: IncidentCode = IncidentCode::Label(LabelIncident::Look);
 
 /// Edits gathered from one inspector frame.
 ///
@@ -74,13 +78,13 @@ pub(crate) struct InspectorEdits {
     /// The window a card asked the overlay to select, with the window count
     /// the card could see, so the overlay can clamp the request (CC5 §6).
     matte_selected_window: Option<(usize, usize)>,
-    /// Which error-log category this frame's refusals belong to.
+    /// Which incident code this frame's refusals carry.
     ///
-    /// `None` is the inspector's own "Look", which every CC4–CC6 caller
-    /// wants. AU5 §6.4 rule 129 gave `push_error` its first caller outside the
-    /// look cards, and a room-tone refusal filed under "Look" is a message
-    /// landing under a lie.
-    error_category: Option<&'static str>,
+    /// `None` is the inspector's own `look_unclassified`, which every CC4–CC6
+    /// caller wants. AU5 §6.4 rule 129 gave `push_error` its first caller
+    /// outside the look cards, and a room-tone refusal filed under "Look" is a
+    /// message landing under a lie.
+    incident_code: Option<IncidentCode>,
     /// Refusals a card produced while building a batch, for the app's error
     /// log.
     ///
@@ -229,16 +233,16 @@ impl InspectorEdits {
     /// errors once: a surface that produces refusals of two kinds in one frame
     /// does not exist, and inventing a per-message category for one that might
     /// would be state nothing reads.
-    pub(crate) const fn set_error_category(&mut self, category: &'static str) {
-        self.error_category = Some(category);
+    pub(crate) const fn set_incident_code(&mut self, code: IncidentCode) {
+        self.incident_code = Some(code);
     }
 
-    /// The category this frame's refusals are filed under.
+    /// The code this frame's refusals carry (`IN1b` §5.4 rule 27).
     #[must_use]
-    pub(crate) const fn error_category(&self) -> &'static str {
-        match self.error_category {
-            Some(category) => category,
-            None => LOOK_ERROR_CATEGORY,
+    pub(crate) const fn incident_code(&self) -> IncidentCode {
+        match self.incident_code {
+            Some(code) => code,
+            None => LOOK_INCIDENT_CODE,
         }
     }
 
@@ -788,9 +792,19 @@ impl KinewrightApp {
         if let Some((window, window_count)) = edits.matte_selected_window {
             self.matte_overlay.select_window(window, window_count);
         }
-        let category = edits.error_category();
+        // Appendix B row 62, the second dynamic site. Typing it at the
+        // producer is what fixes the live bug the sink could not see: the loop
+        // used to write *n* unrelated log lines for *n* messages under one
+        // category, and the incident key `(code, subject, observed)` now
+        // collapses the repeats (`IN1b` §5.4 rule 27). The subject is the
+        // inspector's own selected clip, which is what the frame is about.
+        let code = edits.incident_code();
+        let subject = self
+            .focused()
+            .selected_clip
+            .map_or(IncidentSubject::Project, IncidentSubject::Clip);
         for message in edits.errors {
-            self.record_error(category, message);
+            self.note_plain(code, subject, message);
         }
         if edits.gesture_started {
             self.begin_edit_gesture();
@@ -859,7 +873,11 @@ impl KinewrightApp {
             })
             .is_err()
         {
-            self.record_error("Look", "Core actor stopped while releasing the A/B hold");
+            // Appendix B row 63.
+            self.note_actor_stopped(
+                IncidentSubject::Clip(record.clip),
+                "Core actor stopped while releasing the A/B hold",
+            );
         }
     }
 
@@ -1019,7 +1037,14 @@ impl KinewrightApp {
                     pending.extend_live(operations, speed_coalesce_key(clip.id));
                 }
                 Ok(operations) => pending.extend(operations),
-                Err(error) => self.record_error("Operations", error),
+                // Appendix B row 64.
+                Err(error) => {
+                    self.note_label(
+                        LabelIncident::Operations,
+                        IncidentSubject::Clip(clip.id),
+                        error,
+                    );
+                }
             }
         }
         if let Some(audio_clip) = audio_target_clip(&self.focused().document, clip.id) {

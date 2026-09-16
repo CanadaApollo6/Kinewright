@@ -112,15 +112,28 @@ impl std::fmt::Display for LutParseError {
 impl std::error::Error for LutParseError {}
 
 impl From<LutParseError> for MediaError {
-    /// Map a typed parse rejection onto the crate's transport error.
+    /// Map a typed parse rejection onto the crate's transport error, **with its
+    /// code carried as data** (`IN1b` ruling CR-D2, erratum `IN1b`-A-R14).
     ///
-    /// CC4 maps LUT errors to `MediaError::Backend` with a stable
-    /// `<code>: …; observed=<v>; allowed=<v>; line=<n>` shape (a recorded
+    /// CC4 maps LUT errors onto a stable
+    /// `<code>: observed=<v>; allowed=<v>; line=<n>` shape (a recorded
     /// departure from §2.5's `MediaError::Lut`), the same shape
     /// `LutStoreError` renders; the typed [`LutParseError`] stays public, via
     /// [`parse_cube_lut_typed`], for callers that need the structure.
+    ///
+    /// Converted with the two stores rather than left on
+    /// [`MediaError::Backend`], because `LutStore::import_lut_asset` parses the
+    /// file it imports: a malformed `.cube` handed to the `import_lut_asset`
+    /// tool otherwise reaches the agent with `recovery_code() == None` and is
+    /// served under the tool label instead of its own code (D-R67). `message`
+    /// is the rendering without the `media backend error: ` label, which
+    /// [`MediaError::Store`]'s template supplies, so the rendered text is
+    /// byte-identical to the `Backend` string this replaces.
     fn from(error: LutParseError) -> Self {
-        Self::Backend(error.to_string())
+        Self::Store {
+            code: error.code.as_str(),
+            message: error.to_string(),
+        }
     }
 }
 
@@ -767,8 +780,10 @@ DOMAIN_MAX 1.0 1.0 1.0
     #[test]
     fn media_error_conversion_keeps_the_code_as_a_stable_prefix() {
         let error = parse_cube_lut("LUT_1D_SIZE 2\n").unwrap_err();
-        let MediaError::Backend(message) = error else {
-            panic!("the parser maps rejections onto MediaError::Backend");
+        // `IN1b` CR-D2: a parse rejection crosses typed, and `message` is the
+        // same payload `MediaError::Backend` carried.
+        let MediaError::Store { message, .. } = error else {
+            panic!("the parser maps rejections onto MediaError::Store");
         };
         assert!(
             message.starts_with("unsupported_lut_format: "),
@@ -872,5 +887,81 @@ DOMAIN_MAX 2 2 2
     fn maximum_size_matches_the_core_asset_bound() {
         assert_eq!(MIN_CUBE_SIZE, kinewright_core::LUT_SIZE_MIN);
         assert_eq!(MAX_CUBE_SIZE, kinewright_core::LUT_SIZE_MAX);
+    }
+
+    /// `IN1b` CR-D2 and erratum `IN1b`-A-R14: a typed `.cube` rejection reaches
+    /// `MediaError::recovery_code()` as **data**, and its rendered text is
+    /// byte-identical to the `MediaError::Backend` string it replaced, so the
+    /// agent's served text does not move.
+    ///
+    /// This is the path `LutStore::import_lut_asset` takes — it parses the file
+    /// it imports — so without the conversion a malformed `.cube` reached the
+    /// `import_lut_asset` tool with no code at all (D-R67).
+    #[test]
+    fn in1b_a_parse_refusal_reaches_media_error_typed() {
+        for (source, expected) in [
+            ("LUT_1D_SIZE 2\n", "unsupported_lut_format"),
+            ("LUT_3D_SIZE 1\n", "lut_size_out_of_range"),
+            ("LUT_3D_SIZE 2\n0 0\n", "malformed_lut_file"),
+        ] {
+            let typed = parse_cube_lut_typed(source).unwrap_err();
+            assert_eq!(typed.code.as_str(), expected, "{source:?}");
+            let rendered = typed.to_string();
+            assert!(rendered.starts_with(&format!("{expected}: ")));
+
+            // What the `From` impl produced before CR-D2, spelled out rather
+            // than referenced, so byte-identity is asserted against a literal.
+            let before = MediaError::Backend(rendered.clone());
+            let after = MediaError::from(typed.clone());
+
+            assert_eq!(
+                after,
+                MediaError::Store {
+                    code: expected,
+                    message: rendered.clone(),
+                }
+            );
+            assert_eq!(after.recovery_code(), Some(expected));
+            assert_eq!(after.recovery_code(), Some(typed.code.as_str()));
+            assert_eq!(
+                after.to_string(),
+                before.to_string(),
+                "the rendered text must not move"
+            );
+            assert!(after.to_string().starts_with("media backend error: "));
+            // `message` is the payload: the label lives in `Store`'s template.
+            let MediaError::Store { message, .. } = &after else {
+                unreachable!("just constructed")
+            };
+            assert!(!message.starts_with("media backend error: "));
+            assert_eq!(before.recovery_code(), None);
+        }
+    }
+
+    /// A `recovery_code()` string is **not** a variant identity, and nothing may
+    /// branch on one (`IN1b` ruling CR-D2, D's §16).
+    ///
+    /// `LutParseErrorCode::UnsupportedLutFormat` and `LutStoreErrorCode` share
+    /// no string, but `ColorPipelineError::MissingLutAsset` renders the very
+    /// token `LutStoreErrorCode::MissingLutAsset` renders. That is fine for a
+    /// **served value** — the agent prints the code it was handed — and it is
+    /// why no reader may recover a variant by matching the token: the obvious
+    /// "fix" of testing a leading token against the eleven store codes would
+    /// mis-attribute a render refusal to the store.
+    #[test]
+    fn in1b_a_served_code_string_is_not_a_variant_identity() {
+        let parse = MediaError::from(parse_cube_lut_typed("LUT_1D_SIZE 2\n").unwrap_err());
+        assert_eq!(parse.recovery_code(), Some("unsupported_lut_format"));
+        // Rendered by a different enum, through a different path, with no
+        // `From` impl and no code accessor: `ColorPipelineError` stays on
+        // `MediaError::Backend` and answers `None`.
+        let pipeline = MediaError::Backend(
+            crate::color_pipeline::ColorPipelineError::MissingLutAsset(
+                kinewright_core::LutAssetId(1),
+            )
+            .to_string(),
+        );
+        assert_eq!(pipeline.recovery_code(), None);
+        assert!(pipeline.to_string().contains("missing_lut_asset: "));
     }
 }

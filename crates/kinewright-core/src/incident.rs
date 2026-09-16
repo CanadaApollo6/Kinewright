@@ -27,7 +27,8 @@ use crate::{
     ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance, ColorQcError,
     ColorRange, ColorSourceError, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint,
     DeliveryColorError, DeliveryColorMismatch, DeliveryVariantError, DeliveryVerificationError,
-    EffectId, IncidentFamily, MediaError, OpError, Operation, TimelineRevision, TrackId,
+    EffectId, IncidentFamily, LutAssetId, MediaError, OpError, Operation, TimelineRevision,
+    TrackId,
 };
 
 /// A source-colour failure that Kinewright classifies as an incident.
@@ -887,6 +888,10 @@ pub enum IncidentSeverity {
 /// subject **is** the dedup axis and must be `Ord`. Each variant names the
 /// thing whose repeated failure is one problem (`IN1b` §3.3 rule 17).
 ///
+/// [`Self::LutAsset`] is the eighth variant, added by ruling N5: one LUT whose
+/// import, restore or hash check keeps refusing is one problem, and the seven
+/// `Look` rows of Appendix B anchor to it rather than to the project.
+///
 /// `ExportJob`, `Project` and `Agent` are **unit** variants and no id type is
 /// minted for them (`IN1b` §3.3 rule 18): the application runs one export at a
 /// time, an agent thread is addressed by a re-indexed position rather than by
@@ -898,7 +903,7 @@ pub enum IncidentSeverity {
 ///
 /// The wire union is three shapes, stated rather than discovered
 /// (`IN1b` §3.11 rule 42): a one-key object over a transparent `u64`
-/// (`{"asset":1}`), a one-key object over a nested union
+/// (`{"asset":1}`, `{"lut_asset":5}`), a one-key object over a nested union
 /// (`{"chain":{"bus":3}}` or `{"chain":"master"}`), and a bare string
 /// (`"export_job"`, `"project"`, `"agent"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -906,6 +911,15 @@ pub enum IncidentSeverity {
 pub enum IncidentSubject {
     /// One media file that keeps refusing.
     Asset(AssetId),
+    /// One LUT in the project's look store that keeps refusing.
+    ///
+    /// Its own variant rather than an [`Self::Asset`], because `LutAssetId` is
+    /// a separate id space from `AssetId` (`model.rs`'s `id_type!` mints both)
+    /// and a look failure anchored to [`Self::Project`] loses the card's
+    /// anchor: the person cannot see *which* look is broken. §3.3 rule 17's
+    /// claim that `Asset(AssetId)` covers "Look (per-LUT)" is erratum
+    /// `IN1b`-A-R13.
+    LutAsset(LutAssetId),
     /// One clip whose trim, speed or effect keeps failing.
     Clip(ClipId),
     /// One track's capture refusal.
@@ -930,6 +944,7 @@ impl IncidentSubject {
     pub fn label(self) -> String {
         match self {
             Self::Asset(asset) => format!("Asset {asset}"),
+            Self::LutAsset(lut) => format!("Look {lut}"),
             Self::Clip(clip) => format!("Clip {clip}"),
             Self::Track(track) => format!("Track {track}"),
             Self::Chain(AudioChain::Bus(bus)) => format!("Bus {bus}"),
@@ -1393,13 +1408,16 @@ impl IncidentObservation {
                     revision,
                 }
             }
-            // The two matte enums mint **no** `IncidentCode` (`IN1b` §0.2/e,
-            // §3.9 rule 37), so they share the unclassified media code with the
-            // five code-less variants — and so does their evidence. The matte
-            // code is not lost: it is the first token of every one of their
-            // `#[error]` templates and therefore the first word of `observed`.
+            // The two matte enums and the two stores mint **no** `IncidentCode`
+            // (`IN1b` §0.2/e, §3.9 rule 37, and the code table of §3.2 rule 12,
+            // which declares none of their 21 + 10 strings), so they share the
+            // unclassified media code with the five code-less variants — and so
+            // does their evidence, because one incident carries one code. Their
+            // own code is not lost: it is the first token of every one of their
+            // rendered refusals and therefore the first word of `observed`.
             MediaError::MatteProof(_)
             | MediaError::MatteCoverage(_)
+            | MediaError::Store { .. }
             | MediaError::NotImplemented
             | MediaError::Cancelled
             | MediaError::MixSpectrumRangeTooShort { .. }
@@ -3678,14 +3696,16 @@ mod tests {
         IncidentCode::Label(LabelIncident::Timeline),
     ];
 
-    /// The seven subject variants of `IN1b` §3.3 rule 17, at their widest ids.
+    /// The **eight** subject variants of `IN1b` §3.3 rule 17 as amended by
+    /// erratum `IN1b`-A-R13, at their widest ids.
     ///
     /// `Chain` is taken in its `Bus` form, which is the wider of its two wire
     /// shapes; `Chain(Master)` is covered by
     /// `in1b_every_subject_variant_labels_and_serialises_in_its_declared_shape`.
-    fn every_subject_shape() -> [IncidentSubject; 7] {
+    fn every_subject_shape() -> [IncidentSubject; 8] {
         [
             IncidentSubject::Asset(AssetId(u64::MAX)),
+            IncidentSubject::LutAsset(LutAssetId(u64::MAX)),
             IncidentSubject::Clip(ClipId(u64::MAX)),
             IncidentSubject::Track(TrackId(u64::MAX)),
             IncidentSubject::Chain(AudioChain::Bus(crate::AudioBusId(u64::MAX))),
@@ -4058,6 +4078,11 @@ mod tests {
                 "Asset 1",
                 r#"{"asset":1}"#,
             ),
+            (
+                IncidentSubject::LutAsset(LutAssetId(5)),
+                "Look 5",
+                r#"{"lut_asset":5}"#,
+            ),
             (IncidentSubject::Clip(ClipId(4)), "Clip 4", r#"{"clip":4}"#),
             (
                 IncidentSubject::Track(TrackId(2)),
@@ -4086,7 +4111,7 @@ mod tests {
         for subject in every_subject_shape() {
             assert!(ordered.insert(subject));
         }
-        assert_eq!(ordered.len(), 7);
+        assert_eq!(ordered.len(), 8);
     }
 
     /// `IN1b` §9 clause 15 and regression R-C: Part A's literal is byte
@@ -4140,11 +4165,27 @@ mod tests {
             serde_json::to_string(log.get(chain).unwrap()).unwrap(),
             IN1B_PINNED_CHAIN_WIRE_BODY
         );
+
+        // The eighth subject (erratum `IN1b`-A-R13): one LUT in the project's
+        // look store, on its own id space.
+        let Observed::Opened(look) = log.observe(IncidentObservation::plain(
+            IncidentCode::Label(LabelIncident::Look),
+            IncidentSubject::LutAsset(LutAssetId(5)),
+            "the look could not be restored from the store",
+            TimelineRevision(1),
+        )) else {
+            panic!("a fresh log must open the look incident");
+        };
+        assert_eq!(
+            serde_json::to_string(log.get(look).unwrap()).unwrap(),
+            IN1B_PINNED_LUT_ASSET_WIRE_BODY
+        );
     }
 
     /// **[probe-2c]**, measured against the implementation rather than a
     /// prototype: the worst serialised incident over the **67** declared codes
-    /// times the **seven** subject shapes of `IN1b` §3.3 rule 17.
+    /// times the **eight** subject variants of `IN1b` §3.3 rule 17 as amended
+    /// by erratum `IN1b`-A-R13 — 536 pairs.
     ///
     /// The inputs are probe-2b T2's: the longest rendered `OpError` and
     /// `MediaError` templates on `HEAD` with saturated ids, a seventy-byte
@@ -4182,7 +4223,7 @@ mod tests {
             }
         }
         println!("IN1B_PROBE2C measured={measured} worst={worst} pair={worst_pair}");
-        assert_eq!(measured, 67 * 7);
+        assert_eq!(measured, 67 * 8);
         assert!(
             worst <= 2_048,
             "the measured worst {worst} exceeds the declared ceiling ({worst_pair})"
@@ -4366,6 +4407,17 @@ mod tests {
         r#"ssage names the file; check that it exists and can be read, then open it again — if it w"#,
         r#"as unsaved work that could not be restored, the last saved version of the project is sti"#,
         r#"ll intact."}}],"revision":1,"count":1,"state":"open","telemetry":{"tool_calls":0}}"#,
+    );
+
+    /// `IN1b` §3.11 rule 42's look-subject body, normative as generated (erratum `IN1b`-A-R13).
+    const IN1B_PINNED_LUT_ASSET_WIRE_BODY: &str = concat!(
+        r#"{"id":3,"code":"look_unclassified","class":"explain","severity":"blocks","subject":{"lut"#,
+        r#"_asset":5},"field":"look","observed":"the look could not be restored from the store","al"#,
+        r#"lowed":null,"evidence":"plain","recoveries":[{"label":"How to fix this","kind":{"explain"#,
+        r#"":"The look or LUT could not be imported, restored or applied. The message names the fil"#,
+        r#"e or the store; check that the project has been saved and that its LUT folder is a writa"#,
+        r#"ble directory, then try again."}}],"revision":1,"count":1,"state":"open","telemetry":{"t"#,
+        r#"ool_calls":0}}"#,
     );
 
     /// `IN1b` §3.11 rule 42's chain-subject body, normative as generated.

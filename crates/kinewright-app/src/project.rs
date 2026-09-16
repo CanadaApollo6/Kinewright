@@ -7,9 +7,10 @@ use std::{
 
 use kinewright_agent::{ClaudeCodeDriver, CursorAcpDriver};
 use kinewright_core::{
-    AgentDriver, Analysis, AssetId, ClipId, Core, Document, Event, Export, IncidentLog, LutAssetId,
-    LutAvailabilityKind, LutAvailabilityStatus, MarkerId, MediaKind, Playback, TimeCode,
-    TimelineRevision, TrackId, TrackKind,
+    AgentDriver, Analysis, AssetId, ClipId, Core, Document, Event, Export, IncidentCode,
+    IncidentEvidence, IncidentLog, IncidentObservation, IncidentSubject, LutAssetId,
+    LutAvailabilityKind, LutAvailabilityStatus, MarkerId, MediaKind, Playback, RejectionIncident,
+    TimeCode, TimelineRevision, TrackId, TrackKind,
 };
 use kinewright_media::{LutLibrary, LutStore};
 
@@ -85,6 +86,43 @@ impl std::fmt::Display for ProjectSaveError {
 }
 
 impl std::error::Error for ProjectSaveError {}
+
+impl ProjectSaveError {
+    /// The incident code a failed project write carries
+    /// (`IN1b` §2.2 rule 8).
+    ///
+    /// Declared in the app crate, which owns the trigger; core owns the code
+    /// and the policy class (IN1 §2.1 rule 2).
+    pub(crate) const fn incident_code(&self) -> IncidentCode {
+        match self {
+            Self::Serialize(_) | Self::Write(_) => {
+                IncidentCode::Rejection(RejectionIncident::ProjectSave)
+            }
+        }
+    }
+
+    /// An observation from this refusal, with the caller's subject.
+    ///
+    /// `ProjectSave { reason }` evidence keeps which half failed —
+    /// serialising or writing — which is what the written body tells the
+    /// person to act on.
+    pub(crate) fn incident_observation(
+        &self,
+        subject: IncidentSubject,
+        revision: TimelineRevision,
+    ) -> IncidentObservation {
+        IncidentObservation {
+            code: self.incident_code(),
+            subject,
+            observed: self.to_string(),
+            allowed: None,
+            evidence: IncidentEvidence::ProjectSave {
+                reason: self.to_string(),
+            },
+            revision,
+        }
+    }
+}
 
 /// Derive a project's LUT store root (CC4 §2.2).
 ///

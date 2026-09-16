@@ -34,7 +34,10 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use eframe::egui;
-use kinewright_core::{Core, Document, Event, JournalCommand};
+use kinewright_core::{
+    Core, Document, Event, IncidentCode, IncidentObservation, IncidentSubject, JournalCommand,
+    LabelIncident, TimelineRevision,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::theme::{self, type_size};
@@ -896,10 +899,28 @@ fn damage_description(damage: &Damage) -> String {
     )
 }
 
-pub(crate) fn restore_status(result: Result<(), String>) -> String {
+/// The status line a finished crash-recovery restore writes, and the
+/// observation a failed one opens (`IN1b` §5.7, Appendix B row 28).
+///
+/// The success arm returns its string as it always did. The `Err` arm returns
+/// **no** string: it used to compose *"Could not restore unsaved work: …"*
+/// straight into `self.status` with no log write on the path at all, which is
+/// the third of the three sinks that reached a person without touching
+/// `ErrorLog`. The caller queues the observation and `note_incident` writes
+/// the status line. The observation is boxed because it is much larger than
+/// the success string and `clippy::result_large_err` is part of the house
+/// `-D warnings` gate.
+pub(crate) fn restore_status(
+    result: Result<(), String>,
+) -> Result<String, Box<IncidentObservation>> {
     match result {
-        Ok(()) => "Recovered unsaved work".to_owned(),
-        Err(error) => format!("Could not restore unsaved work: {error}"),
+        Ok(()) => Ok("Recovered unsaved work".to_owned()),
+        Err(error) => Err(Box::new(IncidentObservation::plain(
+            IncidentCode::Label(LabelIncident::Project),
+            IncidentSubject::Project,
+            format!("Could not restore unsaved work: {error}"),
+            TimelineRevision::default(),
+        ))),
     }
 }
 

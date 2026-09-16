@@ -3,10 +3,11 @@ use std::sync::Arc;
 use eframe::egui;
 use kinewright_core::{
     Analysis, AutomationCurve, Clip, ClipContent, ClipId, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB,
-    FrameRounding, Keyframe, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaKind,
-    Operation, Rational, SceneStatus, SilenceStatus, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
-    TimeCode, Title, TrackId, TrackKind, Transition, WaveformData, envelope_coalesce_key,
-    map_frames_with_rounding, map_source_range_to_project,
+    FrameRounding, IncidentCode, IncidentSubject, Keyframe, LabelIncident,
+    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaKind, Operation, Rational,
+    SceneStatus, SilenceStatus, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TimeCode, Title, TrackId,
+    TrackKind, Transition, WaveformData, envelope_coalesce_key, map_frames_with_rounding,
+    map_source_range_to_project,
 };
 use kinewright_media::{RoomToneStore, timeline_source_at};
 
@@ -578,7 +579,12 @@ impl KinewrightApp {
                 true
             }
             EnvelopeDelete::RefuseLastKey => {
-                self.record_error("Operations", ENVELOPE_LAST_KEY_NOTE);
+                // Appendix B row 116: `RefuseLastKey` carries no clip.
+                self.note_label(
+                    LabelIncident::Operations,
+                    IncidentSubject::Project,
+                    ENVELOPE_LAST_KEY_NOTE,
+                );
                 true
             }
         }
@@ -629,7 +635,13 @@ impl KinewrightApp {
             .checked_add(1)
             .map(TrackId)
         else {
-            self.record_error("Operations", "Track id space is exhausted");
+            // Appendix B row 117, amended by erratum `IN1b`-C-R41: an id
+            // space is document-wide and no `ClipId` is in scope.
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Project,
+                "Track id space is exhausted",
+            );
             return;
         };
         self.send_operations(vec![
@@ -649,7 +661,11 @@ impl KinewrightApp {
         let position = self.focused().position;
         match freeze_frame_operations(&self.focused().document, position) {
             Ok(operations) => self.send_operations(operations),
-            Err(error) => self.record_error("Operations", error),
+            // Appendix B row 118, amended by erratum `IN1b`-C-R41: the plan
+            // is made from the playhead and names no `ClipId`.
+            Err(error) => {
+                self.note_label(LabelIncident::Operations, IncidentSubject::Project, error);
+            }
         }
     }
 
@@ -662,8 +678,11 @@ impl KinewrightApp {
                 .map(|source| source.clip)
         });
         let Some(clip) = clip else {
-            self.record_error(
-                "Operations",
+            // Appendix B row 119, amended by erratum `IN1b`-C-R41: the site
+            // fires because there is no clip.
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Project,
                 "No clip is selected or active at the playhead",
             );
             return;
@@ -698,7 +717,13 @@ impl KinewrightApp {
 
     fn delete_selected_clips(&mut self, ripple: bool) {
         let Some(clip) = self.focused().selected_clip else {
-            self.record_error("Operations", "Select a clip to delete");
+            // Appendix B row 120, amended by erratum `IN1b`-C-R41: the site
+            // fires because nothing is selected.
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Project,
+                "Select a clip to delete",
+            );
             return;
         };
         self.send_operations(linked_delete_operations(
@@ -710,7 +735,13 @@ impl KinewrightApp {
 
     pub(crate) fn add_marker_at_playhead(&mut self) {
         let Some(id) = next_marker_id(&self.focused().document) else {
-            self.record_error("Operations", "Marker id space is exhausted");
+            // Appendix B row 121, amended by erratum `IN1b`-C-R41: an id
+            // space is document-wide.
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Project,
+                "Marker id space is exhausted",
+            );
             return;
         };
         let marker = Marker {
@@ -731,7 +762,11 @@ impl KinewrightApp {
         new_source: std::ops::Range<TimeCode>,
     ) {
         let Some(original) = self.focused().document.clip(clip) else {
-            self.record_error("Operations", format!("Clip {clip} no longer exists"));
+            self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Clip(clip),
+                format!("Clip {clip} no longer exists"),
+            );
             return;
         };
         let edge = if new_source.start == original.source_range.start {
@@ -741,7 +776,14 @@ impl KinewrightApp {
         };
         match linked_trim_operations(&self.focused().document, clip, new_source, edge) {
             Ok(operations) => self.send_operations(operations),
-            Err(error) => self.record_error("Operations", error),
+            // Appendix B row 123.
+            Err(error) => {
+                self.note_label(
+                    LabelIncident::Operations,
+                    IncidentSubject::Clip(clip),
+                    error,
+                );
+            }
         }
     }
 
@@ -2899,12 +2941,16 @@ fn project_delta_to_source(project_delta: i64, project_fps: Rational, source_fps
 
 /// AU5 §6.4 rule 129: the toolbar button that fills a gap with room tone.
 pub(crate) const ROOM_TONE_BUTTON: &str = "Room tone";
-/// Where a refused fill lands in the error log (AU5 §0 R134).
+/// The code a refused fill carries (AU5 §0 R134, `IN1b` §5.4 rule 27).
 ///
-/// Not `LOOK_ERROR_CATEGORY`: the button is a timeline gesture, and a
+/// Not `LOOK_INCIDENT_CODE`: the button is a timeline gesture, and a
 /// `Room tone` refusal filed under "Look" tells the editor to go and look at
-/// a surface that had nothing to do with it.
-pub(crate) const ROOM_TONE_ERROR_CATEGORY: &str = "Timeline";
+/// a surface that had nothing to do with it. This is the only producer of
+/// `timeline_unclassified`, the seventeenth label: it appeared at no literal
+/// call site of the old sink at all, so a per-label census of that sink missed
+/// it (`IN1b` §2.1 rule 3).
+pub(crate) const ROOM_TONE_INCIDENT_CODE: IncidentCode =
+    IncidentCode::Label(LabelIncident::Timeline);
 /// AU5 §6.4 rule 129: why the button is grey with nothing selected.
 pub(crate) const ROOM_TONE_NEEDS_CLIP: &str = "Select a clip on the track whose gap to fill";
 /// AU5 §6.4 rule 129: why the button is grey on a track with no hole in it.
@@ -3130,7 +3176,7 @@ impl KinewrightApp {
     pub(crate) fn fill_room_tone_at_selection(&mut self) {
         let mut edits = InspectorEdits::default();
         // A refused fill is a timeline refusal, not a look one (AU5 §0 R134).
-        edits.set_error_category(ROOM_TONE_ERROR_CATEGORY);
+        edits.set_incident_code(ROOM_TONE_INCIDENT_CODE);
         let capture = self.plan_room_tone_fill(&mut edits);
         self.submit_inspector_edits(edits);
         if let Some(job) = capture {
@@ -3263,7 +3309,14 @@ impl KinewrightApp {
             self.room_tone_pending = self.room_tone_pending.saturating_add(1);
             ROOM_TONE_CAPTURING.clone_into(&mut self.status);
         } else {
-            self.record_error("Media", "Could not start the room-tone capture worker");
+            // Appendix B row 124, the one row that constructs
+            // `IncidentSubject::Track`: `RoomToneCaptureJob::track` is still
+            // in scope and one track's capture refusal is one problem.
+            self.note_label(
+                LabelIncident::Media,
+                IncidentSubject::Track(track),
+                "Could not start the room-tone capture worker",
+            );
         }
     }
 
@@ -3272,7 +3325,7 @@ impl KinewrightApp {
         while let Ok(response) = self.room_tone_rx.try_recv() {
             self.room_tone_pending = self.room_tone_pending.saturating_sub(1);
             let mut edits = InspectorEdits::default();
-            edits.set_error_category(ROOM_TONE_ERROR_CATEGORY);
+            edits.set_incident_code(ROOM_TONE_INCIDENT_CODE);
             match self.room_tone_batch(&response) {
                 Ok(operations) => edits.extend_operations(operations),
                 Err(message) => edits.push_error(message),
@@ -5384,21 +5437,27 @@ mod tests {
         }
     }
 
-    /// AU5 §0 R134: a room-tone refusal is filed under `Timeline`, and the
-    /// inspector's own default is still `Look`.
+    /// AU5 §0 R134, carried into `IN1b` §5.4 rule 27: a room-tone refusal
+    /// carries `timeline_unclassified`, and the inspector's own default is
+    /// still `look_unclassified`.
     #[test]
     fn au5_a_room_tone_refusal_is_not_filed_under_look() {
         assert_eq!(
-            InspectorEdits::default().error_category(),
-            crate::inspector_ui::LOOK_ERROR_CATEGORY,
-            "every CC4-CC6 look card keeps the category it has always had"
+            InspectorEdits::default().incident_code(),
+            crate::inspector_ui::LOOK_INCIDENT_CODE,
+            "every CC4-CC6 look card keeps the code it has always had"
+        );
+        assert_eq!(
+            crate::inspector_ui::LOOK_INCIDENT_CODE.code(),
+            "look_unclassified"
         );
         let mut edits = InspectorEdits::default();
-        edits.set_error_category(ROOM_TONE_ERROR_CATEGORY);
-        assert_eq!(edits.error_category(), "Timeline");
+        edits.set_incident_code(ROOM_TONE_INCIDENT_CODE);
+        assert_eq!(edits.incident_code(), ROOM_TONE_INCIDENT_CODE);
+        assert_eq!(edits.incident_code().code(), "timeline_unclassified");
         assert_ne!(
-            ROOM_TONE_ERROR_CATEGORY,
-            crate::inspector_ui::LOOK_ERROR_CATEGORY,
+            ROOM_TONE_INCIDENT_CODE,
+            crate::inspector_ui::LOOK_INCIDENT_CODE,
             "the button is a timeline gesture; a `Room tone` refusal under `Look` \
              sends the editor to a surface that had nothing to do with it"
         );
@@ -5408,7 +5467,7 @@ mod tests {
             .0;
         assert_eq!(
             source
-                .matches("set_error_category(ROOM_TONE_ERROR_CATEGORY)")
+                .matches("set_incident_code(ROOM_TONE_INCIDENT_CODE)")
                 .count(),
             2,
             "`fill_room_tone_at_selection` and `poll_room_tone` both set it"

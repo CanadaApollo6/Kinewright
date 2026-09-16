@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use eframe::egui;
 use kinewright_core::{
-    Clip, EffectUniform, MatteParams, MediaKind, ThreePointMode, TimeCode, TrackId, TrackKind,
+    Clip, EffectUniform, IncidentSubject, LabelIncident, MatteParams, MediaKind, ThreePointMode,
+    TimeCode, TrackId, TrackKind,
 };
 
 use crate::{
@@ -1479,6 +1480,24 @@ fn patch_routes_valid(
 }
 
 impl KinewrightApp {
+    /// Appendix B rows 105-110: a `source_monitor_unclassified` refusal
+    /// against the source asset the edit was about.
+    ///
+    /// The asset is the dedup axis rather than the clip: no clip exists yet —
+    /// the edit that would have made one was refused — and one source that
+    /// keeps refusing is one problem.
+    fn note_source_monitor_refusal(
+        &mut self,
+        asset: kinewright_core::AssetId,
+        observed: impl Into<String>,
+    ) {
+        self.note_label(
+            LabelIncident::SourceMonitor,
+            IncidentSubject::Asset(asset),
+            observed,
+        );
+    }
+
     fn dispatch_source_edit(
         &mut self,
         asset: kinewright_core::AssetId,
@@ -1489,30 +1508,35 @@ impl KinewrightApp {
         mode: ThreePointMode,
     ) {
         if self.source_edit_revalidation_pending() {
-            self.record_error(
-                "Source monitor",
+            // Appendix B row 105.
+            self.note_source_monitor_refusal(
+                asset,
                 "Source verification is already in progress; wait for it to finish before editing",
             );
             return;
         }
         let Some(current_asset) = self.focused().document.asset(asset).cloned() else {
-            self.record_error("Source monitor", "Selected source asset no longer exists");
+            // Appendix B row 106.
+            self.note_source_monitor_refusal(asset, "Selected source asset no longer exists");
             return;
         };
         if self.focused().selected_asset != Some(asset) {
-            self.record_error(
-                "Source monitor",
+            // Appendix B row 107.
+            self.note_source_monitor_refusal(
+                asset,
                 "Selected source changed before the edit could be checked",
             );
             return;
         }
         if source_in < 0 || source_out <= source_in || source_out > current_asset.duration.0 {
-            self.record_error("Source monitor", "Source In/Out marks are no longer valid");
+            // Appendix B row 108.
+            self.note_source_monitor_refusal(asset, "Source In/Out marks are no longer valid");
             return;
         }
         if !self.valid_route(current_asset.kind, video_target, audio_target) {
-            self.record_error(
-                "Source monitor",
+            // Appendix B row 109.
+            self.note_source_monitor_refusal(
+                asset,
                 "Source patch destination is stale or incompatible; choose a current track",
             );
             return;
@@ -1535,8 +1559,9 @@ impl KinewrightApp {
             mode,
         };
         let Some(request_id) = self.force_source_edit_media_revalidation(&current_asset) else {
-            self.record_error(
-                "Source monitor",
+            // Appendix B row 110.
+            self.note_source_monitor_refusal(
+                asset,
                 "Could not start mandatory source verification; no edit was applied",
             );
             return;

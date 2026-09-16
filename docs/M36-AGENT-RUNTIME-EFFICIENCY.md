@@ -126,6 +126,23 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-14, after AU6 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-14, after AU6 §13 agent nits) | 138 | 1,540,292 B | 1,397,185 B | 120,458 B |
 | Served MCP runtime (2026-09-14, after AU6 §13 agent nits) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-15, after IN1 Part A) | 140 | 1,551,301 B | 1,407,012 B | 121,315 B |
+| Served MCP runtime (2026-09-15, after IN1 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-16, after IN1 Part B) | 140 | 1,551,301 B | 1,407,012 B | 121,315 B |
+| Served MCP runtime (2026-09-16, after IN1 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
+
+IN1 Part A adds two capabilities, `get_incidents` and `resolve_incident`,
+reached through `invoke_capability` and served as no tool: the registry grows
+by 11,009 B serialized (1,540,292 → 1,551,301), 9,827 B of input schema and
+857 B of description — 8,525 B of it the new `MediaAsset.assumed_from` field
+inlined into 55 schemas — and the served quad is byte-identical for the
+sixteenth consecutive measurement at 7 / 5,660 B / 3,510 B / 998 B (IN1
+§6.6). Serving the two as tools would have cost +2,012 B, +35.5 %, of served
+bytes, which is why they are capabilities. IN1 Part B adds no capability, no
+operation and no schema byte: incidents grow from 12 codes to 67 and from one
+subject kind to eight, but every addition is output-only, so the registry
+sextuple and the served quad are both unchanged for the seventeenth
+consecutive measurement (IN1b §6.4), asserted in three pin sites.
 
 AU6 Part A adds no capability and no operation; the registry is
 unchanged and the served quad is byte-identical at 7 / 5,660 B /

@@ -85,6 +85,7 @@ use crate::{
     },
     export_queue::{
         ExportJobId, ExportJobRecord, ExportQueue, ExportQueueError, QueueExportRequest,
+        media_refusal_code,
     },
     pacing::{DialoguePacingGap, dialogue_pacing_gaps},
     render::{
@@ -13747,18 +13748,24 @@ fn room_tone_capture_error(
 
 /// One `RoomToneStoreError` rendered into `capture_room_tone`'s envelope.
 ///
-/// `RoomToneStoreError` renders `"<code>: <detail>; observed=<v>; allowed=<v>"`,
-/// which is `LutStoreError`'s own spelling, so the two share
-/// [`lut_error_detail`] and [`lut_error_field`] rather than growing a second
-/// parser for one format.
+/// `IN1b` §6.2 rule 4: the code is [`media_refusal_code`]'s answer, read off
+/// `MediaError::Store`'s typed `code` field, not this function's own reading of
+/// the rendered sentence. `RoomToneStoreError` renders
+/// `"<code>: <detail>; observed=<v>; allowed=<v>"`, which is `LutStoreError`'s
+/// own spelling, so the two share [`lut_error_detail`] and [`lut_error_field`]
+/// for the trailing keys rather than growing a second reader for one format.
+///
+/// **`field` and `recovery_action` are `capture_room_tone`'s tool-level
+/// envelope and are deliberately not derived from the code.** Every body this
+/// function builds says `source_end_frame` and the room-tone recovery sentence,
+/// which is right for the ten `RoomToneStoreErrorCode` refusals this path
+/// actually carries and wrong for any other typed `MediaError` that reached it:
+/// such a caller would be served a field that is not its own. Sourcing `field`
+/// from `IncidentCode::field()` is outside `IN1b` §14 row D and belongs with the
+/// agent-crate refusal migration of §13 D-B1.
 fn room_tone_store_error_result(error: &kinewright_core::MediaError) -> CallToolResult {
     let rendered = error.to_string();
-    let payload = rendered
-        .strip_prefix("media backend error: ")
-        .unwrap_or(rendered.as_str());
-    let (code, remainder) = payload
-        .split_once(": ")
-        .unwrap_or(("room_tone_capture_failed", payload));
+    let (code, remainder) = media_refusal_code(error, &rendered, "room_tone_capture_failed");
     room_tone_capture_error(
         code,
         lut_error_detail(remainder),
@@ -13926,21 +13933,18 @@ fn export_queue_error_result(error: ExportQueueError) -> CallToolResult {
 
 /// Surface a media-layer LUT store or parser failure with its stable code.
 ///
-/// `MediaError` has no LUT variant, so both the store and the `.cube` parser
-/// encode their code as a `"<code>: "` prefix behind `MediaError::Backend`'s
-/// own label, and the typed `LutStoreError`/`LutParseError` are not
-/// recoverable from the `MediaError` the store's public API returns. The parts
-/// are split back out here with anchored keys so an agent reads the same typed
-/// `field`/`observed`/`allowed`/`recovery_action` shape every other CC1-CC4
-/// rejection uses.
+/// `IN1b` §6.2 rule 4: the code is [`media_refusal_code`]'s answer, and after
+/// N4/CR-D1 and CR-D2 **both** LUT families reach this crate typed, on
+/// `MediaError::Store { code, message }` — `LutStoreError`'s eleven codes and
+/// `LutParseError`'s six — so no text is read to recover a code. This tool's own
+/// `lut_import_failed` label is left for a `MediaError` that declares no code at
+/// all. The trailing keys are still split out with anchored readers so an agent
+/// reads the same typed `field`/`observed`/`allowed`/`recovery_action` shape
+/// every other CC1-CC4 rejection uses, and `Store` keeping `Backend`'s
+/// `media backend error: ` template is what makes that byte-identical.
 fn lut_store_error_result(tool: &str, error: &kinewright_core::MediaError) -> CallToolResult {
     let rendered = error.to_string();
-    let payload = rendered
-        .strip_prefix("media backend error: ")
-        .unwrap_or(rendered.as_str());
-    let (code, remainder) = payload
-        .split_once(": ")
-        .unwrap_or(("lut_import_failed", payload));
+    let (code, remainder) = media_refusal_code(error, &rendered, "lut_import_failed");
     lut_tool_error(
         tool,
         code,
@@ -16383,6 +16387,12 @@ fn dollars_to_millionths(cost_usd: f64) -> Option<i64> {
 /// IN1 §6.2 rule 9: the exact serialised size of the **largest** fixture
 /// incident, the untagged-`WebM` one, asserted with `assert_eq!`.
 ///
+/// **Unmoved by `IN1b`** (§3.11 rule 41): the Part A incident serialises byte
+/// for byte as it did at `d4ed8eb`, because `IncidentEvidence`'s `rename_all`,
+/// its `SourceColor` variant's name and both field names, `IncidentCode`'s
+/// hand-written `Serialize` and the colour rows' `Blocks` severity are all
+/// unchanged.
+///
 /// A budget with slack is not a budget. This is the shape every other M36 pin
 /// in this repository uses and the only shape that fails the day a field is
 /// added to [`kinewright_core::Incident`].
@@ -16395,14 +16405,36 @@ fn dollars_to_millionths(cost_usd: f64) -> Option<i64> {
 /// `"inferred"` (8 B). Their `observed` and `allowed` are equal.
 pub const IN1_INCIDENT_SERIALIZED_BYTES: usize = 819;
 
-/// IN1 §6.2 rule 9: the ceiling every incident this policy table can produce
-/// stays under, asserted `<=` over all twelve codes on one synthetic subject.
+/// `IN1b` §3.11 rule 43 and §9 clause 16: the ceiling every incident this
+/// policy table can produce stays under, asserted `<=` over all **67** codes
+/// across all **seven** subject shapes — 469 pairs.
 ///
-/// Set to the smallest power of two above the measured worst. The ceiling
-/// gates the population the migration will grow, not the fixture alone: the
-/// worst of the twelve is `unsupported_source_combination`, because its
-/// `observed()` is the only formatted tuple in the set.
-pub const IN1_INCIDENT_SERIALIZED_CEILING_BYTES: usize = 1_024;
+/// Set to the smallest power of two above the measured worst, which this
+/// crate's own loop measures at **1 358 B** over 536 pairs, on
+/// `unsupported_decoder_format` x `Chain(Bus(u64::MAX))`: the widest
+/// `observed`, the widest evidence and the widest subject in one incident.
+/// Core's [probe-2c] reads **1 351 B** on the same pair; the 7 B is the
+/// synthetic `allowed`, which this loop widened from a round 70 B to
+/// `ColorQcError::NodeRemovalRejected`'s real 77 B literal (agent review 2
+/// N-3). Both figures are of the same shape and neither moves the constant.
+///
+/// **The shape that figure is measured on, stated because the headroom depends
+/// on it.** The loop measures an **`Open`** incident, whose `telemetry` renders
+/// as the one-key `{"tool_calls":0}` shape every `skip_serializing_if` leaves
+/// (§8 rule 2 says the ceiling is taken on the skipped shape). 690 B (34 %) is
+/// therefore the headroom of *that* shape, against Part A's 203 B (20 %). `get_incidents` with
+/// `include_resolved: true` serialises `log.all()`, so the widest body that can
+/// actually reach the wire is a **resolved** incident with `"outcome"` and all
+/// eight telemetry values present: agent review 2 measured that at **1 737 B**,
+/// 311 B (15 %) of headroom, against the same 2 048. Nothing in either shape
+/// breaches the ceiling.
+///
+/// Part A's 1 024 was measured over twelve colour codes on one synthetic
+/// subject and is superseded by erratum `IN1b`-R10: the migration's own
+/// population is 67 codes, and the ceiling gates that population rather than
+/// the fixture alone. `IN1_INCIDENT_SERIALIZED_BYTES` does not move with it,
+/// because `IN1b` §3.11 rule 41's byte-identity is structural.
+pub const IN1_INCIDENT_SERIALIZED_CEILING_BYTES: usize = 2_048;
 
 /// IN1 §6.2 rule 11: the one sentence that stops a model inventing a second
 /// round trip, in the voice of the existing `search_capabilities` and
@@ -16444,10 +16476,39 @@ fn color_provenance_label(provenance: &ColorProvenance) -> String {
         .unwrap_or_else(|| "unserializable".to_owned())
 }
 
-/// IN1 §6.3 rule 16: verify the document actually matches the claimed outcome.
+/// IN1 §6.3 rule 16 and `IN1b` §6.1 rule 2: verify the document actually
+/// matches the claimed outcome, **per code**.
 ///
 /// Returns the typed refusal when it does not, and `None` when the claim
 /// holds. `explained` carries no document check, because nothing was applied.
+///
+/// After Part B there are 67 codes and seven subject shapes, and exactly one
+/// code group has a claim this capability can check against the document the
+/// caller resolved at: a source-colour incident on an asset subject, whose
+/// evidence carries the probed description the revert restores. Every other
+/// code records an outcome against work the document does not show — an export
+/// that failed, a panel that refused, a project that would not save — so there
+/// is nothing to verify and a refusal would be a guess (IN1 §6.3 rule 18).
+///
+/// This is why Part B adds **no** refusal code: `incident_not_found`,
+/// `incident_not_applied` and `incident_not_reverted` are still the three, and
+/// the two outcome codes are still reachable only from the colour arm.
+///
+/// **One Part A refusal becomes a record, by construction of the match above
+/// (erratum `IN1b`-D-R65).** Part A checked the subject first, then looked the
+/// asset up in the media pool — refusing *"asset N is no longer in the media
+/// pool"* — and only then read `probed()`. Hoisting `probed()` into the match
+/// key means a **source-colour-coded incident whose evidence carries no probed
+/// description** falls to the `_` arm before that lookup and is recorded rather
+/// than refused. That pair is reachable, not hypothetical: the
+/// `MediaError::SourceColor(inner)` arm of `IncidentObservation::from_media_error`
+/// builds a `SourceColor` code with `IncidentEvidence::MediaError` evidence. It
+/// is accepted because the refusal it drops was about the **asset**, not about
+/// the claim: with no probed description there is nothing to compare the asset
+/// against, so neither `applied` nor `reverted` can be checked even when the
+/// asset is present, and refusing only the departed-asset half would refuse on
+/// a fact the incident cannot act on. §6.1 rule 2's printed match is exactly
+/// what is implemented.
 fn verify_claimed_outcome(
     incident: &Incident,
     document: &Document,
@@ -16456,14 +16517,34 @@ fn verify_claimed_outcome(
     if matches!(outcome, ResolveIncidentOutcome::Explained) {
         return None;
     }
-    // `IN1b` §3.8 break 5: `IncidentSubject` has seven variants after Part B
-    // and only the asset-scoped one has a document claim to verify. The
-    // per-code verification of `IN1b` §6.1 is implementer D's; this arm keeps
-    // Part A's behaviour for the asset subject and records every other subject
-    // without a document check.
-    let kinewright_core::IncidentSubject::Asset(asset_id) = incident.subject else {
-        return None;
-    };
+    match (incident.code, incident.subject, incident.evidence.probed()) {
+        // The one code with something to verify: the asset must carry the
+        // assumption (applied) or the probed bytes (reverted).
+        (
+            kinewright_core::IncidentCode::SourceColor(_),
+            kinewright_core::IncidentSubject::Asset(asset_id),
+            Some(probed),
+        ) => verify_source_colour_outcome(document, outcome, asset_id, probed),
+        // Every other code, and a source-colour incident whose subject or
+        // evidence is not the asset-scoped pair the check needs.
+        _ => None,
+    }
+}
+
+/// The asset-scoped source-colour half of [`verify_claimed_outcome`].
+///
+/// Split out rather than inlined so the code match above reads as the rule it
+/// implements. `IN1b` §6.1 rule 2 prints this call with the incident as its
+/// first argument; nothing in the body reads it — the code, the subject and the
+/// probed description are already destructured by the caller — and an unused
+/// parameter is a `-D warnings` build error, so it is not taken (erratum
+/// `IN1b`-D-R60).
+fn verify_source_colour_outcome(
+    document: &Document,
+    outcome: ResolveIncidentOutcome,
+    asset_id: AssetId,
+    probed: &kinewright_core::ColorDescription,
+) -> Option<CallToolResult> {
     let code = match outcome {
         ResolveIncidentOutcome::Applied => "incident_not_applied",
         ResolveIncidentOutcome::Reverted => "incident_not_reverted",
@@ -16483,9 +16564,6 @@ fn verify_claimed_outcome(
             "Call get_timeline_state, then resolve the incident against an asset the project still holds.",
         ));
     };
-    // `IN1b` §3.4 rule 25 row 8: `probed()` is an `Option` after Part B, and
-    // evidence that carries no probed description has no colour claim to check.
-    let probed = incident.evidence.probed()?;
     match outcome {
         // The caller applied the recovery: the asset must now carry the
         // agent's assumption and must remember what it replaced.
@@ -16787,12 +16865,12 @@ mod tests {
         audio_qc_exceptions, audio_qc_technical_pass,
     };
     use kinewright_core::{
-        AudioRepairProvenance, AudioRepairReport, AudioRepairRequest, MixNoiseProfileRequest,
-        MixWindowLevelReport, MixWindowRequest, NoiseProfileReport,
+        AudioChain, ColorSourceError, IncidentEvidence, IncidentObservation, IncidentState,
+        IncidentSubject, Observed, POLICY, SourceColorIncident,
     };
     use kinewright_core::{
-        ColorSourceError, IncidentEvidence, IncidentObservation, IncidentState, IncidentSubject,
-        Observed, SourceColorIncident,
+        AudioRepairProvenance, AudioRepairReport, AudioRepairRequest, MixNoiseProfileRequest,
+        MixWindowLevelReport, MixWindowRequest, NoiseProfileReport,
     };
     use serde_json::json;
     use std::{
@@ -26147,10 +26225,24 @@ mod tests {
         assert_eq!(annotations.open_world_hint, Some(false));
     }
 
-    /// IN1 §6.2 rule 9 and §9 clause 14: the two token-budget assertions that
-    /// can fail.
+    /// IN1 §6.2 rule 9 and `IN1b` §3.11 rule 43, §9 clause 16: the two
+    /// token-budget assertions that can fail.
+    ///
+    /// The rewrite of Part A's
+    /// `in1_the_fixture_incident_is_pinned_and_every_code_fits_the_ceiling`
+    /// (erratum `IN1b`-R10). The fixture pin is unchanged and still
+    /// `assert_eq!`-exact at 819 B, because `IN1b` §3.11 rule 41's
+    /// byte-identity is structural; the ceiling loop is quantified over the
+    /// whole declared code set and all **eight** subject shapes — 536 pairs
+    /// after erratum `IN1b`-A-R13 — at 2 048 B, because that is the population
+    /// the migration produces.
+    ///
+    /// The code set is read off [`POLICY`] rather than transcribed, so a code
+    /// added to the enum without a policy row cannot slip past the loop: `IN1b`
+    /// §9 clause 2's core test is what proves the table is exhaustive over the
+    /// enum, and this test inherits that proof rather than repeating it.
     #[test]
-    fn in1_the_fixture_incident_is_pinned_and_every_code_fits_the_ceiling() {
+    fn in1b_every_code_fits_the_measured_ceiling() {
         // The named largest fixture incident, built deterministically: the
         // untagged-`WebM` observation fed twice so `count` is 2 without an
         // engine, and read while still `Open` so no `Duration` reaches the wire.
@@ -26178,36 +26270,470 @@ mod tests {
             "the fixture incident moved off its pinned budget"
         );
 
-        // The ceiling gates the whole policy table, not the fixture alone.
+        // The ceiling gates the whole 67-code population the migration opens,
+        // not the fixture alone, and on every subject shape it can open it on.
         let mut worst = 0;
+        let mut worst_pair = String::new();
         let mut measured = 0;
-        for error in in1_every_source_error() {
-            let mut log = IncidentLog::with_start(Instant::now());
-            let Observed::Opened(id) = log.observe(in1_observation(&error, &probed)) else {
-                panic!("a fresh log must open {}", error.code());
-            };
-            let bytes = serde_json::to_vec(log.get(id).unwrap()).unwrap().len();
-            assert!(
-                bytes <= IN1_INCIDENT_SERIALIZED_CEILING_BYTES,
-                "{} serialises to {bytes} B, over the ceiling",
-                error.code()
-            );
-            worst = worst.max(bytes);
-            measured += 1;
+        for entry in POLICY {
+            for subject in in1b_every_subject_shape() {
+                let mut log = IncidentLog::with_start(Instant::now());
+                let Observed::Opened(id) = log.observe(in1b_worst_observation(entry.code, subject))
+                else {
+                    panic!("a fresh log must open {}", entry.code.code());
+                };
+                // The widest id and count this session can reach, so the
+                // measurement is not an artefact of a one-incident log.
+                let mut widest = log.get(id).unwrap().clone();
+                widest.id = IncidentId(u64::MAX);
+                widest.count = u32::MAX;
+                let bytes = serde_json::to_vec(&widest).unwrap().len();
+                assert!(
+                    bytes <= IN1_INCIDENT_SERIALIZED_CEILING_BYTES,
+                    "{} on {subject:?} serialises to {bytes} B, over the ceiling",
+                    entry.code.code()
+                );
+                if bytes > worst {
+                    worst = bytes;
+                    worst_pair = format!("{} / {subject:?}", entry.code.code());
+                }
+                measured += 1;
+            }
         }
-        // Thirteen classifier variants, not `POLICY.len()`: after `IN1b` §3.2
-        // rule 12 the table has 67 rows and this loop quantifies over the
-        // colour codes alone. Implementer D rewrites the whole test as
-        // `in1b_every_code_fits_the_measured_ceiling`, over 67 codes x seven
-        // subject shapes, and moves the ceiling from 1 024 to 2 048
-        // (`IN1b` §9 clause 16); core's
-        // `in1b_every_code_fits_the_measured_ceiling_on_every_subject_shape`
-        // carries the measurement in the meantime.
-        assert_eq!(measured, 13);
-        println!("in1 worst-of-thirteen incident = {worst} B");
+        // 67 codes x eight subject shapes, after erratum `IN1b`-A-R13 added
+        // `IncidentSubject::LutAsset`. Core's [probe-2c] measures 536 pairs at
+        // a worst of 1 351 B on `unsupported_decoder_format` x
+        // `Chain(Bus(u64::MAX))`; this loop measures the same pair at 1 358 B,
+        // the 7 B being the real 77 B `allowed` accessor string it uses in
+        // place of core's round 70 B synthetic one.
+        assert_eq!(measured, 67 * 8);
+        assert_eq!(POLICY.len(), 67);
+        // Part A's thirteen classifier variants are thirteen of the 67 rows
+        // after erratum `IN1b`-R4, and the loop above measured every one of
+        // them: the ceiling did not widen by dropping the colour codes it was
+        // originally set from.
+        assert_eq!(
+            POLICY
+                .iter()
+                .filter(|entry| matches!(entry.code, kinewright_core::IncidentCode::SourceColor(_)))
+                .count(),
+            in1_every_source_error().len()
+        );
+        println!("IN1B_PROBE2C measured={measured} worst={worst} pair={worst_pair}");
         assert!(
             worst > IN1_INCIDENT_SERIALIZED_CEILING_BYTES / 2,
-            "the ceiling is the smallest power of two above the measured worst of {worst} B"
+            "the ceiling is the smallest power of two above the measured worst of {worst} B ({worst_pair})"
+        );
+    }
+
+    /// The **eight** subject shapes of `IN1b` §3.3 rule 17 as amended by
+    /// erratum `IN1b`-A-R13, each at its widest.
+    ///
+    /// `Chain(Bus(u64::MAX))` is the widest of the eight on the wire —
+    /// `{"chain":{"bus":18446744073709551615}}`, 3 B more than
+    /// `ExportJob`'s bare string and 5 B more than
+    /// `{"lut_asset":18446744073709551615}` — and it is the shape [probe-2c]
+    /// measured the worst case on, over seven shapes and over eight.
+    fn in1b_every_subject_shape() -> [IncidentSubject; 8] {
+        [
+            IncidentSubject::Asset(AssetId(u64::MAX)),
+            IncidentSubject::Clip(ClipId(u64::MAX)),
+            IncidentSubject::Track(TrackId(u64::MAX)),
+            IncidentSubject::Chain(AudioChain::Bus(AudioBusId(u64::MAX))),
+            IncidentSubject::LutAsset(kinewright_core::LutAssetId(u64::MAX)),
+            IncidentSubject::ExportJob,
+            IncidentSubject::Project,
+            IncidentSubject::Agent,
+        ]
+    }
+
+    /// probe-2b T2's worst-case inputs, rebuilt against the real types.
+    ///
+    /// The same shape core's
+    /// `in1b_every_code_fits_the_measured_ceiling_on_every_subject_shape`
+    /// uses, because it measures the same thing: the widest `observed`, the
+    /// widest evidence the code's own rule allows (`IN1b` §3.4 rule 24) and the
+    /// widest `allowed` the accessors produce.
+    fn in1b_worst_observation(
+        code: kinewright_core::IncidentCode,
+        subject: IncidentSubject,
+    ) -> IncidentObservation {
+        IncidentObservation {
+            code,
+            subject,
+            observed: in1b_worst_observed(code),
+            // The widest string a core `allowed_values()` accessor actually
+            // returns, rather than a round number: `ColorQcError::NodeRemovalRejected`'s
+            // literal, 77 B as measured (agent review 2 N-3 reported 76).
+            allowed: Some(
+                "an effect the document model permits removing from the clip it is attached to"
+                    .to_owned(),
+            ),
+            evidence: in1b_worst_evidence(code),
+            revision: TimelineRevision(u64::MAX),
+        }
+    }
+
+    /// The longest rendered `OpError` in the workspace: `ColorStageOrderViolation`'s
+    /// template with saturated ids.
+    fn in1b_worst_op_error() -> kinewright_core::OpError {
+        kinewright_core::OpError::ColorStageOrderViolation {
+            clip: ClipId(u64::MAX),
+            effect: EffectId(u64::MAX),
+            kind: "creative_look".to_owned(),
+            color_stage_rank: u8::MAX,
+            previous_effect: EffectId(u64::MAX),
+            previous_kind: "creative_look".to_owned(),
+            previous_color_stage_rank: u8::MAX,
+        }
+    }
+
+    /// The rendering this loop charges a `MediaError`-evidence incident for, and
+    /// what it is **not** (agent review 2 S-3).
+    ///
+    /// It is not the longest `MediaError` rendering in the workspace. Measured:
+    /// `matte_coverage_*` 115 B, `matte_proof_not_a_color_node` 131 B, this
+    /// `unsupported_decoder_format` template **254 B**,
+    /// `ColorQc(NodeRemovalRejected)` **345 B** — which a `Code::ColorQc(_)`
+    /// incident really does carry as [`IncidentEvidence::MediaError`] — and
+    /// `SourceColorForAsset` **1 263 B**.
+    ///
+    /// The 1 263 B one is the reason the ceiling holds and the reason to say so
+    /// rather than assume it: `IncidentObservation::from_media_error` routes
+    /// `SourceColorForAsset` to `IncidentEvidence::SourceColor`, never to
+    /// `MediaError` evidence, so it can never be charged twice (once in
+    /// `observed`, once in `evidence.message`). Had it been reachable here the
+    /// pair would measure about 3 400 B and breach 2 048. Substituting the
+    /// reachable 345 B `ColorQc` rendering instead raises review 2's
+    /// independent worst from 1 380 B to 1 570 B, still under the ceiling, so
+    /// the constant survives the wider input either way; this helper keeps the
+    /// `unsupported_decoder_format` template because it is the pair
+    /// [probe-2c] and core measure, and the two figures must be comparable.
+    fn in1b_worst_media_error() -> MediaError {
+        MediaError::UnsupportedDecoderFormat {
+            path: PathBuf::from(
+                "/home/editor/Projects/Feature 2026/Media/Day 12/A012C003_260915_R1AB.mov",
+            ),
+            format: "yuv422p10le".to_owned(),
+            declared_bit_depth: Some(10),
+            decoder_bit_depth: Some(10),
+            reason: "the decoder's native format is not a supported integer source surface"
+                .to_owned(),
+        }
+    }
+
+    fn in1b_worst_probe() -> ColorDescription {
+        ColorDescription {
+            primaries: ColorPrimaries::Unknown,
+            transfer: ColorTransfer::Unknown,
+            matrix: ColorMatrix::Unknown,
+            range: ColorRange::Other("full_swing_studio_limited".to_owned()),
+            white_point: ColorWhitePoint::Unknown,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 4_000,
+            provenance: ColorProvenance::Other("stream_metadata_container".to_owned()),
+        }
+    }
+
+    fn in1b_worst_relink_reason() -> String {
+        format!(
+            "Cannot relink asset {}: source fingerprint mismatch (expected sha256:{}…, candidate sha256:{}…)",
+            u64::MAX,
+            "0".repeat(16),
+            "f".repeat(16)
+        )
+    }
+
+    const IN1B_WORST_SOURCE_EDIT_REASON: &str =
+        "Source verification did not confirm the original online source; no edit was applied";
+
+    /// The widest evidence each code's own rule allows (`IN1b` §3.4 rule 24).
+    fn in1b_worst_evidence(code: kinewright_core::IncidentCode) -> IncidentEvidence {
+        use kinewright_core::{IncidentCode as Code, IncidentFamily, RejectionIncident};
+        match code {
+            Code::SourceColor(_) => IncidentEvidence::SourceColor {
+                probed: in1b_worst_probe(),
+                assumption: Some(kinewright_core::ColorSourceProfileAssumption::D65),
+            },
+            Code::Media(_)
+            | Code::DeliveryColor(_)
+            | Code::DeliveryVerification(_)
+            | Code::ColorQc(_) => IncidentEvidence::MediaError {
+                code: "delivery_verification_frame_count_out_of_range",
+                message: in1b_worst_media_error().to_string(),
+            },
+            Code::Operation(family) => IncidentEvidence::OpError {
+                family,
+                op_number: Some(usize::MAX),
+                message: in1b_worst_op_error().to_string(),
+            },
+            Code::LutAssetPolicy | Code::Rejection(RejectionIncident::EditPlan) => {
+                IncidentEvidence::OpError {
+                    family: IncidentFamily::Malformed,
+                    op_number: Some(usize::MAX),
+                    message: in1b_worst_op_error().to_string(),
+                }
+            }
+            Code::EditRevisionConflict => IncidentEvidence::Revision {
+                expected: TimelineRevision(u64::MAX),
+                actual: TimelineRevision(u64::MAX),
+            },
+            Code::Rejection(RejectionIncident::DeliveryVariant) => {
+                IncidentEvidence::DeliveryVariant {
+                    reason: format!(
+                        "edit plan operation {} failed: {}",
+                        usize::MAX,
+                        in1b_worst_op_error()
+                    ),
+                }
+            }
+            Code::Rejection(RejectionIncident::AgentBranch) => IncidentEvidence::Branch {
+                reason: format!(
+                    "cherry-pick operation index {} is outside the one-based range 1..={}",
+                    u64::MAX,
+                    u64::MAX
+                ),
+            },
+            Code::Rejection(RejectionIncident::SourceEdit) => IncidentEvidence::SourceEdit {
+                reason: IN1B_WORST_SOURCE_EDIT_REASON,
+            },
+            Code::Rejection(RejectionIncident::Relink) => IncidentEvidence::Relink {
+                reason: in1b_worst_relink_reason(),
+            },
+            Code::Rejection(RejectionIncident::ProjectSave) => IncidentEvidence::ProjectSave {
+                reason: "could not write the project file: No space left on device (os error 28)"
+                    .to_owned(),
+            },
+            Code::Rejection(RejectionIncident::CaptionPlan) => IncidentEvidence::CaptionPlan {
+                reason: kinewright_core::CaptionPlanError::AuthoredScriptAlignment.to_string(),
+            },
+            Code::Label(_) => IncidentEvidence::Plain,
+        }
+    }
+
+    /// The widest `observed` each code can carry.
+    fn in1b_worst_observed(code: kinewright_core::IncidentCode) -> String {
+        use kinewright_core::{IncidentCode as Code, RejectionIncident};
+        match code {
+            // Every colour row's `observed` comes from
+            // `ColorSourceError::observed()`; the widest is the formatted tuple.
+            Code::SourceColor(_) => ColorSourceError::UnsupportedCombination {
+                primaries: ColorPrimaries::Other("display_p3_container".to_owned()),
+                transfer: ColorTransfer::Other("arri_logc4_wide".to_owned()),
+                matrix: ColorMatrix::Other("ictcp_constant_intensity".to_owned()),
+                range: ColorRange::Other("full_swing_studio_limited".to_owned()),
+            }
+            .observed(),
+            Code::Media(_)
+            | Code::DeliveryColor(_)
+            | Code::DeliveryVerification(_)
+            | Code::ColorQc(_) => in1b_worst_media_error().to_string(),
+            Code::EditRevisionConflict => format!(
+                "expected timeline revision {}, current revision is {}",
+                u64::MAX,
+                u64::MAX
+            ),
+            Code::Rejection(RejectionIncident::SourceEdit) => {
+                IN1B_WORST_SOURCE_EDIT_REASON.to_owned()
+            }
+            Code::Rejection(RejectionIncident::Relink) => in1b_worst_relink_reason(),
+            // A placeholder site carries whatever the application formatted, so
+            // it is measured against the same bound as a typed one.
+            _ => in1b_worst_op_error().to_string(),
+        }
+    }
+
+    /// One incident of one code and subject, opened through the real log.
+    fn in1b_incident(observation: IncidentObservation) -> Incident {
+        let mut log = IncidentLog::with_start(Instant::now());
+        let Observed::Opened(id) = log.observe(observation) else {
+            panic!("a fresh log must open the incident");
+        };
+        log.get(id).expect("the incident was just opened").clone()
+    }
+
+    /// A one-asset document, so the colour check has something to read.
+    fn in1b_asset_document(color_description: ColorDescription, assumed: bool) -> Document {
+        Document {
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: PathBuf::from("fixture.webm"),
+                name: "fixture".to_owned(),
+                duration: TimeCode(60),
+                fps: Rational::new(30, 1).unwrap(),
+                kind: MediaKind::Video,
+                resolution: Some((320, 180)),
+                source_fingerprint: MediaSourceFingerprint::default(),
+                color_description,
+                assumed_from: assumed.then(in1_untagged_webm_probe),
+            }],
+            ..Document::default()
+        }
+    }
+
+    /// `IN1b` §6.1 rule 3 and §9 clause 13, the half that still verifies: a
+    /// source-colour claim is checked against the document, exactly as Part A
+    /// checked it.
+    ///
+    /// The code match of §6.1 rule 2 must not widen the "nothing to verify"
+    /// arm far enough to swallow the one code that does have something to
+    /// verify.
+    ///
+    /// **This test is a regression guard and does not discriminate**: for every
+    /// input it drives — asset subject, `SourceColor` evidence, asset present —
+    /// the `b99c328` body behaves identically, so it passes on the pre-change
+    /// tree (agent review 2 N-1). §9 clause 13 is discharged by
+    /// `in1b_a_non_colour_incident_resolves_without_a_document_check` alone.
+    /// The contract sets the precedent for saying so out loud: §4 rule 8 says
+    /// the same of item 20.
+    #[test]
+    fn in1b_a_source_colour_claim_is_still_verified() {
+        let probed = in1_untagged_webm_probe();
+        let incident = in1b_incident(in1_observation(
+            &ColorSourceError::UnknownPrimaries,
+            &probed,
+        ));
+        assert_eq!(incident.code.code(), "unknown_source_primaries");
+        assert_eq!(incident.subject, IncidentSubject::Asset(AssetId(1)));
+
+        // Nothing has been applied, so `applied` is refused by code.
+        let unmodified = in1b_asset_document(probed.clone(), false);
+        let refusal =
+            verify_claimed_outcome(&incident, &unmodified, ResolveIncidentOutcome::Applied)
+                .expect("an unmodified document does not carry the recovery");
+        let structured = refusal.structured_content.unwrap();
+        assert_eq!(structured["code"], "incident_not_applied");
+        assert_eq!(structured["field"], "color_description");
+        assert_eq!(
+            structured["allowed"],
+            "provenance=agent_assumption with assumed_from present"
+        );
+
+        // The revert claim against the same document is accepted: the probed
+        // bytes are what the asset carries and nothing is left to revert.
+        assert!(
+            verify_claimed_outcome(&incident, &unmodified, ResolveIncidentOutcome::Reverted)
+                .is_none()
+        );
+
+        // After the recovery lands, the opposite claim is the refused one.
+        let applied = in1b_asset_document(
+            ColorDescription {
+                provenance: ColorProvenance::AgentAssumption,
+                ..probed.clone()
+            },
+            true,
+        );
+        assert!(
+            verify_claimed_outcome(&incident, &applied, ResolveIncidentOutcome::Applied).is_none()
+        );
+        let structured =
+            verify_claimed_outcome(&incident, &applied, ResolveIncidentOutcome::Reverted)
+                .expect("an applied assumption is not a revert")
+                .structured_content
+                .unwrap();
+        assert_eq!(structured["code"], "incident_not_reverted");
+
+        // `explained` never reads the document, for any code.
+        assert!(
+            verify_claimed_outcome(&incident, &applied, ResolveIncidentOutcome::Explained)
+                .is_none()
+        );
+    }
+
+    /// `IN1b` §6.1 rule 3 and §9 clause 13, the half Part B adds: every other
+    /// code records its outcome with **no** document check and no refusal.
+    ///
+    /// The document handed in is empty, so a check of any kind would refuse;
+    /// the contract's own example is used — an `operation_bounds` incident on
+    /// a `Clip` subject — and the four non-asset subject shapes are walked
+    /// beside it, because §3.8 break 5's `let … else` would have answered
+    /// `None` for those by accident rather than by rule.
+    #[test]
+    fn in1b_a_non_colour_incident_resolves_without_a_document_check() {
+        let empty = Document::default();
+        assert!(empty.media_pool.is_empty());
+
+        let bounds = in1b_incident(IncidentObservation {
+            code: kinewright_core::IncidentCode::Operation(kinewright_core::IncidentFamily::Bounds),
+            subject: IncidentSubject::Clip(ClipId(4)),
+            observed: "clip 4 is outside the timeline".to_owned(),
+            allowed: None,
+            evidence: IncidentEvidence::OpError {
+                family: kinewright_core::IncidentFamily::Bounds,
+                op_number: Some(1),
+                message: "clip 4 is outside the timeline".to_owned(),
+            },
+            revision: TimelineRevision(1),
+        });
+        assert_eq!(bounds.code.code(), "operation_bounds");
+        for outcome in [
+            ResolveIncidentOutcome::Applied,
+            ResolveIncidentOutcome::Reverted,
+            ResolveIncidentOutcome::Explained,
+        ] {
+            assert!(
+                verify_claimed_outcome(&bounds, &empty, outcome).is_none(),
+                "an operation_bounds incident has no document claim to verify"
+            );
+        }
+
+        // An asset-subject incident whose code is not a colour one is recorded
+        // the same way: the code decides, not the subject.
+        for subject in [
+            IncidentSubject::Asset(AssetId(1)),
+            IncidentSubject::Track(TrackId(2)),
+            IncidentSubject::Chain(AudioChain::Master),
+            IncidentSubject::ExportJob,
+            IncidentSubject::Project,
+            IncidentSubject::Agent,
+        ] {
+            let incident = in1b_incident(IncidentObservation {
+                code: kinewright_core::IncidentCode::Rejection(
+                    kinewright_core::RejectionIncident::ProjectSave,
+                ),
+                subject,
+                observed: "could not write the project file".to_owned(),
+                allowed: None,
+                evidence: IncidentEvidence::ProjectSave {
+                    reason: "could not write the project file".to_owned(),
+                },
+                revision: TimelineRevision(1),
+            });
+            assert!(
+                verify_claimed_outcome(&incident, &empty, ResolveIncidentOutcome::Applied)
+                    .is_none(),
+                "{subject:?} carries no colour claim"
+            );
+        }
+
+        // The discriminating case: the asset subject **and** a probed
+        // description, with a code that is not a colour one. Evidence follows
+        // the code (`IN1b` §3.4 rule 24), so no producer builds this pair; it
+        // is built here deliberately, because it is the only input on which
+        // "match the code" and "match the subject and the evidence" disagree,
+        // and §6.1 rule 2 says the code decides.
+        let off_rule = in1b_incident(IncidentObservation {
+            code: kinewright_core::IncidentCode::Media(
+                kinewright_core::MediaIncident::BackendUnclassified,
+            ),
+            subject: IncidentSubject::Asset(AssetId(1)),
+            observed: "media backend error".to_owned(),
+            allowed: None,
+            evidence: IncidentEvidence::SourceColor {
+                probed: in1_untagged_webm_probe(),
+                assumption: None,
+            },
+            revision: TimelineRevision(1),
+        });
+        assert!(
+            verify_claimed_outcome(
+                &off_rule,
+                &in1b_asset_document(ColorDescription::default(), false),
+                ResolveIncidentOutcome::Applied
+            )
+            .is_none(),
+            "a non-colour code is recorded even when the subject and evidence would answer"
         );
     }
 
@@ -26275,6 +26801,15 @@ mod tests {
     /// `apply_edit_plan`. That is why the field carries a one-sentence doc
     /// comment with its reasoning in `//` comments beside it, and why this pin
     /// is the thing that fails if the sentence ever grows.
+    ///
+    /// **Pin site 1 of 3 (`IN1b` §6.4 rules 7–8, erratum `IN1b`-R3).** Part B
+    /// moves neither the quad nor the sextuple for the **seventeenth**
+    /// consecutive measurement: it adds no served tool, no capability, no
+    /// `Operation` variant and no schema field, and its whole growth is on the
+    /// **output** side of `get_incidents` — more codes, more subjects and more
+    /// evidence variants in a response body, none of which is schema-visible.
+    /// `served_tools()` still filters `capability_tools()` by
+    /// `COMPACT_TOOL_NAMES`, which Part B does not touch.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28766,11 +29301,24 @@ mod tests {
     /// A bare substring search matched `line` inside a path component such as
     /// `baseline`, and splitting on the first `"; "` truncated any value that
     /// contained one - both of which a real filesystem path can produce.
+    ///
+    /// Re-pointed at `MediaError::Store` by `IN1b` N4/CR-D1 and CR-D2: a
+    /// `LutStoreError` and a `LutParseError` both cross the media boundary
+    /// carrying the same
+    /// `"<code>: <detail>; observed=<v>; allowed=<v>; line=<n>"` payload, and
+    /// both now build `Store { code, message }` where they used to build
+    /// `Backend(String)`. **The served body asserted below is byte for byte the
+    /// one this test pinned at `b99c328`** — the anchored readers this test
+    /// exists for are unchanged; only the input's wrapper moved. The two inputs
+    /// here stay hand-built because this test is about the *readers*;
+    /// `in1b_a_malformed_cube_serves_its_parse_code_through_the_typed_path`
+    /// below drives the real parser and the real conversion.
     #[test]
     fn lut_error_fields_are_anchored_and_survive_semicolons_in_values() {
-        let store = kinewright_core::MediaError::Backend(
-            "lut_store_root_invalid: the derived store root is not a directory; observed=/home/e/baseline; takes/edit.kinewright-assets; allowed=a writable directory".to_owned(),
-        );
+        let store = kinewright_core::MediaError::Store {
+            code: "lut_store_root_invalid",
+            message: "lut_store_root_invalid: the derived store root is not a directory; observed=/home/e/baseline; takes/edit.kinewright-assets; allowed=a writable directory".to_owned(),
+        };
         let result = lut_store_error_result("import_lut_asset", &store);
         let structured = result.structured_content.unwrap();
         assert_eq!(structured["code"], "lut_store_root_invalid");
@@ -28789,10 +29337,11 @@ mod tests {
             "`baseline` is not a `line` field"
         );
 
-        let parse = kinewright_core::MediaError::Backend(
-            "invalid_lut_sample: observed 1.0 2.0; allowed three floats in 0..=1; line 42"
+        let parse = kinewright_core::MediaError::Store {
+            code: "invalid_lut_sample",
+            message: "invalid_lut_sample: observed 1.0 2.0; allowed three floats in 0..=1; line 42"
                 .to_owned(),
-        );
+        };
         let structured = lut_store_error_result("import_lut_asset", &parse)
             .structured_content
             .unwrap();
@@ -28802,6 +29351,230 @@ mod tests {
         assert_eq!(structured["details"]["line"], "42");
     }
 
+    /// `IN1b` §6.2 rule 4 and §9 clause 14: `lut_store_error_result` reads its
+    /// code from [`kinewright_core::MediaError::recovery_code`], not from the
+    /// rendered sentence.
+    ///
+    /// The discriminating input is a typed `MediaError` whose rendered text
+    /// does **not** lead with its code: `SourceColor` renders
+    /// *"managed source profile rejected: …"*, so the parser this replaces
+    /// would have reported `managed source profile rejected` as the code. The
+    /// second half drives `MediaError::Store`, which is what a real
+    /// `LutStoreError` crosses as after `IN1b` N4/CR-D1, and asserts that the
+    /// served body is byte for byte the one the hand-written parser produced.
+    #[test]
+    fn in1b_the_lut_store_result_reads_its_code_from_the_typed_error() {
+        let typed = MediaError::SourceColor(ColorSourceError::UnknownPrimaries);
+        assert_eq!(typed.recovery_code(), Some("unknown_source_primaries"));
+        assert!(
+            typed.to_string().starts_with("managed source profile"),
+            "the rendered text must not lead with the code, or the test cannot discriminate"
+        );
+        let structured = lut_store_error_result("import_lut_asset", &typed)
+            .structured_content
+            .unwrap();
+        assert_eq!(structured["code"], "unknown_source_primaries");
+
+        // A matte passthrough is typed after `IN1b` §3.9 rule 36 and carries no
+        // `MediaError::Backend` label at all.
+        let matte = MediaError::MatteProof(kinewright_core::MatteProofError::NoMatte);
+        assert_eq!(matte.recovery_code(), Some("matte_proof_no_matte"));
+        assert!(!matte.to_string().contains("media backend error: "));
+        let structured = lut_store_error_result("import_lut_asset", &matte)
+            .structured_content
+            .unwrap();
+        assert_eq!(structured["code"], "matte_proof_no_matte");
+        assert_eq!(structured["message"], "colour node carries no matte");
+
+        // N4/CR-D1: `LutStoreError`'s eleven codes now arrive typed, and the
+        // served shape is unchanged from the hand-parsed one.
+        let store = MediaError::Store {
+            code: "lut_store_root_invalid",
+            message: "lut_store_root_invalid: the derived store root is not a directory; observed=/tmp/x; allowed=a writable directory"
+                .to_owned(),
+        };
+        assert_eq!(store.recovery_code(), Some("lut_store_root_invalid"));
+        assert!(
+            store
+                .to_string()
+                .starts_with("media backend error: lut_store_root_invalid: "),
+            "Store keeps Backend's label so no pinned text moves"
+        );
+        let structured = lut_store_error_result("import_lut_asset", &store)
+            .structured_content
+            .unwrap();
+        assert_eq!(structured["code"], "lut_store_root_invalid");
+        assert_eq!(
+            structured["message"],
+            "the derived store root is not a directory"
+        );
+        assert_eq!(structured["details"]["observed"], "/tmp/x");
+    }
+
+    /// Erratum `IN1b`-D-R67, half a: the **only** remaining path to the tool
+    /// label is a `MediaError` that declares no code at all.
+    ///
+    /// After N4/CR-D1 and CR-D2 every LUT family reaching this function is
+    /// typed — `LutStoreError` and `LutParseError` both build
+    /// `MediaError::Store { code, message }` — so `media_refusal_code`'s
+    /// `fallback` argument is reached only by `MediaError::Backend`, and by the
+    /// four other codeless variants (`NotImplemented`, `Cancelled` and the two
+    /// mix-range refusals) which no LUT entry point returns. This test pins
+    /// what that last case serves: the tool's own label, and the whole
+    /// rendering under `details.message` so nothing is lost.
+    ///
+    /// The input is hand-built on purpose — it is the *shape* being pinned, not
+    /// a producer — which is exactly why the second half of D-R67 needs the
+    /// production-path test below instead of this one.
+    #[test]
+    fn in1b_a_codeless_backend_refusal_is_served_under_the_tool_label() {
+        let bare =
+            MediaError::Backend("the store root vanished while the import was running".to_owned());
+        assert_eq!(bare.recovery_code(), None);
+        let structured = lut_store_error_result("import_lut_asset", &bare)
+            .structured_content
+            .unwrap();
+        assert_eq!(structured["code"], "lut_import_failed");
+        assert_eq!(
+            structured["message"], "the store root vanished while the import was running",
+            "a codeless refusal keeps its whole sentence as the detail"
+        );
+        assert_eq!(structured["details"]["observed"], serde_json::Value::Null);
+        assert_eq!(structured["details"]["allowed"], serde_json::Value::Null);
+        assert_eq!(structured["details"]["line"], serde_json::Value::Null);
+        assert_eq!(
+            structured["details"]["message"],
+            bare.to_string(),
+            "nothing is lost: the whole rendered sentence still reaches the caller"
+        );
+    }
+
+    /// Erratum `IN1b`-D-R67, half b, and core request **CR-D2, landed**: a
+    /// malformed `.cube` serves its own parse code again, through the
+    /// production conversion.
+    ///
+    /// **This test exists because the pin it replaces could not fail.** D-R67's
+    /// original pin hand-built a `MediaError::Backend(…)` and asserted the
+    /// tool-label shape; when CR-D2 changed *who constructs the `MediaError`*
+    /// — `impl From<LutParseError> for MediaError`
+    /// (`kinewright-media/src/lut.rs:132`) now builds
+    /// `Store { code, message }` — the hand-built value was unaffected and the
+    /// pin stayed green through a served-text change in both directions. A pin
+    /// over a value the production path does not construct cannot detect a
+    /// change in its constructor, which is the lesson worth keeping.
+    ///
+    /// So this one starts from a genuinely malformed `.cube` source, runs it
+    /// through the media crate's real parser, converts it with
+    /// `MediaError::from` — the same conversion `LutStore::import_lut_asset`'s
+    /// `?` performs on the file it is importing — and serves it through the
+    /// production `lut_store_error_result`. **Measured, by temporarily reverting
+    /// the conversion to `MediaError::Backend(parse.to_string())`:** the
+    /// `recovery_code()` assertion fails `None` against
+    /// `Some("unsupported_lut_format")`, and with that assertion removed the
+    /// **served** one still fails, `"lut_import_failed"` against
+    /// `"unsupported_lut_format"`. The test discriminates on the wire, not only
+    /// on the type.
+    ///
+    /// `ColorPipelineError` is deliberately not part of this: erratum
+    /// `IN1b`-A-R14's deferred half records that it has no code accessor, no
+    /// `From` impl onto `MediaError` and no served result on this surface, so
+    /// there is nothing here for it to regress.
+    #[test]
+    fn in1b_a_malformed_cube_serves_its_parse_code_through_the_typed_path() {
+        // A 1D LUT: a real `.cube` header this build does not evaluate.
+        let parse = kinewright_media::parse_cube_lut_typed("LUT_1D_SIZE 2\n0 0 0\n1 1 1\n")
+            .expect_err("a 1D .cube is refused with a typed code");
+        assert_eq!(parse.code.as_str(), "unsupported_lut_format");
+
+        let error = kinewright_core::MediaError::from(parse);
+        assert_eq!(
+            error.recovery_code(),
+            Some("unsupported_lut_format"),
+            "CR-D2: the parse code crosses the media boundary as data"
+        );
+        assert!(
+            error
+                .to_string()
+                .starts_with("media backend error: unsupported_lut_format: "),
+            "Store keeps Backend's label, so no pinned text moves: {error}"
+        );
+
+        let structured = lut_store_error_result("import_lut_asset", &error)
+            .structured_content
+            .unwrap();
+        assert_eq!(structured["code"], "unsupported_lut_format");
+        assert_eq!(
+            structured["message"],
+            "observed=LUT_1D_SIZE 2; allowed=a 3D .cube LUT declared with LUT_3D_SIZE; line=1",
+            "the detail is the rendering with the code prefix removed, byte for byte what the \
+             hand-written parser produced at `b99c328`"
+        );
+        assert!(
+            !structured["message"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported_lut_format"),
+            "the code is served once, under `code`, and not left in the detail"
+        );
+        assert_eq!(structured["details"]["observed"], "LUT_1D_SIZE 2");
+        assert_eq!(
+            structured["details"]["allowed"],
+            "a 3D .cube LUT declared with LUT_3D_SIZE"
+        );
+        assert_eq!(structured["details"]["line"], "1");
+        assert_eq!(structured["details"]["field"], "path");
+        assert_eq!(structured["details"]["message"], error.to_string());
+    }
+
+    /// `IN1b` §6.2 rule 4 and §7 item 31: the same for
+    /// `room_tone_store_error_result`, **the parser that had no test at all**
+    /// at `d4ed8eb`.
+    #[test]
+    fn in1b_the_room_tone_result_reads_its_code_from_the_typed_error() {
+        let typed = MediaError::SourceColor(ColorSourceError::UnknownTransfer);
+        assert_eq!(typed.recovery_code(), Some("unknown_source_transfer"));
+        let structured = room_tone_store_error_result(&typed)
+            .structured_content
+            .unwrap();
+        assert_eq!(structured["code"], "unknown_source_transfer");
+        // `field` and `recovery_action` are `capture_room_tone`'s tool-level
+        // envelope, not the code's: they are hard-coded for the ten room-tone
+        // refusals this path carries, so a typed non-store `MediaError` like
+        // this one is served a field that is not its own. Asserted to record
+        // the pairing, not to bless it — see the function's doc comment.
+        assert_eq!(structured["details"]["field"], "source_end_frame");
+
+        // N4/CR-D1: `RoomToneStoreError`'s ten codes arrive typed, with the
+        // same `"<code>: <detail>; observed=…; allowed=…"` spelling
+        // `LutStoreError` uses, and the same served body as before.
+        let store = MediaError::Store {
+            code: "room_tone_capture_malformed",
+            message: "room_tone_capture_malformed: the capture is shorter than 500 ms; observed=120 ms; allowed=500 ms to 60 s"
+                .to_owned(),
+        };
+        assert_eq!(store.recovery_code(), Some("room_tone_capture_malformed"));
+        let structured = room_tone_store_error_result(&store)
+            .structured_content
+            .unwrap();
+        assert_eq!(structured["code"], "room_tone_capture_malformed");
+        assert_eq!(structured["message"], "the capture is shorter than 500 ms");
+        assert_eq!(structured["details"]["observed"], "120 ms");
+        assert_eq!(structured["details"]["allowed"], "500 ms to 60 s");
+        assert_eq!(
+            structured["details"]["message"],
+            store.to_string(),
+            "the whole rendered sentence still reaches the caller"
+        );
+
+        // An unlabelled failure with no code at all falls back to the tool's
+        // own code rather than reporting a fragment of a sentence.
+        let bare = MediaError::Backend("the device disappeared".to_owned());
+        let structured = room_tone_store_error_result(&bare)
+            .structured_content
+            .unwrap();
+        assert_eq!(structured["code"], "room_tone_capture_failed");
+    }
+
     /// CC4 §8: a *value* that begins with another field's key is still a
     /// value.
     ///
@@ -28809,12 +29582,18 @@ mod tests {
     /// can lead with a key. Applying it while scanning inside an extracted
     /// value made `observed=allowed=x` and `observed line 1 2 3 4` terminate
     /// immediately and report the empty string.
+    ///
+    /// Re-pointed at `MediaError::Store` by `IN1b` N4/CR-D1 for the same reason
+    /// `lut_error_fields_are_anchored_and_survive_semicolons_in_values` is, and
+    /// with the same served body it asserted at `b99c328`.
     #[test]
     fn a_lut_error_value_that_begins_with_another_key_is_not_truncated() {
-        let parse = kinewright_core::MediaError::Backend(
-            "invalid_lut_sample: observed line 1 2 3 4; allowed three floats in 0..=1; line 12"
-                .to_owned(),
-        );
+        let parse = kinewright_core::MediaError::Store {
+            code: "invalid_lut_sample",
+            message:
+                "invalid_lut_sample: observed line 1 2 3 4; allowed three floats in 0..=1; line 12"
+                    .to_owned(),
+        };
         let structured = lut_store_error_result("import_lut_asset", &parse)
             .structured_content
             .unwrap();
@@ -28822,10 +29601,11 @@ mod tests {
         assert_eq!(structured["details"]["allowed"], "three floats in 0..=1");
         assert_eq!(structured["details"]["line"], "12");
 
-        let store = kinewright_core::MediaError::Backend(
-            "lut_store_root_invalid: the derived store root is a symbolic link; observed=allowed=x; allowed=a writable directory; line=3"
+        let store = kinewright_core::MediaError::Store {
+            code: "lut_store_root_invalid",
+            message: "lut_store_root_invalid: the derived store root is a symbolic link; observed=allowed=x; allowed=a writable directory; line=3"
                 .to_owned(),
-        );
+        };
         let structured = lut_store_error_result("import_lut_asset", &store)
             .structured_content
             .unwrap();

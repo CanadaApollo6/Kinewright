@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use eframe::egui;
 use kinewright_core::{
-    Clip, ClipId, ColorNodeKind, ColorStage, Document, EffectId, LutAsset, LutAssetId,
-    LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams, Operation,
+    Clip, ClipId, ColorNodeKind, ColorStage, Document, EffectId, IncidentSubject, LabelIncident,
+    LutAsset, LutAssetId, LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams, Operation,
 };
 use kinewright_media::BuiltinLook;
 
@@ -300,7 +300,11 @@ impl KinewrightApp {
                 self.send_operations(operations);
                 self.look_browser.close();
             }
-            Some(Err(reason)) => self.record_error("Look", reason),
+            // Appendix B row 73: a refused look plan names the store, not one
+            // clip, so the subject is the project.
+            Some(Err(reason)) => {
+                self.note_label(LabelIncident::Look, IncidentSubject::Project, reason);
+            }
             None => {}
         }
     }

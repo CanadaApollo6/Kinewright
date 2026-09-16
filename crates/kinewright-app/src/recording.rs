@@ -18,6 +18,7 @@ use std::{
 };
 
 use eframe::egui;
+use kinewright_core::{IncidentSubject, LabelIncident};
 
 use crate::{
     app::KinewrightApp,
@@ -999,14 +1000,14 @@ impl KinewrightApp {
             },
             RecordSource::Camera => {
                 let Some(camera) = self.record_dialog.camera.clone() else {
-                    self.record_error("Recording", "No camera is selected");
+                    self.note_recording_failure("No camera is selected");
                     return;
                 };
                 RecordingMode::Camera { camera, microphone }
             }
             RecordSource::Voice => {
                 let Some(microphone) = microphone else {
-                    self.record_error("Recording", "No microphone is selected");
+                    self.note_recording_failure("No microphone is selected");
                     return;
                 };
                 RecordingMode::Voice { microphone }
@@ -1018,8 +1019,18 @@ impl KinewrightApp {
                 self.status = format!("Recording {}…", active.label.to_lowercase());
                 self.recording = Some(active);
             }
-            Err(error) => self.record_error("Recording", error),
+            Err(error) => self.note_recording_failure(error),
         }
+    }
+
+    /// Appendix B rows 111-115: every recording refusal is
+    /// `recording_unclassified` against the project.
+    ///
+    /// The subject is the project because a capture names no asset yet — the
+    /// file it would have produced does not exist — and a device that keeps
+    /// refusing is one problem, not one per attempt.
+    fn note_recording_failure(&mut self, observed: impl Into<String>) {
+        self.note_label(LabelIncident::Recording, IncidentSubject::Project, observed);
     }
 
     /// Stop the capture and send the file down the ordinary import path -
@@ -1030,7 +1041,7 @@ impl KinewrightApp {
         };
         match active.stop() {
             Ok(path) => self.import_recorded_file(path),
-            Err(error) => self.record_error("Recording", error),
+            Err(error) => self.note_recording_failure(error),
         }
     }
 
@@ -1057,14 +1068,11 @@ impl KinewrightApp {
         if let Some(status) = active.exited() {
             let path = active.path.clone();
             self.recording = None;
-            self.record_error(
-                "Recording",
-                format!(
-                    "Capture stopped unexpectedly (exit {}); see {}",
-                    status.code().unwrap_or(-1),
-                    path.with_extension("log").display()
-                ),
-            );
+            self.note_recording_failure(format!(
+                "Capture stopped unexpectedly (exit {}); see {}",
+                status.code().unwrap_or(-1),
+                path.with_extension("log").display()
+            ));
             if path.metadata().is_ok_and(|metadata| metadata.len() > 0) {
                 self.import_recorded_file(path);
             }
@@ -1126,6 +1134,46 @@ fn hide_console_window(_command: &mut Command) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `IN1b` §7 item 16, label 10 of 17, **driven** (review-app-2 S3).
+    ///
+    /// Appendix B rows 111 and 112: `start_recording_from_dialog` refuses
+    /// before it ever reaches `start_recording`, so no camera and no
+    /// microphone need exist. The test lives here rather than in `app.rs`'s
+    /// `in1_tests` because both the arm and
+    /// [`KinewrightApp::note_recording_failure`] are private to this module.
+    ///
+    /// The subject is the project: a capture names no asset yet — the file it
+    /// would have produced does not exist — and a device that keeps refusing
+    /// is one problem, not one per attempt.
+    #[test]
+    fn in1b_recording_produces_its_declared_code_class_and_severity() {
+        use crate::app::in1_tests::{in1_shutdown, in1b_app, in1b_declares, in1b_route_one};
+
+        for (source, message) in [
+            (RecordSource::Camera, "No camera is selected"),
+            (RecordSource::Voice, "No microphone is selected"),
+        ] {
+            let (_fixture, mut app) = in1b_app();
+            app.record_dialog.source = source;
+            app.record_dialog.camera = None;
+            app.record_dialog.microphone = None;
+            app.start_recording_from_dialog();
+            assert!(
+                app.recording.is_none(),
+                "the refusal is before any capture starts"
+            );
+            let incident = in1b_route_one(&mut app);
+            in1b_declares(
+                &incident,
+                "recording_unclassified",
+                kinewright_core::IncidentSubject::Project,
+                kinewright_core::IncidentSeverity::Blocks,
+            );
+            assert_eq!(incident.observed, message);
+            in1_shutdown(&mut app);
+        }
+    }
 
     #[cfg(windows)]
     fn joined(mode: &RecordingMode) -> String {

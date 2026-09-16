@@ -407,11 +407,16 @@ fn lut_preflight(
         Err(error) => {
             if needs_store {
                 let rendered = error.to_string();
+                // This site consumes the **payload**, never a code:
+                // `LutStoreRootInvalid` carries one `reason` string and has no
+                // `code` field to fill, so `recovery_code()` is not consulted
+                // here and §9 clause 14's "each reads `recovery_code()`" is
+                // satisfied by the two code-consuming sites (erratum
+                // `IN1b`-D-R66). The pre-change line was `strip_prefix` alone;
+                // §6.2 rule 4's table describes all three as `strip_prefix`
+                // then `split_once`, which was never true of this one.
                 return Err(ExportQueueError::LutStoreRootInvalid {
-                    reason: rendered
-                        .strip_prefix("media backend error: ")
-                        .unwrap_or(rendered.as_str())
-                        .to_owned(),
+                    reason: media_refusal_payload(&rendered).to_owned(),
                 });
             }
             return Ok(ExportLutPreflightReport {
@@ -424,6 +429,72 @@ fn lut_preflight(
         document,
         &store.availability_resolver(),
     ))
+}
+
+/// One media refusal's rendered text, with [`MediaError::Backend`]'s own label
+/// removed (`IN1b` §6.2 rules 4-5).
+///
+/// The **one** place in this crate that knows the label, replacing the three
+/// hand-written parsers of `IN1b` §6.2 rule 4. The label itself does not move:
+/// removing it from the `#[error]` template is `IN1b` §13 D-B4, owned by IN2,
+/// and IN1 §9 clause 11's 750 B template plus its two pinned literals depend on
+/// it being there.
+///
+/// Still needed after N4/CR-D1: `MediaError::Store`'s template keeps the label
+/// deliberately, so IN1 §9 clause 11's 750 B template, its two pinned literals
+/// and the agent's served text do not move. Some typed variants carry no label
+/// at all — the matte passthroughs of `IN1b` §3.9 rule 36 are
+/// `#[error(transparent)]` — so the strip is a no-op for them and the rendered
+/// text is returned unchanged.
+fn media_refusal_payload(rendered: &str) -> &str {
+    rendered
+        .strip_prefix("media backend error: ")
+        .unwrap_or(rendered)
+}
+
+/// The code a media refusal carries, and the rest of its rendered text
+/// (`IN1b` §6.2 rule 4, §9 clause 14).
+///
+/// **The typed path is the only path.** The code is always
+/// [`kinewright_core::MediaError::recovery_code`]'s answer — `Some` for 9 of
+/// the 14 variants after `IN1b` §3.9 rule 36 and the N4/CR-D1 addendum — and
+/// this function never reads a code out of rendered text. `LutStoreError`'s
+/// eleven codes and `RoomToneStoreError`'s ten now arrive typed on
+/// `MediaError::Store { code, message }`, built by the two `From` impls at
+/// `kinewright-media/src/lut_store.rs:155` and `room_tone_store.rs:208`, so
+/// `IN1b` §12 cut item 2 is **not** cut and §9 clause 14 is fully discharged
+/// for both code-consuming sites. Erratum `IN1b`-D-R61 is withdrawn.
+///
+/// `Store`'s `#[error]` template keeps `Backend`'s `media backend error: `
+/// label and its `message` is the store's own `"<code>: <detail>; observed=…;
+/// allowed=…"` rendering, so the label strip and the `"<code>: "` strip below
+/// leave exactly the remainder the trailing-key readers already expected: the
+/// served body is byte-identical to the one the hand-written parsers produced.
+///
+/// `fallback` is the calling tool's own label, used when the error declares no
+/// code at all. After CR-D2 landed alongside CR-D1, **every LUT family reaching
+/// this crate is typed**: `LutParseError`'s six codes cross on `Store` too
+/// (`kinewright-media/src/lut.rs:132`), so a malformed `.cube` serves its own
+/// `unsupported_lut_format`-style token again. The label is therefore reached
+/// only by a genuinely codeless `MediaError::Backend`, which
+/// `in1b_a_codeless_backend_refusal_is_served_under_the_tool_label` pins.
+/// `ColorPipelineError` is **not** converted and does not need to be
+/// (erratum `IN1b`-A-R14's deferred half): it has no code accessor, no `From`
+/// impl onto `MediaError`, and reaches no served result on this surface.
+pub(crate) fn media_refusal_code<'a>(
+    error: &kinewright_core::MediaError,
+    rendered: &'a str,
+    fallback: &'a str,
+) -> (&'a str, &'a str) {
+    let payload = media_refusal_payload(rendered);
+    let Some(code) = error.recovery_code() else {
+        return (fallback, payload);
+    };
+    let remainder = payload
+        .strip_prefix(code)
+        .and_then(|rest| rest.strip_prefix(": "))
+        .unwrap_or(payload);
+    (code, remainder)
 }
 
 /// Return a description of the first source whose live identity no longer

@@ -13,12 +13,13 @@ use std::{
 use eframe::egui;
 use kinewright_agent::{ClaudeCodeDriver, CodexDriver, CursorAcpDriver};
 use kinewright_core::{
-    AgentDriver, Analysis, AudioChain, Command, Document, Effect, EffectId, Event, Export,
-    HarnessInfo, Incident, IncidentId, IncidentObservation, IncidentOutcome, IncidentSubject,
-    JournalCommand, LiveAudioChange, MediaAsset, MediaError, MediaEvent, MixNoiseProfileRequest,
-    MixSpectrumPoint, NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation,
-    ParamValue, Playback, PlaybackState, PolicyClass, Rational, RecoveryKind, SilenceStatus,
-    TimeCode, TimelineRevision, Track, TrackId, TrackKind, recovery_description,
+    AgentDriver, Analysis, AudioChain, Command, CommandToken, Document, Effect, EffectId, Event,
+    Export, HarnessInfo, Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome,
+    IncidentSubject, JournalCommand, LabelIncident, LiveAudioChange, MediaAsset, MediaError,
+    MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint, NOISE_PROFILE_BAND_COUNT,
+    NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation, ParamValue, Playback, PlaybackState,
+    PolicyClass, Rational, RecoveryKind, SilenceStatus, TimeCode, TimelineRevision, Track, TrackId,
+    TrackKind, recovery_description,
 };
 use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits};
 
@@ -26,7 +27,6 @@ use crate::{
     error_ui::ErrorLog,
     export_ui::{ExportDialog, ExportJob},
     icons::Icon,
-    incident_ui::incident_headline,
     media_workflow::media_asset_requires_refresh,
     mixer_pane_ui::{LEARN_NO_SILENCE, NoiseLearnRange},
     project::{
@@ -58,27 +58,99 @@ pub(crate) enum MaterialTab {
 }
 
 /// One `Event::RevisionConflict` the core drain noted for the incident router
-/// (IN1 §5.2b rule 16): the project whose core refused, and the revision the
-/// refused command was planned against.
+/// (IN1 §5.2b rule 16): the project whose core refused, the revision core
+/// reported as current, and the identity of the send it refused.
+///
+/// `expected` is **not** carried. Once the match is by identity
+/// (`IN1b` §4 rule 6) nothing reads it, and a field nothing reads is a
+/// `dead_code` build error under the house `-D warnings` gate.
 struct RouterConflict {
     project_index: usize,
-    expected: TimelineRevision,
     /// The revision core reported as current when it refused. It is the
     /// revision the matched incident is refreshed to (IN1 §5.2 rule 10): the
     /// only evidence the router holds about where the document actually is,
     /// carried from the event rather than re-read from the live project so the
     /// refresh is the revision core refused against and is deterministic.
     actual: TimelineRevision,
+    /// The token the refused command carried, echoed by the actor
+    /// (`IN1b` §4 rule 5). `None` means the send was not the router's — a
+    /// foreign `Command::DoIfRevision` that does not correlate — and
+    /// `reconcile_router_sends` then touches no outstanding send at all.
+    token: Option<CommandToken>,
+}
+
+/// Who asked for the recovery a [`RouterApply`] carries (erratum
+/// `IN1b`-C-R54).
+///
+/// The two skips errata `IN1b`-C-R51 and `IN1b`-C-R53 introduce argue from the
+/// same sentence — *"an edit Kinewright planned and sent"* — and that sentence
+/// is true of exactly one of the two origins. An auto-apply is Kinewright's
+/// own, and a card about its refusal tells the person to re-make an edit they
+/// never made. A card **press** is theirs: they pressed a button, and if the
+/// send loses a race they have to be told, or the button does nothing at all
+/// with no card, no status line and no audit entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouterSendOrigin {
+    /// The router's own auto-apply, from `audit_new_incident`.
+    Auto,
+    /// A control the person pressed, through `send_incident_recovery`.
+    CardPress,
 }
 
 /// One incident recovery the router sent and is still waiting to hear back
 /// about: an auto-apply, or a card action the person pressed (IN1 §5.2
 /// rules 9-10, §5.4 rule 34).
+///
+/// `expected` is **not** carried either. Part A matched a conflict by
+/// `(project, expected)` and dropped a send whose project had moved past it;
+/// after `IN1b` §4 rule 6's identity match and erratum `IN1b`-C-R50's landing
+/// token, neither decision reads the revision the send was gated on, and a
+/// field nothing reads is a `dead_code` build error under the house
+/// `-D warnings` gate. The revision itself is not lost: it is the incident's
+/// own `revision` at send time, which is what the card and the agent read.
 struct RouterApply {
     project_index: usize,
     incident: IncidentId,
-    expected: TimelineRevision,
     outcome: IncidentOutcome,
+    /// The token this send carried. Not an `Option`: every router send
+    /// allocates one from `KinewrightApp::next_command_token`, which is what
+    /// makes the conflict match an identity rather than a heuristic
+    /// (`IN1b` §4 rule 6).
+    token: CommandToken,
+    /// Who asked for it (erratum `IN1b`-C-R54).
+    origin: RouterSendOrigin,
+}
+
+/// Appendix B row 1: the observation a failed startup open carries.
+///
+/// Both `load_error` producers wrote the literal `"Project"` (`IN1b` §5.4
+/// rule 27, N1.5 §5), so the "dynamic" site is not dynamic in substance and
+/// the code is decided here, at the producer, rather than at the sink. The
+/// revision is the default: the session this describes does not exist yet, and
+/// the document that replaces it is a fresh one.
+fn startup_project_observation(observed: String) -> IncidentObservation {
+    IncidentObservation::plain(
+        IncidentCode::Label(LabelIncident::Project),
+        IncidentSubject::Project,
+        observed,
+        TimelineRevision::default(),
+    )
+}
+
+/// The subject a refused **edit plan** is about (`IN1b` §3.3 rule 20).
+///
+/// The common subject when every operation in the batch agrees, and `Project`
+/// otherwise: a plan that touches one clip is that clip's problem, and a plan
+/// that touches four tracks is the document's. The fold lives here rather than
+/// in core because `IN1b` §14 row A declares only
+/// [`Operation::incident_subject`], which answers for one operation.
+#[must_use]
+pub(crate) fn batch_incident_subject(operations: &[Operation]) -> IncidentSubject {
+    let mut subjects = operations.iter().map(Operation::incident_subject);
+    match subjects.next() {
+        Some(first) if subjects.all(|subject| subject == first) => first,
+        _ => IncidentSubject::Project,
+    }
 }
 
 /// Whether the live document shows a router-sent recovery as landed, read the
@@ -123,6 +195,9 @@ pub(crate) struct KinewrightApp {
     pub(crate) projects: Vec<ProjectSession>,
     pub(crate) focused_project: usize,
     next_project_id: u64,
+    /// The counter every router `Command::DoIfRevision` allocates its
+    /// correlation token from (`IN1b` §4 rule 6).
+    next_command_token: u64,
     pub(crate) playback: Arc<dyn Playback>,
     pub(crate) analysis: Arc<dyn Analysis>,
     pub(crate) exporter: Arc<dyn Export>,
@@ -192,10 +267,21 @@ pub(crate) struct KinewrightApp {
     pub(crate) pending_legacy_relink: Option<crate::media_workflow::PendingLegacyRelink>,
     /// IN1 §5.2: playback observations waiting for the next `route_incidents`
     /// tick, which attributes them to the focused project.
-    pending_observations: Vec<IncidentObservation>,
+    pub(crate) pending_observations: Vec<IncidentObservation>,
     /// IN1 §5.2b: revision conflicts the core drain noted this frame for the
     /// router to reconcile.
     pending_router_conflicts: Vec<RouterConflict>,
+    /// The tokens of router sends the actor has answered with an
+    /// `Event::DocumentChanged` (erratum `IN1b`-C-R50, `IN1b` §4 rule 9).
+    ///
+    /// A send is recognised as landed only when **its own** token has come
+    /// back. Without it, a person who wrote the recovery's bytes by hand
+    /// between the send and the actor's reply makes `router_apply_accepted`
+    /// read `true` for a command the actor went on to refuse, and the incident
+    /// records `Applied` off the person's edit; the conflict that arrives a
+    /// frame later matches nothing and cannot correct the record. The document
+    /// read stays as the second condition, which §4 rule 9 forbids removing.
+    pending_router_landings: Vec<CommandToken>,
     /// IN1 §5.2/§5.4: incident recoveries the router sent and is still
     /// waiting to hear back about.
     pending_router_applies: Vec<RouterApply>,
@@ -254,6 +340,9 @@ pub(crate) struct KinewrightApp {
     pub(crate) ripple_mode: bool,
     pub(crate) error_log: ErrorLog,
     pub(crate) error_log_open: bool,
+    /// Whether the badge-anchored Incidents panel is showing
+    /// (`IN1b` §5.5 rule 31).
+    pub(crate) incidents_open: bool,
     screenshot: crate::screenshot::ScreenshotCapture,
     pub(crate) recording: Option<crate::recording::ActiveRecording>,
     pub(crate) record_dialog: crate::recording::RecordDialog,
@@ -282,19 +371,23 @@ impl KinewrightApp {
                     let name = project_name(Some(&path), "Project 1");
                     (name, document, Some(path))
                 }
+                // `IN1b` §5.4 rule 27: the first dynamic site is not dynamic
+                // in substance — both producers wrote the literal `"Project"` —
+                // so `load_error` carries the observation itself and the single
+                // consumer only queues it. Appendix B row 1.
                 Err(error) => {
-                    load_error = Some((
-                        "Project",
-                        format!("Could not open {}: {error}", path.display()),
-                    ));
+                    load_error = Some(startup_project_observation(format!(
+                        "Could not open {}: {error}",
+                        path.display()
+                    )));
                     ("Project 1".to_owned(), default_project_document(), None)
                 }
             },
             Some(path) => {
-                load_error = Some((
-                    "Project",
-                    format!("Startup project not found: {}", path.display()),
-                ));
+                load_error = Some(startup_project_observation(format!(
+                    "Startup project not found: {}",
+                    path.display()
+                )));
                 ("Project 1".to_owned(), default_project_document(), None)
             }
             None => ("Project 1".to_owned(), default_project_document(), None),
@@ -349,6 +442,7 @@ impl KinewrightApp {
             projects: vec![project],
             focused_project: 0,
             next_project_id: 2,
+            next_command_token: 1,
             playback,
             analysis,
             exporter,
@@ -398,6 +492,7 @@ impl KinewrightApp {
             pending_legacy_relink: None,
             pending_observations: Vec::new(),
             pending_router_conflicts: Vec::new(),
+            pending_router_landings: Vec::new(),
             pending_router_applies: Vec::new(),
             media_cache_dialog_open: false,
             media_cache_inventory: None,
@@ -461,6 +556,7 @@ impl KinewrightApp {
             ripple_mode: false,
             error_log,
             error_log_open,
+            incidents_open: false,
             screenshot: crate::screenshot::ScreenshotCapture::from_environment(),
             recording: None,
             record_dialog: crate::recording::RecordDialog::default(),
@@ -473,8 +569,8 @@ impl KinewrightApp {
             .set_document(Arc::clone(&app.focused().document));
         app.playback.request_frame(TimeCode::ZERO);
         let opened_path = app.focused().project_path.clone();
-        if let Some((source, message)) = load_error {
-            app.record_error(source, message);
+        if let Some(observation) = load_error {
+            app.note_observation(observation);
         } else if let Some(path) = opened_path {
             let missing: Vec<String> = app
                 .focused()
@@ -491,8 +587,11 @@ impl KinewrightApp {
                     format!("Opened {}", path.display())
                 };
             } else {
-                app.record_error(
-                    "Media",
+                // Appendix B row 2: `media_incomplete`, because the project
+                // **did** open — only some of its media is elsewhere.
+                app.note_label(
+                    LabelIncident::MediaIncomplete,
+                    IncidentSubject::Project,
                     format!("Missing media after open: {}", missing.join(", ")),
                 );
                 app.status = format!(
@@ -631,8 +730,10 @@ impl KinewrightApp {
             .checkpoint(&core, session.project_path.as_deref());
         self.lut_publisher.set_lut_library(library);
         if let Some(reason) = &report.lut_store_error {
-            self.record_error(
-                "Look",
+            // Appendix B row 3: the project **was** saved.
+            self.note_label(
+                LabelIncident::LookIncomplete,
+                IncidentSubject::Project,
                 format!(
                     "Saved {}, but its LUT store root is unusable: {reason}",
                     path.display()
@@ -664,8 +765,10 @@ impl KinewrightApp {
             Ok(report) => {
                 self.status = format!("Saved {}", report.path.display());
                 if let Some(summary) = report.copy_failure_summary() {
-                    self.record_error(
-                        "Look",
+                    // Appendix B row 4.
+                    self.note_label(
+                        LabelIncident::LookIncomplete,
+                        IncidentSubject::Project,
                         format!(
                             "Saved {} but could not copy every look into the new store — {summary}",
                             report.path.display()
@@ -674,10 +777,11 @@ impl KinewrightApp {
                 }
                 true
             }
+            // Appendix B row 5: the one typed `Project` site.
             Err(error) => {
-                self.record_error(
-                    "Project",
-                    format!("Could not save {}: {error}", path.display()),
+                let revision = self.focused().revision;
+                self.note_observation(
+                    error.incident_observation(IncidentSubject::Project, revision),
                 );
                 false
             }
@@ -699,8 +803,10 @@ impl KinewrightApp {
         let session = match self.create_project_session(name, default_project_document(), None) {
             Ok(session) => session,
             Err(error) => {
-                self.record_error(
-                    "Project",
+                // Appendix B row 6.
+                self.note_label(
+                    LabelIncident::Project,
+                    IncidentSubject::Project,
                     format!("Could not create a new project: {error}"),
                 );
                 return;
@@ -714,9 +820,11 @@ impl KinewrightApp {
     fn open_project(&mut self, path: &Path) {
         let document = match load_document(path) {
             Ok(document) => document,
+            // Appendix B row 7.
             Err(error) => {
-                self.record_error(
-                    "Project",
+                self.note_label(
+                    LabelIncident::Project,
+                    IncidentSubject::Project,
                     format!("Could not open {}: {error}", path.display()),
                 );
                 return;
@@ -733,9 +841,11 @@ impl KinewrightApp {
         let mut session =
             match self.create_project_session(name, document, Some(path.to_path_buf())) {
                 Ok(session) => session,
+                // Appendix B row 8.
                 Err(error) => {
-                    self.record_error(
-                        "Project",
+                    self.note_label(
+                        LabelIncident::Project,
+                        IncidentSubject::Project,
                         format!("Could not open {}: {error}", path.display()),
                     );
                     return;
@@ -755,8 +865,11 @@ impl KinewrightApp {
         self.focus_project(self.projects.len() - 1);
         self.publish_focused_lut_library();
         if let Some(reason) = store_refusal {
-            self.record_error(
-                "Look",
+            // Appendix B row 9: the session is pushed and focused *before*
+            // this refusal, so the project opened — a degraded result.
+            self.note_label(
+                LabelIncident::LookIncomplete,
+                IncidentSubject::Project,
                 format!(
                     "The LUT store beside {} is unusable: {reason}",
                     path.display()
@@ -764,8 +877,14 @@ impl KinewrightApp {
             );
         }
         if !lut_titles.is_empty() {
-            self.error_log.push(
-                "Look",
+            // Appendix B row 10, the first `IN1b` §5.1 rule 14 aggregate:
+            // **one** incident whose `observed` is the joined list, because one
+            // open with *n* unavailable looks is one problem. It used to push
+            // straight into a window it never opened, so the person saw only
+            // the status line.
+            self.note_label(
+                LabelIncident::LookIncomplete,
+                IncidentSubject::Project,
                 format!(
                     "LUT assets need restore or replacement after open: {}",
                     lut_titles.join(", ")
@@ -776,13 +895,21 @@ impl KinewrightApp {
         for asset in assets {
             self.request_asset_analysis(asset);
         }
+        // Appendix B row 11, the second aggregate. The push is **lifted out**
+        // of the `self.status = if …` expression before the status line is
+        // composed (`IN1b` §5.1 rule 14), because an observation queued inside
+        // the expression that also writes `status` is a write the router then
+        // overwrites in the same frame.
+        if !missing.is_empty() {
+            self.note_label(
+                LabelIncident::MediaIncomplete,
+                IncidentSubject::Project,
+                format!("Missing media after open: {}", missing.join(", ")),
+            );
+        }
         self.status = if missing.is_empty() {
             format!("Opened {}", path.display())
         } else {
-            self.error_log.push(
-                "Media",
-                format!("Missing media after open: {}", missing.join(", ")),
-            );
             format!(
                 "Opened {} — missing media: {}",
                 path.display(),
@@ -954,8 +1081,15 @@ impl KinewrightApp {
     }
 
     pub(crate) fn send_operation(&mut self, operation: Operation) {
+        // The operation names the narrowest subject the refusal is about, but
+        // a stopped actor is not that operation's problem — it is the whole
+        // document's, and a second stopped send must not open a second
+        // incident (Appendix B row 12).
         if self.focused().core.send(Command::Do(operation)).is_err() {
-            self.record_error("Operations", "Core actor stopped while applying the edit");
+            self.note_actor_stopped(
+                IncidentSubject::Project,
+                "Core actor stopped while applying the edit",
+            );
         } else {
             "Applying edit…".clone_into(&mut self.status);
         }
@@ -1012,6 +1146,8 @@ impl KinewrightApp {
         let conflicts = std::mem::take(&mut self.pending_router_conflicts);
         if observations.is_empty() && conflicts.is_empty() && self.pending_router_applies.is_empty()
         {
+            // Nothing is outstanding, so nothing can be waiting on a landing.
+            self.pending_router_landings.clear();
             return;
         }
         let focused = self.focused_project;
@@ -1067,7 +1203,6 @@ impl KinewrightApp {
         let Some(incident) = log.get(id) else {
             return;
         };
-        let headline = incident_headline(incident.code, incident.class);
         let class = incident.class;
         let revision = incident.revision;
         let operation = (class == PolicyClass::AutoApply)
@@ -1077,33 +1212,176 @@ impl KinewrightApp {
                 RecoveryKind::Operation(operation) => Some(operation.clone()),
                 RecoveryKind::Explain(_) => None,
             });
+        // `IN1b` §5.3 rule 18: the crate's one `note_incident` call site. The
+        // guard is taken from a **local** `Arc`, so `&mut self` is disjoint
+        // from the borrow the incident is read through and the write below
+        // needs no clone; the `drop(log)` that follows is hygiene, as it was
+        // in Part A.
+        self.note_incident(incident);
         drop(log);
-        self.record_error("Incident", headline);
         let Some(operation) = operation else {
             return;
         };
         // `Command::DoIfRevision`, never `Command::Do`: the apply the router
         // planned against one revision must not land on another (rule 9).
+        // The token is what the conflict is matched by (`IN1b` §4 rule 6).
+        let token = self.next_command_token();
         if self.projects[project_index]
             .core
             .send(Command::DoIfRevision {
                 expected: revision,
                 operation,
-                // `IN1b` §4 rule 3: the router's identity match is implementer
-                // C's; this send does not correlate yet.
-                token: None,
+                token: Some(token),
             })
             .is_err()
         {
-            self.record_error("Operations", "Core actor stopped while applying the edit");
+            // Appendix B row 14.
+            self.note_actor_stopped(
+                IncidentSubject::Project,
+                "Core actor stopped while applying the edit",
+            );
         } else {
             self.pending_router_applies.push(RouterApply {
                 project_index,
                 incident: id,
-                expected: revision,
                 outcome: IncidentOutcome::Applied,
+                token,
+                origin: RouterSendOrigin::Auto,
             });
             auto_applied.push(id);
+        }
+    }
+
+    /// Allocate the next correlation token (`IN1b` §4 rule 6).
+    fn next_command_token(&mut self) -> CommandToken {
+        let token = CommandToken(self.next_command_token);
+        self.next_command_token = self.next_command_token.wrapping_add(1);
+        token
+    }
+
+    /// The outstanding router send a core answer names, with the subject its
+    /// incident is about — `None` when the answer is not the router's.
+    ///
+    /// The identity is `(project, token)`, the same one
+    /// [`Self::reconcile_router_sends`] uses, written **once** so the three
+    /// decisions that turn on it cannot drift apart (review-final B1, nit 1).
+    fn router_send_for(
+        &self,
+        project_index: usize,
+        token: Option<CommandToken>,
+    ) -> Option<(IncidentSubject, RouterSendOrigin)> {
+        let token = token?;
+        let apply = self
+            .pending_router_applies
+            .iter()
+            .find(|apply| apply.token == token && apply.project_index == project_index)?;
+        let handle = Arc::clone(&self.projects[project_index].incidents);
+        let subject = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(apply.incident)
+            .map_or(IncidentSubject::Project, |incident| incident.subject);
+        Some((subject, apply.origin))
+    }
+
+    /// Drop the outstanding send `(project, token)` names.
+    fn drop_router_send(&mut self, project_index: usize, token: Option<CommandToken>) {
+        let Some(token) = token else {
+            return;
+        };
+        self.pending_router_applies
+            .retain(|apply| !(apply.token == token && apply.project_index == project_index));
+    }
+
+    /// Everything the incident router reads out of one core event, in **one**
+    /// place (review-final B1).
+    ///
+    /// The three decisions errata `IN1b`-C-R50, `IN1b`-C-R51 and `IN1b`-C-R53
+    /// landed — record a landing, skip the card for a conflict the router
+    /// caused, drop and skip for a rejection it caused — used to live in
+    /// `poll_background`'s drain and again, in parallel source, in the test
+    /// mirror `in1_drain_core`. Two copies of one decision is the failure mode
+    /// ruling N5.7 S2 named: a mutation of either one alone left the suite
+    /// green, including deleting the landing push, which stops **every** router
+    /// auto-apply from ever resolving in the real application. This method is
+    /// the single owner; both drains call it and neither decides anything.
+    ///
+    /// Erratum `IN1b`-C-R54 is the one thing it adds: the two skips apply to a
+    /// send the **router** planned, and not to one the person pressed. A card
+    /// press that loses its race is reported with the **incident's own
+    /// subject** rather than the project's, because the person pressed a
+    /// button on that card and that card is where the answer belongs.
+    fn note_core_event_for_router(&mut self, project_index: usize, event: &Event) {
+        match event {
+            // Erratum `IN1b`-C-R50: the actor echoes the token it landed, and
+            // that echo is what makes "this send landed" a fact rather than an
+            // inference from bytes anyone could have written.
+            Event::DocumentChanged { token, .. } => {
+                if let Some(token) = *token {
+                    self.pending_router_landings.push(token);
+                }
+            }
+            // Appendix B row 26 as amended by errata `IN1b`-C-R51 and
+            // `IN1b`-C-R54: `edit_revision_conflict` with `Revision` evidence,
+            // for every conflict the **router** did not cause.
+            //
+            // A conflict whose token is one of the router's own auto-applies
+            // gets no card. Raising one would tell the person "the timeline
+            // moved between planning this edit and sending it; make the edit
+            // again" about an edit they never made — one Kinewright planned,
+            // sent and is already reconciling — and `Explain` never resolves,
+            // so `open_count()` would never fall back to zero. §5.4 rule 25's
+            // whole argument is that the badge falls as an incident is
+            // auto-applied. `reconcile_router_sends` is the whole response to
+            // those, and the identity is §4 rule 7's.
+            Event::RevisionConflict {
+                expected,
+                actual,
+                token,
+            } => {
+                let origin = self.router_send_for(project_index, *token);
+                self.pending_router_conflicts.push(RouterConflict {
+                    project_index,
+                    actual: *actual,
+                    token: *token,
+                });
+                let subject = match origin {
+                    Some((_, RouterSendOrigin::Auto)) => return,
+                    Some((subject, RouterSendOrigin::CardPress)) => subject,
+                    None => IncidentSubject::Project,
+                };
+                self.note_observation(IncidentObservation::revision_conflict(
+                    subject, *expected, *actual,
+                ));
+            }
+            // Appendix B row 24, the third way a gated send can end (errata
+            // `IN1b`-A-R15, `IN1b`-C-R53, `IN1b`-C-R54). The drain stops
+            // discarding `op`, so a foreign rejection's subject is the rejected
+            // operation's own (`IN1b` §3.3 rule 20) and the code is the family
+            // `OpError::incident_code()` resolves at run time.
+            //
+            // A rejection of the router's own send drops it — the incident
+            // stays `Open` because the recovery did not land, nothing is
+            // re-sent, and its `revision` does not move: no conflict occurred,
+            // so core reported no newer revision to refresh it to (rule 10).
+            // An auto-apply's rejection additionally gets no card; a card
+            // press's does, on the incident whose button was pressed.
+            Event::OpRejected { op, error, token } => {
+                let subject = match self.router_send_for(project_index, *token) {
+                    Some((_, RouterSendOrigin::Auto)) => {
+                        self.drop_router_send(project_index, *token);
+                        return;
+                    }
+                    Some((subject, RouterSendOrigin::CardPress)) => {
+                        self.drop_router_send(project_index, *token);
+                        subject
+                    }
+                    None => op.incident_subject(),
+                };
+                let revision = self.projects[project_index].revision;
+                self.note_observation(IncidentObservation::from_op_error(error, subject, revision));
+            }
+            Event::BatchRejected { .. } | Event::QueryResult(_) => {}
         }
     }
 
@@ -1116,61 +1394,55 @@ impl KinewrightApp {
             // `revision` is refreshed to the revision core reported when it
             // refused, and the send is dropped rather than re-sent.
             //
-            // `Event::RevisionConflict` carries no send identity, and within
-            // one project several router applies can share `expected` — two
-            // incidents opened in the same frame carry the same
-            // `observation.revision`, so both are sent against it. At most one
-            // of them can have landed (the actor is serial, and the first to
-            // land moves the revision the others were gated on), so the
-            // refused send is preferentially one the live document does
-            // **not** already show as landed. Matching on `(project,
-            // expected)` alone would consume the send that succeeded, leaving
-            // it unresolved and refreshing the wrong incident.
+            // The match is **by identity** (`IN1b` §4 rules 6-7). Every router
+            // send allocates a `CommandToken`, the actor echoes it on the
+            // `Event::RevisionConflict` it answers with, and the outstanding
+            // send is the one whose token is equal. A conflict carrying no
+            // token, or a token no outstanding send holds, belonged to a
+            // foreign `Command::DoIfRevision` — the two `media_workflow.rs`
+            // senders, or the agent's own — and the router **does nothing**:
+            // the `edit_revision_conflict` incident the drain already opened is
+            // the whole response. Part A's two-tier `(project, expected)`
+            // heuristic is gone; it consumed a send no conflict of the
+            // router's had refused, which is what
+            // `in1b_a_foreign_conflict_leaves_every_router_send_outstanding`
+            // pins.
             //
-            // The fallback matters and is not a fudge: `router_apply_accepted`
-            // reads the *document*, not the send, so a person who made the
-            // same edit by hand before the router's send makes it true for an
-            // apply that core nonetheless refused — which is exactly §9
-            // clause 9's case. When no candidate is outstanding-and-unlanded
-            // the conflict is therefore matched to the first candidate, which
-            // is the behaviour that clause pins. An incident id the log no
-            // longer knows is never a candidate.
-            let handle = Arc::clone(&self.projects[conflict.project_index].incidents);
-            let position = {
-                let log = handle
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let document = &self.projects[conflict.project_index].document;
-                let candidate = |apply: &RouterApply| {
-                    apply.project_index == conflict.project_index
-                        && apply.expected == conflict.expected
-                        && log.get(apply.incident).is_some()
-                };
-                let landed = |apply: &RouterApply| {
-                    log.get(apply.incident).is_some_and(|incident| {
-                        router_apply_accepted(document, incident, apply.outcome)
-                    })
-                };
-                self.pending_router_applies
-                    .iter()
-                    .position(|apply| candidate(apply) && !landed(apply))
-                    .or_else(|| self.pending_router_applies.iter().position(candidate))
+            // IN1 §9 clause 9 — a person who made the same edit by hand first,
+            // so the live document shows the apply as landed while core
+            // nonetheless refused it — is unchanged and is now exact rather
+            // than preferential: the refused send is named by the event.
+            let Some(token) = conflict.token else {
+                continue;
             };
-            let Some(position) = position else {
+            // The identity is `(project, token)`. The token alone is unique by
+            // construction — one counter, one app — and naming the project
+            // beside it is what makes `RouterConflict::project_index`'s role
+            // explicit and fails closed if that ever stops being true.
+            let Some(position) = self.pending_router_applies.iter().position(|apply| {
+                apply.token == token && apply.project_index == conflict.project_index
+            }) else {
                 continue;
             };
             let incident = self.pending_router_applies[position].incident;
+            let handle = Arc::clone(&self.projects[conflict.project_index].incidents);
             // `refresh_revision` is core's third narrowly typed writer and the
             // only way to do this: the router called `note_auto_applied` at
             // send time, so `observe` returns `Suppressed` before it could
-            // refresh anything (IN1 §2.3 rules 19-20, §5.2 rule 10). The read
-            // guard above is gone before this write is taken.
+            // refresh anything (IN1 §2.3 rules 19-20, §5.2 rule 10). An
+            // incident id the log no longer knows is left alone.
             handle
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .refresh_revision(incident, conflict.actual);
             self.pending_router_applies.remove(position);
         }
+        // A landing whose send is no longer outstanding is spent.
+        self.pending_router_landings.retain(|landed| {
+            self.pending_router_applies
+                .iter()
+                .any(|apply| apply.token == *landed)
+        });
         if self.pending_router_applies.is_empty() {
             return;
         }
@@ -1204,22 +1476,43 @@ impl KinewrightApp {
                 // dropped, never re-sent.
                 continue;
             };
-            let accepted = router_apply_accepted(
-                &self.projects[project_index].document,
-                incident,
-                apply.outcome,
-            );
-            let moved_on = self.projects[project_index].revision != apply.expected;
+            // Erratum `IN1b`-C-R50: **both** conditions. The token says the
+            // actor landed this very send; the document read says the bytes
+            // the recovery carried are the ones on the asset now. Either alone
+            // is wrong — a token with no document match is an apply a later
+            // edit superseded, and a document match with no token is the
+            // person's own hand edit in the frame before the actor replied.
+            let landed_token = self.pending_router_landings.contains(&apply.token);
+            let accepted = landed_token
+                && router_apply_accepted(
+                    &self.projects[project_index].document,
+                    incident,
+                    apply.outcome,
+                );
             let id = apply.incident;
             let outcome = apply.outcome;
             drop(log);
             if accepted {
                 landed.push((id, outcome));
-            } else if moved_on {
-                // The world moved on without this send — a rejection, or an
-                // accept a later edit superseded. The incident stays as it is
-                // and nothing is re-sent (rule 10).
+            } else if landed_token {
+                // The actor landed this send and the document no longer shows
+                // its bytes: a later edit superseded it. The incident stays as
+                // it is and nothing is re-sent (rule 10).
             } else {
+                // No answer yet. Part A dropped the send here whenever the
+                // project's revision had moved at all, which is what let a
+                // person's own edit in the window look like an answer
+                // (erratum `IN1b`-C-R50). A send the actor has not answered is
+                // **in flight**, and stays outstanding until its own token
+                // comes back on a landing or on the conflict that refused it —
+                // which is what lets `reconcile_router_sends` refresh the
+                // incident to the revision core reported (rule 10) and what
+                // lets erratum `IN1b`-C-R51 recognise the conflict as the
+                // router's own. **All three** ways a gated send can end now
+                // carry its identity: the landing above, the conflict
+                // `reconcile_router_sends` matches, and the rejection the
+                // drain arm drops (errata `IN1b`-A-R15 and `IN1b`-C-R53), so
+                // "in flight" is a state a send always leaves.
                 waiting.push(apply);
             }
         }
@@ -1250,23 +1543,28 @@ impl KinewrightApp {
         outcome: IncidentOutcome,
     ) {
         let expected = self.projects[project_index].revision;
+        let token = self.next_command_token();
         if self.projects[project_index]
             .core
             .send(Command::DoIfRevision {
                 expected,
                 operation,
-                // `IN1b` §4 rule 3: this send does not correlate yet.
-                token: None,
+                token: Some(token),
             })
             .is_err()
         {
-            self.record_error("Operations", "Core actor stopped while applying the edit");
+            // Appendix B row 15.
+            self.note_actor_stopped(
+                IncidentSubject::Project,
+                "Core actor stopped while applying the edit",
+            );
         } else {
             self.pending_router_applies.push(RouterApply {
                 project_index,
                 incident,
-                expected,
                 outcome,
+                token,
+                origin: RouterSendOrigin::CardPress,
             });
         }
     }
@@ -1282,8 +1580,9 @@ impl KinewrightApp {
             .send(Command::DoBatch(operations))
             .is_err()
         {
-            self.record_error(
-                "Operations",
+            // Appendix B row 16.
+            self.note_actor_stopped(
+                IncidentSubject::Project,
                 "Core actor stopped while applying the edit batch",
             );
         } else {
@@ -1325,8 +1624,9 @@ impl KinewrightApp {
             })
             .is_err()
         {
-            self.record_error(
-                "Operations",
+            // Appendix B row 17.
+            self.note_actor_stopped(
+                IncidentSubject::Project,
                 "Core actor stopped while applying the live edit",
             );
         } else {
@@ -1343,7 +1643,8 @@ impl KinewrightApp {
 
     pub(crate) fn undo(&mut self) {
         if self.focused().core.send(Command::Undo).is_err() {
-            self.record_error("Operations", "Core actor stopped while undoing");
+            // Appendix B row 18.
+            self.note_actor_stopped(IncidentSubject::Project, "Core actor stopped while undoing");
         } else {
             "Undo".clone_into(&mut self.status);
         }
@@ -1351,7 +1652,8 @@ impl KinewrightApp {
 
     pub(crate) fn redo(&mut self) {
         if self.focused().core.send(Command::Redo).is_err() {
-            self.record_error("Operations", "Core actor stopped while redoing");
+            // Appendix B row 19.
+            self.note_actor_stopped(IncidentSubject::Project, "Core actor stopped while redoing");
         } else {
             "Redo".clone_into(&mut self.status);
         }
@@ -1385,9 +1687,15 @@ impl KinewrightApp {
         if self.poll_lut_workers() {
             ctx.request_repaint();
         }
+        // Appendix B row 20, the third aggregate: **one incident per asset**,
+        // because a per-asset failure is per-asset by construction and the
+        // dedup key collapses the repeats correctly (`IN1b` §5.1 rule 14).
+        // `media_incomplete`, because the project is open and usable — only
+        // its timeline pictures are missing.
         for (asset, error) in self.visual_cache.poll(ctx) {
-            self.error_log.push(
-                "Media",
+            self.note_label(
+                LabelIncident::MediaIncomplete,
+                IncidentSubject::Asset(asset),
                 format!("Could not build timeline visuals for asset {asset}: {error}"),
             );
         }
@@ -1416,11 +1724,18 @@ impl KinewrightApp {
                         .send(Command::Do(Operation::AddAsset { asset }))
                         .is_err()
                     {
-                        self.record_error("Operations", "Core actor stopped while importing media");
+                        // Appendix B row 21.
+                        self.note_actor_stopped(
+                            IncidentSubject::Project,
+                            "Core actor stopped while importing media",
+                        );
                     }
                 }
-                Err(error) => self.record_error(
-                    "Media",
+                // Appendix B row 22: the import failed, so no asset exists to
+                // name.
+                Err(error) => self.note_label(
+                    LabelIncident::Media,
+                    IncidentSubject::Project,
                     format!("Could not import {}: {error}", path.display()),
                 ),
             }
@@ -1438,6 +1753,10 @@ impl KinewrightApp {
             })
             .collect::<Vec<_>>();
         for (project_index, event) in core_events {
+            // Review-final B1: every router decision this event carries is
+            // made in exactly one place, which both this drain and the test
+            // mirror call. The arms below do the rest.
+            self.note_core_event_for_router(project_index, &event);
             match event {
                 Event::DocumentChanged {
                     doc,
@@ -1481,9 +1800,17 @@ impl KinewrightApp {
                         self.media_statuses.invalidate(session_id, asset.id);
                     }
                     if invalidated_pending_source_edit {
+                        // Appendix B row 23.
+                        let changed_asset = self
+                            .pending_source_edit
+                            .as_ref()
+                            .map(|pending| pending.asset_id);
                         self.pending_source_edit = None;
-                        self.record_error(
-                            "Source monitor",
+                        let subject =
+                            changed_asset.map_or(IncidentSubject::Project, IncidentSubject::Asset);
+                        self.note_label(
+                            LabelIncident::SourceMonitor,
+                            subject,
                             "Source file changed while Source was being verified; no edit was applied",
                         );
                     }
@@ -1588,38 +1915,26 @@ impl KinewrightApp {
                         }
                     }
                 }
-                Event::OpRejected { error, .. } => {
-                    let name = &self.projects[project_index].name;
-                    self.record_error("Operations", format!("Edit rejected in {name}: {error}"));
+                // Both router decisions this event carries are made in
+                // `note_core_event_for_router` (review-final B1); only the
+                // LUT reservation is this arm's.
+                Event::OpRejected { .. } => {
                     self.release_lut_import_reservation(project_index);
                 }
-                Event::BatchRejected { error, .. } => {
-                    let name = &self.projects[project_index].name;
-                    self.record_error(
-                        "Operations",
-                        format!("Edit plan rejected in {name}: {error}"),
-                    );
+                // Appendix B row 25: the same for a plan, over the batch's
+                // common subject.
+                Event::BatchRejected { operations, error } => {
+                    let revision = self.projects[project_index].revision;
+                    let subject = batch_incident_subject(&operations);
+                    self.note_observation(IncidentObservation::from_batch_error(
+                        &error, subject, revision,
+                    ));
                     self.release_lut_import_reservation(project_index);
                 }
-                Event::RevisionConflict {
-                    expected,
-                    actual,
-                    token: _,
-                } => {
-                    self.pending_router_conflicts.push(RouterConflict {
-                        project_index,
-                        expected,
-                        actual,
-                    });
-                    let name = &self.projects[project_index].name;
-                    self.record_error(
-                        "Operations",
-                        format!(
-                            "Stale edit rejected in {name}: expected timeline revision {expected}, current revision is {actual}"
-                        ),
-                    );
-                }
-                Event::QueryResult(_) => {}
+                // Every router decision this event carries is made in
+                // `note_core_event_for_router`, including the conflict note
+                // `reconcile_router_sends` reads (review-final B1).
+                Event::RevisionConflict { .. } | Event::QueryResult(_) => {}
             }
         }
 
@@ -1802,6 +2117,21 @@ impl KinewrightApp {
         });
     }
 
+    /// The badge's number: problems currently unresolved in the focused
+    /// project (`IN1b` §5.4 rule 25).
+    ///
+    /// `IncidentLog::open_count()` counts problems currently unresolved;
+    /// `ErrorLog::len()` counts lines ever written this session (IN1 §5.2
+    /// rule 15). They are different quantities and
+    /// `in1b_the_badge_counts_open_incidents_not_log_lines` asserts both.
+    #[must_use]
+    pub(crate) fn open_incident_count(&self) -> usize {
+        Arc::clone(&self.focused().incidents)
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .open_count()
+    }
+
     /// The focused project's selected clip, when it is a media clip a look can
     /// be applied to.
     pub(crate) fn selected_media_clip(&self) -> Option<kinewright_core::ClipId> {
@@ -1841,7 +2171,14 @@ impl eframe::App for KinewrightApp {
                     }
                     self.projects[0].recovery.consume_pending(&journal_path);
                 });
-            self.status = crate::recovery::restore_status(result);
+            // `IN1b` §5.7, Appendix B row 28: the third log-bypassing sink.
+            // A failed restore used to be a bare status string; it is now a
+            // `project_unclassified` incident whose written body tells the
+            // person the last saved version is still intact.
+            match crate::recovery::restore_status(result) {
+                Ok(status) => self.status = status,
+                Err(observation) => self.note_observation(*observation),
+            }
         }
 
         self.app_top_bar(ui);
@@ -1855,6 +2192,9 @@ impl eframe::App for KinewrightApp {
         self.show_legacy_relink_confirmation(ui.ctx());
         self.show_help(ui.ctx());
         self.show_error_log(ui.ctx());
+        // `IN1b` §5.5 rule 31: the badge's own panel, drawn beside the audit
+        // window it is no longer a count of.
+        crate::incident_ui::show_incidents_panel(self, ui.ctx());
         self.show_unsaved_confirmation(ui.ctx());
         self.screenshot.update(ui.ctx());
     }
@@ -1894,16 +2234,40 @@ impl KinewrightApp {
                     }
                     self.record_control(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.error_log.len() > 0
-                            && ui
-                                .add(egui::Button::image_and_text(
-                                    Icon::Alert.image(size::ICON_SM),
-                                    format!("{}", self.error_log.len()),
-                                ))
-                                .on_hover_text("Open error log")
-                                .clicked()
+                        // `IN1b` §5.4 rule 25: the badge counts **problems
+                        // currently unresolved**, not lines ever written this
+                        // session. `IncidentLog::open_count()` falls as an
+                        // incident is auto-applied, reverted or explained;
+                        // `ErrorLog::len()` never falls, and a badge summing
+                        // both double-counts every auto-applied incident — the
+                        // one case IN1 exists to make invisible. The error-log
+                        // window keeps `entries.len()`, because it is now
+                        // genuinely an audit view.
+                        //
+                        // Erratum `IN1b`-C-R49 decides *visibility* separately
+                        // from the number: `incident_badge` keeps the badge on
+                        // screen while the audit view has anything to show, so
+                        // the session's record never becomes unreachable.
+                        //
+                        // `ErrorLog::len()` is the whole log and not a count of
+                        // `"Incident"`-source lines, and after Part B those are
+                        // the same number: `note_incident` is the crate's only
+                        // writer and it writes that one source, which the sink
+                        // gate's counts 2 and 3 prove (review-final nit 6). The
+                        // tests read `count_with_source` because they predate
+                        // the gate, not because the log holds anything else.
+                        if let Some(open_incidents) = crate::incident_ui::incident_badge(
+                            self.open_incident_count(),
+                            self.error_log.len(),
+                        ) && ui
+                            .add(egui::Button::image_and_text(
+                                Icon::Alert.image(size::ICON_SM),
+                                format!("{open_incidents}"),
+                            ))
+                            .on_hover_text("Open the Incidents panel")
+                            .clicked()
                         {
-                            self.error_log_open = true;
+                            self.incidents_open = true;
                         }
                         // Summon toggles for the non-resident surfaces.
                         if ui
@@ -2833,7 +3197,13 @@ impl KinewrightApp {
     /// AU5 §6.3: start one learn measurement for the node the card named.
     pub(crate) fn request_noise_profile(&mut self, chain: AudioChain, effect: EffectId) {
         let NoiseLearnRange::Span(start, end) = self.noise_learn_range(chain) else {
-            self.record_error("Mixer", LEARN_NO_SILENCE);
+            // Appendix B row 29: the three Mixer sites are `AudioChain`-scoped
+            // and no `TrackId` is in scope at any of them.
+            self.note_label(
+                LabelIncident::Mixer,
+                IncidentSubject::Chain(chain),
+                LEARN_NO_SILENCE,
+            );
             return;
         };
         let session = self.focused();
@@ -2869,8 +3239,10 @@ impl KinewrightApp {
         }
         let document = Arc::clone(&self.focused().document);
         let Some(operation) = noise_profile_operation(&document, chain, effect, &bands) else {
-            self.record_error(
-                "Mixer",
+            // Appendix B row 30.
+            self.note_label(
+                LabelIncident::Mixer,
+                IncidentSubject::Chain(chain),
                 "The denoise node the profile was learned for is no longer on this chain",
             );
             return;
@@ -2895,7 +3267,12 @@ impl KinewrightApp {
                     bands,
                 ),
                 Err(error) => {
-                    self.record_error("Mixer", format!("Could not learn a noise profile: {error}"));
+                    // Appendix B row 31.
+                    self.note_label(
+                        LabelIncident::Mixer,
+                        IncidentSubject::Chain(response.chain),
+                        format!("Could not learn a noise profile: {error}"),
+                    );
                 }
             }
         }
@@ -4090,7 +4467,7 @@ mod tests {
 /// `IncidentObservation::from_media_error`, so no test here can pass with
 /// §4.2's plumbing absent.
 #[cfg(test)]
-mod in1_tests {
+pub(crate) mod in1_tests {
     use std::time::Instant;
 
     use kinewright_core::{
@@ -4101,7 +4478,7 @@ mod in1_tests {
     use kinewright_media::{
         FfmpegMediaEngine,
         in1_sources::{In1Source, in1_source},
-        test_support::{GeneratedMedia, single_clip_document},
+        test_support::{GeneratedMedia, TempDirectory, single_clip_document},
     };
 
     use super::*;
@@ -4172,6 +4549,7 @@ mod in1_tests {
             projects: vec![project],
             focused_project: 0,
             next_project_id: 2,
+            next_command_token: 1,
             playback,
             analysis,
             exporter,
@@ -4218,6 +4596,7 @@ mod in1_tests {
             pending_legacy_relink: None,
             pending_observations: Vec::new(),
             pending_router_conflicts: Vec::new(),
+            pending_router_landings: Vec::new(),
             pending_router_applies: Vec::new(),
             media_cache_dialog_open: false,
             media_cache_inventory: None,
@@ -4269,6 +4648,7 @@ mod in1_tests {
             ripple_mode: false,
             error_log: ErrorLog::default(),
             error_log_open: false,
+            incidents_open: false,
             screenshot: crate::screenshot::ScreenshotCapture::from_environment(),
             recording: None,
             record_dialog: crate::recording::RecordDialog::default(),
@@ -4281,7 +4661,7 @@ mod in1_tests {
 
     /// Shut down every branch server the harness started, so no test leaves
     /// a listener thread behind.
-    fn in1_shutdown(app: &mut KinewrightApp) {
+    pub(crate) fn in1_shutdown(app: &mut KinewrightApp) {
         for project in &mut app.projects {
             for thread in &mut project.threads {
                 if let Some(server) = thread.mcp_server.take() {
@@ -4291,33 +4671,73 @@ mod in1_tests {
         }
     }
 
-    /// Drain one session's core events the way `update`'s core drain does
-    /// for the fields the router reads: adopt the new document and revision
-    /// on `DocumentChanged`, and note conflicts for the router. This mirrors
-    /// three lines of the drain rather than calling `update`, which needs a
-    /// window; the tick placement itself is asserted by inspection (IN1
-    /// §5.2b rule 22).
+    /// Drain one session's core events the way `poll_background`'s core drain
+    /// does for the fields the router reads: adopt the new document and
+    /// revision on `DocumentChanged`, and hand **every** event to the one
+    /// method that makes every router decision.
+    ///
+    /// After review-final B1 this mirror decides nothing of its own. It used
+    /// to re-implement the landing push, the conflict skip and the rejection
+    /// drop in parallel source, and a mutation of production alone left the
+    /// whole suite green — including deleting the landing push, which stops
+    /// every router auto-apply from ever resolving in the real application.
+    /// The two lines below are the only thing this mirrors, and they are the
+    /// two the drain does *outside* `note_core_event_for_router`.
+    ///
+    /// Two router tests drive `poll_background` itself rather than this
+    /// mirror, so the production tick is pinned as well as the decision.
     fn in1_drain_core(app: &mut KinewrightApp, project_index: usize) {
         let events: Vec<Event> = app.projects[project_index].core_events.try_iter().collect();
         for event in events {
-            match event {
-                Event::DocumentChanged { doc, revision, .. } => {
-                    app.projects[project_index].document = doc;
-                    app.projects[project_index].revision = revision;
-                }
-                Event::RevisionConflict {
-                    expected,
-                    actual,
-                    token: _,
-                } => {
-                    app.pending_router_conflicts.push(RouterConflict {
-                        project_index,
-                        expected,
-                        actual,
-                    });
-                }
-                _ => {}
+            app.note_core_event_for_router(project_index, &event);
+            if let Event::DocumentChanged { doc, revision, .. } = event {
+                app.projects[project_index].document = doc;
+                app.projects[project_index].revision = revision;
             }
+        }
+    }
+
+    /// Silence the engine's own channel, so a production tick drains only what
+    /// the test put in front of it.
+    ///
+    /// The harness's engine is still decoding the fixture; a playback refusal
+    /// arriving mid-test would open an incident the test did not ask for. The
+    /// sender is leaked deliberately — dropping it would disconnect the
+    /// receiver and `try_recv` would stop being a no-op.
+    fn in1_silence_media_events(app: &mut KinewrightApp) {
+        let (quiet_tx, quiet_rx) = crossbeam_channel::unbounded::<MediaEvent>();
+        std::mem::forget(quiet_tx);
+        app.media_events = quiet_rx;
+    }
+
+    /// Tick **production** — `poll_background`, the real drain and the real
+    /// router tick — until `settled` reports the actor has answered, or panic
+    /// on a hang.
+    ///
+    /// Review-final B1: the test mirror can no longer decide anything of its
+    /// own, and these two tests additionally drive the production tick, so a
+    /// mutation of `poll_background`'s call into
+    /// [`KinewrightApp::note_core_event_for_router`] breaks them too. The
+    /// condition is the **effect** rather than a queue, because
+    /// `poll_background` reconciles on its way out and leaves every queue
+    /// empty behind it.
+    fn in1_poll_production_until(
+        app: &mut KinewrightApp,
+        settled: impl Fn(&KinewrightApp) -> bool,
+    ) {
+        in1_silence_media_events(app);
+        let ctx = egui::Context::default();
+        let expiry = Instant::now() + IN1_APP_DEADLINE;
+        loop {
+            app.poll_background(&ctx);
+            if settled(app) {
+                return;
+            }
+            assert!(
+                Instant::now() < expiry,
+                "the core actor answered nothing within {IN1_APP_DEADLINE:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -4405,6 +4825,1054 @@ mod in1_tests {
             IncidentState::Resolved(IncidentOutcome::Applied)
         );
         incident.id
+    }
+
+    // ---------------------------------------------------------------------
+    // `IN1b` §7 items 16-19, 22-24 and the three sinks: the migration's own
+    // tests. Each drives a representative site into `pending_observations`,
+    // ticks the real router, and asserts the code, subject, class and
+    // severity Appendix B declares for that row.
+    // ---------------------------------------------------------------------
+
+    /// The smallest real app one of these tests needs: the untagged fixture's
+    /// document on a real `Core`, with the fixture guard returned so the file
+    /// outlives the decoder (IN1 §3 rule 11).
+    ///
+    /// `pub(crate)` so a per-label test can live in the module whose arm it
+    /// drives: `recording.rs`'s two sites and `note_recording_failure` are
+    /// private to that module, and a test that reaches them has to be written
+    /// there (review-app-2 S3).
+    pub(crate) fn in1b_app() -> (GeneratedMedia, KinewrightApp) {
+        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let (fixture, document) = in1_untagged(&probe_engine);
+        let (app, _engine) = in1_harness(document);
+        (fixture, app)
+    }
+
+    /// This file's production half, for the source-shape assertions the
+    /// unreachable arms use (review-app-1 B1, review-app-2 S3).
+    fn in1b_app_source() -> &'static str {
+        in1b_production_half(include_str!("app.rs"))
+    }
+
+    /// One module's production half: everything before its first `#[cfg(test)]`.
+    ///
+    /// Four Appendix B arms cannot be executed from a test at all — two need a
+    /// live MCP endpoint and a spawned harness, one sits inside an
+    /// `egui::Window`'s closure, and one needs a branch whose thumbnail
+    /// renderer fails. For those the **shape** of the arm is what is asserted,
+    /// in the idiom `au5_a_room_tone_refusal_is_not_filed_under_look` already
+    /// uses: the code it queues and the fact that no bare string survives
+    /// beside it (`IN1b` §10's limit, review-app-2 S3).
+    fn in1b_production_half(source: &'static str) -> &'static str {
+        source
+            .split_once("\n#[cfg(test)]")
+            .map_or(source, |(before, _)| before)
+    }
+
+    /// [`in1b_route_one`] for a test that opened a second project, which the
+    /// router attributes to whichever session is focused.
+    fn in1b_route_focused_one(app: &mut KinewrightApp) -> Incident {
+        assert_eq!(app.pending_observations.len(), 1);
+        app.route_incidents();
+        let handle = Arc::clone(&app.projects[app.focused_project].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(log.len(), 1, "exactly one incident was opened");
+        log.all().next().expect("one incident").clone()
+    }
+
+    /// Tick the router and hand back the one incident it opened.
+    pub(crate) fn in1b_route_one(app: &mut KinewrightApp) -> Incident {
+        assert_eq!(
+            app.pending_observations.len(),
+            1,
+            "the site queued exactly one observation"
+        );
+        app.route_incidents();
+        let handle = Arc::clone(&app.projects[0].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(log.len(), 1, "exactly one incident was opened");
+        log.all().next().expect("one incident").clone()
+    }
+
+    /// Assert one incident's declared four: code, subject, class, severity.
+    pub(crate) fn in1b_declares(
+        incident: &Incident,
+        code: &str,
+        subject: IncidentSubject,
+        severity: kinewright_core::IncidentSeverity,
+    ) {
+        assert_eq!(incident.code.code(), code, "code");
+        assert_eq!(incident.subject, subject, "subject");
+        assert_eq!(incident.class, PolicyClass::Explain, "class");
+        assert_eq!(incident.severity, severity, "severity");
+        assert_eq!(incident.field, incident.code.field(), "field");
+        assert_eq!(incident.state, IncidentState::Open);
+    }
+
+    /// `IN1b` §7 item 16, label 1 of 17. Appendix B row 120's site: deleting
+    /// with nothing selected.
+    #[test]
+    fn in1b_operations_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        app.focused_mut().selected_clip = None;
+        app.focused_mut().selected_marker = None;
+        app.delete_selected();
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "operations_unclassified",
+            IncidentSubject::Project,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// Label 2 of 17. Appendix B row 94's site: a look import with no LUT
+    /// store, which is every unsaved project.
+    #[test]
+    fn in1b_look_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        assert!(
+            app.focused().lut_store.is_none(),
+            "an unsaved project has no store root"
+        );
+        app.start_lut_import(
+            PathBuf::from("look.cube"),
+            crate::media_workflow::LutImportIntent::Apply {
+                clip: None,
+                stage: kinewright_core::ColorStage::Look,
+            },
+        );
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "look_unclassified",
+            IncidentSubject::Project,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        in1_shutdown(&mut app);
+
+        // Appendix B row 96 on its own app, for the **eighth** subject shape
+        // (stage A addendum 2, which withdraws erratum `IN1b`-C-R42): one look
+        // that keeps refusing is one problem, on its own axis, and the id in
+        // scope is a `LutAssetId` rather than an `AssetId`.
+        let (_second_fixture, mut second) = in1b_app();
+        let missing = kinewright_core::LutAssetId(404);
+        assert!(second.focused().document.lut_asset(missing).is_none());
+        second.choose_lut_restore(missing);
+        let incident = in1b_route_one(&mut second);
+        in1b_declares(
+            &incident,
+            "look_unclassified",
+            IncidentSubject::LutAsset(missing),
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        assert_eq!(incident.subject.label(), "Look 404");
+        in1_shutdown(&mut second);
+    }
+
+    /// Label 3 of 17. Appendix B row 58's site: an export with no output
+    /// path. The subject is the unit `ExportJob`, which carries no id because
+    /// eleven of the thirteen `Export` rows fire before a job exists.
+    #[test]
+    fn in1b_export_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        app.export_dialog.output = String::new();
+        app.start_export();
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "export_unclassified",
+            IncidentSubject::ExportJob,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        assert!(
+            app.export_job.is_none(),
+            "the refusal is before the job exists, which is why the subject has no id"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// Label 4 of 17. Appendix B row 80's site: a media refresh that cancels
+    /// a Source edit waiting on verification.
+    #[test]
+    fn in1b_source_monitor_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        let asset = app.focused().document.media_pool[0].clone();
+        app.pending_source_edit = Some(crate::media_workflow::PendingSourceEdit {
+            session_id: app.focused().id,
+            request_id: 1,
+            asset_id: asset.id,
+            path: asset.path.clone(),
+            fingerprint: asset.source_fingerprint.clone(),
+            expected_revision: app.focused().revision,
+            selected_asset: Some(asset.id),
+            source_position: TimeCode::ZERO,
+            timeline_in: TimeCode::ZERO,
+            source_in: TimeCode::ZERO,
+            source_out: TimeCode(1),
+            video_target: None,
+            audio_target: None,
+            mode: kinewright_core::ThreePointMode::Overwrite,
+        });
+        app.refresh_media_statuses_for_focused_project();
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "source_monitor_unclassified",
+            IncidentSubject::Asset(asset.id),
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// Label 5 of 17. Appendix B row 92's site, whose own arm is behind a
+    /// modal: the observation the site builds is queued through the same
+    /// `note_label` shorthand the arm uses, with the arm's own arguments.
+    #[test]
+    fn in1b_relink_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        let asset = app.focused().document.media_pool[0].id;
+        app.note_label(
+            kinewright_core::LabelIncident::Relink,
+            IncidentSubject::Asset(asset),
+            "The selected asset no longer exists",
+        );
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "relink_unclassified",
+            IncidentSubject::Asset(asset),
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        in1_shutdown(&mut app);
+
+        // The arm itself sits inside `show_legacy_relink_confirmation`'s
+        // `egui::Window` closure and cannot be executed without a window, so
+        // its shape is asserted instead.
+        let workflow = in1b_production_half(include_str!("media_workflow.rs"));
+        assert!(
+            workflow.contains(
+                "self.note_label(\n                        LabelIncident::Relink,\n                        IncidentSubject::Asset(pending.asset_id),\n                        \"The selected asset no longer exists\","
+            ),
+            "Appendix B row 92 queues `relink_unclassified` against the asset it \
+             refused to replace, and queues nothing else"
+        );
+    }
+
+    /// Label 6 of 17. Appendix B row 48's site, which needs a live harness;
+    /// the arm's own arguments go through the same shorthand.
+    #[test]
+    fn in1b_agent_branch_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        app.note_label(
+            kinewright_core::LabelIncident::AgentBranch,
+            IncidentSubject::Agent,
+            "Could not create an isolated agent branch",
+        );
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "agent_branch_unclassified",
+            IncidentSubject::Agent,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        in1_shutdown(&mut app);
+
+        // The arm needs a spawned harness and a live MCP endpoint, so its
+        // shape is asserted instead.
+        let chat = in1b_production_half(include_str!("chat_ui.rs"));
+        assert!(
+            chat.contains(
+                "self.note_label(\n                LabelIncident::AgentBranch,\n                IncidentSubject::Agent,\n                \"Could not create an isolated agent branch\","
+            ),
+            "Appendix B row 48 queues `agent_branch_unclassified` against the chat panel"
+        );
+    }
+
+    /// Label 7 of 17. Appendix B rows 128-129's site: a filler-word removal
+    /// with no transcript behind it.
+    #[test]
+    fn in1b_transcript_edit_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        app.remove_filler_words();
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "transcript_edit_unclassified",
+            IncidentSubject::Project,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// Label 8 of 17, and erratum `IN1b`-A-R9's clause: Appendix B row 27's
+    /// merged `MediaEvent::Error` sink, whose code comes from
+    /// `MediaError::recovery_code()` at run time. The two **non-colour**
+    /// `Media` code groups carry subject `Project`, not `Asset`, because
+    /// neither `UnsupportedDecoderFormat` nor `Backend` holds an `AssetId`
+    /// to name (erratum `IN1b`-A-R2's added clause amends row 27).
+    #[test]
+    fn in1b_media_produces_its_declared_code_class_and_severity() {
+        // First, the arm itself, driven: a **real** typed decode refusal from
+        // the real engine, delivered on the app's own `media_events` channel,
+        // reaches `poll_background`'s `MediaEvent::Error` drain and becomes an
+        // incident with no `else` branch left to take (Appendix B row 27,
+        // merged by `IN1b` §5.1 rule 12). The channel is replaced so the
+        // delivery is deterministic; everything after it is production's.
+        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let (_driven_fixture, driven_document) = in1_untagged(&probe_engine);
+        let (mut driven, engine) = in1_harness(driven_document);
+        let document = driven.projects[0].document.as_ref().clone();
+        let real_error = in1_playback_error(&engine, &document);
+        let (media_tx, media_rx) = crossbeam_channel::unbounded();
+        driven.media_events = media_rx;
+        driven.playing = true;
+        media_tx
+            .send(MediaEvent::Error(real_error))
+            .expect("the app owns the receiving half");
+        let ctx = egui::Context::default();
+        driven.poll_background(&ctx);
+        assert!(!driven.playing, "the arm stops playback before it observes");
+        {
+            let handle = Arc::clone(&driven.projects[0].incidents);
+            let log = handle
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.len(), 1, "the merged arm opened exactly one incident");
+            let incident = log.all().next().expect("one incident");
+            assert!(
+                matches!(incident.code, kinewright_core::IncidentCode::SourceColor(_)),
+                "the fixture's refusal is a source-colour one: {}",
+                incident.code.code()
+            );
+            assert!(
+                matches!(incident.subject, IncidentSubject::Asset(_)),
+                "the one variant that knows its own subject overrides the fallback"
+            );
+        }
+        in1_shutdown(&mut driven);
+
+        // Then the two **non-colour** `Media` code groups, which no fixture in
+        // this repository produces: they are built through the same total
+        // constructor the arm calls, with the same fallback subject the arm
+        // passes.
+        let (_fixture, mut app) = in1b_app();
+        let revision = app.focused().revision;
+        app.note_observation(IncidentObservation::from_media_error(
+            &MediaError::Backend("the engine refused".to_owned()),
+            IncidentSubject::Project,
+            revision,
+        ));
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "media_backend_unclassified",
+            IncidentSubject::Project,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+
+        // The other non-colour group, on its own app so the log stays at one.
+        let (_second_fixture, mut second) = in1b_app();
+        let revision = second.focused().revision;
+        second.note_observation(IncidentObservation::from_media_error(
+            &MediaError::UnsupportedDecoderFormat {
+                path: PathBuf::from("clip.mov"),
+                format: "yuv444p12le".to_owned(),
+                declared_bit_depth: Some(12),
+                decoder_bit_depth: None,
+                reason: "not a supported integer source surface".to_owned(),
+            },
+            IncidentSubject::Project,
+            revision,
+        ));
+        let second_incident = in1b_route_one(&mut second);
+        in1b_declares(
+            &second_incident,
+            "unsupported_decoder_format",
+            IncidentSubject::Project,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        in1_shutdown(&mut app);
+        in1_shutdown(&mut second);
+    }
+
+    /// Label 9 of 17. Appendix B row 34's site, whose arm needs a live MCP
+    /// endpoint; the arm's own arguments go through the same shorthand.
+    #[test]
+    fn in1b_agent_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        app.note_label(
+            kinewright_core::LabelIncident::Agent,
+            IncidentSubject::Agent,
+            "The Kinewright agent server is unavailable",
+        );
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "agent_unclassified",
+            IncidentSubject::Agent,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        in1_shutdown(&mut app);
+
+        // The arm needs a live MCP endpoint, so its shape is asserted instead.
+        // All five `Agent` rows take the same code and the same subject.
+        let chat = in1b_production_half(include_str!("chat_ui.rs"));
+        assert_eq!(
+            chat.matches("LabelIncident::Agent,").count(),
+            5,
+            "five `Agent` rows, every one against the chat panel"
+        );
+        assert!(
+            chat.contains(
+                "self.note_label(\n                LabelIncident::Agent,\n                IncidentSubject::Agent,\n                \"The Kinewright agent server is unavailable\","
+            ),
+            "Appendix B row 34 queues `agent_unclassified` against the chat panel"
+        );
+    }
+
+    // Label 10 of 17 — `Recording` — lives in `recording.rs`'s own test
+    // module as `in1b_recording_produces_its_declared_code_class_and_severity`,
+    // because `start_recording_from_dialog` and `note_recording_failure` are
+    // private to that module and a test that drives the real arm has to be
+    // written beside them (review-app-2 S3).
+
+    /// Label 11 of 17, and `IN1b` §5.7's **third** sink: Appendix B row 28,
+    /// the crash-recovery restore that used to reach the person as a bare
+    /// status string with no log write anywhere on the path.
+    #[test]
+    fn in1b_project_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        let status = crate::recovery::restore_status(Err("the journal is truncated".to_owned()));
+        let observation = status.expect_err("a failed restore returns an observation");
+        app.note_observation(*observation);
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "project_unclassified",
+            IncidentSubject::Project,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        assert!(
+            incident.observed.contains("Could not restore unsaved work"),
+            "the sentence the status bar used to carry alone survives in `observed`"
+        );
+        assert_eq!(
+            crate::recovery::restore_status(Ok(())),
+            Ok("Recovered unsaved work".to_owned()),
+            "the success arm still returns its string as it always did"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// Label 12 of 17. Appendix B row 29's site: a noise learn with no
+    /// silence on the chain. The subject is `Chain`, not `Track`: all three
+    /// Mixer sites are `AudioChain`-scoped and no `TrackId` is in scope at
+    /// any of them (N2.5/B3).
+    #[test]
+    fn in1b_mixer_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        app.request_noise_profile(AudioChain::Master, EffectId(1));
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "mixer_unclassified",
+            IncidentSubject::Chain(AudioChain::Master),
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        assert_eq!(incident.subject.label(), "Master");
+        in1_shutdown(&mut app);
+    }
+
+    /// Label 13 of 17. Appendix B row 32's site: captions asked for before a
+    /// transcript exists.
+    #[test]
+    fn in1b_captions_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        app.add_captions();
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "captions_unclassified",
+            IncidentSubject::Project,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// Label 14 of 17. Appendix B row 46: the branch preview's own typed
+    /// `MediaError`, whose subject is the chat panel rather than an asset.
+    #[test]
+    fn in1b_branch_preview_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        let revision = app.focused().revision;
+        app.note_observation(IncidentObservation::from_media_error(
+            &MediaError::Backend("no frame at that position".to_owned()),
+            IncidentSubject::Agent,
+            revision,
+        ));
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "media_backend_unclassified",
+            IncidentSubject::Agent,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        in1_shutdown(&mut app);
+
+        // The arm needs a branch whose thumbnail renderer refuses, so its
+        // shape is asserted instead: the code is resolved at run time from
+        // `MediaError::recovery_code()` and the subject is the chat panel.
+        let chat = in1b_production_half(include_str!("chat_ui.rs"));
+        assert!(
+            chat.contains(
+                "IncidentObservation::from_media_error(\n                    &error,\n                    IncidentSubject::Agent,"
+            ),
+            "Appendix B row 46 resolves its code from the typed media failure"
+        );
+    }
+
+    /// Label 15 of 17. Appendix B row 88's site, **driven**: a refused cache
+    /// clear arriving on the worker's own channel. The cache is the project's,
+    /// not an asset's.
+    #[test]
+    fn in1b_media_cache_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        app.cache_clear_tx
+            .send((
+                kinewright_core::MediaCacheFamily::VisualAssets,
+                Err(MediaError::Backend("permission denied".to_owned())),
+            ))
+            .expect("the app owns the receiving half");
+        let ctx = egui::Context::default();
+        app.poll_media_workflow(&ctx);
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "media_cache_unclassified",
+            IncidentSubject::Project,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        assert!(
+            incident.observed.contains("VisualAssets"),
+            "the family the person asked to clear is named"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// Label 16 of 17 — the `"Incident"` source itself. Appendix B row 13 is
+    /// not migrated: it **becomes** the single `note_incident` call site, and
+    /// the audit line keeps the fixed source `"Incident"` (`IN1b` §5.3
+    /// rule 18). The label's test is therefore that the audit view still
+    /// records one line per opened incident, under that source, whatever the
+    /// incident's own code says.
+    #[test]
+    fn in1b_incident_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        app.note_label(
+            kinewright_core::LabelIncident::Captions,
+            IncidentSubject::Project,
+            "a caption sidecar could not be written",
+        );
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "captions_unclassified",
+            IncidentSubject::Project,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        assert_eq!(
+            app.error_log.count_with_source("Incident"),
+            1,
+            "one audit line per opened incident, under the fixed source"
+        );
+        assert_eq!(
+            app.status,
+            crate::incident_ui::incident_headline(incident.code, incident.class),
+            "and the status bar carries the headline, not a label"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// Label 17 of 17 — `"Timeline"`, which appears at no literal call site of
+    /// the old sink at all and is reachable only through
+    /// `InspectorEdits::incident_code()` (`IN1b` §2.1 rule 3, §5.4 rule 27).
+    /// A per-label census of the sink would have been short by exactly this
+    /// one.
+    #[test]
+    fn in1b_timeline_produces_its_declared_code_class_and_severity() {
+        let (_fixture, mut app) = in1b_app();
+        let clip = app.focused().document.tracks[0].clips[0].id;
+        app.focused_mut().selected_clip = Some(clip);
+        let mut edits = crate::inspector_ui::InspectorEdits::default();
+        edits.set_incident_code(crate::timeline_ui::ROOM_TONE_INCIDENT_CODE);
+        edits.push_error("That track has no gap to fill");
+        app.submit_inspector_edits(edits);
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "timeline_unclassified",
+            IncidentSubject::Clip(clip),
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// `IN1b` §5.4 rule 27's live bug, fixed in kind: the inspector's loop
+    /// used to write *n* unrelated log lines for *n* messages under one
+    /// category. Typed at the producer, the incident key
+    /// `(code, subject, observed)` collapses the repeats and keeps the
+    /// distinct ones.
+    #[test]
+    fn in1b_repeated_inspector_messages_collapse_to_one_incident_each() {
+        let (_fixture, mut app) = in1b_app();
+        let clip = app.focused().document.tracks[0].clips[0].id;
+        app.focused_mut().selected_clip = Some(clip);
+        let mut edits = crate::inspector_ui::InspectorEdits::default();
+        edits.push_error("the same refusal");
+        edits.push_error("the same refusal");
+        edits.push_error("a different refusal");
+        app.submit_inspector_edits(edits);
+        assert_eq!(app.pending_observations.len(), 3);
+        app.route_incidents();
+        let handle = Arc::clone(&app.projects[0].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            log.len(),
+            2,
+            "three messages, two distinct problems: the dedup key collapses the repeat"
+        );
+        assert_eq!(log.open_count(), 2);
+        drop(log);
+        assert_eq!(
+            app.error_log.count_with_source("Incident"),
+            2,
+            "and only the newly opened incidents write audit lines"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// `IN1b` §7 item 18 and §9 clause 6's second half: the two behaviours
+    /// deleting `record_error` would otherwise have dropped in silence. No
+    /// test in this crate read `app.status` at `d4ed8eb` — 34 assertions
+    /// mention `status` and none reads the field — so without this both
+    /// regressions would ship under a green gate (N1/B5).
+    #[test]
+    fn in1b_note_incident_writes_the_status_and_opens_the_window() {
+        let (_fixture, mut app) = in1b_app();
+        app.error_log_open = false;
+        "Ready".clone_into(&mut app.status);
+        app.note_label(
+            kinewright_core::LabelIncident::Mixer,
+            IncidentSubject::Chain(AudioChain::Bus(kinewright_core::AudioBusId(3))),
+            "no silence on this bus",
+        );
+        let incident = in1b_route_one(&mut app);
+        assert_eq!(
+            app.status,
+            crate::incident_ui::incident_headline(incident.code, incident.class),
+            "the status bar carries the incident's headline"
+        );
+        assert_ne!(app.status, "Ready");
+        assert!(app.error_log_open, "and the window pops open");
+        assert_eq!(app.error_log.count_with_source("Incident"), 1);
+        assert_eq!(incident.subject.label(), "Bus 3");
+        in1_shutdown(&mut app);
+    }
+
+    /// `IN1b` §7 item 22 and §9 clause 11's first half, **driven through the
+    /// real site**: `open_project` on a project whose media has moved opens
+    /// **one** incident, whose `observed` is the joined list, because one open
+    /// with *n* missing files is one problem (`IN1b` §5.1 rule 14).
+    ///
+    /// Hand-feeding the joined string would prove `note_label`, not the site:
+    /// a site that pushed *n* separate observations would pass it unchanged
+    /// (review-app-1 B1). This writes a real project file whose three assets
+    /// are all elsewhere and opens it, so the aggregation decision under test
+    /// is `app.rs:898`'s and nothing else's.
+    #[test]
+    fn in1b_one_open_with_n_missing_files_opens_one_incident() {
+        let (_fixture, mut app) = in1b_app();
+        let temporary = TempDirectory::new("in1b-missing-media");
+        let mut document = app.projects[0].document.as_ref().clone();
+        let missing_names: Vec<String> = document
+            .media_pool
+            .iter_mut()
+            .enumerate()
+            .map(|(index, asset)| {
+                asset.path = temporary.path(&format!("gone-{index}.mov"));
+                format!("{} ({})", asset.name, asset.path.display())
+            })
+            .collect();
+        assert!(
+            !missing_names.is_empty(),
+            "the fixture document carries at least one asset"
+        );
+        assert!(
+            document
+                .media_pool
+                .iter()
+                .all(|asset| !asset.path.is_file()),
+            "every asset's path is somewhere it is not"
+        );
+        let project_path = temporary.path("missing.kinewright");
+        std::fs::write(
+            &project_path,
+            serde_json::to_string(&document).expect("the fixture document serialises"),
+        )
+        .expect("the temporary project file is writable");
+
+        app.open_project(&project_path);
+        assert_eq!(app.projects.len(), 2, "the project opened");
+        assert_eq!(
+            app.pending_observations.len(),
+            1,
+            "one open with n missing files queues one observation, not n"
+        );
+        let incident = in1b_route_focused_one(&mut app);
+        in1b_declares(
+            &incident,
+            "media_incomplete",
+            IncidentSubject::Project,
+            kinewright_core::IncidentSeverity::Degrades,
+        );
+        for name in &missing_names {
+            assert!(
+                incident.observed.contains(name.as_str()),
+                "the joined list is the incident's `observed`, not n incidents: {name}"
+            );
+        }
+        // The visible behaviour change `IN1b` §5.1 rule 14 wants and names:
+        // at `d4ed8eb` this site pushed straight into a window it never
+        // opened, so the person saw only the status string.
+        assert!(app.error_log_open);
+        assert_eq!(
+            app.status,
+            crate::incident_ui::incident_headline(incident.code, incident.class)
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// `IN1b` §7 item 23 and §9 clause 11's second half, **driven through the
+    /// real site**: `poll_background`'s
+    /// `for (asset, error) in self.visual_cache.poll(ctx)` loop opens *n*
+    /// incidents for *n* visual-cache failures, because a per-asset failure is
+    /// per-asset by construction — and the same asset failing twice is still
+    /// one problem.
+    ///
+    /// The cache is rebuilt over a test channel so the failures are the ones
+    /// this test names; everything downstream of `VisualCache::poll` — the
+    /// loop, the subject, the code and the router — is production's.
+    #[test]
+    fn in1b_n_visual_cache_failures_open_n_asset_incidents() {
+        let (_fixture, mut app) = in1b_app();
+        let (results_tx, results_rx) = crossbeam_channel::unbounded();
+        app.visual_cache = crate::visual_cache::VisualCache::new(results_rx);
+        for (asset, name) in [
+            (kinewright_core::AssetId(1), "one.mov"),
+            (kinewright_core::AssetId(2), "two.mov"),
+            (kinewright_core::AssetId(3), "three.mov"),
+            (kinewright_core::AssetId(2), "two.mov"),
+        ] {
+            results_tx
+                .send(kinewright_core::VisualAssetResult::Failed {
+                    asset,
+                    request_generation: 0,
+                    path: PathBuf::from(name),
+                    request: kinewright_core::VisualRequestKind::Waveform,
+                    message: format!("no decoder for {name}"),
+                })
+                .expect("the test channel accepts the failure");
+        }
+        // `poll_background` drains the cache, queues the observations **and**
+        // ticks the router on its way out (`app.rs:1982`), so the log is the
+        // only place left to read: four failures over three assets become
+        // three incidents, which a single joined observation could not.
+        let ctx = egui::Context::default();
+        app.poll_background(&ctx);
+        assert!(
+            app.pending_observations.is_empty(),
+            "the tick at the end of the poll drained them"
+        );
+        let handle = Arc::clone(&app.projects[0].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(log.len(), 3, "three assets, three problems");
+        let mut subjects: Vec<IncidentSubject> =
+            log.all().map(|incident| incident.subject).collect();
+        subjects.sort_unstable();
+        assert_eq!(
+            subjects,
+            vec![
+                IncidentSubject::Asset(kinewright_core::AssetId(1)),
+                IncidentSubject::Asset(kinewright_core::AssetId(2)),
+                IncidentSubject::Asset(kinewright_core::AssetId(3)),
+            ]
+        );
+        for incident in log.all() {
+            assert_eq!(incident.code.code(), "media_incomplete");
+            assert_eq!(
+                incident.severity,
+                kinewright_core::IncidentSeverity::Degrades
+            );
+            assert!(
+                incident
+                    .observed
+                    .starts_with("Could not build timeline visuals")
+            );
+        }
+        let repeated = log
+            .all()
+            .find(|incident| {
+                incident.subject == IncidentSubject::Asset(kinewright_core::AssetId(2))
+            })
+            .expect("the repeated asset");
+        assert_eq!(repeated.count, 2, "the second observation deduped");
+        assert_eq!(log.open_count(), 3);
+        drop(log);
+        assert_eq!(
+            app.error_log.count_with_source("Incident"),
+            3,
+            "one audit line per opened incident, not per failure"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// The third aggregate of `IN1b` §5.1 rule 14, which shares item 22's
+    /// clause: `open_project`'s unavailable-LUT list is **one** incident too,
+    /// and its `observed` is the joined list of titles.
+    ///
+    /// The site is `app.rs:880`, the `lut_titles` bypass. It is asserted over
+    /// the source rather than driven, because reaching it needs a saved
+    /// project whose LUT store root exists and whose document names assets the
+    /// store cannot produce — a fixture no test in this crate builds. The
+    /// shape is what rule 14 fixes, so the shape is what is asserted, in the
+    /// idiom `in1b_a_branch_conflict_opens_an_edit_revision_conflict_incident`
+    /// uses for the same reason.
+    #[test]
+    fn in1b_the_unavailable_look_list_is_one_incident_with_a_joined_observed() {
+        let source = in1b_app_source();
+        let (_, after) = source
+            .split_once("if !lut_titles.is_empty() {")
+            .expect("the `lut_titles` aggregate is still at its site");
+        // The block ends at the first close-brace at two levels of
+        // indentation, which is where `open_project`'s own body puts it. It
+        // `.expect()`s, so a site that moved fails this loudly rather than
+        // passing silently (review-final nit 5).
+        let body = after
+            .split_once("\n        }\n")
+            .expect("the aggregate's block ends")
+            .0;
+        assert_eq!(
+            body.matches("note_label(").count(),
+            1,
+            "one open with n unavailable looks queues one observation"
+        );
+        assert!(
+            body.contains("LabelIncident::LookIncomplete"),
+            "the project opened, so the severity is a degraded result"
+        );
+        assert!(
+            body.contains("lut_titles.join(\", \")"),
+            "and the joined list is the incident's `observed`"
+        );
+        assert!(
+            !source.contains(concat!("self.error_log.push", "(")),
+            "no bypass survives anywhere in the file"
+        );
+    }
+
+    /// `IN1b` §7 item 24 and §9 clause 12's first half: **both**
+    /// `BranchApplyOutcome::Conflict` arms — the merge and the cherry-pick —
+    /// open an `edit_revision_conflict` incident against the chat panel.
+    /// Neither wrote to `ErrorLog` at `d4ed8eb`; the merge arm wrote the
+    /// transcript and `self.status`, and the cherry-pick arm wrote
+    /// `self.status` and nothing else at all (`IN1b` §5.7).
+    #[test]
+    fn in1b_a_branch_conflict_opens_an_edit_revision_conflict_incident() {
+        let (_fixture, mut app) = in1b_app();
+        let expected = TimelineRevision(4);
+        let actual = TimelineRevision(7);
+        app.note_observation(IncidentObservation::revision_conflict(
+            IncidentSubject::Agent,
+            expected,
+            actual,
+        ));
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "edit_revision_conflict",
+            IncidentSubject::Agent,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        assert_eq!(
+            incident.observed, "7",
+            "the revision the document is on now"
+        );
+        assert_eq!(incident.allowed.as_deref(), Some("4"));
+        assert_eq!(incident.revision, actual);
+        assert_eq!(
+            incident.evidence,
+            kinewright_core::IncidentEvidence::Revision { expected, actual }
+        );
+        // The second arm is the same observation on the same subject, so the
+        // dedup key collapses it: one chat panel losing two races to the same
+        // pair of revisions is one problem.
+        app.note_observation(IncidentObservation::revision_conflict(
+            IncidentSubject::Agent,
+            expected,
+            actual,
+        ));
+        app.route_incidents();
+        let handle = Arc::clone(&app.projects[0].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.all().next().expect("one").count, 2);
+        drop(log);
+
+        // Both arms reach that observation, and neither still writes a bare
+        // sentence. Asserted over the source because a `BranchApplyOutcome`
+        // conflict needs a live agent harness and an isolated branch to
+        // provoke, which `IN1b` §9's terms exclude; this is the same shape
+        // `au5_a_room_tone_refusal_is_not_filed_under_look` uses for the same
+        // reason.
+        let chat = include_str!("chat_ui.rs")
+            .split_once("\n#[cfg(test)]")
+            .map_or(include_str!("chat_ui.rs"), |(before, _)| before);
+        assert_eq!(
+            chat.matches("BranchApplyOutcome::Conflict { expected, actual }")
+                .count(),
+            2,
+            "the branch merge and the cherry-pick"
+        );
+        assert_eq!(
+            chat.matches("IncidentObservation::revision_conflict")
+                .count(),
+            2,
+            "and both of them open the incident rather than writing a string"
+        );
+        assert!(
+            !chat.contains("Cherry-pick stopped: expected live revision"),
+            "the cherry-pick arm's bare status sentence is gone entirely"
+        );
+        assert!(
+            chat.contains("Branch merge stopped: it was based on live revision"),
+            "the merge arm keeps its transcript entry: the chat is the thread's own record"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// `IN1b` §5.5 rule 31: the Incidents panel's pure view. Placement is not
+    /// tested by contract (`IN1b` §10 limit 1); what is tested is that the
+    /// panel lists **every** open incident whatever its subject, which is the
+    /// property the Media panel's deliberate asset-only filter does not have.
+    #[test]
+    fn in1b_the_incidents_panel_lists_every_open_subject() {
+        let (_fixture, mut app) = in1b_app();
+        let asset = app.focused().document.media_pool[0].id;
+        app.note_label(
+            kinewright_core::LabelIncident::Relink,
+            IncidentSubject::Asset(asset),
+            "no verified fingerprint",
+        );
+        app.note_label(
+            kinewright_core::LabelIncident::Mixer,
+            IncidentSubject::Chain(AudioChain::Master),
+            "no silence",
+        );
+        app.note_label(
+            kinewright_core::LabelIncident::Project,
+            IncidentSubject::Project,
+            "could not be read",
+        );
+        app.note_label(
+            kinewright_core::LabelIncident::Agent,
+            IncidentSubject::Agent,
+            "harness missing",
+        );
+        // The eighth subject shape (stage A addendum 2): a look that keeps
+        // refusing is one problem, on its own axis.
+        app.note_label(
+            kinewright_core::LabelIncident::Look,
+            IncidentSubject::LutAsset(kinewright_core::LutAssetId(7)),
+            "the stored bytes do not match the recorded hash",
+        );
+        app.route_incidents();
+        let handle = Arc::clone(&app.projects[0].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rows = crate::incident_ui::incident_panel_rows(log.all());
+        assert_eq!(rows.len(), 5, "every open incident, not only the asset one");
+        let labels: Vec<&str> = rows
+            .iter()
+            .map(|row| row.view.subject_label.as_str())
+            .collect();
+        assert!(labels.contains(&"Master"));
+        assert!(labels.contains(&"Project"));
+        assert!(labels.contains(&"Agent"));
+        assert!(labels.contains(&"Look 7"));
+        assert!(labels.iter().any(|label| label.starts_with("Asset ")));
+        for row in &rows {
+            assert_eq!(row.view.state_label, "Open");
+            assert_eq!(
+                row.view.actions.len(),
+                1,
+                "one explanation, nothing to press"
+            );
+            assert!(!row.view.actions[0].enabled);
+        }
+        assert_eq!(
+            app.open_incident_count(),
+            5,
+            "the badge counts what the panel lists"
+        );
+        drop(log);
+        in1_shutdown(&mut app);
+    }
+
+    /// `IN1b` §5.2 rule 16 and IN1 §5.2b rule 20: a tick with nothing queued
+    /// changes nothing, and a second tick over the same log changes nothing
+    /// either.
+    #[test]
+    fn in1b_a_second_tick_over_the_same_observations_changes_nothing() {
+        let (_fixture, mut app) = in1b_app();
+        app.note_label(
+            kinewright_core::LabelIncident::Export,
+            IncidentSubject::ExportJob,
+            "Choose an export output path",
+        );
+        app.route_incidents();
+        let before = (
+            app.open_incident_count(),
+            app.error_log.count_with_source("Incident"),
+            app.status.clone(),
+        );
+        app.route_incidents();
+        app.route_incidents();
+        assert_eq!(
+            (
+                app.open_incident_count(),
+                app.error_log.count_with_source("Incident"),
+                app.status.clone(),
+            ),
+            before,
+            "a quiet tick writes nothing"
+        );
+        assert!(app.pending_observations.is_empty());
+        assert!(app.pending_router_applies.is_empty());
+        in1_shutdown(&mut app);
     }
 
     /// IN1 §9 clause 3, app half, through a real decode: the untagged
@@ -4564,6 +6032,35 @@ mod in1_tests {
             1,
             "the router still sends once against the stale revision"
         );
+
+        // Erratum `IN1b`-C-R50's window: one ordinary tick between the send
+        // and the actor's reply. The person already wrote the recovery's bytes
+        // by hand, so `router_apply_accepted` reads `true` here — and the send
+        // must still be outstanding, because the actor has not answered it and
+        // is about to refuse it. Before C-R50 this tick recorded the incident
+        // `Resolved(Applied)` off the person's edit, and the conflict that
+        // arrived afterwards matched nothing and could not correct it.
+        assert!(
+            router_apply_accepted(
+                &app.projects[0].document,
+                &in1_incident(&app, app.pending_router_applies[0].incident),
+                IncidentOutcome::Applied,
+            ),
+            "the person's hand edit makes the document read say `landed`"
+        );
+        assert!(app.pending_router_landings.is_empty());
+        app.route_incidents();
+        assert_eq!(
+            app.pending_router_applies.len(),
+            1,
+            "a tick with no landing for this token resolves nothing"
+        );
+        assert_eq!(
+            in1_incident(&app, app.pending_router_applies[0].incident).state,
+            IncidentState::Open,
+            "and the incident is not recorded as applied off someone else's edit"
+        );
+
         in1_drain_until_conflict(&mut app, 0);
         assert!(
             !app.pending_router_conflicts.is_empty(),
@@ -4616,18 +6113,22 @@ mod in1_tests {
         in1_shutdown(&mut app);
     }
 
-    /// IN1 §5.2 rule 10 when **two** auto-applies go out at the same expected
-    /// revision in one project: the conflict core reports belongs to the send
-    /// it refused, never to the send that landed.
+    /// `IN1b` §4 rules 6-8 when **two** auto-applies go out at the same
+    /// expected revision in one project: the conflict core reports is matched
+    /// to the send it refused **by token identity**, never to the send that
+    /// landed.
     ///
     /// Two incidents opened in the same frame carry the same
     /// `observation.revision`, so both `RouterApply`s carry the same
     /// `expected` and `(project, expected)` does not identify a send. The
     /// actor is serial: the first command lands and moves the revision, the
-    /// second is refused against it. Matching on `(project, expected)` alone
-    /// would consume the landed send — never resolving it, and refreshing the
-    /// wrong incident's `revision` — so the match also requires that the live
-    /// document does not already show the send as landed.
+    /// second is refused against it, and the `Event::RevisionConflict` echoes
+    /// the refused command's own token (`IN1b` §4 rule 5).
+    ///
+    /// This test does **not** discriminate against Part A's two-tier
+    /// `(project, expected)` heuristic and `IN1b` §4 rule 8 says so: the
+    /// heuristic's first tier already handled this case. The discriminating
+    /// test is `in1b_a_foreign_conflict_leaves_every_router_send_outstanding`.
     ///
     /// The second asset is a second pool entry over the same untagged fixture
     /// (same probed description, its own `AssetId`, no clip of its own), and
@@ -4635,7 +6136,7 @@ mod in1_tests {
     /// engine emits one refusal per played clip, and what this test needs is
     /// two `AutoApply` incidents at one revision, not two decodes.
     #[test]
-    fn in1_a_conflict_is_matched_to_the_refused_send_not_the_landed_one() {
+    fn in1b_a_conflict_is_matched_to_the_refused_send_by_token() {
         let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
         let (_fixture, mut document) = in1_untagged(&probe_engine);
         let first_asset = document.media_pool.first().expect("one asset").clone();
@@ -4666,23 +6167,57 @@ mod in1_tests {
             "both incidents are AutoApply and both are sent"
         );
         assert!(
-            app.pending_router_applies
+            log_revisions(&app)
                 .iter()
-                .all(|apply| apply.expected == revision),
+                .all(|incident_revision| *incident_revision == revision),
             "both sends are gated on the one revision the observations carried"
         );
+        // The identity the match now uses: two distinct tokens over one
+        // `(project, expected)` pair (`IN1b` §4 rule 6).
+        let tokens: Vec<CommandToken> = app
+            .pending_router_applies
+            .iter()
+            .map(|apply| apply.token)
+            .collect();
+        assert_ne!(tokens[0], tokens[1], "each router send has its own token");
 
-        // The actor applies the first and refuses the second.
-        in1_drain_until_conflict(&mut app, 0);
+        // Erratum `IN1b`-C-R50's window again, on two sends: one ordinary tick
+        // before the actor's replies have been drained resolves neither, even
+        // though the first of them has in fact landed in the actor.
+        app.route_incidents();
+        assert_eq!(
+            app.pending_router_applies.len(),
+            2,
+            "no landing token has come back yet, so neither send is reconciled"
+        );
+
+        // The actor applies the first and refuses the second — drained and
+        // reconciled by **production**, `poll_background`, rather than by the
+        // test mirror (review-final B1). `poll_background` reconciles on its
+        // way out, so the settled condition is the effect: both sends gone.
+        in1_poll_production_until(&mut app, |app| app.pending_router_applies.is_empty());
         assert_ne!(
             app.projects[0].revision, revision,
             "the first send landed and moved the revision"
         );
-        let actual = app.pending_router_conflicts[0].actual;
+        let actual = app.projects[0].revision;
+        assert!(
+            app.pending_router_conflicts.is_empty(),
+            "the production tick reconciles the conflict it drained"
+        );
+        // Review-final B1's other half: the landing the production tick
+        // recorded is what let the landed send resolve at all. Deleting the
+        // push in `note_core_event_for_router` leaves this empty and every
+        // router auto-apply `Open` for the session.
+        assert_eq!(
+            app.pending_router_landings,
+            vec![tokens[0]],
+            "the production drain recorded the landed send's own token"
+        );
         app.route_incidents();
         assert!(
-            app.pending_router_applies.is_empty(),
-            "the refused send is dropped and the landed one is resolved"
+            app.pending_router_landings.is_empty(),
+            "and a quiet tick spends it, because nothing is outstanding"
         );
 
         let handle = Arc::clone(&app.projects[0].incidents);
@@ -4718,15 +6253,551 @@ mod in1_tests {
         in1_shutdown(&mut app);
     }
 
-    /// IN1 §5.2 rule 15 and §9 clause 12 through the real router: after the
-    /// auto-apply resolves, the open count is 0 and exactly one `ErrorLog`
-    /// line carries source `"Incident"` — different quantities, asserted as
-    /// a pair. The count is of `"Incident"`-source entries rather than
-    /// `len()`, because the log may also hold an environment-dependent
-    /// audio line. The tail discharges IN1 §8 rule 6: `resolved_after` is
-    /// set and every token field is honestly empty.
+    /// Erratum `IN1b`-C-R51: a router auto-apply that the actor refuses opens
+    /// **no second incident** about the router's own internal send.
+    ///
+    /// Appendix B row 26 raises `edit_revision_conflict` for a refused
+    /// revision gate, and before C-R51 it raised one for every conflict — the
+    /// router's own included. That left the person with two cards for one
+    /// problem: the colour incident they can act on, and a second one reading
+    /// *"the timeline moved between planning this edit and sending it … make
+    /// the edit again"* about an edit they never made. `Explain` never
+    /// resolves it, so `open_count()` never fell back to zero, which is the
+    /// exact case §5.4 rule 25's argument turns on.
+    ///
+    /// The scenario is clause 9's: a stale auto-apply the actor refuses. The
+    /// conflict still reaches `reconcile_router_sends` and still refreshes the
+    /// incident, so nothing else about rule 10 moves.
     #[test]
-    fn in1_the_open_count_and_the_audit_line_are_different_quantities() {
+    fn in1b_the_routers_own_refused_send_opens_no_second_incident() {
+        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let (_fixture, probed) = in1_untagged(&probe_engine);
+        let (mut app, engine) = in1_harness(probed);
+        let document = app.projects[0].document.as_ref().clone();
+        let error = in1_playback_error(&engine, &document);
+
+        // A person's hand edit lands first, so the router's send is stale.
+        let probe_asset = document.media_pool.first().expect("one asset").clone();
+        let advance = assume_rec709_operation(probe_asset.id, &probe_asset.color_description);
+        app.projects[0]
+            .core
+            .send(Command::Do(advance))
+            .expect("the actor takes commands");
+        in1_drain_until_revision(&mut app, 0, TimelineRevision::default());
+
+        let stale = TimelineRevision::default();
+        app.pending_observations
+            .push(IncidentObservation::from_media_error(
+                &error,
+                IncidentSubject::Project,
+                stale,
+            ));
+        app.route_incidents();
+        assert_eq!(app.pending_router_applies.len(), 1);
+        let token = app.pending_router_applies[0].token;
+
+        in1_drain_until_conflict(&mut app, 0);
+        assert_eq!(
+            app.pending_router_conflicts[0].token,
+            Some(token),
+            "the conflict carries the router's own token"
+        );
+        assert!(
+            app.pending_observations.is_empty(),
+            "and the drain raised no row-26 observation for it"
+        );
+        app.route_incidents();
+
+        let handle = Arc::clone(&app.projects[0].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            log.len(),
+            1,
+            "one problem, one card — not a second about the router's own send"
+        );
+        let codes: Vec<&str> = log.all().map(|incident| incident.code.code()).collect();
+        assert_eq!(codes, vec!["unknown_source_primaries"]);
+        assert!(
+            !codes.contains(&"edit_revision_conflict"),
+            "the person is never told to re-make an edit Kinewright made"
+        );
+        assert_eq!(log.open_count(), 1, "and the badge counts the one problem");
+        drop(log);
+
+        // Rule 10 is unmoved: the conflict still matched by token, still
+        // refreshed the incident, and still dropped the send.
+        assert!(app.pending_router_applies.is_empty());
+        let incident = in1_incident(&app, log_first_id(&app));
+        assert_eq!(incident.state, IncidentState::Open);
+        assert_ne!(incident.revision, stale);
+
+        // A **foreign** conflict at the same moment still gets its card, which
+        // is what keeps the skip a correlation rather than a silencing.
+        app.pending_router_conflicts.push(RouterConflict {
+            project_index: 0,
+            actual: TimelineRevision(99),
+            token: None,
+        });
+        app.pending_observations
+            .push(IncidentObservation::revision_conflict(
+                IncidentSubject::Project,
+                TimelineRevision(98),
+                TimelineRevision(99),
+            ));
+        app.route_incidents();
+        let handle = Arc::clone(&app.projects[0].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(log.len(), 2);
+        assert!(
+            log.all()
+                .any(|incident| incident.code.code() == "edit_revision_conflict"),
+            "a conflict the router did not cause is still the person's to see"
+        );
+        drop(log);
+        in1_shutdown(&mut app);
+    }
+
+    /// Every incident's revision in the focused project's log, in log order.
+    fn log_revisions(app: &KinewrightApp) -> Vec<TimelineRevision> {
+        let handle = Arc::clone(&app.projects[0].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        log.all().map(|incident| incident.revision).collect()
+    }
+
+    /// The id of the only incident in the focused project's log.
+    fn log_first_id(app: &KinewrightApp) -> IncidentId {
+        let handle = Arc::clone(&app.projects[0].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        log.all().next().expect("one incident").id
+    }
+
+    /// Erratum `IN1b`-C-R53: a router auto-apply the actor **rejects** is
+    /// dropped, not left outstanding for the session, and opens no second
+    /// incident about the router's own internal send.
+    ///
+    /// The third way a revision-gated send can end. The gate passes — the
+    /// revision has not moved — and `Document::apply` refuses the operation
+    /// anyway, so the actor answers `Event::OpRejected`. Before erratum
+    /// `IN1b`-A-R15 that event carried no token, so `reconcile_router_sends`
+    /// could never name the send and it waited for ever, costing one log read
+    /// and one document read per tick; and the drain raised Appendix B row
+    /// 24's card for it, telling the person to fix and re-make an edit
+    /// Kinewright had planned and sent.
+    ///
+    /// **The reachable construction**, stated because it is not the obvious
+    /// one: the incident is observed against an `AssetId` the media pool does
+    /// not hold. Everything else is the fixture's — the same probed
+    /// description, so the same `AutoApply` class and the same stored
+    /// `SetAssetColorDescription` recovery — but the asset it names is gone,
+    /// so `Document::apply` answers `MissingAsset`. Removing a real asset
+    /// instead would move the revision and produce a *conflict*, which is the
+    /// case `in1b_the_routers_own_refused_send_opens_no_second_incident`
+    /// already covers; this test needs the gate to **pass**.
+    #[test]
+    fn in1b_the_routers_own_rejected_send_is_dropped_not_left_outstanding() {
+        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let (_fixture, probed) = in1_untagged(&probe_engine);
+        let (mut app, engine) = in1_harness(probed);
+        let document = app.projects[0].document.as_ref().clone();
+        let error = in1_playback_error(&engine, &document);
+
+        let revision = app.projects[0].revision;
+        let absent = kinewright_core::AssetId(4_242);
+        assert!(
+            document.asset(absent).is_none(),
+            "the subject names an asset the pool does not hold"
+        );
+        let mut observation =
+            IncidentObservation::from_media_error(&error, IncidentSubject::Project, revision);
+        observation.subject = IncidentSubject::Asset(absent);
+        app.pending_observations.push(observation);
+        app.route_incidents();
+
+        assert_eq!(
+            app.pending_router_applies.len(),
+            1,
+            "the incident is AutoApply, so the router sends once"
+        );
+        let incident_id = app.pending_router_applies[0].incident;
+        assert_eq!(
+            in1_incident(&app, incident_id).class,
+            PolicyClass::AutoApply,
+            "the probed description is the fixture's, so the class is unchanged"
+        );
+
+        // Wait for the actor's answer through **production** — the real drain
+        // and the real router tick — rather than through the test mirror
+        // (review-final B1). The drop is the effect, so an empty queue is the
+        // condition, and the deadline is the hang detector.
+        in1_poll_production_until(&mut app, |app| app.pending_router_applies.is_empty());
+        assert!(
+            app.pending_observations.is_empty(),
+            "the rejection of the router's own send raises no card"
+        );
+
+        assert!(
+            app.pending_router_applies.is_empty(),
+            "the send is dropped, not left outstanding for the session"
+        );
+        let handle = Arc::clone(&app.projects[0].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            log.len(),
+            1,
+            "one problem, one card — not a second about the router's own send"
+        );
+        let incident = log.all().next().expect("one incident");
+        assert_eq!(
+            incident.state,
+            IncidentState::Open,
+            "the recovery did not land, so the incident stays open"
+        );
+        assert_eq!(
+            incident.revision, revision,
+            "no conflict occurred, so core reported no newer revision to refresh to"
+        );
+        assert_eq!(log.open_count(), 1);
+        drop(log);
+
+        // And nothing is re-sent (rule 10): a further tick is quiet.
+        let audit_lines = app.error_log.count_with_source("Incident");
+        app.route_incidents();
+        app.route_incidents();
+        assert!(app.pending_router_applies.is_empty());
+        assert!(app.pending_observations.is_empty());
+        assert_eq!(app.error_log.count_with_source("Incident"), audit_lines);
+        assert_eq!(app.open_incident_count(), 1);
+
+        in1_shutdown(&mut app);
+    }
+
+    /// Review-final S2: Appendix B row 104 and the `LutRestoreResponse`
+    /// field that serves it.
+    ///
+    /// Stage A addendum 2 gave looks their own dedup axis, and row 104 — a
+    /// refused `Locate file…` restore — is the one `Look` row whose id had to
+    /// be carried on the worker's response to reach the site at all
+    /// (`media_workflow.rs:1753`, set once at `:2125`). Nothing pinned it:
+    /// changing the subject back to `Project` left the whole suite green.
+    ///
+    /// The response is sent down the worker's own channel and the real
+    /// `poll_lut_workers` drain reads it, so everything from
+    /// `handle_lut_restore_response` onwards is production's.
+    #[test]
+    fn in1b_a_refused_look_restore_names_the_look_it_could_not_restore() {
+        let (_fixture, mut app) = in1b_app();
+        let lut_asset = kinewright_core::LutAssetId(7);
+        app.lut_worker_pending = 1;
+        app.lut_restore_tx
+            .send(crate::media_workflow::LutRestoreResponse {
+                session_id: app.projects[0].id,
+                lut_asset,
+                title: "Bleach Bypass".to_owned(),
+                candidate: PathBuf::from("bleach.cube"),
+                result: Err(MediaError::Backend(
+                    "lut_store_hash_mismatch: the bytes do not match the recorded hash".to_owned(),
+                )),
+            })
+            .expect("the app owns the receiving half");
+        assert!(app.poll_lut_workers(), "the drain consumed the response");
+
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "look_unclassified",
+            IncidentSubject::LutAsset(lut_asset),
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        assert_eq!(
+            incident.subject.label(),
+            "Look 7",
+            "one look that keeps refusing is one problem, on its own axis"
+        );
+        assert!(
+            incident.observed.contains("Bleach Bypass"),
+            "the title the person was locating survives in `observed`"
+        );
+        assert!(
+            matches!(
+                incident.evidence,
+                kinewright_core::IncidentEvidence::MediaError { .. }
+            ),
+            "the typed media failure is kept as evidence (erratum `IN1b`-C-R48)"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// Erratum `IN1b`-C-R54: a **card press** the actor refuses is reported;
+    /// an auto-apply's refusal is not.
+    ///
+    /// Both skips errata `IN1b`-C-R51 and `IN1b`-C-R53 introduce argue from
+    /// *"an edit Kinewright planned and sent"*, which is true of an auto-apply
+    /// and false of a button the person pressed. Before C-R54 the two sends
+    /// were indistinguishable — `send_incident_recovery` pushed the same
+    /// `RouterApply` shape as `audit_new_incident` and neither site set a
+    /// status — so a press that lost its race did **nothing at all**: no card,
+    /// no status line, no audit entry. At `b99c328` the person got a card.
+    ///
+    /// Both halves run on one app, over the same failure, so the contrast is
+    /// the test rather than an argument: the auto-apply's rejection is
+    /// silent, the press's is not. The press's card carries the **incident's
+    /// own subject**, not the project's — the person pressed a button on that
+    /// card, and that card is where the answer belongs.
+    #[test]
+    fn in1b_a_refused_card_press_is_reported_where_an_auto_apply_is_not() {
+        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let (_fixture, probed) = in1_untagged(&probe_engine);
+        let (mut app, engine) = in1_harness(probed);
+        let document = app.projects[0].document.as_ref().clone();
+        let error = in1_playback_error(&engine, &document);
+        let description = document
+            .media_pool
+            .first()
+            .expect("one asset")
+            .color_description
+            .clone();
+
+        // The same construction C-R53's test uses: the incident names an asset
+        // the pool does not hold, so the gate passes and `Document::apply`
+        // answers `MissingAsset`.
+        let absent = kinewright_core::AssetId(4_242);
+        let revision = app.projects[0].revision;
+        let mut observation =
+            IncidentObservation::from_media_error(&error, IncidentSubject::Project, revision);
+        observation.subject = IncidentSubject::Asset(absent);
+        app.pending_observations.push(observation);
+        app.route_incidents();
+        assert_eq!(app.pending_router_applies.len(), 1);
+        let incident_id = app.pending_router_applies[0].incident;
+
+        // Half one — the auto-apply. Silent, by C-R53.
+        in1_poll_production_until(&mut app, |app| app.pending_router_applies.is_empty());
+        let after_auto = {
+            let handle = Arc::clone(&app.projects[0].incidents);
+            let log = handle
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            log.len()
+        };
+        assert_eq!(after_auto, 1, "the router's own refusal opened no card");
+        let audit_after_auto = app.error_log.count_with_source("Incident");
+
+        // Half two — the person presses the card's control for the same
+        // recovery, which the actor refuses for the same reason.
+        app.send_incident_recovery(
+            0,
+            incident_id,
+            assume_rec709_operation(absent, &description),
+            IncidentOutcome::Applied,
+        );
+        assert_eq!(
+            app.pending_router_applies.len(),
+            1,
+            "the press sends once, through the same revision gate"
+        );
+        in1_poll_production_until(&mut app, |app| app.pending_router_applies.is_empty());
+        assert!(
+            app.pending_router_applies.is_empty(),
+            "the press's send is dropped too — it did not land"
+        );
+
+        let handle = Arc::clone(&app.projects[0].incidents);
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            log.len(),
+            2,
+            "the press that failed is reported, where the auto-apply's was not"
+        );
+        let reported = log
+            .all()
+            .find(|incident| incident.id != incident_id)
+            .expect("the card the press opened");
+        assert_eq!(reported.code.code(), "operation_missing");
+        assert_eq!(
+            reported.subject,
+            IncidentSubject::Asset(absent),
+            "the incident's own subject, not the project's: the person pressed a \
+             button on that card"
+        );
+        assert_eq!(reported.state, IncidentState::Open);
+        assert_eq!(
+            log.get(incident_id).expect("the first incident").state,
+            IncidentState::Open,
+            "and the incident the button sat on is still open, because the \
+             recovery still did not land"
+        );
+        drop(log);
+        assert_eq!(
+            app.error_log.count_with_source("Incident"),
+            audit_after_auto + 1,
+            "one audit line for the one card the press opened"
+        );
+        assert_ne!(
+            app.status, "Ready",
+            "and the status bar says something, where the press used to be silent"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// The other half of erratum `IN1b`-C-R53, split out because folding it in
+    /// pushed its sibling to 101 lines and the honest fix for a second
+    /// distinct case is a second test rather than another `#[allow]` — the
+    /// same call stage A made at `impl-core.md` §12.3.
+    ///
+    /// A **foreign** rejection — the person's own edit, carrying `token: None`
+    /// — still gets its Appendix B row 24 card, which is what keeps C-R53's
+    /// drop a correlation rather than a silencing.
+    #[test]
+    fn in1b_a_foreign_rejection_still_opens_its_card() {
+        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let (_fixture, probed) = in1_untagged(&probe_engine);
+        let (mut app, _engine) = in1_harness(probed);
+        app.projects[0]
+            .core
+            .send(Command::Do(Operation::RemoveMarker {
+                marker: kinewright_core::MarkerId(9_999),
+            }))
+            .expect("the actor takes commands");
+        let expiry = Instant::now() + IN1_APP_DEADLINE;
+        while app.pending_observations.is_empty() {
+            in1_drain_core(&mut app, 0);
+            assert!(
+                Instant::now() < expiry,
+                "no foreign rejection within {IN1_APP_DEADLINE:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            app.pending_router_applies.is_empty(),
+            "the router sent nothing, so there is no token for this to match"
+        );
+        let incident = in1b_route_one(&mut app);
+        in1b_declares(
+            &incident,
+            "operation_missing",
+            IncidentSubject::Project,
+            kinewright_core::IncidentSeverity::Blocks,
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// `IN1b` §4 rule 7 and §9 clause 10's discriminating half: a conflict
+    /// that belongs to no router send leaves **every** outstanding send in
+    /// place.
+    ///
+    /// This is the test that fails at `d4ed8eb`. Part A matched a conflict to
+    /// a send by `(project_index, expected)` with a first-candidate fallback,
+    /// so a foreign `Command::DoIfRevision` refused at the same expected
+    /// revision — the two `media_workflow.rs` senders, or the agent's own —
+    /// consumed a router send the conflict had nothing to do with: the
+    /// incident was refreshed to a revision that refused someone else's
+    /// command, and the send was dropped without ever being reconciled.
+    ///
+    /// The conflicts are injected rather than provoked, because the shape
+    /// under test is the matcher and not the actor: a real foreign send would
+    /// have to be refused in the same frame as a router send that has not yet
+    /// landed, which no test can schedule. Both halves are asserted — a
+    /// tokenless conflict and a conflict carrying a token no send holds change
+    /// nothing, and the send's **own** token still consumes it, so the test
+    /// cannot pass by doing nothing at all.
+    #[test]
+    fn in1b_a_foreign_conflict_leaves_every_router_send_outstanding() {
+        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let (_fixture, probed) = in1_untagged(&probe_engine);
+        let (mut app, engine) = in1_harness(probed);
+        let document = app.projects[0].document.as_ref().clone();
+        let error = in1_playback_error(&engine, &document);
+
+        let revision = app.projects[0].revision;
+        app.pending_observations
+            .push(IncidentObservation::from_media_error(
+                &error,
+                IncidentSubject::Project,
+                revision,
+            ));
+        app.route_incidents();
+        assert_eq!(app.pending_router_applies.len(), 1);
+        let token = app.pending_router_applies[0].token;
+        let incident_id = app.pending_router_applies[0].incident;
+        assert_eq!(
+            in1_incident(&app, app.pending_router_applies[0].incident).revision,
+            revision,
+            "the send is gated on the revision its incident was observed at"
+        );
+        let opened_at_revision = in1_incident(&app, incident_id).revision;
+
+        // A foreign send refused at the same expected revision: no token at
+        // all, which is what `media_workflow.rs`'s two senders pass.
+        let foreign = TimelineRevision(opened_at_revision.0 + 41);
+        app.pending_router_conflicts.push(RouterConflict {
+            project_index: 0,
+            actual: foreign,
+            token: None,
+        });
+        // And one carrying a token no outstanding send holds.
+        app.pending_router_conflicts.push(RouterConflict {
+            project_index: 0,
+            actual: foreign,
+            token: Some(CommandToken(u64::MAX)),
+        });
+        app.route_incidents();
+        assert_eq!(
+            app.pending_router_applies.len(),
+            1,
+            "a conflict the router did not cause consumes no send"
+        );
+        assert_eq!(app.pending_router_applies[0].token, token);
+        assert_eq!(
+            in1_incident(&app, incident_id).revision,
+            opened_at_revision,
+            "and refreshes no incident onto a revision that refused someone else"
+        );
+
+        // The positive control: the send's own token does consume it.
+        app.pending_router_conflicts.push(RouterConflict {
+            project_index: 0,
+            actual: foreign,
+            token: Some(token),
+        });
+        app.route_incidents();
+        assert!(
+            app.pending_router_applies.is_empty(),
+            "the send named by the conflict is the one that is dropped"
+        );
+        assert_eq!(in1_incident(&app, incident_id).revision, foreign);
+        in1_shutdown(&mut app);
+    }
+
+    /// IN1 §5.2 rule 15, §9 clause 12 and `IN1b` §5.4 rules 25-26 through the
+    /// real router: after the auto-apply resolves, the **badge's** number is 0
+    /// and exactly one `ErrorLog` line carries source `"Incident"` — different
+    /// quantities, asserted as a pair.
+    ///
+    /// `IN1b` moves this test onto the badge's own reader. At `d4ed8eb` the
+    /// badge rendered `self.error_log.len()`, so it would have read 1 here,
+    /// for an incident Kinewright had already fixed: exactly the double-count
+    /// IN1 exists to make invisible. `open_incident_count()` is what the
+    /// toolbar draws, so asserting it is what makes this test fail against a
+    /// badge that still counts lines.
+    ///
+    /// The log count is of `"Incident"`-source entries rather than `len()`,
+    /// because the log may also hold an environment-dependent audio line. The
+    /// tail discharges IN1 §8 rule 6: `resolved_after` is set and every token
+    /// field is honestly empty.
+    #[test]
+    fn in1b_the_badge_counts_open_incidents_not_log_lines() {
         let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
         let (_fixture, probed) = in1_untagged(&probe_engine);
         let (mut app, engine) = in1_harness(probed);
@@ -4734,6 +6805,16 @@ mod in1_tests {
         let error = in1_playback_error(&engine, &document);
         let id = in1_auto_apply(&mut app, &error);
         assert_eq!(app.error_log.count_with_source("Incident"), 1);
+        assert_eq!(
+            app.open_incident_count(),
+            0,
+            "the badge counts problems currently unresolved, and this one is fixed"
+        );
+        assert_ne!(
+            app.open_incident_count(),
+            app.error_log.len(),
+            "the badge's number and the audit view's are different quantities"
+        );
         let incident = in1_incident(&app, id);
         let telemetry = incident.telemetry;
         assert!(
@@ -4749,6 +6830,17 @@ mod in1_tests {
         // A further quiet tick moves neither quantity (rule 20).
         app.route_incidents();
         assert_eq!(app.error_log.count_with_source("Incident"), 1);
+        assert_eq!(app.open_incident_count(), 0);
+        // And one unresolved problem does move the badge, so the zero above is
+        // a measurement rather than a badge that is always zero.
+        app.note_label(
+            kinewright_core::LabelIncident::Export,
+            IncidentSubject::ExportJob,
+            "Choose an export output path",
+        );
+        app.route_incidents();
+        assert_eq!(app.open_incident_count(), 1);
+        assert_eq!(app.error_log.count_with_source("Incident"), 2);
         in1_shutdown(&mut app);
     }
 

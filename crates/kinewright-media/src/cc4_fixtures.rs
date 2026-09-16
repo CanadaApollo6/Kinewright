@@ -3441,6 +3441,10 @@ fn cc4_relocating_the_store_reproduces_the_render_bit_identically() {
     assert!(bare_library.get(LutAssetId(1)).is_none());
     let error = published_render_hash(&context, &document, bare_library)
         .expect_err("a missing asset must block the render, never drop the node");
+    // A *render* refusal, not a store one: this `missing_lut_asset` is
+    // `ColorPipelineError::MissingLutAsset` (`color_pipeline.rs:130`), which
+    // keeps its own `From` impl and still crosses as `MediaError::Backend`.
+    // The two enums share the code string and nothing else.
     let kinewright_core::MediaError::Backend(message) = &error else {
         panic!("expected a typed backend failure, got {error:?}");
     };
@@ -3562,8 +3566,10 @@ fn cc4_recovery_rejections_are_typed_and_leave_the_store_untouched() {
     let error = store
         .restore(&asset, &other)
         .expect_err("a different file must be refused");
-    let kinewright_core::MediaError::Backend(message) = &error else {
-        panic!("expected a typed backend failure, got {error:?}");
+    // `IN1b` N4/CR-D1: a LUT-store refusal crosses as `MediaError::Store`, and
+    // `message` is the same payload `Backend` carried.
+    let kinewright_core::MediaError::Store { message, .. } = &error else {
+        panic!("expected a typed store failure, got {error:?}");
     };
     assert!(
         message.starts_with("lut_relink_hash_mismatch:"),
@@ -3614,6 +3620,8 @@ fn cc4_recovery_rejections_are_typed_and_leave_the_store_untouched() {
     );
     let blocked = published_render_hash(&context, &document, changed_library)
         .expect_err("a changed asset must block the render");
+    // A render refusal again: `ColorPipelineError::MissingLutAsset`, not the
+    // store's variant of the same name.
     let kinewright_core::MediaError::Backend(blocked_message) = &blocked else {
         panic!("expected a typed backend failure, got {blocked:?}");
     };

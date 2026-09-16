@@ -1,8 +1,9 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use kinewright_core::{
-    BatchError, Command, Core, CoreDisconnected, Document, Event, OpError, Operation, Query,
-    QueryResult, TimelineRevision,
+    BatchError, Command, Core, CoreDisconnected, Document, Event, IncidentCode, IncidentEvidence,
+    IncidentObservation, IncidentSubject, OpError, Operation, Query, QueryResult,
+    RejectionIncident, TimelineRevision,
 };
 use thiserror::Error;
 
@@ -55,6 +56,74 @@ pub enum BranchError {
     InvalidOperationIndex { index: usize, maximum: usize },
     #[error("cherry-pick operation index {0} occurs more than once")]
     DuplicateOperationIndex(usize),
+}
+
+impl BranchError {
+    /// The incident code this branch refusal carries (`IN1b` §6.3 rule 6).
+    ///
+    /// Declared in the agent crate rather than in core, because `IN1b` §2.2
+    /// rule 8 keeps the four out-of-core typed enums where they are: core owns
+    /// the code and the policy class, not the code's trigger.
+    ///
+    /// `InvalidBase(OpError)` **delegates** to [`OpError::incident_code`]: a
+    /// rejected base document is a rejected operation, and telling the person
+    /// *"start a new agent thread"* for a duplicate clip id would be false.
+    /// The other four are the branch's own refusal — a stopped branch actor, a
+    /// reply the branch did not expect, and the two cherry-pick index
+    /// refusals — and take `agent_branch_rejected`.
+    #[must_use]
+    pub const fn incident_code(&self) -> IncidentCode {
+        match self {
+            Self::InvalidBase(error) => error.incident_code(),
+            Self::CoreDisconnected(_)
+            | Self::UnexpectedResponse
+            | Self::InvalidOperationIndex { .. }
+            | Self::DuplicateOperationIndex(_) => {
+                IncidentCode::Rejection(RejectionIncident::AgentBranch)
+            }
+        }
+    }
+
+    /// An observation from this refusal, with the caller's subject.
+    ///
+    /// **Evidence follows the code** (`IN1b` §3.4 rule 24): the delegating arm
+    /// supplies [`IncidentEvidence::OpError`] with the inner family and
+    /// **never** a `reason` string, and the other four supply
+    /// [`IncidentEvidence::Branch`].
+    ///
+    /// The subject is the caller's because the error does not know it: the four
+    /// branch refusals are the chat panel's own, `IncidentSubject::Agent`
+    /// (Appendix B rows 41 and 45), while `InvalidBase` carries the rejected
+    /// operation's subject, which only the caller holding that operation can
+    /// name.
+    #[must_use]
+    pub fn incident_observation(
+        &self,
+        subject: IncidentSubject,
+        revision: TimelineRevision,
+    ) -> IncidentObservation {
+        let evidence = match self {
+            Self::InvalidBase(error) => IncidentEvidence::OpError {
+                family: error.incident_family(),
+                op_number: None,
+                message: error.to_string(),
+            },
+            Self::CoreDisconnected(_)
+            | Self::UnexpectedResponse
+            | Self::InvalidOperationIndex { .. }
+            | Self::DuplicateOperationIndex(_) => IncidentEvidence::Branch {
+                reason: self.to_string(),
+            },
+        };
+        IncidentObservation {
+            code: self.incident_code(),
+            subject,
+            observed: self.to_string(),
+            allowed: None,
+            evidence,
+            revision,
+        }
+    }
 }
 
 impl TimelineBranch {
@@ -206,6 +275,66 @@ mod tests {
     use kinewright_core::{AssetId, MediaAsset, MediaKind, Rational, TimeCode};
 
     use super::*;
+
+    /// `IN1b` §6.3 rule 6, §3.4 rule 24 and §7 item 10's agent half: every
+    /// `BranchError` names a code, and `InvalidBase` **delegates** rather than
+    /// falling back to a `reason` string.
+    ///
+    /// Core's `in1b_evidence_follows_the_code_for_every_delegating_producer`
+    /// covers `BatchError`'s two delegating arms; the `BranchError` half lives
+    /// here, because the enum lives in this crate (§2.2 rule 8).
+    #[test]
+    fn in1b_branch_error_names_a_code_and_the_base_rejection_delegates() {
+        use kinewright_core::{ClipId, IncidentFamily};
+
+        let agent_branch = IncidentCode::Rejection(RejectionIncident::AgentBranch);
+        for error in [
+            BranchError::CoreDisconnected(CoreDisconnected),
+            BranchError::UnexpectedResponse,
+            BranchError::InvalidOperationIndex {
+                index: 4,
+                maximum: 2,
+            },
+            BranchError::DuplicateOperationIndex(2),
+        ] {
+            assert_eq!(error.incident_code(), agent_branch, "{error}");
+            assert_eq!(error.incident_code().code(), "agent_branch_rejected");
+            let observation =
+                error.incident_observation(IncidentSubject::Agent, TimelineRevision(3));
+            assert_eq!(observation.subject, IncidentSubject::Agent);
+            assert_eq!(observation.observed, error.to_string());
+            assert_eq!(
+                observation.evidence,
+                IncidentEvidence::Branch {
+                    reason: error.to_string()
+                },
+                "the branch's own refusals carry Branch evidence"
+            );
+        }
+
+        // The delegating arm: the code, the family and the evidence are the
+        // inner rejection's, and a `Branch { reason }` never appears.
+        let inner = OpError::MissingClip(ClipId(9));
+        let invalid = BranchError::InvalidBase(inner.clone());
+        assert_eq!(invalid.incident_code(), inner.incident_code());
+        assert_ne!(invalid.incident_code(), agent_branch);
+        let observation =
+            invalid.incident_observation(IncidentSubject::Clip(ClipId(9)), TimelineRevision(3));
+        assert_eq!(observation.code, inner.incident_code());
+        assert_eq!(
+            observation.evidence,
+            IncidentEvidence::OpError {
+                family: inner.incident_family(),
+                op_number: None,
+                message: inner.to_string(),
+            }
+        );
+        assert_ne!(inner.incident_family(), IncidentFamily::Internal);
+        assert!(
+            !matches!(observation.evidence, IncidentEvidence::Branch { .. }),
+            "a delegating variant never falls back to a reason string"
+        );
+    }
 
     fn asset(id: u64) -> MediaAsset {
         MediaAsset {
