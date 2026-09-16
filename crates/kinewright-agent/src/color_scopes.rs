@@ -2210,6 +2210,7 @@ mod tests {
         let first = asset(1);
         let second = asset(2);
         Document {
+            investigator: None,
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             tracks: vec![kinewright_core::Track {

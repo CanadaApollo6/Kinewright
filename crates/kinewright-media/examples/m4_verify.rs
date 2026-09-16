@@ -43,6 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let red = engine.probe(&red_path)?;
     let blue = engine.probe(&blue_path)?;
     let mut document = Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),

@@ -2422,6 +2422,7 @@ fn cc7_timeline_document(assets: Vec<MediaAsset>) -> Result<Document, EvalError>
             .ok_or_else(|| EvalError::Fixture("a CC7 document duration overflowed".to_owned()))?;
     }
     Ok(Document {
+        investigator: None,
         catalog: MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         tracks: vec![Track {
@@ -3858,6 +3859,7 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
         })))
         .collect::<Result<Vec<_>, EvalError>>()?;
     let document = Document {
+        investigator: None,
         catalog: MediaCatalog {
             sync_groups: vec![SyncGroup {
                 id: SyncGroupId(1),
@@ -4247,6 +4249,7 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
         )));
     }
     let document = Document {
+        investigator: None,
         catalog: MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -4828,6 +4831,7 @@ fn single_asset_document(asset: MediaAsset) -> Document {
 
 fn empty_timeline_document(assets: Vec<MediaAsset>) -> Document {
     Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -4879,6 +4883,7 @@ fn timeline_document(
             .ok_or_else(|| EvalError::Fixture("fixture duration overflowed".to_owned()))?;
     }
     Ok(Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         tracks: vec![Track {

@@ -134,6 +134,7 @@ fn fps() -> Rational {
 
 fn document_with_one_clip() -> Document {
     let mut doc = Document {
+        investigator: None,
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -1228,6 +1229,7 @@ fn au5_repair_reuses_the_mix_spectrum_point_spelling() {
 /// the track has no gap at all.
 fn gap_corpus() -> Document {
     Document {
+        investigator: None,
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -1671,6 +1673,7 @@ fn au5_a_fill_built_from_the_inverse_has_the_gaps_exact_duration() {
     let source_fps = Rational::new(30, 1).unwrap();
     let project_fps = Rational::new(25, 1).unwrap();
     let mut doc = Document {
+        investigator: None,
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),

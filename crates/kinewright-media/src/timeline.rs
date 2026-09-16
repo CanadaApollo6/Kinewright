@@ -457,6 +457,7 @@ mod tests {
 
     fn fixture() -> Document {
         Document {
+            investigator: None,
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),

@@ -185,7 +185,10 @@ fn router_apply_accepted(
         IncidentOutcome::Reverted => {
             asset.color_description == *probed && asset.assumed_from.is_none()
         }
-        IncidentOutcome::Explained => false,
+        // Neither outcome lands a colour recovery: `Explained` applied
+        // nothing, and `Rejected` is the person refusing an investigator
+        // session's proposal (IN2 §4.5 rule 20).
+        IncidentOutcome::Explained | IncidentOutcome::Rejected => false,
     }
 }
 
@@ -6220,18 +6223,24 @@ pub(crate) mod in1_tests {
             "the production tick reconciles the conflict it drained"
         );
         // Review-final B1's other half: the landing the production tick
-        // recorded is what let the landed send resolve at all. Deleting the
-        // push in `note_core_event_for_router` leaves this empty and every
-        // router auto-apply `Open` for the session.
-        assert_eq!(
-            app.pending_router_landings,
-            vec![tokens[0]],
-            "the production drain recorded the landed send's own token"
+        // recorded is what let the landed send resolve at all — the
+        // `Resolved(Applied)` assertion below is its proof, and deleting the
+        // push in `note_core_event_for_router` fails that assertion for every
+        // router auto-apply in the session. The landings list itself is an
+        // intermediate state: when the actor's landing and its conflict are
+        // drained in one tick it still holds the landed token here, and when
+        // a slower actor (the Windows CI lane) spreads them over two ticks the
+        // second tick has already spent it. Both are correct, so neither is
+        // asserted; only the settled end is.
+        assert!(
+            app.pending_router_landings.is_empty()
+                || app.pending_router_landings == vec![tokens[0]],
+            "the landings list holds at most the landed send's own token"
         );
         app.route_incidents();
         assert!(
             app.pending_router_landings.is_empty(),
-            "and a quiet tick spends it, because nothing is outstanding"
+            "a quiet tick leaves no landing behind, because nothing is outstanding"
         );
 
         let handle = Arc::clone(&app.projects[0].incidents);

@@ -277,6 +277,17 @@ pub struct Transition {
     pub duration: TimeCode,
 }
 
+/// Per-project investigator preferences (IN2 §2.4).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InvestigatorPreferences {
+    /// Stable `IncidentCode::code()` strings this project never starts an
+    /// investigator session for. An unrecognised string is inert
+    /// (IN2 §0.1 N2/b).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub muted_codes: Vec<String>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ClipContent {
@@ -1116,6 +1127,12 @@ pub struct Document {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub lut_assets: Vec<LutAsset>,
+    /// Per-project investigator preferences (IN2 §2.4). Absent in every
+    /// pre-IN2 project, so those projects load byte-unchanged and re-save
+    /// without the field until a preference is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub investigator: Option<InvestigatorPreferences>,
     pub fps: Rational,
     pub resolution: (u32, u32),
     pub duration: TimeCode,
@@ -1131,6 +1148,7 @@ impl Default for Document {
             audio_mix: AudioMix::default(),
             color_context: ColorContext::default(),
             lut_assets: Vec::new(),
+            investigator: None,
             fps: Rational::default(),
             resolution: (1_920, 1_080),
             duration: TimeCode::ZERO,

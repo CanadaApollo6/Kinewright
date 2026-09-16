@@ -180,12 +180,15 @@ pub use effect::{
     matte_window_parameter_names, matte_window_parameters,
 };
 pub use incident::{
-    ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, Incident, IncidentCode,
-    IncidentEvidence, IncidentId, IncidentLog, IncidentObservation, IncidentOutcome,
-    IncidentSeverity, IncidentState, IncidentSubject, IncidentTelemetry, LabelIncident,
-    MediaIncident, Observed, POLICY, PolicyClass, PolicyEntry, PolicyPredicate, RecoveryAction,
-    RecoveryKind, RejectionIncident, SourceColorIncident, assume_rec709_operation, explain_body,
-    policy_class, policy_recovery, rec709_compatible, recovery_description,
+    ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, INVESTIGATOR_ALLOWLIST,
+    INVESTIGATOR_EXPLANATION_CEILING_BYTES, INVESTIGATOR_MAX_PROPOSAL_OPERATIONS, Incident,
+    IncidentCode, IncidentEvidence, IncidentId, IncidentLog, IncidentObservation, IncidentOutcome,
+    IncidentProposal, IncidentResolver, IncidentSeverity, IncidentState, IncidentSubject,
+    IncidentTelemetry, LabelIncident, MediaIncident, Observed, POLICY, PolicyClass, PolicyEntry,
+    PolicyPredicate, RecordProposalError, RecoveryAction, RecoveryKind, RejectionIncident,
+    SourceColorIncident, assume_rec709_operation, deterministic_recovery, explain_body,
+    json_escaped_len, policy_class, policy_recovery, rec709_compatible, recovery_description,
+    truncate_to_serialized_bytes,
 };
 pub use journal::JournalCommand;
 pub use media::{
@@ -213,12 +216,12 @@ pub use model::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AssetId,
     AudioBus, AudioBusId, AudioMaster, AudioMix, BinId, CHAIN_LOOKAHEAD_MILLISECONDS,
     ChainLookahead, Clip, ClipContent, ClipId, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect,
-    EffectId, FreezeFrame, LUT_ASSET_ID_MAX, LUT_SIZE_MAX, LUT_SIZE_MIN, LinkId, LutAsset,
-    LutAssetId, LutAssetKind, LutAssetSource, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId,
-    MediaAsset, MediaBin, MediaCatalog, MediaKind, MediaSourceFingerprint, PanLaw, ParamValue,
-    RelinkCandidate, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
-    TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX,
-    TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix, Transition,
+    EffectId, FreezeFrame, InvestigatorPreferences, LUT_ASSET_ID_MAX, LUT_SIZE_MAX, LUT_SIZE_MIN,
+    LinkId, LutAsset, LutAssetId, LutAssetKind, LutAssetSource, MARKER_COLOR_TOKEN_COUNT, Marker,
+    MarkerId, MediaAsset, MediaBin, MediaCatalog, MediaKind, MediaSourceFingerprint, PanLaw,
+    ParamValue, RelinkCandidate, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId,
+    SyncGroupMember, TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
+    TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix, Transition,
     chain_lookahead_milliseconds, clip_effective_fps, envelope_coalesce_key,
     track_automation_coalesce_key, validate_lut_asset,
 };

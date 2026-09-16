@@ -5415,6 +5415,7 @@ mod tests {
             assumed_from: None,
         };
         Document {
+            investigator: None,
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,

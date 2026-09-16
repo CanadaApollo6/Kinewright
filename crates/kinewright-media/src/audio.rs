@@ -5032,6 +5032,7 @@ mod tests {
 
     fn video_only_document(fps: Rational) -> Document {
         Document {
+            investigator: None,
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -5686,6 +5687,7 @@ mod tests {
 
     fn parity_document(voice: &Path, bed: &Path, fps: Rational) -> Document {
         Document {
+            investigator: None,
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: AudioMix {
                 tracks: Vec::new(),
@@ -5880,6 +5882,7 @@ mod tests {
     /// starts at frame 15 on track 2.
     fn levels_document(steady: &Path, late: &Path, fps: Rational) -> Document {
         Document {
+            investigator: None,
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -7359,6 +7362,7 @@ mod tests {
     /// One track routed to a bus carrying a 10 ms lookahead limiter.
     fn impulse_document(source: &Path, fps: Rational) -> Document {
         Document {
+            investigator: None,
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: AudioMix {
                 tracks: Vec::new(),
@@ -8543,6 +8547,7 @@ mod tests {
         let mut asset = audio_asset(1, source, "au3", fps);
         asset.duration = TimeCode(frames);
         Document {
+            investigator: None,
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),

@@ -397,13 +397,19 @@ const fn label_headline(incident: LabelIncident) -> &'static str {
     }
 }
 
-/// `Open`, `Applied`, `Reverted` or `Explained`, from the state alone.
+/// `Open`, `Investigating`, `Applied`, `Reverted`, `Explained` or `Rejected`,
+/// from the state alone.
+///
+/// Six arms since IN2 §3.6 rule 33: `Investigating` is a third open state and
+/// `Rejected` is a fourth outcome.
 const fn state_label(state: IncidentState) -> &'static str {
     match state {
         IncidentState::Open => "Open",
+        IncidentState::Investigating => "Investigating",
         IncidentState::Resolved(IncidentOutcome::Applied) => "Applied",
         IncidentState::Resolved(IncidentOutcome::Reverted) => "Reverted",
         IncidentState::Resolved(IncidentOutcome::Explained) => "Explained",
+        IncidentState::Resolved(IncidentOutcome::Rejected) => "Rejected",
     }
 }
 
@@ -1016,9 +1022,21 @@ mod tests {
 
     #[test]
     fn in1_an_explain_row_offers_the_core_sentence_and_nothing_to_press() {
-        let probed = untagged_mp4_probe();
+        // IN2 §7 rule 1 gave `unknown_source_range` a button, so the row this
+        // test needs is one of the seven `unsupported_source_*` rows, which
+        // have neither a button nor a session and are IN3's (IN2 §10 limit 11).
+        // Erratum IN2 A-R2: §9 regression R-A does not name this rewrite.
+        //
+        // The probe is the **reachable** one: an `unsupported_source_primaries`
+        // row is only ever opened when the primaries carry a known non-Rec.709
+        // value, and `rec709_compatible` of such a probe is false (IN2 §7
+        // rule 5's reachability half).
+        let probed = ColorDescription {
+            primaries: ColorPrimaries::Bt2020,
+            ..untagged_mp4_probe()
+        };
         let (log, id) = opened(
-            IncidentCode::SourceColor(SourceColorIncident::UnknownRange),
+            IncidentCode::SourceColor(SourceColorIncident::UnsupportedPrimaries),
             &probed,
         );
         let incident = log.get(id).expect("open");

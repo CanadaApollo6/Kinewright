@@ -408,6 +408,7 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
     std::mem::forget(red);
     std::mem::forget(blue);
     let document = Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -616,6 +617,7 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
 fn title_export_pixels_match_preview_after_h264_redecode() {
     let engine = FfmpegMediaEngine::new().unwrap();
     let document = Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -709,6 +711,7 @@ fn freeze_export_pixels_match_preview_after_h264_redecode() {
     let engine = FfmpegMediaEngine::new().unwrap();
     let asset = engine.probe(&input.0).unwrap();
     let document = Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -1052,6 +1055,7 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
     let engine = FfmpegMediaEngine::new().unwrap();
     let asset = engine.probe(&clip.0).unwrap();
     let document = Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -1187,6 +1191,7 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
         "device fixtures are unexpectedly short"
     );
     let document = Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -1270,6 +1275,7 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
     let engine = FfmpegMediaEngine::new().unwrap();
     let asset = engine.probe(&clip.0).unwrap();
     let document = Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -1339,6 +1345,7 @@ fn full_timeline(asset: MediaAsset) -> Document {
     let fps = asset.fps;
     let resolution = asset.resolution.unwrap();
     let document = Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),

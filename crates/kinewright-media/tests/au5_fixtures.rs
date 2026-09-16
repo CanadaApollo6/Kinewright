@@ -221,6 +221,7 @@ fn fixture_document(asset: MediaAsset, effects: Vec<Effect>) -> Arc<Document> {
     let fps = fixture_fps();
     let duration = asset.duration;
     let document = Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: AudioMix {
             tracks: Vec::new(),

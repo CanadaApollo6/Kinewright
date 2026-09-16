@@ -221,6 +221,7 @@ pub fn single_clip_document(asset: MediaAsset) -> Document {
     let fps = asset.fps;
     let resolution = asset.resolution.unwrap_or((320, 180));
     Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),

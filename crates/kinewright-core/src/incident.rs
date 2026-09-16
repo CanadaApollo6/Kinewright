@@ -1073,6 +1073,13 @@ pub enum IncidentOutcome {
     Reverted,
     /// Nothing was applied; the person was told what the problem is.
     Explained,
+    /// The person refused the session's proposal.
+    ///
+    /// An approved proposal that lands is [`Self::Applied`], which the document
+    /// shows (IN2 §0.1 N1/Q7). A session that ended **without** a proposal the
+    /// person refused does not produce this outcome — it returns the incident
+    /// to [`IncidentState::Open`] (IN2 §3.7, §4.5 rule 20).
+    Rejected,
 }
 
 /// Whether the incident is still outstanding.
@@ -1082,22 +1089,38 @@ pub enum IncidentOutcome {
 /// `"state":"resolved","outcome":"applied"` — and as the single key
 /// `"state":"open"` while the incident is open (IN1 §2.5 rule 43).
 ///
-/// `Investigating` is not declared in Part A: nothing constructs it while
-/// there is no session (IN1 §2.3 rule 13, §13 D5).
+/// `Investigating` has the same single-key shape, `"state":"investigating"`,
+/// and is declared between `Open` and `Resolved` (IN2 §3.6 rule 32).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "outcome")]
 pub enum IncidentState {
     /// Outstanding.
     Open,
+    /// Outstanding, with an investigator session running against it
+    /// (IN2 §3.6 rule 32).
+    Investigating,
     /// Ended, with the outcome that ended it.
     Resolved(IncidentOutcome),
+}
+
+impl IncidentState {
+    /// Whether the incident is still outstanding. An incident under
+    /// investigation is unresolved: the work is happening, not finished
+    /// (IN2 §3.6 rule 33).
+    #[must_use]
+    pub const fn is_open(self) -> bool {
+        matches!(self, Self::Open | Self::Investigating)
+    }
 }
 
 /// What resolving an incident cost.
 ///
 /// Every `Option` field skips when `None`, so an unresolved incident costs one
 /// wire key rather than eight keys of `null` (IN1 §8 rule 4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+///
+/// **Not [`Copy`]** since IN2 §5.4 rule 12: [`IncidentResolver::Session`]
+/// carries owned strings. Probe-2 measured the fallout at zero sites.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct IncidentTelemetry {
     /// Wall time from observation to resolution, measured at the router.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1125,6 +1148,167 @@ pub struct IncidentTelemetry {
     /// rather than a measurement (IN1 §8 rule 5).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd_millionths: Option<i64>,
+    /// Turns the resolving session spent, when a session resolved it.
+    ///
+    /// Skips when absent so `IN1_INCIDENT_SERIALIZED_BYTES` cannot move: a bare
+    /// `u32` beside `tool_calls` would add `,"turns":0` to **every** incident
+    /// (IN2 §5.4 rule 12).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turns: Option<u32>,
+    /// Who resolved it, when it was not the router; or why a session stopped
+    /// without resolving it (IN2 §0.4 p).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolver: Option<IncidentResolver>,
+}
+
+/// Who resolved an incident, or why the session working on it stopped
+/// (IN2 §5.4 rule 12).
+///
+/// A router-resolved incident costs **zero** extra keys, which is IN1 §8
+/// rule 4's shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentResolver {
+    /// The deterministic router applied the recovery itself.
+    Router,
+    /// The person pressed a card action.
+    Person,
+    /// An investigator session.
+    Session {
+        /// The `HarnessId` string the session ran on.
+        harness: String,
+        /// The model, when one was configured.
+        model: Option<String>,
+        /// The pump's stop, or the reason the session was ended. A `String`
+        /// rather than a `&'static str` because `StopReason::Harness` and
+        /// `StopReason::Observer` carry a message (IN2 §5.4 rule 12).
+        stop: String,
+    },
+}
+
+/// The ceiling, in bytes of **JSON-escaped** output, on each of
+/// [`IncidentProposal`]'s two free-text fields (IN2 §4.1 rule 5).
+pub const INVESTIGATOR_EXPLANATION_CEILING_BYTES: usize = 240;
+
+/// The most operations a branch may carry and still be proposable
+/// (IN2 §4.1 rule 6 code 4).
+pub const INVESTIGATOR_MAX_PROPOSAL_OPERATIONS: usize = 8;
+
+/// The JSON-escaped length of `text`, in bytes, **excluding** the surrounding
+/// quotes — that is, `serde_json::to_string(text).len() - 2`.
+///
+/// Computed here rather than through `serde_json` because core does not depend
+/// on it outside `[dev-dependencies]`. `serde_json`'s default escape table is
+/// exactly `"`, `\` and the C0 controls; `\b`, `\t`, `\n`, `\f` and `\r` take
+/// two bytes and every other control takes six as `\u00XX`. Nothing above
+/// `0x1F` is escaped, so UTF-8 passes through byte for byte. The unit test
+/// `in2_both_proposal_strings_are_capped_on_their_serialised_length` asserts
+/// this function against `serde_json` itself.
+const fn json_escaped_byte_len(byte: u8) -> usize {
+    match byte {
+        b'"' | b'\\' | 0x08 | 0x09 | 0x0a | 0x0c | 0x0d => 2,
+        0x00..=0x1f => 6,
+        _ => 1,
+    }
+}
+
+/// The JSON-escaped length of `text`, in bytes, excluding the quotes.
+#[must_use]
+pub fn json_escaped_len(text: &str) -> usize {
+    text.bytes().map(json_escaped_byte_len).sum()
+}
+
+/// The largest index `<= index` that is a `char` boundary of `text`.
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    let mut boundary = index;
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
+}
+
+/// Truncate `text` so that its **serialised** length is at most `ceiling`
+/// bytes (IN2 §4.1 rule 5).
+///
+/// JSON escaping is not length-preserving — 240 bytes of control characters
+/// serialise to about 1 440 — and `IN1_INCIDENT_SERIALIZED_CEILING_BYTES` is an
+/// `assert` in production code over a string a **model** supplies. Capping the
+/// raw length would therefore be a bet on which 240 bytes arrive; capping the
+/// serialised length is a property.
+///
+/// Each pass shrinks proportionally and then backs off to a `char` boundary, so
+/// the loop strictly shrinks and terminates; the empty string escapes to zero.
+#[must_use]
+pub fn truncate_to_serialized_bytes(text: &str, ceiling: usize) -> String {
+    let mut candidate = text;
+    loop {
+        let escaped = json_escaped_len(candidate);
+        if escaped <= ceiling {
+            return candidate.to_owned();
+        }
+        let proportional = candidate.len().saturating_mul(ceiling) / escaped;
+        let target = proportional.min(candidate.len().saturating_sub(1));
+        candidate = &candidate[..floor_char_boundary(candidate, target)];
+    }
+}
+
+/// Why [`IncidentLog::record_proposal`] refused (IN2 erratum A-R7).
+///
+/// Each variant maps one-to-one onto one of `propose_fix`'s six refusal codes
+/// (IN2 §4.1 rule 6), which is why this is a typed error rather than the `bool`
+/// rule 7 spells: a caller that must answer `incident_not_found`,
+/// `incident_not_investigating` and `proposal_already_recorded` separately
+/// cannot do it from one `false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RecordProposalError {
+    /// No such id in the log — `incident_not_found` (code 1).
+    #[error("no incident with that id")]
+    NotFound,
+    /// The incident's state is not `Investigating` — the person or the router
+    /// got there first (`incident_not_investigating`, code 2).
+    #[error("the incident is not under investigation")]
+    NotInvestigating,
+    /// The incident already carries a proposal that is not stale —
+    /// `proposal_already_recorded` (code 6).
+    #[error("the incident already carries a proposal")]
+    AlreadyRecorded,
+}
+
+/// A typed fix an investigator session proposes for one incident (IN2 §4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IncidentProposal {
+    /// The branch's applied operations, in order. **Never serialised**:
+    /// [`Operation`] has 57 variants and several carry unbounded payloads, so a
+    /// `Vec<Operation>` on the wire would end
+    /// `IN1_INCIDENT_SERIALIZED_CEILING_BYTES` as a property rather than move
+    /// it (IN2 §0.1 N2/c). The app reads them through the shared log, in
+    /// process, which is the only consumer there is.
+    #[serde(skip)]
+    pub operations: Vec<Operation>,
+    /// How many there are (IN2 §0.4 l). What the card's headline reads when
+    /// `summary` has been truncated.
+    pub operation_count: usize,
+    /// One line per operation, at most
+    /// [`INVESTIGATOR_EXPLANATION_CEILING_BYTES`] bytes of JSON.
+    pub summary: String,
+    /// One sentence a person can act on, at most
+    /// [`INVESTIGATOR_EXPLANATION_CEILING_BYTES`] bytes of JSON.
+    pub explanation: String,
+    /// The **live** revision the branch was seeded at by [`crate::Core::spawn_at`].
+    ///
+    /// The field a reader needs is *what live looked like when this was
+    /// proved*, which is comparable with the live revision at approval time.
+    /// The branch's own counter is private to a core nobody outside the session
+    /// can query and is not put on the wire (IN2 §4.2 rule 9).
+    pub base_revision: TimelineRevision,
+    /// Set by the app when a merge has conflicted twice (IN2 §4.4 rule 18), and
+    /// by Part B on **every** proposal it loads: `operations` is
+    /// `#[serde(skip)]`, so a deserialised proposal is always stale
+    /// (IN2 §4.2 rule 10).
+    pub stale: bool,
 }
 
 /// One classified problem, with its evidence and its typed recoveries.
@@ -1176,6 +1360,9 @@ pub struct Incident {
     pub state: IncidentState,
     /// What resolving it cost.
     pub telemetry: IncidentTelemetry,
+    /// The session's proposal, when one has been recorded (IN2 §4.2 rule 8).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<IncidentProposal>,
 }
 
 /// The only way an incident is created.
@@ -2072,6 +2259,93 @@ pub const POLICY: [PolicyEntry; 67] = [
     },
 ];
 
+/// The codes an investigator session may start for, and no other
+/// (IN2 §3.1 rule 1).
+///
+/// A `const` list rather than a predicate evaluated at run time. A predicate
+/// would silently enrol Part B's eleven newly reachable codes and D-B2's three
+/// panel-sink groups the day they land, on a population Part A never measured;
+/// a `const` makes joining it an edit somebody reviews.
+///
+/// **It is exactly `POLICY[13..67]` — rows 14–67, contiguous** — which is a
+/// checkable property and not a coincidence: [`POLICY`] declares the three
+/// `AutoApply` rows first, then the colour rows the recovery vocabulary can and
+/// cannot serve, then everything else (IN2 §3.1 rule 3).
+///
+/// **Thirteen codes are off it, for exactly two reasons**, both of which the
+/// table prints (IN2 §3.1 rule 2):
+///
+/// - **it has a deterministic recovery** — [`deterministic_recovery`] builds
+///   one, so the card already has a button and a code with a button must never
+///   spend a model. Three rows: `unknown_source_range`,
+///   `unknown_source_bit_depth`, `unknown_source_white_point`.
+/// - **no honest recovery exists in Part A and a session cannot invent one** —
+///   the seven `unsupported_source_*` rows, whose probe carries a *known*
+///   non-Rec.709 value that a recovery would have to overwrite
+///   (IN2 §7 rule 5). A session would spend a model to arrive at the sentence
+///   the card already shows.
+///
+/// Plus the three `AutoApply` rows, which the router owns. **13 off, 54 on.**
+/// Everything else is on it, including every row IN2 §7 measured *unbuildable*:
+/// a row with no button and no honest operation is exactly the row a session is
+/// for.
+pub const INVESTIGATOR_ALLOWLIST: [IncidentCode; 54] = [
+    IncidentCode::Media(MediaIncident::UnsupportedDecoderFormat),
+    IncidentCode::Media(MediaIncident::BackendUnclassified),
+    IncidentCode::DeliveryColor(DeliveryColorIncident::UnsupportedCodec),
+    IncidentCode::DeliveryColor(DeliveryColorIncident::UnsupportedField),
+    IncidentCode::DeliveryColor(DeliveryColorIncident::PixelFormatDepthMismatch),
+    IncidentCode::DeliveryColor(DeliveryColorIncident::EncoderPixelFormatUnavailable),
+    IncidentCode::DeliveryVerification(DeliveryVerificationIncident::NotFullResolution),
+    IncidentCode::DeliveryVerification(DeliveryVerificationIncident::PlaneOutOfContainer),
+    IncidentCode::DeliveryVerification(DeliveryVerificationIncident::FrameCountMismatch),
+    IncidentCode::DeliveryVerification(DeliveryVerificationIncident::FrameCountOutOfRange),
+    IncidentCode::DeliveryVerification(DeliveryVerificationIncident::BudgetLaneMismatch),
+    IncidentCode::ColorQc(ColorQcIncident::ProxyProofRefused),
+    IncidentCode::ColorQc(ColorQcIncident::RasterLengthMismatch),
+    IncidentCode::ColorQc(ColorQcIncident::EmptyPopulation),
+    IncidentCode::ColorQc(ColorQcIncident::NodeBudgetExceeded),
+    IncidentCode::ColorQc(ColorQcIncident::MatteRegionRasterMismatch),
+    IncidentCode::ColorQc(ColorQcIncident::NodeRemovalRejected),
+    IncidentCode::Operation(IncidentFamily::Bounds),
+    IncidentCode::Operation(IncidentFamily::Malformed),
+    IncidentCode::Operation(IncidentFamily::Duplicate),
+    IncidentCode::Operation(IncidentFamily::Placement),
+    IncidentCode::Operation(IncidentFamily::Missing),
+    IncidentCode::Operation(IncidentFamily::Structure),
+    IncidentCode::Operation(IncidentFamily::Relink),
+    IncidentCode::Operation(IncidentFamily::Unrepresentable),
+    IncidentCode::Operation(IncidentFamily::UnknownName),
+    IncidentCode::Operation(IncidentFamily::Internal),
+    IncidentCode::Operation(IncidentFamily::ColorPolicy),
+    IncidentCode::LutAssetPolicy,
+    IncidentCode::EditRevisionConflict,
+    IncidentCode::Rejection(RejectionIncident::EditPlan),
+    IncidentCode::Rejection(RejectionIncident::DeliveryVariant),
+    IncidentCode::Rejection(RejectionIncident::AgentBranch),
+    IncidentCode::Rejection(RejectionIncident::SourceEdit),
+    IncidentCode::Rejection(RejectionIncident::Relink),
+    IncidentCode::Rejection(RejectionIncident::ProjectSave),
+    IncidentCode::Rejection(RejectionIncident::CaptionPlan),
+    IncidentCode::Label(LabelIncident::Operations),
+    IncidentCode::Label(LabelIncident::Look),
+    IncidentCode::Label(LabelIncident::LookIncomplete),
+    IncidentCode::Label(LabelIncident::Export),
+    IncidentCode::Label(LabelIncident::SourceMonitor),
+    IncidentCode::Label(LabelIncident::Relink),
+    IncidentCode::Label(LabelIncident::AgentBranch),
+    IncidentCode::Label(LabelIncident::TranscriptEdit),
+    IncidentCode::Label(LabelIncident::Media),
+    IncidentCode::Label(LabelIncident::MediaIncomplete),
+    IncidentCode::Label(LabelIncident::Agent),
+    IncidentCode::Label(LabelIncident::Recording),
+    IncidentCode::Label(LabelIncident::Project),
+    IncidentCode::Label(LabelIncident::Captions),
+    IncidentCode::Label(LabelIncident::Mixer),
+    IncidentCode::Label(LabelIncident::MediaCache),
+    IncidentCode::Label(LabelIncident::Timeline),
+];
+
 /// The plain-language body every `Explain` recovery carries.
 ///
 /// Exhaustive with **no wildcard arm**, so a sixty-eighth code breaks the
@@ -2289,10 +2563,193 @@ pub fn policy_recovery(
         // `code.source_error().recovery_action()`, delegating to that same
         // accessor for the thirteen colour rows so they keep the shipped
         // sentence verbatim (`IN1b` §3.7 rule 34).
-        PolicyClass::Explain => vec![RecoveryAction {
-            label: EXPLAIN_LABEL,
-            kind: RecoveryKind::Explain(explain_body(code)),
-        }],
+        //
+        // A row with a buildable operation offers **a button and the
+        // sentence**, in that order, and every other row is byte-for-byte what
+        // it was before IN2 (IN2 §7 rule 1). `card_actions` needs no change:
+        // it already enables an action iff its kind is
+        // [`RecoveryKind::Operation`], so the card's button and the no-harness
+        // fallback come from this one arm.
+        PolicyClass::Explain => {
+            let mut actions = Vec::new();
+            if let Some(action) = deterministic_recovery(code, subject, evidence) {
+                actions.push(action);
+            }
+            actions.push(RecoveryAction {
+                label: EXPLAIN_LABEL,
+                kind: RecoveryKind::Explain(explain_body(code)),
+            });
+            actions
+        }
+    }
+}
+
+/// The deterministic recovery an `Explain` row offers, when one is buildable
+/// from the evidence the incident already carries (IN2 §7).
+///
+/// An **exhaustive match with no wildcard**, so a sixty-eighth code cannot
+/// silently default to "no button": every code is named, and the fifty-one that
+/// IN2 §7's table does not discuss return `None` through one explicit
+/// `|`-joined arm.
+///
+/// **Three rows build one**, and they are the three `unknown_source_*` rows
+/// whose producer — `IncidentObservation::from_media_error`'s
+/// `MediaError::SourceColorForAsset` arm — emits
+/// [`IncidentEvidence::SourceColor`] and sets the subject to the asset itself,
+/// so every input [`assume_rec709_operation`] needs is already there
+/// (IN2 §7 rule 5).
+///
+/// **Ten colour rows do not**, and the reason is a predicate *plus* a
+/// reachability argument, because the predicate alone does not do it.
+/// [`rec709_compatible`] is a predicate over the **probe**, not over the code,
+/// and returns `true` for an all-`Unknown` probe on an `unsupported_*` code
+/// too. What separates the two groups is that an `unsupported_*` row is only
+/// *reached* when the named field carries a known non-Rec.709 value, and
+/// `rec709_compatible` of such a probe is `false` — so the builder would have
+/// to **overwrite** a known value, which is the silent behaviour CC1 §1
+/// forbids. The gate below is the predicate, and the reachability is what makes
+/// it sufficient.
+///
+/// **Six delivery and clamp rows do not**, for two independent reasons either
+/// of which is sufficient (IN2 §7 rule 6): this function never sees `observed`
+/// or `allowed` — they are fields of [`Incident`], not of
+/// [`IncidentEvidence`], and `policy_recovery` is called at observe time with
+/// the evidence alone — and even given them, both are prose, so building a
+/// typed [`Operation`] would mean parsing `Debug` output.
+#[must_use]
+pub fn deterministic_recovery(
+    code: IncidentCode,
+    subject: IncidentSubject,
+    evidence: &IncidentEvidence,
+) -> Option<RecoveryAction> {
+    if !has_deterministic_recovery(code) {
+        return None;
+    }
+    // The three rows' shared producer sets the subject to the asset itself and
+    // puts the whole probe on the evidence, so both destructurings hold on the
+    // reachable path and neither is a silent fallback.
+    let IncidentSubject::Asset(asset) = subject else {
+        return None;
+    };
+    let probed = evidence.probed()?;
+    if !rec709_compatible(probed) {
+        return None;
+    }
+    Some(RecoveryAction {
+        label: ASSUME_REC709_LABEL,
+        kind: RecoveryKind::Operation(assume_rec709_operation(asset, probed)),
+    })
+}
+
+/// Whether [`deterministic_recovery`] has a builder for this code at all.
+///
+/// The **exhaustive match with no wildcard** IN2 §7 rule 2 requires: every one
+/// of the sixty-seven codes is named, so a sixty-eighth cannot silently default
+/// to "no button". The `false` arm's groups are named in order, and the reason
+/// each group is `false` is in [`deterministic_recovery`]'s own documentation.
+const fn has_deterministic_recovery(code: IncidentCode) -> bool {
+    match code {
+        // IN2 §7 rows 1-3: buildable, under `rec709_compatible`.
+        IncidentCode::SourceColor(
+            SourceColorIncident::UnknownRange
+            | SourceColorIncident::UnknownBitDepth
+            | SourceColorIncident::UnknownWhitePoint,
+        ) => true,
+        // Everything else. Clippy requires one nested group per outer
+        // variant, so the reasons are named beside the rows they cover.
+        IncidentCode::SourceColor(
+            // IN2 §7 rows 4-10: a recovery would have to overwrite a known
+            // non-Rec.709 value. IN1 §13 D8, IN3.
+            SourceColorIncident::UnsupportedPrimaries
+            | SourceColorIncident::UnsupportedTransfer
+            | SourceColorIncident::UnsupportedMatrix
+            | SourceColorIncident::UnsupportedRange
+            | SourceColorIncident::UnsupportedWhitePoint
+            | SourceColorIncident::UnsupportedBitDepth
+            | SourceColorIncident::UnsupportedCombination
+            // The three `AutoApply` rows, whose recovery is `policy_recovery`'s
+            // own `AutoApply` arm and never this one.
+            | SourceColorIncident::UnknownPrimaries
+            | SourceColorIncident::UnknownTransfer
+            | SourceColorIncident::UnknownMatrix,
+        )
+        // IN2 §7 rows 11-16: the evidence is a code and a rendered sentence,
+        // `probed()` is `None`, and `observed`/`allowed` are prose this
+        // function never sees anyway. Rows 11-14 and 15 are here; row 16 is
+        // the `FrameCountOutOfRange` below.
+        | IncidentCode::DeliveryColor(
+            DeliveryColorIncident::UnsupportedCodec
+            | DeliveryColorIncident::UnsupportedField
+            | DeliveryColorIncident::PixelFormatDepthMismatch
+            | DeliveryColorIncident::EncoderPixelFormatUnavailable,
+        )
+        | IncidentCode::ColorQc(
+            // IN2 §7 row 15.
+            ColorQcIncident::NodeBudgetExceeded
+            // The five remaining colour-QC rows: each is a session.
+            | ColorQcIncident::ProxyProofRefused
+            | ColorQcIncident::RasterLengthMismatch
+            | ColorQcIncident::EmptyPopulation
+            | ColorQcIncident::MatteRegionRasterMismatch
+            | ColorQcIncident::NodeRemovalRejected,
+        )
+        | IncidentCode::DeliveryVerification(
+            // IN2 §7 row 16.
+            DeliveryVerificationIncident::FrameCountOutOfRange
+            // The four remaining verification rows: each is a session.
+            | DeliveryVerificationIncident::NotFullResolution
+            | DeliveryVerificationIncident::PlaneOutOfContainer
+            | DeliveryVerificationIncident::FrameCountMismatch
+            | DeliveryVerificationIncident::BudgetLaneMismatch,
+        )
+        // Every remaining code: no deterministic recovery in Part A, named
+        // rather than defaulted. Each is a session (IN2 §3.1 rule 2).
+        | IncidentCode::Media(
+            MediaIncident::UnsupportedDecoderFormat | MediaIncident::BackendUnclassified,
+        )
+        | IncidentCode::Operation(
+            IncidentFamily::Bounds
+            | IncidentFamily::Malformed
+            | IncidentFamily::Duplicate
+            | IncidentFamily::Placement
+            | IncidentFamily::Missing
+            | IncidentFamily::Structure
+            | IncidentFamily::Relink
+            | IncidentFamily::Unrepresentable
+            | IncidentFamily::UnknownName
+            | IncidentFamily::Internal
+            | IncidentFamily::ColorPolicy,
+        )
+        | IncidentCode::LutAssetPolicy
+        | IncidentCode::EditRevisionConflict
+        | IncidentCode::Rejection(
+            RejectionIncident::EditPlan
+            | RejectionIncident::DeliveryVariant
+            | RejectionIncident::AgentBranch
+            | RejectionIncident::SourceEdit
+            | RejectionIncident::Relink
+            | RejectionIncident::ProjectSave
+            | RejectionIncident::CaptionPlan,
+        )
+        | IncidentCode::Label(
+            LabelIncident::Operations
+            | LabelIncident::Look
+            | LabelIncident::LookIncomplete
+            | LabelIncident::Export
+            | LabelIncident::SourceMonitor
+            | LabelIncident::Relink
+            | LabelIncident::AgentBranch
+            | LabelIncident::TranscriptEdit
+            | LabelIncident::Media
+            | LabelIncident::MediaIncomplete
+            | LabelIncident::Agent
+            | LabelIncident::Recording
+            | LabelIncident::Project
+            | LabelIncident::Captions
+            | LabelIncident::Mixer
+            | LabelIncident::MediaCache
+            | LabelIncident::Timeline,
+        ) => false,
     }
 }
 
@@ -2434,8 +2891,11 @@ impl IncidentLog {
     ///
     /// A `Resolved` entry never absorbs an observation; the re-open that
     /// permits is closed by the suppression set, not by weakening the rule
-    /// (IN1 §2.3 rule 16). The `state == Open` filter below is therefore
-    /// belt-and-braces: rule 19's suppression already makes a resolved entry
+    /// (IN1 §2.3 rule 16). An `Investigating` entry **does** absorb one: a
+    /// repeat observation while a session runs must dedup, not open a second
+    /// incident about the same problem, which is why the filter below reads
+    /// [`IncidentState::is_open`] rather than `== Open` (IN2 §3.6 site 2). The
+    /// filter is otherwise belt-and-braces: rule 19's suppression already makes a resolved entry
     /// unreachable, because both [`Self::resolve`] and
     /// [`Self::note_auto_applied`] insert `(code, subject)` into `suppressed`
     /// and the check above returns first. It is kept so that the rule is
@@ -2448,7 +2908,7 @@ impl IncidentLog {
             return Observed::Suppressed;
         }
         if let Some(existing) = self.entries.iter_mut().find(|incident| {
-            incident.state == IncidentState::Open
+            incident.state.is_open()
                 && incident.code == observation.code
                 && incident.subject == observation.subject
                 && incident.observed == observation.observed
@@ -2479,6 +2939,7 @@ impl IncidentLog {
             count: 1,
             state: IncidentState::Open,
             telemetry: IncidentTelemetry::default(),
+            proposal: None,
         });
         Observed::Opened(id)
     }
@@ -2487,7 +2948,7 @@ impl IncidentLog {
     pub fn open(&self) -> impl Iterator<Item = &Incident> {
         self.entries
             .iter()
-            .filter(|incident| incident.state == IncidentState::Open)
+            .filter(|incident| incident.state.is_open())
     }
 
     /// Every incident this session opened, resolved or not.
@@ -2559,9 +3020,12 @@ impl IncidentLog {
     ///
     /// The third narrowly typed writer, beside [`Self::telemetry_mut`] and
     /// [`Self::note_auto_applied`], and like them it writes exactly one thing:
-    /// `revision`, and only on an `Open` entry. `count`, `suppressed`, `state`,
-    /// `opened_at` and telemetry are untouched. Returns `false`, changing
-    /// nothing, for an unknown id or a `Resolved` entry.
+    /// `revision`, and only on an entry that is still outstanding — `Open` or
+    /// `Investigating`, through [`IncidentState::is_open`], so IN1 §5.2
+    /// rule 10's conflict refresh keeps working for an investigated incident
+    /// (IN2 §3.6 site 5). `count`, `suppressed`, `state`, `opened_at` and
+    /// telemetry are untouched. Returns `false`, changing nothing, for an
+    /// unknown id or a `Resolved` entry.
     ///
     /// It exists because [`Self::observe`] cannot do this job. IN1 §5.2 rule 10
     /// says a stale router auto-apply that core refuses on the revision leaves
@@ -2577,11 +3041,123 @@ impl IncidentLog {
         let Some(incident) = self.entries.iter_mut().find(|incident| incident.id == id) else {
             return false;
         };
-        if incident.state != IncidentState::Open {
+        if !incident.state.is_open() {
             return false;
         }
         incident.revision = revision;
         true
+    }
+
+    /// Mark an incident as being investigated.
+    ///
+    /// The fourth narrowly typed writer, in the shape of
+    /// [`Self::note_auto_applied`] and [`Self::refresh_revision`]: it writes
+    /// `state = IncidentState::Investigating` and **only** on an `Open` entry,
+    /// returning `false` and changing nothing otherwise. A session that fails
+    /// to begin because the incident is no longer `Open` never starts
+    /// (IN2 §3.6 rule 35, §3.7 rules 41–42).
+    ///
+    /// **It writes one more thing, and erratum A-R7 is why.** An incident that
+    /// was investigated, returned to `Open` by [`Self::end_investigation`] and
+    /// is now being re-investigated still carries the previous session's
+    /// proposal, proved on a branch seeded at an older live revision. Leaving
+    /// it as it was would let the card offer **Approve** on a
+    /// `base_revision` two sessions old, which IN1 §5.3 rule 29 forbids — a
+    /// button that cannot honestly succeed. So `begin_investigation` sets
+    /// `proposal.stale = true` on any proposal it finds: a new session makes a
+    /// new proposal, and until it does the card offers **Re-investigate**
+    /// (IN2 §4.3 rule 15). It does **not** clear `telemetry.resolver`, which is
+    /// the previous session's history and the only record of why it stopped;
+    /// the card gates §3.7 rule 39's *"stopped"* row on `state == Open`
+    /// instead. `suppressed`, `count`, `opened_at` and `revision` are untouched.
+    pub fn begin_investigation(&mut self, id: IncidentId) -> bool {
+        let Some(incident) = self.entries.iter_mut().find(|incident| incident.id == id) else {
+            return false;
+        };
+        if incident.state != IncidentState::Open {
+            return false;
+        }
+        incident.state = IncidentState::Investigating;
+        if let Some(proposal) = incident.proposal.as_mut() {
+            proposal.stale = true;
+        }
+        true
+    }
+
+    /// Return an investigated incident to [`IncidentState::Open`] and record
+    /// why the session stopped.
+    ///
+    /// **This is the writer that suppresses nothing.** Six of the seven ends a
+    /// session can have are not outcomes — a budget, the off switch, a policy
+    /// violation, a disconnect, a harness failure, a hand resolution elsewhere
+    /// — so they must not reach [`Self::resolve`], which inserts into
+    /// `suppressed` for **every** outcome (IN1 §2.3 rule 19, unamended). An
+    /// end that silenced the problem it was investigating is the regression
+    /// IN2 §3.7 rule 38 exists to prevent.
+    ///
+    /// Writes `state = IncidentState::Open` and `stopped_reason` onto
+    /// `telemetry.resolver`, and **only** on an `Investigating` entry
+    /// (IN2 §0.4 p, §3.6 rule 35). `suppressed` is untouched.
+    pub fn end_investigation(&mut self, id: IncidentId, stopped_reason: IncidentResolver) -> bool {
+        let Some(incident) = self.entries.iter_mut().find(|incident| incident.id == id) else {
+            return false;
+        };
+        if incident.state != IncidentState::Investigating {
+            return false;
+        }
+        incident.state = IncidentState::Open;
+        incident.telemetry.resolver = Some(stopped_reason);
+        true
+    }
+
+    /// Record one session's proposal against the incident it is for.
+    ///
+    /// The sixth narrowly typed writer: it writes `proposal` and **only** on an
+    /// `Investigating` entry that does not already carry a live one. It does
+    /// not resolve the incident and it does not change its state — the **app**
+    /// applies a proposal and the **app** records every outcome
+    /// (IN2 §4.1 rules 4, 7).
+    ///
+    /// **What this writer does not check**, because IN2 §4.1 splits the six
+    /// refusals between core and the `propose_fix` handler: the
+    /// `INVESTIGATOR_MAX_PROPOSAL_OPERATIONS` cap (§4.1 rule 6 code 4), the
+    /// empty-proposal refusal (code 3) and the destructive-operation check
+    /// (code 5, §6 rule 3) are all the handler's, run over the branch's applied
+    /// list **before** anything is recorded. Core's backstop is the
+    /// already-recorded refusal (code 6), because only the log knows what it is
+    /// already holding; the handler maps [`RecordProposalError`] onto its own
+    /// `incident_not_found`, `incident_not_investigating` and
+    /// `proposal_already_recorded` codes (erratum A-R7).
+    ///
+    /// A **stale** proposal is not a live one: [`Self::begin_investigation`]
+    /// marks the previous session's proposal stale, so a re-investigation's
+    /// `propose_fix` replaces it rather than being refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecordProposalError`] for an unknown id, a non-`Investigating`
+    /// entry, or an entry already carrying a non-stale proposal. Nothing is
+    /// written in any of the three cases.
+    pub fn record_proposal(
+        &mut self,
+        id: IncidentId,
+        proposal: IncidentProposal,
+    ) -> Result<(), RecordProposalError> {
+        let Some(incident) = self.entries.iter_mut().find(|incident| incident.id == id) else {
+            return Err(RecordProposalError::NotFound);
+        };
+        if incident.state != IncidentState::Investigating {
+            return Err(RecordProposalError::NotInvestigating);
+        }
+        if incident
+            .proposal
+            .as_ref()
+            .is_some_and(|existing| !existing.stale)
+        {
+            return Err(RecordProposalError::AlreadyRecorded);
+        }
+        incident.proposal = Some(proposal);
+        Ok(())
     }
 
     /// How many incidents are still outstanding.
@@ -2611,8 +3187,9 @@ impl IncidentLog {
 mod tests {
     use super::*;
     use crate::{
-        BinId, ColorSourceProfile, Document, MediaAsset, MediaKind, MediaSourceFingerprint,
-        Rational, SourceColorRefusal, TimeCode, classify_source_with_assumption,
+        BinId, ColorSourceProfile, Document, InvestigatorPreferences, MediaAsset, MediaKind,
+        MediaSourceFingerprint, Rational, SourceColorRefusal, TimeCode,
+        classify_source_with_assumption,
     };
 
     /// `in1_untagged.mp4`'s pinned probed tuple (IN1 §3 rule 5 row 1).
@@ -4182,12 +4759,23 @@ mod tests {
         );
     }
 
-    /// **[probe-2c]**, measured against the implementation rather than a
-    /// prototype: the worst serialised incident over the **67** declared codes
-    /// times the **eight** subject variants of `IN1b` §3.3 rule 17 as amended
-    /// by erratum `IN1b`-A-R13 — 536 pairs.
+    /// The worst serialised incident over IN2 §4.2 rule 11's product, measured
+    /// against the implementation rather than a prototype: the **67** declared
+    /// codes times the **eight** subject variants of `IN1b` §3.3 rule 17 as
+    /// amended by erratum `IN1b`-A-R13, times **two probes**, times
+    /// {no proposal, a proposal at the cap}, times {open, investigating,
+    /// resolved with all telemetry, resolved without the two new fields} —
+    /// **8 576** shapes.
     ///
-    /// The inputs are probe-2b T2's: the longest rendered `OpError` and
+    /// The probe is an axis because the recoveries array is part of the wire
+    /// body and IN2 §7 rule 1 put a **second** action on three of the sixty-
+    /// seven rows. A Rec.709-incompatible probe demotes every predicated row to
+    /// `Explain` and builds no operation at all, so a loop with that probe
+    /// alone cannot see the one thing this slice changed about the record
+    /// (IN2 erratum A-R9). The loop therefore measures both, and asserts a
+    /// positive count of shapes that carried a `RecoveryKind::Operation`.
+    ///
+    /// The other inputs are probe-2b T2's: the longest rendered `OpError` and
     /// `MediaError` templates on `HEAD` with saturated ids, a seventy-byte
     /// `allowed`, saturated revision and count, and the row's own written body.
     /// The figure is a measurement over chosen realistic inputs and not a proof
@@ -4197,51 +4785,183 @@ mod tests {
     ///
     /// `crates/kinewright-agent/src/server.rs`'s
     /// `IN1_INCIDENT_SERIALIZED_CEILING_BYTES` is the constant this number
-    /// sets, and implementer D moves it from 1 024 to 2 048 with the
-    /// 67 x 7 loop of `IN1b` §9 clause 16.
+    /// sets, and implementer **D moves it from 2 048 to 4 096** with a twin of
+    /// the loop below, whose probe axis it needs too (IN2 §4.2 rule 11).
     #[test]
-    fn in1b_every_code_fits_the_measured_ceiling_on_every_subject_shape() {
+    fn in2_every_code_fits_the_re_measured_ceiling_on_every_subject_shape() {
+        // The core twin of `in1b_every_code_fits_the_measured_ceiling`, grown
+        // over IN2 §4.2 rule 11's product: 67 codes x 8 subject shapes x
+        // 2 probes x {no proposal, a proposal at the cap} x {open,
+        // investigating, resolved with all telemetry, resolved without the two
+        // new fields}.
+        //
+        // **The pin is the loop, not a remembered number** (IN2 probe-2
+        // disagreement 4): nothing below asserts an intermediate byte figure.
+        // `IN1_INCIDENT_SERIALIZED_CEILING_BYTES` itself lives on the agent
+        // crate's `KinewrightMcp` (IN2 §14 row D); this literal is its twin and
+        // moves with it, 2 048 -> 4 096.
+        const CEILING: usize = 4_096;
+
         let mut worst = 0_usize;
-        let mut worst_pair = String::new();
+        let mut worst_shape = String::new();
+        let mut with_operation_worst = 0_usize;
+        let mut with_operation_shape = String::new();
+        let mut with_operation = 0_usize;
         let mut measured = 0_usize;
         for code in EVERY_INCIDENT_CODE {
             for subject in every_subject_shape() {
-                let mut log = IncidentLog::with_start(Instant::now());
-                let Observed::Opened(id) = log.observe(worst_observation(code, subject)) else {
-                    panic!("a fresh log must open {}", code.code());
-                };
-                let incident = log.get(id).unwrap().clone();
-                let mut widest = incident;
-                widest.id = IncidentId(u64::MAX);
-                widest.count = u32::MAX;
-                let bytes = serde_json::to_vec(&widest).unwrap().len();
-                measured += 1;
-                if bytes > worst {
-                    worst = bytes;
-                    worst_pair = format!("{} / {:?}", code.code(), subject);
+                for probed in [worst_probe(), rec709_compatible_worst_probe()] {
+                    let mut log = IncidentLog::with_start(Instant::now());
+                    let Observed::Opened(id) =
+                        log.observe(worst_observation(code, subject, &probed))
+                    else {
+                        panic!("a fresh log must open {}", code.code());
+                    };
+                    let opened = log.get(id).unwrap().clone();
+                    let carries_operation = opened
+                        .recoveries
+                        .iter()
+                        .any(|action| matches!(action.kind, RecoveryKind::Operation(_)));
+                    for proposal in [None, Some(widest_proposal())] {
+                        for (shape, state, telemetry) in [
+                            ("open", IncidentState::Open, IncidentTelemetry::default()),
+                            (
+                                "investigating",
+                                IncidentState::Investigating,
+                                IncidentTelemetry::default(),
+                            ),
+                            (
+                                "resolved+turns+resolver",
+                                IncidentState::Resolved(IncidentOutcome::Explained),
+                                widest_telemetry(true),
+                            ),
+                            (
+                                "resolved",
+                                IncidentState::Resolved(IncidentOutcome::Explained),
+                                widest_telemetry(false),
+                            ),
+                        ] {
+                            let mut widest = opened.clone();
+                            widest.id = IncidentId(u64::MAX);
+                            widest.count = u32::MAX;
+                            widest.state = state;
+                            widest.telemetry = telemetry;
+                            widest.proposal = proposal.clone();
+                            let bytes = serde_json::to_vec(&widest).unwrap().len();
+                            measured += 1;
+                            let label = format!(
+                                "{} / {subject:?} / {shape} / recoveries={} / proposal={}",
+                                code.code(),
+                                widest.recoveries.len(),
+                                proposal.is_some()
+                            );
+                            if bytes > worst {
+                                worst = bytes;
+                                worst_shape = label.clone();
+                            }
+                            if carries_operation {
+                                with_operation += 1;
+                                if bytes > with_operation_worst {
+                                    with_operation_worst = bytes;
+                                    with_operation_shape = label;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-        println!("IN1B_PROBE2C measured={measured} worst={worst} pair={worst_pair}");
-        assert_eq!(measured, 67 * 8);
+        println!("IN2_CEILING measured={measured} worst={worst} shape={worst_shape}");
+        println!(
+            "IN2_CEILING with_operation={with_operation} worst={with_operation_worst} shape={with_operation_shape}"
+        );
+        assert_eq!(
+            measured,
+            67 * 8 * 2 * 2 * 4,
+            "IN2 §4.2 rule 11's shapes, with the probe axis erratum A-R9 adds"
+        );
+        // The one thing IN2 changes about the wire body's `recoveries` array is
+        // §7 rule 1's second action, and a loop that never builds an operation
+        // cannot see it (erratum A-R9).
         assert!(
-            worst <= 2_048,
-            "the measured worst {worst} exceeds the declared ceiling ({worst_pair})"
+            with_operation > 0,
+            "the population must include shapes whose recoveries carry an Operation"
         );
         assert!(
-            worst > 2_048 / 2,
+            with_operation_worst <= CEILING,
+            "the worst shape carrying an Operation ({with_operation_worst}) exceeds the ceiling ({with_operation_shape})"
+        );
+        assert!(
+            worst <= CEILING,
+            "the measured worst {worst} exceeds the declared ceiling ({worst_shape})"
+        );
+        assert!(
+            worst > CEILING / 2,
             "a ceiling more than twice the measured worst {worst} is not a measurement"
         );
     }
 
+    /// A proposal at `INVESTIGATOR_MAX_PROPOSAL_OPERATIONS` with both strings
+    /// at the 240 B serialised cap and a saturated `base_revision`. The
+    /// operations are `#[serde(skip)]` and therefore cost nothing on the wire,
+    /// which is the whole point of IN2 §4.2 rule 8.
+    fn widest_proposal() -> IncidentProposal {
+        let filler = "a".repeat(INVESTIGATOR_EXPLANATION_CEILING_BYTES);
+        assert_eq!(
+            json_escaped_len(&filler),
+            INVESTIGATOR_EXPLANATION_CEILING_BYTES
+        );
+        IncidentProposal {
+            operations: vec![
+                Operation::DeleteClip {
+                    clip: ClipId(u64::MAX)
+                };
+                INVESTIGATOR_MAX_PROPOSAL_OPERATIONS
+            ],
+            operation_count: INVESTIGATOR_MAX_PROPOSAL_OPERATIONS,
+            summary: filler.clone(),
+            explanation: filler,
+            base_revision: TimelineRevision(u64::MAX),
+            stale: true,
+        }
+    }
+
+    /// Every telemetry field filled at its widest. `turns` and `resolver` are
+    /// the two IN2 adds; the `false` arm is the pre-IN2 shape, so the loop
+    /// measures both columns. The resolver's three strings are the widest
+    /// **real** ones: a harness id, a model id and IN2 §3.7 rule 38's longest
+    /// stop sentence.
+    fn widest_telemetry(with_session: bool) -> IncidentTelemetry {
+        IncidentTelemetry {
+            resolved_after: Some(Duration::MAX),
+            tool_calls: u32::MAX,
+            input_tokens: Some(u64::MAX),
+            cached_input_tokens: Some(u64::MAX),
+            cache_creation_input_tokens: Some(u64::MAX),
+            output_tokens: Some(u64::MAX),
+            reasoning_output_tokens: Some(u64::MAX),
+            cost_usd_millionths: Some(i64::MIN),
+            turns: with_session.then_some(u32::MAX),
+            resolver: with_session.then(|| IncidentResolver::Session {
+                harness: "claude-code".to_owned(),
+                model: Some("claude-opus-4-1-20250805".to_owned()),
+                stop: "the session asked for a confirmation".to_owned(),
+            }),
+        }
+    }
+
     /// probe-2b T2's worst-case inputs, rebuilt against the real types.
-    fn worst_observation(code: IncidentCode, subject: IncidentSubject) -> IncidentObservation {
+    fn worst_observation(
+        code: IncidentCode,
+        subject: IncidentSubject,
+        probed: &ColorDescription,
+    ) -> IncidentObservation {
         IncidentObservation {
             code,
             subject,
             observed: worst_observed(code),
             allowed: Some("a".repeat(70)),
-            evidence: worst_evidence(code),
+            evidence: worst_evidence(code, probed),
             revision: TimelineRevision(u64::MAX),
         }
     }
@@ -4287,6 +5007,27 @@ mod tests {
         }
     }
 
+    /// The widest **Rec.709-compatible** probe, so the loop measures the rows
+    /// whose recoveries carry a `RecoveryKind::Operation` — the three
+    /// `AutoApply` rows and IN2 §7 rows 1-3, which are the only rows on which
+    /// this slice changed the `recoveries` array (erratum A-R9).
+    ///
+    /// `worst_probe`'s `ColorRange::Other(_)` is refused by `rec709_compatible`
+    /// (`incident.rs:2370-2391`), which admits `range` only in
+    /// `Unknown | Limited | Full`, so that probe builds no operation at all.
+    fn rec709_compatible_worst_probe() -> ColorDescription {
+        ColorDescription {
+            primaries: ColorPrimaries::Unknown,
+            transfer: ColorTransfer::Unknown,
+            matrix: ColorMatrix::Unknown,
+            range: ColorRange::Limited,
+            white_point: ColorWhitePoint::Unknown,
+            bit_depth: ColorBitDepth::Sixteen,
+            confidence_basis_points: u16::MAX,
+            provenance: ColorProvenance::Other("stream_metadata_container".to_owned()),
+        }
+    }
+
     fn worst_relink_reason() -> String {
         format!(
             "Cannot relink asset {}: source fingerprint mismatch (expected sha256:{}…, candidate sha256:{}…)",
@@ -4299,10 +5040,10 @@ mod tests {
     const WORST_SOURCE_EDIT_REASON: &str =
         "Source verification did not confirm the original online source; no edit was applied";
 
-    fn worst_evidence(code: IncidentCode) -> IncidentEvidence {
+    fn worst_evidence(code: IncidentCode, probed: &ColorDescription) -> IncidentEvidence {
         match code {
             IncidentCode::SourceColor(_) => IncidentEvidence::SourceColor {
-                probed: worst_probe(),
+                probed: probed.clone(),
                 assumption: Some(ColorSourceProfileAssumption::D65),
             },
             IncidentCode::Media(_)
@@ -4445,4 +5186,938 @@ mod tests {
         r#""bit_depth":8,"confidence_basis_points":10000,"provenance":"agent_assumption"}}}}}],"#,
         r#""revision":1,"count":2,"state":"open","telemetry":{"tool_calls":0}}"#,
     );
+
+    // ---------------------------------------------------------------------
+    // IN2 §9.1, core items 1-12.
+    // ---------------------------------------------------------------------
+
+    /// IN2 §7 rule 4's sixteen, with its `buildable?` column. The tests below
+    /// read this column rather than a literal, so the count of buildable rows
+    /// is whatever the table says and is never written twice (N2.5/B8).
+    const DETERMINISTIC_SIXTEEN: [(IncidentCode, bool); 16] = [
+        (
+            IncidentCode::SourceColor(SourceColorIncident::UnknownRange),
+            true,
+        ),
+        (
+            IncidentCode::SourceColor(SourceColorIncident::UnknownBitDepth),
+            true,
+        ),
+        (
+            IncidentCode::SourceColor(SourceColorIncident::UnknownWhitePoint),
+            true,
+        ),
+        (
+            IncidentCode::SourceColor(SourceColorIncident::UnsupportedPrimaries),
+            false,
+        ),
+        (
+            IncidentCode::SourceColor(SourceColorIncident::UnsupportedTransfer),
+            false,
+        ),
+        (
+            IncidentCode::SourceColor(SourceColorIncident::UnsupportedMatrix),
+            false,
+        ),
+        (
+            IncidentCode::SourceColor(SourceColorIncident::UnsupportedRange),
+            false,
+        ),
+        (
+            IncidentCode::SourceColor(SourceColorIncident::UnsupportedWhitePoint),
+            false,
+        ),
+        (
+            IncidentCode::SourceColor(SourceColorIncident::UnsupportedBitDepth),
+            false,
+        ),
+        (
+            IncidentCode::SourceColor(SourceColorIncident::UnsupportedCombination),
+            false,
+        ),
+        (
+            IncidentCode::DeliveryColor(DeliveryColorIncident::UnsupportedCodec),
+            false,
+        ),
+        (
+            IncidentCode::DeliveryColor(DeliveryColorIncident::UnsupportedField),
+            false,
+        ),
+        (
+            IncidentCode::DeliveryColor(DeliveryColorIncident::PixelFormatDepthMismatch),
+            false,
+        ),
+        (
+            IncidentCode::DeliveryColor(DeliveryColorIncident::EncoderPixelFormatUnavailable),
+            false,
+        ),
+        (
+            IncidentCode::ColorQc(ColorQcIncident::NodeBudgetExceeded),
+            false,
+        ),
+        (
+            IncidentCode::DeliveryVerification(DeliveryVerificationIncident::FrameCountOutOfRange),
+            false,
+        ),
+    ];
+
+    /// An all-`Unknown` probe: what an `unknown_source_*` row carries, and the
+    /// shape `rec709_compatible` admits.
+    fn all_unknown_probe() -> ColorDescription {
+        ColorDescription {
+            primaries: ColorPrimaries::Unknown,
+            transfer: ColorTransfer::Unknown,
+            matrix: ColorMatrix::Unknown,
+            range: ColorRange::Unknown,
+            white_point: ColorWhitePoint::Unknown,
+            bit_depth: ColorBitDepth::Unknown,
+            confidence_basis_points: 0,
+            provenance: ColorProvenance::Inferred,
+        }
+    }
+
+    fn source_color_evidence(probed: &ColorDescription) -> IncidentEvidence {
+        IncidentEvidence::SourceColor {
+            probed: probed.clone(),
+            assumption: None,
+        }
+    }
+
+    /// Every evidence shape IN2 §7 can build an operation from, plus the two
+    /// that carry nothing typed at all.
+    fn buildable_evidence_shapes() -> Vec<IncidentEvidence> {
+        vec![
+            source_color_evidence(&all_unknown_probe()),
+            source_color_evidence(&untagged_mp4_probe()),
+            source_color_evidence(&untagged_webm_probe()),
+            source_color_evidence(&{
+                let mut probed = all_unknown_probe();
+                probed.primaries = ColorPrimaries::Bt2020;
+                probed
+            }),
+            IncidentEvidence::Plain,
+        ]
+    }
+
+    /// IN2 §9.1 item 1, §9.2 clause 1.
+    #[test]
+    fn in2_the_allowlist_is_fifty_four_explain_codes_that_are_policy_rows_fourteen_to_sixty_seven()
+    {
+        assert_eq!(INVESTIGATOR_ALLOWLIST.len(), 54);
+
+        let mut seen = BTreeSet::new();
+        for code in INVESTIGATOR_ALLOWLIST {
+            assert!(seen.insert(code), "{} is listed twice", code.code());
+        }
+        assert_eq!(seen.len(), 54);
+
+        for code in INVESTIGATOR_ALLOWLIST {
+            let entry = policy_entry(code);
+            assert_eq!(
+                entry.class,
+                PolicyClass::Explain,
+                "{} is not an Explain row",
+                code.code()
+            );
+            assert_eq!(
+                entry.predicate,
+                PolicyPredicate::Always,
+                "{} is predicated",
+                code.code()
+            );
+        }
+
+        let auto_apply: Vec<IncidentCode> = POLICY
+            .iter()
+            .filter(|entry| entry.class == PolicyClass::AutoApply)
+            .map(|entry| entry.code)
+            .collect();
+        assert_eq!(auto_apply.len(), 3);
+        for code in &auto_apply {
+            assert!(
+                !INVESTIGATOR_ALLOWLIST.contains(code),
+                "the router owns {}",
+                code.code()
+            );
+        }
+
+        // Rows 14-67, contiguous.
+        let rows: Vec<IncidentCode> = POLICY[13..67].iter().map(|entry| entry.code).collect();
+        assert_eq!(INVESTIGATOR_ALLOWLIST.to_vec(), rows);
+
+        // No member yields an `Operation` recovery under any evidence IN2 §7
+        // can build one from.
+        let mut checked = 0_usize;
+        for code in INVESTIGATOR_ALLOWLIST {
+            for subject in every_subject_shape() {
+                for evidence in buildable_evidence_shapes() {
+                    assert!(
+                        deterministic_recovery(code, subject, &evidence).is_none(),
+                        "{} must have no button",
+                        code.code()
+                    );
+                    assert!(
+                        !policy_recovery(code, subject, &evidence)
+                            .iter()
+                            .any(|action| matches!(action.kind, RecoveryKind::Operation(_))),
+                        "{} must have no button",
+                        code.code()
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 54 * 8 * 5);
+
+        // The converse, read from IN2 §7 rule 4's own column: every row the
+        // table marks `yes` yields one, and they are exactly the `Explain`
+        // codes that do.
+        let expected_buildable: BTreeSet<IncidentCode> = DETERMINISTIC_SIXTEEN
+            .iter()
+            .filter(|(_, buildable)| *buildable)
+            .map(|(code, _)| *code)
+            .collect();
+        assert!(!expected_buildable.is_empty());
+
+        let mut measured_buildable = BTreeSet::new();
+        for code in EVERY_INCIDENT_CODE {
+            if policy_entry(code).class != PolicyClass::Explain {
+                continue;
+            }
+            for evidence in buildable_evidence_shapes() {
+                if policy_recovery(code, IncidentSubject::Asset(AssetId(1)), &evidence)
+                    .iter()
+                    .any(|action| matches!(action.kind, RecoveryKind::Operation(_)))
+                {
+                    measured_buildable.insert(code);
+                }
+            }
+        }
+        assert_eq!(measured_buildable, expected_buildable);
+    }
+
+    /// IN2 §9.1 item 2, §9.2 clause 6 — the four behaviours core owns. The
+    /// remaining two, `incident_panel_rows` and the Media panel's filter, plus
+    /// `card_actions`' revert guard, live in `kinewright-app` and are asserted
+    /// by that crate's own tests (IN2 §3.6 rule 33 sites 1, 6, 7, 8).
+    #[test]
+    fn in2_investigating_counts_as_open_at_every_site() {
+        assert!(IncidentState::Open.is_open());
+        assert!(IncidentState::Investigating.is_open());
+        for outcome in [
+            IncidentOutcome::Applied,
+            IncidentOutcome::Reverted,
+            IncidentOutcome::Explained,
+            IncidentOutcome::Rejected,
+        ] {
+            assert!(!IncidentState::Resolved(outcome).is_open());
+        }
+
+        let probed = untagged_mp4_probe();
+        let mut log = IncidentLog::with_start(Instant::now());
+        let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+            panic!("the first observation must open an incident");
+        };
+        assert!(log.begin_investigation(id));
+        assert_eq!(log.get(id).unwrap().state, IncidentState::Investigating);
+
+        // Site 3: still in the default listing. Site 4: the badge does not fall.
+        assert_eq!(log.open().count(), 1);
+        assert_eq!(log.open_count(), 1);
+
+        // Site 2: a repeat observation dedups rather than opening a second
+        // incident about the same problem.
+        assert_eq!(
+            log.observe(unknown_primaries_observation(&probed)),
+            Observed::Deduped(id)
+        );
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.get(id).unwrap().count, 2);
+
+        // Site 5: IN1 §5.2 rule 10's conflict refresh keeps working.
+        assert!(log.refresh_revision(id, TimelineRevision(9)));
+        assert_eq!(log.get(id).unwrap().revision, TimelineRevision(9));
+        assert_eq!(log.get(id).unwrap().state, IncidentState::Investigating);
+    }
+
+    /// IN2 §9.1 item 3, §3.6 rule 35.
+    #[test]
+    fn in2_begin_investigation_writes_one_field_and_only_on_an_open_entry() {
+        let probed = untagged_mp4_probe();
+        let mut log = IncidentLog::with_start(Instant::now());
+        let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+            panic!("the first observation must open an incident");
+        };
+        let before = log.get(id).unwrap().clone();
+
+        assert!(log.begin_investigation(id));
+        let after = log.get(id).unwrap().clone();
+        assert_eq!(after.state, IncidentState::Investigating);
+        // The second field erratum A-R7 adds only exists when a previous
+        // session left a proposal behind; there is none here.
+        assert!(after.proposal.is_none());
+        assert_eq!(after.count, before.count);
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.opened_at, before.opened_at);
+        assert_eq!(after.telemetry, before.telemetry);
+        assert!(after.proposal.is_none());
+        assert_eq!(
+            log.observe(unknown_primaries_observation(&probed)),
+            Observed::Deduped(id),
+            "`begin_investigation` must not touch `suppressed`"
+        );
+
+        // Already investigating.
+        assert!(!log.begin_investigation(id));
+        // Unknown id.
+        assert!(!log.begin_investigation(IncidentId(9_999)));
+
+        let mut refused = 0_usize;
+        for outcome in [
+            IncidentOutcome::Applied,
+            IncidentOutcome::Reverted,
+            IncidentOutcome::Explained,
+            IncidentOutcome::Rejected,
+        ] {
+            let mut log = IncidentLog::with_start(Instant::now());
+            let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+                panic!("the first observation must open an incident");
+            };
+            assert!(log.resolve(id, outcome));
+            assert!(!log.begin_investigation(id));
+            assert_eq!(log.get(id).unwrap().state, IncidentState::Resolved(outcome));
+            refused += 1;
+        }
+        assert_eq!(refused, 4);
+    }
+
+    /// IN2 §9.1 item 4, §9.2 clause 8 — N2.5/B3's rule, and the one that fails
+    /// hardest at `7e85972`, because neither the state nor the writer exists.
+    #[test]
+    fn in2_end_investigation_returns_the_incident_to_open_and_suppresses_nothing() {
+        let probed = untagged_mp4_probe();
+        let stops = [
+            "budget: turns",
+            "budget: wall time",
+            "budget: tokens",
+            "the investigator was switched off",
+            "the session asked for a confirmation",
+            "the agent event stream disconnected",
+        ];
+        let mut ended = 0_usize;
+        for stop in stops {
+            let mut log = IncidentLog::with_start(Instant::now());
+            let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+                panic!("the first observation must open an incident");
+            };
+            assert!(log.begin_investigation(id));
+            assert!(log.end_investigation(
+                id,
+                IncidentResolver::Session {
+                    harness: "scripted".to_owned(),
+                    model: None,
+                    stop: stop.to_owned(),
+                },
+            ));
+
+            let incident = log.get(id).unwrap();
+            assert_eq!(incident.state, IncidentState::Open);
+            assert!(matches!(
+                incident.telemetry.resolver,
+                Some(IncidentResolver::Session { stop: ref written, .. })
+                    if written == stop
+            ));
+            assert_eq!(log.open_count(), 1);
+
+            // Nothing was suppressed: the next observation of the same
+            // `(code, subject)` dedups into the same incident.
+            assert_eq!(
+                log.observe(unknown_primaries_observation(&probed)),
+                Observed::Deduped(id)
+            );
+            assert_eq!(log.len(), 1);
+            ended += 1;
+        }
+        assert_eq!(ended, stops.len());
+
+        // Only on an `Investigating` entry.
+        let mut log = IncidentLog::with_start(Instant::now());
+        let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+            panic!("the first observation must open an incident");
+        };
+        assert!(!log.end_investigation(
+            id,
+            IncidentResolver::Session {
+                harness: "scripted".to_owned(),
+                model: None,
+                stop: "budget: turns".to_owned(),
+            },
+        ));
+        assert!(log.get(id).unwrap().telemetry.resolver.is_none());
+        assert!(!log.end_investigation(IncidentId(9_999), IncidentResolver::Person));
+    }
+
+    /// IN2 §9.1 item 5, §4.5 rule 22: the one end that resolves.
+    #[test]
+    fn in2_an_explicit_reject_resolves_and_suppresses() {
+        let probed = untagged_mp4_probe();
+        let mut log = IncidentLog::with_start(Instant::now());
+        let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+            panic!("the first observation must open an incident");
+        };
+        assert!(log.begin_investigation(id));
+        assert!(log.resolve(id, IncidentOutcome::Rejected));
+
+        let incident = log.get(id).unwrap();
+        assert_eq!(
+            incident.state,
+            IncidentState::Resolved(IncidentOutcome::Rejected)
+        );
+        assert!(incident.telemetry.resolved_after.is_some());
+        assert_eq!(log.open_count(), 0);
+        assert_eq!(
+            log.observe(unknown_primaries_observation(&probed)),
+            Observed::Suppressed,
+            "IN1 §2.3 rule 19 is unamended: `resolve` inserts for every outcome"
+        );
+        assert_eq!(log.len(), 1);
+    }
+
+    /// IN2 §9.1 item 6, §9.2 clause 4, §7 rules 1 and 7. The card half —
+    /// `card_actions`' first action being `enabled` — is asserted by
+    /// `kinewright-app`, which owns `card_actions`.
+    #[test]
+    fn in2_the_three_deterministic_rows_offer_a_button_and_the_sentence() {
+        let buildable: Vec<IncidentCode> = DETERMINISTIC_SIXTEEN
+            .iter()
+            .filter(|(_, is_buildable)| *is_buildable)
+            .map(|(code, _)| *code)
+            .collect();
+        assert!(!buildable.is_empty());
+
+        let probed = all_unknown_probe();
+        assert!(rec709_compatible(&probed));
+        let evidence = source_color_evidence(&probed);
+        let subject = IncidentSubject::Asset(AssetId(4));
+
+        for code in buildable {
+            let actions = policy_recovery(code, subject, &evidence);
+            assert_eq!(actions.len(), 2, "{} must offer two actions", code.code());
+            assert_eq!(
+                actions[0].kind,
+                RecoveryKind::Operation(assume_rec709_operation(AssetId(4), &probed)),
+                "{}'s first action is the button",
+                code.code()
+            );
+            assert_eq!(actions[0].label, ASSUME_REC709_LABEL);
+            assert_eq!(
+                actions[1].kind,
+                RecoveryKind::Explain(explain_body(code)),
+                "{}'s second action is still the sentence",
+                code.code()
+            );
+            assert_eq!(actions[1].label, EXPLAIN_LABEL);
+
+            // The no-harness fallback is the same value, by construction: the
+            // incident stores exactly what `policy_recovery` returned.
+            let mut log = IncidentLog::with_start(Instant::now());
+            let Observed::Opened(id) = log.observe(IncidentObservation {
+                code,
+                subject,
+                observed: "unknown".to_owned(),
+                allowed: None,
+                evidence: evidence.clone(),
+                revision: TimelineRevision(1),
+            }) else {
+                panic!("a fresh log must open {}", code.code());
+            };
+            assert_eq!(log.get(id).unwrap().recoveries, actions);
+        }
+    }
+
+    /// IN2 §9.1 item 7, §7 rule 5 — the predicate **and** the reachability.
+    #[test]
+    fn in2_an_unsupported_colour_row_still_offers_only_its_sentence() {
+        let reached: [(IncidentCode, ColorDescription); 7] = [
+            (
+                IncidentCode::SourceColor(SourceColorIncident::UnsupportedPrimaries),
+                ColorDescription {
+                    primaries: ColorPrimaries::Bt2020,
+                    ..all_unknown_probe()
+                },
+            ),
+            (
+                IncidentCode::SourceColor(SourceColorIncident::UnsupportedTransfer),
+                ColorDescription {
+                    transfer: ColorTransfer::Smpte2084,
+                    ..all_unknown_probe()
+                },
+            ),
+            (
+                IncidentCode::SourceColor(SourceColorIncident::UnsupportedMatrix),
+                ColorDescription {
+                    matrix: ColorMatrix::Bt2020Ncl,
+                    ..all_unknown_probe()
+                },
+            ),
+            (
+                IncidentCode::SourceColor(SourceColorIncident::UnsupportedRange),
+                ColorDescription {
+                    range: ColorRange::Other("weird".to_owned()),
+                    ..all_unknown_probe()
+                },
+            ),
+            (
+                IncidentCode::SourceColor(SourceColorIncident::UnsupportedWhitePoint),
+                ColorDescription {
+                    white_point: ColorWhitePoint::D50,
+                    ..all_unknown_probe()
+                },
+            ),
+            (
+                IncidentCode::SourceColor(SourceColorIncident::UnsupportedBitDepth),
+                ColorDescription {
+                    bit_depth: ColorBitDepth::Float32,
+                    ..all_unknown_probe()
+                },
+            ),
+            (
+                IncidentCode::SourceColor(SourceColorIncident::UnsupportedCombination),
+                ColorDescription {
+                    primaries: ColorPrimaries::Bt709,
+                    transfer: ColorTransfer::Srgb,
+                    matrix: ColorMatrix::Bt709,
+                    range: ColorRange::Limited,
+                    ..all_unknown_probe()
+                },
+            ),
+        ];
+
+        // Half two of rule 5: the predicate alone does **not** do it — it is
+        // `true` for an all-`Unknown` probe on these very codes.
+        let all_unknown = all_unknown_probe();
+        assert!(rec709_compatible(&all_unknown));
+
+        let mut checked = 0_usize;
+        for (code, probed) in reached {
+            assert!(
+                !rec709_compatible(&probed),
+                "{} is only reached with a known non-Rec.709 value",
+                code.code()
+            );
+            let evidence = source_color_evidence(&probed);
+            let actions = policy_recovery(code, IncidentSubject::Asset(AssetId(1)), &evidence);
+            assert_eq!(actions.len(), 1, "{} offers only its sentence", code.code());
+            assert_eq!(actions[0].kind, RecoveryKind::Explain(explain_body(code)));
+            assert!(
+                deterministic_recovery(code, IncidentSubject::Asset(AssetId(1)), &evidence)
+                    .is_none()
+            );
+            // And not even with the admitted probe: the row has no builder.
+            assert!(
+                deterministic_recovery(
+                    code,
+                    IncidentSubject::Asset(AssetId(1)),
+                    &source_color_evidence(&all_unknown),
+                )
+                .is_none()
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 7);
+    }
+
+    /// IN2 §9.1 item 8, §7 rule 6 — each of rows 11-16 through its **real**
+    /// producer, so the test pins the producer and not a hand-built value.
+    #[test]
+    fn in2_the_six_delivery_and_clamp_rows_carry_no_typed_evidence() {
+        let cases: Vec<(&str, MediaError)> = vec![
+            (
+                "unsupported_delivery_codec",
+                MediaError::DeliveryColor(DeliveryColorError::UnsupportedCodec {
+                    observed: "prores_ks".to_owned(),
+                    allowed: "libx264",
+                }),
+            ),
+            (
+                "unsupported_delivery_color",
+                MediaError::DeliveryColor(DeliveryColorError::UnsupportedField(
+                    DeliveryColorMismatch {
+                        field: "primaries".to_owned(),
+                        observed: "Bt2020".to_owned(),
+                        allowed: "Bt709".to_owned(),
+                    },
+                )),
+            ),
+            (
+                "delivery_pixel_format_depth_mismatch",
+                MediaError::DeliveryColor(DeliveryColorError::PixelFormatDepthMismatch {
+                    observed: "yuv420p".to_owned(),
+                    allowed: "yuv420p10le".to_owned(),
+                }),
+            ),
+            (
+                "delivery_encoder_pixel_format_unavailable",
+                MediaError::DeliveryColor(DeliveryColorError::EncoderPixelFormatUnavailable {
+                    observed: "yuv420p".to_owned(),
+                    allowed: "yuv420p10le".to_owned(),
+                }),
+            ),
+            (
+                "color_qc_node_budget_exceeded",
+                MediaError::ColorQc(ColorQcError::NodeBudgetExceeded {
+                    observed: "17".to_owned(),
+                    allowed: "1..=16",
+                }),
+            ),
+            (
+                "delivery_verification_frame_count_out_of_range",
+                MediaError::DeliveryVerification(DeliveryVerificationError::FrameCountOutOfRange {
+                    observed: "32".to_owned(),
+                    allowed: "1..=16",
+                }),
+            ),
+        ];
+        assert_eq!(cases.len(), 6);
+
+        let table: BTreeSet<&str> = DETERMINISTIC_SIXTEEN[10..16]
+            .iter()
+            .map(|(code, _)| code.code())
+            .collect();
+        let mut checked = 0_usize;
+        for (expected, error) in cases {
+            assert!(table.contains(expected));
+            let observation = IncidentObservation::from_media_error(
+                &error,
+                IncidentSubject::ExportJob,
+                TimelineRevision::default(),
+            );
+            assert_eq!(observation.code.code(), expected);
+            assert!(
+                matches!(observation.evidence, IncidentEvidence::MediaError { .. }),
+                "{expected} carries only a code and a rendered sentence"
+            );
+            assert!(observation.evidence.probed().is_none());
+            assert!(
+                deterministic_recovery(
+                    observation.code,
+                    observation.subject,
+                    &observation.evidence,
+                )
+                .is_none()
+            );
+            let actions =
+                policy_recovery(observation.code, observation.subject, &observation.evidence);
+            assert_eq!(actions.len(), 1);
+            assert!(matches!(actions[0].kind, RecoveryKind::Explain(_)));
+            checked += 1;
+        }
+        assert_eq!(checked, 6);
+    }
+
+    /// IN2 §9.1 item 9, §4.2 rule 8.
+    #[test]
+    fn in2_a_recorded_proposal_never_serialises_its_operations() {
+        let probed = untagged_mp4_probe();
+        let mut log = IncidentLog::with_start(Instant::now());
+        let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+            panic!("the first observation must open an incident");
+        };
+
+        let proposal = IncidentProposal {
+            operations: vec![
+                Operation::DeleteClip { clip: ClipId(1) },
+                Operation::DeleteClip { clip: ClipId(2) },
+                Operation::DeleteClip { clip: ClipId(3) },
+            ],
+            operation_count: 3,
+            summary: "remove_clip 1, remove_clip 2, remove_clip 3".to_owned(),
+            explanation: "Three clips point past their source end.".to_owned(),
+            base_revision: TimelineRevision(12),
+            stale: false,
+        };
+
+        // Only on an `Investigating` entry.
+        assert_eq!(
+            log.record_proposal(id, proposal.clone()),
+            Err(RecordProposalError::NotInvestigating)
+        );
+        assert!(log.begin_investigation(id));
+        assert_eq!(log.record_proposal(id, proposal.clone()), Ok(()));
+        assert_eq!(
+            log.get(id).unwrap().state,
+            IncidentState::Investigating,
+            "`record_proposal` does not resolve and does not change state"
+        );
+        assert_eq!(log.get(id).unwrap().proposal.as_ref(), Some(&proposal));
+
+        let body = serde_json::to_string(log.get(id).unwrap()).unwrap();
+        assert!(body.contains(r#""operation_count":3"#));
+        assert!(
+            !body.contains("\"operations\""),
+            "a `Vec<Operation>` on the wire would end the ceiling as a property"
+        );
+        assert!(body.contains(r#""base_revision":12"#));
+        assert!(body.contains(r#""stale":false"#));
+
+        // Resolved entries refuse it too.
+        let mut log = IncidentLog::with_start(Instant::now());
+        let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+            panic!("the first observation must open an incident");
+        };
+        assert!(log.resolve(id, IncidentOutcome::Explained));
+        assert_eq!(
+            log.record_proposal(id, proposal),
+            Err(RecordProposalError::NotInvestigating)
+        );
+        assert!(log.get(id).unwrap().proposal.is_none());
+        assert_eq!(
+            log.record_proposal(IncidentId(9_999), tiny_proposal()),
+            Err(RecordProposalError::NotFound)
+        );
+    }
+
+    /// IN2 erratum A-R7: a second session makes a new proposal, and the
+    /// previous one is stale from the moment that session begins.
+    #[test]
+    fn in2_a_second_session_marks_the_old_proposal_stale_and_replaces_it() {
+        let probed = untagged_mp4_probe();
+        let mut log = IncidentLog::with_start(Instant::now());
+        let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+            panic!("the first observation must open an incident");
+        };
+
+        let first = IncidentProposal {
+            explanation: "the first session's sentence".to_owned(),
+            base_revision: TimelineRevision(3),
+            ..tiny_proposal()
+        };
+        let second = IncidentProposal {
+            explanation: "the second session's sentence".to_owned(),
+            base_revision: TimelineRevision(11),
+            ..tiny_proposal()
+        };
+
+        assert!(log.begin_investigation(id));
+        assert_eq!(log.record_proposal(id, first.clone()), Ok(()));
+        assert!(!log.get(id).unwrap().proposal.as_ref().unwrap().stale);
+
+        // A second record while the first is live is refused, and nothing moves.
+        assert_eq!(
+            log.record_proposal(id, second.clone()),
+            Err(RecordProposalError::AlreadyRecorded)
+        );
+        assert_eq!(log.get(id).unwrap().proposal.as_ref(), Some(&first));
+
+        // The session stops without an outcome; the incident goes back to
+        // `Open` carrying the proposal and the stop.
+        assert!(log.end_investigation(
+            id,
+            IncidentResolver::Session {
+                harness: "scripted".to_owned(),
+                model: None,
+                stop: "budget: turns".to_owned(),
+            },
+        ));
+        let stopped = log.get(id).unwrap();
+        assert_eq!(stopped.state, IncidentState::Open);
+        assert!(!stopped.proposal.as_ref().unwrap().stale);
+        assert!(stopped.telemetry.resolver.is_some());
+
+        // Re-investigating marks it stale and leaves telemetry as history.
+        assert!(log.begin_investigation(id));
+        let reinvestigating = log.get(id).unwrap();
+        assert_eq!(reinvestigating.state, IncidentState::Investigating);
+        assert!(
+            reinvestigating.proposal.as_ref().unwrap().stale,
+            "a proposal proved two sessions ago must not offer Approve"
+        );
+        assert_eq!(
+            reinvestigating.proposal.as_ref().unwrap().base_revision,
+            first.base_revision,
+            "only `stale` moves; the record is otherwise the first session's"
+        );
+        assert!(
+            reinvestigating.telemetry.resolver.is_some(),
+            "the previous session's stop is history and is not cleared"
+        );
+
+        // And the new session's proposal replaces the stale one.
+        assert_eq!(log.record_proposal(id, second.clone()), Ok(()));
+        let replaced = log.get(id).unwrap().proposal.as_ref().unwrap();
+        assert_eq!(replaced, &second);
+        assert!(!replaced.stale);
+    }
+
+    fn tiny_proposal() -> IncidentProposal {
+        IncidentProposal {
+            operations: Vec::new(),
+            operation_count: 0,
+            summary: String::new(),
+            explanation: String::new(),
+            base_revision: TimelineRevision::default(),
+            stale: false,
+        }
+    }
+
+    /// IN2 §9.1 item 10, §4.1 rule 5 — the cap is on the **serialised** string,
+    /// and `json_escaped_len` is asserted against `serde_json` itself rather
+    /// than trusted.
+    #[test]
+    fn in2_both_proposal_strings_are_capped_on_their_serialised_length() {
+        let ceiling = INVESTIGATOR_EXPLANATION_CEILING_BYTES;
+        assert_eq!(ceiling, 240);
+
+        let cases = [
+            "\u{1}".repeat(240),
+            "é".repeat(240),
+            "\u{1f600}".repeat(240),
+            "\"\\\n\t".repeat(80),
+            "a".repeat(240),
+            "a".repeat(10),
+            String::new(),
+        ];
+        let mut checked = 0_usize;
+        for raw in &cases {
+            // The helper agrees with `serde_json` byte for byte.
+            assert_eq!(
+                json_escaped_len(raw),
+                serde_json::to_string(raw).unwrap().len() - 2,
+                "the escaped-length model must equal serde_json's"
+            );
+
+            let capped = truncate_to_serialized_bytes(raw, ceiling);
+            let serialised = serde_json::to_string(&capped).unwrap();
+            assert!(
+                serialised.len() <= ceiling + 2,
+                "{} bytes serialise to {}",
+                capped.len(),
+                serialised.len()
+            );
+            assert!(raw.starts_with(&capped), "truncation is a prefix");
+            assert!(raw.is_char_boundary(capped.len()));
+            if json_escaped_len(raw) <= ceiling {
+                assert_eq!(&capped, raw, "a string that fits is not touched");
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, cases.len());
+
+        // 240 control characters serialise to about 1 440 B raw, which is the
+        // whole reason the cap is on the serialised string.
+        assert_eq!(json_escaped_len(&"\u{1}".repeat(240)), 1_440);
+
+        let proposal = IncidentProposal {
+            operations: Vec::new(),
+            operation_count: 0,
+            summary: truncate_to_serialized_bytes(&"é".repeat(240), ceiling),
+            explanation: truncate_to_serialized_bytes(&"\u{1}".repeat(240), ceiling),
+            base_revision: TimelineRevision::default(),
+            stale: false,
+        };
+        assert!(serde_json::to_string(&proposal.summary).unwrap().len() <= 242);
+        assert!(serde_json::to_string(&proposal.explanation).unwrap().len() <= 242);
+    }
+
+    /// IN2 §9.1 item 11, §5.4 rule 12 — the three new keys skip when absent, so
+    /// `IN1_INCIDENT_SERIALIZED_BYTES` cannot move.
+    #[test]
+    fn in2_the_proposal_and_the_new_telemetry_fields_skip_when_absent() {
+        let mut log = IncidentLog::with_start(Instant::now());
+        let probed = untagged_webm_probe();
+        let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+            panic!("the first observation must open an incident");
+        };
+        assert_eq!(
+            log.observe(unknown_primaries_observation(&probed)),
+            Observed::Deduped(id)
+        );
+
+        let incident = log.get(id).unwrap();
+        assert!(incident.proposal.is_none());
+        assert!(incident.telemetry.turns.is_none());
+        assert!(incident.telemetry.resolver.is_none());
+
+        let body = serde_json::to_string(incident).unwrap();
+        for key in ["\"proposal\"", "\"turns\"", "\"resolver\""] {
+            assert!(!body.contains(key), "{key} must skip when absent");
+        }
+        assert_eq!(body, IN1_PINNED_WIRE_BODY);
+        assert_eq!(body.len(), 819, "`IN1_INCIDENT_SERIALIZED_BYTES`");
+    }
+
+    /// IN2 §9.1 item 12, §9.2 clause 13, §2.4.
+    #[test]
+    fn in2_a_muted_code_round_trips_through_the_document_byte_identically() {
+        // The pre-IN2 project has no `investigator` key and loads and re-saves
+        // byte-unchanged. The same pin lives in `tests/contracts.rs`; it is
+        // repeated here because clause 13 is about the field this slice adds.
+        let legacy: Document = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/pre_m13_project.json"
+        )))
+        .unwrap();
+        assert!(legacy.investigator.is_none());
+        let round_tripped = serde_json::to_vec(&legacy).unwrap();
+        assert!(
+            !round_tripped
+                .windows(12)
+                .any(|window| window == b"investigator")
+        );
+        assert_eq!(round_tripped.len(), 1_215);
+        assert_eq!(
+            format!("{:016x}", fnv1a64_digest(&round_tripped)),
+            "c9da3186e131e4fd"
+        );
+
+        // One muted code round-trips, and an unrecognised string is inert.
+        let muted = Document {
+            investigator: Some(InvestigatorPreferences {
+                muted_codes: vec![
+                    IncidentCode::Label(LabelIncident::Operations)
+                        .code()
+                        .to_owned(),
+                    "a_code_this_build_has_never_heard_of".to_owned(),
+                ],
+            }),
+            ..Document::default()
+        };
+        let encoded = serde_json::to_string(&muted).unwrap();
+        assert!(encoded.contains(r#""investigator":{"muted_codes":["operations_unclassified""#));
+        let decoded: Document = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, muted);
+        let preferences = decoded.investigator.unwrap();
+        assert_eq!(preferences.muted_codes.len(), 2);
+        assert!(
+            preferences
+                .muted_codes
+                .iter()
+                .any(|code| code == "operations_unclassified")
+        );
+        assert!(
+            !EVERY_INCIDENT_CODE
+                .iter()
+                .any(|code| code.code() == "a_code_this_build_has_never_heard_of"),
+            "an unrecognised string matches no code and is therefore inert"
+        );
+
+        // An empty preference block still costs no `muted_codes` key.
+        let empty = Document {
+            investigator: Some(InvestigatorPreferences::default()),
+            ..Document::default()
+        };
+        let encoded = serde_json::to_string(&empty).unwrap();
+        assert!(encoded.contains(r#""investigator":{}"#));
+    }
+
+    /// FNV-1a 64, the digest `tests/contracts.rs` pins the legacy round trip
+    /// with.
+    fn fnv1a64_digest(bytes: &[u8]) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        hash
+    }
 }

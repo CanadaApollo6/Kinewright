@@ -63,6 +63,7 @@ fn codes(exceptions: &[AudioQcException]) -> Vec<&str> {
 
 fn empty_timeline(fps: Rational) -> Document {
     Document {
+        investigator: None,
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),

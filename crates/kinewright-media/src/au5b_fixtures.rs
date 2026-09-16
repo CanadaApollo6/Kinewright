@@ -138,6 +138,7 @@ fn seam_document(fps: Rational, assets: &[MediaAsset], pieces: Vec<Piece>) -> Do
         .max()
         .expect("the document carries clips");
     let document = Document {
+        investigator: None,
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),

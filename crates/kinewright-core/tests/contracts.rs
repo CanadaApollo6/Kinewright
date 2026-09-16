@@ -69,6 +69,7 @@ fn user_color_override() -> ColorDescription {
 
 fn empty_timeline(fps: Rational) -> Document {
     Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: ColorContext::default(),
@@ -4461,6 +4462,7 @@ fn unsorted_input_document_is_rejected() {
         ..later.clone()
     };
     let doc = Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         tracks: vec![Track {

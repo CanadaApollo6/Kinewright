@@ -8,6 +8,7 @@ use kinewright_core::{
 
 fn empty_timeline(fps: Rational) -> Document {
     Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),

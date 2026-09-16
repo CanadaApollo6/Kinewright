@@ -38,6 +38,7 @@ fn asset(id: u64, name: &str, duration: i64, rate: Rational) -> MediaAsset {
 /// An empty 30 fps project with one video track and one 300-frame asset.
 fn empty_document() -> Document {
     let mut doc = Document {
+        investigator: None,
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),

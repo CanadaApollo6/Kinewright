@@ -336,6 +336,7 @@ const NEW_PARAMETER_ROWS: [(&str, &str, i64, i64, i64, EffectUniform); 40] = [
 fn document_with_one_clip() -> Document {
     let fps = Rational::new(30, 1).unwrap();
     let mut doc = Document {
+        investigator: None,
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),

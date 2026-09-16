@@ -169,11 +169,35 @@ impl Core {
     ///
     /// Panics if the operating system cannot create the actor thread.
     pub fn spawn(initial_document: Document) -> Result<Self, OpError> {
+        Self::spawn_at(initial_document, TimelineRevision::default())
+    }
+
+    /// Start the core actor with its revision counter already at `revision`.
+    ///
+    /// An investigator session's branch core is spawned at the **live**
+    /// project's revision, so the operations it proves on the branch are proved
+    /// against the document an approval will apply them to, and the proposal's
+    /// `base_revision` is a live revision rather than a private counter
+    /// (IN2 §3.3 rules 15–17). [`Self::spawn`] is
+    /// `spawn_at(document, TimelineRevision::default())`, so no existing
+    /// behaviour moves.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operation error when the initial document is invalid.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operating system cannot create the actor thread.
+    pub fn spawn_at(
+        initial_document: Document,
+        revision: TimelineRevision,
+    ) -> Result<Self, OpError> {
         initial_document.validate()?;
         let (sender, receiver) = unbounded();
         thread::Builder::new()
             .name("kinewright-core".to_owned())
-            .spawn(move || run_actor(&receiver, CoreState::new(initial_document)))
+            .spawn(move || run_actor(&receiver, CoreState::new(initial_document, revision)))
             .expect("failed to spawn Core actor");
         Ok(Self { sender })
     }
@@ -246,10 +270,10 @@ struct CoreState {
 }
 
 impl CoreState {
-    fn new(document: Document) -> Self {
+    fn new(document: Document, revision: TimelineRevision) -> Self {
         Self {
             document: Arc::new(document),
-            revision: TimelineRevision::default(),
+            revision,
             undo: Vec::new(),
             redo: Vec::new(),
             op_log: Vec::new(),
@@ -1059,7 +1083,7 @@ mod tests {
 
     #[test]
     fn rejected_batch_is_atomic_and_reports_the_failed_operation() {
-        let mut state = CoreState::new(Document::default());
+        let mut state = CoreState::new(Document::default(), TimelineRevision::default());
         let before = Arc::clone(&state.document);
         let operations = vec![
             Operation::AddAsset { asset: asset(1) },
@@ -1272,6 +1296,7 @@ mod tests {
             })
             .collect();
         Document {
+            investigator: None,
             catalog: crate::MediaCatalog::default(),
             audio_mix: crate::AudioMix::default(),
             color_context: crate::ColorContext::default(),
@@ -1368,7 +1393,7 @@ mod tests {
         ) {
             let initial = generated_document(&lengths, &gaps);
             prop_assert!(initial.validate().is_ok());
-            let mut state = CoreState::new(initial.clone());
+            let mut state = CoreState::new(initial.clone(), TimelineRevision::default());
             let mut expected = Arc::new(initial);
             let mut expected_undo = Vec::new();
             let mut expected_redo = Vec::new();
@@ -1521,5 +1546,70 @@ mod tests {
                 prop_assert_eq!(state.op_log.len(), successful_dos);
             }
         }
+    }
+    /// IN2 §9.1 item 13.
+    #[test]
+    fn in2_a_core_spawned_at_a_revision_reports_that_revision() {
+        let core = Core::spawn_at(Document::default(), TimelineRevision(41)).unwrap();
+        let Event::QueryResult(QueryResult::Snapshot { revision, .. }) =
+            core.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("expected a revisioned snapshot");
+        };
+        assert_eq!(revision, TimelineRevision(41));
+
+        core.request(Command::Do(Operation::AddAsset { asset: asset(1) }))
+            .unwrap();
+        let Event::QueryResult(QueryResult::Snapshot {
+            revision: after, ..
+        }) = core.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("expected a revisioned snapshot");
+        };
+        assert_eq!(after, TimelineRevision(42));
+
+        // `Core::spawn` is `spawn_at(document, TimelineRevision::default())`
+        // and no existing behaviour moves.
+        let plain = Core::spawn(Document::default()).unwrap();
+        let Event::QueryResult(QueryResult::Snapshot { revision: zero, .. }) =
+            plain.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("expected a revisioned snapshot");
+        };
+        assert_eq!(zero, TimelineRevision::default());
+    }
+
+    /// IN2 §9.1 item 14: `spawn_at` starts with an empty `op_log`, so
+    /// "since `spawn_at`" is the whole applied-operation list (IN2 §4.1 rule 4).
+    #[test]
+    fn in2_a_branch_spawned_at_a_revision_reports_its_applied_operations_from_empty() {
+        let core = Core::spawn_at(Document::default(), TimelineRevision(7)).unwrap();
+        let applied = |core: &Core| {
+            let Event::QueryResult(QueryResult::AppliedOperations(applied)) = core
+                .request(Command::Query(Query::AppliedOperations))
+                .unwrap()
+            else {
+                panic!("expected an applied-operation query");
+            };
+            (*applied).clone()
+        };
+
+        assert!(applied(&core).is_empty());
+
+        let first = Operation::AddAsset { asset: asset(1) };
+        let second = Operation::AddTrack {
+            track: Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: Vec::new(),
+            },
+        };
+        core.request(Command::Do(first.clone())).unwrap();
+        core.request(Command::Do(second)).unwrap();
+        assert_eq!(applied(&core).len(), 2);
+
+        core.request(Command::Undo).unwrap();
+        assert_eq!(applied(&core), vec![first]);
     }
 }

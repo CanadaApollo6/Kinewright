@@ -183,6 +183,7 @@ fn single_clip_document(asset: MediaAsset) -> Document {
     let fps = asset.fps;
     let resolution = asset.resolution.expect("the fixture carries video");
     let document = Document {
+        investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: ColorContext::sdr_rec709(),

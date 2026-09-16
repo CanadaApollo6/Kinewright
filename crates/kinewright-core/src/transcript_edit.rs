@@ -223,6 +223,7 @@ mod tests {
             assets.push(asset);
         }
         Document {
+            investigator: None,
             catalog: crate::MediaCatalog::default(),
             audio_mix: crate::AudioMix::default(),
             color_context: crate::ColorContext::default(),

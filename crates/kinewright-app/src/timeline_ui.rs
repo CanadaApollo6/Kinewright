@@ -3517,6 +3517,7 @@ mod tests {
             audio_gain_curve: None,
         };
         Document {
+            investigator: None,
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -4713,6 +4714,7 @@ mod tests {
         let span = map_source_range_to_project(TimeCode::ZERO..second, asset_fps, project_fps)
             .unwrap_or(TimeCode(30));
         Document {
+            investigator: None,
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -4990,6 +4992,7 @@ mod tests {
             ..source.clone()
         };
         Document {
+            investigator: None,
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
