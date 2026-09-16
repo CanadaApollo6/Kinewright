@@ -7,14 +7,13 @@ use std::{
 
 use eframe::egui;
 use kinewright_agent::{
-    BranchApplyOutcome, CODEX_SANDBOX_NOTICE, CURSOR_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver,
-    ConfirmationBroker, ConfirmationRequest, CursorAcpDriver, McpServer, TimelineBranch,
-    compact_tool_names,
+    BranchApplyOutcome, CODEX_SANDBOX_NOTICE, CURSOR_SANDBOX_NOTICE, ConfirmationBroker,
+    ConfirmationRequest, McpServer, TimelineBranch, compact_tool_names, harness_driver,
 };
 use kinewright_core::{
-    AgentDriver, AgentEvent, AgentSession, Analysis, AuthenticationStatus, Command, Document,
-    Event, Export, HarnessInfo, IncidentObservation, IncidentSubject, LabelIncident, Playback,
-    QaSeverity, SessionConfig, TimeCode, TimelineRevision, qa_document,
+    AgentError, AgentEvent, AgentSession, Analysis, AuthenticationStatus, Command, Document, Event,
+    Export, HarnessInfo, IncidentObservation, IncidentSubject, LabelIncident, Playback, QaSeverity,
+    SessionConfig, TimeCode, TimelineRevision, qa_document,
 };
 use serde::Serialize;
 
@@ -26,29 +25,69 @@ use crate::{
 };
 
 const AGENT_HARNESS_MEMORY_ID: &str = "kinewright-agent-harness";
-const CLAUDE_MODEL_MEMORY_ID: &str = "kinewright-agent-model-claude-code";
-const CODEX_MODEL_MEMORY_ID: &str = "kinewright-agent-model-codex";
-const CURSOR_MODEL_MEMORY_ID: &str = "kinewright-agent-model-cursor";
-const CLAUDE_EFFORT_MEMORY_ID: &str = "kinewright-agent-effort-claude-code";
-const CODEX_EFFORT_MEMORY_ID: &str = "kinewright-agent-effort-codex";
-const CURSOR_EFFORT_MEMORY_ID: &str = "kinewright-agent-effort-cursor";
-const CLAUDE_TIER_MEMORY_ID: &str = "kinewright-agent-tier-claude-code";
-const CODEX_TIER_MEMORY_ID: &str = "kinewright-agent-tier-codex";
-const CURSOR_TIER_MEMORY_ID: &str = "kinewright-agent-tier-cursor";
+
+/// How many harnesses the app knows about, taken from the agent crate's
+/// registry so the picker, [`AgentHarnessChoice::ALL`] and the per-harness
+/// state array on [`KinewrightApp`] cannot drift apart.
+pub(crate) const HARNESS_COUNT: usize = kinewright_agent::HARNESS_KEYS.len();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentHarnessChoice {
     ClaudeCode,
     Codex,
     Cursor,
+    Muse,
+    OpenCode,
+    Qwen,
+    Kimi,
+    Kiro,
+    Devin,
+    Copilot,
 }
 
 impl AgentHarnessChoice {
-    fn key(self) -> &'static str {
+    /// Every harness in picker order; the index doubles as the position in
+    /// [`HarnessUiState`] storage on [`KinewrightApp`].
+    pub(crate) const ALL: [Self; HARNESS_COUNT] = [
+        Self::ClaudeCode,
+        Self::Codex,
+        Self::Cursor,
+        Self::Muse,
+        Self::OpenCode,
+        Self::Qwen,
+        Self::Kimi,
+        Self::Kiro,
+        Self::Devin,
+        Self::Copilot,
+    ];
+
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::ClaudeCode => 0,
+            Self::Codex => 1,
+            Self::Cursor => 2,
+            Self::Muse => 3,
+            Self::OpenCode => 4,
+            Self::Qwen => 5,
+            Self::Kimi => 6,
+            Self::Kiro => 7,
+            Self::Devin => 8,
+            Self::Copilot => 9,
+        }
+    }
+
+    pub(crate) fn key(self) -> &'static str {
         match self {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
             Self::Cursor => "cursor",
+            Self::Muse => "muse",
+            Self::OpenCode => "opencode",
+            Self::Qwen => "qwen",
+            Self::Kimi => "kimi",
+            Self::Kiro => "kiro",
+            Self::Devin => "devin",
+            Self::Copilot => "copilot",
         }
     }
 
@@ -57,6 +96,13 @@ impl AgentHarnessChoice {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
+            Self::Muse => "Muse",
+            Self::OpenCode => "OpenCode",
+            Self::Qwen => "Qwen",
+            Self::Kimi => "Kimi",
+            Self::Kiro => "Kiro",
+            Self::Devin => "Devin",
+            Self::Copilot => "Copilot",
         }
     }
 
@@ -65,6 +111,13 @@ impl AgentHarnessChoice {
             "claude-code" => Some(Self::ClaudeCode),
             "codex" => Some(Self::Codex),
             "cursor" => Some(Self::Cursor),
+            "muse" => Some(Self::Muse),
+            "opencode" => Some(Self::OpenCode),
+            "qwen" => Some(Self::Qwen),
+            "kimi" => Some(Self::Kimi),
+            "kiro" => Some(Self::Kiro),
+            "devin" => Some(Self::Devin),
+            "copilot" => Some(Self::Copilot),
             _ => None,
         }
     }
@@ -75,7 +128,209 @@ impl AgentHarnessChoice {
             Self::ClaudeCode => Icon::BrandClaude,
             Self::Codex => Icon::BrandOpenAi,
             Self::Cursor => Icon::BrandCursor,
+            Self::Muse => Icon::BrandMuse,
+            Self::OpenCode => Icon::BrandOpenCode,
+            Self::Qwen => Icon::BrandQwen,
+            Self::Kimi => Icon::BrandKimi,
+            Self::Kiro => Icon::BrandKiro,
+            Self::Devin => Icon::BrandDevin,
+            Self::Copilot => Icon::BrandCopilot,
         }
+    }
+
+    pub(crate) const fn install_url(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "https://code.claude.com/docs/en/setup",
+            Self::Codex => "https://developers.openai.com/codex/quickstart",
+            Self::Cursor => "https://cursor.com/docs/cli",
+            Self::Muse => "https://dev.meta.ai",
+            Self::OpenCode => "https://opencode.ai",
+            Self::Qwen => "https://github.com/QwenLM/qwen-code",
+            Self::Kimi => "https://github.com/MoonshotAI/kimi-cli",
+            Self::Kiro => "https://kiro.dev/docs/cli",
+            Self::Devin => "https://docs.devin.ai",
+            Self::Copilot => "https://docs.github.com/copilot/how-tos/copilot-cli",
+        }
+    }
+
+    /// The sandbox boundary the picker hover states, if the harness needs
+    /// one beyond the scratch directory every session already gets.
+    pub(crate) fn sandbox_notice(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCode => None,
+            Self::Codex => Some(CODEX_SANDBOX_NOTICE),
+            Self::Cursor => Some(CURSOR_SANDBOX_NOTICE),
+            Self::Muse => Some(kinewright_agent::MUSE_SANDBOX_NOTICE),
+            Self::OpenCode => Some(kinewright_agent::OPENCODE_SANDBOX_NOTICE),
+            Self::Qwen => Some(kinewright_agent::QWEN_SANDBOX_NOTICE),
+            Self::Kimi => Some(kinewright_agent::KIMI_SANDBOX_NOTICE),
+            Self::Kiro => Some(kinewright_agent::KIRO_SANDBOX_NOTICE),
+            Self::Devin => Some(kinewright_agent::DEVIN_SANDBOX_NOTICE),
+            Self::Copilot => Some(kinewright_agent::COPILOT_SANDBOX_NOTICE),
+        }
+    }
+
+    const fn model_memory_id(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "kinewright-agent-model-claude-code",
+            Self::Codex => "kinewright-agent-model-codex",
+            Self::Cursor => "kinewright-agent-model-cursor",
+            Self::Muse => "kinewright-agent-model-muse",
+            Self::OpenCode => "kinewright-agent-model-opencode",
+            Self::Qwen => "kinewright-agent-model-qwen",
+            Self::Kimi => "kinewright-agent-model-kimi",
+            Self::Kiro => "kinewright-agent-model-kiro",
+            Self::Devin => "kinewright-agent-model-devin",
+            Self::Copilot => "kinewright-agent-model-copilot",
+        }
+    }
+
+    const fn effort_memory_id(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "kinewright-agent-effort-claude-code",
+            Self::Codex => "kinewright-agent-effort-codex",
+            Self::Cursor => "kinewright-agent-effort-cursor",
+            Self::Muse => "kinewright-agent-effort-muse",
+            Self::OpenCode => "kinewright-agent-effort-opencode",
+            Self::Qwen => "kinewright-agent-effort-qwen",
+            Self::Kimi => "kinewright-agent-effort-kimi",
+            Self::Kiro => "kinewright-agent-effort-kiro",
+            Self::Devin => "kinewright-agent-effort-devin",
+            Self::Copilot => "kinewright-agent-effort-copilot",
+        }
+    }
+
+    const fn tier_memory_id(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "kinewright-agent-tier-claude-code",
+            Self::Codex => "kinewright-agent-tier-codex",
+            Self::Cursor => "kinewright-agent-tier-cursor",
+            Self::Muse => "kinewright-agent-tier-muse",
+            Self::OpenCode => "kinewright-agent-tier-opencode",
+            Self::Qwen => "kinewright-agent-tier-qwen",
+            Self::Kimi => "kinewright-agent-tier-kimi",
+            Self::Kiro => "kinewright-agent-tier-kiro",
+            Self::Devin => "kinewright-agent-tier-devin",
+            Self::Copilot => "kinewright-agent-tier-copilot",
+        }
+    }
+}
+
+/// Per-harness UI state: detection, the model catalog, and the user's
+/// remembered model/effort/tier picks. Stored as one array on the app indexed
+/// by [`AgentHarnessChoice::index`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HarnessUiState {
+    pub info: Option<HarnessInfo>,
+    /// Whether the probe thread has reported on this harness yet. Until it
+    /// has, `info: None` means "not looked yet", not "not installed", and
+    /// the settings card says so.
+    pub detected: bool,
+    /// Selectable models; `None` chosen means the CLI's default.
+    pub models: Vec<kinewright_agent::ModelChoice>,
+    /// Whether the background catalog loader has reported for this harness.
+    /// Remembered picks are only validated once the catalog has landed, so a
+    /// slow CLI never wipes them.
+    pub models_loaded: bool,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// Service tier id; `None` means the provider's standard tier (only
+    /// offered where the harness catalog advertises tiers).
+    pub tier: Option<String>,
+    /// The model the Codex CLI's config actually runs as its default, so the
+    /// picker's "Default" resolves to that model's real efforts and tiers.
+    pub default_model: Option<String>,
+}
+
+/// One delivery from the background harness-probe thread.
+///
+/// Detection and the model catalogs both spawn the harness CLI — ten
+/// `detect()` calls cost seconds on this machine and several of them are
+/// network round trips — so neither runs on the frame and both arrive here.
+pub(crate) enum HarnessUpdate {
+    /// One harness's CLI, or `None` when it is not installed. Always sent,
+    /// so the card can stop saying "detecting" either way.
+    Detected(AgentHarnessChoice, Box<Option<HarnessInfo>>),
+    /// One harness's model catalog, and (Codex only) the CLI config's
+    /// default model.
+    Catalog(
+        AgentHarnessChoice,
+        Vec<kinewright_agent::ModelChoice>,
+        Option<String>,
+    ),
+}
+
+/// Detect one harness's CLI. Runs on the probe thread, never on the frame:
+/// `detect()` spawns up to three children, and `--version`/auth probes carry
+/// their own timeout rather than hanging the caller.
+pub(crate) fn detect_harness(harness: AgentHarnessChoice) -> Option<HarnessInfo> {
+    harness_driver(harness.key())?.detect()
+}
+
+/// Fold one probe delivery into the per-harness state. Split out from the
+/// pump so the "detecting" contract is testable without an app: until the
+/// `Detected` arrives, `info: None` means "not looked yet" and the settings
+/// card must not claim the CLI is missing.
+pub(crate) fn apply_harness_update(
+    harness: &mut [HarnessUiState; HARNESS_COUNT],
+    update: HarnessUpdate,
+) {
+    match update {
+        HarnessUpdate::Detected(choice, info) => {
+            let state = &mut harness[choice.index()];
+            state.info = *info;
+            state.detected = true;
+        }
+        HarnessUpdate::Catalog(choice, models, default_model) => {
+            let state = &mut harness[choice.index()];
+            state.models = models;
+            state.models_loaded = true;
+            if default_model.is_some() {
+                state.default_model = default_model;
+            }
+        }
+    }
+}
+
+/// Probe every harness: detection first, so the picker fills in as soon as
+/// it can, then the catalogs.
+pub(crate) fn probe_harnesses(updates: &crossbeam_channel::Sender<HarnessUpdate>) {
+    for choice in AgentHarnessChoice::ALL {
+        let detected = HarnessUpdate::Detected(choice, Box::new(detect_harness(choice)));
+        if updates.send(detected).is_err() {
+            return;
+        }
+    }
+    for choice in AgentHarnessChoice::ALL {
+        let models = load_harness_models(choice);
+        let default_model = (choice == AgentHarnessChoice::Codex)
+            .then(kinewright_agent::codex_default_model)
+            .flatten();
+        if updates
+            .send(HarnessUpdate::Catalog(choice, models, default_model))
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// Load one harness's model catalog. Some catalogs spawn their CLI, so this
+/// runs on the background loader thread, never on the frame.
+pub(crate) fn load_harness_models(
+    harness: AgentHarnessChoice,
+) -> Vec<kinewright_agent::ModelChoice> {
+    match harness {
+        AgentHarnessChoice::ClaudeCode => kinewright_agent::claude_models(),
+        AgentHarnessChoice::Codex => kinewright_agent::codex_models(),
+        AgentHarnessChoice::Cursor => kinewright_agent::cursor_models(),
+        AgentHarnessChoice::Muse => kinewright_agent::muse_models(),
+        AgentHarnessChoice::OpenCode => kinewright_agent::opencode_models(),
+        AgentHarnessChoice::Qwen => kinewright_agent::qwen_models(),
+        AgentHarnessChoice::Kimi => kinewright_agent::kimi_models(),
+        AgentHarnessChoice::Kiro => kinewright_agent::kiro_models(),
+        AgentHarnessChoice::Devin => kinewright_agent::devin_models(),
+        AgentHarnessChoice::Copilot => kinewright_agent::copilot_models(),
     }
 }
 
@@ -324,13 +579,13 @@ impl KinewrightApp {
         &mut self.projects[project_index].threads[active_thread]
     }
 
-    /// The model the Codex side of the picker effectively runs: the chosen
-    /// one, else the CLI config's default - so "Default" offers that model's
-    /// real efforts and tiers instead of a lowest-common-denominator set.
-    fn codex_model_or_default(&self) -> Option<&str> {
-        self.codex_model
-            .as_deref()
-            .or(self.codex_default_model.as_deref())
+    /// The model one harness's side of the picker effectively runs: the
+    /// chosen one, else the CLI config's default - so "Default" offers that
+    /// model's real efforts and tiers instead of a lowest-common-denominator
+    /// set. Only Codex reports a config default today.
+    fn harness_model_or_default(&self, harness: AgentHarnessChoice) -> Option<&str> {
+        let state = &self.harness[harness.index()];
+        state.model.as_deref().or(state.default_model.as_deref())
     }
 
     /// The remembered model, effort, and service tier for one harness.
@@ -338,22 +593,86 @@ impl KinewrightApp {
         &self,
         harness: AgentHarnessChoice,
     ) -> (Option<String>, Option<String>, Option<String>) {
-        match harness {
-            AgentHarnessChoice::ClaudeCode => (
-                self.claude_model.clone(),
-                self.claude_effort.clone(),
-                self.claude_tier.clone(),
-            ),
-            AgentHarnessChoice::Codex => (
-                self.codex_model.clone(),
-                self.codex_effort.clone(),
-                self.codex_tier.clone(),
-            ),
-            AgentHarnessChoice::Cursor => (
-                self.cursor_model.clone(),
-                self.cursor_effort.clone(),
-                self.cursor_tier.clone(),
-            ),
+        let state = &self.harness[harness.index()];
+        (
+            state.model.clone(),
+            state.effort.clone(),
+            state.tier.clone(),
+        )
+    }
+
+    /// Drain whatever the background probe thread has finished. Each arrival
+    /// repaints once, so the provider cards and the pickers fill in without
+    /// further interaction.
+    fn pump_harness_updates(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = &self.harness_update_rx else {
+            return;
+        };
+        let mut updated = false;
+        let mut pending = Vec::new();
+        while let Ok(update) = receiver.try_recv() {
+            pending.push(update);
+            updated = true;
+        }
+        for update in pending {
+            apply_harness_update(&mut self.harness, update);
+        }
+        if updated {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Whether the probe thread has reported on every harness.
+    pub(crate) fn harness_detection_finished(&self) -> bool {
+        self.harness.iter().all(|state| state.detected)
+    }
+
+    /// Restore one harness's remembered picks from persisted memory, and keep
+    /// the effort/tier picks valid for the current model. Nothing is read
+    /// before the catalog lands, so a slow CLI never wipes a remembered pick.
+    fn restore_harness_choices(&mut self, ctx: &egui::Context, harness: AgentHarnessChoice) {
+        let index = harness.index();
+        if !self.harness[index].models_loaded {
+            return;
+        }
+        if self.harness[index].model.is_none() {
+            let models = self.harness[index].models.clone();
+            self.harness[index].model = restore_choice(ctx, harness.model_memory_id(), |id| {
+                models.iter().any(|model| model.id == id)
+            });
+        }
+        let effective = self.harness_model_or_default(harness).map(str::to_owned);
+        let (efforts, tiers) = {
+            let state = &self.harness[index];
+            (
+                effort_options(&state.models, effective.as_deref()),
+                tier_options(&state.models, effective.as_deref()),
+            )
+        };
+        if self.harness[index]
+            .effort
+            .as_deref()
+            .is_some_and(|effort| !efforts.iter().any(|level| level == effort))
+        {
+            self.harness[index].effort = None;
+        }
+        if self.harness[index].effort.is_none() {
+            self.harness[index].effort =
+                restore_choice(ctx, harness.effort_memory_id(), |effort| {
+                    efforts.iter().any(|level| level == effort)
+                });
+        }
+        if self.harness[index]
+            .tier
+            .as_deref()
+            .is_some_and(|tier| !tiers.iter().any(|offered| offered.id == tier))
+        {
+            self.harness[index].tier = None;
+        }
+        if self.harness[index].tier.is_none() {
+            self.harness[index].tier = restore_choice(ctx, harness.tier_memory_id(), |id| {
+                tiers.iter().any(|tier| tier.id == id)
+            });
         }
     }
 
@@ -397,12 +716,7 @@ impl KinewrightApp {
             return;
         };
         let harness = self.projects[project_index].threads[thread_index].harness;
-        let harness_info = match harness {
-            AgentHarnessChoice::ClaudeCode => self.claude_info.as_ref(),
-            AgentHarnessChoice::Codex => self.codex_info.as_ref(),
-            AgentHarnessChoice::Cursor => self.cursor_info.as_ref(),
-        };
-        if harness_info.is_none() {
+        if self.harness[harness.index()].info.is_none() {
             // Appendix B row 35.
             self.note_label(
                 LabelIncident::Agent,
@@ -435,11 +749,10 @@ impl KinewrightApp {
                 mcp_url: Some(endpoint),
                 tool_names: Some(compact_tool_names()),
             };
-            let session = match harness {
-                AgentHarnessChoice::ClaudeCode => ClaudeCodeDriver.start_session(config),
-                AgentHarnessChoice::Codex => CodexDriver.start_session(config),
-                AgentHarnessChoice::Cursor => CursorAcpDriver.start_session(config),
-            };
+            let session = harness_driver(harness.key()).map_or_else(
+                || Err(AgentError::NotInstalled),
+                |driver| driver.start_session(config),
+            );
             match session {
                 Ok(session) => {
                     self.projects[project_index].threads[thread_index].events =
@@ -1421,20 +1734,14 @@ impl KinewrightApp {
         let project_index = self.focused_project;
         let project_id = self.projects[project_index].id;
         let active_thread = self.projects[project_index].active_thread;
-        let claude_ready = self.claude_info.is_some()
-            && crate::settings_ui::provider_enabled(ui.ctx(), AgentHarnessChoice::ClaudeCode);
-        let codex_ready = self.codex_info.is_some()
-            && crate::settings_ui::provider_enabled(ui.ctx(), AgentHarnessChoice::Codex);
-        let cursor_ready = self.cursor_info.is_some()
-            && crate::settings_ui::provider_enabled(ui.ctx(), AgentHarnessChoice::Cursor);
-        let ready_harnesses = [
-            (AgentHarnessChoice::ClaudeCode, claude_ready),
-            (AgentHarnessChoice::Codex, codex_ready),
-            (AgentHarnessChoice::Cursor, cursor_ready),
-        ]
-        .into_iter()
-        .filter_map(|(harness, ready)| ready.then_some(harness))
-        .collect::<Vec<_>>();
+        self.pump_harness_updates(ui.ctx());
+        let ready_harnesses = AgentHarnessChoice::ALL
+            .into_iter()
+            .filter(|harness| {
+                self.harness[harness.index()].info.is_some()
+                    && crate::settings_ui::provider_enabled(ui.ctx(), *harness)
+            })
+            .collect::<Vec<_>>();
         if !self.projects[project_index].threads[active_thread].running
             && self.projects[project_index].threads[active_thread]
                 .session
@@ -1453,91 +1760,48 @@ impl KinewrightApp {
                     self.projects[project_index].threads[active_thread].harness = remembered;
                 }
             }
-            self.claude_model = restore_choice(ui.ctx(), CLAUDE_MODEL_MEMORY_ID, |id| {
-                self.claude_models.iter().any(|model| model.id == id)
-            });
-            self.codex_model = restore_choice(ui.ctx(), CODEX_MODEL_MEMORY_ID, |id| {
-                self.codex_models.iter().any(|model| model.id == id)
-            });
-            self.cursor_model = restore_choice(ui.ctx(), CURSOR_MODEL_MEMORY_ID, |id| {
-                self.cursor_models.iter().any(|model| model.id == id)
-            });
-            let claude_efforts = effort_options(&self.claude_models, self.claude_model.as_deref());
-            let codex_efforts = effort_options(&self.codex_models, self.codex_model_or_default());
-            let cursor_efforts = effort_options(&self.cursor_models, self.cursor_model.as_deref());
-            self.claude_effort = restore_choice(ui.ctx(), CLAUDE_EFFORT_MEMORY_ID, |effort| {
-                claude_efforts.iter().any(|level| level == effort)
-            });
-            self.codex_effort = restore_choice(ui.ctx(), CODEX_EFFORT_MEMORY_ID, |effort| {
-                codex_efforts.iter().any(|level| level == effort)
-            });
-            self.cursor_effort = restore_choice(ui.ctx(), CURSOR_EFFORT_MEMORY_ID, |effort| {
-                cursor_efforts.iter().any(|level| level == effort)
-            });
-            let claude_tiers = tier_options(&self.claude_models, self.claude_model.as_deref());
-            let codex_tiers = tier_options(&self.codex_models, self.codex_model_or_default());
-            let cursor_tiers = tier_options(&self.cursor_models, self.cursor_model.as_deref());
-            self.claude_tier = restore_choice(ui.ctx(), CLAUDE_TIER_MEMORY_ID, |id| {
-                claude_tiers.iter().any(|tier| tier.id == id)
-            });
-            self.codex_tier = restore_choice(ui.ctx(), CODEX_TIER_MEMORY_ID, |id| {
-                codex_tiers.iter().any(|tier| tier.id == id)
-            });
-            self.cursor_tier = restore_choice(ui.ctx(), CURSOR_TIER_MEMORY_ID, |id| {
-                cursor_tiers.iter().any(|tier| tier.id == id)
-            });
+            for harness in AgentHarnessChoice::ALL {
+                self.restore_harness_choices(ui.ctx(), harness);
+            }
         }
         let any_harness = !ready_harnesses.is_empty();
 
         if !any_harness {
-            let any_installed = self.claude_info.is_some()
-                || self.codex_info.is_some()
-                || self.cursor_info.is_some();
+            let any_installed = self.harness.iter().any(|state| state.info.is_some());
+            let detecting = !self.harness_detection_finished();
             chat_frame(color::SURFACE).show(ui, |ui| {
-                if any_installed {
+                if detecting {
+                    ui.label("Looking for installed agent CLIs…");
+                } else if any_installed {
                     ui.label("Every provider is switched off.");
                     if ui.button("Open Settings").clicked() {
                         self.settings_open = true;
                     }
                 } else {
-                    harness_row(
-                        ui,
-                        Icon::BrandClaude,
-                        "Claude Code",
-                        self.claude_info.as_ref(),
-                    );
-                    harness_row(ui, Icon::BrandOpenAi, "Codex", self.codex_info.as_ref());
-                    harness_row(ui, Icon::BrandCursor, "Cursor", self.cursor_info.as_ref());
+                    for harness in AgentHarnessChoice::ALL {
+                        harness_row(
+                            ui,
+                            harness.brand_icon(),
+                            harness.label(),
+                            self.harness[harness.index()].info.as_ref(),
+                        );
+                    }
                     ui.separator();
                     ui.label("Install and authenticate a supported agent CLI to use chat.");
-                    ui.hyperlink_to(
-                        "Install Claude Code",
-                        "https://docs.anthropic.com/en/docs/claude-code/getting-started",
-                    );
-                    ui.hyperlink_to(
-                        "Install Codex CLI",
-                        "https://developers.openai.com/codex/cli",
-                    );
-                    ui.hyperlink_to(
-                        "Install Cursor Agent",
-                        "https://docs.cursor.com/en/cli/installation",
-                    );
+                    for harness in AgentHarnessChoice::ALL {
+                        ui.hyperlink_to(
+                            format!("Install {}", harness.label()),
+                            harness.install_url(),
+                        );
+                    }
                 }
             });
             ui.add_space(space::ONE);
         }
 
         let harness = self.projects[project_index].threads[active_thread].harness;
-        let selected_info = match harness {
-            AgentHarnessChoice::ClaudeCode => self.claude_info.as_ref(),
-            AgentHarnessChoice::Codex => self.codex_info.as_ref(),
-            AgentHarnessChoice::Cursor => self.cursor_info.as_ref(),
-        };
-        let selected_available = match harness {
-            AgentHarnessChoice::ClaudeCode => claude_ready,
-            AgentHarnessChoice::Codex => codex_ready,
-            AgentHarnessChoice::Cursor => cursor_ready,
-        };
+        let selected_info = self.harness[harness.index()].info.as_ref();
+        let selected_available = ready_harnesses.contains(&harness);
         // Owned summary so the composer row can render it while self mutates.
         let harness_summary = selected_info.map(|info| {
             let version = info.version.as_deref().map_or("version unknown", |value| {
@@ -1555,13 +1819,9 @@ impl KinewrightApp {
             )
         });
         let harness_hover = harness_summary.map(|summary| {
-            if harness == AgentHarnessChoice::Codex {
-                format!("{summary}\n{CODEX_SANDBOX_NOTICE}")
-            } else if harness == AgentHarnessChoice::Cursor {
-                format!("{summary}\n{CURSOR_SANDBOX_NOTICE}")
-            } else {
-                summary
-            }
+            harness
+                .sandbox_notice()
+                .map_or(summary.clone(), |notice| format!("{summary}\n{notice}"))
         });
 
         let mut confirmation_decision = None;
@@ -1810,34 +2070,10 @@ impl KinewrightApp {
                         ))
                         .selected_text(choice.label())
                         .show_ui(ui, |ui| {
-                            if claude_ready {
+                            for harness in &ready_harnesses {
                                 ui.horizontal(|ui| {
-                                    ui.add(Icon::BrandClaude.image(size::ICON_SM));
-                                    ui.selectable_value(
-                                        &mut choice,
-                                        AgentHarnessChoice::ClaudeCode,
-                                        "Claude Code",
-                                    );
-                                });
-                            }
-                            if codex_ready {
-                                ui.horizontal(|ui| {
-                                    ui.add(Icon::BrandOpenAi.image(size::ICON_SM));
-                                    ui.selectable_value(
-                                        &mut choice,
-                                        AgentHarnessChoice::Codex,
-                                        "Codex",
-                                    );
-                                });
-                            }
-                            if cursor_ready {
-                                ui.horizontal(|ui| {
-                                    ui.add(Icon::BrandCursor.image(size::ICON_SM));
-                                    ui.selectable_value(
-                                        &mut choice,
-                                        AgentHarnessChoice::Cursor,
-                                        "Cursor",
-                                    );
+                                    ui.add(harness.brand_icon().image(size::ICON_SM));
+                                    ui.selectable_value(&mut choice, *harness, harness.label());
                                 });
                             }
                         });
@@ -1873,23 +2109,10 @@ impl KinewrightApp {
             if selected_available {
                 let running = self.projects[project_index].threads[active_thread].running;
                 let composer_harness = self.projects[project_index].threads[active_thread].harness;
-                let (models, choice, memory_id) = match composer_harness {
-                    AgentHarnessChoice::ClaudeCode => (
-                        &self.claude_models,
-                        &mut self.claude_model,
-                        CLAUDE_MODEL_MEMORY_ID,
-                    ),
-                    AgentHarnessChoice::Codex => (
-                        &self.codex_models,
-                        &mut self.codex_model,
-                        CODEX_MODEL_MEMORY_ID,
-                    ),
-                    AgentHarnessChoice::Cursor => (
-                        &self.cursor_models,
-                        &mut self.cursor_model,
-                        CURSOR_MODEL_MEMORY_ID,
-                    ),
-                };
+                let state = &mut self.harness[composer_harness.index()];
+                let models = &state.models;
+                let choice = &mut state.model;
+                let memory_id = composer_harness.model_memory_id();
                 if !models.is_empty() {
                     let before = choice.clone();
                     let selected_text = choice
@@ -1929,23 +2152,13 @@ impl KinewrightApp {
             if selected_available {
                 let running = self.projects[project_index].threads[active_thread].running;
                 let composer_harness = self.projects[project_index].threads[active_thread].harness;
-                let (options, choice, memory_id) = match composer_harness {
-                    AgentHarnessChoice::ClaudeCode => (
-                        effort_options(&self.claude_models, self.claude_model.as_deref()),
-                        &mut self.claude_effort,
-                        CLAUDE_EFFORT_MEMORY_ID,
-                    ),
-                    AgentHarnessChoice::Codex => (
-                        effort_options(&self.codex_models, self.codex_model_or_default()),
-                        &mut self.codex_effort,
-                        CODEX_EFFORT_MEMORY_ID,
-                    ),
-                    AgentHarnessChoice::Cursor => (
-                        effort_options(&self.cursor_models, self.cursor_model.as_deref()),
-                        &mut self.cursor_effort,
-                        CURSOR_EFFORT_MEMORY_ID,
-                    ),
-                };
+                let state = &mut self.harness[composer_harness.index()];
+                let options = effort_options(
+                    &state.models,
+                    state.model.as_deref().or(state.default_model.as_deref()),
+                );
+                let choice = &mut state.effort;
+                let memory_id = composer_harness.effort_memory_id();
                 if !options.is_empty() {
                     let before = choice.clone();
                     let selected_text = choice.as_deref().unwrap_or("Effort").to_owned();
@@ -1977,23 +2190,13 @@ impl KinewrightApp {
             if selected_available {
                 let running = self.projects[project_index].threads[active_thread].running;
                 let composer_harness = self.projects[project_index].threads[active_thread].harness;
-                let (options, choice, memory_id) = match composer_harness {
-                    AgentHarnessChoice::ClaudeCode => (
-                        tier_options(&self.claude_models, self.claude_model.as_deref()),
-                        &mut self.claude_tier,
-                        CLAUDE_TIER_MEMORY_ID,
-                    ),
-                    AgentHarnessChoice::Codex => (
-                        tier_options(&self.codex_models, self.codex_model_or_default()),
-                        &mut self.codex_tier,
-                        CODEX_TIER_MEMORY_ID,
-                    ),
-                    AgentHarnessChoice::Cursor => (
-                        tier_options(&self.cursor_models, self.cursor_model.as_deref()),
-                        &mut self.cursor_tier,
-                        CURSOR_TIER_MEMORY_ID,
-                    ),
-                };
+                let state = &mut self.harness[composer_harness.index()];
+                let options = tier_options(
+                    &state.models,
+                    state.model.as_deref().or(state.default_model.as_deref()),
+                );
+                let choice = &mut state.tier;
+                let memory_id = composer_harness.tier_memory_id();
                 if !options.is_empty() {
                     let before = choice.clone();
                     let selected_text = choice
@@ -2659,5 +2862,122 @@ mod tests {
             },
         ];
         assert_eq!(latest_activity_snippet(&chat, fps), "Ran split_clip");
+    }
+
+    /// The picker, the agent crate's registry and the per-harness state
+    /// array on the app used to be three independent hard-coded tens. This
+    /// pins them to one another: a harness added to one and not the others
+    /// fails here rather than panicking on an out-of-range index at runtime.
+    #[test]
+    fn the_harness_picker_matches_the_agent_crate_registry() {
+        assert_eq!(AgentHarnessChoice::ALL.len(), HARNESS_COUNT);
+        assert_eq!(
+            AgentHarnessChoice::ALL
+                .iter()
+                .map(|harness| harness.key())
+                .collect::<Vec<_>>(),
+            kinewright_agent::HARNESS_KEYS,
+            "the picker order and the registry disagree"
+        );
+        // `KinewrightApp::harness` is declared `[HarnessUiState;
+        // HARNESS_COUNT]`, so the array width is the same fact, checked by
+        // the compiler; what needs checking here is the index mapping.
+        for (position, harness) in AgentHarnessChoice::ALL.into_iter().enumerate() {
+            // `index` addresses that array, so it must be a bijection onto
+            // its range.
+            assert_eq!(harness.index(), position, "{} is misindexed", harness.key());
+            assert_eq!(AgentHarnessChoice::from_key(harness.key()), Some(harness));
+            assert!(
+                kinewright_agent::harness_driver(harness.key()).is_some(),
+                "{} has no driver",
+                harness.key()
+            );
+            assert!(harness.install_url().starts_with("https://"));
+            assert!(!harness.label().is_empty());
+        }
+        assert_eq!(AgentHarnessChoice::from_key("not-a-harness"), None);
+    }
+
+    /// Detection moved off the startup path, so "no CLI" and "not looked
+    /// yet" became different states. A card that mixes them tells someone
+    /// with the CLI installed to go and install it.
+    #[test]
+    fn a_harness_is_only_undetected_once_the_probe_has_reported() {
+        let mut harness: [HarnessUiState; HARNESS_COUNT] =
+            std::array::from_fn(|_| HarnessUiState::default());
+        assert!(
+            harness.iter().all(|state| !state.detected),
+            "nothing is known before the probe thread reports"
+        );
+
+        // A harness that is not installed: reported, and still `None`.
+        apply_harness_update(
+            &mut harness,
+            HarnessUpdate::Detected(AgentHarnessChoice::Kiro, Box::new(None)),
+        );
+        let kiro = &harness[AgentHarnessChoice::Kiro.index()];
+        assert!(kiro.detected && kiro.info.is_none());
+
+        // A harness that is installed.
+        apply_harness_update(
+            &mut harness,
+            HarnessUpdate::Detected(
+                AgentHarnessChoice::Codex,
+                Box::new(Some(HarnessInfo {
+                    id: kinewright_core::HarnessId::new("codex"),
+                    executable: std::path::PathBuf::from("codex"),
+                    version: Some("0.147.0".to_owned()),
+                    authentication: AuthenticationStatus::Authenticated,
+                    subscription_tier: None,
+                })),
+            ),
+        );
+        let codex = &harness[AgentHarnessChoice::Codex.index()];
+        assert!(codex.detected);
+        assert_eq!(
+            codex.info.as_ref().unwrap().version.as_deref(),
+            Some("0.147.0")
+        );
+
+        // A catalog lands separately and never un-reports the detection.
+        assert!(!codex.models_loaded);
+        apply_harness_update(
+            &mut harness,
+            HarnessUpdate::Catalog(
+                AgentHarnessChoice::Codex,
+                vec![kinewright_agent::ModelChoice {
+                    id: "gpt-5.3-codex".to_owned(),
+                    label: "GPT-5.3-Codex".to_owned(),
+                    efforts: Vec::new(),
+                    tiers: Vec::new(),
+                }],
+                Some("gpt-5.3-codex".to_owned()),
+            ),
+        );
+        let codex = &harness[AgentHarnessChoice::Codex.index()];
+        assert!(codex.detected && codex.models_loaded);
+        assert_eq!(codex.models.len(), 1);
+        assert_eq!(codex.default_model.as_deref(), Some("gpt-5.3-codex"));
+        assert!(codex.info.is_some(), "the catalog must not clear detection");
+
+        // A catalog for a harness the probe has not reached yet says
+        // nothing about whether its CLI is there: catalogs are loaded for
+        // all ten regardless, and several answer from a fallback list.
+        apply_harness_update(
+            &mut harness,
+            HarnessUpdate::Catalog(AgentHarnessChoice::Muse, Vec::new(), None),
+        );
+        let muse = &harness[AgentHarnessChoice::Muse.index()];
+        assert!(
+            muse.models_loaded && !muse.detected,
+            "a catalog must not settle detection"
+        );
+
+        // Every other harness is still unreported.
+        assert_eq!(
+            harness.iter().filter(|state| state.detected).count(),
+            2,
+            "only the harnesses the probe reported are settled"
+        );
     }
 }

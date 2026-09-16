@@ -11,7 +11,8 @@ use std::{
 };
 
 use kinewright_agent::{
-    ClaudeCodeDriver, CodexDriver, CursorAcpDriver,
+    ClaudeCodeDriver, CodexDriver, CopilotDriver, CursorAcpDriver, DevinDriver, KimiDriver,
+    KiroDriver, MuseDriver, OpenCodeDriver, QwenDriver,
     eval::{
         AUDIO_WORKFLOW_BENCHMARK_ID, AudioEvalRequest, BLIND_DIRECTORY_NAME, BLIND_FORM_FILE_NAME,
         BLIND_KEY_FILE_NAME, BLIND_SCHEMA_VERSION, BlindKeyEntry, BlindKeyFile, BlindReviewForm,
@@ -233,8 +234,15 @@ fn eval_driver(harness: &str) -> Result<Box<dyn AgentDriver>, EvalError> {
         "claude" | "claude-code" => Ok(Box::new(ClaudeCodeDriver)),
         "codex" => Ok(Box::new(CodexDriver)),
         "cursor" => Ok(Box::new(CursorAcpDriver)),
+        "muse" => Ok(Box::new(MuseDriver)),
+        "opencode" => Ok(Box::new(OpenCodeDriver)),
+        "qwen" => Ok(Box::new(QwenDriver)),
+        "kimi" => Ok(Box::new(KimiDriver)),
+        "kiro" => Ok(Box::new(KiroDriver)),
+        "devin" => Ok(Box::new(DevinDriver)),
+        "copilot" => Ok(Box::new(CopilotDriver)),
         other => Err(EvalError::Agent(format!(
-            "unknown harness {other:?}; expected claude-code, codex, or cursor"
+            "unknown harness {other:?}; expected claude-code, codex, cursor, muse, opencode, qwen, kimi, kiro, devin, or copilot"
         ))),
     }
 }
@@ -731,7 +739,7 @@ fn print_usage() {
 /// The usage banner, as one string, so a test can assert the suite list is
 /// complete without capturing stdout.
 fn usage_text() -> &'static str {
-    "Usage: KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4|generalization-v5|color-workflow-v6|audio-workflow-v7] [--harness claude-code|codex|cursor] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p kinewright-agent --bin kinewright-eval -- --prepare-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --verify-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --score-review PATH\n       cargo run -p kinewright-agent --bin kinewright-eval -- --rerender-document DOCUMENT --artifact-directory DIRECTORY [--delivery-profile vertical_short] [--loudness-contract MIN_LUFS,MAX_LUFS,MAX_PEAK] [--audio-tail-contract TERMINAL_FRAMES,MAX_PEAK,ACTIVITY_FRAMES,MIN_ACTIVE_LUFS,MAX_INACTIVE_FRAMES]"
+    "Usage: KINEWRIGHT_EVAL=1 cargo run -p kinewright-agent --bin kinewright-eval -- [--suite auto-edit-v1|finished-cut-v2|editorial-cut-v3|dialogue-pacing-v4|generalization-v5|color-workflow-v6|audio-workflow-v7] [--harness claude-code|codex|cursor|muse|opencode|qwen|kimi|kiro|devin|copilot] [--model MODEL] [--only EVAL] [--samples N]\n       cargo run -p kinewright-agent --bin kinewright-eval -- --prepare-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --verify-fixtures MANIFEST\n       cargo run -p kinewright-agent --bin kinewright-eval -- --score-review PATH\n       cargo run -p kinewright-agent --bin kinewright-eval -- --rerender-document DOCUMENT --artifact-directory DIRECTORY [--delivery-profile vertical_short] [--loudness-contract MIN_LUFS,MAX_LUFS,MAX_PEAK] [--audio-tail-contract TERMINAL_FRAMES,MAX_PEAK,ACTIVITY_FRAMES,MIN_ACTIVE_LUFS,MAX_INACTIVE_FRAMES]"
 }
 
 fn next_option_value(
@@ -7907,6 +7915,31 @@ mod tests {
         };
         let error = error.to_string();
         assert!(error.contains("color-workflow-v6"), "{error}");
+    }
+
+    /// `--harness` is the only way to reach a driver from the eval binary,
+    /// and both the banner and the unknown-harness error spell the names
+    /// out literally. A harness registered in the agent crate but missing
+    /// from either is unreachable or undiscoverable, so this pins all three
+    /// to `HARNESS_KEYS`.
+    #[test]
+    fn the_harness_option_accepts_and_lists_every_registered_harness() {
+        let usage = usage_text();
+        let Err(unknown) = eval_driver("not-a-harness") else {
+            panic!("an unknown harness must be refused");
+        };
+        let unknown = unknown.to_string();
+        for key in kinewright_agent::HARNESS_KEYS {
+            let driver = eval_driver(key)
+                .unwrap_or_else(|error| panic!("--harness {key} was refused: {error}"));
+            assert_eq!(
+                driver.id(),
+                kinewright_core::HarnessId::new(key),
+                "{key} reports another id"
+            );
+            assert!(usage.contains(key), "the usage banner omits {key}");
+            assert!(unknown.contains(key), "the refusal message omits {key}");
+        }
     }
 
     /// The usage banner enumerates the suites literally, so a suite that is

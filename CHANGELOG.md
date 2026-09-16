@@ -9,6 +9,59 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Fixed
+- One Kinewright turn could switch the user's Cursor CLI out of Fast mode, or
+  pin an effort, permanently. Cursor persists `session/set_config_option`
+  CLI-wide even over ACP, which is why Kinewright snapshots and restores it —
+  but the snapshot was built from `session/new`, and real Cursor answers that
+  with only `mode` and `model`. `fast` and `effort` are per-model and appear
+  only in the ladder a model change restates, so the two settings a turn
+  actually overwrites were exactly the two the restore could never put back.
+  Each write now records the value it displaces, read from the ladder it is
+  about to change, and the restore replays that instead (model first).
+- Pressing Stop could freeze the whole window. Muse's `turn/cancel` was a
+  blocking 30-second request and Cursor's configuration restore was one
+  blocking request per option — both on the egui frame thread, and both
+  reached precisely when the harness has stopped answering. Cancelling is now
+  fire-and-forget, the restore runs on a teardown worker under a five-second
+  budget, and `interrupt` and `Drop` return to the frame at once.
+- One unreadable line on a harness's stdout — a banner, a progress line, a
+  reply with a string id — permanently deafened an ACP or MSP session: the
+  transport skipped the line but the event loop treated it as the end of the
+  stream, so every later message was dropped and the turn ran blind to its
+  30-minute timeout with no diagnostic. The transport now distinguishes one
+  bad line from a closed stream; the first is reported once and stepped over.
+- Detecting the ten harnesses ran on the startup path and cost about 3.5
+  seconds before the first frame on a machine with all ten installed, with no
+  timeout on probes that are network round trips. Detection moved onto the
+  same background thread as the model catalogues, each probe carries a
+  five-second budget, and a provider card says "Detecting…" until its own
+  answer lands rather than claiming the CLI is missing.
+- Devin could not start a session on Windows: only `XDG_CONFIG_HOME` was
+  redirected, while Devin reads `%APPDATA%` there, so its fail-closed check
+  refused every Windows start. Both roots are redirected now, and the check
+  also reads the config file Devin says it loaded rather than trusting the
+  path alone.
+- A Copilot turn hung for good once the CLI wrote about 64 KiB to stderr: the
+  driver piped that stream and never read it, so the child blocked on a full
+  pipe with no diagnostic. Its stderr is now drained on its own thread and
+  kept for the failure message, as Codex's already was, and a turn that ends
+  non-zero reports what the CLI said. Its reader also no longer holds the
+  child's mutex across `wait()`, which could have blocked Stop for as long as
+  the child lived, and a turn whose reader thread fails to start no longer
+  leaves the session marked running for ever.
+- The Qwen brand mark was about to ship as a PNG, which no installed image
+  loader decodes: `egui_extras` is pinned to the `svg` loader alone, so the
+  settings and picker cards would have rendered egui's load-error
+  placeholder. The mark is an SVG cropped from the official `qwen-logo.svg`
+  that `chat.qwen.ai` loads, and a test checks every icon's asset exists,
+  matches its embedded copy, and has an extension an installed loader
+  decodes. The same test found `chat.svg`, an asset no variant had pointed at
+  for some time; it is removed.
+- Muse submitted each turn with a blocking `turn/start` request on the egui
+  frame thread. `turn/start` answers with an admission ack rather than the
+  finished turn (confirmed against the wire schema `muse schema` exports), so
+  the ack is now awaited on a turn thread and the 30 s budget is a deadline
+  on that one request instead of a frame block.
 - `cargo build -p kinewright-app` (the release workflow's build) failed on
   `main` after AU6 Part B: `kinewright-agent`'s `eval` module imported
   `kinewright_core::au6_scenarios` at module scope, which only exists under
@@ -95,6 +148,24 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- Seven more subscription harnesses, taking the chat panel from three agent
+  CLIs to ten: Muse (Meta, over MSP), OpenCode, Qwen Code, Kimi (Moonshot),
+  Kiro, Devin (all over ACP), and Copilot (headless JSONL). OpenCode routes
+  to the user's own configured providers, so DeepSeek, Z.ai (GLM), Moonshot,
+  and MiniMax models are reachable through it without new credentials in
+  Kinewright. A harness whose CLI is installed but logged out degrades to
+  the CLI default instead of failing; the picker, settings cards, provider
+  toggles, eval `--harness` flag, and the model catalog loader (now a
+  background thread, since several catalogs spawn their CLI) cover all ten.
+  Live subscription tests for the new drivers share the
+  `KINEWRIGHT_NEW_AGENT_TEST=1` gate. Cursor moved onto the same shared ACP
+  session runtime the five new ACP harnesses use, keeping its configuration
+  snapshot, one-turn lease and restore as a field on that runtime's
+  per-harness spec; the driver files no longer carry their own copies of the
+  console-window, command-output, scratch-directory or ACP-translation
+  helpers. `kinewright_agent::harness_driver` is now the one place a harness
+  key becomes a driver, shared by the app and the eval binary. See
+  docs/agent-harnesses.md.
 - IN1 Part B, the error migration: every error path that reaches the person
   through the app's log, status bar or chat transcript is now a typed
   incident — 128 `record_error` sites, 3 direct log writes and 3 log-bypassing

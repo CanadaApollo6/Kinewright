@@ -256,6 +256,151 @@ impl CodexProtocol {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct CopilotProtocol {
+    tool_names: HashMap<String, String>,
+    announced: HashSet<String>,
+}
+
+impl CopilotProtocol {
+    /// Map `copilot -p --output-format json` JSONL to agent events. Final
+    /// assistant text comes from `assistant.message` (streaming deltas are
+    /// ignored); tool calls come from its `toolRequests` (deduplicated
+    /// against `tool.execution_start`, which repeats them); results come from
+    /// `tool.execution_complete`; the terminal `result` line ends the turn.
+    /// Copilot reports premium requests and AI units rather than token
+    /// counts, so no `Cost` event is emitted.
+    pub(crate) fn parse_line(&mut self, line: &str) -> Result<Vec<AgentEvent>, AgentError> {
+        let value: Value = serde_json::from_str(line)
+            .map_err(|error| AgentError::Protocol(format!("invalid Copilot JSONL: {error}")))?;
+        let mut events = Vec::new();
+        let data = value.get("data").unwrap_or(&Value::Null);
+        match value.get("type").and_then(Value::as_str) {
+            Some("assistant.message") => self.translate_message(data, &mut events),
+            Some("tool.execution_start") => self.translate_execution_start(data, &mut events),
+            Some("tool.execution_complete") => {
+                events.push(self.translate_execution_complete(data));
+            }
+            Some("result") => translate_copilot_result(&value, &mut events),
+            Some("error") => {
+                let message = data
+                    .get("message")
+                    .map_or_else(|| compact_json(&value), content_text);
+                events.push(AgentEvent::Error(format!("Copilot error: {message}")));
+                events.push(AgentEvent::Done);
+            }
+            _ => {}
+        }
+        Ok(events)
+    }
+
+    fn translate_message(&mut self, data: &Value, events: &mut Vec<AgentEvent>) {
+        for request in data
+            .get("toolRequests")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            self.announce_tool_call(
+                request
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                request
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool"),
+                request.get("arguments").unwrap_or(&Value::Null),
+                events,
+            );
+        }
+        if let Some(text) = data.get("content").and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            events.push(AgentEvent::Text(text.to_owned()));
+        }
+    }
+
+    fn translate_execution_start(&mut self, data: &Value, events: &mut Vec<AgentEvent>) {
+        self.announce_tool_call(
+            data.get("toolCallId")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            data.get("toolName")
+                .and_then(Value::as_str)
+                .unwrap_or("tool"),
+            data.get("arguments").unwrap_or(&Value::Null),
+            events,
+        );
+    }
+
+    fn announce_tool_call(
+        &mut self,
+        id: &str,
+        raw_name: &str,
+        arguments: &Value,
+        events: &mut Vec<AgentEvent>,
+    ) {
+        let name = display_tool_call_name(raw_name, arguments);
+        self.tool_names.insert(id.to_owned(), name.clone());
+        if self.announced.insert(id.to_owned()) {
+            events.push(AgentEvent::ToolCall {
+                name,
+                arguments: compact_json(arguments),
+            });
+        }
+    }
+
+    fn translate_execution_complete(&mut self, data: &Value) -> AgentEvent {
+        let id = data
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let name = self
+            .tool_names
+            .remove(id)
+            .unwrap_or_else(|| "tool".to_owned());
+        self.announced.remove(id);
+        let result = data
+            .get("result")
+            .and_then(|result| {
+                result
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        result
+                            .get("detailedContent")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+            })
+            .or_else(|| data.get("error").map(compact_json))
+            .unwrap_or_else(|| {
+                if data.get("success").and_then(Value::as_bool) == Some(false) {
+                    "tool failed".to_owned()
+                } else {
+                    "completed".to_owned()
+                }
+            });
+        AgentEvent::ToolResult { name, result }
+    }
+}
+
+fn translate_copilot_result(value: &Value, events: &mut Vec<AgentEvent>) {
+    let exit_code = value.get("exitCode").and_then(Value::as_i64).unwrap_or(0);
+    if exit_code == 0 {
+        events.push(AgentEvent::Done);
+    } else {
+        let message = value.get("error").map_or_else(
+            || format!("Copilot exited with code {exit_code}"),
+            content_text,
+        );
+        events.push(AgentEvent::Error(format!("Copilot error: {message}")));
+        events.push(AgentEvent::Done);
+    }
+}
+
 fn codex_tool_result(item: &Value) -> String {
     if let Some(error) = item.get("error").filter(|error| !error.is_null()) {
         return content_text(error);
@@ -291,7 +436,10 @@ fn nested_token_value(value: &Value, object: &str, field: &str) -> Option<u64> {
 }
 
 fn display_tool_name(name: &str) -> String {
+    // Copilot joins the MCP server and tool with a dash; every other harness
+    // uses the double-underscore form.
     name.strip_prefix("mcp__kinewright__")
+        .or_else(|| name.strip_prefix("kinewright-"))
         .unwrap_or(name)
         .to_owned()
 }
@@ -395,6 +543,65 @@ mod tests {
     fn malformed_protocol_lines_report_driver_errors() {
         assert!(ClaudeProtocol::default().parse_line("not-json").is_err());
         assert!(CodexProtocol::default().parse_line("{").is_err());
+        assert!(CopilotProtocol::default().parse_line("not-json").is_err());
+    }
+
+    #[test]
+    fn parses_recorded_copilot_jsonl_shapes() {
+        let fixture = include_str!("../tests/fixtures/copilot-stream.jsonl");
+        let mut protocol = CopilotProtocol::default();
+        let events = fixture
+            .lines()
+            .flat_map(|line| protocol.parse_line(line).unwrap())
+            .collect::<Vec<_>>();
+        // toolRequests and tool.execution_start describe the same call once.
+        let calls = events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolCall { .. }))
+            .count();
+        assert_eq!(calls, 1);
+        assert!(events.contains(&AgentEvent::ToolCall {
+            name: "bash".to_owned(),
+            arguments: r#"{"command":"echo TOOL-PROBE-OK","description":"Run the exact requested shell command once and capture its output","initial_wait":10,"mode":"sync"}"#.to_owned(),
+        }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolResult { name, result }
+                if name == "bash" && result.contains("TOOL-PROBE-OK")
+        )));
+        assert!(events.contains(&AgentEvent::Text("TOOL-PROBE-OK".to_owned())));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Cost { .. }))
+        );
+        assert_eq!(events.last(), Some(&AgentEvent::Done));
+    }
+
+    #[test]
+    fn copilot_mcp_tool_names_strip_the_server_prefix() {
+        let events = CopilotProtocol::default()
+            .parse_line(
+                r#"{"type":"assistant.message","data":{"messageId":"m","content":"","toolRequests":[{"toolCallId":"t","name":"kinewright-get_timeline_state","arguments":{}}]}}"#,
+            )
+            .unwrap();
+        assert!(
+            matches!(events.first(), Some(AgentEvent::ToolCall { name, .. }) if name == "get_timeline_state")
+        );
+    }
+
+    #[test]
+    fn copilot_failure_results_report_errors_and_done() {
+        let events = CopilotProtocol::default()
+            .parse_line(r#"{"type":"result","exitCode":1,"error":"model overloaded"}"#)
+            .unwrap();
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::Error("Copilot error: model overloaded".to_owned()),
+                AgentEvent::Done,
+            ]
+        );
     }
 
     #[test]

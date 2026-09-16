@@ -11,7 +11,7 @@
 [![Windows](https://img.shields.io/badge/Windows-native-0078D4?logo=windows&logoColor=white)](docs/BUILDING.md)
 [![Linux](https://img.shields.io/badge/Linux-native-FCC624?logo=linux&logoColor=black)](docs/BUILDING.md)
 
-Kinewright is a **native desktop** video editor written in Rust — the same fast binary on **Windows and Linux**, not a web wrapper, Electron shell, or VM. At its core it is an **agentic harness for video editing**. Type "cut the first three seconds and tighten the pauses" into the chat panel, and the agent CLI you already pay for — Claude Code, Codex, or Cursor — makes the edits on your timeline, using the exact same operations you'd use by hand. Every agent edit lands on the same undo stack as yours: **Ctrl+Z reverses the robot.**
+Kinewright is a **native desktop** video editor written in Rust — the same fast binary on **Windows and Linux**, not a web wrapper, Electron shell, or VM. At its core it is an **agentic harness for video editing**. Type "cut the first three seconds and tighten the pauses" into the chat panel, and the agent CLI you already pay for — Claude Code, Codex, Cursor, Muse, OpenCode, Qwen, Kimi, Kiro, Devin, or Copilot — makes the edits on your timeline, using the exact same operations you'd use by hand. Every agent edit lands on the same undo stack as yours: **Ctrl+Z reverses the robot.**
 
 > Early development. The editor works end to end — import, cut, composite, export, agent editing, transcript editing — but expect rough edges. The product goal is an open-source, agent-native Premiere-class editor, built slice by slice. After Effects tooling is a later programme, not current work.
 
@@ -25,7 +25,7 @@ Kinewright is a **native desktop** video editor written in Rust — the same fas
 
 - **Native on Windows and Linux.** One Rust desktop app on both platforms — `eframe` / `wgpu` / FFmpeg, not a browser tab. Same editor, same agent harness, same undo stack.
 - **Not a video generator.** Models never create footage here. They edit footage *you shot*. The source of truth is your media plus an inspectable edit log — never model output.
-- **Bring your own subscription.** Kinewright drives the agent CLIs already installed on your machine (Claude Code, Codex CLI, or Cursor Agent). No API keys to paste, no account, no server, no markup. The CLI handles auth; Kinewright never sees a credential.
+- **Bring your own subscription.** Kinewright drives the agent CLIs already installed on your machine (Claude Code, Codex CLI, Cursor Agent, Muse, OpenCode, Qwen Code, Kimi, Kiro, Devin, or Copilot). No API keys to paste, no account, no server, no markup. The CLI handles auth; Kinewright never sees a credential.
 - **Human/agent parity by construction.** Every Kinewright mutation — human or agent — is an `Operation` flowing through one core actor. The agent's editing tools are *generated from the operation set*, so it receives the same validated, undoable editing vocabulary as the GUI.
 - **Edit by transcript.** Local Whisper transcription (on-device, one-time model download) gives the agent word-level timestamps. "Remove the filler words" becomes a set of precise, frame-accurate cuts.
 - **Free forever.** GPLv3. No paid tier, no telemetry, no plans to monetize.
@@ -55,6 +55,13 @@ Kinewright is a **native desktop** video editor written in Rust — the same fas
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code/getting-started) (any Claude subscription)
   - [Codex CLI](https://developers.openai.com/codex/cli) 0.147.0+ (ChatGPT subscription)
   - [Cursor Agent CLI](https://docs.cursor.com/en/cli/installation) (Cursor subscription)
+  - [Muse](https://dev.meta.ai) (Meta account)
+  - [OpenCode](https://opencode.ai) (your configured providers, e.g. DeepSeek, GLM, Kimi, MiniMax)
+  - [Qwen Code](https://github.com/QwenLM/qwen-code) (Qwen OAuth or DashScope key)
+  - [Kimi](https://github.com/MoonshotAI/kimi-cli) (Moonshot account)
+  - [Kiro CLI](https://kiro.dev/docs/cli) (Kiro subscription)
+  - [Devin](https://docs.devin.ai) (Devin subscription)
+  - [Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) (Copilot subscription)
 - Everything else (FFmpeg, Whisper) is bundled or downloaded automatically
 
 **Install**
@@ -93,7 +100,7 @@ Kinewright runs a local MCP (Model Context Protocol) server inside the app and s
 1. **Edit operations** — plan schemas such as `split_clip`, `trim_clip`, and `add_effect`, auto-generated from the same operation definitions the GUI uses.
 2. **Capabilities** — inspectors, planners, proofs, and actions such as timeline summaries, rendered frames, transcripts, analysis, and delivery.
 
-Claude Code and Codex sessions run with their built-in shell/file/web tools disabled or sandboxed away. Cursor receives only the per-project Kinewright MCP endpoint and starts in an empty scratch directory, but its ACP server may still expose Cursor-owned tools; the settings panel states this weaker boundary explicitly. Destructive Kinewright operations pause for your approval in the chat panel. Costs are surfaced when the harness reports them, and turns are capped per session.
+Claude Code and Codex sessions run with their built-in shell/file/web tools disabled or sandboxed away. Copilot gets Kinewright as its only MCP server, but its own shell and file tools stay available and run auto-approved, because Copilot cannot ask headlessly - the weakest boundary of the ten, and the settings panel says so. Cursor, Muse, OpenCode, Qwen, Kimi, Kiro, and Devin receive only the per-project Kinewright MCP endpoint and start in an empty scratch directory, but their agent servers may still expose vendor-owned tools; the settings panel states this weaker boundary explicitly. Destructive Kinewright operations pause for your approval in the chat panel. Costs are surfaced when the harness reports them, and turns are capped per session.
 
 Details: [roadmap and development workflows](docs/ROADMAP-AND-WORKFLOWS.md) · [agent harnesses](docs/agent-harnesses.md) · [M36 agent runtime efficiency](docs/M36-AGENT-RUNTIME-EFFICIENCY.md) · [M37 human-acceptable first cut](docs/M37-HUMAN-ACCEPTABLE-FIRST-CUT.md) · [model-first editor](docs/MODEL-FIRST-EDITOR.md) · [M35 product-position snapshot](docs/PRODUCT-POSITION-M35-2026-08.md) · [transcription](docs/TRANSCRIPTION.md)
 

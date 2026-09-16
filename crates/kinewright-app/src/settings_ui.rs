@@ -6,7 +6,6 @@
 //! they never interrupt a session that is already running.
 
 use eframe::egui;
-use kinewright_agent::{CODEX_SANDBOX_NOTICE, CURSOR_SANDBOX_NOTICE};
 use kinewright_core::HarnessInfo;
 
 use crate::{
@@ -20,6 +19,13 @@ const fn provider_memory_id(harness: AgentHarnessChoice) -> &'static str {
         AgentHarnessChoice::ClaudeCode => "kinewright-provider-enabled-claude-code",
         AgentHarnessChoice::Codex => "kinewright-provider-enabled-codex",
         AgentHarnessChoice::Cursor => "kinewright-provider-enabled-cursor",
+        AgentHarnessChoice::Muse => "kinewright-provider-enabled-muse",
+        AgentHarnessChoice::OpenCode => "kinewright-provider-enabled-opencode",
+        AgentHarnessChoice::Qwen => "kinewright-provider-enabled-qwen",
+        AgentHarnessChoice::Kimi => "kinewright-provider-enabled-kimi",
+        AgentHarnessChoice::Kiro => "kinewright-provider-enabled-kiro",
+        AgentHarnessChoice::Devin => "kinewright-provider-enabled-devin",
+        AgentHarnessChoice::Copilot => "kinewright-provider-enabled-copilot",
     }
 }
 
@@ -51,26 +57,20 @@ impl KinewrightApp {
                 ui.set_width(440.0);
                 ui.label(theme::caps_label("PROVIDERS", color::TEXT_MUTED));
                 ui.add_space(space::ONE);
-                provider_card(
-                    ui,
-                    AgentHarnessChoice::ClaudeCode,
-                    self.claude_info.as_ref(),
-                    "https://docs.anthropic.com/en/docs/claude-code/getting-started",
-                );
-                ui.add_space(space::ONE);
-                provider_card(
-                    ui,
-                    AgentHarnessChoice::Codex,
-                    self.codex_info.as_ref(),
-                    "https://developers.openai.com/codex/cli",
-                );
-                ui.add_space(space::ONE);
-                provider_card(
-                    ui,
-                    AgentHarnessChoice::Cursor,
-                    self.cursor_info.as_ref(),
-                    "https://docs.cursor.com/en/cli/installation",
-                );
+                egui::ScrollArea::vertical()
+                    .max_height(520.0)
+                    .show(ui, |ui| {
+                        for harness in AgentHarnessChoice::ALL {
+                            provider_card(
+                                ui,
+                                harness,
+                                self.harness[harness.index()].info.as_ref(),
+                                self.harness[harness.index()].detected,
+                                harness.install_url(),
+                            );
+                            ui.add_space(space::ONE);
+                        }
+                    });
             });
         self.settings_open = open;
     }
@@ -110,6 +110,7 @@ fn provider_card(
     ui: &mut egui::Ui,
     harness: AgentHarnessChoice,
     info: Option<&HarnessInfo>,
+    detected: bool,
     install_url: &str,
 ) {
     let ctx = ui.ctx().clone();
@@ -142,22 +143,21 @@ fn provider_card(
                     |tier| format!("{} · {tier}", authentication_label(info.authentication)),
                 );
                 ui.colored_label(color::TEXT_MUTED, identity);
-                if harness == AgentHarnessChoice::Codex {
+                if let Some(notice) = harness.sandbox_notice() {
                     ui.colored_label(
                         color::TEXT_MUTED,
-                        egui::RichText::new(CODEX_SANDBOX_NOTICE).size(type_size::CAPTION),
-                    );
-                } else if harness == AgentHarnessChoice::Cursor {
-                    ui.colored_label(
-                        color::TEXT_MUTED,
-                        egui::RichText::new(CURSOR_SANDBOX_NOTICE).size(type_size::CAPTION),
+                        egui::RichText::new(notice).size(type_size::CAPTION),
                     );
                 }
-            } else {
+            } else if detected {
                 ui.horizontal(|ui| {
                     ui.colored_label(color::TEXT_MUTED, "Not detected on this machine.");
                     ui.hyperlink_to("Install", install_url.to_owned());
                 });
+            } else {
+                // The probe thread has not reached this harness yet, so
+                // "not detected" would be a guess rather than an answer.
+                ui.colored_label(color::TEXT_MUTED, "Detecting…");
             }
         });
     theme::paint_raised_lighting(ui.painter(), card.response.rect, radius::px(radius::MD));

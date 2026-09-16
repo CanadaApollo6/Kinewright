@@ -21,6 +21,8 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use kinewright_core::{AgentError, AgentEvent};
 use serde_json::{Value, json};
 
+use crate::child_process::{hide_console_window, spawn_stderr_capture};
+
 type PendingReply = Result<Value, AgentError>;
 
 #[derive(Debug, Clone)]
@@ -34,6 +36,12 @@ pub(crate) enum AcpIncoming {
         method: String,
         params: Value,
     },
+    /// One line could not be understood. The stream is still alive: the
+    /// reader skipped it and keeps going, so a consumer must report it and
+    /// carry on. A banner or a deprecation warning on stdout arrives here.
+    Malformed(String),
+    /// The stream is gone. Every pending request has already been failed;
+    /// the consumer's loop ends here.
     Fault(String),
 }
 
@@ -41,6 +49,17 @@ pub(crate) struct AcpPendingRequest {
     id: u64,
     reply: Receiver<PendingReply>,
     pending: Arc<Mutex<HashMap<u64, Sender<PendingReply>>>>,
+}
+
+/// A pending request the caller drops without waiting (a fire-and-forget
+/// `turn/cancel`) must not leave its reply slot in the map for the life of
+/// the session.
+impl Drop for AcpPendingRequest {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.id);
+        }
+    }
 }
 
 impl AcpPendingRequest {
@@ -171,11 +190,16 @@ impl AcpClient {
     }
 
     pub(crate) fn notify(&self, method: &str, params: &Value) -> Result<(), AgentError> {
-        self.write_message(&json!({
+        // `params` is optional in JSON-RPC: a null params member is not the
+        // same as an absent one (MSP's `initialized` rejects the former).
+        let mut message = json!({
             "jsonrpc": "2.0",
             "method": method,
-            "params": params,
-        }))
+        });
+        if !params.is_null() {
+            message["params"] = params.clone();
+        }
+        self.write_message(&message)
     }
 
     pub(crate) fn respond(&self, id: &Value, result: &Value) -> Result<(), AgentError> {
@@ -231,14 +255,7 @@ fn spawn_reader(
     interrupted: Arc<AtomicBool>,
     process_name: &'static str,
 ) -> Result<(), AgentError> {
-    let stderr_reader = thread::Builder::new()
-        .name("kinewright-acp-stderr".to_owned())
-        .spawn(move || {
-            let mut text = String::new();
-            let _ = BufReader::new(stderr).read_to_string(&mut text);
-            text
-        })
-        .map_err(|error| AgentError::Harness(error.to_string()))?;
+    let stderr_reader = spawn_stderr_capture(stderr, "kinewright-acp-stderr")?;
 
     thread::Builder::new()
         .name("kinewright-acp-reader".to_owned())
@@ -256,7 +273,7 @@ fn spawn_reader(
                 let message = match serde_json::from_str::<Value>(&line) {
                     Ok(message) => message,
                     Err(error) => {
-                        let _ = incoming.send(AcpIncoming::Fault(format!(
+                        let _ = incoming.send(AcpIncoming::Malformed(format!(
                             "{process_name} sent invalid NDJSON: {error}"
                         )));
                         continue;
@@ -304,7 +321,7 @@ fn route_message(
     }
 
     let Some(id) = message.get("id").and_then(Value::as_u64) else {
-        let _ = incoming.send(AcpIncoming::Fault(
+        let _ = incoming.send(AcpIncoming::Malformed(
             "ACP message had neither a method nor a numeric reply id".to_owned(),
         ));
         return;
@@ -346,16 +363,6 @@ pub(crate) fn send_done(events: &Sender<AgentEvent>, done: &AtomicBool) {
         let _ = events.send(AgentEvent::Done);
     }
 }
-
-#[cfg(windows)]
-fn hide_console_window(command: &mut ProcessCommand) {
-    use std::os::windows::process::CommandExt as _;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_console_window(_command: &mut ProcessCommand) {}
 
 #[cfg(test)]
 mod tests {
@@ -412,5 +419,64 @@ mod tests {
             reply_rx.recv().unwrap().unwrap_err(),
             AgentError::Protocol("no session".to_owned())
         );
+    }
+
+    /// A banner, a progress line or a reply with a string id is one bad line,
+    /// not a dead stream. The reader must skip it, say so once, and keep
+    /// delivering — the whole session used to go deaf on the first one.
+    /// Portable: `spawn_reader` takes two `impl Read`, so no child is needed.
+    #[test]
+    fn an_unparseable_line_is_malformed_and_the_stream_survives_it() {
+        let stdout = concat!(
+            "OpenCode v1.2.3 starting…\n",
+            r#"{"jsonrpc":"2.0","id":"not-a-number","result":{}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1"}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":1,"result":{"sessionId":"s1"}}"#,
+            "\n",
+        );
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let (reply_tx, reply_rx) = bounded(1);
+        pending.lock().unwrap().insert(1, reply_tx);
+        let (incoming_tx, incoming_rx) = unbounded();
+        spawn_reader(
+            std::io::Cursor::new(stdout.as_bytes().to_vec()),
+            std::io::empty(),
+            Arc::clone(&pending),
+            incoming_tx,
+            Arc::new(AtomicBool::new(false)),
+            "Fake ACP",
+        )
+        .unwrap();
+
+        let first = incoming_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            matches!(&first, AcpIncoming::Malformed(message) if message.contains("invalid NDJSON")),
+            "{first:?}"
+        );
+        let second = incoming_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            matches!(&second, AcpIncoming::Malformed(message) if message.contains("reply id")),
+            "{second:?}"
+        );
+        // The valid notification after both bad lines still arrives...
+        assert!(matches!(
+            incoming_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            AcpIncoming::Notification { method, .. } if method == "session/update"
+        ));
+        // ...and so does the reply the caller is waiting on.
+        assert_eq!(
+            reply_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap()["sessionId"],
+            "s1"
+        );
+        // Only the end of the stream is a `Fault`.
+        assert!(matches!(
+            incoming_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            AcpIncoming::Fault(message) if message.contains("closed its ACP stream")
+        ));
     }
 }

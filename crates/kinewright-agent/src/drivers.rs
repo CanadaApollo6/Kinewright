@@ -2,15 +2,14 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{BufRead as _, BufReader, Read as _, Write as _},
+    io::{BufRead as _, BufReader, Write as _},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command as ProcessCommand, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -21,6 +20,9 @@ use kinewright_core::{
 use serde_json::{Value, json};
 
 use crate::{
+    child_process::{
+        create_scratch_directory, hide_console_window, process_output, spawn_stderr_capture,
+    },
     compact_tool_names,
     protocol::{ClaudeProtocol, CodexProtocol},
 };
@@ -60,7 +62,6 @@ const CODEX_DISABLED_FEATURES: &[&str] = &[
     "default_mode_request_user_input",
     "request_permissions_tool",
 ];
-static CODEX_SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub const CODEX_SANDBOX_NOTICE: &str = "Codex sessions use a read-only empty scratch sandbox; shell, file-write, and web tools are disabled.";
 
@@ -288,7 +289,7 @@ impl CodexSession {
         cfg: SessionConfig,
     ) -> Result<Self, AgentError> {
         let tool_names = configured_tool_names(&cfg);
-        let scratch_directory = create_codex_scratch_directory()?;
+        let scratch_directory = create_scratch_directory("codex")?;
         let (model_catalog_directory, model_catalog_path) =
             match create_codex_direct_model_catalog(&target) {
                 Ok(catalog) => catalog,
@@ -536,14 +537,7 @@ fn spawn_codex_reader(
     events: Sender<AgentEvent>,
     done: Arc<AtomicBool>,
 ) -> Result<(), AgentError> {
-    let stderr_reader = thread::Builder::new()
-        .name("kinewright-codex-stderr".to_owned())
-        .spawn(move || {
-            let mut stderr_text = String::new();
-            let _ = BufReader::new(stderr).read_to_string(&mut stderr_text);
-            stderr_text
-        })
-        .map_err(|error| AgentError::Harness(error.to_string()))?;
+    let stderr_reader = spawn_stderr_capture(stderr, "kinewright-codex-stderr")?;
     thread::Builder::new()
         .name("kinewright-codex-events".to_owned())
         .spawn(move || {
@@ -595,32 +589,6 @@ fn spawn_codex_reader(
         .map_err(|error| AgentError::Harness(error.to_string()))
 }
 
-fn create_codex_scratch_directory() -> Result<PathBuf, AgentError> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    for _ in 0..16 {
-        let counter = CODEX_SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = env::temp_dir().join(format!(
-            "kinewright-codex-{}-{now}-{counter}",
-            std::process::id()
-        ));
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => {
-                return Err(AgentError::Harness(format!(
-                    "could not create the Codex scratch directory: {error}"
-                )));
-            }
-        }
-    }
-    Err(AgentError::Harness(
-        "could not allocate a unique Codex scratch directory".to_owned(),
-    ))
-}
-
 fn create_codex_direct_model_catalog(
     target: &CodexSpawnTarget,
 ) -> Result<(PathBuf, PathBuf), AgentError> {
@@ -640,7 +608,7 @@ fn create_codex_direct_model_catalog(
     })?;
     force_direct_tool_mode(&mut catalog)?;
 
-    let directory = create_codex_scratch_directory()?;
+    let directory = create_scratch_directory("codex-models")?;
     let path = directory.join("models-direct.json");
     let serialized = serde_json::to_vec(&catalog).map_err(|error| {
         AgentError::Harness(format!(
@@ -832,7 +800,7 @@ fn detect_cli(
     authentication: fn(&Path) -> AuthenticationStatus,
 ) -> Option<HarnessInfo> {
     let executable = find_on_path(executable_name)?;
-    let version = process_output(&executable, &["--version"])
+    let version = process_output(ProcessCommand::new(&executable), &["--version"])
         .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned));
     let authentication = authentication(&executable);
     Some(HarnessInfo {
@@ -845,7 +813,7 @@ fn detect_cli(
 }
 
 fn claude_authentication(executable: &Path) -> AuthenticationStatus {
-    let Some(output) = process_output(executable, &["auth", "status"]) else {
+    let Some(output) = process_output(ProcessCommand::new(executable), &["auth", "status"]) else {
         return AuthenticationStatus::Unknown;
     };
     serde_json::from_str::<Value>(&output)
@@ -963,31 +931,7 @@ fn resolve_codex_spawn_target(
 }
 
 fn codex_process_output(target: &CodexSpawnTarget, arguments: &[&str]) -> Option<String> {
-    let mut command = target.command();
-    command.args(arguments).stdin(Stdio::null());
-    hide_console_window(&mut command);
-    process_command_output(command)
-}
-
-fn process_output(executable: &Path, arguments: &[&str]) -> Option<String> {
-    let mut command = ProcessCommand::new(executable);
-    command.args(arguments).stdin(Stdio::null());
-    hide_console_window(&mut command);
-    process_command_output(command)
-}
-
-fn process_command_output(mut command: ProcessCommand) -> Option<String> {
-    let output = command.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Some(if stdout.trim().is_empty() {
-        stderr.into_owned()
-    } else {
-        stdout.into_owned()
-    })
+    process_output(target.command(), arguments)
 }
 
 pub(crate) fn find_on_path(executable: &str) -> Option<PathBuf> {
@@ -1012,16 +956,6 @@ pub(crate) fn find_on_path(executable: &str) -> Option<PathBuf> {
     }
     None
 }
-
-#[cfg(windows)]
-fn hide_console_window(command: &mut ProcessCommand) {
-    use std::os::windows::process::CommandExt as _;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_console_window(_command: &mut ProcessCommand) {}
 
 #[cfg(test)]
 mod tests {
@@ -1149,7 +1083,7 @@ mod tests {
 
     #[test]
     fn codex_npm_shim_resolves_to_the_vendored_native_binary() {
-        let npm_bin = create_codex_scratch_directory().unwrap();
+        let npm_bin = create_scratch_directory("codex-test").unwrap();
         let shim = npm_bin.join("codex.cmd");
         fs::write(&shim, "@echo off\r\n").unwrap();
         let (platform_package, target_triple) = codex_windows_platform();
@@ -1178,7 +1112,7 @@ mod tests {
 
     #[test]
     fn codex_npm_shim_falls_back_to_node_and_the_javascript_entrypoint() {
-        let npm_bin = create_codex_scratch_directory().unwrap();
+        let npm_bin = create_scratch_directory("codex-test").unwrap();
         let shim = npm_bin.join("codex.ps1");
         fs::write(&shim, "#!/usr/bin/env pwsh\n").unwrap();
         let javascript_entrypoint = npm_bin
@@ -1199,17 +1133,6 @@ mod tests {
             vec![javascript_entrypoint.into_os_string()]
         );
         fs::remove_dir_all(npm_bin).unwrap();
-    }
-
-    #[test]
-    fn codex_scratch_directories_are_unique_and_empty() {
-        let first = create_codex_scratch_directory().unwrap();
-        let second = create_codex_scratch_directory().unwrap();
-        assert_ne!(first, second);
-        assert_eq!(fs::read_dir(&first).unwrap().count(), 0);
-        assert_eq!(fs::read_dir(&second).unwrap().count(), 0);
-        fs::remove_dir_all(first).unwrap();
-        fs::remove_dir_all(second).unwrap();
     }
 
     #[test]

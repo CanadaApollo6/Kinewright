@@ -1,12 +1,16 @@
 //! `MCP` tools and installed-agent CLI drivers for the live `Kinewright` process.
 
 mod acp;
+mod acp_drivers;
+mod acp_session;
 mod audio_qc_tool;
 mod audio_repair_tool;
 mod branch;
+mod child_process;
 mod color_qc_tool;
 mod color_scopes;
 mod color_status;
+mod copilot;
 mod cursor;
 mod drivers;
 /// The eval harness. Gated with the fixture data it consumes: `eval.rs`
@@ -18,7 +22,9 @@ mod drivers;
 pub mod eval;
 pub mod export_queue;
 pub mod fixture_pack;
+mod harness;
 mod models;
+mod muse;
 mod pacing;
 mod protocol;
 mod render;
@@ -32,15 +38,23 @@ mod server;
 mod session;
 mod silence;
 
+pub use acp_drivers::{
+    DEVIN_SANDBOX_NOTICE, DevinDriver, KIMI_SANDBOX_NOTICE, KIRO_SANDBOX_NOTICE, KimiDriver,
+    KiroDriver, OPENCODE_SANDBOX_NOTICE, OpenCodeDriver, QWEN_SANDBOX_NOTICE, QwenDriver,
+    devin_models, kimi_models, kiro_models, opencode_models, qwen_models,
+};
 pub use branch::{
     BranchApplyOutcome, BranchComparison, BranchError, TimelineBranch, apply_to_live,
 };
+pub use copilot::{COPILOT_SANDBOX_NOTICE, CopilotDriver, copilot_models};
 pub use cursor::{CURSOR_SANDBOX_NOTICE, CursorAcpDriver, cursor_models};
 pub use drivers::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
+pub use harness::{HARNESS_KEYS, harness_driver};
 pub use models::{
     CLAUDE_ULTRACODE, ModelChoice, ServiceTier, claude_models, codex_default_model, codex_models,
     common_efforts, common_tiers,
 };
+pub use muse::{MUSE_SANDBOX_NOTICE, MuseDriver, muse_models};
 pub use render::{
     render_asset_transcript, render_clip_info, render_timeline_state, render_timeline_transcript,
 };

@@ -11,12 +11,11 @@ use std::{
 };
 
 use eframe::egui;
-use kinewright_agent::{ClaudeCodeDriver, CodexDriver, CursorAcpDriver};
 use kinewright_core::{
-    AgentDriver, Analysis, AudioChain, Command, CommandToken, Document, Effect, EffectId, Event,
-    Export, HarnessInfo, Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome,
-    IncidentSubject, JournalCommand, LabelIncident, LiveAudioChange, MediaAsset, MediaError,
-    MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint, NOISE_PROFILE_BAND_COUNT,
+    Analysis, AudioChain, Command, CommandToken, Document, Effect, EffectId, Event, Export,
+    Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome, IncidentSubject,
+    JournalCommand, LabelIncident, LiveAudioChange, MediaAsset, MediaError, MediaEvent,
+    MixNoiseProfileRequest, MixSpectrumPoint, NOISE_PROFILE_BAND_COUNT,
     NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation, ParamValue, Playback, PlaybackState,
     PolicyClass, Rational, RecoveryKind, SilenceStatus, TimeCode, TimelineRevision, Track, TrackId,
     TrackKind, recovery_description,
@@ -217,29 +216,16 @@ pub(crate) struct KinewrightApp {
     pub(crate) frames: crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)>,
     pub(crate) media_events: crossbeam_channel::Receiver<MediaEvent>,
     pub(crate) visual_cache: crate::visual_cache::VisualCache,
-    pub(crate) claude_info: Option<HarnessInfo>,
-    pub(crate) codex_info: Option<HarnessInfo>,
-    pub(crate) cursor_info: Option<HarnessInfo>,
+    /// Per-harness detection, model catalog, and remembered picks, indexed
+    /// by [`AgentHarnessChoice::index`](crate::chat_ui::AgentHarnessChoice::index).
+    pub(crate) harness: [crate::chat_ui::HarnessUiState; crate::chat_ui::HARNESS_COUNT],
+    /// Detection results and model catalogs arriving from the background
+    /// harness-probe thread. `None` in tests, where no probe runs, so every
+    /// harness stays undetected with an empty catalog.
+    pub(crate) harness_update_rx:
+        Option<crossbeam_channel::Receiver<crate::chat_ui::HarnessUpdate>>,
     pub(crate) show_thread_rail: bool,
     pub(crate) settings_open: bool,
-    /// Selectable models per harness; `None` chosen means the CLI's default.
-    pub(crate) claude_models: Vec<kinewright_agent::ModelChoice>,
-    pub(crate) codex_models: Vec<kinewright_agent::ModelChoice>,
-    pub(crate) cursor_models: Vec<kinewright_agent::ModelChoice>,
-    /// The model the Codex CLI's config actually runs as its default, so the
-    /// picker's "Default" resolves to that model's real efforts and tiers.
-    pub(crate) codex_default_model: Option<String>,
-    pub(crate) claude_model: Option<String>,
-    pub(crate) codex_model: Option<String>,
-    pub(crate) cursor_model: Option<String>,
-    pub(crate) claude_effort: Option<String>,
-    pub(crate) codex_effort: Option<String>,
-    pub(crate) cursor_effort: Option<String>,
-    /// Service tier ids per harness; `None` means the provider's standard
-    /// tier (only offered where the harness catalog advertises tiers).
-    pub(crate) claude_tier: Option<String>,
-    pub(crate) codex_tier: Option<String>,
-    pub(crate) cursor_tier: Option<String>,
     pub(crate) probe_tx: mpsc::Sender<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) probe_rx: mpsc::Receiver<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) relink_probe_tx: mpsc::Sender<crate::media_workflow::RelinkProbeResponse>,
@@ -435,9 +421,18 @@ impl KinewrightApp {
         let screenshotting = std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some();
         let assets = project.document.media_pool.clone();
         let error_log = ErrorLog::default();
-        let claude_info = ClaudeCodeDriver.detect();
-        let codex_info = CodexDriver.detect();
-        let cursor_info = CursorAcpDriver.detect();
+        let harness = std::array::from_fn(|_| crate::chat_ui::HarnessUiState::default());
+        // Detection and model catalogs both spawn the harness CLIs, so both
+        // run off the frame. Detecting ten harnesses took about three
+        // seconds of the startup path on a machine with all ten installed,
+        // and `devin auth status` is a network round trip, so an unreachable
+        // endpoint held the first frame with no window to show for it.
+        let (harness_update_tx, harness_update_rx) = crossbeam_channel::unbounded();
+        let harness_update_rx = std::thread::Builder::new()
+            .name("kinewright-harness-probes".to_owned())
+            .spawn(move || crate::chat_ui::probe_harnesses(&harness_update_tx))
+            .map(|_| harness_update_rx)
+            .ok();
         let resolution = document.resolution;
         let fps = document.fps;
         let error_log_open = error_log.len() > 0;
@@ -453,27 +448,13 @@ impl KinewrightApp {
             frames,
             media_events,
             visual_cache,
-            claude_info,
-            codex_info,
-            cursor_info,
+            harness,
+            harness_update_rx,
             show_thread_rail: true,
             settings_open: matches!(
                 std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").as_deref(),
                 Ok("settings")
             ),
-            claude_models: kinewright_agent::claude_models(),
-            codex_models: kinewright_agent::codex_models(),
-            cursor_models: kinewright_agent::cursor_models(),
-            codex_default_model: kinewright_agent::codex_default_model(),
-            claude_model: None,
-            codex_model: None,
-            cursor_model: None,
-            claude_effort: None,
-            codex_effort: None,
-            cursor_effort: None,
-            claude_tier: None,
-            codex_tier: None,
-            cursor_tier: None,
             probe_tx,
             probe_rx,
             relink_probe_tx,
@@ -4560,24 +4541,10 @@ pub(crate) mod in1_tests {
             frames,
             media_events,
             visual_cache: crate::visual_cache::VisualCache::new(engine.visual_asset_results()),
-            claude_info: None,
-            codex_info: None,
-            cursor_info: None,
+            harness: std::array::from_fn(|_| crate::chat_ui::HarnessUiState::default()),
+            harness_update_rx: None,
             show_thread_rail: true,
             settings_open: false,
-            claude_models: Vec::new(),
-            codex_models: Vec::new(),
-            cursor_models: Vec::new(),
-            codex_default_model: None,
-            claude_model: None,
-            codex_model: None,
-            cursor_model: None,
-            claude_effort: None,
-            codex_effort: None,
-            cursor_effort: None,
-            claude_tier: None,
-            codex_tier: None,
-            cursor_tier: None,
             probe_tx,
             probe_rx,
             relink_probe_tx,

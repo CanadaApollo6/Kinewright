@@ -5,12 +5,11 @@ use std::{
     sync::Arc,
 };
 
-use kinewright_agent::{ClaudeCodeDriver, CursorAcpDriver};
 use kinewright_core::{
-    AgentDriver, Analysis, AssetId, ClipId, Core, Document, Event, Export, IncidentCode,
-    IncidentEvidence, IncidentLog, IncidentObservation, IncidentSubject, LutAssetId,
-    LutAvailabilityKind, LutAvailabilityStatus, MarkerId, MediaKind, Playback, RejectionIncident,
-    TimeCode, TimelineRevision, TrackId, TrackKind,
+    Analysis, AssetId, ClipId, Core, Document, Event, Export, IncidentCode, IncidentEvidence,
+    IncidentLog, IncidentObservation, IncidentSubject, LutAssetId, LutAvailabilityKind,
+    LutAvailabilityStatus, MarkerId, MediaKind, Playback, RejectionIncident, TimeCode,
+    TimelineRevision, TrackId, TrackKind,
 };
 use kinewright_media::{LutLibrary, LutStore};
 
@@ -354,13 +353,12 @@ impl ProjectSession {
         let chat = vec![ChatEntry::Text(
             "Drop a clip anywhere (or /import), then describe your edit.".to_owned(),
         )];
-        let agent_harness = if ClaudeCodeDriver.detect().is_some() {
-            AgentHarnessChoice::ClaudeCode
-        } else if CursorAcpDriver.detect().is_some() {
-            AgentHarnessChoice::Cursor
-        } else {
-            AgentHarnessChoice::Codex
-        };
+        // Seeded, not detected: `detect_harness` spawns the CLI, and opening
+        // a project happens on the frame thread. The agent panel re-picks
+        // this from the detected-and-enabled set (and the remembered
+        // choice) on every frame while no session is running, so the seed
+        // only has to be a valid variant.
+        let agent_harness = AgentHarnessChoice::ALL[0];
         let recovery = if id == 1 {
             Recovery::start(&core, project_path.as_deref())
         } else {
