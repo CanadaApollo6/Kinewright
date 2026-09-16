@@ -8,14 +8,14 @@ use crate::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AssetId,
     AudioBus, AudioBusId, AudioChain, AudioMaster, AutomationCurve, BinId,
     COLOR_CONFIDENCE_MAX_BASIS_POINTS, CaptionPreset, Clip, ClipContent, ClipId, ColorContext,
-    ColorDescription, ColorProvenance, Document, Effect, EffectId, FreezeFrame, Keyframe,
-    KeyframeInterpolation, LinkId, LutAsset, LutAssetId, MARKER_COLOR_TOKEN_COUNT, Marker,
-    MarkerId, MediaAsset, MediaBin, MediaSourceFingerprint, PanLaw, ParamValue, RelinkCandidate,
-    StringOut, StringOutId, SyncGroup, SyncGroupId, TRACK_AUTOMATION_PARAMETERS,
-    TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, ThreePointMode,
-    TimeCode, TimeMappingError, Title, TitleParameterKind, TitlePosition, Track, TrackId,
-    TrackKind, TrackMix, Transition, is_audio_effect, map_source_range_to_project,
-    title_parameter_descriptor,
+    ColorDescription, ColorProvenance, Document, Effect, EffectId, FreezeFrame, IncidentCode,
+    IncidentSubject, Keyframe, KeyframeInterpolation, LinkId, LutAsset, LutAssetId,
+    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaSourceFingerprint,
+    PanLaw, ParamValue, RelinkCandidate, StringOut, StringOutId, SyncGroup, SyncGroupId,
+    TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX,
+    TRACK_MIX_PAN_MIN, ThreePointMode, TimeCode, TimeMappingError, Title, TitleParameterKind,
+    TitlePosition, Track, TrackId, TrackKind, TrackMix, Transition, is_audio_effect,
+    map_source_range_to_project, title_parameter_descriptor,
 };
 
 #[allow(clippy::large_enum_variant)]
@@ -4901,6 +4901,351 @@ fn validate_catalog(doc: &Document) -> Result<(), OpError> {
     Ok(())
 }
 
+/// What must change for the same request to succeed (`IN1b` §3.1 rule 1).
+///
+/// Every `OpError` variant belongs to exactly one family; the family, not the
+/// variant, is the incident code, because no `OpError` variant carries a
+/// distinct recovery.
+///
+/// `Serialize` is on the derive list because `IN1b` §3.4 rule 23 puts a
+/// `family` field inside `IncidentEvidence`, which serialises; the rendering is
+/// serde's `snake_case` short name (`"bounds"`), never the code string, so the
+/// family and the incident's own `code` do not say the same word twice
+/// (erratum `IN1b`-A-R3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentFamily {
+    /// Set the value inside the range the message names.
+    Bounds,
+    /// Supply the missing or correctly typed field.
+    Malformed,
+    /// Use a fresh id, or drop the second entry.
+    Duplicate,
+    /// Choose a target of the right kind.
+    Placement,
+    /// Re-read state; the id is stale.
+    Missing,
+    /// Change the other object first.
+    Structure,
+    /// Relink, or relink with the explicit unverified-source option.
+    Relink,
+    /// Choose another frame or another duration.
+    Unrepresentable,
+    /// Search the capability registry for the accepted spelling.
+    UnknownName,
+    /// Nothing the person can do — report it.
+    Internal,
+    /// IN1's own colour card.
+    ColorPolicy,
+}
+
+impl IncidentFamily {
+    /// The family's stable code string (`IN1b` §3.1 rule 5).
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Bounds => "operation_bounds",
+            Self::Malformed => "operation_malformed",
+            Self::Duplicate => "operation_duplicate",
+            Self::Placement => "operation_placement",
+            Self::Missing => "operation_missing",
+            Self::Structure => "operation_structure",
+            Self::Relink => "operation_relink",
+            Self::Unrepresentable => "operation_unrepresentable",
+            Self::UnknownName => "operation_unknown_name",
+            Self::Internal => "operation_internal",
+            Self::ColorPolicy => "operation_color_policy",
+        }
+    }
+}
+
+impl OpError {
+    /// The family this rejection belongs to (`IN1b` §3.1 rules 2–4).
+    ///
+    /// Arms are grouped by family with `|` patterns, which is what removes
+    /// `clippy::match_same_arms` honestly (`IN1b` §3.1 rule 3, N1.5 §8).
+    #[must_use]
+    // 154 arms at 156 lines against clippy's 100: grouping saves none of them,
+    // because rustfmt puts every `|` alternative on its own line. This is the
+    // one allow `IN1b` §3.1 rule 3 mandates.
+    #[allow(clippy::too_many_lines)]
+    pub const fn incident_family(&self) -> IncidentFamily {
+        match self {
+            Self::AudioBusLookaheadExceeded { .. }
+            | Self::AudioBusKeyframeOutsideProject { .. }
+            | Self::AudioBusGainOutOfRange { .. }
+            | Self::AudioMasterGainOutOfRange { .. }
+            | Self::AudioMasterKeyframeOutsideProject { .. }
+            | Self::AudioMasterLookaheadExceeded { .. }
+            | Self::SourceOutOfBounds { .. }
+            | Self::NegativeTimelinePosition { .. }
+            | Self::SplitOutsideClip { .. }
+            | Self::NegativeMarkerPosition { .. }
+            | Self::InvalidMarkerColor { .. }
+            | Self::InvalidRippleDuration { .. }
+            | Self::InvalidTitleDuration { .. }
+            | Self::InvalidFreezeDuration { .. }
+            | Self::FreezeSourceFrameOutOfRange { .. }
+            | Self::TitleParamOutOfRange { .. }
+            | Self::TitleTextTooLong { .. }
+            | Self::TitleFadeTooLong { .. }
+            | Self::EffectParamOutOfRange { .. }
+            | Self::TooManyColorNodes { .. }
+            | Self::TooManyLutNodes { .. }
+            | Self::EffectIndexOutOfRange { .. }
+            | Self::EffectKeyframeOutsideClip { .. }
+            | Self::InvalidTransitionDuration { .. }
+            | Self::TransitionTooLong { .. }
+            | Self::AudioGainOutOfRange { .. }
+            | Self::NegativeAudioFade { .. }
+            | Self::AudioFadesTooLong { .. }
+            | Self::ClipGainEnvelopeOutOfRange { .. }
+            | Self::ClipGainEnvelopeKeyframeOutsideClip { .. }
+            | Self::TrackAutomationOutOfRange { .. }
+            | Self::TrackAutomationKeyframeOutsideProject { .. }
+            | Self::AudioBusGainKeyframeOutsideProject { .. }
+            | Self::AudioMasterGainKeyframeOutsideProject { .. }
+            | Self::TrackMixGainOutOfRange { .. }
+            | Self::TrackMixPanOutOfRange { .. }
+            | Self::ClipSpeedOutOfRange { .. }
+            | Self::ColorConfidenceOutOfRange { .. } => IncidentFamily::Bounds,
+            Self::EmptyBinName { .. }
+            | Self::InvalidStringOut { .. }
+            | Self::InvalidSyncGroup { .. }
+            | Self::EmptySyncAngle { .. }
+            | Self::InvalidAudioBus { .. }
+            | Self::InvalidSourceRange { .. }
+            | Self::InvalidThreePointSelection { .. }
+            | Self::EmptySourcePatch { .. }
+            | Self::InvalidThreePointSource { .. }
+            | Self::InvalidThreePointTimeline { .. }
+            | Self::InvalidProjectRate { .. }
+            | Self::InvalidAssetRate { .. }
+            | Self::InvalidAssetDuration { .. }
+            | Self::InvalidResolution { .. }
+            | Self::InvalidTitleParamType { .. }
+            | Self::InvalidMarkerParamType { .. }
+            | Self::InvalidEffectParamType { .. }
+            | Self::MissingCubeLutPath { .. }
+            | Self::InvalidLutAssetHash { .. }
+            | Self::InvalidLutAssetMetadata { .. }
+            | Self::InvalidEffectAutomation { .. }
+            | Self::InvalidClipGainEnvelope { .. }
+            | Self::InvalidTrackAutomation { .. }
+            | Self::TooFewLinkedClips { .. }
+            | Self::NonHoldKeyframeParameter { .. } => IncidentFamily::Malformed,
+            Self::DuplicateAsset { .. }
+            | Self::DuplicateBin { .. }
+            | Self::DuplicateBinAsset { .. }
+            | Self::AssetInMultipleBins { .. }
+            | Self::DuplicateStringOut { .. }
+            | Self::DuplicateSyncGroup { .. }
+            | Self::DuplicateSyncGroupAsset { .. }
+            | Self::DuplicateAudioBus { .. }
+            | Self::TrackInMultipleAudioBuses { .. }
+            | Self::DuplicateAudioBusEffect { .. }
+            | Self::DuplicateAudioMasterEffect { .. }
+            | Self::DuplicateTrack { .. }
+            | Self::DuplicateClip { .. }
+            | Self::DuplicateSourcePatchTrack { .. }
+            | Self::DuplicateClipSelection { .. }
+            | Self::DuplicateMarker { .. }
+            | Self::DuplicateEffect { .. }
+            | Self::DuplicateLutAsset { .. }
+            | Self::DuplicateTransition { .. }
+            | Self::DuplicateTrackMix { .. } => IncidentFamily::Duplicate,
+            Self::VisualEffectOnAudioBus { .. }
+            | Self::AudioEffectOnClip { .. }
+            | Self::VisualEffectOnAudioMaster { .. }
+            | Self::IncompatibleTrack { .. }
+            | Self::TitleOnAudioTrack { .. }
+            | Self::FreezeOnAudioTrack { .. }
+            | Self::EditorialRequiresMedia { .. }
+            | Self::InvalidSourcePatchRouteKind { .. }
+            | Self::NotTitleClip { .. }
+            | Self::NotALegacyLook { .. }
+            | Self::TitleClipHasNoAudio { .. }
+            | Self::FreezeClipHasNoAudio { .. }
+            | Self::SpeedOnNonMediaClip { .. } => IncidentFamily::Placement,
+            Self::MissingBin { .. }
+            | Self::MissingStringOut { .. }
+            | Self::MissingSyncGroup { .. }
+            | Self::MissingAudioBus { .. }
+            | Self::AudioBusMissingTrack { .. }
+            | Self::MissingAsset { .. }
+            | Self::MissingTrack { .. }
+            | Self::MissingClip { .. }
+            | Self::MissingMarker { .. }
+            | Self::MissingEffect { .. }
+            | Self::MissingLutAsset { .. }
+            | Self::UnknownLutAsset { .. }
+            | Self::MissingTransition { .. } => IncidentFamily::Missing,
+            Self::BinSelfParent { .. }
+            | Self::BinCycle { .. }
+            | Self::BinHasChildren { .. }
+            | Self::ClipOverlap { .. }
+            | Self::ClipsUnsorted { .. }
+            | Self::ClipsNotAdjacent { .. }
+            | Self::SlideRequiresNeighbors { .. }
+            | Self::MarkersUnsorted { .. }
+            | Self::CaptionPresetMismatch { .. }
+            | Self::CurvePointCountAnimatedWithPoints { .. }
+            | Self::LutAssetInUse { .. }
+            | Self::ColorStageOrderViolation { .. }
+            | Self::TrackMixUnsorted { .. }
+            | Self::InvalidCurvePoints { .. }
+            | Self::NewTrackNotEmpty { .. }
+            | Self::AudioBusDuckingWithoutSidechain { .. }
+            | Self::AudioMasterDuckingUnsupported { .. } => IncidentFamily::Structure,
+            Self::SourceFingerprintIncomplete { .. }
+            | Self::InvalidSourceFingerprintHash { .. }
+            | Self::InvalidSourceFingerprintByteLength { .. }
+            | Self::EmptyRelinkCandidatePath { .. }
+            | Self::UnverifiedRelinkCandidate { .. }
+            | Self::RelinkMetadataMismatch { .. }
+            | Self::RelinkFingerprintMismatch { .. }
+            | Self::RelinkRequiresExplicitUnverifiedSource { .. } => IncidentFamily::Relink,
+            Self::ZeroProjectDuration { .. }
+            | Self::UnrepresentableSplit { .. }
+            | Self::UnrepresentableEditBoundary { .. }
+            | Self::ReplacementDurationMismatch { .. }
+            | Self::FitToFillUnrepresentable { .. }
+            | Self::IncorrectDocumentDuration { .. } => IncidentFamily::Unrepresentable,
+            Self::UnknownTitleParam { .. }
+            | Self::UnknownMarkerParam { .. }
+            | Self::UnknownEffect { .. }
+            | Self::UnknownEffectParam { .. }
+            | Self::UnknownTransition { .. }
+            | Self::UnknownTrackAutomationParameter { .. } => IncidentFamily::UnknownName,
+            Self::ClipIdExhausted { .. }
+            | Self::LinkIdExhausted { .. }
+            | Self::LutAssetIdExhausted { .. }
+            | Self::TimeOverflow { .. } => IncidentFamily::Internal,
+            Self::ZeroConfidenceColorOverride { .. }
+            | Self::InvalidColorOverrideProvenance { .. }
+            | Self::AssumedFromNotSuppliable { .. } => IncidentFamily::ColorPolicy,
+            // IN1b §3.1 rule 4: six of the seven `TimeMappingError` variants
+            // are person-fixable, so the family is the inner error's.
+            Self::TimeMapping(inner) => inner.incident_family(),
+        }
+    }
+}
+
+impl OpError {
+    /// The incident code this rejection carries (`IN1b` §3.1 rule 6).
+    ///
+    /// Two variants earn a per-variant code: an allowlist refusal whose
+    /// recovery is the LUT store's own import rather than "supply a different
+    /// field" (N1.5 §9). [`Self::incident_family`] stays **total** and answers
+    /// `Malformed` for both, so Appendix A remains a partition of 154 and this
+    /// is the override.
+    #[must_use]
+    pub const fn incident_code(&self) -> IncidentCode {
+        match self {
+            Self::InvalidLutAssetHash { .. } | Self::InvalidLutAssetMetadata { .. } => {
+                IncidentCode::LutAssetPolicy
+            }
+            other => IncidentCode::Operation(other.incident_family()),
+        }
+    }
+}
+
+impl Operation {
+    /// The narrowest subject this operation addresses (`IN1b` §3.3 rule 20).
+    ///
+    /// The precedence is `Clip` -> `Asset` -> `Track` -> `Chain` -> `Project`,
+    /// and `Project` where the operation addresses none of them. The subject is
+    /// derived from the operation rather than chosen by the caller so that two
+    /// refusals about one clip share a dedup axis whoever raised them.
+    ///
+    /// An operation that addresses a *set* of clips — [`Self::LinkClips`] and
+    /// [`Self::UnlinkClips`] — has no single narrowest id and therefore answers
+    /// `Project`. Bins, string-outs, sync groups, markers, LUT assets and the
+    /// pan law are not subject kinds, so they answer `Project` too.
+    ///
+    /// `IN1b` §0.3 D3 names **five** variants that address a track and nothing
+    /// narrower; applying the precedence, there are **seven** — D3's
+    /// `AddTrack`, `RemoveTrack`, `SetTrackSyncLock`, `SetTrackMix` and
+    /// `SetTrackAutomation`, plus [`Self::AddTitle`] and
+    /// [`Self::RippleInsertGap`], which name a track and no clip or asset
+    /// (erratum `IN1b`-A-R11).
+    #[must_use]
+    // 57 arms, one per `Operation` variant, grouped by subject kind: the list
+    // is the deliverable and splitting it would hide the precedence it exists
+    // to show.
+    #[allow(clippy::too_many_lines)]
+    pub const fn incident_subject(&self) -> IncidentSubject {
+        match self {
+            // Clip: the narrowest id in the precedence.
+            Self::SplitClip { clip, .. }
+            | Self::TrimClip { clip, .. }
+            | Self::MoveClip { clip, .. }
+            | Self::SlipClip { clip, .. }
+            | Self::SlideClip { clip, .. }
+            | Self::ReplaceClip { clip, .. }
+            | Self::FitToFill { clip, .. }
+            | Self::DeleteClip { clip }
+            | Self::RippleDeleteClip { clip }
+            | Self::AddEffect { clip, .. }
+            | Self::InsertEffect { clip, .. }
+            | Self::RemoveEffect { clip, .. }
+            | Self::SetEffectParam { clip, .. }
+            | Self::SetEffectKeyframes { clip, .. }
+            | Self::ClearEffectKeyframes { clip, .. }
+            | Self::ConvertLegacyLook { clip, .. }
+            | Self::SetTitleParam { clip, .. }
+            | Self::SetClipAudio { clip, .. }
+            | Self::SetClipGainEnvelope { clip, .. }
+            | Self::AddTransition { clip, .. }
+            | Self::RemoveTransition { clip }
+            | Self::SetClipSpeed { clip, .. } => IncidentSubject::Clip(*clip),
+            // A roll edit addresses two adjacent clips; the left one is the
+            // edit's own anchor and is the subject both sides dedup on.
+            Self::RollEdit { left_clip, .. } => IncidentSubject::Clip(*left_clip),
+            // Asset: no clip id, but one media file the refusal is about.
+            Self::AddAsset { asset } => IncidentSubject::Asset(asset.id),
+            Self::RelinkAsset { asset, .. }
+            | Self::SetAssetColorDescription { asset, .. }
+            | Self::SetAssetBin { asset, .. }
+            | Self::AddClip { asset, .. }
+            | Self::ThreePointEdit { asset, .. }
+            | Self::PatchedThreePointEdit { asset, .. }
+            | Self::AddFreezeFrame { asset, .. } => IncidentSubject::Asset(*asset),
+            // Track: no clip and no asset, but one track. Seven variants, not
+            // the five `IN1b` §0.3 D3 names: `AddTitle` and `RippleInsertGap`
+            // address a track and nothing narrower too (erratum `IN1b`-A-R11).
+            Self::AddTrack { track } => IncidentSubject::Track(track.id),
+            Self::RemoveTrack { track }
+            | Self::SetTrackSyncLock { track, .. }
+            | Self::SetTrackMix { track, .. }
+            | Self::SetTrackAutomation { track, .. }
+            | Self::AddTitle { track, .. }
+            | Self::RippleInsertGap { track, .. } => IncidentSubject::Track(*track),
+            // Chain: one bus, or the master.
+            Self::UpsertAudioBus { bus } => IncidentSubject::Chain(AudioChain::Bus(bus.id)),
+            Self::RemoveAudioBus { bus } => IncidentSubject::Chain(AudioChain::Bus(*bus)),
+            Self::SetAudioMaster { .. } => IncidentSubject::Chain(AudioChain::Master),
+            // Project: a document-wide edit with no narrower subject.
+            Self::SetColorContext { .. }
+            | Self::UpsertBin { .. }
+            | Self::RemoveBin { .. }
+            | Self::UpsertStringOut { .. }
+            | Self::RemoveStringOut { .. }
+            | Self::UpsertSyncGroup { .. }
+            | Self::RemoveSyncGroup { .. }
+            | Self::SetPanLaw { .. }
+            | Self::LinkClips { .. }
+            | Self::UnlinkClips { .. }
+            | Self::AddMarker { .. }
+            | Self::RemoveMarker { .. }
+            | Self::MoveMarker { .. }
+            | Self::AddLutAsset { .. }
+            | Self::RemoveLutAsset { .. }
+            | Self::SetMarkerParam { .. } => IncidentSubject::Project,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4917,5 +5262,702 @@ mod tests {
         shift_markers_left(&mut markers, TimeCode(5), TimeCode(10)).unwrap();
 
         assert_eq!(markers[0].position, TimeCode::ZERO);
+    }
+
+    // ------------------------------------------------------------ `IN1b` §7
+
+    /// The source of one single-`fn` `impl` block in this file, from its
+    /// signature to the block's closing brace.
+    ///
+    /// Reading the source is how a test asserts an **arm count**: the compiler
+    /// already proves the match is exhaustive and wildcard-free over
+    /// `OpError`'s 154 and `Operation`'s 57 variants, but it cannot be asked
+    /// how many names each arm groups, and building 154 payload-carrying
+    /// rejections to count them would be a fixture, not a measurement.
+    fn single_fn_impl_body(signature: &str) -> &'static str {
+        const SOURCE: &str = include_str!("operation.rs");
+        let start = SOURCE
+            .find(signature)
+            .expect("the accessor is declared in this file");
+        let rest = &SOURCE[start..];
+        let end = rest
+            .find("\n    }\n}")
+            .expect("the accessor is the only item in its impl block");
+        &rest[..end]
+    }
+
+    /// Group the `Self::Variant` names of one grouped match by the arm they
+    /// belong to, keyed by the result the arm returns after `marker::`.
+    fn arms_by_result(body: &str, marker: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut grouped: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut pending: Vec<String> = Vec::new();
+        let needle = format!("{marker}::");
+        for line in body.lines() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            let mut rest = line;
+            while let Some(at) = rest.find("Self::") {
+                rest = &rest[at + "Self::".len()..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|character| character.is_alphanumeric() || *character == '_')
+                    .collect();
+                if !name.is_empty() {
+                    pending.push(name);
+                }
+            }
+            if pending.is_empty() {
+                continue;
+            }
+            if line.contains("=> inner.incident_family()") {
+                // The delegating `TimeMapping` arm, whose family is the inner
+                // error's (`IN1b` §3.1 rule 4).
+                grouped
+                    .entry("Internal".to_owned())
+                    .or_default()
+                    .append(&mut std::mem::take(&mut pending));
+            } else if let Some(at) = line.rfind(&needle) {
+                let result: String = line[at + needle.len()..]
+                    .chars()
+                    .take_while(|character| character.is_alphanumeric() || *character == '_')
+                    .collect();
+                grouped
+                    .entry(result)
+                    .or_default()
+                    .append(&mut std::mem::take(&mut pending));
+            }
+        }
+        assert!(
+            pending.is_empty(),
+            "an arm was left unterminated: {pending:?}"
+        );
+        grouped
+    }
+
+    /// Appendix A, normative, **per variant**: all 154 `OpError` variant names
+    /// with the family the contract assigns each one.
+    ///
+    /// Written out rather than counted, so a variant moved from one family to
+    /// another fails here instead of cancelling out against another move
+    /// (review-2 S4, review-1 N2). It is transcribed from
+    /// `docs/IN1B-ERROR-MIGRATION.md`'s Appendix A, not from the accessor.
+    const APPENDIX_A: [(&str, &str); 154] = [
+        ("AudioBusLookaheadExceeded", "Bounds"),
+        ("AudioBusKeyframeOutsideProject", "Bounds"),
+        ("AudioBusGainOutOfRange", "Bounds"),
+        ("AudioMasterGainOutOfRange", "Bounds"),
+        ("AudioMasterKeyframeOutsideProject", "Bounds"),
+        ("AudioMasterLookaheadExceeded", "Bounds"),
+        ("SourceOutOfBounds", "Bounds"),
+        ("NegativeTimelinePosition", "Bounds"),
+        ("SplitOutsideClip", "Bounds"),
+        ("NegativeMarkerPosition", "Bounds"),
+        ("InvalidMarkerColor", "Bounds"),
+        ("InvalidRippleDuration", "Bounds"),
+        ("InvalidTitleDuration", "Bounds"),
+        ("InvalidFreezeDuration", "Bounds"),
+        ("FreezeSourceFrameOutOfRange", "Bounds"),
+        ("TitleParamOutOfRange", "Bounds"),
+        ("TitleTextTooLong", "Bounds"),
+        ("TitleFadeTooLong", "Bounds"),
+        ("EffectParamOutOfRange", "Bounds"),
+        ("TooManyColorNodes", "Bounds"),
+        ("TooManyLutNodes", "Bounds"),
+        ("EffectIndexOutOfRange", "Bounds"),
+        ("EffectKeyframeOutsideClip", "Bounds"),
+        ("InvalidTransitionDuration", "Bounds"),
+        ("TransitionTooLong", "Bounds"),
+        ("AudioGainOutOfRange", "Bounds"),
+        ("NegativeAudioFade", "Bounds"),
+        ("AudioFadesTooLong", "Bounds"),
+        ("ClipGainEnvelopeOutOfRange", "Bounds"),
+        ("ClipGainEnvelopeKeyframeOutsideClip", "Bounds"),
+        ("TrackAutomationOutOfRange", "Bounds"),
+        ("TrackAutomationKeyframeOutsideProject", "Bounds"),
+        ("AudioBusGainKeyframeOutsideProject", "Bounds"),
+        ("AudioMasterGainKeyframeOutsideProject", "Bounds"),
+        ("TrackMixGainOutOfRange", "Bounds"),
+        ("TrackMixPanOutOfRange", "Bounds"),
+        ("ClipSpeedOutOfRange", "Bounds"),
+        ("ColorConfidenceOutOfRange", "Bounds"),
+        ("EmptyBinName", "Malformed"),
+        ("InvalidStringOut", "Malformed"),
+        ("InvalidSyncGroup", "Malformed"),
+        ("EmptySyncAngle", "Malformed"),
+        ("InvalidAudioBus", "Malformed"),
+        ("InvalidSourceRange", "Malformed"),
+        ("InvalidThreePointSelection", "Malformed"),
+        ("EmptySourcePatch", "Malformed"),
+        ("InvalidThreePointSource", "Malformed"),
+        ("InvalidThreePointTimeline", "Malformed"),
+        ("InvalidProjectRate", "Malformed"),
+        ("InvalidAssetRate", "Malformed"),
+        ("InvalidAssetDuration", "Malformed"),
+        ("InvalidResolution", "Malformed"),
+        ("InvalidTitleParamType", "Malformed"),
+        ("InvalidMarkerParamType", "Malformed"),
+        ("InvalidEffectParamType", "Malformed"),
+        ("MissingCubeLutPath", "Malformed"),
+        ("InvalidLutAssetHash", "Malformed"),
+        ("InvalidLutAssetMetadata", "Malformed"),
+        ("InvalidEffectAutomation", "Malformed"),
+        ("InvalidClipGainEnvelope", "Malformed"),
+        ("InvalidTrackAutomation", "Malformed"),
+        ("TooFewLinkedClips", "Malformed"),
+        ("NonHoldKeyframeParameter", "Malformed"),
+        ("DuplicateAsset", "Duplicate"),
+        ("DuplicateBin", "Duplicate"),
+        ("DuplicateBinAsset", "Duplicate"),
+        ("AssetInMultipleBins", "Duplicate"),
+        ("DuplicateStringOut", "Duplicate"),
+        ("DuplicateSyncGroup", "Duplicate"),
+        ("DuplicateSyncGroupAsset", "Duplicate"),
+        ("DuplicateAudioBus", "Duplicate"),
+        ("TrackInMultipleAudioBuses", "Duplicate"),
+        ("DuplicateAudioBusEffect", "Duplicate"),
+        ("DuplicateAudioMasterEffect", "Duplicate"),
+        ("DuplicateTrack", "Duplicate"),
+        ("DuplicateClip", "Duplicate"),
+        ("DuplicateSourcePatchTrack", "Duplicate"),
+        ("DuplicateClipSelection", "Duplicate"),
+        ("DuplicateMarker", "Duplicate"),
+        ("DuplicateEffect", "Duplicate"),
+        ("DuplicateLutAsset", "Duplicate"),
+        ("DuplicateTransition", "Duplicate"),
+        ("DuplicateTrackMix", "Duplicate"),
+        ("VisualEffectOnAudioBus", "Placement"),
+        ("AudioEffectOnClip", "Placement"),
+        ("VisualEffectOnAudioMaster", "Placement"),
+        ("IncompatibleTrack", "Placement"),
+        ("TitleOnAudioTrack", "Placement"),
+        ("FreezeOnAudioTrack", "Placement"),
+        ("EditorialRequiresMedia", "Placement"),
+        ("InvalidSourcePatchRouteKind", "Placement"),
+        ("NotTitleClip", "Placement"),
+        ("NotALegacyLook", "Placement"),
+        ("TitleClipHasNoAudio", "Placement"),
+        ("FreezeClipHasNoAudio", "Placement"),
+        ("SpeedOnNonMediaClip", "Placement"),
+        ("MissingBin", "Missing"),
+        ("MissingStringOut", "Missing"),
+        ("MissingSyncGroup", "Missing"),
+        ("MissingAudioBus", "Missing"),
+        ("AudioBusMissingTrack", "Missing"),
+        ("MissingAsset", "Missing"),
+        ("MissingTrack", "Missing"),
+        ("MissingClip", "Missing"),
+        ("MissingMarker", "Missing"),
+        ("MissingEffect", "Missing"),
+        ("MissingLutAsset", "Missing"),
+        ("UnknownLutAsset", "Missing"),
+        ("MissingTransition", "Missing"),
+        ("BinSelfParent", "Structure"),
+        ("BinCycle", "Structure"),
+        ("BinHasChildren", "Structure"),
+        ("ClipOverlap", "Structure"),
+        ("ClipsUnsorted", "Structure"),
+        ("ClipsNotAdjacent", "Structure"),
+        ("SlideRequiresNeighbors", "Structure"),
+        ("MarkersUnsorted", "Structure"),
+        ("CaptionPresetMismatch", "Structure"),
+        ("CurvePointCountAnimatedWithPoints", "Structure"),
+        ("LutAssetInUse", "Structure"),
+        ("ColorStageOrderViolation", "Structure"),
+        ("TrackMixUnsorted", "Structure"),
+        ("InvalidCurvePoints", "Structure"),
+        ("NewTrackNotEmpty", "Structure"),
+        ("AudioBusDuckingWithoutSidechain", "Structure"),
+        ("AudioMasterDuckingUnsupported", "Structure"),
+        ("SourceFingerprintIncomplete", "Relink"),
+        ("InvalidSourceFingerprintHash", "Relink"),
+        ("InvalidSourceFingerprintByteLength", "Relink"),
+        ("EmptyRelinkCandidatePath", "Relink"),
+        ("UnverifiedRelinkCandidate", "Relink"),
+        ("RelinkMetadataMismatch", "Relink"),
+        ("RelinkFingerprintMismatch", "Relink"),
+        ("RelinkRequiresExplicitUnverifiedSource", "Relink"),
+        ("ZeroProjectDuration", "Unrepresentable"),
+        ("UnrepresentableSplit", "Unrepresentable"),
+        ("UnrepresentableEditBoundary", "Unrepresentable"),
+        ("ReplacementDurationMismatch", "Unrepresentable"),
+        ("FitToFillUnrepresentable", "Unrepresentable"),
+        ("IncorrectDocumentDuration", "Unrepresentable"),
+        ("UnknownTitleParam", "UnknownName"),
+        ("UnknownMarkerParam", "UnknownName"),
+        ("UnknownEffect", "UnknownName"),
+        ("UnknownEffectParam", "UnknownName"),
+        ("UnknownTransition", "UnknownName"),
+        ("UnknownTrackAutomationParameter", "UnknownName"),
+        ("ClipIdExhausted", "Internal"),
+        ("LinkIdExhausted", "Internal"),
+        ("LutAssetIdExhausted", "Internal"),
+        ("TimeOverflow", "Internal"),
+        ("TimeMapping", "Internal"),
+        ("ZeroConfidenceColorOverride", "ColorPolicy"),
+        ("InvalidColorOverrideProvenance", "ColorPolicy"),
+        ("AssumedFromNotSuppliable", "ColorPolicy"),
+    ];
+
+    /// §3.3 rule 20's precedence applied **per variant**: all 57 `Operation`
+    /// variant names with the subject kind the rule assigns each one.
+    ///
+    /// Read off `Operation`'s own declaration — which id fields the variant
+    /// carries — rather than off the accessor, so a variant that answers with
+    /// the wrong kind fails here (review-2 S4).
+    const OPERATION_SUBJECTS: [(&str, &str); 57] = [
+        ("AddAsset", "Asset"),
+        ("RelinkAsset", "Asset"),
+        ("SetAssetColorDescription", "Asset"),
+        ("SetColorContext", "Project"),
+        ("UpsertBin", "Project"),
+        ("RemoveBin", "Project"),
+        ("SetAssetBin", "Asset"),
+        ("UpsertStringOut", "Project"),
+        ("RemoveStringOut", "Project"),
+        ("UpsertSyncGroup", "Project"),
+        ("RemoveSyncGroup", "Project"),
+        ("UpsertAudioBus", "Chain"),
+        ("RemoveAudioBus", "Chain"),
+        ("SetAudioMaster", "Chain"),
+        ("SetPanLaw", "Project"),
+        ("AddTrack", "Track"),
+        ("RemoveTrack", "Track"),
+        ("SetTrackSyncLock", "Track"),
+        ("SetTrackMix", "Track"),
+        ("SetTrackAutomation", "Track"),
+        ("AddClip", "Asset"),
+        ("AddTitle", "Track"),
+        ("SplitClip", "Clip"),
+        ("TrimClip", "Clip"),
+        ("MoveClip", "Clip"),
+        ("ThreePointEdit", "Asset"),
+        ("PatchedThreePointEdit", "Asset"),
+        ("SlipClip", "Clip"),
+        ("RollEdit", "Clip"),
+        ("SlideClip", "Clip"),
+        ("ReplaceClip", "Clip"),
+        ("FitToFill", "Clip"),
+        ("DeleteClip", "Clip"),
+        ("RippleDeleteClip", "Clip"),
+        ("RippleInsertGap", "Track"),
+        ("LinkClips", "Project"),
+        ("UnlinkClips", "Project"),
+        ("AddMarker", "Project"),
+        ("RemoveMarker", "Project"),
+        ("MoveMarker", "Project"),
+        ("AddEffect", "Clip"),
+        ("InsertEffect", "Clip"),
+        ("RemoveEffect", "Clip"),
+        ("SetEffectParam", "Clip"),
+        ("SetEffectKeyframes", "Clip"),
+        ("ClearEffectKeyframes", "Clip"),
+        ("ConvertLegacyLook", "Clip"),
+        ("AddLutAsset", "Project"),
+        ("RemoveLutAsset", "Project"),
+        ("SetTitleParam", "Clip"),
+        ("SetClipAudio", "Clip"),
+        ("SetClipGainEnvelope", "Clip"),
+        ("AddTransition", "Clip"),
+        ("RemoveTransition", "Clip"),
+        ("SetMarkerParam", "Project"),
+        ("AddFreezeFrame", "Asset"),
+        ("SetClipSpeed", "Clip"),
+    ];
+
+    /// `IN1b` §9 clause 1: the match is exhaustive over all **154** `OpError`
+    /// variants with no wildcard, every family is non-empty, and **every
+    /// variant** is in the family Appendix A gives it.
+    #[test]
+    fn in1b_every_op_error_variant_has_a_family() {
+        let body = single_fn_impl_body("pub const fn incident_family(&self) -> IncidentFamily {");
+        let grouped = arms_by_result(body, "IncidentFamily");
+
+        // Per variant, both ways: what the accessor groups must equal what
+        // Appendix A declares, name for name. Counting alone would let two
+        // variants swap families and still pass (review-2 S4).
+        let mut implemented = std::collections::BTreeMap::new();
+        for (family, members) in &grouped {
+            for member in members {
+                assert!(
+                    implemented.insert(member.clone(), family.clone()).is_none(),
+                    "{member} is in two families"
+                );
+            }
+        }
+        let declared: std::collections::BTreeMap<String, String> = APPENDIX_A
+            .iter()
+            .map(|(variant, family)| ((*variant).to_owned(), (*family).to_owned()))
+            .collect();
+        assert_eq!(
+            declared.len(),
+            154,
+            "Appendix A names 154 distinct variants"
+        );
+        assert_eq!(implemented.len(), 154, "the accessor names 154 variants");
+        for (variant, family) in &declared {
+            assert_eq!(
+                implemented.get(variant),
+                Some(family),
+                "{variant} is not in Appendix A's family"
+            );
+        }
+        for variant in implemented.keys() {
+            assert!(
+                declared.contains_key(variant),
+                "{variant} is classified but is not in Appendix A"
+            );
+        }
+        // Every family still has at least one member.
+        assert_eq!(
+            grouped.len(),
+            11,
+            "every family must have at least one member, got {:?}",
+            grouped.keys().collect::<Vec<_>>()
+        );
+
+        // Every family answers with a distinct, non-empty code string.
+        let mut codes = std::collections::BTreeSet::new();
+        for family in [
+            IncidentFamily::Bounds,
+            IncidentFamily::Malformed,
+            IncidentFamily::Duplicate,
+            IncidentFamily::Placement,
+            IncidentFamily::Missing,
+            IncidentFamily::Structure,
+            IncidentFamily::Relink,
+            IncidentFamily::Unrepresentable,
+            IncidentFamily::UnknownName,
+            IncidentFamily::Internal,
+            IncidentFamily::ColorPolicy,
+        ] {
+            assert!(family.code().starts_with("operation_"));
+            assert!(codes.insert(family.code()));
+        }
+        assert_eq!(codes.len(), 11);
+
+        // And a live rejection of each family answers with it.
+        for (error, family) in family_representatives() {
+            assert_eq!(error.incident_family(), family, "{error}");
+        }
+    }
+
+    /// One live rejection per family, so the source-read counts above are
+    /// anchored to values the accessor actually classifies.
+    fn family_representatives() -> Vec<(OpError, IncidentFamily)> {
+        vec![
+            (
+                OpError::TooManyColorNodes {
+                    clip: ClipId(1),
+                    limit: 8,
+                    actual: 9,
+                },
+                IncidentFamily::Bounds,
+            ),
+            (OpError::EmptyBinName(BinId(1)), IncidentFamily::Malformed),
+            (OpError::DuplicateBin(BinId(2)), IncidentFamily::Duplicate),
+            (
+                OpError::TitleOnAudioTrack(TrackId(3)),
+                IncidentFamily::Placement,
+            ),
+            (OpError::MissingBin(BinId(4)), IncidentFamily::Missing),
+            (OpError::BinCycle(BinId(5)), IncidentFamily::Structure),
+            (
+                OpError::EmptyRelinkCandidatePath { asset: AssetId(6) },
+                IncidentFamily::Relink,
+            ),
+            (
+                OpError::ZeroProjectDuration(ClipId(7)),
+                IncidentFamily::Unrepresentable,
+            ),
+            (
+                OpError::UnknownEffect("glow".to_owned()),
+                IncidentFamily::UnknownName,
+            ),
+            (OpError::TimeOverflow, IncidentFamily::Internal),
+            (
+                OpError::InvalidColorOverrideProvenance {
+                    asset: AssetId(8),
+                    actual: ColorProvenance::StreamMetadata,
+                },
+                IncidentFamily::ColorPolicy,
+            ),
+        ]
+    }
+
+    /// `IN1b` §3.1 rule 4: six of the seven `TimeMappingError` variants are
+    /// person-fixable, and `OpError::TimeMapping` delegates to them.
+    #[test]
+    fn in1b_time_mapping_delegates_to_its_own_seven_variants() {
+        for (inner, family) in [
+            (
+                TimeMappingError::InvalidRate {
+                    numerator: 0,
+                    denominator: 1,
+                },
+                IncidentFamily::Malformed,
+            ),
+            (
+                TimeMappingError::NegativeFrames(TimeCode(-1)),
+                IncidentFamily::Bounds,
+            ),
+            (TimeMappingError::Overflow, IncidentFamily::Internal),
+            (
+                TimeMappingError::InvalidRange { start: 4, end: 2 },
+                IncidentFamily::Malformed,
+            ),
+            (
+                TimeMappingError::InexactDuration {
+                    source_start: 3,
+                    project_duration: 3,
+                },
+                IncidentFamily::Unrepresentable,
+            ),
+            (
+                TimeMappingError::NoCoveringSourceRange {
+                    project_duration: 3,
+                    source_duration: 2,
+                },
+                IncidentFamily::Unrepresentable,
+            ),
+            (
+                TimeMappingError::SourceTooShortToCover {
+                    project_duration: 3,
+                    source_duration: 1,
+                    minimum_source_frames: 2,
+                },
+                IncidentFamily::Bounds,
+            ),
+        ] {
+            assert_eq!(inner.incident_family(), family, "{inner}");
+            assert_eq!(
+                OpError::TimeMapping(inner.clone()).incident_family(),
+                inner.incident_family(),
+                "the delegating arm must not decide for itself"
+            );
+        }
+        // Exactly one of the seven is internal, which is the whole reason the
+        // arm delegates rather than declaring the enum `Internal`.
+        let body = single_fn_impl_body("pub const fn incident_family(&self) -> IncidentFamily {");
+        assert!(body.contains("Self::TimeMapping(inner) => inner.incident_family()"));
+    }
+
+    /// `IN1b` §3.1 rule 6: `incident_code()` agrees with
+    /// `IncidentCode::Operation(incident_family())` everywhere except the two
+    /// LUT-asset variants, which are the only per-variant codes.
+    #[test]
+    fn in1b_the_two_lut_asset_variants_are_the_only_per_variant_codes() {
+        let body = single_fn_impl_body("pub const fn incident_code(&self) -> IncidentCode {");
+        let overrides = arms_by_result(body, "IncidentCode");
+        assert_eq!(
+            overrides.get("LutAssetPolicy").map(Vec::len),
+            Some(2),
+            "exactly two variants earn a per-variant code"
+        );
+        assert_eq!(
+            overrides.len(),
+            1,
+            "the only override is `LutAssetPolicy`, got {:?}",
+            overrides.keys().collect::<Vec<_>>()
+        );
+
+        for error in [
+            OpError::InvalidLutAssetHash {
+                lut_asset: LutAssetId(1),
+                observed: "sha256:0".to_owned(),
+                allowed: "the recorded hash",
+            },
+            OpError::InvalidLutAssetMetadata {
+                field: "size",
+                observed: "0".to_owned(),
+                allowed: "33",
+            },
+        ] {
+            assert_eq!(
+                error.incident_code(),
+                IncidentCode::LutAssetPolicy,
+                "{error}"
+            );
+            // The family map stays total, so Appendix A remains a partition.
+            assert_eq!(
+                error.incident_family(),
+                IncidentFamily::Malformed,
+                "{error}"
+            );
+        }
+
+        for (error, family) in family_representatives() {
+            assert_eq!(
+                error.incident_code(),
+                IncidentCode::Operation(family),
+                "{error}"
+            );
+        }
+    }
+
+    /// `IN1b` §9 clause 8 through §3.3 rule 20: the accessor covers all **57**
+    /// `Operation` variants with no wildcard and answers by the declared
+    /// precedence `Clip` -> `Asset` -> `Track` -> `Chain` -> `Project`.
+    #[test]
+    // The value assertions are the point: one constructed `Operation` per
+    // precedence rung, written out so a reader can see which id each one names.
+    #[allow(clippy::too_many_lines)]
+    fn in1b_every_operation_names_its_incident_subject() {
+        let body = single_fn_impl_body("pub const fn incident_subject(&self) -> IncidentSubject {");
+        let grouped = arms_by_result(body, "IncidentSubject");
+
+        // Per variant, both ways, for the same reason the family test is
+        // (review-2 S4): a variant that answered `Project` where it should
+        // answer `Track` would cancel against one that did the reverse.
+        let mut implemented = std::collections::BTreeMap::new();
+        for (kind, members) in &grouped {
+            for member in members {
+                assert!(
+                    implemented.insert(member.clone(), kind.clone()).is_none(),
+                    "{member} answers twice"
+                );
+            }
+        }
+        let declared: std::collections::BTreeMap<String, String> = OPERATION_SUBJECTS
+            .iter()
+            .map(|(variant, kind)| ((*variant).to_owned(), (*kind).to_owned()))
+            .collect();
+        assert_eq!(declared.len(), 57, "`Operation` has 57 distinct variants");
+        assert_eq!(implemented.len(), 57, "the accessor covers every variant");
+        for (variant, kind) in &declared {
+            assert_eq!(
+                implemented.get(variant),
+                Some(kind),
+                "{variant} does not answer with the subject kind rule 20 gives it"
+            );
+        }
+        for variant in implemented.keys() {
+            assert!(
+                declared.contains_key(variant),
+                "{variant} answers but is not in the declared table"
+            );
+        }
+        assert_eq!(grouped.len(), 5, "all five subject kinds are reachable");
+
+        // The precedence itself, on values (`IN1b` §7 item 4).
+        assert_eq!(
+            Operation::AddClip {
+                track: TrackId(1),
+                asset: AssetId(2),
+                at: TimeCode(0),
+                source: TimeCode(0)..TimeCode(5),
+            }
+            .incident_subject(),
+            IncidentSubject::Asset(AssetId(2)),
+            "`AddClip` names an asset and a track; the asset is narrower"
+        );
+        assert_eq!(
+            Operation::TrimClip {
+                clip: ClipId(9),
+                new_source: TimeCode(0)..TimeCode(5),
+            }
+            .incident_subject(),
+            IncidentSubject::Clip(ClipId(9))
+        );
+        // The track-addressed variants. `IN1b` §0.3 D3 names five; applying
+        // rule 20's precedence, `AddTitle` and `RippleInsertGap` address a
+        // track and nothing narrower too, so **seven** answer `Track`
+        // (erratum `IN1b`-A-R11). `AddTrack` carries the whole `Track`, so its
+        // id comes off the payload rather than off a field.
+        assert_eq!(
+            Operation::AddTrack {
+                track: Track {
+                    id: TrackId(3),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                },
+            }
+            .incident_subject(),
+            IncidentSubject::Track(TrackId(3)),
+            "`AddTrack` reads the id off the track it carries"
+        );
+        for operation in [
+            Operation::RemoveTrack { track: TrackId(3) },
+            Operation::SetTrackSyncLock {
+                track: TrackId(3),
+                locked: true,
+            },
+            Operation::SetTrackMix {
+                track: TrackId(3),
+                gain_tenth_db: 0,
+                pan_percent: 0,
+                mute: false,
+                solo: false,
+            },
+            Operation::SetTrackAutomation {
+                track: TrackId(3),
+                parameter: "gain".to_owned(),
+                curve: None,
+            },
+            Operation::AddTitle {
+                track: TrackId(3),
+                at: TimeCode(0),
+                duration: TimeCode(10),
+                title: Title::default(),
+            },
+            Operation::RippleInsertGap {
+                track: TrackId(3),
+                at: TimeCode(0),
+                duration: TimeCode(10),
+            },
+        ] {
+            assert_eq!(
+                operation.incident_subject(),
+                IncidentSubject::Track(TrackId(3)),
+                "{operation:?}"
+            );
+        }
+        // The three chain-addressed ones. `UpsertAudioBus` carries the whole
+        // bus, so its id comes off the payload.
+        assert_eq!(
+            Operation::UpsertAudioBus {
+                bus: AudioBus {
+                    id: AudioBusId(4),
+                    name: "dialogue".to_owned(),
+                    tracks: Vec::new(),
+                    gain_tenth_db: 0,
+                    gain_curve: None,
+                    effects: Vec::new(),
+                    ducking_sidechain_tracks: Vec::new(),
+                },
+            }
+            .incident_subject(),
+            IncidentSubject::Chain(AudioChain::Bus(AudioBusId(4))),
+            "`UpsertAudioBus` reads the id off the bus it carries"
+        );
+        assert_eq!(
+            Operation::RemoveAudioBus { bus: AudioBusId(4) }.incident_subject(),
+            IncidentSubject::Chain(AudioChain::Bus(AudioBusId(4)))
+        );
+        assert_eq!(
+            Operation::SetAudioMaster {
+                master: AudioMaster::default(),
+            }
+            .incident_subject(),
+            IncidentSubject::Chain(AudioChain::Master)
+        );
+        // And one that addresses nothing narrower than the document.
+        assert_eq!(
+            Operation::SetPanLaw {
+                law: PanLaw::default()
+            }
+            .incident_subject(),
+            IncidentSubject::Project
+        );
+        // A set of clips has no single narrowest id.
+        assert_eq!(
+            Operation::LinkClips {
+                clips: vec![ClipId(1), ClipId(2)],
+            }
+            .incident_subject(),
+            IncidentSubject::Project
+        );
     }
 }

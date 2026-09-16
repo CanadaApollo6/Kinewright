@@ -23,19 +23,26 @@ use std::{
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
-    AssetId, COLOR_CONFIDENCE_MAX_BASIS_POINTS, ColorBitDepth, ColorDescription, ColorMatrix,
-    ColorPrimaries, ColorProvenance, ColorRange, ColorSourceError, ColorSourceProfileAssumption,
-    ColorTransfer, ColorWhitePoint, MediaError, Operation, TimelineRevision,
+    AssetId, AudioChain, BatchError, COLOR_CONFIDENCE_MAX_BASIS_POINTS, CaptionPlanError, ClipId,
+    ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance, ColorQcError,
+    ColorRange, ColorSourceError, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint,
+    DeliveryColorError, DeliveryColorMismatch, DeliveryVariantError, DeliveryVerificationError,
+    EffectId, IncidentFamily, MediaError, OpError, Operation, TimelineRevision, TrackId,
 };
 
 /// A source-colour failure that Kinewright classifies as an incident.
 ///
-/// Mirrors [`ColorSourceError`] one-to-one **except**
-/// [`ColorSourceError::UnknownWhitePoint`], which is not an incident:
+/// Mirrors [`ColorSourceError`] one-to-one: **thirteen** incident codes from
+/// thirteen classifier variants (`IN1b` §3.2 rule 16, erratum `IN1b`-R4).
+///
+/// Part A declared twelve, leaving `unknown_source_white_point` out because
 /// `color_description_from_decoder` never sets a white point, so every
-/// correctly BT.709-tagged source in existence fails the bare classifier with
-/// that code and passes only through the decoder's explicit D65 assumption
-/// (IN1 §2.2 rule 6). Twelve incident codes from thirteen classifier variants.
+/// correctly BT.709-tagged source fails the *bare* classifier with that code
+/// (IN1 §2.2 rule 6). That reason is about the bare classifier and is
+/// unchanged; `IN1b` §3.2 rule 14 measures the residue it left — a source with
+/// `primaries: Srgb` and `white_point: Unknown` receives no D65 assumption and
+/// reaches `Err(UnknownWhitePoint)` after it — so the code is reachable and is
+/// declared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SourceColorIncident {
     /// The source declares no colour primaries.
@@ -63,6 +70,11 @@ pub enum SourceColorIncident {
     /// Every field is individually supported and the tuple still names no
     /// managed CC1 profile.
     UnsupportedCombination,
+    /// The source declares no white point.
+    ///
+    /// Declared last rather than beside its siblings so Part A's twelve
+    /// [`POLICY`] row indices do not move (`IN1b` §3.2 rule 16).
+    UnknownWhitePoint,
 }
 
 impl SourceColorIncident {
@@ -85,27 +97,27 @@ impl SourceColorIncident {
         self.source_error().field()
     }
 
-    /// The incident for a classifier failure, or `None` when the failure is
-    /// not an incident in this slice.
+    /// The incident for a classifier failure.
     ///
-    /// [`ColorSourceError::UnknownWhitePoint`] is the only `None` (IN1 §2.2
-    /// rule 6).
+    /// Total: there is no `None` case any more (`IN1b` §3.2 rule 16, erratum
+    /// `IN1b`-R4). The match carries no wildcard, so a fourteenth classifier
+    /// variant breaks the build.
     #[must_use]
-    pub fn from_source_error(error: &ColorSourceError) -> Option<Self> {
+    pub const fn from_source_error(error: &ColorSourceError) -> Self {
         match error {
-            ColorSourceError::UnknownPrimaries => Some(Self::UnknownPrimaries),
-            ColorSourceError::UnknownTransfer => Some(Self::UnknownTransfer),
-            ColorSourceError::UnknownMatrix => Some(Self::UnknownMatrix),
-            ColorSourceError::UnknownRange => Some(Self::UnknownRange),
-            ColorSourceError::UnknownBitDepth => Some(Self::UnknownBitDepth),
-            ColorSourceError::UnsupportedPrimaries(_) => Some(Self::UnsupportedPrimaries),
-            ColorSourceError::UnsupportedTransfer(_) => Some(Self::UnsupportedTransfer),
-            ColorSourceError::UnsupportedMatrix(_) => Some(Self::UnsupportedMatrix),
-            ColorSourceError::UnsupportedRange(_) => Some(Self::UnsupportedRange),
-            ColorSourceError::UnsupportedWhitePoint(_) => Some(Self::UnsupportedWhitePoint),
-            ColorSourceError::UnsupportedBitDepth(_) => Some(Self::UnsupportedBitDepth),
-            ColorSourceError::UnsupportedCombination { .. } => Some(Self::UnsupportedCombination),
-            ColorSourceError::UnknownWhitePoint => None,
+            ColorSourceError::UnknownPrimaries => Self::UnknownPrimaries,
+            ColorSourceError::UnknownTransfer => Self::UnknownTransfer,
+            ColorSourceError::UnknownMatrix => Self::UnknownMatrix,
+            ColorSourceError::UnknownRange => Self::UnknownRange,
+            ColorSourceError::UnknownBitDepth => Self::UnknownBitDepth,
+            ColorSourceError::UnsupportedPrimaries(_) => Self::UnsupportedPrimaries,
+            ColorSourceError::UnsupportedTransfer(_) => Self::UnsupportedTransfer,
+            ColorSourceError::UnsupportedMatrix(_) => Self::UnsupportedMatrix,
+            ColorSourceError::UnsupportedRange(_) => Self::UnsupportedRange,
+            ColorSourceError::UnsupportedWhitePoint(_) => Self::UnsupportedWhitePoint,
+            ColorSourceError::UnsupportedBitDepth(_) => Self::UnsupportedBitDepth,
+            ColorSourceError::UnsupportedCombination { .. } => Self::UnsupportedCombination,
+            ColorSourceError::UnknownWhitePoint => Self::UnknownWhitePoint,
         }
     }
 
@@ -145,6 +157,7 @@ impl SourceColorIncident {
                 matrix: ColorMatrix::Unknown,
                 range: ColorRange::Unknown,
             },
+            Self::UnknownWhitePoint => ColorSourceError::UnknownWhitePoint,
         }
     }
 
@@ -167,50 +180,655 @@ impl SourceColorIncident {
             Self::UnsupportedWhitePoint => 9,
             Self::UnsupportedBitDepth => 10,
             Self::UnsupportedCombination => 11,
+            Self::UnknownWhitePoint => 12,
+        }
+    }
+}
+
+/// The stable code string every code-less [`MediaError`] variant shares.
+///
+/// Declared once so [`MediaIncident::code`] can delegate its other arm without
+/// restating a literal in the delegation's unreachable fallback.
+const MEDIA_BACKEND_UNCLASSIFIED: &str = "media_backend_unclassified";
+
+/// A media failure that is not a source-colour one (`IN1b` §3.2 rule 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MediaIncident {
+    /// The managed renderer cannot prove the decoder's native format is a
+    /// supported integer source surface.
+    UnsupportedDecoderFormat,
+    /// The media engine refused with a reason and no code of its own: the five
+    /// `MediaError` variants whose `recovery_code()` is `None`.
+    BackendUnclassified,
+}
+
+impl MediaIncident {
+    /// The stable machine-readable code.
+    ///
+    /// `unsupported_decoder_format` is delegated to
+    /// [`MediaError::recovery_code`], which owns the string (`IN1b` §3.2
+    /// rule 11); the `None` arm cannot be reached, because that accessor
+    /// answers `Some` for the variant built below, and it yields the shared
+    /// constant rather than panicking in core.
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::UnsupportedDecoderFormat => match self.media_error().recovery_code() {
+                Some(code) => code,
+                None => MEDIA_BACKEND_UNCLASSIFIED,
+            },
+            Self::BackendUnclassified => MEDIA_BACKEND_UNCLASSIFIED,
+        }
+    }
+
+    /// The stable field associated with the failure. Minted: [`MediaError`]
+    /// ships no `field()` accessor to delegate to.
+    #[must_use]
+    pub const fn field(self) -> &'static str {
+        match self {
+            Self::UnsupportedDecoderFormat => "format",
+            Self::BackendUnclassified => "media",
+        }
+    }
+
+    /// A canonical media failure for this incident, used only to reach
+    /// [`MediaError::recovery_code`]. The payload is a placeholder and never
+    /// leaves this module.
+    fn media_error(self) -> MediaError {
+        match self {
+            Self::UnsupportedDecoderFormat => MediaError::UnsupportedDecoderFormat {
+                path: std::path::PathBuf::new(),
+                format: String::new(),
+                declared_bit_depth: None,
+                decoder_bit_depth: None,
+                reason: String::new(),
+            },
+            Self::BackendUnclassified => MediaError::Backend(String::new()),
+        }
+    }
+
+    const fn table_index(self) -> usize {
+        match self {
+            Self::UnsupportedDecoderFormat => 0,
+            Self::BackendUnclassified => 1,
+        }
+    }
+}
+
+/// A managed delivery encode refused for a typed colour reason
+/// (`IN1b` §3.2 rule 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DeliveryColorIncident {
+    /// The video codec cannot carry managed delivery tags.
+    UnsupportedCodec,
+    /// One delivery-colour field is outside the managed set.
+    UnsupportedField,
+    /// The negotiated pixel format does not carry the declared depth.
+    PixelFormatDepthMismatch,
+    /// This build's encoder does not offer the required pixel format.
+    EncoderPixelFormatUnavailable,
+}
+
+impl DeliveryColorIncident {
+    /// The stable machine-readable code, delegated to [`DeliveryColorError`].
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        self.delivery_error().code()
+    }
+
+    /// The stable settings field associated with the failure.
+    ///
+    /// **Minted, not delegated, and the reason is a type**:
+    /// `DeliveryColorError::field()` returns `&str` borrowed from `&self`
+    /// because [`DeliveryColorError::UnsupportedField`] answers with the
+    /// mismatch's own per-instance field name, so there is no `&'static str`
+    /// to delegate to. The three static arms below are asserted equal to that
+    /// accessor by `in1b_every_code_delegates_its_string_to_the_accessor_that_owns_it`;
+    /// `UnsupportedField` answers `delivery_color`, the name of the check
+    /// rather than of the one field that failed (erratum `IN1b`-A-R4).
+    #[must_use]
+    pub const fn field(self) -> &'static str {
+        match self {
+            Self::UnsupportedCodec => "video_codec",
+            Self::UnsupportedField => "delivery_color",
+            Self::PixelFormatDepthMismatch | Self::EncoderPixelFormatUnavailable => "pixel_format",
+        }
+    }
+
+    /// The shipped recovery sentence, delegated (`IN1b` §3.7 rule 34).
+    #[must_use]
+    pub fn recovery_action(self) -> &'static str {
+        self.delivery_error().recovery_action()
+    }
+
+    /// A canonical delivery failure, used only to reach the `const` accessors
+    /// that ignore the payload.
+    /// The incident one [`DeliveryColorError`] classifies as, with no
+    /// wildcard arm so a fifth variant breaks the build.
+    #[must_use]
+    pub const fn from_delivery_error(error: &DeliveryColorError) -> Self {
+        match error {
+            DeliveryColorError::UnsupportedCodec { .. } => Self::UnsupportedCodec,
+            DeliveryColorError::UnsupportedField(_) => Self::UnsupportedField,
+            DeliveryColorError::PixelFormatDepthMismatch { .. } => Self::PixelFormatDepthMismatch,
+            DeliveryColorError::EncoderPixelFormatUnavailable { .. } => {
+                Self::EncoderPixelFormatUnavailable
+            }
+        }
+    }
+
+    fn delivery_error(self) -> DeliveryColorError {
+        match self {
+            Self::UnsupportedCodec => DeliveryColorError::UnsupportedCodec {
+                observed: String::new(),
+                allowed: "",
+            },
+            Self::UnsupportedField => DeliveryColorError::UnsupportedField(DeliveryColorMismatch {
+                field: String::new(),
+                observed: String::new(),
+                allowed: String::new(),
+            }),
+            Self::PixelFormatDepthMismatch => DeliveryColorError::PixelFormatDepthMismatch {
+                observed: String::new(),
+                allowed: String::new(),
+            },
+            Self::EncoderPixelFormatUnavailable => {
+                DeliveryColorError::EncoderPixelFormatUnavailable {
+                    observed: String::new(),
+                    allowed: String::new(),
+                }
+            }
+        }
+    }
+
+    const fn table_index(self) -> usize {
+        match self {
+            Self::UnsupportedCodec => 0,
+            Self::UnsupportedField => 1,
+            Self::PixelFormatDepthMismatch => 2,
+            Self::EncoderPixelFormatUnavailable => 3,
+        }
+    }
+}
+
+/// Post-export delivery verification could not produce an honest measurement
+/// (`IN1b` §3.2 rule 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DeliveryVerificationIncident {
+    /// The sampled reference render is not full resolution.
+    NotFullResolution,
+    /// A native plane sample does not fit its declared container.
+    PlaneOutOfContainer,
+    /// The written file holds a different number of frames than the document.
+    FrameCountMismatch,
+    /// The requested sample count is outside the accepted range.
+    FrameCountOutOfRange,
+    /// The request carries another lane's budgets.
+    BudgetLaneMismatch,
+}
+
+impl DeliveryVerificationIncident {
+    /// The stable machine-readable code, delegated to
+    /// [`DeliveryVerificationError`].
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        self.verification_error().code()
+    }
+
+    /// The stable verification field, delegated the same way.
+    #[must_use]
+    pub fn field(self) -> &'static str {
+        self.verification_error().field()
+    }
+
+    /// The shipped recovery sentence, delegated (`IN1b` §3.7 rule 34).
+    #[must_use]
+    pub fn recovery_action(self) -> &'static str {
+        self.verification_error().recovery_action()
+    }
+
+    /// The incident one [`DeliveryVerificationError`] classifies as, with no
+    /// wildcard arm so a sixth variant breaks the build.
+    #[must_use]
+    pub const fn from_verification_error(error: &DeliveryVerificationError) -> Self {
+        match error {
+            DeliveryVerificationError::NotFullResolution { .. } => Self::NotFullResolution,
+            DeliveryVerificationError::PlaneOutOfContainer { .. } => Self::PlaneOutOfContainer,
+            DeliveryVerificationError::FrameCountMismatch { .. } => Self::FrameCountMismatch,
+            DeliveryVerificationError::FrameCountOutOfRange { .. } => Self::FrameCountOutOfRange,
+            DeliveryVerificationError::BudgetLaneMismatch { .. } => Self::BudgetLaneMismatch,
+        }
+    }
+
+    fn verification_error(self) -> DeliveryVerificationError {
+        match self {
+            Self::NotFullResolution => DeliveryVerificationError::NotFullResolution {
+                observed: String::new(),
+                allowed: "",
+            },
+            Self::PlaneOutOfContainer => DeliveryVerificationError::PlaneOutOfContainer {
+                observed: String::new(),
+                allowed: "",
+            },
+            Self::FrameCountMismatch => DeliveryVerificationError::FrameCountMismatch {
+                observed: String::new(),
+                allowed: String::new(),
+            },
+            Self::FrameCountOutOfRange => DeliveryVerificationError::FrameCountOutOfRange {
+                observed: String::new(),
+                allowed: "",
+            },
+            Self::BudgetLaneMismatch => DeliveryVerificationError::BudgetLaneMismatch {
+                observed: String::new(),
+                allowed: String::new(),
+            },
+        }
+    }
+
+    const fn table_index(self) -> usize {
+        match self {
+            Self::NotFullResolution => 0,
+            Self::PlaneOutOfContainer => 1,
+            Self::FrameCountMismatch => 2,
+            Self::FrameCountOutOfRange => 3,
+            Self::BudgetLaneMismatch => 4,
+        }
+    }
+}
+
+/// A colour QC measurement refused with a typed reason (`IN1b` §3.2 rule 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ColorQcIncident {
+    /// A proxy raster was offered as a delivery reference.
+    ProxyProofRefused,
+    /// The pixel buffer is not `width * height * 4` samples.
+    RasterLengthMismatch,
+    /// The resolved region of interest is empty.
+    EmptyPopulation,
+    /// More nodes were requested than the budget allows.
+    NodeBudgetExceeded,
+    /// The coverage raster does not match the region.
+    MatteRegionRasterMismatch,
+    /// The scratch node removal was refused by the document model.
+    NodeRemovalRejected,
+}
+
+impl ColorQcIncident {
+    /// The stable machine-readable code, delegated to [`ColorQcError`].
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        self.qc_error().code()
+    }
+
+    /// The stable request or proof field, delegated the same way.
+    #[must_use]
+    pub fn field(self) -> &'static str {
+        self.qc_error().field()
+    }
+
+    /// The shipped recovery sentence, delegated (`IN1b` §3.7 rule 34).
+    #[must_use]
+    pub fn recovery_action(self) -> &'static str {
+        self.qc_error().recovery_action()
+    }
+
+    /// The incident one [`ColorQcError`] classifies as, with no wildcard arm so
+    /// a seventh variant breaks the build.
+    #[must_use]
+    pub const fn from_qc_error(error: &ColorQcError) -> Self {
+        match error {
+            ColorQcError::ProxyProofRefused { .. } => Self::ProxyProofRefused,
+            ColorQcError::RasterLengthMismatch { .. } => Self::RasterLengthMismatch,
+            ColorQcError::EmptyPopulation { .. } => Self::EmptyPopulation,
+            ColorQcError::NodeBudgetExceeded { .. } => Self::NodeBudgetExceeded,
+            ColorQcError::MatteRegionRasterMismatch { .. } => Self::MatteRegionRasterMismatch,
+            ColorQcError::NodeRemovalRejected { .. } => Self::NodeRemovalRejected,
+        }
+    }
+
+    fn qc_error(self) -> ColorQcError {
+        match self {
+            Self::ProxyProofRefused => ColorQcError::ProxyProofRefused {
+                observed: String::new(),
+                allowed: "",
+            },
+            Self::RasterLengthMismatch => ColorQcError::RasterLengthMismatch {
+                observed: String::new(),
+                allowed: String::new(),
+            },
+            Self::EmptyPopulation => ColorQcError::EmptyPopulation {
+                observed: String::new(),
+                allowed: "",
+            },
+            Self::NodeBudgetExceeded => ColorQcError::NodeBudgetExceeded {
+                observed: String::new(),
+                allowed: "",
+            },
+            Self::MatteRegionRasterMismatch => ColorQcError::MatteRegionRasterMismatch {
+                observed: String::new(),
+                allowed: String::new(),
+            },
+            Self::NodeRemovalRejected => ColorQcError::NodeRemovalRejected {
+                clip: ClipId(0),
+                effect: EffectId(0),
+                reason: String::new(),
+            },
+        }
+    }
+
+    const fn table_index(self) -> usize {
+        match self {
+            Self::ProxyProofRefused => 0,
+            Self::RasterLengthMismatch => 1,
+            Self::EmptyPopulation => 2,
+            Self::NodeBudgetExceeded => 3,
+            Self::MatteRegionRasterMismatch => 4,
+            Self::NodeRemovalRejected => 5,
+        }
+    }
+}
+
+/// A refusal raised by one of the seven typed rejection enums
+/// (`IN1b` §3.2 rule 10).
+///
+/// Four of the seven live outside core — `BranchError` in the agent crate,
+/// `SourceEditRejection`, the relink pair and `ProjectSaveError` in the app —
+/// and each reads this enum from its own crate. Core owns the code and the
+/// policy class; core does not own the code's trigger (IN1 §2.1 rule 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RejectionIncident {
+    /// An edit plan was refused as a whole.
+    EditPlan,
+    /// A delivery variant could not be built from this project.
+    DeliveryVariant,
+    /// The isolated agent branch refused the request.
+    AgentBranch,
+    /// A Source-monitor edit was refused before anything was applied.
+    SourceEdit,
+    /// A relink candidate was refused.
+    Relink,
+    /// The project file could not be written.
+    ProjectSave,
+    /// A caption track could not be planned from the cues.
+    CaptionPlan,
+}
+
+impl RejectionIncident {
+    /// The stable machine-readable code. Minted: none of the seven enums ships
+    /// a `code()` accessor (`IN1b` §3.2 rule 12).
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::EditPlan => "edit_plan_rejected",
+            Self::DeliveryVariant => "delivery_variant_rejected",
+            Self::AgentBranch => "agent_branch_rejected",
+            Self::SourceEdit => "source_edit_rejected",
+            Self::Relink => "relink_rejected",
+            Self::ProjectSave => "project_save_failed",
+            Self::CaptionPlan => "caption_plan_rejected",
+        }
+    }
+
+    /// The stable field associated with the refusal.
+    #[must_use]
+    pub const fn field(self) -> &'static str {
+        match self {
+            Self::EditPlan => "edit_plan",
+            Self::DeliveryVariant => "delivery_variant",
+            Self::AgentBranch => "agent_branch",
+            Self::SourceEdit => "source_edit",
+            Self::Relink => "relink",
+            Self::ProjectSave => "project_file",
+            Self::CaptionPlan => "caption_plan",
+        }
+    }
+
+    const fn table_index(self) -> usize {
+        match self {
+            Self::EditPlan => 0,
+            Self::DeliveryVariant => 1,
+            Self::AgentBranch => 2,
+            Self::SourceEdit => 3,
+            Self::Relink => 4,
+            Self::ProjectSave => 5,
+            Self::CaptionPlan => 6,
+        }
+    }
+}
+
+/// One code per source label the application still reports under
+/// (`IN1b` §3.2 rule 12).
+///
+/// Fifteen are placeholders — the label's failures have no typed payload yet —
+/// and two are not: `look_incomplete` and `media_incomplete` exist because
+/// their label's sites disagree about severity, and a code declares one
+/// severity (`IN1b` §3.6 rule 30).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LabelIncident {
+    /// `Operations`, with no typed payload.
+    Operations,
+    /// `Look`, with no typed payload.
+    Look,
+    /// `Look`, where the save or open completed with looks missing.
+    LookIncomplete,
+    /// `Export`, with no typed payload.
+    Export,
+    /// `Source monitor`, with no typed payload.
+    SourceMonitor,
+    /// `Relink`, with no typed payload.
+    Relink,
+    /// `Agent branch`, with no typed payload.
+    AgentBranch,
+    /// `Transcript edit`, with no typed payload.
+    TranscriptEdit,
+    /// `Media`, with no typed payload.
+    Media,
+    /// `Media`, where the open completed with media missing.
+    MediaIncomplete,
+    /// `Agent`, with no typed payload.
+    Agent,
+    /// `Recording`, with no typed payload.
+    Recording,
+    /// `Project`, with no typed payload.
+    Project,
+    /// `Captions`, with no typed payload.
+    Captions,
+    /// `Mixer`, with no typed payload.
+    Mixer,
+    /// `Media cache`, with no typed payload.
+    MediaCache,
+    /// `Timeline`, reachable only through the inspector's dynamic site.
+    Timeline,
+}
+
+impl LabelIncident {
+    /// The stable machine-readable code. Minted: a label has no accessor.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Operations => "operations_unclassified",
+            Self::Look => "look_unclassified",
+            Self::LookIncomplete => "look_incomplete",
+            Self::Export => "export_unclassified",
+            Self::SourceMonitor => "source_monitor_unclassified",
+            Self::Relink => "relink_unclassified",
+            Self::AgentBranch => "agent_branch_unclassified",
+            Self::TranscriptEdit => "transcript_edit_unclassified",
+            Self::Media => "media_unclassified",
+            Self::MediaIncomplete => "media_incomplete",
+            Self::Agent => "agent_unclassified",
+            Self::Recording => "recording_unclassified",
+            Self::Project => "project_unclassified",
+            Self::Captions => "captions_unclassified",
+            Self::Mixer => "mixer_unclassified",
+            Self::MediaCache => "media_cache_unclassified",
+            Self::Timeline => "timeline_unclassified",
+        }
+    }
+
+    /// The stable field associated with the label.
+    #[must_use]
+    pub const fn field(self) -> &'static str {
+        match self {
+            Self::Operations => "operations",
+            Self::Look | Self::LookIncomplete => "look",
+            Self::Export => "export",
+            Self::SourceMonitor => "source_monitor",
+            Self::Relink => "relink",
+            Self::AgentBranch => "agent_branch",
+            Self::TranscriptEdit => "transcript_edit",
+            Self::Media | Self::MediaIncomplete => "media",
+            Self::Agent => "agent",
+            Self::Recording => "recording",
+            Self::Project => "project",
+            Self::Captions => "captions",
+            Self::Mixer => "mixer",
+            Self::MediaCache => "media_cache",
+            Self::Timeline => "timeline",
+        }
+    }
+
+    const fn table_index(self) -> usize {
+        match self {
+            Self::Operations => 0,
+            Self::Look => 1,
+            Self::LookIncomplete => 2,
+            Self::Export => 3,
+            Self::SourceMonitor => 4,
+            Self::Relink => 5,
+            Self::AgentBranch => 6,
+            Self::TranscriptEdit => 7,
+            Self::Media => 8,
+            Self::MediaIncomplete => 9,
+            Self::Agent => 10,
+            Self::Recording => 11,
+            Self::Project => 12,
+            Self::Captions => 13,
+            Self::Mixer => 14,
+            Self::MediaCache => 15,
+            Self::Timeline => 16,
         }
     }
 }
 
 /// The exhaustive set of incident codes Kinewright declares.
 ///
-/// Part A declares source colour and nothing else: there is no catch-all, no
-/// `Unclassified`, and no `Other(String)` (IN1 §2.2 rule 9). It also carries no
-/// `#[non_exhaustive]`, because that would force a wildcard arm into every
-/// downstream `match` and make IN1 §2.4 rule 35's exhaustiveness test — the one
-/// thing that proves [`POLICY`] covers every code — pass vacuously
-/// (IN1 §2.2 rule 10).
+/// **67 codes** (`IN1b` §3.2 rule 12): thirteen source-colour, two media, four
+/// delivery-colour, five delivery-verification, six colour-QC, eleven operation
+/// families, the minted LUT-asset and revision-conflict rows, seven typed
+/// rejections and seventeen source labels. Fifty-six are reachable from one of
+/// the 129 measured error paths; the eleven delivery-verification and colour-QC
+/// rows are declared under `IN1b` §3.2 rule 13's exemption, because dropping
+/// them would make [`Self::code`]'s delegation partial.
+///
+/// There is no catch-all, no `Unclassified` and no `Other(String)` (IN1 §2.2
+/// rule 9). It also carries no `#[non_exhaustive]`, because that would force a
+/// wildcard arm into every downstream `match` and make IN1 §2.4 rule 35's
+/// exhaustiveness test — the one thing that proves [`POLICY`] covers every
+/// code — pass vacuously (IN1 §2.2 rule 10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IncidentCode {
     /// A CC1 source-colour classification failure.
     SourceColor(SourceColorIncident),
+    /// A media failure that is not a source-colour one.
+    Media(MediaIncident),
+    /// A managed delivery encode refused for a typed colour reason.
+    DeliveryColor(DeliveryColorIncident),
+    /// A delivery verification that could not produce an honest measurement.
+    DeliveryVerification(DeliveryVerificationIncident),
+    /// A refused colour QC measurement.
+    ColorQc(ColorQcIncident),
+    /// A rejected edit, by the family of thing that must change.
+    Operation(IncidentFamily),
+    /// A LUT allowlist refusal, whose recovery is the store's own import
+    /// rather than "supply a different field" (`IN1b` §3.1 rule 6).
+    LutAssetPolicy,
+    /// A revision-gated send refused because the timeline moved.
+    EditRevisionConflict,
+    /// A refusal raised by one of the seven typed rejection enums.
+    Rejection(RejectionIncident),
+    /// A source label whose failures have no typed payload yet.
+    Label(LabelIncident),
 }
 
 impl IncidentCode {
-    /// The stable machine-readable code, delegated to the inner incident.
+    /// The stable machine-readable code.
+    ///
+    /// Delegated to the accessor that owns the string wherever one exists, and
+    /// minted otherwise; no string is restated (`IN1b` §3.2 rule 11).
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
             Self::SourceColor(incident) => incident.code(),
+            Self::Media(incident) => incident.code(),
+            Self::DeliveryColor(incident) => incident.code(),
+            Self::DeliveryVerification(incident) => incident.code(),
+            Self::ColorQc(incident) => incident.code(),
+            Self::Operation(family) => family.code(),
+            Self::LutAssetPolicy => "lut_asset_policy",
+            Self::EditRevisionConflict => "edit_revision_conflict",
+            Self::Rejection(incident) => incident.code(),
+            Self::Label(incident) => incident.code(),
         }
     }
 
-    /// The stable source-description field, delegated to the inner incident.
+    /// The stable field the failure is about, delegated the same way.
     #[must_use]
     pub fn field(self) -> &'static str {
         match self {
             Self::SourceColor(incident) => incident.field(),
+            Self::Media(incident) => incident.field(),
+            Self::DeliveryColor(incident) => incident.field(),
+            Self::DeliveryVerification(incident) => incident.field(),
+            Self::ColorQc(incident) => incident.field(),
+            // An operation rejection names its field inside the message; the
+            // three variants that keep an untyped `reason` are `IN1b` §13 D-B5.
+            Self::Operation(_) => "operation",
+            Self::LutAssetPolicy => "lut_asset",
+            Self::EditRevisionConflict => "revision",
+            Self::Rejection(incident) => incident.field(),
+            Self::Label(incident) => incident.field(),
         }
     }
 
-    /// A canonical classifier failure for this code, delegated to the inner
-    /// incident. Private, and subject to
-    /// [`SourceColorIncident::source_error`]'s caveat: the payload is a
-    /// placeholder, so this reaches `const` accessors that ignore it and never
-    /// `observed()`.
-    fn source_error(self) -> ColorSourceError {
+    /// This code's row index in [`POLICY`], in the enum's declaration order.
+    ///
+    /// Total by construction, so [`policy_class`] needs no fallible lookup and
+    /// no panic. `in1b_policy_rows_are_declared_in_table_order` pins the
+    /// correspondence and `IN1b` §9 clause 2's test pins the coverage.
+    const fn table_index(self) -> usize {
         match self {
-            Self::SourceColor(incident) => incident.source_error(),
+            Self::SourceColor(incident) => incident.table_index(),
+            Self::Media(incident) => 13 + incident.table_index(),
+            Self::DeliveryColor(incident) => 15 + incident.table_index(),
+            Self::DeliveryVerification(incident) => 19 + incident.table_index(),
+            Self::ColorQc(incident) => 24 + incident.table_index(),
+            Self::Operation(family) => 30 + family_index(family),
+            Self::LutAssetPolicy => 41,
+            Self::EditRevisionConflict => 42,
+            Self::Rejection(incident) => 43 + incident.table_index(),
+            Self::Label(incident) => 50 + incident.table_index(),
         }
+    }
+}
+
+/// [`IncidentFamily`]'s row offset inside [`POLICY`].
+///
+/// Declared here rather than beside the enum so a twelfth family breaks this
+/// file too, where the eleven rows it must gain live.
+const fn family_index(family: IncidentFamily) -> usize {
+    match family {
+        IncidentFamily::Bounds => 0,
+        IncidentFamily::Malformed => 1,
+        IncidentFamily::Duplicate => 2,
+        IncidentFamily::Placement => 3,
+        IncidentFamily::Missing => 4,
+        IncidentFamily::Structure => 5,
+        IncidentFamily::Relink => 6,
+        IncidentFamily::Unrepresentable => 7,
+        IncidentFamily::UnknownName => 8,
+        IncidentFamily::Internal => 9,
+        IncidentFamily::ColorPolicy => 10,
     }
 }
 
@@ -262,36 +880,80 @@ pub enum IncidentSeverity {
     Informs,
 }
 
-/// What the incident is about.
+/// What the incident is about, and the axis two failures dedup on.
 ///
-/// Part A declares only [`IncidentSubject::Asset`]; `Clip`, `Track`,
-/// `ExportJob`, `Project` and `Agent` arrive with Part B's sources
-/// (IN1 §2.3 rule 14).
+/// The dedup key is `(code, subject, observed)` (IN1 §2.3 rule 15) and
+/// `suppressed` is a `BTreeSet<(IncidentCode, IncidentSubject)>`, so the
+/// subject **is** the dedup axis and must be `Ord`. Each variant names the
+/// thing whose repeated failure is one problem (`IN1b` §3.3 rule 17).
+///
+/// `ExportJob`, `Project` and `Agent` are **unit** variants and no id type is
+/// minted for them (`IN1b` §3.3 rule 18): the application runs one export at a
+/// time, an agent thread is addressed by a re-indexed position rather than by
+/// an id, and the incident log is per-project by construction. Their dedup axis
+/// is therefore `(code, observed)`.
+///
+/// `Subject(String)` is rejected, and the reason is the dedup key: two
+/// spellings of one clip would become two problems.
+///
+/// The wire union is three shapes, stated rather than discovered
+/// (`IN1b` §3.11 rule 42): a one-key object over a transparent `u64`
+/// (`{"asset":1}`), a one-key object over a nested union
+/// (`{"chain":{"bus":3}}` or `{"chain":"master"}`), and a bare string
+/// (`"export_job"`, `"project"`, `"agent"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncidentSubject {
-    /// One media asset in the project's pool.
+    /// One media file that keeps refusing.
     Asset(AssetId),
+    /// One clip whose trim, speed or effect keeps failing.
+    Clip(ClipId),
+    /// One track's capture refusal.
+    Track(TrackId),
+    /// One bus or the master, whose mix or learn keeps refusing.
+    Chain(AudioChain),
+    /// One export attempt, not one incident per variant it checks.
+    ExportJob,
+    /// A document-wide refusal with no narrower subject.
+    Project,
+    /// The chat panel's own refusals.
+    Agent,
 }
 
 impl IncidentSubject {
     /// A short human label for a card or a log line, for example `Asset 1`.
     ///
     /// The asset's human *name* is deliberately not on the incident: an
-    /// incident carries no document view (IN1 §2.3c rule 31, §13 D15).
+    /// incident carries no document view (IN1 §2.3c rule 31, §13 D15,
+    /// `IN1b` §13 D-B6).
     #[must_use]
     pub fn label(self) -> String {
         match self {
             Self::Asset(asset) => format!("Asset {asset}"),
+            Self::Clip(clip) => format!("Clip {clip}"),
+            Self::Track(track) => format!("Track {track}"),
+            Self::Chain(AudioChain::Bus(bus)) => format!("Bus {bus}"),
+            Self::Chain(AudioChain::Master) => "Master".to_owned(),
+            Self::ExportJob => "Export".to_owned(),
+            Self::Project => "Project".to_owned(),
+            Self::Agent => "Agent".to_owned(),
         }
     }
 }
 
-/// The typed facts the incident was opened from.
+/// The typed facts the incident was opened from (`IN1b` §3.4 rule 23).
+///
+/// **Evidence follows the code, by rule** (`IN1b` §3.4 rule 24): where a
+/// producer resolves its code at run time, the evidence variant is resolved
+/// with it, and a delegating variant never falls back to a `reason` string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncidentEvidence {
     /// A CC1 source-colour refusal on the managed decode path.
+    ///
+    /// Part A's variant, byte-identical on the wire: its name, both field
+    /// names and the container's `rename_all` are load-bearing and must not
+    /// change (`IN1b` §3.11 rule 41).
     SourceColor {
         /// The description the incident captured at open time. The revert
         /// restores exactly these bytes (IN1 §0.1 N1.5/B4).
@@ -300,14 +962,85 @@ pub enum IncidentEvidence {
         /// refused, if there was one.
         assumption: Option<ColorSourceProfileAssumption>,
     },
+    /// A refusal whose only typed facts are already in `observed`/`allowed`.
+    Plain,
+    /// A rejected edit, with the family so a consumer can branch without
+    /// re-parsing the message.
+    OpError {
+        /// The family the inner [`crate::OpError`] belongs to.
+        family: IncidentFamily,
+        /// The one-based operation number, when the refusal came from a batch.
+        op_number: Option<usize>,
+        /// The rendered rejection.
+        message: String,
+    },
+    /// A typed media failure that is not a source-colour one.
+    MediaError {
+        /// [`MediaError::recovery_code`]'s answer, or the incident's own code
+        /// when the failure carries none.
+        code: &'static str,
+        /// The rendered failure.
+        message: String,
+    },
+    /// A revision gate that refused (`IN1b` §4).
+    Revision {
+        /// The revision the send was planned against.
+        expected: TimelineRevision,
+        /// The revision the document was actually on.
+        actual: TimelineRevision,
+    },
+    /// A Source-monitor edit refused before anything was applied.
+    SourceEdit {
+        /// The app's own rendered reason.
+        reason: &'static str,
+    },
+    /// A relink candidate refused.
+    Relink {
+        /// The app's own rendered reason.
+        reason: String,
+    },
+    /// A project file that could not be written.
+    ProjectSave {
+        /// The app's own rendered reason.
+        reason: String,
+    },
+    /// An isolated agent branch that refused.
+    Branch {
+        /// The agent crate's own rendered reason.
+        reason: String,
+    },
+    /// A caption plan that could not be built.
+    CaptionPlan {
+        /// Core's own rendered reason.
+        reason: String,
+    },
+    /// A delivery variant that could not be built.
+    DeliveryVariant {
+        /// The rendered reason.
+        reason: String,
+    },
 }
 
 impl IncidentEvidence {
-    /// The probed description this evidence captured.
+    /// The probed description this evidence captured, when it captured one.
+    ///
+    /// `Option`, not a reference, because evidence is per-variant after Part B
+    /// and an `operation_bounds` incident on a clip has no probed colour
+    /// description at all (`IN1b` §3.4 rule 23).
     #[must_use]
-    pub const fn probed(&self) -> &ColorDescription {
+    pub const fn probed(&self) -> Option<&ColorDescription> {
         match self {
-            Self::SourceColor { probed, .. } => probed,
+            Self::SourceColor { probed, .. } => Some(probed),
+            Self::Plain
+            | Self::OpError { .. }
+            | Self::MediaError { .. }
+            | Self::Revision { .. }
+            | Self::SourceEdit { .. }
+            | Self::Relink { .. }
+            | Self::ProjectSave { .. }
+            | Self::Branch { .. }
+            | Self::CaptionPlan { .. }
+            | Self::DeliveryVariant { .. } => None,
         }
     }
 }
@@ -452,44 +1185,356 @@ pub struct IncidentObservation {
 }
 
 impl IncidentObservation {
-    /// Build an observation from a typed media failure, or `None` when the
-    /// failure has no incident code in this slice.
+    /// An observation whose only typed facts are the ones it already carries.
     ///
-    /// The match carries **no** wildcard arm, so a new [`MediaError`] variant
-    /// breaks the build and forces a decision rather than silently becoming a
-    /// non-incident (IN1 §2.3b rule 22).
+    /// The shape every label placeholder uses: a code, a subject, the message
+    /// the site had, and [`IncidentEvidence::Plain`].
     #[must_use]
-    pub fn from_media_error(error: &MediaError, revision: TimelineRevision) -> Option<Self> {
+    pub fn plain(
+        code: IncidentCode,
+        subject: IncidentSubject,
+        observed: impl Into<String>,
+        revision: TimelineRevision,
+    ) -> Self {
+        Self {
+            code,
+            subject,
+            observed: observed.into(),
+            allowed: None,
+            evidence: IncidentEvidence::Plain,
+            revision,
+        }
+    }
+
+    /// An observation from a rejected edit (`IN1b` §5.2 rule 15).
+    ///
+    /// The `subject` parameter stays, because a caller that knows better than
+    /// the operation keeps the right to say so; what changes is that no caller
+    /// has to invent one — [`Operation::incident_subject`] derives it.
+    #[must_use]
+    pub fn from_op_error(
+        error: &OpError,
+        subject: IncidentSubject,
+        revision: TimelineRevision,
+    ) -> Self {
+        Self {
+            code: error.incident_code(),
+            subject,
+            observed: error.to_string(),
+            allowed: None,
+            evidence: IncidentEvidence::OpError {
+                family: error.incident_family(),
+                op_number: None,
+                message: error.to_string(),
+            },
+            revision,
+        }
+    }
+
+    /// An observation from a refused edit plan (`IN1b` §3.4 rule 24).
+    ///
+    /// Evidence follows the code: [`BatchError::Empty`] is `edit_plan_rejected`
+    /// with [`IncidentFamily::Malformed`] evidence, because a plan with no
+    /// operations is a malformed plan; [`BatchError::OperationFailed`]
+    /// delegates both its code and its family to the inner rejection and never
+    /// falls back to a `reason` string.
+    #[must_use]
+    pub fn from_batch_error(
+        error: &BatchError,
+        subject: IncidentSubject,
+        revision: TimelineRevision,
+    ) -> Self {
+        let (code, family, op_number) = match error {
+            BatchError::Empty => (
+                IncidentCode::Rejection(RejectionIncident::EditPlan),
+                IncidentFamily::Malformed,
+                None,
+            ),
+            BatchError::OperationFailed { op_number, error } => (
+                error.incident_code(),
+                error.incident_family(),
+                Some(*op_number),
+            ),
+        };
+        Self {
+            code,
+            subject,
+            observed: error.to_string(),
+            allowed: None,
+            evidence: IncidentEvidence::OpError {
+                family,
+                op_number,
+                message: error.to_string(),
+            },
+            revision,
+        }
+    }
+
+    /// An observation from a revision gate that refused (`IN1b` §4).
+    ///
+    /// The incident is stated against the revision the document is *actually*
+    /// on, which is the revision the person must make the edit against now.
+    #[must_use]
+    pub fn revision_conflict(
+        subject: IncidentSubject,
+        expected: TimelineRevision,
+        actual: TimelineRevision,
+    ) -> Self {
+        Self {
+            code: IncidentCode::EditRevisionConflict,
+            subject,
+            observed: actual.to_string(),
+            allowed: Some(expected.to_string()),
+            evidence: IncidentEvidence::Revision { expected, actual },
+            revision: actual,
+        }
+    }
+
+    /// Build an observation from a typed media failure.
+    ///
+    /// **Total** after `IN1b` §3.9: every [`MediaError`] variant has a code, so
+    /// the constructor returns an observation rather than an `Option` and the
+    /// app's `else` arm disappears rather than being migrated
+    /// (`IN1b` §5.1 rule 12, erratum `IN1b`-R9). The match carries **no**
+    /// wildcard arm, so a new variant breaks the build and forces a decision
+    /// (IN1 §2.3b rule 22).
+    ///
+    /// `subject` is the fallback the caller supplies for a failure that names
+    /// none; [`MediaError::SourceColorForAsset`] overrides it with the asset it
+    /// carries, which is the only variant that knows its own subject.
+    #[must_use]
+    pub fn from_media_error(
+        error: &MediaError,
+        subject: IncidentSubject,
+        revision: TimelineRevision,
+    ) -> Self {
         match error {
-            MediaError::SourceColorForAsset(refusal) => {
-                let incident = SourceColorIncident::from_source_error(&refusal.error)?;
-                Some(Self {
-                    code: IncidentCode::SourceColor(incident),
-                    subject: IncidentSubject::Asset(refusal.asset),
-                    observed: refusal.error.observed(),
-                    allowed: Some(refusal.error.allowed_values().to_owned()),
-                    evidence: IncidentEvidence::SourceColor {
-                        probed: refusal.description.clone(),
-                        assumption: refusal.assumption,
-                    },
+            MediaError::SourceColorForAsset(refusal) => Self {
+                code: IncidentCode::SourceColor(SourceColorIncident::from_source_error(
+                    &refusal.error,
+                )),
+                subject: IncidentSubject::Asset(refusal.asset),
+                observed: refusal.error.observed(),
+                allowed: Some(refusal.error.allowed_values().to_owned()),
+                evidence: IncidentEvidence::SourceColor {
+                    probed: refusal.description.clone(),
+                    assumption: refusal.assumption,
+                },
+                revision,
+            },
+            // The bare refusal with no subject. `contextual_managed_decode_error`
+            // turns every one of these into a `SourceColorForAsset` before it
+            // leaves `kinewright-media`, so the arm exists to keep the match
+            // honest rather than because the path is reachable
+            // (IN1 §2.3b rule 23); the caller's fallback subject is used and
+            // the evidence is the media one, because there is no probed
+            // description to carry.
+            MediaError::SourceColor(inner) => Self {
+                code: IncidentCode::SourceColor(SourceColorIncident::from_source_error(inner)),
+                subject,
+                observed: inner.observed(),
+                allowed: Some(inner.allowed_values().to_owned()),
+                evidence: media_evidence(
+                    error,
+                    IncidentCode::SourceColor(SourceColorIncident::from_source_error(inner)),
+                ),
+                revision,
+            },
+            // `observed` is the whole rendered refusal and `allowed` is `None`,
+            // matching the `Backend` arm below rather than half-splitting the
+            // template: the `#[error]` string already names the path, the
+            // format, both depths and the reason, and `reason` is a sentence
+            // about the format rather than the set of formats that would have
+            // been accepted, so putting it under `allowed` would mislabel it.
+            MediaError::UnsupportedDecoderFormat { .. } => {
+                let code = IncidentCode::Media(MediaIncident::UnsupportedDecoderFormat);
+                Self {
+                    code,
+                    subject,
+                    observed: error.to_string(),
+                    allowed: None,
+                    evidence: media_evidence(error, code),
                     revision,
-                })
+                }
             }
-            // An incident needs a subject, and the layer that supplies one is
-            // `contextual_managed_decode_error`, which turns every
-            // `SourceColor` into a `SourceColorForAsset` before it leaves
-            // `kinewright-media`. The arm exists so the exhaustive match is
-            // honest, not because the path is reachable (IN1 §2.3b rule 23).
-            MediaError::SourceColor(_)
+            MediaError::DeliveryColor(inner) => {
+                let code =
+                    IncidentCode::DeliveryColor(DeliveryColorIncident::from_delivery_error(inner));
+                Self {
+                    code,
+                    subject,
+                    observed: inner.observed(),
+                    allowed: Some(inner.allowed_values()),
+                    evidence: media_evidence(error, code),
+                    revision,
+                }
+            }
+            MediaError::DeliveryVerification(inner) => {
+                let code = IncidentCode::DeliveryVerification(
+                    DeliveryVerificationIncident::from_verification_error(inner),
+                );
+                Self {
+                    code,
+                    subject,
+                    observed: inner.observed(),
+                    allowed: Some(inner.allowed_values()),
+                    evidence: media_evidence(error, code),
+                    revision,
+                }
+            }
+            MediaError::ColorQc(inner) => {
+                let code = IncidentCode::ColorQc(ColorQcIncident::from_qc_error(inner));
+                Self {
+                    code,
+                    subject,
+                    observed: inner.observed(),
+                    allowed: Some(inner.allowed_values()),
+                    evidence: media_evidence(error, code),
+                    revision,
+                }
+            }
+            // The two matte enums mint **no** `IncidentCode` (`IN1b` §0.2/e,
+            // §3.9 rule 37), so they share the unclassified media code with the
+            // five code-less variants — and so does their evidence. The matte
+            // code is not lost: it is the first token of every one of their
+            // `#[error]` templates and therefore the first word of `observed`.
+            MediaError::MatteProof(_)
+            | MediaError::MatteCoverage(_)
             | MediaError::NotImplemented
             | MediaError::Cancelled
-            | MediaError::UnsupportedDecoderFormat { .. }
-            | MediaError::DeliveryColor(_)
-            | MediaError::DeliveryVerification(_)
-            | MediaError::ColorQc(_)
             | MediaError::MixSpectrumRangeTooShort { .. }
             | MediaError::MixLoudnessRangeTooShort { .. }
-            | MediaError::Backend(_) => None,
+            | MediaError::Backend(_) => {
+                let code = IncidentCode::Media(MediaIncident::BackendUnclassified);
+                Self {
+                    code,
+                    subject,
+                    observed: error.to_string(),
+                    allowed: None,
+                    evidence: media_evidence(error, code),
+                    revision,
+                }
+            }
+        }
+    }
+}
+
+/// [`IncidentEvidence::MediaError`] for one failure.
+///
+/// **One incident carries one code.** The evidence's `code` is the incident's
+/// own, never the engine's `recovery_code()`: an incident whose `code` reads
+/// `media_backend_unclassified` while its evidence read `matte_proof_no_matte`
+/// would give an agent two answers to one question, which is the shape IN1
+/// exists to remove (review-2 S2). For every variant that declares a code of
+/// its own the two strings are equal anyway — asserted by
+/// `in1b_from_media_error_is_total_and_keeps_the_asset_scoped_subject` — and
+/// for the two matte variants and the five code-less ones the engine's own
+/// token survives as the first word of `observed`.
+fn media_evidence(error: &MediaError, code: IncidentCode) -> IncidentEvidence {
+    IncidentEvidence::MediaError {
+        code: code.code(),
+        message: error.to_string(),
+    }
+}
+
+impl CaptionPlanError {
+    /// The incident code this caption-plan refusal carries
+    /// (`IN1b` §3.10 rule 39).
+    ///
+    /// Two of the six variants take `operation_internal` instead of
+    /// `caption_plan_rejected`: `TrackIdExhausted` and `ClipIdExhausted` are
+    /// id-space exhaustion, and `caption_plan_rejected`'s body — *"adjust the
+    /// transcript selection or the script"* — is false for them. This is the
+    /// hybrid code rule used the way [`OpError::incident_code`] uses it for the
+    /// two LUT-asset variants, and it mints no code.
+    ///
+    /// Declared here rather than in `captions.rs` so that `IN1b` §14 row A's
+    /// "`src/captions.rs` — read, not edited" stays true.
+    #[must_use]
+    pub const fn incident_code(&self) -> IncidentCode {
+        match self {
+            Self::TrackIdExhausted | Self::ClipIdExhausted => {
+                IncidentCode::Operation(IncidentFamily::Internal)
+            }
+            Self::NoCues
+            | Self::EmptyAuthoredScript
+            | Self::AuthoredScriptAlignment
+            | Self::InvalidCueDuration => IncidentCode::Rejection(RejectionIncident::CaptionPlan),
+        }
+    }
+
+    /// An observation from this refusal, with the caller's subject.
+    #[must_use]
+    pub fn incident_observation(
+        &self,
+        subject: IncidentSubject,
+        revision: TimelineRevision,
+    ) -> IncidentObservation {
+        IncidentObservation {
+            code: self.incident_code(),
+            subject,
+            observed: self.to_string(),
+            allowed: None,
+            evidence: IncidentEvidence::CaptionPlan {
+                reason: self.to_string(),
+            },
+            revision,
+        }
+    }
+}
+
+impl DeliveryVariantError {
+    /// The incident code this delivery-variant refusal carries
+    /// (`IN1b` §3.4 rule 24).
+    ///
+    /// `InvalidDocument(OpError)` **delegates** its code to the inner
+    /// rejection, exactly as `BranchError::InvalidBase` does: the reason the
+    /// variant could not be built is the document rejection, and telling the
+    /// person "adjust the focus percentages" for a duplicate clip id would be
+    /// false. The other two arms are the variant's own refusal.
+    ///
+    /// Declared here rather than in `delivery.rs` so that `IN1b` §14 row A's
+    /// "`src/delivery.rs` — read, not edited" stays true.
+    #[must_use]
+    pub const fn incident_code(&self) -> IncidentCode {
+        match self {
+            Self::InvalidDocument(error) => error.incident_code(),
+            Self::InvalidFocus { .. } | Self::EffectIdExhausted => {
+                IncidentCode::Rejection(RejectionIncident::DeliveryVariant)
+            }
+        }
+    }
+
+    /// An observation from this refusal, with the caller's subject.
+    ///
+    /// Evidence follows the code (`IN1b` §3.4 rule 24): the delegating arm
+    /// supplies [`IncidentEvidence::OpError`] with the inner family and
+    /// **never** a `reason` string.
+    #[must_use]
+    pub fn incident_observation(
+        &self,
+        subject: IncidentSubject,
+        revision: TimelineRevision,
+    ) -> IncidentObservation {
+        let evidence = match self {
+            Self::InvalidDocument(error) => IncidentEvidence::OpError {
+                family: error.incident_family(),
+                op_number: None,
+                message: error.to_string(),
+            },
+            Self::InvalidFocus { .. } | Self::EffectIdExhausted => {
+                IncidentEvidence::DeliveryVariant {
+                    reason: self.to_string(),
+                }
+            }
+        };
+        IncidentObservation {
+            code: self.incident_code(),
+            subject,
+            observed: self.to_string(),
+            allowed: None,
+            evidence,
+            revision,
         }
     }
 }
@@ -585,9 +1630,24 @@ pub struct PolicyEntry {
     pub severity: IncidentSeverity,
 }
 
-/// The declared policy for every [`IncidentCode`], one row per code, in
-/// IN1 §2.2's table order.
-pub const POLICY: [PolicyEntry; 12] = [
+/// The declared policy for every [`IncidentCode`], one row per code, in the
+/// enum's declaration order (`IN1b` §3.6 rule 28).
+///
+/// **67 rows**: 3 `AutoApply`, 0 `AskFirst`, 64 `Explain`; 54 `Blocks`,
+/// 13 `Degrades`, 0 `Informs`. A row's severity answers one question — *did
+/// the thing the person asked for happen?* — derived from the site's own
+/// control flow and declared once per code (`IN1b` §3.6 rule 30). The thirteen
+/// `Degrades` rows are the five delivery-verification rows (the export **was**
+/// written), the six colour-QC rows (nothing was mutated), and
+/// `look_incomplete`/`media_incomplete` (the project opened or saved without
+/// all of its looks or media). `Informs` has no Part B row and stays declared
+/// for IN3.
+///
+/// IN1 §9 clause 1's "every row `Blocks`" is superseded by erratum `IN1b`-R1a:
+/// it was true of a twelve-row table in which every row stopped a managed
+/// decode, and is false of a sixty-seven-row table in which thirteen rows
+/// report work that completed with a loss.
+pub const POLICY: [PolicyEntry; 67] = [
     PolicyEntry {
         code: IncidentCode::SourceColor(SourceColorIncident::UnknownPrimaries),
         class: PolicyClass::AutoApply,
@@ -660,29 +1720,512 @@ pub const POLICY: [PolicyEntry; 12] = [
         predicate: PolicyPredicate::Always,
         severity: IncidentSeverity::Blocks,
     },
+    PolicyEntry {
+        code: IncidentCode::SourceColor(SourceColorIncident::UnknownWhitePoint),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Media(MediaIncident::UnsupportedDecoderFormat),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Media(MediaIncident::BackendUnclassified),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::DeliveryColor(DeliveryColorIncident::UnsupportedCodec),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::DeliveryColor(DeliveryColorIncident::UnsupportedField),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::DeliveryColor(DeliveryColorIncident::PixelFormatDepthMismatch),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::DeliveryColor(DeliveryColorIncident::EncoderPixelFormatUnavailable),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::DeliveryVerification(DeliveryVerificationIncident::NotFullResolution),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::DeliveryVerification(DeliveryVerificationIncident::PlaneOutOfContainer),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::DeliveryVerification(DeliveryVerificationIncident::FrameCountMismatch),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::DeliveryVerification(
+            DeliveryVerificationIncident::FrameCountOutOfRange,
+        ),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::DeliveryVerification(DeliveryVerificationIncident::BudgetLaneMismatch),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::ColorQc(ColorQcIncident::ProxyProofRefused),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::ColorQc(ColorQcIncident::RasterLengthMismatch),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::ColorQc(ColorQcIncident::EmptyPopulation),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::ColorQc(ColorQcIncident::NodeBudgetExceeded),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::ColorQc(ColorQcIncident::MatteRegionRasterMismatch),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::ColorQc(ColorQcIncident::NodeRemovalRejected),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::Operation(IncidentFamily::Bounds),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Operation(IncidentFamily::Malformed),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Operation(IncidentFamily::Duplicate),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Operation(IncidentFamily::Placement),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Operation(IncidentFamily::Missing),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Operation(IncidentFamily::Structure),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Operation(IncidentFamily::Relink),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Operation(IncidentFamily::Unrepresentable),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Operation(IncidentFamily::UnknownName),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Operation(IncidentFamily::Internal),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Operation(IncidentFamily::ColorPolicy),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::LutAssetPolicy,
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::EditRevisionConflict,
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Rejection(RejectionIncident::EditPlan),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Rejection(RejectionIncident::DeliveryVariant),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Rejection(RejectionIncident::AgentBranch),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Rejection(RejectionIncident::SourceEdit),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Rejection(RejectionIncident::Relink),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Rejection(RejectionIncident::ProjectSave),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Rejection(RejectionIncident::CaptionPlan),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::Operations),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::Look),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::LookIncomplete),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::Export),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::SourceMonitor),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::Relink),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::AgentBranch),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::TranscriptEdit),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::Media),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::MediaIncomplete),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::Agent),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::Recording),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::Project),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::Captions),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::Mixer),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::MediaCache),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::Timeline),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
 ];
 
-/// The [`POLICY`] row for one code. Total by construction; see
-/// [`SourceColorIncident::table_index`].
-const fn policy_entry(code: IncidentCode) -> PolicyEntry {
+/// The plain-language body every `Explain` recovery carries.
+///
+/// Exhaustive with **no wildcard arm**, so a sixty-eighth code breaks the
+/// build. **Twenty-eight** codes delegate to a shipped `recovery_action()` and
+/// no string of theirs is restated here (`IN1b` §3.7 rule 34); the delegated
+/// set carries **16** distinct sentences, because
+/// `ColorSourceError::recovery_action()` is a `const fn` with no `match` and
+/// returns one sentence for all thirteen source-colour codes. Rewriting those
+/// thirteen per code is IN1 §13 D8 and is owned by IN3. The remaining
+/// **39** bodies are written in `IN1b` §5.6 and are copied here verbatim, so
+/// the whole table carries 55 distinct sentences over 67 codes and the 54
+/// non-colour bodies are pairwise distinct.
+#[must_use]
+// 67 arms carrying 39 written sentences: the bodies are the deliverable and
+// they are read as prose, so splitting the table across helper functions would
+// scatter the thing a reviewer is asked to read in one pass (`IN1b` §5.6, N0/Q4).
+#[allow(clippy::too_many_lines)]
+pub fn explain_body(code: IncidentCode) -> &'static str {
     match code {
-        IncidentCode::SourceColor(incident) => POLICY[incident.table_index()],
+        // Delegated, all thirteen to the one shipped sentence.
+        IncidentCode::SourceColor(incident) => incident.source_error().recovery_action(),
+        // Delegated, one sentence each.
+        IncidentCode::DeliveryColor(incident) => incident.recovery_action(),
+        IncidentCode::DeliveryVerification(incident) => incident.recovery_action(),
+        IncidentCode::ColorQc(incident) => incident.recovery_action(),
+        // Written (`IN1b` §5.6), one per code with no accessor behind it.
+        IncidentCode::Media(MediaIncident::UnsupportedDecoderFormat) => {
+            "This file's pixel format is not one the managed renderer can prove is a supported integer source surface, so it refuses to decode it rather than guess at its depth. The message names the format and the depths it found; transcode the file to an 8-, 10- or 16-bit integer format, or relink to a copy that is already in one."
+        }
+        IncidentCode::Media(MediaIncident::BackendUnclassified) => {
+            "The media engine refused this work and gave a reason but no code Kinewright can act on. The message is the engine's own; if it names a file, check the file is where the project expects it, then try again."
+        }
+        IncidentCode::Operation(IncidentFamily::Bounds) => {
+            "This value is outside the range the edit allows. The message names the value you gave and, where it can, the range it must be in; set it inside that range and make the edit again."
+        }
+        IncidentCode::Operation(IncidentFamily::Malformed) => {
+            "One of the fields this edit carries is missing, empty, or the wrong kind of value. The message names the field; supply a value of the kind it asks for and make the edit again."
+        }
+        IncidentCode::Operation(IncidentFamily::Duplicate) => {
+            "Something with this identity is already in the project, so adding it again would leave two things sharing one id. Use a fresh id, or drop the second entry, and make the edit again."
+        }
+        IncidentCode::Operation(IncidentFamily::Placement) => {
+            "This edit is valid, but not on the thing it was aimed at — a picture effect on an audio bus, a title on an audio track. Choose a target of the right kind and make the edit again."
+        }
+        IncidentCode::Operation(IncidentFamily::Missing) => {
+            "The clip, track, asset, marker or effect this edit names is not in the project any more, so the id it used is stale. Re-read the timeline and make the edit against what is there now."
+        }
+        IncidentCode::Operation(IncidentFamily::Structure) => {
+            "The edit is well formed, but something else has to change first — an overlap, an ordering, a live reference, or two fields that disagree. The message names what blocks it; change that, then make the edit again."
+        }
+        IncidentCode::Operation(IncidentFamily::Relink) => {
+            "The replacement media could not be matched to the clip it is meant to replace: its fingerprint is missing, or it does not agree with the original. Relink from the media panel, or relink again with the explicit unverified-source option if you know it is the right file."
+        }
+        IncidentCode::Operation(IncidentFamily::Unrepresentable) => {
+            "There is no value that would work: the edit cannot be expressed on this project's whole-frame grid. Choose a different frame or a different duration, rather than a different number."
+        }
+        IncidentCode::Operation(IncidentFamily::UnknownName) => {
+            "Kinewright does not know an effect, transition, parameter or capability by that name. Look the accepted spelling up in the capability registry and make the edit with that name."
+        }
+        IncidentCode::Operation(IncidentFamily::Internal) => {
+            "Nothing you did caused this and nothing you can change will fix it: the part of Kinewright that applies edits has stopped, an id space has run out, or an internal time conversion overflowed. Your project is intact and still on disk. Save it if you can, restart Kinewright, and report what you were doing."
+        }
+        IncidentCode::Operation(IncidentFamily::ColorPolicy) => {
+            "This colour override is not one Kinewright will write — it names a provenance the guard refuses, or supplies a field only the application may set. Change a source's colour through the incident card or the Media panel's own control rather than writing the description directly."
+        }
+        IncidentCode::LutAssetPolicy => {
+            "This LUT's hash or metadata is not the one the project recorded for it, so the file on disk is not the file the project expects. Import or restore the LUT through the look browser, which writes the store entry and the document together."
+        }
+        IncidentCode::EditRevisionConflict => {
+            "The timeline moved between the moment this edit was planned and the moment it was sent, so it was refused rather than applied to a document it was not planned against. Nothing changed; make the edit again against what the timeline shows now."
+        }
+        IncidentCode::Rejection(RejectionIncident::EditPlan) => {
+            "The edit plan was refused as a whole, so nothing in it was applied — either it contained no operations at all, or one of them failed. Where an operation failed the message names which one and why; fix that one, or add an operation to an empty plan, and send it again."
+        }
+        IncidentCode::Rejection(RejectionIncident::DeliveryVariant) => {
+            "The delivery variant could not be built from this project — the focal point is outside the frame, or the derived document is not valid. Adjust the focus percentages or the source timeline, then export again."
+        }
+        IncidentCode::Rejection(RejectionIncident::AgentBranch) => {
+            "The isolated agent branch refused this request. Either the base document or the operation number named is not one it can use — read the branch's operation list and name one of the numbers it shows — or the branch's own core has stopped, in which case start a new agent thread, which builds a fresh one."
+        }
+        IncidentCode::Rejection(RejectionIncident::SourceEdit) => {
+            "Nothing was applied: something the Source edit depended on changed while the source was being verified. The message says which — if the source asset itself is gone, relink it from the media panel; otherwise reload the source, re-mark In and Out on what is loaded now, and make the edit again."
+        }
+        IncidentCode::Rejection(RejectionIncident::Relink) => {
+            "This file cannot stand in for the asset — either it produced no verified fingerprint, or its fingerprint does not match the original. Choose a different file, or relink with the explicit unverified-source option if you know it is the right media."
+        }
+        IncidentCode::Rejection(RejectionIncident::ProjectSave) => {
+            "The project file could not be written, so this project is still only in memory. The message says whether it failed while serialising or while writing; free some space or choose another location, then save again."
+        }
+        IncidentCode::Rejection(RejectionIncident::CaptionPlan) => {
+            "The caption track could not be planned from these cues: there are no cues, the authored script does not line up with them, or a cue has no duration. Adjust the transcript selection or the script, then generate the captions again."
+        }
+        IncidentCode::Label(LabelIncident::Operations) => {
+            "This edit was not applied, and Kinewright has no code for the reason yet — the message is the only description it has. Read the message, change what it names, and make the edit again."
+        }
+        IncidentCode::Label(LabelIncident::Look) => {
+            "The look or LUT could not be imported, restored or applied. The message names the file or the store; check that the project has been saved and that its LUT folder is a writable directory, then try again."
+        }
+        IncidentCode::Label(LabelIncident::LookIncomplete) => {
+            "The project was saved or opened, but not every look came with it, or the LUT folder beside it cannot be used. The message names which looks or which folder; re-import or restore them from the look browser, or save the project somewhere its LUT folder can be written, and they will be available again. The rest of the project is unaffected."
+        }
+        IncidentCode::Label(LabelIncident::Export) => {
+            "The export did not start, or did not finish. The message names the step that stopped it; fix what it names in the export dialog and export again."
+        }
+        IncidentCode::Label(LabelIncident::SourceMonitor) => {
+            "No edit was applied: the Source monitor could not act on what is loaded. The message says which part of the source or its marks is no longer usable; reload the source, re-mark it, and make the edit again."
+        }
+        IncidentCode::Label(LabelIncident::Relink) => {
+            "The relink could not go ahead. The message names the file or the project; choose a replacement the application can read and press Relink again."
+        }
+        IncidentCode::Label(LabelIncident::AgentBranch) => {
+            "The isolated branch this agent thread edits in could not be created or used. The message is the only description; start a new agent thread, which builds a fresh branch."
+        }
+        IncidentCode::Label(LabelIncident::TranscriptEdit) => {
+            "The transcript edit produced no change: either the words selected contain no removable frames, or the plan behind them was refused. Select a different range of words and try again."
+        }
+        IncidentCode::Label(LabelIncident::Media) => {
+            "Playback, import or capture stopped, or there was nothing to play. The message is the only description Kinewright has — it may name a file that has moved, or a thing the timeline still needs, such as a clip before you can press play. Do what it names, then try again."
+        }
+        IncidentCode::Label(LabelIncident::MediaIncomplete) => {
+            "The project opened, but some of its media is not where the project expects it, or its timeline pictures could not be built. The message names which; relink the missing files from the media panel — the rest of the project is unaffected."
+        }
+        IncidentCode::Label(LabelIncident::Agent) => {
+            "The agent harness could not be reached, started, or spoken to. The message names the harness; check that it is installed and on your PATH, then send the message again."
+        }
+        IncidentCode::Label(LabelIncident::Recording) => {
+            "The recording did not start, or stopped before it finished. The message names the device or the log file; choose a camera and a microphone that are connected, then start the capture again."
+        }
+        IncidentCode::Label(LabelIncident::Project) => {
+            "The project could not be opened, created, read, or restored from the crash-recovery journal. The message names the file; check that it exists and can be read, then open it again — if it was unsaved work that could not be restored, the last saved version of the project is still intact."
+        }
+        IncidentCode::Label(LabelIncident::Captions) => {
+            "The captions could not be generated or saved. The message names the step; adjust the transcript selection or the output path and try again."
+        }
+        IncidentCode::Label(LabelIncident::Mixer) => {
+            "The mixer could not do what was asked — usually because the audio it needs to learn from, or the node it was learned for, is not on the bus any more. Re-select the range or the node and try again."
+        }
+        IncidentCode::Label(LabelIncident::MediaCache) => {
+            "The media cache could not be cleared. The message names the cache and the reason; close anything using those files, then clear it again."
+        }
+        IncidentCode::Label(LabelIncident::Timeline) => {
+            "The timeline gesture did not complete. The message is the only description Kinewright has; re-select what the gesture needed and make it again."
+        }
     }
 }
 
-/// The class a code resolves to for one probed description.
+/// The [`POLICY`] row for one code. Total by construction; see
+/// [`IncidentCode::table_index`].
+const fn policy_entry(code: IncidentCode) -> PolicyEntry {
+    POLICY[code.table_index()]
+}
+
+/// The class a code resolves to for one piece of evidence.
+///
+/// The parameter is the whole evidence rather than a probed description
+/// (`IN1b` §3.5 rule 26), and the reason is measurable: an `operation_bounds`
+/// incident on a clip carries no probed colour description, so under Part A's
+/// signature it could not be classified at all.
 ///
 /// [`PolicyPredicate::Always`] returns the declared class;
 /// [`PolicyPredicate::Rec709Compatible`] returns the declared class when
-/// [`rec709_compatible`] is true and [`PolicyClass::Explain`] otherwise
-/// (IN1 §2.4 rule 36).
+/// [`rec709_compatible`] is true of a probed description the evidence actually
+/// carries, and [`PolicyClass::Explain`] otherwise — so a predicated row
+/// reached with no probed description falls to `Explain`, which is the safe
+/// direction and the only honest one (IN1 §2.4 rule 36).
 #[must_use]
-pub fn policy_class(code: IncidentCode, probed: &ColorDescription) -> PolicyClass {
+pub fn policy_class(code: IncidentCode, evidence: &IncidentEvidence) -> PolicyClass {
     let entry = policy_entry(code);
     match entry.predicate {
         PolicyPredicate::Always => entry.class,
         PolicyPredicate::Rec709Compatible => {
-            if rec709_compatible(probed) {
+            if evidence.probed().is_some_and(rec709_compatible) {
                 entry.class
             } else {
                 PolicyClass::Explain
@@ -709,25 +2252,28 @@ pub fn policy_recovery(
     subject: IncidentSubject,
     evidence: &IncidentEvidence,
 ) -> Vec<RecoveryAction> {
-    let probed = evidence.probed();
-    match policy_class(code, probed) {
+    match policy_class(code, evidence) {
         PolicyClass::AutoApply | PolicyClass::AskFirst => {
-            let IncidentSubject::Asset(asset) = subject;
-            vec![RecoveryAction {
-                label: ASSUME_REC709_LABEL,
-                kind: RecoveryKind::Operation(assume_rec709_operation(asset, probed)),
-            }]
+            // The only applying recovery IN1 ships needs an asset and a probed
+            // description; a row that resolves to `AutoApply` without both is a
+            // contradiction the exhaustiveness test catches, not a panic here.
+            // An empty `Vec` is therefore a legal return (`IN1b` §3.7 rule 33).
+            match (subject, evidence.probed()) {
+                (IncidentSubject::Asset(asset), Some(probed)) => vec![RecoveryAction {
+                    label: ASSUME_REC709_LABEL,
+                    kind: RecoveryKind::Operation(assume_rec709_operation(asset, probed)),
+                }],
+                _ => Vec::new(),
+            }
         }
-        // The sentence is `ColorSourceError::recovery_action()`'s and is never
-        // restated here (IN1 §2.5 rule 46). It is reached through *this* code's
-        // own canonical failure rather than through a fixed variant, so when
-        // §13 D8 gives `recovery_action` per-code bodies in IN3 each row keeps
-        // answering for itself instead of silently inheriting the primaries
-        // sentence. Rule 47's observation that the accessor is a `const fn`
-        // with no `match` today is what makes the two spellings agree now.
+        // The sentence is core's and is never composed by a caller
+        // (IN1 §2.5 rule 46). `explain_body` supersedes Part A's direct call to
+        // `code.source_error().recovery_action()`, delegating to that same
+        // accessor for the thirteen colour rows so they keep the shipped
+        // sentence verbatim (`IN1b` §3.7 rule 34).
         PolicyClass::Explain => vec![RecoveryAction {
             label: EXPLAIN_LABEL,
-            kind: RecoveryKind::Explain(code.source_error().recovery_action()),
+            kind: RecoveryKind::Explain(explain_body(code)),
         }],
     }
 }
@@ -896,7 +2442,7 @@ impl IncidentLog {
 
         let id = IncidentId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
-        let class = policy_class(observation.code, observation.evidence.probed());
+        let class = policy_class(observation.code, &observation.evidence);
         let recoveries =
             policy_recovery(observation.code, observation.subject, &observation.evidence);
         self.entries.push(Incident {
@@ -1047,8 +2593,8 @@ impl IncidentLog {
 mod tests {
     use super::*;
     use crate::{
-        ColorSourceProfile, Document, MediaAsset, MediaKind, MediaSourceFingerprint, Rational,
-        SourceColorRefusal, TimeCode, classify_source_with_assumption,
+        BinId, ColorSourceProfile, Document, MediaAsset, MediaKind, MediaSourceFingerprint,
+        Rational, SourceColorRefusal, TimeCode, classify_source_with_assumption,
     };
 
     /// `in1_untagged.mp4`'s pinned probed tuple (IN1 §3 rule 5 row 1).
@@ -1083,10 +2629,8 @@ mod tests {
     }
 
     fn observation_for(error: &ColorSourceError, probed: &ColorDescription) -> IncidentObservation {
-        let incident =
-            SourceColorIncident::from_source_error(error).expect("the fixture code is an incident");
         IncidentObservation {
-            code: IncidentCode::SourceColor(incident),
+            code: IncidentCode::SourceColor(SourceColorIncident::from_source_error(error)),
             subject: IncidentSubject::Asset(AssetId(1)),
             observed: error.observed(),
             allowed: Some(error.allowed_values().to_owned()),
@@ -1144,8 +2688,9 @@ mod tests {
         ]
     }
 
-    /// One arm per variant with no wildcard: a thirteenth code cannot compile
-    /// until `POLICY` grows a row for it (IN1 §2.4 rule 35).
+    /// One arm per code with no wildcard in either position: a sixty-eighth
+    /// code cannot compile until `POLICY` grows a row for it (IN1 §2.4 rule 35,
+    /// erratum `IN1b`-R15).
     const fn ordinal(code: IncidentCode) -> usize {
         match code {
             IncidentCode::SourceColor(incident) => match incident {
@@ -1161,31 +2706,142 @@ mod tests {
                 SourceColorIncident::UnsupportedWhitePoint => 9,
                 SourceColorIncident::UnsupportedBitDepth => 10,
                 SourceColorIncident::UnsupportedCombination => 11,
+                SourceColorIncident::UnknownWhitePoint => 12,
+            },
+            IncidentCode::Media(incident) => match incident {
+                MediaIncident::UnsupportedDecoderFormat => 13,
+                MediaIncident::BackendUnclassified => 14,
+            },
+            IncidentCode::DeliveryColor(incident) => match incident {
+                DeliveryColorIncident::UnsupportedCodec => 15,
+                DeliveryColorIncident::UnsupportedField => 16,
+                DeliveryColorIncident::PixelFormatDepthMismatch => 17,
+                DeliveryColorIncident::EncoderPixelFormatUnavailable => 18,
+            },
+            IncidentCode::DeliveryVerification(incident) => match incident {
+                DeliveryVerificationIncident::NotFullResolution => 19,
+                DeliveryVerificationIncident::PlaneOutOfContainer => 20,
+                DeliveryVerificationIncident::FrameCountMismatch => 21,
+                DeliveryVerificationIncident::FrameCountOutOfRange => 22,
+                DeliveryVerificationIncident::BudgetLaneMismatch => 23,
+            },
+            IncidentCode::ColorQc(incident) => match incident {
+                ColorQcIncident::ProxyProofRefused => 24,
+                ColorQcIncident::RasterLengthMismatch => 25,
+                ColorQcIncident::EmptyPopulation => 26,
+                ColorQcIncident::NodeBudgetExceeded => 27,
+                ColorQcIncident::MatteRegionRasterMismatch => 28,
+                ColorQcIncident::NodeRemovalRejected => 29,
+            },
+            IncidentCode::Operation(family) => match family {
+                IncidentFamily::Bounds => 30,
+                IncidentFamily::Malformed => 31,
+                IncidentFamily::Duplicate => 32,
+                IncidentFamily::Placement => 33,
+                IncidentFamily::Missing => 34,
+                IncidentFamily::Structure => 35,
+                IncidentFamily::Relink => 36,
+                IncidentFamily::Unrepresentable => 37,
+                IncidentFamily::UnknownName => 38,
+                IncidentFamily::Internal => 39,
+                IncidentFamily::ColorPolicy => 40,
+            },
+            IncidentCode::LutAssetPolicy => 41,
+            IncidentCode::EditRevisionConflict => 42,
+            IncidentCode::Rejection(incident) => match incident {
+                RejectionIncident::EditPlan => 43,
+                RejectionIncident::DeliveryVariant => 44,
+                RejectionIncident::AgentBranch => 45,
+                RejectionIncident::SourceEdit => 46,
+                RejectionIncident::Relink => 47,
+                RejectionIncident::ProjectSave => 48,
+                RejectionIncident::CaptionPlan => 49,
+            },
+            IncidentCode::Label(incident) => match incident {
+                LabelIncident::Operations => 50,
+                LabelIncident::Look => 51,
+                LabelIncident::LookIncomplete => 52,
+                LabelIncident::Export => 53,
+                LabelIncident::SourceMonitor => 54,
+                LabelIncident::Relink => 55,
+                LabelIncident::AgentBranch => 56,
+                LabelIncident::TranscriptEdit => 57,
+                LabelIncident::Media => 58,
+                LabelIncident::MediaIncomplete => 59,
+                LabelIncident::Agent => 60,
+                LabelIncident::Recording => 61,
+                LabelIncident::Project => 62,
+                LabelIncident::Captions => 63,
+                LabelIncident::Mixer => 64,
+                LabelIncident::MediaCache => 65,
+                LabelIncident::Timeline => 66,
             },
         }
     }
 
+    /// `IN1b` §9 clause 2: 67 rows, an explicit no-wildcard `ordinal()`, every
+    /// **colour** row `Blocks`, and every row's severity equal to `IN1b` §3.6
+    /// rule 31's table. Replaces Part A's
+    /// `in1_policy_covers_every_incident_code_exactly_once_and_every_row_blocks`,
+    /// whose "every row `Blocks`" is erratum `IN1b`-R1a.
     #[test]
-    fn in1_policy_covers_every_incident_code_exactly_once_and_every_row_blocks() {
-        assert_eq!(POLICY.len(), 12);
-        let mut seen = [0_usize; 12];
+    fn in1b_policy_covers_every_incident_code_exactly_once_with_its_declared_severity() {
+        assert_eq!(POLICY.len(), 67);
+        let mut seen = [0_usize; 67];
+        let mut blocks = 0_usize;
+        let mut degrades = 0_usize;
+        let mut informs = 0_usize;
+        let mut auto_apply = 0_usize;
+        let mut ask_first = 0_usize;
+        let mut explain = 0_usize;
         for entry in POLICY {
             seen[ordinal(entry.code)] += 1;
+            // The expectation is written from `IN1b` §3.6 rule 31's grouping
+            // rather than read back from the row, so a row that declares the
+            // wrong value fails here instead of agreeing with itself.
+            let expected = match entry.code {
+                IncidentCode::DeliveryVerification(_)
+                | IncidentCode::ColorQc(_)
+                | IncidentCode::Label(
+                    LabelIncident::LookIncomplete | LabelIncident::MediaIncomplete,
+                ) => IncidentSeverity::Degrades,
+                _ => IncidentSeverity::Blocks,
+            };
             assert_eq!(
                 entry.severity,
-                IncidentSeverity::Blocks,
-                "{} declares a severity other than Blocks",
+                expected,
+                "{} declares the wrong severity",
                 entry.code.code()
             );
+            if let IncidentCode::SourceColor(_) = entry.code {
+                assert_eq!(
+                    entry.severity,
+                    IncidentSeverity::Blocks,
+                    "every colour row blocks (IN1 §2.3b rule 26)"
+                );
+            }
+            match entry.severity {
+                IncidentSeverity::Blocks => blocks += 1,
+                IncidentSeverity::Degrades => degrades += 1,
+                IncidentSeverity::Informs => informs += 1,
+            }
+            match entry.class {
+                PolicyClass::AutoApply => auto_apply += 1,
+                PolicyClass::AskFirst => ask_first += 1,
+                PolicyClass::Explain => explain += 1,
+            }
         }
         assert!(
             seen.iter().all(|count| *count == 1),
             "every code must have exactly one POLICY row, got {seen:?}"
         );
+        assert_eq!((blocks, degrades, informs), (54, 13, 0));
+        assert_eq!((auto_apply, ask_first, explain), (3, 0, 64));
     }
 
     #[test]
     fn in1_policy_rows_are_declared_in_table_order() {
+        assert_eq!(POLICY.len(), 67, "erratum `IN1b`-R15");
         for (index, entry) in POLICY.iter().enumerate() {
             assert_eq!(
                 ordinal(entry.code),
@@ -1196,26 +2852,23 @@ mod tests {
         }
     }
 
+    /// Thirteen for thirteen, with **no** `None` case (erratum `IN1b`-R4).
     #[test]
     fn in1_source_colour_incidents_mirror_the_classifier_one_to_one() {
         let mut mapped = BTreeSet::new();
         for error in every_source_error() {
-            match SourceColorIncident::from_source_error(&error) {
-                Some(incident) => {
-                    assert_eq!(incident.code(), error.code());
-                    assert_eq!(incident.field(), error.field());
-                    assert_eq!(IncidentCode::SourceColor(incident).code(), error.code());
-                    assert_eq!(IncidentCode::SourceColor(incident).field(), error.field());
-                    assert!(
-                        mapped.insert(incident),
-                        "{} maps to an incident another variant already claimed",
-                        error.code()
-                    );
-                }
-                None => assert_eq!(error, ColorSourceError::UnknownWhitePoint),
-            }
+            let incident = SourceColorIncident::from_source_error(&error);
+            assert_eq!(incident.code(), error.code());
+            assert_eq!(incident.field(), error.field());
+            assert_eq!(IncidentCode::SourceColor(incident).code(), error.code());
+            assert_eq!(IncidentCode::SourceColor(incident).field(), error.field());
+            assert!(
+                mapped.insert(incident),
+                "{} maps to an incident another variant already claimed",
+                error.code()
+            );
         }
-        assert_eq!(mapped.len(), 12);
+        assert_eq!(mapped.len(), 13);
     }
 
     #[test]
@@ -1239,11 +2892,20 @@ mod tests {
         bt2020.primaries = ColorPrimaries::Bt2020;
         for (probed, rec709_compatible) in [(untagged_mp4_probe(), true), (bt2020, false)] {
             for entry in POLICY {
+                // Quantified over the colour rows, because they are the rows
+                // whose observation this fixture can build: the other 54 codes
+                // carry no `ColorSourceError` (`IN1b` §3.2 rule 10). Their
+                // `field`/`severity` agreement is asserted by
+                // `in1b_every_code_delegates_its_string_to_the_accessor_that_owns_it`
+                // and `in1b_policy_covers_every_incident_code_exactly_once_with_its_declared_severity`.
+                let IncidentCode::SourceColor(colour) = entry.code else {
+                    continue;
+                };
                 let mut log = IncidentLog::with_start(Instant::now());
                 // Built from the row's own canonical failure, so `observed` and
                 // `allowed` belong to the code under test rather than to a
                 // borrowed `UnknownPrimaries` fixture.
-                let observation = observation_for(&entry.code.source_error(), &probed);
+                let observation = observation_for(&colour.source_error(), &probed);
                 assert_eq!(observation.code, entry.code);
                 let Observed::Opened(id) = log.observe(observation) else {
                     panic!("a fresh log must open {}", entry.code.code());
@@ -1295,7 +2957,7 @@ mod tests {
                 probed: probed.clone(),
                 assumption: None,
             };
-            assert_eq!(policy_class(entry.code, &probed), PolicyClass::AutoApply);
+            assert_eq!(policy_class(entry.code, &evidence), PolicyClass::AutoApply);
             let recoveries = policy_recovery(entry.code, subject, &evidence);
             assert_eq!(recoveries.len(), 1);
             assert_eq!(recoveries[0].label, "Assume Rec.709 for this source");
@@ -1322,7 +2984,10 @@ mod tests {
                 probed: bt2020.clone(),
                 assumption: None,
             };
-            assert_eq!(policy_class(entry.code, &bt2020), PolicyClass::Explain);
+            assert_eq!(
+                policy_class(entry.code, &bt2020_evidence),
+                PolicyClass::Explain
+            );
             let explained = policy_recovery(entry.code, subject, &bt2020_evidence);
             assert_eq!(explained.len(), 1);
             assert_eq!(explained[0].label, "How to fix this");
@@ -1582,8 +3247,16 @@ mod tests {
         assert_eq!(log.len(), 2);
     }
 
+    /// Rewritten from Part A's
+    /// `in1_from_media_error_maps_only_the_asset_scoped_source_colour_refusal`:
+    /// after `IN1b` §3.9 every [`MediaError`] variant carries a code, so the
+    /// constructor is total and there is no `None` to assert (erratum
+    /// `IN1b`-R9).
     #[test]
-    fn in1_from_media_error_maps_only_the_asset_scoped_source_colour_refusal() {
+    // The list is the point: one arm per `MediaError` variant, written out so a
+    // reader can see that the constructor is total over all thirteen.
+    #[allow(clippy::too_many_lines)]
+    fn in1b_from_media_error_is_total_and_keeps_the_asset_scoped_subject() {
         let probed = untagged_mp4_probe();
         let error = MediaError::SourceColorForAsset(Box::new(SourceColorRefusal {
             asset: AssetId(1),
@@ -1592,16 +3265,16 @@ mod tests {
             description: probed.clone(),
             assumption: None,
         }));
-        let observation =
-            IncidentObservation::from_media_error(&error, TimelineRevision(1)).unwrap();
-        assert_eq!(
-            observation,
-            unknown_primaries_observation(&probed),
-            "every string field comes from a core accessor, never from the app"
+        // The asset-scoped refusal overrides the caller's fallback subject, and
+        // every string field still comes from a core accessor.
+        let observation = IncidentObservation::from_media_error(
+            &error,
+            IncidentSubject::Project,
+            TimelineRevision(1),
         );
+        assert_eq!(observation, unknown_primaries_observation(&probed));
 
-        // The white-point refusal is not an incident in this slice, even with a
-        // subject: `color_description_from_decoder` never sets a white point.
+        // The white-point refusal is the thirteenth code now, not a `None`.
         let white_point = MediaError::SourceColorForAsset(Box::new(SourceColorRefusal {
             asset: AssetId(1),
             path: "in1_tagged.mp4".into(),
@@ -1609,27 +3282,133 @@ mod tests {
             description: probed.clone(),
             assumption: None,
         }));
-        assert!(IncidentObservation::from_media_error(&white_point, TimelineRevision(1)).is_none());
+        assert_eq!(
+            IncidentObservation::from_media_error(
+                &white_point,
+                IncidentSubject::Project,
+                TimelineRevision(1),
+            )
+            .code,
+            IncidentCode::SourceColor(SourceColorIncident::UnknownWhitePoint)
+        );
 
-        for other in [
-            MediaError::SourceColor(ColorSourceError::UnknownPrimaries),
-            MediaError::NotImplemented,
-            MediaError::Cancelled,
-            MediaError::Backend("alsa: snd_pcm_pause failed".to_owned()),
-            MediaError::MixSpectrumRangeTooShort {
-                sample_frames: 1,
-                required: 2,
-            },
-            MediaError::MixLoudnessRangeTooShort {
-                sample_frames: 1,
-                required: 2,
-            },
+        // Every other variant takes the caller's subject and its own code; the
+        // five code-less ones share `media_backend_unclassified`, and the two
+        // matte enums take it too while keeping their own code on the evidence
+        // (`IN1b` §3.9 rule 37, as deviated from in erratum `IN1b`-A-R2).
+        for (other, expected) in [
+            (
+                MediaError::SourceColor(ColorSourceError::UnknownPrimaries),
+                IncidentCode::SourceColor(SourceColorIncident::UnknownPrimaries),
+            ),
+            (
+                MediaError::UnsupportedDecoderFormat {
+                    path: "a.mov".into(),
+                    format: "yuv422p10le".to_owned(),
+                    declared_bit_depth: Some(10),
+                    decoder_bit_depth: Some(10),
+                    reason: "not a supported integer source surface".to_owned(),
+                },
+                IncidentCode::Media(MediaIncident::UnsupportedDecoderFormat),
+            ),
+            (
+                MediaError::DeliveryColor(DeliveryColorError::UnsupportedCodec {
+                    observed: "prores".to_owned(),
+                    allowed: "libx264",
+                }),
+                IncidentCode::DeliveryColor(DeliveryColorIncident::UnsupportedCodec),
+            ),
+            (
+                MediaError::DeliveryVerification(DeliveryVerificationError::NotFullResolution {
+                    observed: "proxy".to_owned(),
+                    allowed: "full",
+                }),
+                IncidentCode::DeliveryVerification(DeliveryVerificationIncident::NotFullResolution),
+            ),
+            (
+                MediaError::ColorQc(ColorQcError::EmptyPopulation {
+                    observed: "0 px".to_owned(),
+                    allowed: "at least one pixel",
+                }),
+                IncidentCode::ColorQc(ColorQcIncident::EmptyPopulation),
+            ),
+            (
+                MediaError::MatteProof(crate::MatteProofError::NoMatte),
+                IncidentCode::Media(MediaIncident::BackendUnclassified),
+            ),
+            (
+                MediaError::MatteCoverage(crate::MatteCoverageError::ArithmeticOverflow {
+                    operation: "sum",
+                }),
+                IncidentCode::Media(MediaIncident::BackendUnclassified),
+            ),
+            (
+                MediaError::NotImplemented,
+                IncidentCode::Media(MediaIncident::BackendUnclassified),
+            ),
+            (
+                MediaError::Cancelled,
+                IncidentCode::Media(MediaIncident::BackendUnclassified),
+            ),
+            (
+                MediaError::Backend("alsa: snd_pcm_pause failed".to_owned()),
+                IncidentCode::Media(MediaIncident::BackendUnclassified),
+            ),
+            (
+                MediaError::MixSpectrumRangeTooShort {
+                    sample_frames: 1,
+                    required: 2,
+                },
+                IncidentCode::Media(MediaIncident::BackendUnclassified),
+            ),
+            (
+                MediaError::MixLoudnessRangeTooShort {
+                    sample_frames: 1,
+                    required: 2,
+                },
+                IncidentCode::Media(MediaIncident::BackendUnclassified),
+            ),
         ] {
-            assert!(
-                IncidentObservation::from_media_error(&other, TimelineRevision(1)).is_none(),
-                "{other} must stay an untyped error line in Part A"
+            let observation = IncidentObservation::from_media_error(
+                &other,
+                IncidentSubject::ExportJob,
+                TimelineRevision(3),
             );
+            assert_eq!(observation.code, expected, "{other}");
+            assert_eq!(observation.revision, TimelineRevision(3));
+            if !matches!(other, MediaError::SourceColor(_)) {
+                assert_eq!(observation.subject, IncidentSubject::ExportJob, "{other}");
+            }
+            // One incident, one code: the evidence's `code` is always the
+            // incident's own (review-2 S2), and for every variant that declares
+            // a code it is the engine's `recovery_code()` as well.
+            let IncidentEvidence::MediaError { code, .. } = &observation.evidence else {
+                panic!("a media failure carries media evidence: {other}");
+            };
+            assert_eq!(*code, expected.code(), "{other}");
+            let matte = matches!(
+                other,
+                MediaError::MatteProof(_) | MediaError::MatteCoverage(_)
+            );
+            if matte {
+                // The matte pair mints no code, so the engine's token differs
+                // from the incident's — and survives in `observed`.
+                assert_ne!(*code, other.recovery_code().expect("a matte code"));
+                assert!(
+                    observation
+                        .observed
+                        .starts_with(other.recovery_code().expect("a matte code")),
+                    "the matte code must survive in `observed`: {}",
+                    observation.observed
+                );
+            } else if let Some(engine) = other.recovery_code() {
+                assert_eq!(*code, engine, "{other}");
+            }
         }
+        assert_eq!(
+            MediaError::MatteProof(crate::MatteProofError::NoMatte).recovery_code(),
+            Some("matte_proof_no_matte")
+        );
     }
 
     #[test]
@@ -1825,6 +3604,780 @@ mod tests {
             "a predicate that is never true proves nothing"
         );
     }
+
+    /// Every declared code, in `POLICY`'s own order. Written out rather than
+    /// read from `POLICY`, so a test that quantifies over the code set cannot
+    /// be satisfied by a table that lost a row.
+    const EVERY_INCIDENT_CODE: [IncidentCode; 67] = [
+        IncidentCode::SourceColor(SourceColorIncident::UnknownPrimaries),
+        IncidentCode::SourceColor(SourceColorIncident::UnknownTransfer),
+        IncidentCode::SourceColor(SourceColorIncident::UnknownMatrix),
+        IncidentCode::SourceColor(SourceColorIncident::UnknownRange),
+        IncidentCode::SourceColor(SourceColorIncident::UnknownBitDepth),
+        IncidentCode::SourceColor(SourceColorIncident::UnsupportedPrimaries),
+        IncidentCode::SourceColor(SourceColorIncident::UnsupportedTransfer),
+        IncidentCode::SourceColor(SourceColorIncident::UnsupportedMatrix),
+        IncidentCode::SourceColor(SourceColorIncident::UnsupportedRange),
+        IncidentCode::SourceColor(SourceColorIncident::UnsupportedWhitePoint),
+        IncidentCode::SourceColor(SourceColorIncident::UnsupportedBitDepth),
+        IncidentCode::SourceColor(SourceColorIncident::UnsupportedCombination),
+        IncidentCode::SourceColor(SourceColorIncident::UnknownWhitePoint),
+        IncidentCode::Media(MediaIncident::UnsupportedDecoderFormat),
+        IncidentCode::Media(MediaIncident::BackendUnclassified),
+        IncidentCode::DeliveryColor(DeliveryColorIncident::UnsupportedCodec),
+        IncidentCode::DeliveryColor(DeliveryColorIncident::UnsupportedField),
+        IncidentCode::DeliveryColor(DeliveryColorIncident::PixelFormatDepthMismatch),
+        IncidentCode::DeliveryColor(DeliveryColorIncident::EncoderPixelFormatUnavailable),
+        IncidentCode::DeliveryVerification(DeliveryVerificationIncident::NotFullResolution),
+        IncidentCode::DeliveryVerification(DeliveryVerificationIncident::PlaneOutOfContainer),
+        IncidentCode::DeliveryVerification(DeliveryVerificationIncident::FrameCountMismatch),
+        IncidentCode::DeliveryVerification(DeliveryVerificationIncident::FrameCountOutOfRange),
+        IncidentCode::DeliveryVerification(DeliveryVerificationIncident::BudgetLaneMismatch),
+        IncidentCode::ColorQc(ColorQcIncident::ProxyProofRefused),
+        IncidentCode::ColorQc(ColorQcIncident::RasterLengthMismatch),
+        IncidentCode::ColorQc(ColorQcIncident::EmptyPopulation),
+        IncidentCode::ColorQc(ColorQcIncident::NodeBudgetExceeded),
+        IncidentCode::ColorQc(ColorQcIncident::MatteRegionRasterMismatch),
+        IncidentCode::ColorQc(ColorQcIncident::NodeRemovalRejected),
+        IncidentCode::Operation(IncidentFamily::Bounds),
+        IncidentCode::Operation(IncidentFamily::Malformed),
+        IncidentCode::Operation(IncidentFamily::Duplicate),
+        IncidentCode::Operation(IncidentFamily::Placement),
+        IncidentCode::Operation(IncidentFamily::Missing),
+        IncidentCode::Operation(IncidentFamily::Structure),
+        IncidentCode::Operation(IncidentFamily::Relink),
+        IncidentCode::Operation(IncidentFamily::Unrepresentable),
+        IncidentCode::Operation(IncidentFamily::UnknownName),
+        IncidentCode::Operation(IncidentFamily::Internal),
+        IncidentCode::Operation(IncidentFamily::ColorPolicy),
+        IncidentCode::LutAssetPolicy,
+        IncidentCode::EditRevisionConflict,
+        IncidentCode::Rejection(RejectionIncident::EditPlan),
+        IncidentCode::Rejection(RejectionIncident::DeliveryVariant),
+        IncidentCode::Rejection(RejectionIncident::AgentBranch),
+        IncidentCode::Rejection(RejectionIncident::SourceEdit),
+        IncidentCode::Rejection(RejectionIncident::Relink),
+        IncidentCode::Rejection(RejectionIncident::ProjectSave),
+        IncidentCode::Rejection(RejectionIncident::CaptionPlan),
+        IncidentCode::Label(LabelIncident::Operations),
+        IncidentCode::Label(LabelIncident::Look),
+        IncidentCode::Label(LabelIncident::LookIncomplete),
+        IncidentCode::Label(LabelIncident::Export),
+        IncidentCode::Label(LabelIncident::SourceMonitor),
+        IncidentCode::Label(LabelIncident::Relink),
+        IncidentCode::Label(LabelIncident::AgentBranch),
+        IncidentCode::Label(LabelIncident::TranscriptEdit),
+        IncidentCode::Label(LabelIncident::Media),
+        IncidentCode::Label(LabelIncident::MediaIncomplete),
+        IncidentCode::Label(LabelIncident::Agent),
+        IncidentCode::Label(LabelIncident::Recording),
+        IncidentCode::Label(LabelIncident::Project),
+        IncidentCode::Label(LabelIncident::Captions),
+        IncidentCode::Label(LabelIncident::Mixer),
+        IncidentCode::Label(LabelIncident::MediaCache),
+        IncidentCode::Label(LabelIncident::Timeline),
+    ];
+
+    /// The seven subject variants of `IN1b` §3.3 rule 17, at their widest ids.
+    ///
+    /// `Chain` is taken in its `Bus` form, which is the wider of its two wire
+    /// shapes; `Chain(Master)` is covered by
+    /// `in1b_every_subject_variant_labels_and_serialises_in_its_declared_shape`.
+    fn every_subject_shape() -> [IncidentSubject; 7] {
+        [
+            IncidentSubject::Asset(AssetId(u64::MAX)),
+            IncidentSubject::Clip(ClipId(u64::MAX)),
+            IncidentSubject::Track(TrackId(u64::MAX)),
+            IncidentSubject::Chain(AudioChain::Bus(crate::AudioBusId(u64::MAX))),
+            IncidentSubject::ExportJob,
+            IncidentSubject::Project,
+            IncidentSubject::Agent,
+        ]
+    }
+
+    /// `IN1b` §7 item 6 and erratum `IN1b`-R14: accessor against accessor over
+    /// every delegating code, and `field` equal to `code.field()` over all 67.
+    #[test]
+    fn in1b_every_code_delegates_its_string_to_the_accessor_that_owns_it() {
+        let mut delegating = 0_usize;
+        for code in EVERY_INCIDENT_CODE {
+            assert!(!code.code().is_empty());
+            assert!(!code.field().is_empty());
+            match code {
+                IncidentCode::SourceColor(incident) => {
+                    let error = incident.source_error();
+                    assert_eq!(incident.code(), error.code());
+                    assert_eq!(incident.field(), error.field());
+                    delegating += 1;
+                }
+                IncidentCode::Media(MediaIncident::UnsupportedDecoderFormat) => {
+                    assert_eq!(
+                        code.code(),
+                        MediaError::UnsupportedDecoderFormat {
+                            path: std::path::PathBuf::new(),
+                            format: String::new(),
+                            declared_bit_depth: None,
+                            decoder_bit_depth: None,
+                            reason: String::new(),
+                        }
+                        .recovery_code()
+                        .expect("the decoder-format refusal carries a recovery code")
+                    );
+                    delegating += 1;
+                }
+                IncidentCode::DeliveryColor(incident) => {
+                    let error = incident.delivery_error();
+                    assert_eq!(incident.code(), error.code());
+                    // `field()` is minted rather than delegated, because
+                    // `DeliveryColorError::field()` borrows from `&self` for
+                    // `UnsupportedField` (erratum `IN1b`-A-R4). The three
+                    // static arms are asserted equal to the accessor here.
+                    if incident == DeliveryColorIncident::UnsupportedField {
+                        assert_eq!(incident.field(), "delivery_color");
+                    } else {
+                        assert_eq!(incident.field(), error.field());
+                    }
+                    delegating += 1;
+                }
+                IncidentCode::DeliveryVerification(incident) => {
+                    let error = incident.verification_error();
+                    assert_eq!(incident.code(), error.code());
+                    assert_eq!(incident.field(), error.field());
+                    delegating += 1;
+                }
+                IncidentCode::ColorQc(incident) => {
+                    let error = incident.qc_error();
+                    assert_eq!(incident.code(), error.code());
+                    assert_eq!(incident.field(), error.field());
+                    delegating += 1;
+                }
+                IncidentCode::Operation(family) => assert_eq!(code.code(), family.code()),
+                IncidentCode::Media(MediaIncident::BackendUnclassified)
+                | IncidentCode::LutAssetPolicy
+                | IncidentCode::EditRevisionConflict
+                | IncidentCode::Rejection(_)
+                | IncidentCode::Label(_) => {}
+            }
+        }
+        assert_eq!(delegating, 29, "`IN1b` §3.2 rule 12's 29 existing strings");
+
+        // Every code string is distinct, and every one opens an incident whose
+        // `field` is the code's own (IN1 §2.3b rule 25, erratum `IN1b`-R14).
+        let mut strings = BTreeSet::new();
+        for code in EVERY_INCIDENT_CODE {
+            assert!(
+                strings.insert(code.code()),
+                "{} is declared twice",
+                code.code()
+            );
+            let mut log = IncidentLog::with_start(Instant::now());
+            let Observed::Opened(id) = log.observe(IncidentObservation::plain(
+                code,
+                IncidentSubject::Project,
+                "observed",
+                TimelineRevision(1),
+            )) else {
+                panic!("a fresh log must open {}", code.code());
+            };
+            assert_eq!(log.get(id).unwrap().field, code.field());
+        }
+        assert_eq!(strings.len(), 67);
+    }
+
+    /// `IN1b` §9 clause 3: a predicated row reached with no probed description
+    /// falls to `Explain`.
+    #[test]
+    fn in1b_policy_class_falls_to_explain_without_a_probed_description() {
+        let predicated = IncidentCode::SourceColor(SourceColorIncident::UnknownPrimaries);
+        assert_eq!(
+            policy_class(predicated, &IncidentEvidence::Plain),
+            PolicyClass::Explain
+        );
+        // The same row with a compatible probe keeps its declared class, so the
+        // fall is the evidence's doing and not the row's.
+        assert_eq!(
+            policy_class(
+                predicated,
+                &IncidentEvidence::SourceColor {
+                    probed: untagged_mp4_probe(),
+                    assumption: None,
+                }
+            ),
+            PolicyClass::AutoApply
+        );
+        // A non-colour code classifies at all, which is the measurable reason
+        // the signature changed (`IN1b` §3.5 rule 26).
+        assert_eq!(
+            policy_class(
+                IncidentCode::Operation(IncidentFamily::Bounds),
+                &IncidentEvidence::OpError {
+                    family: IncidentFamily::Bounds,
+                    op_number: None,
+                    message: "out of range".to_owned(),
+                }
+            ),
+            PolicyClass::Explain
+        );
+    }
+
+    /// `IN1b` §3.7 rule 33: the empty-`Vec` case is legal and is what an
+    /// `AutoApply` row without an asset and a probe yields.
+    #[test]
+    fn in1b_policy_recovery_returns_nothing_for_a_subjectless_auto_apply() {
+        let code = IncidentCode::SourceColor(SourceColorIncident::UnknownPrimaries);
+        let evidence = IncidentEvidence::SourceColor {
+            probed: untagged_mp4_probe(),
+            assumption: None,
+        };
+        assert_eq!(policy_class(code, &evidence), PolicyClass::AutoApply);
+        assert!(policy_recovery(code, IncidentSubject::Project, &evidence).is_empty());
+        assert!(policy_recovery(code, IncidentSubject::ExportJob, &evidence).is_empty());
+        assert_eq!(
+            policy_recovery(code, IncidentSubject::Asset(AssetId(1)), &evidence).len(),
+            1
+        );
+    }
+
+    /// `IN1b` §9 clause 4: every one of the 67 codes reaches a body, the 54
+    /// non-colour bodies are pairwise distinct, the 13 colour bodies are each
+    /// `ColorSourceError::recovery_action()`'s one sentence, and the 15
+    /// non-colour delegating rows equal their own accessor's string.
+    #[test]
+    fn in1b_every_explain_body_covers_the_code_set_and_the_non_colour_bodies_are_distinct() {
+        const SHARED_COLOUR_BODY: &str =
+            "Apply an explicit supported source-colour override or relink to compatible media.";
+        let mut non_colour = BTreeSet::new();
+        let mut colour = 0_usize;
+        let mut delegated = 0_usize;
+        for code in EVERY_INCIDENT_CODE {
+            let body = explain_body(code);
+            assert!(!body.is_empty(), "{} has no body", code.code());
+            match code {
+                IncidentCode::SourceColor(_) => {
+                    assert_eq!(body, SHARED_COLOUR_BODY, "{}", code.code());
+                    colour += 1;
+                }
+                other => {
+                    if let IncidentCode::DeliveryColor(incident) = other {
+                        assert_eq!(body, incident.recovery_action());
+                        delegated += 1;
+                    } else if let IncidentCode::DeliveryVerification(incident) = other {
+                        assert_eq!(body, incident.recovery_action());
+                        delegated += 1;
+                    } else if let IncidentCode::ColorQc(incident) = other {
+                        assert_eq!(body, incident.recovery_action());
+                        delegated += 1;
+                    }
+                    assert!(
+                        non_colour.insert(body),
+                        "{} shares its body with another code",
+                        other.code()
+                    );
+                }
+            }
+            // The body reaches the person through the one producer, never
+            // through a sentence a caller composed (IN1 §2.5 rule 45).
+            let recoveries =
+                policy_recovery(code, IncidentSubject::Project, &IncidentEvidence::Plain);
+            assert_eq!(recoveries.len(), 1, "{}", code.code());
+            assert_eq!(recoveries[0].label, "How to fix this");
+            assert_eq!(recoveries[0].kind, RecoveryKind::Explain(body));
+        }
+        assert_eq!(colour, 13);
+        assert_eq!(non_colour.len(), 54);
+        assert_eq!(delegated, 15);
+    }
+
+    /// `IN1b` §3.4 rule 24: evidence follows the code for every delegating
+    /// producer core owns. `BranchError::InvalidBase` is the agent crate's half
+    /// of the same rule.
+    #[test]
+    // One case per delegating producer core owns, written out rather than
+    // folded, so the pairing each one asserts is readable beside it.
+    #[allow(clippy::too_many_lines)]
+    fn in1b_evidence_follows_the_code_for_every_delegating_producer() {
+        let empty = IncidentObservation::from_batch_error(
+            &BatchError::Empty,
+            IncidentSubject::Project,
+            TimelineRevision(2),
+        );
+        assert_eq!(
+            empty.code,
+            IncidentCode::Rejection(RejectionIncident::EditPlan)
+        );
+        assert!(matches!(
+            empty.evidence,
+            IncidentEvidence::OpError {
+                family: IncidentFamily::Malformed,
+                op_number: None,
+                ..
+            }
+        ));
+
+        let inner = OpError::MissingClip(ClipId(4));
+        let failed = IncidentObservation::from_batch_error(
+            &BatchError::OperationFailed {
+                op_number: 3,
+                error: inner.clone(),
+            },
+            IncidentSubject::Clip(ClipId(4)),
+            TimelineRevision(2),
+        );
+        assert_eq!(
+            failed.code,
+            IncidentCode::Operation(IncidentFamily::Missing)
+        );
+        assert!(matches!(
+            failed.evidence,
+            IncidentEvidence::OpError {
+                family: IncidentFamily::Missing,
+                op_number: Some(3),
+                ..
+            }
+        ));
+
+        // A per-variant code override still carries its own family on the
+        // evidence, so a consumer can branch without re-parsing.
+        let lut = OpError::InvalidLutAssetHash {
+            lut_asset: crate::LutAssetId(1),
+            observed: "sha256:0".to_owned(),
+            allowed: "the recorded hash",
+        };
+        let observation =
+            IncidentObservation::from_op_error(&lut, IncidentSubject::Project, TimelineRevision(2));
+        assert_eq!(observation.code, IncidentCode::LutAssetPolicy);
+        assert!(matches!(
+            observation.evidence,
+            IncidentEvidence::OpError {
+                family: IncidentFamily::Malformed,
+                op_number: None,
+                ..
+            }
+        ));
+
+        // The two caption id-exhaustion variants take `operation_internal`
+        // (`IN1b` §3.10 rule 39) and the other four take the rejection code.
+        for (error, expected) in [
+            (
+                CaptionPlanError::TrackIdExhausted,
+                IncidentCode::Operation(IncidentFamily::Internal),
+            ),
+            (
+                CaptionPlanError::ClipIdExhausted,
+                IncidentCode::Operation(IncidentFamily::Internal),
+            ),
+            (
+                CaptionPlanError::NoCues,
+                IncidentCode::Rejection(RejectionIncident::CaptionPlan),
+            ),
+            (
+                CaptionPlanError::EmptyAuthoredScript,
+                IncidentCode::Rejection(RejectionIncident::CaptionPlan),
+            ),
+            (
+                CaptionPlanError::AuthoredScriptAlignment,
+                IncidentCode::Rejection(RejectionIncident::CaptionPlan),
+            ),
+            (
+                CaptionPlanError::InvalidCueDuration,
+                IncidentCode::Rejection(RejectionIncident::CaptionPlan),
+            ),
+        ] {
+            assert_eq!(error.incident_code(), expected, "{error}");
+            let observation =
+                error.incident_observation(IncidentSubject::Project, TimelineRevision(1));
+            assert_eq!(observation.code, expected);
+            assert!(matches!(
+                observation.evidence,
+                IncidentEvidence::CaptionPlan { .. }
+            ));
+        }
+
+        // `DeliveryVariantError::InvalidDocument` delegates its code and its
+        // family to the inner rejection and supplies `OpError` evidence, never
+        // a `reason` string; its two siblings supply the rejection code and
+        // `DeliveryVariant` evidence.
+        let delegating = DeliveryVariantError::InvalidDocument(OpError::DuplicateBin(BinId(2)));
+        assert_eq!(
+            delegating.incident_code(),
+            IncidentCode::Operation(IncidentFamily::Duplicate)
+        );
+        let observation =
+            delegating.incident_observation(IncidentSubject::ExportJob, TimelineRevision(5));
+        assert_eq!(observation.subject, IncidentSubject::ExportJob);
+        assert!(matches!(
+            observation.evidence,
+            IncidentEvidence::OpError {
+                family: IncidentFamily::Duplicate,
+                op_number: None,
+                ..
+            }
+        ));
+        for error in [
+            DeliveryVariantError::InvalidFocus { x: 200, y: 0 },
+            DeliveryVariantError::EffectIdExhausted,
+        ] {
+            assert_eq!(
+                error.incident_code(),
+                IncidentCode::Rejection(RejectionIncident::DeliveryVariant),
+                "{error}"
+            );
+            assert!(matches!(
+                error
+                    .incident_observation(IncidentSubject::ExportJob, TimelineRevision(5))
+                    .evidence,
+                IncidentEvidence::DeliveryVariant { .. }
+            ));
+        }
+
+        // A revision conflict is stated against the revision the document is
+        // actually on (`IN1b` §4).
+        let conflict = IncidentObservation::revision_conflict(
+            IncidentSubject::Agent,
+            TimelineRevision(7),
+            TimelineRevision(9),
+        );
+        assert_eq!(conflict.code, IncidentCode::EditRevisionConflict);
+        assert_eq!(conflict.revision, TimelineRevision(9));
+        assert_eq!(
+            conflict.evidence,
+            IncidentEvidence::Revision {
+                expected: TimelineRevision(7),
+                actual: TimelineRevision(9),
+            }
+        );
+    }
+
+    /// `IN1b` §9 clause 5: all seven variants label and serialise in their
+    /// declared shapes, `Chain` in both of its forms.
+    #[test]
+    fn in1b_every_subject_variant_labels_and_serialises_in_its_declared_shape() {
+        for (subject, label, wire) in [
+            (
+                IncidentSubject::Asset(AssetId(1)),
+                "Asset 1",
+                r#"{"asset":1}"#,
+            ),
+            (IncidentSubject::Clip(ClipId(4)), "Clip 4", r#"{"clip":4}"#),
+            (
+                IncidentSubject::Track(TrackId(2)),
+                "Track 2",
+                r#"{"track":2}"#,
+            ),
+            (
+                IncidentSubject::Chain(AudioChain::Bus(crate::AudioBusId(3))),
+                "Bus 3",
+                r#"{"chain":{"bus":3}}"#,
+            ),
+            (
+                IncidentSubject::Chain(AudioChain::Master),
+                "Master",
+                r#"{"chain":"master"}"#,
+            ),
+            (IncidentSubject::ExportJob, "Export", r#""export_job""#),
+            (IncidentSubject::Project, "Project", r#""project""#),
+            (IncidentSubject::Agent, "Agent", r#""agent""#),
+        ] {
+            assert_eq!(subject.label(), label);
+            assert_eq!(serde_json::to_string(&subject).unwrap(), wire);
+        }
+        // The dedup axis is ordered, which is what `suppressed` needs.
+        let mut ordered = BTreeSet::new();
+        for subject in every_subject_shape() {
+            assert!(ordered.insert(subject));
+        }
+        assert_eq!(ordered.len(), 7);
+    }
+
+    /// `IN1b` §9 clause 15 and regression R-C: Part A's literal is byte
+    /// identical after Part B, re-run here under its `IN1b` name. The
+    /// unmodified Part A test
+    /// `in1_the_fixture_incident_serialises_to_the_pinned_wire_body` asserts
+    /// the same body; this one also pins its length at 819 B.
+    #[test]
+    fn in1b_the_part_a_wire_body_is_byte_identical() {
+        let mut log = IncidentLog::with_start(Instant::now());
+        let probed = untagged_webm_probe();
+        let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+            panic!("the first observation must open an incident");
+        };
+        assert_eq!(
+            log.observe(unknown_primaries_observation(&probed)),
+            Observed::Deduped(id)
+        );
+        let body = serde_json::to_string(log.get(id).unwrap()).unwrap();
+        assert_eq!(body, IN1_PINNED_WIRE_BODY);
+        assert_eq!(body.len(), 819, "`IN1_INCIDENT_SERIALIZED_BYTES`");
+    }
+
+    /// `IN1b` §7 item 13: the second and third wire literals of §3.11 rule 42,
+    /// a project-subject and a chain-subject incident, pinned byte for byte.
+    #[test]
+    fn in1b_a_project_and_a_chain_subject_incident_serialise_to_their_pinned_bodies() {
+        let mut log = IncidentLog::with_start(Instant::now());
+        let Observed::Opened(project) = log.observe(IncidentObservation::plain(
+            IncidentCode::Label(LabelIncident::Project),
+            IncidentSubject::Project,
+            "could not read the project file",
+            TimelineRevision(1),
+        )) else {
+            panic!("a fresh log must open the project incident");
+        };
+        assert_eq!(
+            serde_json::to_string(log.get(project).unwrap()).unwrap(),
+            IN1B_PINNED_PROJECT_WIRE_BODY
+        );
+
+        let Observed::Opened(chain) = log.observe(IncidentObservation::plain(
+            IncidentCode::Label(LabelIncident::Mixer),
+            IncidentSubject::Chain(AudioChain::Bus(crate::AudioBusId(3))),
+            "no silence was selected on the bus",
+            TimelineRevision(1),
+        )) else {
+            panic!("a fresh log must open the chain incident");
+        };
+        assert_eq!(
+            serde_json::to_string(log.get(chain).unwrap()).unwrap(),
+            IN1B_PINNED_CHAIN_WIRE_BODY
+        );
+    }
+
+    /// **[probe-2c]**, measured against the implementation rather than a
+    /// prototype: the worst serialised incident over the **67** declared codes
+    /// times the **seven** subject shapes of `IN1b` §3.3 rule 17.
+    ///
+    /// The inputs are probe-2b T2's: the longest rendered `OpError` and
+    /// `MediaError` templates on `HEAD` with saturated ids, a seventy-byte
+    /// `allowed`, saturated revision and count, and the row's own written body.
+    /// The figure is a measurement over chosen realistic inputs and not a proof
+    /// — `observed` is not bounded by the type system (`IN1b` §3.11 rule 44) —
+    /// which is why the assertion is a ceiling and a floor rather than an
+    /// equality.
+    ///
+    /// `crates/kinewright-agent/src/server.rs`'s
+    /// `IN1_INCIDENT_SERIALIZED_CEILING_BYTES` is the constant this number
+    /// sets, and implementer D moves it from 1 024 to 2 048 with the
+    /// 67 x 7 loop of `IN1b` §9 clause 16.
+    #[test]
+    fn in1b_every_code_fits_the_measured_ceiling_on_every_subject_shape() {
+        let mut worst = 0_usize;
+        let mut worst_pair = String::new();
+        let mut measured = 0_usize;
+        for code in EVERY_INCIDENT_CODE {
+            for subject in every_subject_shape() {
+                let mut log = IncidentLog::with_start(Instant::now());
+                let Observed::Opened(id) = log.observe(worst_observation(code, subject)) else {
+                    panic!("a fresh log must open {}", code.code());
+                };
+                let incident = log.get(id).unwrap().clone();
+                let mut widest = incident;
+                widest.id = IncidentId(u64::MAX);
+                widest.count = u32::MAX;
+                let bytes = serde_json::to_vec(&widest).unwrap().len();
+                measured += 1;
+                if bytes > worst {
+                    worst = bytes;
+                    worst_pair = format!("{} / {:?}", code.code(), subject);
+                }
+            }
+        }
+        println!("IN1B_PROBE2C measured={measured} worst={worst} pair={worst_pair}");
+        assert_eq!(measured, 67 * 7);
+        assert!(
+            worst <= 2_048,
+            "the measured worst {worst} exceeds the declared ceiling ({worst_pair})"
+        );
+        assert!(
+            worst > 2_048 / 2,
+            "a ceiling more than twice the measured worst {worst} is not a measurement"
+        );
+    }
+
+    /// probe-2b T2's worst-case inputs, rebuilt against the real types.
+    fn worst_observation(code: IncidentCode, subject: IncidentSubject) -> IncidentObservation {
+        IncidentObservation {
+            code,
+            subject,
+            observed: worst_observed(code),
+            allowed: Some("a".repeat(70)),
+            evidence: worst_evidence(code),
+            revision: TimelineRevision(u64::MAX),
+        }
+    }
+
+    /// The longest rendered `OpError` message on `HEAD`:
+    /// `ColorStageOrderViolation`'s template with saturated ids.
+    fn worst_op_error() -> OpError {
+        OpError::ColorStageOrderViolation {
+            clip: ClipId(u64::MAX),
+            effect: EffectId(u64::MAX),
+            kind: "creative_look".to_owned(),
+            color_stage_rank: u8::MAX,
+            previous_effect: EffectId(u64::MAX),
+            previous_kind: "creative_look".to_owned(),
+            previous_color_stage_rank: u8::MAX,
+        }
+    }
+
+    /// The longest rendered `MediaError` on `HEAD`.
+    fn worst_media_error() -> MediaError {
+        MediaError::UnsupportedDecoderFormat {
+            path: std::path::PathBuf::from(
+                "/home/editor/Projects/Feature 2026/Media/Day 12/A012C003_260915_R1AB.mov",
+            ),
+            format: "yuv422p10le".to_owned(),
+            declared_bit_depth: Some(10),
+            decoder_bit_depth: Some(10),
+            reason: "the decoder's native format is not a supported integer source surface"
+                .to_owned(),
+        }
+    }
+
+    fn worst_probe() -> ColorDescription {
+        ColorDescription {
+            primaries: ColorPrimaries::Unknown,
+            transfer: ColorTransfer::Unknown,
+            matrix: ColorMatrix::Unknown,
+            range: ColorRange::Other("full_swing_studio_limited".to_owned()),
+            white_point: ColorWhitePoint::Unknown,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 4_000,
+            provenance: ColorProvenance::Other("stream_metadata_container".to_owned()),
+        }
+    }
+
+    fn worst_relink_reason() -> String {
+        format!(
+            "Cannot relink asset {}: source fingerprint mismatch (expected sha256:{}…, candidate sha256:{}…)",
+            u64::MAX,
+            "0".repeat(16),
+            "f".repeat(16)
+        )
+    }
+
+    const WORST_SOURCE_EDIT_REASON: &str =
+        "Source verification did not confirm the original online source; no edit was applied";
+
+    fn worst_evidence(code: IncidentCode) -> IncidentEvidence {
+        match code {
+            IncidentCode::SourceColor(_) => IncidentEvidence::SourceColor {
+                probed: worst_probe(),
+                assumption: Some(ColorSourceProfileAssumption::D65),
+            },
+            IncidentCode::Media(_)
+            | IncidentCode::DeliveryColor(_)
+            | IncidentCode::DeliveryVerification(_)
+            | IncidentCode::ColorQc(_) => IncidentEvidence::MediaError {
+                code: "delivery_verification_frame_count_out_of_range",
+                message: worst_media_error().to_string(),
+            },
+            IncidentCode::Operation(family) => IncidentEvidence::OpError {
+                family,
+                op_number: Some(usize::MAX),
+                message: worst_op_error().to_string(),
+            },
+            IncidentCode::LutAssetPolicy | IncidentCode::Rejection(RejectionIncident::EditPlan) => {
+                IncidentEvidence::OpError {
+                    family: IncidentFamily::Malformed,
+                    op_number: Some(usize::MAX),
+                    message: worst_op_error().to_string(),
+                }
+            }
+            IncidentCode::EditRevisionConflict => IncidentEvidence::Revision {
+                expected: TimelineRevision(u64::MAX),
+                actual: TimelineRevision(u64::MAX),
+            },
+            IncidentCode::Rejection(RejectionIncident::DeliveryVariant) => {
+                IncidentEvidence::DeliveryVariant {
+                    reason: format!(
+                        "edit plan operation {} failed: {}",
+                        usize::MAX,
+                        worst_op_error()
+                    ),
+                }
+            }
+            IncidentCode::Rejection(RejectionIncident::AgentBranch) => IncidentEvidence::Branch {
+                reason: format!(
+                    "cherry-pick operation index {} is outside the one-based range 1..={}",
+                    u64::MAX,
+                    u64::MAX
+                ),
+            },
+            IncidentCode::Rejection(RejectionIncident::SourceEdit) => {
+                IncidentEvidence::SourceEdit {
+                    reason: WORST_SOURCE_EDIT_REASON,
+                }
+            }
+            IncidentCode::Rejection(RejectionIncident::Relink) => IncidentEvidence::Relink {
+                reason: worst_relink_reason(),
+            },
+            IncidentCode::Rejection(RejectionIncident::ProjectSave) => {
+                IncidentEvidence::ProjectSave {
+                    reason:
+                        "could not write the project file: No space left on device (os error 28)"
+                            .to_owned(),
+                }
+            }
+            IncidentCode::Rejection(RejectionIncident::CaptionPlan) => {
+                IncidentEvidence::CaptionPlan {
+                    reason: CaptionPlanError::AuthoredScriptAlignment.to_string(),
+                }
+            }
+            IncidentCode::Label(_) => IncidentEvidence::Plain,
+        }
+    }
+
+    fn worst_observed(code: IncidentCode) -> String {
+        match code {
+            // Every colour row's `observed` comes from
+            // `ColorSourceError::observed()`; the widest is the formatted tuple.
+            IncidentCode::SourceColor(_) => ColorSourceError::UnsupportedCombination {
+                primaries: ColorPrimaries::Other("display_p3_container".to_owned()),
+                transfer: ColorTransfer::Other("arri_logc4_wide".to_owned()),
+                matrix: ColorMatrix::Other("ictcp_constant_intensity".to_owned()),
+                range: ColorRange::Other("full_swing_studio_limited".to_owned()),
+            }
+            .observed(),
+            IncidentCode::Media(_)
+            | IncidentCode::DeliveryColor(_)
+            | IncidentCode::DeliveryVerification(_)
+            | IncidentCode::ColorQc(_) => worst_media_error().to_string(),
+            IncidentCode::EditRevisionConflict => format!(
+                "expected timeline revision {}, current revision is {}",
+                u64::MAX,
+                u64::MAX
+            ),
+            IncidentCode::Rejection(RejectionIncident::SourceEdit) => {
+                WORST_SOURCE_EDIT_REASON.to_owned()
+            }
+            IncidentCode::Rejection(RejectionIncident::Relink) => worst_relink_reason(),
+            // A placeholder site carries whatever the application formatted, so
+            // it is measured against the same bound as a typed one.
+            _ => worst_op_error().to_string(),
+        }
+    }
+
+    /// `IN1b` §3.11 rule 42's project-subject body, normative as generated.
+    const IN1B_PINNED_PROJECT_WIRE_BODY: &str = concat!(
+        r#"{"id":1,"code":"project_unclassified","class":"explain","severity":"blocks","subject":"p"#,
+        r#"roject","field":"project","observed":"could not read the project file","allowed":null,"e"#,
+        r#"vidence":"plain","recoveries":[{"label":"How to fix this","kind":{"explain":"The project"#,
+        r#" could not be opened, created, read, or restored from the crash-recovery journal. The me"#,
+        r#"ssage names the file; check that it exists and can be read, then open it again — if it w"#,
+        r#"as unsaved work that could not be restored, the last saved version of the project is sti"#,
+        r#"ll intact."}}],"revision":1,"count":1,"state":"open","telemetry":{"tool_calls":0}}"#,
+    );
+
+    /// `IN1b` §3.11 rule 42's chain-subject body, normative as generated.
+    const IN1B_PINNED_CHAIN_WIRE_BODY: &str = concat!(
+        r#"{"id":2,"code":"mixer_unclassified","class":"explain","severity":"blocks","subject":{"ch"#,
+        r#"ain":{"bus":3}},"field":"mixer","observed":"no silence was selected on the bus","allowed"#,
+        r#"":null,"evidence":"plain","recoveries":[{"label":"How to fix this","kind":{"explain":"Th"#,
+        r#"e mixer could not do what was asked — usually because the audio it needs to learn from, "#,
+        r#"or the node it was learned for, is not on the bus any more. Re-select the range or the n"#,
+        r#"ode and try again."}}],"revision":1,"count":1,"state":"open","telemetry":{"tool_calls":0"#,
+        r#"}}"#,
+    );
 
     /// IN1 §6.2 rule 10's body, normative as generated.
     const IN1_PINNED_WIRE_BODY: &str = concat!(

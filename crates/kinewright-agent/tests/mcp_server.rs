@@ -9848,8 +9848,7 @@ async fn in1_await_media_error(playback: &dyn Playback, deadline: Duration) -> O
 /// every string from a core accessor (IN1 §2.3b rule 24).
 fn in1_untagged_observation(revision: u64) -> kinewright_core::IncidentObservation {
     let error = kinewright_core::ColorSourceError::UnknownPrimaries;
-    let incident = kinewright_core::SourceColorIncident::from_source_error(&error)
-        .expect("unknown_source_primaries is an incident");
+    let incident = kinewright_core::SourceColorIncident::from_source_error(&error);
     kinewright_core::IncidentObservation {
         code: kinewright_core::IncidentCode::SourceColor(incident),
         subject: kinewright_core::IncidentSubject::Asset(AssetId(1)),
@@ -9934,11 +9933,13 @@ async fn in1_the_untagged_source_opens_one_incident_and_the_tagged_twin_opens_no
                  {IN1_DECODE_EVENT_DEADLINE:?}; the events it did see are printed above"
             )
         });
+    // `IN1b` §5.1 rule 12: the constructor is total, and the asset-scoped
+    // refusal overrides the fallback subject with the asset it carries.
     let observation = kinewright_core::IncidentObservation::from_media_error(
         &error,
+        kinewright_core::IncidentSubject::Project,
         kinewright_core::TimelineRevision(0),
-    )
-    .unwrap_or_else(|| panic!("the decoder's refusal must carry an incident code: {error}"));
+    );
     let id = {
         let handle = server.incident_log_handle();
         let mut log = handle.write().unwrap();

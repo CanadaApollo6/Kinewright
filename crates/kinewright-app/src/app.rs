@@ -95,16 +95,23 @@ fn router_apply_accepted(
     incident: &Incident,
     outcome: IncidentOutcome,
 ) -> bool {
-    let IncidentSubject::Asset(asset_id) = incident.subject;
+    // `IN1b` §3.8 breaks 2 and 3: `IncidentSubject` has seven variants and
+    // `probed()` is an `Option` after Part B. A non-asset subject has no colour
+    // recovery to land, and evidence with no probed description has nothing to
+    // compare against, so both read as not landed.
+    let IncidentSubject::Asset(asset_id) = incident.subject else {
+        return false;
+    };
+    let Some(probed) = incident.evidence.probed() else {
+        return false;
+    };
     let Some(asset) = document.asset(asset_id) else {
         return false;
     };
     match outcome {
-        IncidentOutcome::Applied => {
-            asset.color_description == recovery_description(incident.evidence.probed())
-        }
+        IncidentOutcome::Applied => asset.color_description == recovery_description(probed),
         IncidentOutcome::Reverted => {
-            asset.color_description == *incident.evidence.probed() && asset.assumed_from.is_none()
+            asset.color_description == *probed && asset.assumed_from.is_none()
         }
         IncidentOutcome::Explained => false,
     }
@@ -1082,6 +1089,9 @@ impl KinewrightApp {
             .send(Command::DoIfRevision {
                 expected: revision,
                 operation,
+                // `IN1b` §4 rule 3: the router's identity match is implementer
+                // C's; this send does not correlate yet.
+                token: None,
             })
             .is_err()
         {
@@ -1245,6 +1255,8 @@ impl KinewrightApp {
             .send(Command::DoIfRevision {
                 expected,
                 operation,
+                // `IN1b` §4 rule 3: this send does not correlate yet.
+                token: None,
             })
             .is_err()
         {
@@ -1432,6 +1444,7 @@ impl KinewrightApp {
                     revision,
                     last_op,
                     journal_command,
+                    token: _,
                 } => {
                     let previous_document = Arc::clone(&self.projects[project_index].document);
                     let live_audio =
@@ -1588,7 +1601,11 @@ impl KinewrightApp {
                     );
                     self.release_lut_import_reservation(project_index);
                 }
-                Event::RevisionConflict { expected, actual } => {
+                Event::RevisionConflict {
+                    expected,
+                    actual,
+                    token: _,
+                } => {
                     self.pending_router_conflicts.push(RouterConflict {
                         project_index,
                         expected,
@@ -1629,13 +1646,18 @@ impl KinewrightApp {
                 MediaEvent::Error(error) => {
                     self.playing = false;
                     let revision = self.focused().revision;
-                    if let Some(observation) =
-                        IncidentObservation::from_media_error(&error, revision)
-                    {
-                        self.pending_observations.push(observation);
-                    } else {
-                        self.record_error("Media", format!("Playback error: {error}"));
-                    }
+                    // `IN1b` §5.1 rule 12: the constructor is total after
+                    // Part B, so both arms fold into one and IN1 §5.2 rule 6's
+                    // `else` arm ceases to exist. The fallback subject is the
+                    // project, because a playback failure that names no asset
+                    // is a document-wide one; implementer C owns the rest of
+                    // Appendix B row 27.
+                    self.pending_observations
+                        .push(IncidentObservation::from_media_error(
+                            &error,
+                            IncidentSubject::Project,
+                            revision,
+                        ));
                 }
             }
         }
@@ -4283,7 +4305,11 @@ mod in1_tests {
                     app.projects[project_index].document = doc;
                     app.projects[project_index].revision = revision;
                 }
-                Event::RevisionConflict { expected, actual } => {
+                Event::RevisionConflict {
+                    expected,
+                    actual,
+                    token: _,
+                } => {
                     app.pending_router_conflicts.push(RouterConflict {
                         project_index,
                         expected,
@@ -4356,8 +4382,8 @@ mod in1_tests {
     /// incident id, resolved `Applied`.
     fn in1_auto_apply(app: &mut KinewrightApp, error: &MediaError) -> IncidentId {
         let revision = app.projects[0].revision;
-        let observation = IncidentObservation::from_media_error(error, revision)
-            .expect("the typed refusal is an incident");
+        let observation =
+            IncidentObservation::from_media_error(error, IncidentSubject::Project, revision);
         app.pending_observations.push(observation);
         app.route_incidents();
         assert_eq!(
@@ -4395,9 +4421,11 @@ mod in1_tests {
         let (_fixture, document) = in1_untagged(&engine);
         let error = in1_playback_error(&engine, &document);
         let mut log = IncidentLog::default();
-        let observation =
-            IncidentObservation::from_media_error(&error, TimelineRevision::default())
-                .expect("the typed refusal is an incident");
+        let observation = IncidentObservation::from_media_error(
+            &error,
+            IncidentSubject::Project,
+            TimelineRevision::default(),
+        );
         let Observed::Opened(id) = log.observe(observation) else {
             panic!("a fresh log opens the fixture's incident");
         };
@@ -4420,7 +4448,9 @@ mod in1_tests {
             incident_card(incident, false).headline,
             "Kinewright assumed Rec.709 for this source because its colour primaries were unknown."
         );
-        let IncidentSubject::Asset(asset_id) = incident.subject;
+        let IncidentSubject::Asset(asset_id) = incident.subject else {
+            panic!("the fixture incident is asset-scoped")
+        };
         let recoveries = policy_recovery(incident.code, incident.subject, &incident.evidence);
         assert_eq!(recoveries.len(), 1);
         let RecoveryKind::Operation(operation) = &recoveries[0].kind else {
@@ -4433,7 +4463,7 @@ mod in1_tests {
         let asset = amended.asset(asset_id).expect("the asset survives");
         assert_eq!(
             asset.assumed_from.as_ref(),
-            Some(incident.evidence.probed()),
+            incident.evidence.probed(),
             "the recovery records the exact probed description it replaced"
         );
         let description = &asset.color_description;
@@ -4478,9 +4508,11 @@ mod in1_tests {
         );
         let mut log = IncidentLog::default();
         for error in &errors {
-            let observation =
-                IncidentObservation::from_media_error(error, TimelineRevision::default())
-                    .expect("every fixture refusal is an incident");
+            let observation = IncidentObservation::from_media_error(
+                error,
+                IncidentSubject::Project,
+                TimelineRevision::default(),
+            );
             log.observe(observation);
         }
         assert_eq!(log.open_count(), 1);
@@ -4523,8 +4555,8 @@ mod in1_tests {
         // first: it returns only once the revision has moved off the default.
         in1_drain_until_revision(&mut app, 0, TimelineRevision::default());
         let stale = TimelineRevision::default();
-        let observation = IncidentObservation::from_media_error(&error, stale)
-            .expect("the typed refusal is an incident");
+        let observation =
+            IncidentObservation::from_media_error(&error, IncidentSubject::Project, stale);
         app.pending_observations.push(observation);
         app.route_incidents();
         assert_eq!(
@@ -4567,8 +4599,11 @@ mod in1_tests {
         // property of the log rather than of this test's patience: the same
         // observation now yields `Suppressed`, which the router answers with
         // nothing at all.
-        let repeat = IncidentObservation::from_media_error(&error, app.projects[0].revision)
-            .expect("the typed refusal is an incident");
+        let repeat = IncidentObservation::from_media_error(
+            &error,
+            IncidentSubject::Project,
+            app.projects[0].revision,
+        );
         let handle = Arc::clone(&app.projects[0].incidents);
         let mut log = handle
             .write()
@@ -4613,8 +4648,8 @@ mod in1_tests {
         let error = in1_playback_error(&engine, &document);
 
         let revision = app.projects[0].revision;
-        let first_observation = IncidentObservation::from_media_error(&error, revision)
-            .expect("the typed refusal is an incident");
+        let first_observation =
+            IncidentObservation::from_media_error(&error, IncidentSubject::Project, revision);
         assert_eq!(
             first_observation.subject,
             IncidentSubject::Asset(first_asset.id)
@@ -4743,7 +4778,9 @@ mod in1_tests {
         // condition to wait on.
         in1_drain_until_revision(&mut app, 0, before_undo);
         let incident = in1_incident(&app, id);
-        let IncidentSubject::Asset(asset_id) = incident.subject;
+        let IncidentSubject::Asset(asset_id) = incident.subject else {
+            panic!("the fixture incident is asset-scoped")
+        };
         let asset = app.projects[0]
             .document
             .asset(asset_id)
@@ -4751,7 +4788,10 @@ mod in1_tests {
             .clone();
         assert_eq!(
             asset.color_description,
-            *incident.evidence.probed(),
+            *incident
+                .evidence
+                .probed()
+                .expect("the fixture incident carries a probed description"),
             "undo restores the probed bytes"
         );
         assert_eq!(
@@ -4761,8 +4801,8 @@ mod in1_tests {
         // The restored document fails the managed decode again; the router
         // must answer with nothing at all.
         let revision = app.projects[0].revision;
-        let observation = IncidentObservation::from_media_error(&error, revision)
-            .expect("the typed refusal is an incident");
+        let observation =
+            IncidentObservation::from_media_error(&error, IncidentSubject::Project, revision);
         app.pending_observations.push(observation);
         app.route_incidents();
         assert_eq!(

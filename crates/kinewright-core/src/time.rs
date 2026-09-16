@@ -755,6 +755,29 @@ fn validate_rate(rate: Rational) -> Result<(), TimeMappingError> {
     }
 }
 
+impl TimeMappingError {
+    /// The family this mapping failure belongs to (`IN1b` §3.1 rule 4).
+    ///
+    /// Six of the seven variants are person-fixable; only `Overflow` is
+    /// internal, which is why `OpError::TimeMapping` delegates here instead of
+    /// declaring the whole enum `Internal`.
+    #[must_use]
+    pub const fn incident_family(&self) -> crate::IncidentFamily {
+        match self {
+            Self::InvalidRate { .. } | Self::InvalidRange { .. } => {
+                crate::IncidentFamily::Malformed
+            }
+            Self::NegativeFrames(_) | Self::SourceTooShortToCover { .. } => {
+                crate::IncidentFamily::Bounds
+            }
+            Self::Overflow => crate::IncidentFamily::Internal,
+            Self::InexactDuration { .. } | Self::NoCoveringSourceRange { .. } => {
+                crate::IncidentFamily::Unrepresentable
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

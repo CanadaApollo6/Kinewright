@@ -548,19 +548,26 @@ fn matte_proof_failures_carry_stable_codes() {
         "matte_proof_not_a_color_node"
     );
 
-    // Converting into a media error keeps the code as the message prefix.
+    // Converting into a media error keeps the code as the message prefix, and
+    // after `IN1b` §3.9 rule 36 it also keeps the typed refusal itself, so
+    // `recovery_code()` answers with the matte code instead of `None`.
     let media: MediaError = inactive.clone().into();
     match &media {
-        MediaError::Backend(message) => {
+        MediaError::MatteProof(carried) => {
+            let message = carried.to_string();
             assert!(
                 message.starts_with("matte_proof_node_inactive: "),
                 "unexpected message: {message}"
             );
             assert!(message.contains("matte_excluded"), "{message}");
+            assert_eq!(carried, &inactive);
         }
-        other => panic!("expected a backend error, got {other:?}"),
+        other => panic!("expected a typed matte-proof error, got {other:?}"),
     }
-    assert_eq!(media.recovery_code(), None);
+    assert_eq!(media.recovery_code(), Some("matte_proof_node_inactive"));
+    // The rendered sentence is unchanged apart from the lost
+    // `media backend error: ` prefix the `Backend` wrapper used to add.
+    assert_eq!(media.to_string(), inactive.to_string());
 }
 
 #[test]
@@ -569,12 +576,19 @@ fn coverage_failures_convert_into_media_errors() {
         operation: "centroid_basis_points",
     };
     assert_eq!(error.code(), "matte_coverage_overflow");
-    let media: MediaError = error.into();
-    match media {
-        MediaError::Backend(message) => assert!(
-            message.starts_with("matte_coverage_overflow: "),
-            "unexpected message: {message}"
-        ),
-        other => panic!("expected a backend error, got {other:?}"),
+    let media: MediaError = error.clone().into();
+    match &media {
+        MediaError::MatteCoverage(carried) => {
+            let message = carried.to_string();
+            assert!(
+                message.starts_with("matte_coverage_overflow: "),
+                "unexpected message: {message}"
+            );
+            assert_eq!(carried, &error);
+        }
+        other => panic!("expected a typed matte-coverage error, got {other:?}"),
     }
+    // `IN1b` §3.9 rule 36: the code survives the conversion typed.
+    assert_eq!(media.recovery_code(), Some("matte_coverage_overflow"));
+    assert_eq!(media.to_string(), error.to_string());
 }

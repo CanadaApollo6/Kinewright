@@ -6188,9 +6188,13 @@ mod tests {
         // Typed failures, never a blank frame.
         let inactive = render_coverage(&compositor, &frame, &stack, 1)
             .expect_err("an inactive node cannot be proved");
-        let MediaError::Backend(message) = inactive else {
-            panic!("expected a backend error");
+        // `IN1b` §3.9 rule 36: a matte-proof refusal travels typed rather than
+        // flattened into `MediaError::Backend`, and its rendered text is
+        // unchanged apart from the lost `media backend error: ` prefix.
+        let MediaError::MatteProof(inactive) = inactive else {
+            panic!("expected a typed matte-proof error");
         };
+        let message = inactive.to_string();
         assert!(
             message.starts_with("matte_proof_node_inactive:"),
             "unexpected message: {message}"
@@ -6198,18 +6202,20 @@ mod tests {
         assert!(message.contains("neutral"), "unexpected message: {message}");
         let no_matte = render_coverage(&compositor, &frame, &stack, 4)
             .expect_err("a matte-free node cannot be proved");
-        let MediaError::Backend(message) = no_matte else {
-            panic!("expected a backend error");
+        let MediaError::MatteProof(no_matte) = no_matte else {
+            panic!("expected a typed matte-proof error");
         };
+        let message = no_matte.to_string();
         assert!(
             message.starts_with("matte_proof_no_matte:"),
             "unexpected message: {message}"
         );
         let missing = render_coverage(&compositor, &frame, &stack, 99)
             .expect_err("an absent effect cannot be proved");
-        let MediaError::Backend(message) = missing else {
-            panic!("expected a backend error");
+        let MediaError::MatteProof(missing) = missing else {
+            panic!("expected a typed matte-proof error");
         };
+        let message = missing.to_string();
         assert!(
             message.starts_with("matte_proof_effect_not_found:"),
             "unexpected message: {message}"

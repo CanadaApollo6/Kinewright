@@ -14,7 +14,7 @@
 use eframe::egui;
 use kinewright_core::{
     Incident, IncidentCode, IncidentOutcome, IncidentSeverity, IncidentState, IncidentSubject,
-    Operation, PolicyClass, RecoveryAction, RecoveryKind, SourceColorIncident,
+    Operation, PolicyClass, RecoveryAction, RecoveryKind, SourceColorIncident, explain_body,
     recovery_description,
 };
 
@@ -91,7 +91,13 @@ pub(crate) fn card_action_outcome(incident: &Incident, action: &CardAction) -> I
     match &action.recovery.kind {
         RecoveryKind::Operation(Operation::SetAssetColorDescription {
             color_description, ..
-        }) if color_description == incident.evidence.probed() => IncidentOutcome::Reverted,
+        }) if incident
+            .evidence
+            .probed()
+            .is_some_and(|probed| color_description == probed) =>
+        {
+            IncidentOutcome::Reverted
+        }
         RecoveryKind::Operation(_) => IncidentOutcome::Applied,
         RecoveryKind::Explain(_) => IncidentOutcome::Explained,
     }
@@ -111,7 +117,15 @@ pub(crate) fn card_action_outcome(incident: &Incident, action: &CardAction) -> I
 /// build (IN1 §5.3 rules 25–27).
 #[must_use]
 pub(crate) fn incident_headline(code: IncidentCode, class: PolicyClass) -> &'static str {
-    let IncidentCode::SourceColor(incident) = code;
+    // `IN1b` §3.8 break 4: `IncidentCode` has 67 variants after Part B and the
+    // 70-row table of `IN1b` §5.5 rule 30 is implementer C's. Until it lands,
+    // a non-colour code takes core's own written body, which is a
+    // `&'static str` that names what must change; Part A's fifteen colour rows
+    // below are unchanged byte for byte, so IN1 §9 clause 3's pinned headline
+    // still holds.
+    let IncidentCode::SourceColor(incident) = code else {
+        return explain_body(code);
+    };
     match (incident, class) {
         (SourceColorIncident::UnknownPrimaries, PolicyClass::AutoApply) => {
             "Kinewright assumed Rec.709 for this source because its colour primaries were unknown."
@@ -169,6 +183,11 @@ pub(crate) fn incident_headline(code: IncidentCode, class: PolicyClass) -> &'sta
         ) => {
             "This source's colour metadata does not add up to a profile Kinewright can manage yet."
         }
+        // The thirteenth code (`IN1b` §3.2 rule 16).
+        (
+            SourceColorIncident::UnknownWhitePoint,
+            PolicyClass::AutoApply | PolicyClass::AskFirst | PolicyClass::Explain,
+        ) => "This source does not say what white point it was graded against.",
     }
 }
 
@@ -189,10 +208,14 @@ const fn state_label(state: IncidentState) -> &'static str {
 /// `CardAction` per entry, in order, enabled for an operation and disabled for
 /// an explanation (IN1 §5.3 rules 29–30).
 fn card_actions(incident: &Incident, assumed_from_present: bool) -> Vec<CardAction> {
+    // `IN1b` §3.8 break 3: only an asset-scoped incident carrying a probed
+    // description has something to revert to; every other incident falls
+    // through to the `policy_recovery` branch below.
     if incident.class == PolicyClass::AutoApply
         && incident.state == IncidentState::Resolved(IncidentOutcome::Applied)
+        && let (IncidentSubject::Asset(asset), Some(probed)) =
+            (incident.subject, incident.evidence.probed())
     {
-        let IncidentSubject::Asset(asset) = incident.subject;
         return vec![CardAction {
             label: REVERT_LABEL,
             enabled: assumed_from_present,
@@ -200,7 +223,7 @@ fn card_actions(incident: &Incident, assumed_from_present: bool) -> Vec<CardActi
                 label: REVERT_LABEL,
                 kind: RecoveryKind::Operation(Operation::SetAssetColorDescription {
                     asset,
-                    color_description: incident.evidence.probed().clone(),
+                    color_description: probed.clone(),
                 }),
             },
         }];
@@ -223,16 +246,19 @@ fn card_actions(incident: &Incident, assumed_from_present: bool) -> Vec<CardActi
 /// honest "after" to set beside the `probed` "before", and the card has no
 /// document to read the live description from.
 fn card_details(incident: &Incident, assumed_from_present: bool) -> Vec<(&'static str, String)> {
-    let probed = incident.evidence.probed();
     let mut details = vec![
         ("code", incident.code.code().to_owned()),
         ("field", incident.field.to_owned()),
         ("observed", incident.observed.clone()),
         ("allowed", incident.allowed.clone().unwrap_or_default()),
-        ("probed", format!("{probed:?}")),
     ];
-    if assumed_from_present {
-        details.push(("assumed", format!("{:?}", recovery_description(probed))));
+    // `IN1b` §3.4 rule 25 row 7: the `probed` and `assumed` rows exist only
+    // where the evidence carries a probed description.
+    if let Some(probed) = incident.evidence.probed() {
+        details.push(("probed", format!("{probed:?}")));
+        if assumed_from_present {
+            details.push(("assumed", format!("{:?}", recovery_description(probed))));
+        }
     }
     details.push(("revision", incident.revision.to_string()));
     details.push(("seen", incident.count.to_string()));
@@ -414,7 +440,12 @@ mod tests {
                 headlines.push(incident_headline(entry.code, PolicyClass::AutoApply));
             }
         }
-        assert_eq!(headlines.len(), 15, "fifteen rows for twelve codes");
+        // Seventy rows for 67 codes, because the three `Rec709Compatible` codes
+        // are reachable under both classes (`IN1b` §5.5 rule 30). Part A's
+        // fifteen colour rows are unchanged; the other 54 take core's written
+        // body through `incident_headline`'s shim until implementer C writes
+        // the per-code headline table.
+        assert_eq!(headlines.len(), 70, "seventy rows for sixty-seven codes");
         let mut sorted = headlines.clone();
         sorted.sort_unstable();
         sorted.dedup();

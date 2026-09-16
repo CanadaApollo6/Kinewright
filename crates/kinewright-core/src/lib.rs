@@ -38,7 +38,9 @@ mod title;
 mod transcript_edit;
 mod transition;
 
-pub use actor::{Command, Core, CoreDisconnected, Event, Query, QueryResult, TimelineRevision};
+pub use actor::{
+    Command, CommandToken, Core, CoreDisconnected, Event, Query, QueryResult, TimelineRevision,
+};
 pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
@@ -178,11 +180,12 @@ pub use effect::{
     matte_window_parameter_names, matte_window_parameters,
 };
 pub use incident::{
-    Incident, IncidentCode, IncidentEvidence, IncidentId, IncidentLog, IncidentObservation,
-    IncidentOutcome, IncidentSeverity, IncidentState, IncidentSubject, IncidentTelemetry, Observed,
-    POLICY, PolicyClass, PolicyEntry, PolicyPredicate, RecoveryAction, RecoveryKind,
-    SourceColorIncident, assume_rec709_operation, policy_class, policy_recovery, rec709_compatible,
-    recovery_description,
+    ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, Incident, IncidentCode,
+    IncidentEvidence, IncidentId, IncidentLog, IncidentObservation, IncidentOutcome,
+    IncidentSeverity, IncidentState, IncidentSubject, IncidentTelemetry, LabelIncident,
+    MediaIncident, Observed, POLICY, PolicyClass, PolicyEntry, PolicyPredicate, RecoveryAction,
+    RecoveryKind, RejectionIncident, SourceColorIncident, assume_rec709_operation, explain_body,
+    policy_class, policy_recovery, rec709_compatible, recovery_description,
 };
 pub use journal::JournalCommand;
 pub use media::{
@@ -227,7 +230,9 @@ pub use multicam::{
     plan_subject_reframe, plan_subject_reframe_basis_points,
     plan_subject_reframe_basis_points_with_containment, stabilize_tracked_centres_basis_points,
 };
-pub use operation::{ApplyOp, BatchError, OpError, Operation, apply_batch, is_hold_only_parameter};
+pub use operation::{
+    ApplyOp, BatchError, IncidentFamily, OpError, Operation, apply_batch, is_hold_only_parameter,
+};
 pub use qa::{QaIssue, QaReport, QaSeverity, qa_document};
 pub use scopes::{
     ChannelStatistics, ChannelStatisticsDelta, ClippingBasisPoints, ClippingDelta, LumaWaveform,

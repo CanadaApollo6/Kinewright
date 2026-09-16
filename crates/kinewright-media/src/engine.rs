@@ -2694,10 +2694,12 @@ mod tests {
                     EffectId(effect),
                 )
                 .expect_err("a refusing node must not render a frame");
-            let MediaError::Backend(message) = error else {
-                panic!("a matte proof refusal is a backend error");
+            // `IN1b` §3.9 rule 36: the refusal is carried typed, and its
+            // rendered text still begins with the code token.
+            let MediaError::MatteProof(error) = error else {
+                panic!("a matte proof refusal is a typed matte-proof error");
             };
-            message
+            error.to_string()
         };
 
         let inactive = refusal(7);
@@ -2763,9 +2765,10 @@ mod tests {
         let error = engine
             .matte_proof_for_document(Arc::clone(&document), past_the_end, ClipId(1), EffectId(7))
             .expect_err("a clip that is off screen must not render a coverage frame");
-        let MediaError::Backend(message) = error else {
-            panic!("a matte proof refusal is a backend error");
+        let MediaError::MatteProof(error) = error else {
+            panic!("a matte proof refusal is a typed matte-proof error");
         };
+        let message = error.to_string();
         assert!(
             message.starts_with("matte_proof_clip_not_visible:"),
             "unexpected message: {message}"
@@ -2794,9 +2797,10 @@ mod tests {
                 EffectId(99),
             )
             .expect_err("an absent node still refuses");
-        let MediaError::Backend(absent) = absent else {
-            panic!("a matte proof refusal is a backend error");
+        let MediaError::MatteProof(absent) = absent else {
+            panic!("a matte proof refusal is a typed matte-proof error");
         };
+        let absent = absent.to_string();
         assert!(
             absent.starts_with("matte_proof_effect_not_found:"),
             "unexpected message: {absent}"

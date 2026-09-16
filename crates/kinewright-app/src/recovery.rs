@@ -1008,7 +1008,9 @@ mod tests {
                 Event::BatchRejected { error, .. } => {
                     panic!("fixture edit plan was rejected: {error}")
                 }
-                Event::RevisionConflict { expected, actual } => {
+                Event::RevisionConflict {
+                    expected, actual, ..
+                } => {
                     panic!("fixture revision conflict: expected {expected:?}, actual {actual:?}")
                 }
                 Event::QueryResult(_) => panic!("unexpected query result"),

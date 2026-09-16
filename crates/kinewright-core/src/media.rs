@@ -7,6 +7,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
@@ -598,8 +599,11 @@ impl MatteProofError {
 }
 
 impl From<MatteProofError> for MediaError {
+    /// Carried typed rather than flattened into [`MediaError::Backend`]
+    /// (`IN1b` §3.9 rule 36), so `recovery_code()` keeps answering with
+    /// [`MatteProofError::code`].
     fn from(error: MatteProofError) -> Self {
-        Self::Backend(error.to_string())
+        Self::MatteProof(error)
     }
 }
 
@@ -657,8 +661,10 @@ impl MatteCoverageError {
 }
 
 impl From<MatteCoverageError> for MediaError {
+    /// Carried typed rather than flattened into [`MediaError::Backend`]
+    /// (`IN1b` §3.9 rule 36).
     fn from(error: MatteCoverageError) -> Self {
-        Self::Backend(error.to_string())
+        Self::MatteCoverage(error)
     }
 }
 
@@ -1162,7 +1168,15 @@ pub struct LoudnessSnapshot {
 ///
 /// [`AudioChain::Master`] slots exist only from AU2 Part B; Part A emits
 /// [`AudioChain::Bus`] keys only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// `PartialOrd`, `Ord` and `Serialize` are on the derive list because
+/// `IncidentSubject::Chain` carries an `AudioChain` and the incident dedup key
+/// is ordered (`IN1b` §3.3 rule 19). `AudioBusId` already derives all three, so
+/// no wrapper is needed, and `AudioChain` is serialised nowhere else, so the
+/// addition moves no byte. `Deserialize` and `JsonSchema` are deliberately not
+/// added: `IncidentSubject` carries neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AudioChain {
     Bus(AudioBusId),
     Master,
@@ -1816,6 +1830,20 @@ pub enum MediaError {
     /// [`SourceColorRefusal`], which owns the template.
     #[error("{0}")]
     SourceColorForAsset(Box<SourceColorRefusal>),
+    /// A matte proof was refused with a typed reason (`IN1b` §3.9 rule 36).
+    ///
+    /// Transparent, and passed through rather than flattened into
+    /// [`Self::Backend`], so `recovery_code()` still answers with
+    /// [`MatteProofError::code`]. The rendered text is unchanged apart from the
+    /// lost `media backend error: ` prefix: the code string is already the
+    /// first token of every `#[error]` template on the inner enum.
+    #[error(transparent)]
+    MatteProof(MatteProofError),
+    /// A coverage measurement was refused with a typed reason
+    /// (`IN1b` §3.9 rule 36). Transparent for the same reason
+    /// [`Self::MatteProof`] is.
+    #[error(transparent)]
+    MatteCoverage(MatteCoverageError),
     #[error("media backend error: {0}")]
     Backend(String),
 }
@@ -1831,6 +1859,8 @@ impl MediaError {
             Self::ColorQc(error) => Some(error.code()),
             Self::SourceColor(error) => Some(error.code()),
             Self::SourceColorForAsset(refusal) => Some(refusal.error.code()),
+            Self::MatteProof(error) => Some(error.code()),
+            Self::MatteCoverage(error) => Some(error.code()),
             Self::NotImplemented
             | Self::Cancelled
             | Self::MixSpectrumRangeTooShort { .. }
@@ -3039,5 +3069,88 @@ mod tests {
             assert_eq!(carried.to_string(), expected.to_string());
             assert_eq!(carried, MediaError::ColorQc(expected));
         }
+    }
+
+    /// `IN1b` §9 clause 15: `recovery_code()` is `Some` for **8 of 13**
+    /// variants, both matte enums survive their `From` impls typed, and the
+    /// rendered text keeps the same code token it carried as a `Backend`
+    /// string — the one visible change being the lost
+    /// `media backend error: ` prefix (`IN1b` §3.9 rule 36).
+    #[test]
+    fn in1b_matte_failures_keep_their_code_through_media_error() {
+        let proof = MatteProofError::NoMatte;
+        let coverage = MatteCoverageError::InvalidDimensions {
+            observed: "0x0".to_owned(),
+            allowed: "a non-empty raster",
+        };
+
+        let carried_proof = MediaError::from(proof.clone());
+        assert_eq!(carried_proof, MediaError::MatteProof(proof.clone()));
+        assert_eq!(carried_proof.recovery_code(), Some(proof.code()));
+        assert_eq!(carried_proof.to_string(), proof.to_string());
+        assert!(carried_proof.to_string().starts_with(proof.code()));
+        assert!(!carried_proof.to_string().contains("media backend error: "));
+
+        let carried_coverage = MediaError::from(coverage.clone());
+        assert_eq!(
+            carried_coverage,
+            MediaError::MatteCoverage(coverage.clone())
+        );
+        assert_eq!(carried_coverage.recovery_code(), Some(coverage.code()));
+        assert_eq!(carried_coverage.to_string(), coverage.to_string());
+        assert!(carried_coverage.to_string().starts_with(coverage.code()));
+
+        // Eight of thirteen carry a code; the five that do not are the ones
+        // `IN1b` §5.1 rule 11 step 1 routes to `media_backend_unclassified`.
+        let every_variant = [
+            MediaError::NotImplemented,
+            MediaError::Cancelled,
+            MediaError::UnsupportedDecoderFormat {
+                path: std::path::PathBuf::new(),
+                format: String::new(),
+                declared_bit_depth: None,
+                decoder_bit_depth: None,
+                reason: String::new(),
+            },
+            MediaError::DeliveryColor(crate::DeliveryColorError::UnsupportedCodec {
+                observed: String::new(),
+                allowed: "",
+            }),
+            MediaError::DeliveryVerification(crate::DeliveryVerificationError::NotFullResolution {
+                observed: String::new(),
+                allowed: "",
+            }),
+            MediaError::ColorQc(crate::ColorQcError::EmptyPopulation {
+                observed: String::new(),
+                allowed: "",
+            }),
+            MediaError::MixSpectrumRangeTooShort {
+                sample_frames: 1,
+                required: 2,
+            },
+            MediaError::MixLoudnessRangeTooShort {
+                sample_frames: 1,
+                required: 2,
+            },
+            MediaError::SourceColor(crate::ColorSourceError::UnknownPrimaries),
+            MediaError::SourceColorForAsset(Box::new(SourceColorRefusal {
+                asset: crate::AssetId(1),
+                path: std::path::PathBuf::new(),
+                error: crate::ColorSourceError::UnknownPrimaries,
+                description: crate::ColorDescription::unknown(),
+                assumption: None,
+            })),
+            MediaError::MatteProof(proof),
+            MediaError::MatteCoverage(coverage),
+            MediaError::Backend(String::new()),
+        ];
+        assert_eq!(every_variant.len(), 13);
+        assert_eq!(
+            every_variant
+                .iter()
+                .filter(|error| error.recovery_code().is_some())
+                .count(),
+            8
+        );
     }
 }

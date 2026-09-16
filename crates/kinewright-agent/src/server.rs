@@ -1582,6 +1582,9 @@ impl KinewrightMcp {
         match self.core.request(Command::DoIfRevision {
             expected: expected_revision,
             operation,
+            // IN1b §4 rule 3: the synchronous request reads its own reply, so
+            // it has nothing to correlate.
+            token: None,
         }) {
             Ok(Event::DocumentChanged { doc, revision, .. }) => {
                 if self.publish_to_playback {
@@ -1599,9 +1602,9 @@ impl KinewrightMcp {
             }
             Ok(Event::OpRejected { error, .. }) => error_text(error.to_string()),
             Ok(Event::BatchRejected { error, .. }) => error_text(error.to_string()),
-            Ok(Event::RevisionConflict { expected, actual }) => {
-                revision_conflict_text(expected, actual)
-            }
+            Ok(Event::RevisionConflict {
+                expected, actual, ..
+            }) => revision_conflict_text(expected, actual),
             Ok(_) => error_text("Core returned the wrong operation result"),
             Err(error) => error_text(error.to_string()),
         }
@@ -1694,9 +1697,9 @@ impl KinewrightMcp {
             Event::BatchRejected { error, .. } => {
                 error_text(render_plan_outcomes(operations, Some(&error), None))
             }
-            Event::RevisionConflict { expected, actual } => {
-                revision_conflict_text(expected, actual)
-            }
+            Event::RevisionConflict {
+                expected, actual, ..
+            } => revision_conflict_text(expected, actual),
             _ => error_text("Core returned the wrong edit-plan result"),
         })
     }
@@ -2506,9 +2509,9 @@ impl KinewrightMcp {
                     "recovery_action": "Call get_color_context for the current node stack and asset table, then resend at the current timeline_revision.",
                 }),
             )),
-            Event::RevisionConflict { expected, actual } => {
-                Err(lut_revision_conflict(tool, expected, actual))
-            }
+            Event::RevisionConflict {
+                expected, actual, ..
+            } => Err(lut_revision_conflict(tool, expected, actual)),
             _ => Err(lut_tool_error(
                 tool,
                 "core_rejected",
@@ -16453,7 +16456,14 @@ fn verify_claimed_outcome(
     if matches!(outcome, ResolveIncidentOutcome::Explained) {
         return None;
     }
-    let kinewright_core::IncidentSubject::Asset(asset_id) = incident.subject;
+    // `IN1b` §3.8 break 5: `IncidentSubject` has seven variants after Part B
+    // and only the asset-scoped one has a document claim to verify. The
+    // per-code verification of `IN1b` §6.1 is implementer D's; this arm keeps
+    // Part A's behaviour for the asset subject and records every other subject
+    // without a document check.
+    let kinewright_core::IncidentSubject::Asset(asset_id) = incident.subject else {
+        return None;
+    };
     let code = match outcome {
         ResolveIncidentOutcome::Applied => "incident_not_applied",
         ResolveIncidentOutcome::Reverted => "incident_not_reverted",
@@ -16473,7 +16483,9 @@ fn verify_claimed_outcome(
             "Call get_timeline_state, then resolve the incident against an asset the project still holds.",
         ));
     };
-    let probed = incident.evidence.probed();
+    // `IN1b` §3.4 rule 25 row 8: `probed()` is an `Option` after Part B, and
+    // evidence that carries no probed description has no colour claim to check.
+    let probed = incident.evidence.probed()?;
     match outcome {
         // The caller applied the recovery: the asset must now carry the
         // agent's assumption and must remember what it replaced.
@@ -16780,7 +16792,7 @@ mod tests {
     };
     use kinewright_core::{
         ColorSourceError, IncidentEvidence, IncidentObservation, IncidentState, IncidentSubject,
-        Observed, POLICY, SourceColorIncident,
+        Observed, SourceColorIncident,
     };
     use serde_json::json;
     use std::{
@@ -25983,10 +25995,10 @@ mod tests {
     /// One observation built the way IN1 §2.3b rule 24 requires: every string
     /// comes from a core accessor and none is formatted here.
     fn in1_observation(error: &ColorSourceError, probed: &ColorDescription) -> IncidentObservation {
-        let incident =
-            SourceColorIncident::from_source_error(error).expect("the fixture code is an incident");
         IncidentObservation {
-            code: kinewright_core::IncidentCode::SourceColor(incident),
+            code: kinewright_core::IncidentCode::SourceColor(
+                SourceColorIncident::from_source_error(error),
+            ),
             subject: IncidentSubject::Asset(AssetId(1)),
             observed: error.observed(),
             allowed: Some(error.allowed_values().to_owned()),
@@ -26019,6 +26031,9 @@ mod tests {
                 matrix: ColorMatrix::Bt709,
                 range: ColorRange::Limited,
             },
+            // The thirteenth: `unknown_source_white_point` is a code after
+            // `IN1b` §3.2 rule 16 (erratum `IN1b`-R4).
+            ColorSourceError::UnknownWhitePoint,
         ]
     }
 
@@ -26180,8 +26195,16 @@ mod tests {
             worst = worst.max(bytes);
             measured += 1;
         }
-        assert_eq!(measured, POLICY.len());
-        println!("in1 worst-of-twelve incident = {worst} B");
+        // Thirteen classifier variants, not `POLICY.len()`: after `IN1b` §3.2
+        // rule 12 the table has 67 rows and this loop quantifies over the
+        // colour codes alone. Implementer D rewrites the whole test as
+        // `in1b_every_code_fits_the_measured_ceiling`, over 67 codes x seven
+        // subject shapes, and moves the ceiling from 1 024 to 2 048
+        // (`IN1b` §9 clause 16); core's
+        // `in1b_every_code_fits_the_measured_ceiling_on_every_subject_shape`
+        // carries the measurement in the meantime.
+        assert_eq!(measured, 13);
+        println!("in1 worst-of-thirteen incident = {worst} B");
         assert!(
             worst > IN1_INCIDENT_SERIALIZED_CEILING_BYTES / 2,
             "the ceiling is the smallest power of two above the measured worst of {worst} B"

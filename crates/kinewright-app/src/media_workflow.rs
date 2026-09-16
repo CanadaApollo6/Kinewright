@@ -1096,6 +1096,8 @@ impl KinewrightApp {
                     .send(Command::DoIfRevision {
                         expected: intent.expected_revision,
                         operation: intent.operation,
+                        // `IN1b` §4 rule 3: this send does not correlate yet.
+                        token: None,
                     })
                     .is_err()
                 {
@@ -1310,6 +1312,8 @@ impl KinewrightApp {
             .send(Command::DoIfRevision {
                 expected: expected_revision,
                 operation,
+                // `IN1b` §4 rule 3: this send does not correlate yet.
+                token: None,
             })
             .is_err()
         {

@@ -35,6 +35,13 @@ impl std::fmt::Display for TimelineRevision {
     }
 }
 
+/// An in-process correlation id for one revision-gated send (`IN1b` §4 rule 2).
+///
+/// Never serialised: it exists so a router can match a refusal to the send it
+/// refused by identity rather than by `(project, expected)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CommandToken(pub u64);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Do(Operation),
@@ -58,6 +65,9 @@ pub enum Command {
     DoIfRevision {
         expected: TimelineRevision,
         operation: Operation,
+        /// Echoed on whichever event this send produces (`IN1b` §4 rule 3).
+        /// `None` means "this send does not care".
+        token: Option<CommandToken>,
     },
     /// Apply one atomic batch only if the caller planned it against the current revision.
     DoBatchIfRevision {
@@ -101,6 +111,8 @@ pub enum Event {
         /// Exact accepted history command. `None` is reserved for the initial
         /// snapshot sent to a new subscriber.
         journal_command: Option<JournalCommand>,
+        /// The token of the `DoIfRevision` that landed, when there was one.
+        token: Option<CommandToken>,
     },
     OpRejected {
         op: Operation,
@@ -113,6 +125,8 @@ pub enum Event {
     RevisionConflict {
         expected: TimelineRevision,
         actual: TimelineRevision,
+        /// The token of the refused send, when it carried one.
+        token: Option<CommandToken>,
     },
     QueryResult(QueryResult),
 }
@@ -363,6 +377,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
                         revision: state.revision,
                         last_op: None,
                         journal_command: None,
+                        token: None,
                     })
                     .is_ok()
                 {
@@ -384,7 +399,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
 
 fn execute_command(state: &mut CoreState, command: Command) -> Event {
     match command {
-        Command::Do(operation) => execute_operation(state, operation),
+        Command::Do(operation) => execute_operation(state, operation, None),
         Command::DoBatch(operations) => execute_batch(state, operations),
         Command::DoBatchCoalesced {
             operations,
@@ -393,12 +408,14 @@ fn execute_command(state: &mut CoreState, command: Command) -> Event {
         Command::DoIfRevision {
             expected,
             operation,
-        } => revision_conflict(state, expected)
-            .unwrap_or_else(|| execute_operation(state, operation)),
+            token,
+        } => revision_conflict(state, expected, token)
+            .unwrap_or_else(|| execute_operation(state, operation, token)),
         Command::DoBatchIfRevision {
             expected,
             operations,
-        } => revision_conflict(state, expected).unwrap_or_else(|| execute_batch(state, operations)),
+        } => revision_conflict(state, expected, None)
+            .unwrap_or_else(|| execute_batch(state, operations)),
         Command::Undo => {
             let doc = state.undo();
             Event::DocumentChanged {
@@ -406,6 +423,7 @@ fn execute_command(state: &mut CoreState, command: Command) -> Event {
                 revision: state.revision,
                 last_op: None,
                 journal_command: Some(JournalCommand::Undo),
+                token: None,
             }
         }
         Command::Redo => {
@@ -415,20 +433,30 @@ fn execute_command(state: &mut CoreState, command: Command) -> Event {
                 revision: state.revision,
                 last_op: None,
                 journal_command: Some(JournalCommand::Redo),
+                token: None,
             }
         }
         Command::Query(query) => Event::QueryResult(state.query(&query)),
     }
 }
 
-fn revision_conflict(state: &CoreState, expected: TimelineRevision) -> Option<Event> {
+fn revision_conflict(
+    state: &CoreState,
+    expected: TimelineRevision,
+    token: Option<CommandToken>,
+) -> Option<Event> {
     (expected != state.revision).then_some(Event::RevisionConflict {
         expected,
         actual: state.revision,
+        token,
     })
 }
 
-fn execute_operation(state: &mut CoreState, mut operation: Operation) -> Event {
+fn execute_operation(
+    state: &mut CoreState,
+    mut operation: Operation,
+    token: Option<CommandToken>,
+) -> Event {
     operation.canonicalize_legacy_effect_names();
     match state.do_operation(operation.clone()) {
         Ok(doc) => Event::DocumentChanged {
@@ -436,6 +464,7 @@ fn execute_operation(state: &mut CoreState, mut operation: Operation) -> Event {
             revision: state.revision,
             last_op: Some(operation.clone()),
             journal_command: Some(JournalCommand::Do(operation)),
+            token,
         },
         Err(error) => Event::OpRejected {
             op: operation,
@@ -454,6 +483,7 @@ fn execute_batch(state: &mut CoreState, mut operations: Vec<Operation>) -> Event
             revision: state.revision,
             last_op: None,
             journal_command: Some(JournalCommand::DoBatch(operations)),
+            token: None,
         },
         Err(error) => Event::BatchRejected { operations, error },
     }
@@ -472,6 +502,7 @@ fn execute_batch_coalesced(
             doc,
             revision: state.revision,
             last_op: None,
+            token: None,
             journal_command: Some(JournalCommand::DoBatchCoalesced {
                 operations,
                 coalesce_key: coalesce_key.to_owned(),
@@ -540,6 +571,7 @@ mod tests {
             revision: TimelineRevision(2),
             last_op: Some(last_op),
             journal_command: Some(JournalCommand::Do(journaled)),
+            token: None,
         } = core.request(Command::Do(operation.clone())).unwrap()
         else {
             panic!("expected accepted color override");
@@ -660,6 +692,102 @@ mod tests {
         ));
     }
 
+    /// `IN1b` §4 rule 5 and §9 clause 9: the actor echoes the token on both
+    /// events and invents one nowhere.
+    #[test]
+    fn in1b_a_correlation_token_is_echoed_on_both_the_conflict_and_the_change() {
+        let core = Core::spawn(Document::default()).unwrap();
+        let Event::QueryResult(QueryResult::Snapshot { revision, .. }) =
+            core.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("expected revisioned snapshot");
+        };
+        let landed = core
+            .request(Command::DoIfRevision {
+                expected: revision,
+                operation: Operation::AddAsset { asset: asset(1) },
+                token: Some(CommandToken(11)),
+            })
+            .unwrap();
+        assert!(matches!(
+            landed,
+            Event::DocumentChanged {
+                token: Some(CommandToken(11)),
+                ..
+            }
+        ));
+        let refused = core
+            .request(Command::DoIfRevision {
+                expected: revision,
+                operation: Operation::AddAsset { asset: asset(2) },
+                token: Some(CommandToken(12)),
+            })
+            .unwrap();
+        assert_eq!(
+            refused,
+            Event::RevisionConflict {
+                expected: revision,
+                actual: TimelineRevision(1),
+                token: Some(CommandToken(12)),
+            }
+        );
+        // The actor invents a token nowhere: every other command path that
+        // produces a `DocumentChanged` or a `RevisionConflict` emits `None`.
+        let plain = core
+            .request(Command::Do(Operation::AddAsset { asset: asset(3) }))
+            .unwrap();
+        assert!(matches!(plain, Event::DocumentChanged { token: None, .. }));
+        for command in [
+            Command::DoBatch(vec![Operation::AddAsset { asset: asset(4) }]),
+            Command::Undo,
+            Command::Redo,
+        ] {
+            let event = core.request(command.clone()).unwrap();
+            assert!(
+                matches!(event, Event::DocumentChanged { token: None, .. }),
+                "{command:?} must not carry a token"
+            );
+        }
+        // `DoBatchIfRevision` carries no token in either direction
+        // (`IN1b` §4 rule 4): its senders all use the synchronous
+        // `Core::request`, whose private reply channel is already an identity.
+        let batch = core
+            .request(Command::DoBatchIfRevision {
+                expected: TimelineRevision(0),
+                operations: vec![Operation::AddAsset { asset: asset(5) }],
+            })
+            .unwrap();
+        assert!(matches!(batch, Event::RevisionConflict { token: None, .. }));
+        let Event::QueryResult(QueryResult::Snapshot { revision: live, .. }) =
+            core.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("expected revisioned snapshot");
+        };
+        let batch = core
+            .request(Command::DoBatchIfRevision {
+                expected: live,
+                operations: vec![Operation::AddAsset { asset: asset(5) }],
+            })
+            .unwrap();
+        assert!(matches!(batch, Event::DocumentChanged { token: None, .. }));
+
+        // And the initial snapshot a new subscriber receives (`actor.rs`'s
+        // `Subscribe` path) carries `None` too.
+        let events = core.subscribe().unwrap();
+        let snapshot = events.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            matches!(
+                snapshot,
+                Event::DocumentChanged {
+                    journal_command: None,
+                    token: None,
+                    ..
+                }
+            ),
+            "the initial snapshot must not carry a token"
+        );
+    }
+
     #[test]
     fn revision_preconditions_reject_stale_work_without_touching_history() {
         let core = Core::spawn(Document::default()).unwrap();
@@ -676,6 +804,7 @@ mod tests {
             .request(Command::DoIfRevision {
                 expected: initial_revision,
                 operation: Operation::AddAsset { asset: asset(1) },
+                token: Some(CommandToken(7)),
             })
             .unwrap();
         assert!(matches!(
@@ -697,6 +826,8 @@ mod tests {
             Event::RevisionConflict {
                 expected: TimelineRevision(0),
                 actual: TimelineRevision(1),
+                // `DoBatchIfRevision` carries no token (`IN1b` §4 rule 4).
+                token: None,
             }
         );
 
@@ -829,6 +960,7 @@ mod tests {
             revision: TimelineRevision(1),
             last_op: None,
             journal_command: Some(JournalCommand::DoBatch(journaled)),
+            token: None,
         } = events.recv_timeout(Duration::from_secs(1)).unwrap()
         else {
             panic!("expected one batch document change");

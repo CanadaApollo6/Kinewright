@@ -190,9 +190,9 @@ fn apply_to_live(
             document: doc,
             operation_count,
         },
-        Event::RevisionConflict { expected, actual } => {
-            BranchApplyOutcome::Conflict { expected, actual }
-        }
+        Event::RevisionConflict {
+            expected, actual, ..
+        } => BranchApplyOutcome::Conflict { expected, actual },
         Event::BatchRejected { operations, error } => {
             BranchApplyOutcome::Rejected { operations, error }
         }
