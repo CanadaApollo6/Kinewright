@@ -14,8 +14,8 @@ use eframe::egui;
 use kinewright_core::{
     Analysis, AudioChain, Command, CommandToken, Document, Effect, EffectId, Event, Export,
     Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome, IncidentSubject,
-    JournalCommand, LabelIncident, LiveAudioChange, MediaAsset, MediaError, MediaEvent,
-    MixNoiseProfileRequest, MixSpectrumPoint, NOISE_PROFILE_BAND_COUNT,
+    InvestigatorPreferences, JournalCommand, LabelIncident, LiveAudioChange, MediaAsset,
+    MediaError, MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint, NOISE_PROFILE_BAND_COUNT,
     NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation, ParamValue, Playback, PlaybackState,
     PolicyClass, Rational, RecoveryKind, SilenceStatus, TimeCode, TimelineRevision, Track, TrackId,
     TrackKind, recovery_description,
@@ -554,6 +554,15 @@ impl KinewrightApp {
         app.playback
             .set_document(Arc::clone(&app.focused().document));
         app.playback.request_frame(TimeCode::ZERO);
+        // The investigator settings file is read once at startup (IN2 §2.1
+        // rule 6); a malformed file opens one incident and is left alone
+        // until the person changes a setting (rule 3).
+        let (settings_path, settings_durable) = crate::investigator::investigator_config_path();
+        let settings_load = crate::investigator::load_investigator_settings_for_run(
+            &settings_path,
+            settings_durable,
+        );
+        crate::investigator::apply_settings_load_for_run(&mut app, settings_load, settings_durable);
         let opened_path = app.focused().project_path.clone();
         if let Some(observation) = load_error {
             app.note_observation(observation);
@@ -636,7 +645,7 @@ impl KinewrightApp {
             .next_project_id
             .checked_add(1)
             .ok_or_else(|| "project session identity space is exhausted".to_owned())?;
-        ProjectSession::create(
+        let mut session = ProjectSession::create(
             id,
             name,
             document,
@@ -644,7 +653,18 @@ impl KinewrightApp {
             &self.playback,
             &self.analysis,
             &self.exporter,
-        )
+        )?;
+        // The investigator settings are app-wide: a new project inherits the
+        // focused copy rather than re-reading the file. Mutes stay
+        // per-project, from the opened document (IN2 §2.1, §2.4).
+        if let Some(focused) = self.projects.get(self.focused_project)
+            && let Some(source) = focused.investigator.as_ref()
+            && let Some(target) = session.investigator.as_mut()
+        {
+            target.settings = source.settings.clone();
+            target.settings_durable = source.settings_durable;
+        }
+        Ok(session)
     }
 
     pub(crate) fn focus_project(&mut self, index: usize) {
@@ -697,7 +717,32 @@ impl KinewrightApp {
     ) -> Result<ProjectSaveReport, ProjectSaveError> {
         let document = Arc::clone(&self.focused().document);
         let previous_store = self.focused().lut_store.clone();
-        let report = write_project_document(&document, path, previous_store.as_ref())?;
+        // The live investigator mutes travel in the saved bytes (IN2 §2.4).
+        // Preserve the original document only when the live list is exactly
+        // what the document already carries; removing the last mute must be a
+        // real save rather than an accidental write of the old snapshot.
+        let mutes = self
+            .focused()
+            .investigator
+            .as_ref()
+            .map(|session| session.muted_codes().to_vec())
+            .unwrap_or_default();
+        let document_mutes = document
+            .investigator
+            .as_ref()
+            .map(|preferences| preferences.muted_codes.clone())
+            .unwrap_or_default();
+        let snapshot;
+        let to_write = if mutes == document_mutes {
+            document.as_ref()
+        } else {
+            let mut injected = (*document).clone();
+            injected.investigator =
+                (!mutes.is_empty()).then_some(InvestigatorPreferences { muted_codes: mutes });
+            snapshot = injected;
+            &snapshot
+        };
+        let report = write_project_document(to_write, path, previous_store.as_ref())?;
         let name = project_name(Some(path), &self.focused().name);
         let (store, store_error) = match derive_lut_store(Some(path)) {
             Ok(store) => (store, None),
@@ -708,6 +753,9 @@ impl KinewrightApp {
         session.project_path = Some(path.to_path_buf());
         session.set_lut_store(store, store_error);
         session.saved_document = Some(Arc::clone(&session.document));
+        if let Some(investigator) = session.investigator.as_mut() {
+            investigator.note_mutes_saved();
+        }
         let library = session.rebuild_lut_library();
         session.publish_project_path_to_agents();
         let core = session.core.clone();
@@ -1134,39 +1182,48 @@ impl KinewrightApp {
         {
             // Nothing is outstanding, so nothing can be waiting on a landing.
             self.pending_router_landings.clear();
-            return;
-        }
-        let focused = self.focused_project;
-        // `media_events` is a single app-level receiver from the one engine,
-        // and the one engine plays the focused document, so the focused
-        // project owns every playback refusal (rule 5).
-        let mut opened = Vec::new();
-        if !observations.is_empty() {
-            let handle = Arc::clone(&self.projects[focused].incidents);
-            let mut log = handle
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for observation in observations {
-                // `Deduped` and `Suppressed` do nothing at all (rule 17).
-                if let Observed::Opened(id) = log.observe(observation) {
-                    opened.push(id);
+        } else {
+            let focused = self.focused_project;
+            // `media_events` is a single app-level receiver from the one engine,
+            // and the one engine plays the focused document, so the focused
+            // project owns every playback refusal (rule 5).
+            let mut opened = Vec::new();
+            if !observations.is_empty() {
+                let handle = Arc::clone(&self.projects[focused].incidents);
+                let mut log = handle
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for observation in observations {
+                    // `Deduped` and `Suppressed` do nothing at all (rule 17).
+                    // The observation is kept beside the id so the
+                    // investigator can reunite the open with its refused
+                    // operation below.
+                    if let Observed::Opened(id) = log.observe(observation.clone()) {
+                        opened.push((id, observation));
+                    }
                 }
             }
-        }
-        self.reconcile_router_sends(&conflicts);
-        let mut auto_applied = Vec::new();
-        for id in opened {
-            self.audit_new_incident(focused, id, &mut auto_applied);
-        }
-        if !auto_applied.is_empty() {
-            let handle = Arc::clone(&self.projects[focused].incidents);
-            let mut log = handle
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for id in auto_applied {
-                log.note_auto_applied(id);
+            self.reconcile_router_sends(&conflicts);
+            let mut auto_applied = Vec::new();
+            for (id, _) in &opened {
+                self.audit_new_incident(focused, *id, &mut auto_applied);
+            }
+            if !auto_applied.is_empty() {
+                let handle = Arc::clone(&self.projects[focused].incidents);
+                let mut log = handle
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for id in auto_applied {
+                    log.note_auto_applied(id);
+                }
+            }
+            for (id, observation) in &opened {
+                self.consider_investigator_queue(*id, observation);
             }
         }
+        // Outside the idle fast path: a finishing session reports through its
+        // own channel, never through an observation (IN2 §3.2).
+        self.pump_investigator_sessions();
     }
 
     /// Write one audit line for a newly opened incident and auto-apply it
@@ -1176,7 +1233,11 @@ impl KinewrightApp {
     /// predicate, and the operation sent is the one `policy_recovery`
     /// stored on the incident at observe time — the router builds no
     /// recovery itself (§2.5 rule 45).
-    fn audit_new_incident(
+    ///
+    /// `pub(crate)` for IN2's approve path, which reuses this funnel for
+    /// rule 18's audit line rather than opening a second `note_incident`
+    /// call site the sink gate forbids (`IN1b` §5.3 rule 18).
+    pub(crate) fn audit_new_incident(
         &mut self,
         project_index: usize,
         id: IncidentId,
@@ -1365,7 +1426,13 @@ impl KinewrightApp {
                     None => op.incident_subject(),
                 };
                 let revision = self.projects[project_index].revision;
-                self.note_observation(IncidentObservation::from_op_error(error, subject, revision));
+                let observation = IncidentObservation::from_op_error(error, subject, revision);
+                // The investigator replays the refused operation into its
+                // opening message; the incident id does not exist until the
+                // observation routes, so the operation waits beside it
+                // (IN2 §3.4 rule 22).
+                self.stash_refused_if_eligible(project_index, &observation, op);
+                self.note_observation(observation);
             }
             Event::BatchRejected { .. } | Event::QueryResult(_) => {}
         }
@@ -1912,9 +1979,14 @@ impl KinewrightApp {
                 Event::BatchRejected { operations, error } => {
                     let revision = self.projects[project_index].revision;
                     let subject = batch_incident_subject(&operations);
-                    self.note_observation(IncidentObservation::from_batch_error(
-                        &error, subject, revision,
-                    ));
+                    let observation =
+                        IncidentObservation::from_batch_error(&error, subject, revision);
+                    // The investigator needs the refused plan in its opening
+                    // message just as it needs a refused single operation.
+                    // Keep the first operation beside the observation before
+                    // routing creates the incident id.
+                    self.stash_batch_refused(project_index, &observation, &operations);
+                    self.note_observation(observation);
                     self.release_lut_import_reservation(project_index);
                 }
                 // Every router decision this event carries is made in
@@ -4465,11 +4537,14 @@ mod tests {
 /// §4.2's plumbing absent.
 #[cfg(test)]
 pub(crate) mod in1_tests {
+    use std::net::{SocketAddr, TcpStream};
     use std::time::Instant;
 
+    use kinewright_agent::{ScriptedCall, ScriptedCost, ScriptedDriver, ScriptedTurn};
     use kinewright_core::{
-        COLOR_CONFIDENCE_MAX_BASIS_POINTS, ColorBitDepth, ColorMatrix, ColorPrimaries,
-        ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, IncidentLog, IncidentState,
+        COLOR_CONFIDENCE_MAX_BASIS_POINTS, ColorBitDepth, ColorDescription, ColorMatrix,
+        ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint,
+        IncidentEvidence, IncidentLog, IncidentResolver, IncidentState, MediaBin, Observed,
         assume_rec709_operation, policy_recovery,
     };
     use kinewright_media::{
@@ -5775,6 +5850,10 @@ pub(crate) mod in1_tests {
     /// tested by contract (`IN1b` §10 limit 1); what is tested is that the
     /// panel lists **every** open incident whatever its subject, which is the
     /// property the Media panel's deliberate asset-only filter does not have.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression test names every subject and its panel state"
+    )]
     #[test]
     fn in1b_the_incidents_panel_lists_every_open_subject() {
         let (_fixture, mut app) = in1b_app();
@@ -5808,10 +5887,40 @@ pub(crate) mod in1_tests {
         );
         app.route_incidents();
         let handle = Arc::clone(&app.projects[0].incidents);
+        let investigating_id = {
+            let mut log = handle
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let id = log
+                .all()
+                .find(|incident| {
+                    incident.code
+                        == kinewright_core::IncidentCode::Label(
+                            kinewright_core::LabelIncident::Agent,
+                        )
+                })
+                .expect("the agent incident exists")
+                .id;
+            assert!(log.begin_investigation(id));
+            id
+        };
+        let investigating = crate::investigator::InvestigatingCard {
+            id: investigating_id,
+            turns: 1,
+            max_turns: 6,
+            input_tokens: 12,
+            output_tokens: 8,
+            tokens_known: true,
+            max_tokens: 40_000,
+            elapsed_secs: 1,
+            max_wall_secs: 90,
+        };
         let log = handle
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let rows = crate::incident_ui::incident_panel_rows(log.all());
+        let session_pairs = crate::investigator::InvestigatorSessionPairs::default();
+        let rows =
+            crate::incident_ui::incident_panel_rows(log.all(), Some(investigating), &session_pairs);
         assert_eq!(rows.len(), 5, "every open incident, not only the asset one");
         let labels: Vec<&str> = rows
             .iter()
@@ -5822,7 +5931,26 @@ pub(crate) mod in1_tests {
         assert!(labels.contains(&"Agent"));
         assert!(labels.contains(&"Look 7"));
         assert!(labels.iter().any(|label| label.starts_with("Asset ")));
+        let investigating_rows = rows
+            .iter()
+            .filter(|row| row.view.state_label == "Investigating")
+            .count();
+        assert_eq!(
+            investigating_rows, 1,
+            "the running row is visible in the panel"
+        );
         for row in &rows {
+            if row.view.state_label == "Investigating" {
+                let counter_rows = row
+                    .view
+                    .details
+                    .iter()
+                    .filter(|(key, _)| matches!(*key, "turns" | "tokens" | "elapsed"))
+                    .count();
+                assert_eq!(counter_rows, 3, "the running row has three counters");
+                assert_eq!(row.view.actions.len(), 1);
+                continue;
+            }
             assert_eq!(row.view.state_label, "Open");
             assert_eq!(
                 row.view.actions.len(),
@@ -6938,5 +7066,1947 @@ pub(crate) mod in1_tests {
         assert_eq!(log.len(), 0);
         drop(log);
         in1_shutdown(&mut app);
+    }
+
+    // ------------------------------------------------------------------
+    // IN2 stage C: the app-side investigator sessions.
+    // ------------------------------------------------------------------
+
+    fn in2_call(tool: &str, arguments: serde_json::Value) -> ScriptedCall {
+        ScriptedCall {
+            tool: tool.to_owned(),
+            arguments,
+        }
+    }
+
+    fn in2_cost(input_tokens: u64, output_tokens: u64) -> ScriptedCost {
+        ScriptedCost {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens: Some(2),
+            cache_creation_input_tokens: Some(3),
+            reasoning_output_tokens: Some(1),
+            cost_usd: Some(0.01),
+        }
+    }
+
+    fn in2_add_track(id: u64) -> Operation {
+        Operation::AddTrack {
+            track: Track {
+                id: TrackId(id),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: Vec::new(),
+            },
+        }
+    }
+
+    fn in2_upsert_bin(id: u64) -> Operation {
+        Operation::UpsertBin {
+            bin: MediaBin {
+                id: kinewright_core::BinId(id),
+                name: format!("in2-bin-{id}"),
+                parent: None,
+                assets: Vec::new(),
+            },
+        }
+    }
+
+    fn in2_remove_bin(id: u64) -> Operation {
+        Operation::RemoveBin {
+            bin: kinewright_core::BinId(id),
+        }
+    }
+
+    fn in2_allowlisted_code() -> IncidentCode {
+        IncidentCode::Label(LabelIncident::Agent)
+    }
+
+    fn in2_open_at(
+        app: &mut KinewrightApp,
+        project_index: usize,
+        code: IncidentCode,
+        subject: IncidentSubject,
+        observed: &str,
+    ) -> IncidentId {
+        let revision = app.projects[project_index].revision;
+        let observation = IncidentObservation::plain(code, subject, observed, revision);
+        let handle = Arc::clone(&app.projects[project_index].incidents);
+        let mut log = handle.write().unwrap();
+        let Observed::Opened(id) = log.observe(observation) else {
+            panic!("the IN2 fixture observation must open an incident");
+        };
+        id
+    }
+
+    fn in2_configure_scripted_at(
+        app: &mut KinewrightApp,
+        project_index: usize,
+        driver: ScriptedDriver,
+        budgets: crate::investigator::InvestigatorBudgets,
+    ) {
+        let session = app.projects[project_index]
+            .investigator
+            .as_mut()
+            .expect("every project owns investigator state");
+        session.settings.enabled = true;
+        session.settings.harness = Some("scripted".to_owned());
+        session.settings.budgets = budgets;
+        session.test_driver = Some(driver);
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the scripted fixture names every session input explicitly"
+    )]
+    fn in2_start_at(
+        app: &mut KinewrightApp,
+        project_index: usize,
+        driver: ScriptedDriver,
+        budgets: crate::investigator::InvestigatorBudgets,
+        code: IncidentCode,
+        subject: IncidentSubject,
+        observed: &str,
+        prompts: Vec<String>,
+        preload: Vec<Operation>,
+    ) -> IncidentId {
+        in2_configure_scripted_at(app, project_index, driver, budgets);
+        let id = in2_open_at(app, project_index, code, subject, observed);
+        {
+            let mut log = app.projects[project_index].incidents.write().unwrap();
+            assert!(
+                log.begin_investigation(id),
+                "the direct fixture enters investigating"
+            );
+        }
+        let queued = crate::investigator::QueuedIncident {
+            id,
+            code,
+            subject,
+            refused: None,
+        };
+        app.spawn_investigator_session(project_index, &queued, "scripted", prompts, preload)
+            .expect("the investigator branch and server start");
+        id
+    }
+
+    fn in2_configure_scripted(
+        app: &mut KinewrightApp,
+        driver: ScriptedDriver,
+        budgets: crate::investigator::InvestigatorBudgets,
+    ) {
+        in2_configure_scripted_at(app, 0, driver, budgets);
+    }
+
+    #[test]
+    fn in2_refused_operation_stash_is_empty_off_and_bounded_on() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let code = in2_allowlisted_code();
+        let operation = in2_add_track(900);
+        let revision = app.projects[0].revision;
+        let observation = |number| {
+            IncidentObservation::plain(
+                code,
+                IncidentSubject::Agent,
+                format!("stash-{number}"),
+                revision,
+            )
+        };
+        in2_configure_scripted(
+            &mut app,
+            ScriptedDriver::new(Vec::new()),
+            in2_default_budgets(),
+        );
+        app.set_investigator_enabled(false);
+        for number in 0..100 {
+            let current = observation(number);
+            app.stash_refused_if_eligible(0, &current, &operation);
+        }
+        let off_count = app.projects[0]
+            .investigator
+            .as_ref()
+            .expect("investigator state exists")
+            .pending_refused_count();
+        assert_eq!(off_count, 0, "off means no refused backlog");
+
+        app.set_investigator_enabled(true);
+        for number in 0..100 {
+            let current = observation(number);
+            app.stash_refused_if_eligible(0, &current, &operation);
+        }
+        let on_count = app.projects[0]
+            .investigator
+            .as_ref()
+            .expect("investigator state exists")
+            .pending_refused_count();
+        assert!(on_count > 0, "eligible refused edits are retained");
+        assert!(on_count <= 8, "the refused backlog is an eight-entry ring");
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_a_second_reinvestigate_press_on_a_queued_pair_is_successful() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let id = in2_open_at(
+            &mut app,
+            0,
+            in2_allowlisted_code(),
+            IncidentSubject::Agent,
+            "queued-reinvestigate",
+        );
+
+        assert!(app.reinvestigate(0, id));
+        assert!(
+            app.reinvestigate(0, id),
+            "a second press on the already-queued pair is still handled"
+        );
+        assert_eq!(
+            app.projects[0]
+                .investigator
+                .as_ref()
+                .expect("the project owns investigator state")
+                .queued_count(),
+            1,
+            "the repeated press does not duplicate the queued pair"
+        );
+        assert_eq!(in2_incident(&app, id).state, IncidentState::Open);
+        in2_cleanup(&mut app);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2_reinvestigate_card_uses_pair_level_running_queue_and_finished_state() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let code = in2_allowlisted_code();
+        let subject = IncidentSubject::Track(TrackId(77));
+        let first_revision = app.projects[0].revision;
+        let b_expected = in2_next_incident_id(&app);
+        let b_id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![in2_happy_turn(b_expected, first_revision, 77)]),
+            in2_default_budgets(),
+            code,
+            subject,
+            "pair-b-finished",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        assert!(matches!(
+            in2_incident(&app, b_id).state,
+            IncidentState::Open | IncidentState::Investigating
+        ));
+
+        // A is running while B still carries its fresh proposal.  The pair,
+        // rather than B's incident id, removes Re-investigate from B's card.
+        let a_id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![
+                ScriptedTurn::new(Vec::new(), "the pair is busy")
+                    .with_pause(Duration::from_secs(1)),
+            ]),
+            in2_default_budgets(),
+            code,
+            subject,
+            "pair-a-running",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        let running_pairs = app.investigator_session_pairs_for_project(0);
+        assert!(
+            !running_pairs.can_reinvestigate(b_id, code, subject),
+            "B cannot re-investigate while A holds the same pair"
+        );
+        let running_card = app.investigating_card_for_project(0);
+        let log = app.projects[0].incidents.read().unwrap();
+        let running_rows =
+            crate::incident_ui::incident_panel_rows(log.all(), running_card, &running_pairs);
+        let running_b = running_rows
+            .iter()
+            .find(|row| row.id == b_id)
+            .and_then(|row| row.proposal.as_ref())
+            .expect("B's fresh proposal remains visible");
+        assert!(
+            !running_b
+                .actions
+                .contains(&crate::investigator::ProposalAction::Reinvestigate)
+        );
+        drop(log);
+        app.set_investigator_enabled(false);
+        std::thread::sleep(Duration::from_millis(1_100));
+        app.set_investigator_enabled(true);
+
+        // Hold the app-wide cap on two other projects, then queue A.  B's
+        // card must see the queued pair even though this project has no
+        // running card of its own.
+        in2_add_project(&mut app, 2);
+        in2_add_project(&mut app, 3);
+        let _cap_first = in2_start_at(
+            &mut app,
+            1,
+            ScriptedDriver::new(vec![
+                ScriptedTurn::new(Vec::new(), "cap one").with_pause(Duration::from_millis(500)),
+            ]),
+            in2_default_budgets(),
+            IncidentCode::Label(LabelIncident::Project),
+            IncidentSubject::Project,
+            "pair-cap-one",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        let _cap_second = in2_start_at(
+            &mut app,
+            2,
+            ScriptedDriver::new(vec![
+                ScriptedTurn::new(Vec::new(), "cap two").with_pause(Duration::from_millis(500)),
+            ]),
+            in2_default_budgets(),
+            IncidentCode::Label(LabelIncident::Media),
+            IncidentSubject::Agent,
+            "pair-cap-two",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        assert_eq!(
+            app.investigator_running_count(),
+            2,
+            "the app-wide cap holds while A is queued"
+        );
+        assert!(app.reinvestigate(0, a_id));
+        let queued_pairs = app.investigator_session_pairs_for_project(0);
+        assert!(
+            !queued_pairs.can_reinvestigate(b_id, code, subject),
+            "B cannot re-investigate while A holds the queued pair"
+        );
+        let queued_card = app.investigating_card_for_project(0);
+        let log = app.projects[0].incidents.read().unwrap();
+        let queued_rows =
+            crate::incident_ui::incident_panel_rows(log.all(), queued_card, &queued_pairs);
+        let queued_b = queued_rows
+            .iter()
+            .find(|row| row.id == b_id)
+            .and_then(|row| row.proposal.as_ref())
+            .expect("B's proposal remains visible while A waits");
+        assert!(
+            !queued_b
+                .actions
+                .contains(&crate::investigator::ProposalAction::Reinvestigate)
+        );
+        drop(log);
+
+        // Release the cap and start the same A incident to completion.  With
+        // no holder left, B's card shows Re-investigate and the real press
+        // succeeds, staling B's old proposal before its new session starts.
+        app.set_investigator_enabled(false);
+        std::thread::sleep(Duration::from_millis(600));
+        app.set_investigator_enabled(true);
+        {
+            let mut log = app.projects[0].incidents.write().unwrap();
+            assert!(log.begin_investigation(a_id));
+        }
+        let queued = crate::investigator::QueuedIncident {
+            id: a_id,
+            code,
+            subject,
+            refused: None,
+        };
+        app.spawn_investigator_session(
+            0,
+            &queued,
+            "scripted",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        )
+        .expect("the finished-pair session starts");
+        in2_pump_until_finished(&mut app);
+        let finished_pairs = app.investigator_session_pairs_for_project(0);
+        assert!(
+            finished_pairs.can_reinvestigate(b_id, code, subject),
+            "B can re-investigate after A finishes"
+        );
+        let finished_card = app.investigating_card_for_project(0);
+        let log = app.projects[0].incidents.read().unwrap();
+        let finished_rows =
+            crate::incident_ui::incident_panel_rows(log.all(), finished_card, &finished_pairs);
+        let finished_b = finished_rows
+            .iter()
+            .find(|row| row.id == b_id)
+            .and_then(|row| row.proposal.as_ref())
+            .expect("B's finished-pair proposal remains visible");
+        assert!(
+            finished_b
+                .actions
+                .contains(&crate::investigator::ProposalAction::Reinvestigate)
+        );
+        drop(log);
+        assert!(
+            app.reinvestigate(0, b_id),
+            "the shown pair-level Re-investigate action succeeds"
+        );
+        assert!(
+            in2_incident(&app, b_id)
+                .proposal
+                .as_ref()
+                .is_some_and(|proposal| proposal.stale),
+            "the new B session stales its old proposal"
+        );
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_saving_after_unmuting_last_code_removes_document_mute() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let temporary = TempDirectory::new("in2-mute-save");
+        let path = temporary.path("project.kinewright");
+        let code = in2_allowlisted_code();
+        app.mute_investigator_code(0, code);
+        app.write_project(&path).expect("the muted project saves");
+        let muted: Document = load_document(&path).expect("the muted project reopens");
+        assert_eq!(
+            muted
+                .investigator
+                .as_ref()
+                .map(|prefs| prefs.muted_codes.as_slice()),
+            Some([code.code().to_owned()].as_slice()),
+            "the live mute is injected into the project bytes"
+        );
+
+        assert!(app.unmute_investigator_code(0, code.code()));
+        app.write_project(&path).expect("the unmuted project saves");
+        let reopened: Document = load_document(&path).expect("the unmuted project reopens");
+        assert!(
+            reopened.investigator.is_none()
+                || reopened
+                    .investigator
+                    .as_ref()
+                    .is_some_and(|prefs| prefs.muted_codes.is_empty()),
+            "saving the empty live mute list removes the old document mute"
+        );
+        in2_cleanup(&mut app);
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the scripted fixture names every session input explicitly"
+    )]
+    fn in2_start_direct(
+        app: &mut KinewrightApp,
+        driver: ScriptedDriver,
+        budgets: crate::investigator::InvestigatorBudgets,
+        code: IncidentCode,
+        subject: IncidentSubject,
+        observed: &str,
+        prompts: Vec<String>,
+        preload: Vec<Operation>,
+    ) -> IncidentId {
+        in2_start_at(
+            app, 0, driver, budgets, code, subject, observed, prompts, preload,
+        )
+    }
+
+    fn in2_default_budgets() -> crate::investigator::InvestigatorBudgets {
+        crate::investigator::InvestigatorBudgets {
+            max_turns: 6,
+            max_wall_time_seconds: 30,
+            max_tokens: 40_000,
+        }
+    }
+
+    fn in2_add_project(app: &mut KinewrightApp, id: u64) {
+        let project = ProjectSession::create(
+            id,
+            format!("IN2 project {id}"),
+            Document::default(),
+            None,
+            &app.playback,
+            &app.analysis,
+            &app.exporter,
+        )
+        .expect("the second IN2 project builds");
+        app.projects.push(project);
+    }
+
+    fn in2_happy_turn(id: IncidentId, revision: TimelineRevision, track: u64) -> ScriptedTurn {
+        ScriptedTurn::new(
+            vec![
+                in2_call("get_timeline_state", serde_json::json!({})),
+                in2_call(
+                    "search_capabilities",
+                    serde_json::json!({"queries": ["incident"]}),
+                ),
+                in2_call(
+                    "get_capability",
+                    serde_json::json!({"names": ["get_incidents", "propose_fix"]}),
+                ),
+                in2_call(
+                    "prepare_edit_plan",
+                    serde_json::json!({
+                        "expected_revision": revision.0,
+                        "operations": [{
+                            "op": "add_track",
+                            "track": {"id": track, "kind": "Video", "clips": []}
+                        }]
+                    }),
+                ),
+                in2_call(
+                    "commit_edit_plan",
+                    serde_json::json!({"plan_id": 1, "expected_revision": revision.0}),
+                ),
+                in2_call(
+                    "invoke_capability",
+                    serde_json::json!({
+                        "name": "propose_fix",
+                        "arguments": {
+                            "incident_id": id.0,
+                            "explanation": "Add a clean video track."
+                        }
+                    }),
+                ),
+            ],
+            "The branch proves the fix and records the proposal.",
+        )
+        .with_cost(in2_cost(17, 11))
+    }
+
+    fn in2_proposal_call(id: IncidentId) -> ScriptedCall {
+        in2_call(
+            "invoke_capability",
+            serde_json::json!({
+                "name": "propose_fix",
+                "arguments": {
+                    "incident_id": id.0,
+                    "explanation": "The branch carries the smallest safe fix."
+                }
+            }),
+        )
+    }
+
+    fn in2_pump_until_finished(app: &mut KinewrightApp) {
+        let expiry = Instant::now() + IN1_APP_DEADLINE;
+        loop {
+            app.pump_investigator_sessions();
+            let running = app.investigator_running_count();
+            if running == 0 {
+                return;
+            }
+            assert!(
+                Instant::now() < expiry,
+                "the investigator session did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn in2_cleanup(app: &mut KinewrightApp) {
+        let mut detached_reaper_needed = false;
+        for project in &mut app.projects {
+            let incidents = Arc::clone(&project.incidents);
+            if let Some(session) = project.investigator.as_mut() {
+                detached_reaper_needed |= session.is_running();
+                session.shutdown_for_close("IN2 test cleanup", &incidents);
+            }
+        }
+        in1_shutdown(app);
+        if detached_reaper_needed {
+            // Cancellation is deliberately non-joining on the frame thread;
+            // give the detached reapers time to drain their test harnesses
+            // before the test drops the app fixture.
+            std::thread::sleep(Duration::from_millis(450));
+        } else {
+            // Let the fixture's ordinary core actor observe its shutdown too;
+            // this keeps tests that only changed investigator settings from
+            // racing process teardown.
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn in2_incident(app: &KinewrightApp, id: IncidentId) -> Incident {
+        in1_incident(app, id)
+    }
+
+    fn in2_open_end_dedups(
+        app: &mut KinewrightApp,
+        id: IncidentId,
+        code: IncidentCode,
+        subject: IncidentSubject,
+        observed: &str,
+    ) -> bool {
+        if in2_incident(app, id).state != IncidentState::Open {
+            return false;
+        }
+        let observation =
+            IncidentObservation::plain(code, subject, observed, app.projects[0].revision);
+        let mut log = app.projects[0].incidents.write().unwrap();
+        matches!(log.observe(observation), Observed::Deduped(found) if found == id)
+    }
+
+    fn in2_next_incident_id(app: &KinewrightApp) -> IncidentId {
+        let next = app.projects[0]
+            .incidents
+            .read()
+            .unwrap()
+            .all()
+            .map(|incident| incident.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        IncidentId(next)
+    }
+
+    #[test]
+    fn in2_a_session_starts_only_for_an_allowlisted_unmuted_code() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        app.projects[0].project_path = Some(PathBuf::from("/tmp/in2/session/project.kinewright"));
+        assert_eq!(
+            crate::investigator::investigator_working_directory(
+                app.projects[0].project_path.as_deref()
+            ),
+            Some(PathBuf::from("/tmp/in2/session")),
+            "a saved project session starts its driver in the project parent"
+        );
+        let codes = [
+            IncidentCode::Operation(kinewright_core::IncidentFamily::Bounds),
+            IncidentCode::Label(LabelIncident::Operations),
+            IncidentCode::Operation(kinewright_core::IncidentFamily::Malformed),
+            IncidentCode::Media(kinewright_core::MediaIncident::UnsupportedDecoderFormat),
+            IncidentCode::DeliveryColor(kinewright_core::DeliveryColorIncident::UnsupportedCodec),
+            IncidentCode::Label(LabelIncident::AgentBranch),
+        ];
+        let mut started_codes = Vec::new();
+        for (number, code) in codes.into_iter().enumerate() {
+            let expected = in2_next_incident_id(&app);
+            let subject = IncidentSubject::Track(TrackId(100 + number as u64));
+            let observed = format!("allowlisted-{number}");
+            in2_configure_scripted(
+                &mut app,
+                ScriptedDriver::new(vec![ScriptedTurn::new(Vec::new(), "done")]),
+                in2_default_budgets(),
+            );
+            app.note_observation(IncidentObservation::plain(
+                code,
+                subject,
+                observed,
+                app.projects[0].revision,
+            ));
+            app.route_incidents();
+            let id = expected;
+            assert_eq!(id, expected, "the allowlisted incident gets a stable id");
+            assert_eq!(
+                in2_incident(&app, id).state,
+                IncidentState::Investigating,
+                "the production allowlist/enabled/harness gate starts this code"
+            );
+            started_codes.push(in2_incident(&app, id).code);
+            in2_pump_until_finished(&mut app);
+        }
+        assert_eq!(
+            started_codes.len(),
+            6,
+            "sessions start for six distinct allowlisted codes"
+        );
+        assert_eq!(
+            started_codes
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            6,
+            "the six session starts cover six distinct codes"
+        );
+        assert!(
+            started_codes.contains(&IncidentCode::Operation(
+                kinewright_core::IncidentFamily::Bounds
+            )),
+            "the counted population includes operation_bounds"
+        );
+        assert!(
+            started_codes.contains(&IncidentCode::Label(LabelIncident::Operations)),
+            "the counted population includes operations_unclassified"
+        );
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_no_session_starts_for_the_three_auto_apply_codes() {
+        let (_fixture, mut app) = in1b_app();
+        let driver = ScriptedDriver::new(vec![ScriptedTurn::new(Vec::new(), "unused")]);
+        in2_configure_scripted(&mut app, driver, in2_default_budgets());
+        let asset = app.focused().document.media_pool[0].id;
+        let probed = ColorDescription::default();
+        let codes = [
+            kinewright_core::SourceColorIncident::UnknownPrimaries,
+            kinewright_core::SourceColorIncident::UnknownTransfer,
+            kinewright_core::SourceColorIncident::UnknownMatrix,
+        ];
+        let mut attempted = 0_usize;
+        let mut applied = 0_usize;
+        let mut router_telemetry_empty = 0_usize;
+        for source_code in codes {
+            let code = IncidentCode::SourceColor(source_code);
+            let observation = IncidentObservation {
+                code,
+                subject: IncidentSubject::Asset(asset),
+                observed: format!("in2-auto-{}", code.code()),
+                allowed: Some("Rec.709".to_owned()),
+                evidence: IncidentEvidence::SourceColor {
+                    probed: probed.clone(),
+                    assumption: None,
+                },
+                revision: app.projects[0].revision,
+            };
+            app.note_observation(observation);
+            app.route_incidents();
+            attempted += 1;
+            in1_poll_production_until(&mut app, |app| {
+                let log = app.projects[0].incidents.read().unwrap();
+                log.all().any(|incident| {
+                    incident.code == code
+                        && incident.state == IncidentState::Resolved(IncidentOutcome::Applied)
+                })
+            });
+            let log = app.projects[0].incidents.read().unwrap();
+            if log.all().any(|incident| {
+                incident.code == code
+                    && incident.state == IncidentState::Resolved(IncidentOutcome::Applied)
+            }) {
+                applied += 1;
+                if let Some(incident) = log.all().find(|incident| incident.code == code) {
+                    let telemetry = incident.telemetry.clone();
+                    let none_fields = [
+                        telemetry.input_tokens,
+                        telemetry.cached_input_tokens,
+                        telemetry.cache_creation_input_tokens,
+                        telemetry.output_tokens,
+                        telemetry.reasoning_output_tokens,
+                        telemetry.cost_usd_millionths.map(i64::cast_unsigned),
+                        telemetry.turns.map(u64::from),
+                        telemetry.resolver.as_ref().map(|_| 1_u64),
+                    ]
+                    .into_iter()
+                    .filter(Option::is_none)
+                    .count();
+                    router_telemetry_empty += usize::from(none_fields == 8);
+                }
+            }
+        }
+        assert!(attempted > 0, "three auto-apply codes were attempted");
+        assert_eq!(
+            app.investigator_running_count(),
+            0,
+            "auto-apply codes start no session"
+        );
+        assert!(
+            applied > 0,
+            "the router still landed at least one auto-apply"
+        );
+        assert_eq!(attempted, 3, "all three auto-apply codes were attempted");
+        assert_eq!(applied, 3, "all three auto-apply landings arrived");
+        let sessions = app.investigator_running_count();
+        assert_eq!(
+            sessions, 0,
+            "the three auto-apply codes start zero sessions"
+        );
+        assert_eq!(
+            router_telemetry_empty, 3,
+            "all eight telemetry fields stay empty on router resolutions"
+        );
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_the_queue_dedups_by_code_and_subject_and_caps_at_two() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        in2_add_project(&mut app, 2);
+        let slow = |message: &str| {
+            ScriptedDriver::new(vec![
+                ScriptedTurn::new(Vec::new(), message).with_pause(Duration::from_millis(400)),
+            ])
+        };
+        let budgets = in2_default_budgets();
+        let first = in2_start_at(
+            &mut app,
+            0,
+            slow("first"),
+            budgets.clone(),
+            IncidentCode::Label(LabelIncident::Agent),
+            IncidentSubject::Agent,
+            "cap-first",
+            vec!["first".to_owned()],
+            Vec::new(),
+        );
+        let second = in2_start_at(
+            &mut app,
+            1,
+            slow("second"),
+            budgets,
+            IncidentCode::Label(LabelIncident::Project),
+            IncidentSubject::Project,
+            "cap-second",
+            vec!["second".to_owned()],
+            Vec::new(),
+        );
+        let queued = in2_open_at(
+            &mut app,
+            0,
+            IncidentCode::Label(LabelIncident::Media),
+            IncidentSubject::Agent,
+            "cap-queued",
+        );
+        let queued_item = crate::investigator::QueuedIncident {
+            id: queued,
+            code: IncidentCode::Label(LabelIncident::Media),
+            subject: IncidentSubject::Agent,
+            refused: None,
+        };
+        let duplicate = queued_item.clone();
+        let first_queue = app.projects[0]
+            .investigator
+            .as_mut()
+            .unwrap()
+            .enqueue(queued_item);
+        let duplicate_queue = app.projects[0]
+            .investigator
+            .as_mut()
+            .unwrap()
+            .enqueue(duplicate);
+        app.pump_investigator_sessions();
+        let running = app.investigator_running_count();
+        let queued_count = app.projects[0]
+            .investigator
+            .as_ref()
+            .unwrap()
+            .queued_count();
+        assert!(running > 0, "at least one session is running");
+        assert_eq!(running, 2, "the app-wide investigator cap is two");
+        assert!(
+            queued_count > 0,
+            "the third incident remains queued at the cap"
+        );
+        assert!(first_queue, "the first pair enters the queue");
+        assert!(
+            !duplicate_queue,
+            "the same code and subject are deduplicated"
+        );
+        assert!(
+            first.0 > 0 && second.0 > 0,
+            "both capped sessions have stable ids"
+        );
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_the_investigating_card_shows_its_three_counters() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![
+                ScriptedTurn::new(Vec::new(), "working").with_pause(Duration::from_millis(250)),
+            ]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Agent,
+            "counters",
+            vec!["work".to_owned()],
+            Vec::new(),
+        );
+        let card = app
+            .investigating_card_for_project(0)
+            .expect("the running session publishes a card");
+        let log = app.projects[0].incidents.read().unwrap();
+        let session_pairs = app.investigator_session_pairs_for_project(0);
+        let rows = crate::incident_ui::incident_panel_rows(log.all(), Some(card), &session_pairs);
+        let row = rows
+            .iter()
+            .find(|row| row.id == id)
+            .expect("the investigating incident is listed");
+        let counter_rows = row
+            .view
+            .details
+            .iter()
+            .filter(|(key, _)| matches!(*key, "turns" | "tokens" | "elapsed"))
+            .count();
+        assert!(counter_rows > 0, "the card has running counter rows");
+        assert_eq!(counter_rows, 3, "turns, tokens and elapsed are all visible");
+        assert_eq!(row.view.state_label, "Investigating");
+        drop(log);
+        in2_pump_until_finished(&mut app);
+        assert!(in2_incident(&app, id).telemetry.turns.is_some());
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_the_stopped_card_offers_reinvestigate() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let mut budgets = in2_default_budgets();
+        budgets.max_turns = 1;
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![
+                ScriptedTurn::new(Vec::new(), "one"),
+                ScriptedTurn::new(Vec::new(), "two"),
+            ]),
+            budgets,
+            in2_allowlisted_code(),
+            IncidentSubject::Agent,
+            "stopped",
+            vec!["one".to_owned(), "two".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        let incident = in2_incident(&app, id);
+        assert_eq!(incident.state, IncidentState::Open);
+        assert!(matches!(
+            incident.telemetry.resolver,
+            Some(IncidentResolver::Session { .. })
+        ));
+        let view = incident_card(&incident, false);
+        let stopped_rows = view
+            .details
+            .iter()
+            .filter(|(key, _)| *key == "stopped")
+            .count();
+        assert!(
+            stopped_rows > 0,
+            "an open stopped session prints its reason"
+        );
+        let stopped = view
+            .details
+            .iter()
+            .find(|(key, _)| *key == "stopped")
+            .map(|(_, value)| value.as_str())
+            .expect("the stopped sentence is present");
+        assert!(stopped.contains("Investigation stopped:"));
+        assert!(stopped.contains("Press Re-investigate"));
+        assert_eq!(
+            stopped.matches(':').count(),
+            1,
+            "the person-facing row has one colon"
+        );
+        assert!(!stopped.contains("scripted"));
+        assert!(!stopped.contains("BranchError"));
+        assert!(view.reinvestigate, "the stopped card offers re-investigate");
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2_the_proposal_card_offers_approve_reject_and_reinvestigate() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let first_revision = app.projects[0].revision;
+        let first_id = in2_next_incident_id(&app);
+        let first_id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![in2_happy_turn(first_id, first_revision, 31)]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Agent,
+            "proposal-card-approve",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        let first_view = {
+            let incident = in2_incident(&app, first_id);
+            crate::investigator::proposal_card(
+                &incident,
+                incident
+                    .proposal
+                    .as_ref()
+                    .expect("the proposal is recorded"),
+            )
+        };
+        assert_eq!(first_view.actions.len(), 3);
+        assert!(!first_view.operation_summary.is_empty());
+        assert!(first_view.operation_summary[0].contains("Agent"));
+        assert!(
+            first_view
+                .operation_summary
+                .iter()
+                .all(|line| !line.contains("IncidentSubject"))
+        );
+        assert!(first_view.approval_note.contains("one Undo"));
+        let first_before = app.projects[0].revision;
+        assert!(app.approve_investigator_proposal(0, first_id));
+        in1_drain_until_revision(&mut app, 0, first_before);
+        assert_eq!(
+            in2_incident(&app, first_id).state,
+            IncidentState::Resolved(IncidentOutcome::Applied)
+        );
+
+        let second_revision = app.projects[0].revision;
+        let second_expected = in2_next_incident_id(&app);
+        let second_id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![in2_happy_turn(second_expected, second_revision, 32)]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Project,
+            "proposal-card-reject",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        assert!(app.reject_investigator_proposal(0, second_id));
+        assert_eq!(
+            in2_incident(&app, second_id).state,
+            IncidentState::Resolved(IncidentOutcome::Rejected)
+        );
+
+        let third_revision = app.projects[0].revision;
+        let third_expected = in2_next_incident_id(&app);
+        let third_id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![
+                in2_happy_turn(third_expected, third_revision, 33),
+                ScriptedTurn::new(Vec::new(), "the re-investigated session ends"),
+            ]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(33)),
+            "proposal-card-reinvestigate",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        assert!(app.reinvestigate(0, third_id));
+        let third = in2_incident(&app, third_id);
+        assert!(
+            third
+                .proposal
+                .as_ref()
+                .is_some_and(|proposal| proposal.stale),
+            "re-investigate stales the previous proposal before the new session"
+        );
+        assert!(
+            app.investigator_running_count() > 0,
+            "re-investigate starts a new session"
+        );
+        let stale_running_card = crate::investigator::proposal_card_with_reinvestigate(
+            &third,
+            third
+                .proposal
+                .as_ref()
+                .expect("the old proposal remains on the incident"),
+            false,
+        );
+        assert!(
+            stale_running_card.actions.is_empty(),
+            "a stale proposal on its already-running incident has no dead button"
+        );
+
+        // A budget end returns to Open without staling a proposal, so the
+        // same three-card actions remain meaningful after the session thread
+        // is gone; exercise Approve on that Open entry.
+        in2_pump_until_finished(&mut app);
+        let budget_revision = app.projects[0].revision;
+        let budget_expected = in2_next_incident_id(&app);
+        let mut budget = in2_default_budgets();
+        budget.max_turns = 1;
+        let budget_id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![
+                in2_happy_turn(budget_expected, budget_revision, 34),
+                ScriptedTurn::new(Vec::new(), "the budget ends the session"),
+            ]),
+            budget,
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(34)),
+            "proposal-card-open-budget",
+            vec!["opening".to_owned(), "the next turn".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        let budget_incident = in2_incident(&app, budget_id);
+        assert_eq!(budget_incident.state, IncidentState::Open);
+        let budget_card = crate::investigator::proposal_card(
+            &budget_incident,
+            budget_incident
+                .proposal
+                .as_ref()
+                .expect("budget keeps proposal"),
+        );
+        assert_eq!(budget_card.actions.len(), 3);
+        let budget_before = app.projects[0].revision;
+        assert!(app.approve_investigator_proposal(0, budget_id));
+        in1_drain_until_revision(&mut app, 0, budget_before);
+        assert_eq!(
+            in2_incident(&app, budget_id).state,
+            IncidentState::Resolved(IncidentOutcome::Applied)
+        );
+
+        // The same Open-with-fresh-proposal card exposes Reject and
+        // Re-investigate too. Use separate incidents so every shown action is
+        // pressed against the exact state that rendered it.
+        let reject_revision = app.projects[0].revision;
+        let reject_expected = in2_next_incident_id(&app);
+        let mut reject_budget = in2_default_budgets();
+        reject_budget.max_turns = 1;
+        let reject_id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![
+                in2_happy_turn(reject_expected, reject_revision, 35),
+                ScriptedTurn::new(Vec::new(), "the budget ends the session"),
+            ]),
+            reject_budget,
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(35)),
+            "proposal-card-open-reject",
+            vec!["opening".to_owned(), "the next turn".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        let reject_incident = in2_incident(&app, reject_id);
+        let reject_card = crate::investigator::proposal_card(
+            &reject_incident,
+            reject_incident.proposal.as_ref().expect("reject proposal"),
+        );
+        assert_eq!(reject_card.actions.len(), 3);
+        assert!(app.reject_investigator_proposal(0, reject_id));
+        assert_eq!(
+            in2_incident(&app, reject_id).state,
+            IncidentState::Resolved(IncidentOutcome::Rejected)
+        );
+
+        let reinvestigate_revision = app.projects[0].revision;
+        let reinvestigate_expected = in2_next_incident_id(&app);
+        let mut reinvestigate_budget = in2_default_budgets();
+        reinvestigate_budget.max_turns = 1;
+        let reinvestigate_id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![
+                in2_happy_turn(reinvestigate_expected, reinvestigate_revision, 36),
+                ScriptedTurn::new(Vec::new(), "the budget ends the session"),
+            ]),
+            reinvestigate_budget,
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(36)),
+            "proposal-card-open-reinvestigate",
+            vec!["opening".to_owned(), "the next turn".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        let reinvestigate_incident = in2_incident(&app, reinvestigate_id);
+        let reinvestigate_card = crate::investigator::proposal_card(
+            &reinvestigate_incident,
+            reinvestigate_incident
+                .proposal
+                .as_ref()
+                .expect("re-investigate proposal"),
+        );
+        assert_eq!(reinvestigate_card.actions.len(), 3);
+        assert!(app.reinvestigate(0, reinvestigate_id));
+        assert!(
+            in2_incident(&app, reinvestigate_id)
+                .proposal
+                .as_ref()
+                .is_some_and(|proposal| proposal.stale)
+        );
+        in2_pump_until_finished(&mut app);
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_an_approved_proposal_applies_and_records_applied() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let mut approved = 0_usize;
+        let mut destructive_operations = 0_usize;
+        let mut confirmation_requests = 0_usize;
+        let mut prior_revision = app.projects[0].revision;
+        for (number, track) in [41_u64, 42, 43].into_iter().enumerate() {
+            let expected_id = in2_next_incident_id(&app);
+            let id = in2_start_direct(
+                &mut app,
+                ScriptedDriver::new(vec![in2_happy_turn(expected_id, prior_revision, track)]),
+                in2_default_budgets(),
+                in2_allowlisted_code(),
+                IncidentSubject::Track(TrackId(200 + number as u64)),
+                &format!("approve-{number}"),
+                vec!["opening".to_owned()],
+                Vec::new(),
+            );
+            in2_pump_until_finished(&mut app);
+            let incident = in2_incident(&app, id);
+            let proposal = incident.proposal.as_ref().expect("a proposal is recorded");
+            destructive_operations += proposal
+                .operations
+                .iter()
+                .filter(|operation| kinewright_agent::is_destructive_operation(operation))
+                .count();
+            let telemetry = incident.telemetry;
+            let mirrored_cost_fields = [
+                telemetry.input_tokens,
+                telemetry.cached_input_tokens,
+                telemetry.cache_creation_input_tokens,
+                telemetry.output_tokens,
+                telemetry.reasoning_output_tokens,
+                telemetry.cost_usd_millionths.map(i64::cast_unsigned),
+            ]
+            .into_iter()
+            .flatten()
+            .count();
+            assert_eq!(
+                mirrored_cost_fields, 6,
+                "approval {number} mirrors all six costs"
+            );
+            assert_eq!(telemetry.input_tokens, Some(17));
+            assert_eq!(telemetry.output_tokens, Some(11));
+            assert_eq!(
+                telemetry.input_tokens.unwrap() + telemetry.output_tokens.unwrap(),
+                28,
+                "telemetry token total equals the scripted session counters"
+            );
+            assert_eq!(telemetry.turns, Some(1));
+            assert!(
+                telemetry.resolver.is_some(),
+                "session resolution records a resolver"
+            );
+            confirmation_requests += app.investigator_pending_confirmation_requests(0).len();
+            assert!(app.approve_investigator_proposal(0, id));
+            in1_drain_until_revision(&mut app, 0, prior_revision);
+            let after_apply = app.projects[0].revision;
+            assert!(
+                after_apply > prior_revision,
+                "approval {number} advances the live revision"
+            );
+            assert_eq!(
+                in2_incident(&app, id).state,
+                IncidentState::Resolved(IncidentOutcome::Applied)
+            );
+            approved += 1;
+            prior_revision = after_apply;
+        }
+        assert!(approved > 0, "at least one proposal was approved");
+        assert_eq!(approved, 3, "three proposals are approved and applied live");
+        assert_eq!(
+            destructive_operations, 0,
+            "approved proposals contain zero destructive operations"
+        );
+        assert_eq!(
+            confirmation_requests, 0,
+            "approved proposals raise zero confirmations"
+        );
+
+        // One global Undo removes the last approved batch, preserving the
+        // existing contract that an approval is exactly one undo entry.
+        app.undo();
+        in1_drain_until_revision(&mut app, 0, prior_revision);
+        let undo_track_count = app
+            .focused()
+            .document
+            .tracks
+            .iter()
+            .filter(|track| track.id == TrackId(43))
+            .count();
+        assert_eq!(undo_track_count, 0, "one undo removes the approved batch");
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_a_conflicting_approval_retries_once_then_goes_stale() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let first_base = app.projects[0].revision;
+        let first = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![in2_happy_turn(IncidentId(1), first_base, 51)]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Agent,
+            "retry-applied",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        app.projects[0]
+            .core
+            .request(Command::Do(in2_add_track(50)))
+            .expect("the intervening live edit lands");
+        assert!(app.approve_investigator_proposal(0, first));
+        in1_drain_until_revision(&mut app, 0, first_base);
+        let first_incident = in2_incident(&app, first);
+        assert_eq!(
+            first_incident.state,
+            IncidentState::Resolved(IncidentOutcome::Applied)
+        );
+        let retry_applied = usize::from(
+            app.focused()
+                .document
+                .tracks
+                .iter()
+                .any(|track| track.id == TrackId(51)),
+        );
+
+        let second_base = app.projects[0].revision;
+        let second = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![in2_happy_turn(IncidentId(2), second_base, 52)]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Project,
+            "retry-stale",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        app.projects[0]
+            .core
+            .request(Command::Do(in2_add_track(52)))
+            .expect("the conflicting duplicate edit lands first");
+        let retry_core = app.projects[0].core.clone();
+        app.projects[0]
+            .investigator
+            .as_mut()
+            .expect("the investigator state remains")
+            .approval_retry_hook = Some(Box::new(move |attempt| {
+            if attempt == 1 {
+                retry_core
+                    .request(Command::Do(in2_add_track(53)))
+                    .expect("the retry hook's second live edit lands");
+            }
+        }));
+        assert!(app.approve_investigator_proposal(0, second));
+        let stale_incident = in2_incident(&app, second);
+        assert_eq!(stale_incident.state, IncidentState::Open);
+        assert!(
+            stale_incident
+                .proposal
+                .as_ref()
+                .is_some_and(|proposal| proposal.stale)
+        );
+        let stale_card = crate::investigator::proposal_card(
+            &stale_incident,
+            stale_incident.proposal.as_ref().unwrap(),
+        );
+        let stale_actions = stale_card.actions.len();
+        assert!(
+            stale_actions > 0,
+            "a stale proposal still has a recovery control"
+        );
+        assert_eq!(
+            stale_card.actions,
+            vec![crate::investigator::ProposalAction::Reinvestigate]
+        );
+        assert!(retry_applied > 0, "the first conflict retried and applied");
+        let stale_count = usize::from(
+            stale_incident
+                .proposal
+                .is_some_and(|proposal| proposal.stale),
+        );
+        assert!(
+            stale_count > 0,
+            "the second conflict marked its proposal stale"
+        );
+        assert_eq!(
+            stale_card.actions,
+            vec![crate::investigator::ProposalAction::Reinvestigate],
+            "twice-conflicting proposals offer only Re-investigate"
+        );
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_a_branch_error_on_approve_leaves_the_incident_open() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let revision = app.projects[0].revision;
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![in2_happy_turn(IncidentId(1), revision, 61)]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Agent,
+            "branch-error",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        // Make the real live actor fail its request: the first accepted batch
+        // at u64::MAX panics while incrementing its revision, so
+        // `apply_to_live` observes CoreDisconnected and the production Err arm
+        // performs the stale return.
+        let replacement = kinewright_core::Core::spawn_at(
+            app.projects[0].document.as_ref().clone(),
+            TimelineRevision(u64::MAX),
+        )
+        .expect("the replacement max-revision core starts");
+        let stopped_core = std::mem::replace(&mut app.projects[0].core, replacement);
+        drop(stopped_core);
+        app.projects[0].revision = TimelineRevision(u64::MAX);
+        assert!(app.approve_investigator_proposal(0, id));
+        let incident = in2_incident(&app, id);
+        assert_eq!(incident.state, IncidentState::Open);
+        assert!(
+            incident
+                .proposal
+                .as_ref()
+                .is_some_and(|proposal| proposal.stale)
+        );
+        let branch_error_count = usize::from(
+            incident
+                .telemetry
+                .resolver
+                .as_ref()
+                .is_some_and(|resolver| {
+                    matches!(resolver, IncidentResolver::Session { stop, .. } if stop.contains("Core actor has stopped"))
+                }),
+        );
+        assert!(
+            branch_error_count > 0,
+            "the branch error reason is recorded"
+        );
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_the_off_switch_cancels_a_running_session_and_suppresses_nothing() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let code = in2_allowlisted_code();
+        in2_configure_scripted(
+            &mut app,
+            ScriptedDriver::new(vec![ScriptedTurn::new(Vec::new(), "working")]),
+            in2_default_budgets(),
+        );
+        app.projects[0]
+            .investigator
+            .as_mut()
+            .expect("the investigator state remains")
+            .test_start_delay = Some(Duration::from_secs(3));
+        let id = in2_open_at(&mut app, 0, code, IncidentSubject::Agent, "off-switch");
+        {
+            let mut log = app.projects[0].incidents.write().unwrap();
+            assert!(log.begin_investigation(id));
+        }
+        let queued = crate::investigator::QueuedIncident {
+            id,
+            code,
+            subject: IncidentSubject::Agent,
+            refused: None,
+        };
+        app.spawn_investigator_session(
+            0,
+            &queued,
+            "scripted",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        )
+        .expect("the blocked investigator session starts");
+        let old_endpoint = app.projects[0]
+            .investigator
+            .as_ref()
+            .and_then(crate::investigator::InvestigatorSession::running_endpoint)
+            .expect("the cancelled session owns an MCP endpoint");
+        let running_before = app.investigator_running_count();
+        assert!(
+            running_before > 0,
+            "the off-switch test has a running session"
+        );
+        let cancel_started = Instant::now();
+        app.set_investigator_enabled(false);
+        assert!(
+            cancel_started.elapsed() < Duration::from_millis(100),
+            "the frame thread never waits for a blocked start_session"
+        );
+        let incident = in2_incident(&app, id);
+        assert_eq!(incident.state, IncidentState::Open);
+        assert!(matches!(
+            incident.telemetry.resolver,
+            Some(IncidentResolver::Session { ref stop, .. }) if stop.contains("switched off")
+        ));
+        assert_eq!(app.investigator_running_count(), 0);
+        let authority = old_endpoint
+            .strip_prefix("http://")
+            .and_then(|endpoint| endpoint.split('/').next())
+            .expect("the loopback endpoint has an authority");
+        let address: SocketAddr = authority
+            .parse()
+            .expect("the endpoint has a socket address");
+        let refusal_started = Instant::now();
+        let expiry = refusal_started + Duration::from_millis(750);
+        let mut refused_at = None;
+        while Instant::now() < expiry {
+            if TcpStream::connect_timeout(&address, Duration::from_millis(20)).is_err() {
+                refused_at = Some(Instant::now());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let refused_at = refused_at.expect(
+            "the old MCP server refuses while the three-second start path is still blocked",
+        );
+        let refusal_elapsed = refused_at.duration_since(cancel_started);
+        assert!(
+            refusal_elapsed < Duration::from_secs(1),
+            "the old MCP endpoint closes well inside the blocked three-second start window"
+        );
+        assert!(refused_at.duration_since(refusal_started) < Duration::from_secs(1));
+        // The frame thread has already returned and the server is already
+        // closed. Let the detached reaper finish its deliberately non-frame
+        // join before this test drops the app-owned branch/core resources.
+        std::thread::sleep(Duration::from_millis(3_250));
+        let observation = IncidentObservation::plain(
+            code,
+            IncidentSubject::Agent,
+            "off-switch",
+            app.projects[0].revision,
+        );
+        let deduped = {
+            let mut log = app.projects[0].incidents.write().unwrap();
+            log.observe(observation)
+        };
+        let deduped_count = usize::from(matches!(deduped, Observed::Deduped(_)));
+        assert!(deduped_count > 0, "off-switch leaves the pair unsuppressed");
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_a_hand_resolution_mid_session_keeps_the_persons_outcome() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![
+                ScriptedTurn::new(Vec::new(), "working").with_pause(Duration::from_millis(300)),
+            ]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Agent,
+            "hand-resolution",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        let resolved = {
+            let mut log = app.projects[0].incidents.write().unwrap();
+            log.resolve(id, IncidentOutcome::Explained)
+        };
+        assert!(resolved, "the person can resolve the open incident");
+        app.pump_investigator_sessions();
+        std::thread::sleep(Duration::from_millis(350));
+        let incident = in2_incident(&app, id);
+        let person_outcome =
+            usize::from(incident.state == IncidentState::Resolved(IncidentOutcome::Explained));
+        assert!(
+            person_outcome > 0,
+            "the person's outcome remains authoritative"
+        );
+        assert!(
+            incident.telemetry.resolver.is_none(),
+            "the silent cancel writes no resolver"
+        );
+        assert_eq!(app.investigator_running_count(), 0);
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_the_revert_branch_keys_on_applied_asset_and_probed_evidence() {
+        let (_fixture, mut app) = in1b_app();
+        let probed = ColorDescription {
+            primaries: ColorPrimaries::Bt2020,
+            ..ColorDescription::default()
+        };
+        let observation = IncidentObservation {
+            code: IncidentCode::SourceColor(kinewright_core::SourceColorIncident::UnknownPrimaries),
+            subject: IncidentSubject::Asset(kinewright_core::AssetId(909)),
+            observed: "known non-Rec.709 primaries".to_owned(),
+            allowed: Some("bt709".to_owned()),
+            evidence: IncidentEvidence::SourceColor {
+                probed,
+                assumption: None,
+            },
+            revision: app.projects[0].revision,
+        };
+        let id = {
+            let mut log = app.projects[0].incidents.write().unwrap();
+            let Observed::Opened(id) = log.observe(observation) else {
+                panic!("the re-key fixture opens");
+            };
+            assert!(log.resolve(id, IncidentOutcome::Applied));
+            id
+        };
+        let incident = in2_incident(&app, id);
+        assert_eq!(incident.class, PolicyClass::Explain);
+        let view = incident_card(&incident, true);
+        let actions = view.actions.len();
+        assert!(actions > 0, "an applied probed asset has a revert control");
+        assert_eq!(actions, 1);
+        assert_eq!(view.actions[0].label, REVERT_LABEL);
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    fn in2_resolved_asset_proposals_are_not_rendered_as_proposal_cards() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let revision = app.projects[0].revision;
+        let expected = in2_next_incident_id(&app);
+        let mut budgets = in2_default_budgets();
+        budgets.max_turns = 1;
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![
+                in2_happy_turn(expected, revision, 77),
+                ScriptedTurn::new(Vec::new(), "the budget ends the session"),
+            ]),
+            budgets,
+            in2_allowlisted_code(),
+            IncidentSubject::Asset(kinewright_core::AssetId(777)),
+            "proposal-card-asset",
+            vec!["opening".to_owned(), "the next turn".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        let open = in2_incident(&app, id);
+        assert_eq!(open.state, IncidentState::Open);
+        assert!(
+            crate::investigator::shows_proposal_card(&open),
+            "an Open asset proposal has an actionable proposal card"
+        );
+        let before = app.projects[0].revision;
+        assert!(app.approve_investigator_proposal(0, id));
+        in1_drain_until_revision(&mut app, 0, before);
+        let applied = in2_incident(&app, id);
+        assert_eq!(
+            applied.state,
+            IncidentState::Resolved(IncidentOutcome::Applied)
+        );
+        assert!(
+            !crate::investigator::shows_proposal_card(&applied),
+            "a resolved asset proposal remains history, not a proposal card"
+        );
+        in2_cleanup(&mut app);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2_the_scripted_suite_drives_eleven_scripts_to_their_ends() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let mut ended = 0_usize;
+        let mut proposals = 0_usize;
+        let mut unsuppressed_open_ends = 0_usize;
+        let mut deduped_after_open_end = 0_usize;
+
+        // S1: happy proposal through the real six-tool investigator surface.
+        let revision = app.projects[0].revision;
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![in2_happy_turn(IncidentId(1), revision, 71)]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Agent,
+            "suite-s1",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        proposals += usize::from(in2_incident(&app, id).proposal.is_some());
+        ended += 1;
+
+        // S2: the same real proposal is rejected by the person.
+        let revision = app.projects[0].revision;
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![in2_happy_turn(IncidentId(2), revision, 72)]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Project,
+            "suite-s2",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        assert!(app.reject_investigator_proposal(0, id));
+        let s2_ok =
+            in2_incident(&app, id).state == IncidentState::Resolved(IncidentOutcome::Rejected);
+        ended += usize::from(s2_ok);
+
+        // S3: explanation, with no proposal.
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![ScriptedTurn::new(
+                vec![in2_call("get_timeline_state", serde_json::json!({}))],
+                "no honest fix exists",
+            )]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(3)),
+            "suite-s3",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        let s3_ok =
+            in2_incident(&app, id).state == IncidentState::Resolved(IncidentOutcome::Explained);
+        ended += usize::from(s3_ok);
+
+        // S4: turn budget.
+        let mut budgets = in2_default_budgets();
+        budgets.max_turns = 1;
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![
+                ScriptedTurn::new(Vec::new(), "one"),
+                ScriptedTurn::new(Vec::new(), "two"),
+            ]),
+            budgets,
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(4)),
+            "suite-s4",
+            vec!["one".to_owned(), "two".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        let s4_ok = in2_incident(&app, id).state == IncidentState::Open;
+        ended += usize::from(s4_ok);
+        unsuppressed_open_ends += usize::from(s4_ok);
+        deduped_after_open_end += usize::from(in2_open_end_dedups(
+            &mut app,
+            id,
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(4)),
+            "suite-s4",
+        ));
+
+        // S5: wall-time budget.
+        let mut budgets = in2_default_budgets();
+        budgets.max_wall_time_seconds = 1;
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![
+                ScriptedTurn::new(Vec::new(), "slow").with_pause(Duration::from_millis(1_100)),
+            ]),
+            budgets,
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(5)),
+            "suite-s5",
+            vec!["slow".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        let s5_ok = in2_incident(&app, id).state == IncidentState::Open;
+        ended += usize::from(s5_ok);
+        unsuppressed_open_ends += usize::from(s5_ok);
+        deduped_after_open_end += usize::from(in2_open_end_dedups(
+            &mut app,
+            id,
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(5)),
+            "suite-s5",
+        ));
+
+        // S6: post-turn token budget.
+        let mut budgets = in2_default_budgets();
+        budgets.max_tokens = 10;
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![
+                ScriptedTurn::new(Vec::new(), "one").with_cost(in2_cost(5, 2)),
+                ScriptedTurn::new(Vec::new(), "two").with_cost(in2_cost(8, 4)),
+            ]),
+            budgets,
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(6)),
+            "suite-s6",
+            vec!["one".to_owned(), "two".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        let s6_ok = in2_incident(&app, id).state == IncidentState::Open;
+        ended += usize::from(s6_ok);
+        unsuppressed_open_ends += usize::from(s6_ok);
+        deduped_after_open_end += usize::from(in2_open_end_dedups(
+            &mut app,
+            id,
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(6)),
+            "suite-s6",
+        ));
+
+        // S7: the branch's destructive proposal is refused before recording.
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![ScriptedTurn::new(
+                vec![in2_proposal_call(IncidentId(7))],
+                "try the destructive proposal",
+            )]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(7)),
+            "suite-s7",
+            vec!["proposal".to_owned()],
+            vec![in2_upsert_bin(7), in2_remove_bin(7)],
+        );
+        in2_pump_until_finished(&mut app);
+        let s7 = in2_incident(&app, id);
+        let s7_ok = s7.state == IncidentState::Open && s7.proposal.is_none();
+        ended += usize::from(s7_ok);
+        unsuppressed_open_ends += usize::from(s7_ok);
+        deduped_after_open_end += usize::from(in2_open_end_dedups(
+            &mut app,
+            id,
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(7)),
+            "suite-s7",
+        ));
+
+        // S8: all nine denied capability names go through invoke_capability.
+        let denied_calls = kinewright_agent::INVESTIGATOR_CAPABILITY_DENYLIST
+            .iter()
+            .map(|name| {
+                in2_call(
+                    "invoke_capability",
+                    serde_json::json!({"name": name, "arguments": {}}),
+                )
+            })
+            .collect();
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![ScriptedTurn::new(denied_calls, "all denied")]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(8)),
+            "suite-s8",
+            vec!["denied".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        let s8_ok =
+            in2_incident(&app, id).state == IncidentState::Resolved(IncidentOutcome::Explained);
+        ended += usize::from(s8_ok);
+
+        // S9: the three deterministic auto-apply codes are attempted as
+        // routed observations and never enter the investigator queue.
+        let auto_attempts = [
+            kinewright_core::SourceColorIncident::UnknownPrimaries,
+            kinewright_core::SourceColorIncident::UnknownTransfer,
+            kinewright_core::SourceColorIncident::UnknownMatrix,
+        ]
+        .into_iter()
+        .filter(|source_code| {
+            let code = IncidentCode::SourceColor(*source_code);
+            let observation = IncidentObservation::plain(
+                code,
+                IncidentSubject::Agent,
+                format!("suite-s9-{}", code.code()),
+                app.projects[0].revision,
+            );
+            app.note_observation(observation);
+            app.route_incidents();
+            app.investigator_running_count() == 0
+        })
+        .count();
+        assert!(
+            auto_attempts > 0,
+            "S9 attempted all three deterministic rows"
+        );
+        let s9_ok = auto_attempts == 3;
+        ended += usize::from(s9_ok);
+
+        // S10: a proposal can be returned stale after approval loses the
+        // live revision race; the dedicated test proves the retry too.
+        let revision = app.projects[0].revision;
+        let s10_id = in2_next_incident_id(&app);
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![in2_happy_turn(s10_id, revision, 73)]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(10)),
+            "suite-s10",
+            vec!["opening".to_owned()],
+            Vec::new(),
+        );
+        in2_pump_until_finished(&mut app);
+        app.return_proposal_open_with_stale(0, id, "the proposal conflicted twice");
+        let s10_ok = in2_incident(&app, id)
+            .proposal
+            .is_some_and(|proposal| proposal.stale);
+        ended += usize::from(s10_ok);
+
+        // S11: the branch confirmation is rejected by the pump's policy.
+        let s11_revision = app.projects[0].revision.0;
+        let id = in2_start_direct(
+            &mut app,
+            ScriptedDriver::new(vec![ScriptedTurn::new(
+                vec![
+                    in2_call(
+                        "prepare_edit_plan",
+                        serde_json::json!({
+                            "expected_revision": s11_revision,
+                            "operations": [
+                                {"op": "upsert_bin", "bin": {"id": 11, "name": "s11", "parent": null, "assets": []}},
+                                {"op": "remove_bin", "bin": 11}
+                            ]
+                        }),
+                    ),
+                    in2_call(
+                        "commit_edit_plan",
+                        serde_json::json!({"plan_id": 1, "expected_revision": s11_revision}),
+                    ),
+                ],
+                "the destructive commit is refused",
+            )]),
+            in2_default_budgets(),
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(11)),
+            "suite-s11",
+            vec!["commit".to_owned()],
+            Vec::new(),
+        );
+        let branch_operations_before = app
+            .investigator_branch_applied_operation_count(0)
+            .expect("S11 has a live branch before its confirmation");
+        let mut s11_requests = Vec::new();
+        let request_deadline = Instant::now() + IN1_APP_DEADLINE;
+        while s11_requests.is_empty() && Instant::now() < request_deadline {
+            s11_requests = app.investigator_take_and_reject_confirmation_requests(0);
+            if s11_requests.is_empty() {
+                assert!(
+                    app.investigator_running_count() > 0,
+                    "S11 remains alive until its confirmation is observed"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        assert_eq!(
+            s11_requests.len(),
+            1,
+            "S11 raises exactly one confirmation request"
+        );
+        assert_eq!(
+            s11_requests[0].incident,
+            Some(id),
+            "the confirmation request carries S11's incident id"
+        );
+        in2_pump_until_finished(&mut app);
+        let branch_operations_after = app
+            .investigator_branch_applied_operation_count(0)
+            .unwrap_or(branch_operations_before);
+        assert_eq!(
+            branch_operations_after, branch_operations_before,
+            "the rejected S11 confirmation leaves branch operations unchanged"
+        );
+        let s11 = in2_incident(&app, id);
+        let s11_ok = s11.state == IncidentState::Open
+            && matches!(
+                s11.telemetry.resolver,
+                Some(IncidentResolver::Session { ref stop, .. }) if stop.contains("confirmation")
+            );
+        ended += usize::from(s11_ok);
+        unsuppressed_open_ends += usize::from(s11_ok);
+        deduped_after_open_end += usize::from(in2_open_end_dedups(
+            &mut app,
+            id,
+            in2_allowlisted_code(),
+            IncidentSubject::Track(TrackId(11)),
+            "suite-s11",
+        ));
+
+        assert!(ended > 0, "the scripted suite produced eleven session ends");
+        assert_eq!(ended, 11, "S1 through S11 each reached its expected end");
+        assert!(proposals > 0, "the suite recorded at least one proposal");
+        assert!(
+            unsuppressed_open_ends >= 4,
+            "at least four budget/policy ends return Open without suppression"
+        );
+        assert_eq!(
+            deduped_after_open_end, unsuppressed_open_ends,
+            "every returned-open pair dedups on a later observation"
+        );
+        in2_cleanup(&mut app);
     }
 }

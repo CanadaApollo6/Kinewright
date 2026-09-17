@@ -16,6 +16,7 @@ use kinewright_media::{LutLibrary, LutStore};
 
 use crate::{
     chat_ui::{AgentHarnessChoice, AgentThread, ChatEntry},
+    investigator::InvestigatorSession,
     recovery::Recovery,
     transcript_ui::TranscriptSelection,
 };
@@ -346,6 +347,11 @@ pub(crate) struct ProjectSession {
     /// how Delete/Backspace tells "remove this key" from "delete this clip" —
     /// the matte overlay's `report_expanded` pattern, one frame old.
     pub(crate) envelope_hover: Option<crate::timeline_ui::EnvelopeHover>,
+    /// The IN2 investigator state for this project: session queue, running
+    /// session, and per-project mutes. Always present after `create`, with
+    /// the mutes starting from the opened document's; session state lives
+    /// here, never on the app struct.
+    pub(crate) investigator: Option<InvestigatorSession>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,12 +452,29 @@ impl ProjectSession {
             timeline_scroll_target: 0.0,
             show_envelopes: true,
             envelope_hover: None,
+            investigator: Some(InvestigatorSession::with_muted_codes(
+                document
+                    .investigator
+                    .as_ref()
+                    .map(|preferences| preferences.muted_codes.clone())
+                    .unwrap_or_default(),
+            )),
         };
         session.publish_project_path_to_agents();
         Ok(session)
     }
 
-    /// Whether the live document differs structurally from the last save.
+    /// Whether the project differs from the last save: the live document
+    /// differs structurally, or the investigator mutes changed since the save.
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.document_dirty()
+            || self
+                .investigator
+                .as_ref()
+                .is_some_and(InvestigatorSession::mutes_dirty)
+    }
+
+    /// The document half of [`Self::is_dirty`].
     ///
     /// An unsaved project (no `saved_document`) is always dirty. Otherwise the
     /// verdict is exact structural equality, memoized on the identity of both
@@ -460,7 +483,7 @@ impl ProjectSession {
     /// the cached verdict without a deep comparison, while any edit, undo, or
     /// save swap misses and recomputes. A same-allocation pair is clean
     /// without comparing at all.
-    pub(crate) fn is_dirty(&self) -> bool {
+    fn document_dirty(&self) -> bool {
         let Some(saved) = self.saved_document.as_ref() else {
             self.dirty_cache.borrow_mut().take();
             return true;
@@ -584,6 +607,10 @@ impl ProjectSession {
     }
 
     pub(crate) fn stop_threads(&mut self, reason: &str) {
+        if let Some(investigator) = self.investigator.as_mut() {
+            let incidents = std::sync::Arc::clone(&self.incidents);
+            investigator.shutdown_for_close(reason, &incidents);
+        }
         for thread in &mut self.threads {
             if let Some(session) = &mut thread.session {
                 session.interrupt();

@@ -148,6 +148,28 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- IN2 Part A, investigator sessions: when an incident opens on one of a named
+  54-code allowlist, Kinewright can start a headless agent session against the
+  live project on a branch core — one per project, deduped by code and
+  subject, capped at two app-wide, inside turn, wall-time and token budgets the
+  person can see on the card. The session's harness, model, effort, tier and
+  budgets live in a per-user settings file with discovery, an off switch and
+  per-project per-code mutes in the project document; a machine without a
+  durable config directory runs on in-memory defaults and says so in Settings.
+  The agent records a typed proposal from its own branch through a new
+  registry-only `propose_fix` capability; the card shows it as one sentence
+  and one list of edits with Approve, Reject and Re-investigate, and the
+  application applies it on one approval through the live core with an undo
+  entry and a single retry on a revision conflict. Every end that is not a
+  person's decision returns the incident to `Open` unsuppressed with the
+  session's numbers on its telemetry. The confirmation broker now guards all
+  seven destructive operation variants and auto-rejects them for an
+  investigator; the investigator's server serves exactly six tools. Three
+  `Explain` codes gain a pressable recovery, so the no-harness fallback
+  resolves 3 of 67 by button. A production `ScriptedDriver` runs the whole path
+  deterministically in tests. No served tool is added: the served quad is
+  unchanged for the eighteenth consecutive measurement. See
+  docs/IN2-INVESTIGATOR-SESSIONS.md.
 - Seven more subscription harnesses, taking the chat panel from three agent
   CLIs to ten: Muse (Meta, over MSP), OpenCode, Qwen Code, Kimi (Moonshot),
   Kiro, Devin (all over ACP), and Copilot (headless JSONL). OpenCode routes

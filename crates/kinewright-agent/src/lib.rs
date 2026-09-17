@@ -62,7 +62,7 @@ pub use runtime::{
     CapabilityDescriptor, CapabilityKind, EditPlanPreview, INVESTIGATOR_TOOL_NAMES, PreparedPlanId,
     ToolSurfaceMetrics, compact_tool_names, is_destructive_operation,
 };
-pub use schema::{capability_tool_names, operation_tools};
+pub use schema::{capability_tool_names, operation_tool_name, operation_tools};
 pub use scripted::{
     SCRIPTED_HARNESS_ID, ScriptedCall, ScriptedCost, ScriptedDriver, ScriptedSession, ScriptedTurn,
 };

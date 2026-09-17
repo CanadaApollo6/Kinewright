@@ -13,12 +13,16 @@
 
 use eframe::egui;
 use kinewright_core::{
-    ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, Incident, IncidentCode,
-    IncidentFamily, IncidentOutcome, IncidentSeverity, IncidentState, IncidentSubject,
-    LabelIncident, MediaIncident, Operation, PolicyClass, RecoveryAction, RecoveryKind,
-    RejectionIncident, SourceColorIncident, recovery_description,
+    ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, INVESTIGATOR_ALLOWLIST,
+    Incident, IncidentCode, IncidentFamily, IncidentOutcome, IncidentResolver, IncidentSeverity,
+    IncidentState, IncidentSubject, LabelIncident, MediaIncident, Operation, PolicyClass,
+    RecoveryAction, RecoveryKind, RejectionIncident, SourceColorIncident, recovery_description,
 };
 
+use crate::investigator::{
+    InvestigatingCard, InvestigatorSessionPairs, ProposalAction, ProposalCardView,
+    proposal_card_with_reinvestigate, shows_proposal_card,
+};
 use crate::theme::{self, color, space, type_size};
 
 /// The button text of the card's own control (IN1 §0.1 B4, option (b)).
@@ -27,6 +31,12 @@ use crate::theme::{self, color, space, type_size};
 /// restores whatever is on top of the single global stack, which after one
 /// further edit is the person's edit rather than the assumption.
 pub(crate) const REVERT_LABEL: &str = "Revert to probed description";
+
+/// The stopped card's way back (IN2 §3.7 rule 39).
+pub(crate) const REINVESTIGATE_LABEL: &str = "Re-investigate";
+
+/// The per-code opt-out (IN2 §2.4 rule 14).
+pub(crate) const NEVER_INVESTIGATE_LABEL: &str = "Never investigate this";
 
 /// Everything the Media panel needs to draw one incident, and nothing that
 /// needs a `Document` or an `egui::Ui` to compute.
@@ -46,6 +56,25 @@ pub(crate) struct IncidentCardView {
     pub(crate) actions: Vec<CardAction>,
     /// The typed facts, verbatim, in IN1 §5.3 rule 32's fixed key order.
     pub(crate) details: Vec<(&'static str, String)>,
+    /// IN2 §3.7 rule 39: a stopped investigation offers Re-investigate.
+    ///
+    /// Beside `actions` rather than in it: a `CardAction` is a stored
+    /// recovery by construction, and the investigator's controls are not
+    /// recoveries.
+    pub(crate) reinvestigate: bool,
+    /// IN2 §2.4 rule 14: an allowlisted code offers Never-investigate-this.
+    pub(crate) never_investigate: bool,
+}
+
+/// What the person pressed on a card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CardPress {
+    /// One of `view.actions`, by index.
+    Action(usize),
+    /// The Re-investigate button.
+    Reinvestigate,
+    /// The Never-investigate-this button.
+    NeverInvestigate,
 }
 
 /// One control on the card.
@@ -89,6 +118,12 @@ pub(crate) fn incident_card(incident: &Incident, revert_available: bool) -> Inci
         state_label: state_label(incident.state),
         actions: card_actions(incident, revert_available),
         details: card_details(incident, revert_available),
+        reinvestigate: incident.state == IncidentState::Open
+            && matches!(
+                incident.telemetry.resolver,
+                Some(IncidentResolver::Session { .. })
+            ),
+        never_investigate: INVESTIGATOR_ALLOWLIST.contains(&incident.code),
     }
 }
 
@@ -420,11 +455,12 @@ const fn state_label(state: IncidentState) -> &'static str {
 /// `CardAction` per entry, in order, enabled for an operation and disabled for
 /// an explanation (IN1 §5.3 rules 29–30).
 fn card_actions(incident: &Incident, revert_available: bool) -> Vec<CardAction> {
-    // `IN1b` §3.8 break 3: only an asset-scoped incident carrying a probed
-    // description has something to revert to; every other incident falls
-    // through to the `policy_recovery` branch below.
-    if incident.class == PolicyClass::AutoApply
-        && incident.state == IncidentState::Resolved(IncidentOutcome::Applied)
+    // `IN1b` §3.8 break 3 as re-keyed by IN2 N5.1: the revert branch keys on
+    // `Resolved(Applied)` plus an asset subject plus probed evidence — not on
+    // the stored class — now that three `Explain` rows carry a button of
+    // their own. Every other incident falls through to the `policy_recovery`
+    // branch below.
+    if incident.state == IncidentState::Resolved(IncidentOutcome::Applied)
         && let (IncidentSubject::Asset(asset), Some(probed)) =
             (incident.subject, incident.evidence.probed())
     {
@@ -476,7 +512,75 @@ fn card_details(incident: &Incident, revert_available: bool) -> Vec<(&'static st
     }
     details.push(("revision", incident.revision.to_string()));
     details.push(("seen", incident.count.to_string()));
+    // IN2 §3.7 rule 39, N5.3: the stopped row exists only on an `Open` card
+    // whose resolver is a finished session.
+    if incident.state == IncidentState::Open
+        && let Some(IncidentResolver::Session { stop, .. }) = incident.telemetry.resolver.as_ref()
+    {
+        details.push(("stopped", investigation_stopped_sentence(stop)));
+    }
     details
+}
+
+/// Turn an internal stop/telemetry string into one calm sentence a person can
+/// act on. The raw resolver remains available in telemetry for diagnosis, but
+/// it never becomes UI copy (§3.7 rule 39, review fix F13).
+fn investigation_stopped_sentence(stop: &str) -> String {
+    let reason = if stop.contains("budget: turns") {
+        "it ran out of turns"
+    } else if stop.contains("budget: wall time") {
+        "it ran out of time"
+    } else if stop.contains("budget: tokens") {
+        "it reached its token budget"
+    } else if stop.contains("switched off") {
+        "you switched investigation off"
+    } else if stop.contains("confirmation") {
+        "it asked for confirmation"
+    } else if stop.contains("disconnected") {
+        "the agent disconnected"
+    } else if stop.contains("re-investigated") {
+        "you asked to try again"
+    } else {
+        "the session stopped"
+    };
+    format!("Investigation stopped: {reason}. Press Re-investigate to try again.")
+}
+
+/// Group a count with ASCII spaces: `12400` reads `"12 400"` (IN2 §5.5
+/// rule 14's `"12 400 of 40 000"`).
+fn group_thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, (_, digit)) in digits.char_indices().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            grouped.push(' ');
+        }
+        grouped.push(digit);
+    }
+    grouped.chars().rev().collect()
+}
+
+/// Append the running session's counter rows to a card view (IN2 §5.5
+/// rule 14): turns, tokens, and elapsed beside their budgets.
+pub(crate) fn append_investigating_rows(view: &mut IncidentCardView, card: &InvestigatingCard) {
+    view.details
+        .push(("turns", format!("{} of {}", card.turns, card.max_turns)));
+    view.details.push((
+        "tokens",
+        if card.tokens_known {
+            format!(
+                "{} of {}",
+                group_thousands(card.input_tokens.saturating_add(card.output_tokens)),
+                group_thousands(card.max_tokens),
+            )
+        } else {
+            "unknown".to_owned()
+        },
+    ));
+    view.details.push((
+        "elapsed",
+        format!("{}s of {}s", card.elapsed_secs, card.max_wall_secs),
+    ));
 }
 
 /// Whether the toolbar badge is drawn, and the number it shows
@@ -519,6 +623,8 @@ pub(crate) struct IncidentPanelRow {
     pub(crate) id: kinewright_core::IncidentId,
     /// The pure view, exactly as the Media panel's card is built.
     pub(crate) view: IncidentCardView,
+    /// The proposal card, when the incident carries a proposal (IN2 §4.3).
+    pub(crate) proposal: Option<ProposalCardView>,
 }
 
 /// Every incident the badge counts, as cards, in the order the log keeps them.
@@ -537,25 +643,55 @@ pub(crate) struct IncidentPanelRow {
 /// `revert_available` is `false` for every row: colour's revert is the only one
 /// `IN1b` ships and it is offered beside its asset, where the document fact
 /// that gates it can be read (`IN1b` §5.5 rule 28).
+///
+/// `investigating` is the running session's counters, when a session is
+/// running on this project: the matching row gains the three counter rows
+/// (IN2 §5.5 rule 14).
 #[must_use]
 pub(crate) fn incident_panel_rows<'a>(
     incidents: impl Iterator<Item = &'a Incident>,
+    investigating: Option<InvestigatingCard>,
+    session_pairs: &InvestigatorSessionPairs,
 ) -> Vec<IncidentPanelRow> {
     incidents
-        .filter(|incident| incident.state == IncidentState::Open)
-        .map(|incident| IncidentPanelRow {
-            id: incident.id,
-            view: incident_card(incident, false),
+        .filter(|incident| incident.state.is_open())
+        .map(|incident| {
+            let mut view = incident_card(incident, false);
+            if let Some(card) = investigating
+                && card.id == incident.id
+            {
+                append_investigating_rows(&mut view, &card);
+            }
+            let proposal = if shows_proposal_card(incident) {
+                incident.proposal.as_ref().map(|proposal| {
+                    proposal_card_with_reinvestigate(
+                        incident,
+                        proposal,
+                        session_pairs.can_reinvestigate(
+                            incident.id,
+                            incident.code,
+                            incident.subject,
+                        ),
+                    )
+                })
+            } else {
+                None
+            };
+            IncidentPanelRow {
+                id: incident.id,
+                view,
+                proposal,
+            }
         })
         .collect()
 }
 
-/// Paint one card and report which action the person pressed.
+/// Paint one card and report what the person pressed.
 ///
 /// Untested by design (IN1 §5.3 rule 23): every assertion lives on
 /// [`incident_card`], and the placement of the card in the Media panel is not
 /// proven at all.
-pub(crate) fn show_incident_card(ui: &mut egui::Ui, view: &IncidentCardView) -> Option<usize> {
+pub(crate) fn show_incident_card(ui: &mut egui::Ui, view: &IncidentCardView) -> Option<CardPress> {
     let mut pressed = None;
     theme::card_frame(false).show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -584,12 +720,64 @@ pub(crate) fn show_incident_card(ui: &mut egui::Ui, view: &IncidentCardView) -> 
                             )
                             .clicked()
                         {
-                            pressed = Some(index);
+                            pressed = Some(CardPress::Action(index));
                         }
                     }
                     RecoveryKind::Explain(body) => {
                         ui.colored_label(color::TEXT_SECONDARY, *body);
                     }
+                }
+            }
+        });
+        if view.reinvestigate || view.never_investigate {
+            ui.horizontal_wrapped(|ui| {
+                if view.reinvestigate && ui.button(REINVESTIGATE_LABEL).clicked() {
+                    pressed = Some(CardPress::Reinvestigate);
+                }
+                if view.never_investigate && ui.button(NEVER_INVESTIGATE_LABEL).clicked() {
+                    pressed = Some(CardPress::NeverInvestigate);
+                }
+            });
+        }
+    });
+    pressed
+}
+
+/// Paint the proposal card below its incident card and report which proposal
+/// action the person pressed (IN2 §4.3).
+///
+/// Untested by design, exactly as [`show_incident_card`] is: the tested thing
+/// is [`proposal_card`](crate::investigator::proposal_card).
+pub(crate) fn show_proposal_card(
+    ui: &mut egui::Ui,
+    view: &ProposalCardView,
+) -> Option<ProposalAction> {
+    let mut pressed = None;
+    theme::card_frame(false).show(ui, |ui| {
+        ui.label(egui::RichText::new(view.headline).font(theme::semibold(type_size::CAPTION)));
+        ui.colored_label(color::TEXT_MUTED, view.subject_label.as_str());
+        if view.stale {
+            ui.colored_label(
+                color::TEXT_MUTED,
+                "This proposal no longer applies; Re-investigate to try again.",
+            );
+        }
+        ui.label(view.explanation.as_str());
+        for line in &view.operation_summary {
+            ui.label(line);
+        }
+        if !view.stale {
+            ui.colored_label(color::TEXT_MUTED, view.approval_note);
+        }
+        ui.horizontal_wrapped(|ui| {
+            for action in &view.actions {
+                let label = match action {
+                    ProposalAction::Approve => "Approve",
+                    ProposalAction::Reject => "Reject",
+                    ProposalAction::Reinvestigate => REINVESTIGATE_LABEL,
+                };
+                if ui.button(label).clicked() {
+                    pressed = Some(*action);
                 }
             }
         });
@@ -603,18 +791,28 @@ pub(crate) fn show_incident_card(ui: &mut egui::Ui, view: &IncidentCardView) -> 
 /// incident's card whatever its subject. Untested by design, exactly as
 /// [`show_incident_card`] is: the tested thing is
 /// [`incident_panel_rows`], which needs no `egui::Ui` at all.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the panel owns the complete card and proposal interaction path"
+)]
 pub(crate) fn show_incidents_panel(app: &mut crate::app::KinewrightApp, ctx: &egui::Context) {
     if !app.incidents_open {
         return;
     }
+    let project_index = app.focused_project;
+    let investigating = app.investigating_card_for_project(project_index);
+    let session_pairs = app.investigator_session_pairs_for_project(project_index);
     let rows = {
         let handle = std::sync::Arc::clone(&app.focused().incidents);
         let log = handle
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        incident_panel_rows(log.all())
+        incident_panel_rows(log.all(), investigating, &session_pairs)
     };
     let mut pressed = None;
+    let mut reinvestigate = None;
+    let mut mute = None;
+    let mut proposal_press = None;
     let mut open = app.incidents_open;
     let mut show_audit = false;
     let audit_entries = app.error_log.len();
@@ -644,11 +842,25 @@ pub(crate) fn show_incidents_panel(app: &mut crate::app::KinewrightApp, ctx: &eg
             }
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for row in &rows {
-                    if let Some(index) = show_incident_card(ui, &row.view) {
-                        let action = &row.view.actions[index];
-                        if let RecoveryKind::Operation(operation) = &action.recovery.kind {
-                            pressed = Some((row.id, operation.clone(), action.clone()));
+                    match show_incident_card(ui, &row.view) {
+                        Some(CardPress::Action(index)) => {
+                            let action = &row.view.actions[index];
+                            if let RecoveryKind::Operation(operation) = &action.recovery.kind {
+                                pressed = Some((row.id, operation.clone(), action.clone()));
+                            }
                         }
+                        Some(CardPress::Reinvestigate) => {
+                            reinvestigate = Some(row.id);
+                        }
+                        Some(CardPress::NeverInvestigate) => {
+                            mute = Some(row.id);
+                        }
+                        None => {}
+                    }
+                    if let Some(proposal) = &row.proposal
+                        && let Some(action) = show_proposal_card(ui, proposal)
+                    {
+                        proposal_press = Some((row.id, action));
                     }
                     ui.add_space(space::ONE);
                 }
@@ -659,7 +871,6 @@ pub(crate) fn show_incidents_panel(app: &mut crate::app::KinewrightApp, ctx: &eg
         app.error_log_open = true;
     }
     if let Some((id, operation, action)) = pressed {
-        let project_index = app.focused_project;
         let outcome = {
             let handle = std::sync::Arc::clone(&app.projects[project_index].incidents);
             let log = handle
@@ -670,6 +881,34 @@ pub(crate) fn show_incidents_panel(app: &mut crate::app::KinewrightApp, ctx: &eg
         };
         if let Some(outcome) = outcome {
             app.send_incident_recovery(project_index, id, operation, outcome);
+        }
+    }
+    if let Some(id) = reinvestigate {
+        app.reinvestigate(project_index, id);
+    }
+    if let Some(id) = mute {
+        let code = {
+            let handle = std::sync::Arc::clone(&app.projects[project_index].incidents);
+            let log = handle
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            log.get(id).map(|incident| incident.code)
+        };
+        if let Some(code) = code {
+            app.mute_investigator_code(project_index, code);
+        }
+    }
+    if let Some((id, action)) = proposal_press {
+        match action {
+            ProposalAction::Approve => {
+                app.approve_investigator_proposal(project_index, id);
+            }
+            ProposalAction::Reject => {
+                app.reject_investigator_proposal(project_index, id);
+            }
+            ProposalAction::Reinvestigate => {
+                app.reinvestigate(project_index, id);
+            }
         }
     }
 }

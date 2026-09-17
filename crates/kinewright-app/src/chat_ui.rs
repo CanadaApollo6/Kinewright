@@ -106,7 +106,7 @@ impl AgentHarnessChoice {
         }
     }
 
-    fn from_key(key: &str) -> Option<Self> {
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
         match key {
             "claude-code" => Some(Self::ClaudeCode),
             "codex" => Some(Self::Codex),
@@ -605,17 +605,22 @@ impl KinewrightApp {
     /// repaints once, so the provider cards and the pickers fill in without
     /// further interaction.
     fn pump_harness_updates(&mut self, ctx: &egui::Context) {
-        let Some(receiver) = &self.harness_update_rx else {
-            return;
-        };
         let mut updated = false;
-        let mut pending = Vec::new();
-        while let Ok(update) = receiver.try_recv() {
-            pending.push(update);
-            updated = true;
+        if let Some(receiver) = &self.harness_update_rx {
+            let mut pending = Vec::new();
+            while let Ok(update) = receiver.try_recv() {
+                pending.push(update);
+                updated = true;
+            }
+            for update in pending {
+                apply_harness_update(&mut self.harness, update);
+            }
         }
-        for update in pending {
+        // The investigator settings section re-probes on open; those
+        // deliveries arrive here too (IN2 §2.2 rule 7).
+        for update in crate::investigator::drain_detection_refresh() {
             apply_harness_update(&mut self.harness, update);
+            updated = true;
         }
         if updated {
             ctx.request_repaint();
@@ -979,9 +984,9 @@ impl KinewrightApp {
             Ok(BranchApplyOutcome::Rejected { operations, error }) => {
                 let revision = self.projects[project_index].revision;
                 let subject = crate::app::batch_incident_subject(&operations);
-                self.note_observation(IncidentObservation::from_batch_error(
-                    &error, subject, revision,
-                ));
+                let observation = IncidentObservation::from_batch_error(&error, subject, revision);
+                self.stash_batch_refused(project_index, &observation, &operations);
+                self.note_observation(observation);
             }
             // Appendix B row 41: a `BranchError`. `InvalidBase` delegates its
             // code to the inner rejection; the subject stays `Agent`, because
@@ -1083,9 +1088,9 @@ impl KinewrightApp {
             Ok(BranchApplyOutcome::Rejected { operations, error }) => {
                 let revision = self.projects[project_index].revision;
                 let subject = crate::app::batch_incident_subject(&operations);
-                self.note_observation(IncidentObservation::from_batch_error(
-                    &error, subject, revision,
-                ));
+                let observation = IncidentObservation::from_batch_error(&error, subject, revision);
+                self.stash_batch_refused(project_index, &observation, &operations);
+                self.note_observation(observation);
             }
             // Appendix B row 45.
             Err(error) => {

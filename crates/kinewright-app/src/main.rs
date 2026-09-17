@@ -12,6 +12,7 @@ mod export_ui;
 mod icons;
 mod incident_ui;
 mod inspector_ui;
+mod investigator;
 mod keys;
 mod look_browser_ui;
 mod matte_overlay_ui;
