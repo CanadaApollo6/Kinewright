@@ -466,13 +466,23 @@ pub fn apply_batch(doc: &mut Document, operations: &[Operation]) -> Result<(), B
         return Err(BatchError::Empty);
     }
     let mut candidate = doc.clone();
+    validate_document(&candidate).map_err(|error| BatchError::OperationFailed {
+        op_number: 1,
+        error,
+    })?;
     for (index, operation) in operations.iter().enumerate() {
-        operation
-            .apply(&mut candidate)
-            .map_err(|error| BatchError::OperationFailed {
-                op_number: index + 1,
-                error,
-            })?;
+        // The batch already owns an unpublished candidate. Reuse it instead
+        // of cloning the entire document inside Operation::apply for each
+        // step. Validate every intermediate result so a later operation can
+        // never repair an invalid earlier step. Failure drops the candidate
+        // and leaves the caller's document untouched.
+        let result = apply_unchecked(operation, &mut candidate)
+            .and_then(|()| candidate.recompute_duration())
+            .and_then(|()| validate_document(&candidate));
+        result.map_err(|error| BatchError::OperationFailed {
+            op_number: index + 1,
+            error,
+        })?;
     }
     *doc = candidate;
     Ok(())

@@ -119,6 +119,8 @@ kinewright-app     the native egui desktop app (Windows and Linux)
 
 The full design doc — including why every mutation is an operation, why undo is snapshots, and why the audio callback owns the clock — is [Kinewright-Architecture.md](Kinewright-Architecture.md). The visual language is specified in [docs/DESIGN.md](docs/DESIGN.md).
 
+Repeatable startup, memory, preview-seek, and edit-plan measurements are described in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
 ## Contributing
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the build setup, the architectural ground rules (they're short but firm), and how releases work. By contributing you agree your work is licensed under GPLv3; there is no CLA.

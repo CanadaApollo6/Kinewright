@@ -275,6 +275,7 @@ fn bind_document_luts(
 }
 
 enum Control {
+    SetEventWakeup(Box<dyn Fn() + Send + Sync>),
     SetDocument(Arc<Document>),
     /// CC4 2.4: the engine's content-addressed lattice table gained entries,
     /// so the playback worker rebinds its document-local library. The library
@@ -342,6 +343,16 @@ pub struct FfmpegMediaEngine {
 }
 
 impl FfmpegMediaEngine {
+    /// Wake an event-driven consumer after publishing a preview frame or event.
+    ///
+    /// Install this before requesting work. The callback runs on the media
+    /// worker and must return promptly; it should schedule UI work, not do it.
+    pub fn set_event_wakeup(&self, wakeup: impl Fn() + Send + Sync + 'static) {
+        let _ = self
+            .control_tx
+            .send(Control::SetEventWakeup(Box::new(wakeup)));
+    }
+
     /// Start the media engine with the default cache directory and GPU selection.
     ///
     /// # Errors
@@ -1600,6 +1611,7 @@ impl WorkerLoudness {
 
 struct Worker {
     control_rx: Receiver<Control>,
+    event_wakeup: Option<Box<dyn Fn() + Send + Sync>>,
     frames_tx: Sender<(TimeCode, FrameTexture)>,
     frames_drop_rx: Receiver<(TimeCode, FrameTexture)>,
     events_tx: Sender<MediaEvent>,
@@ -1653,6 +1665,7 @@ impl Worker {
     ) -> Self {
         Self {
             control_rx: channels.control_rx,
+            event_wakeup: None,
             frames_tx: channels.frames_tx,
             frames_drop_rx: channels.frames_drop_rx,
             events_tx: channels.events_tx,
@@ -1696,6 +1709,7 @@ impl Worker {
 
     fn handle_control(&mut self, control: Control) {
         match control {
+            Control::SetEventWakeup(wakeup) => self.event_wakeup = Some(wakeup),
             Control::SetDocument(doc) => self.set_document(&doc),
             Control::LutLatticesPublished => self.rebind_lut_library(),
             Control::UpdateAudio(kind, doc) => self.update_audio(kind, doc),
@@ -1994,6 +2008,7 @@ impl Worker {
             }
         };
         send_latest(&self.frames_tx, &self.frames_drop_rx, (project_at, frame));
+        self.wake_consumer();
     }
 
     fn audio_for_position(
@@ -2052,6 +2067,13 @@ impl Worker {
 
     fn emit(&self, event: MediaEvent) {
         send_latest(&self.events_tx, &self.events_drop_rx, event);
+        self.wake_consumer();
+    }
+
+    fn wake_consumer(&self) {
+        if let Some(wakeup) = &self.event_wakeup {
+            wakeup();
+        }
     }
 }
 
@@ -2113,6 +2135,48 @@ mod tests {
         sha256::{sha256_bytes, source_fingerprint},
         test_support::{GeneratedMedia, TempDirectory, single_clip_document},
     };
+
+    #[test]
+    fn preview_frames_and_paused_seek_events_wake_a_sleeping_consumer() {
+        let temp = TempDirectory::new("media-wakeup");
+        let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(
+            fallback_gpu().context(),
+            temp.root().to_path_buf(),
+        )
+        .unwrap();
+        let frames = engine.frames();
+        let events = engine.events();
+        let (wake_tx, wake_rx) = unbounded();
+        engine.set_event_wakeup(move || {
+            // Consume only in response to the wake, just as a sleeping event
+            // loop would. Publication must precede the callback.
+            let _ = wake_tx.send((frames.try_recv().ok(), events.try_recv().ok()));
+        });
+
+        engine.set_document(Arc::new(Document {
+            resolution: (64, 64),
+            ..Document::default()
+        }));
+        let (frame, event) = wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(frame.unwrap().0, TimeCode::ZERO);
+        assert!(event.is_none());
+
+        // No playback clock or UI polling is running. A seek must wake for
+        // both the position event and the asynchronously rendered frame.
+        engine.seek(TimeCode(10));
+        let (frame, event) = wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(frame.is_none());
+        assert!(matches!(event, Some(MediaEvent::Position(TimeCode(10)))));
+        let (frame, event) = wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(frame.unwrap().0, TimeCode(10));
+        assert!(event.is_none());
+
+        // Errors must also wake the consumer instead of waiting for input.
+        engine.play(TimeCode::ZERO);
+        let (frame, event) = wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(frame.is_none());
+        assert!(matches!(event, Some(MediaEvent::Error(_))));
+    }
 
     /// AU3 §7 item A12 (§3.9): `Worker::reset_loudness`'s origin selection —
     /// `Some(AudioRuntime::fed_position_samples())` while playing, `None`

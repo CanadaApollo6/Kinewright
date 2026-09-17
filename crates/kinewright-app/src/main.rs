@@ -19,6 +19,7 @@ mod media_bin;
 mod media_workflow;
 mod mixer_pane_ui;
 mod mixer_ui;
+mod performance;
 mod preview_ui;
 mod project;
 mod recording;

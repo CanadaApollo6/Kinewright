@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
@@ -247,6 +248,19 @@ pub(crate) type ProjectPathHandle = std::sync::Arc<std::sync::RwLock<Option<Path
 /// the shape `ProjectPathHandle` already uses (IN1 §5.1 rule 2).
 pub(crate) type IncidentLogHandle = std::sync::Arc<std::sync::RwLock<IncidentLog>>;
 
+/// The memoized result of one [`ProjectSession::is_dirty`] deep comparison.
+///
+/// The keys are `Arc` clones, not raw pointers: holding the allocations alive
+/// is what keeps `Arc::ptr_eq` on them sound against pointer reuse after a
+/// drop, and the cache's own clones also keep a third party from mutating
+/// either document through `Arc::get_mut` while a cached verdict is
+/// outstanding (the strong count stays above one). No `unsafe` anywhere.
+struct DirtyCacheEntry {
+    current: Arc<Document>,
+    saved: Arc<Document>,
+    dirty: bool,
+}
+
 /// One independently editable project and all UI/agent state that must follow it.
 pub(crate) struct ProjectSession {
     pub(crate) id: u64,
@@ -282,6 +296,14 @@ pub(crate) struct ProjectSession {
     /// looks actually resolved without rebuilding.
     pub(crate) lut_library: Arc<LutLibrary>,
     pub(crate) saved_document: Option<Arc<Document>>,
+    /// Memoized [`ProjectSession::is_dirty`] verdict for the last compared
+    /// `(current, saved)` pair. `is_dirty` takes `&self` and runs on hot UI
+    /// paths (window title, close guards), so the cache lives behind a
+    /// `RefCell` rather than requiring `&mut self`. Keyed on the identity of
+    /// *both* Arcs: an edit, an undo back to saved content, a no-op edit, or
+    /// a `saved_document` swap without an edit all miss and recompute, keeping
+    /// the exact structural-equality semantics of the uncached comparison.
+    dirty_cache: RefCell<Option<DirtyCacheEntry>>,
     pub(crate) recovery: Recovery,
     pub(crate) threads: Vec<AgentThread>,
     pub(crate) active_thread: usize,
@@ -389,6 +411,7 @@ impl ProjectSession {
             lut_availability: statuses.into_iter().collect(),
             lut_library: Arc::new(library),
             saved_document: None,
+            dirty_cache: RefCell::new(None),
             recovery,
             threads: vec![AgentThread::new(
                 "Thread 1",
@@ -428,10 +451,42 @@ impl ProjectSession {
         Ok(session)
     }
 
+    /// Whether the live document differs structurally from the last save.
+    ///
+    /// An unsaved project (no `saved_document`) is always dirty. Otherwise the
+    /// verdict is exact structural equality, memoized on the identity of both
+    /// the current and the saved `Arc`: repeated polls with the same pair —
+    /// the steady state of every frame's title and close-guard checks — return
+    /// the cached verdict without a deep comparison, while any edit, undo, or
+    /// save swap misses and recomputes. A same-allocation pair is clean
+    /// without comparing at all.
     pub(crate) fn is_dirty(&self) -> bool {
-        self.saved_document
-            .as_deref()
-            .is_none_or(|saved| saved != self.document.as_ref())
+        let Some(saved) = self.saved_document.as_ref() else {
+            self.dirty_cache.borrow_mut().take();
+            return true;
+        };
+        if Arc::ptr_eq(saved, &self.document) {
+            // A save can make this pair identical. Release any older pair
+            // instead of retaining obsolete document snapshots indefinitely.
+            self.dirty_cache.borrow_mut().take();
+            return false;
+        }
+        {
+            let cached = self.dirty_cache.borrow();
+            if let Some(entry) = cached.as_ref()
+                && Arc::ptr_eq(&entry.current, &self.document)
+                && Arc::ptr_eq(&entry.saved, saved)
+            {
+                return entry.dirty;
+            }
+        }
+        let dirty = saved.as_ref() != self.document.as_ref();
+        *self.dirty_cache.borrow_mut() = Some(DirtyCacheEntry {
+            current: Arc::clone(&self.document),
+            saved: Arc::clone(saved),
+            dirty,
+        });
+        dirty
     }
 
     /// Adopt a freshly derived store.
@@ -1571,5 +1626,272 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&project).expect("read")).expect("parse");
         assert_eq!(reloaded.lut_assets.len(), 2);
         reloaded.validate().expect("the reopened project is valid");
+    }
+
+    /// A valid synthetic document with `clip_count` media clips on one video
+    /// track, mirroring `kinewright_core`'s `generated_document` fixture shape
+    /// (packed 30-frame clips, one source asset, derived duration).
+    fn synthetic_document(clip_count: usize) -> Document {
+        let fps = Rational::new(30, 1).expect("valid fps");
+        let mut timeline_start = 0_i64;
+        let mut clips = Vec::with_capacity(clip_count);
+        for index in 0..clip_count {
+            clips.push(Clip {
+                id: ClipId(index as u64 + 1),
+                asset: AssetId(1),
+                source_range: TimeCode::ZERO..TimeCode(30),
+                content: ClipContent::Media,
+                timeline_start: TimeCode(timeline_start),
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+                audio_gain_curve: None,
+            });
+            timeline_start += 30;
+        }
+        let document = Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips,
+            }],
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: "synthetic.mov".into(),
+                name: "Synthetic".to_owned(),
+                duration: TimeCode(300),
+                fps,
+                kind: MediaKind::Video,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: MediaSourceFingerprint::default(),
+                color_description: ColorDescription::default(),
+                assumed_from: None,
+            }],
+            fps,
+            resolution: (1920, 1080),
+            duration: TimeCode(timeline_start),
+            ..Document::default()
+        };
+        document
+            .validate()
+            .expect("the synthetic document is valid");
+        document
+    }
+
+    /// A real session behind the stub media backends, so `is_dirty` runs
+    /// through the exact struct the app polls. Id 2 takes the attached
+    /// recovery path (no process-startup scan).
+    fn dirty_test_session(document: Document) -> ProjectSession {
+        let playback: Arc<dyn Playback> = Arc::new(StubMedia);
+        let analysis: Arc<dyn Analysis> = Arc::new(StubMedia);
+        let exporter: Arc<dyn Export> = Arc::new(StubMedia);
+        ProjectSession::create(
+            2,
+            "dirty-test",
+            document,
+            None,
+            &playback,
+            &analysis,
+            &exporter,
+        )
+        .expect("the dirty-test session builds")
+    }
+
+    fn shutdown_test_session(session: &mut ProjectSession) {
+        for thread in &mut session.threads {
+            if let Some(server) = thread.mcp_server.take() {
+                server.shutdown();
+            }
+        }
+    }
+
+    #[test]
+    fn an_unsaved_project_is_dirty_no_matter_the_document() {
+        let mut session = dirty_test_session(synthetic_document(4));
+        assert!(session.is_dirty());
+        // Swapping the live document without ever saving stays dirty, whether
+        // the replacement matches the old content or not.
+        session.document = Arc::new(synthetic_document(4));
+        assert!(session.is_dirty());
+        session.document = Arc::new(synthetic_document(5));
+        assert!(session.is_dirty());
+        shutdown_test_session(&mut session);
+    }
+
+    #[test]
+    fn saving_makes_independently_allocated_equal_documents_clean() {
+        let mut session = dirty_test_session(synthetic_document(4));
+        // A save records the same allocation: clean via the pointer fast path.
+        session.saved_document = Some(Arc::clone(&session.document));
+        assert!(!session.is_dirty());
+        // An independently allocated but structurally equal save is clean too:
+        // one deep comparison, then the memoized verdict on repeat polls.
+        let separate = Arc::new(synthetic_document(4));
+        assert!(!Arc::ptr_eq(&separate, &session.document));
+        session.saved_document = Some(separate);
+        assert!(!session.is_dirty());
+        assert!(!session.is_dirty(), "the equal pair memoizes clean");
+        shutdown_test_session(&mut session);
+    }
+
+    #[test]
+    fn an_edit_dirties_and_an_undo_back_to_saved_cleans() {
+        let mut session = dirty_test_session(synthetic_document(4));
+        session.saved_document = Some(Arc::clone(&session.document));
+        assert!(!session.is_dirty());
+
+        // An edit swaps in a new allocation with different content.
+        let mut edited = (*session.document).clone();
+        edited.resolution = (1_280, 720);
+        session.document = Arc::new(edited);
+        assert!(session.is_dirty());
+        assert!(session.is_dirty(), "the dirty pair memoizes dirty");
+
+        // Undo restores the saved content on a fresh allocation: clean again,
+        // not stuck on the cached dirty verdict.
+        let saved = session.saved_document.clone().expect("saved");
+        session.document = Arc::new((*saved).clone());
+        assert!(!Arc::ptr_eq(
+            &session.document,
+            session.saved_document.as_ref().expect("saved")
+        ));
+        assert!(!session.is_dirty());
+        assert!(!session.is_dirty(), "the restored pair memoizes clean");
+        shutdown_test_session(&mut session);
+    }
+
+    #[test]
+    fn a_noop_edit_keeps_a_clean_project_clean() {
+        let mut session = dirty_test_session(synthetic_document(4));
+        session.saved_document = Some(Arc::new(synthetic_document(4)));
+        assert!(!session.is_dirty());
+        // A no-op "edit" swaps in a new allocation with identical content.
+        session.document = Arc::new(synthetic_document(4));
+        assert!(!Arc::ptr_eq(
+            &session.document,
+            session.saved_document.as_ref().expect("saved")
+        ));
+        assert!(!session.is_dirty());
+        shutdown_test_session(&mut session);
+    }
+
+    #[test]
+    fn replacing_the_save_without_an_edit_invalidates_the_verdict() {
+        let mut session = dirty_test_session(synthetic_document(4));
+        session.saved_document = Some(Arc::clone(&session.document));
+        assert!(!session.is_dirty());
+
+        // The live document never moves; only the save does. The cache is
+        // keyed on both identities, so it must miss and recompute.
+        session.saved_document = Some(Arc::new(synthetic_document(5)));
+        assert!(session.is_dirty());
+        assert!(session.is_dirty(), "the swapped pair memoizes dirty");
+
+        session.saved_document = Some(Arc::clone(&session.document));
+        assert!(!session.is_dirty());
+        shutdown_test_session(&mut session);
+    }
+
+    #[test]
+    fn is_dirty_fast_paths_release_obsolete_cached_documents() {
+        for saved in [true, false] {
+            let mut session = dirty_test_session(Document::default());
+            // Use distinct allocations that no Core history owns, so weak
+            // references observe whether the cache prolongs their lifetime.
+            session.document = Arc::new(Document::default());
+            session.saved_document = Some(Arc::new(Document {
+                resolution: (640, 360),
+                ..Document::default()
+            }));
+            let old_current = Arc::downgrade(&session.document);
+            let old_saved = Arc::downgrade(session.saved_document.as_ref().unwrap());
+            assert!(session.is_dirty());
+
+            session.document = Arc::new(Document::default());
+            session.saved_document = saved.then(|| Arc::clone(&session.document));
+            assert!(old_current.upgrade().is_some(), "the pair is cached");
+            assert!(old_saved.upgrade().is_some(), "the pair is cached");
+            assert_eq!(session.is_dirty(), !saved);
+            assert!(old_current.upgrade().is_none(), "old current is released");
+            assert!(old_saved.upgrade().is_none(), "old save is released");
+        }
+    }
+
+    /// Release-only measurement of the memoized `is_dirty` poll, deliberately
+    /// excluded from correctness CI. Run with
+    /// `cargo test -p kinewright-app --release -- --ignored --nocapture
+    /// is_dirty_memoized_poll_release_perf`.
+    ///
+    /// Each lane polls `is_dirty` 20k times against a save that is
+    /// structurally equal but separately allocated — the shape that forces the
+    /// expensive deep comparison without memoization — and compares it against
+    /// the previous direct deep-equality implementation as a control.
+    #[test]
+    #[ignore = "manual release performance measurement"]
+    fn is_dirty_memoized_poll_release_perf() {
+        use std::{hint::black_box, time::Instant};
+
+        const POLLS: usize = 20_000;
+        for (lane, clips) in [("typical", 48), ("heavy", 480), ("agent", 1_200)] {
+            let mut session = dirty_test_session(synthetic_document(clips));
+            // Semantically equal but separately allocated: `ptr_eq` cannot
+            // save either path, so the control pays the full deep comparison.
+            session.saved_document = Some(Arc::new(synthetic_document(clips)));
+            assert!(!Arc::ptr_eq(
+                &session.document,
+                session.saved_document.as_ref().expect("saved")
+            ));
+            assert!(!session.is_dirty(), "the {lane} lane starts clean");
+
+            let began = Instant::now();
+            for _ in 0..POLLS {
+                black_box(black_box(&session).is_dirty());
+            }
+            let memoized_ms = began.elapsed().as_secs_f64() * 1_000.0;
+
+            // The previous implementation, measured as a control: the raw deep
+            // comparison with its inputs behind `black_box` so the loop cannot
+            // be elided or hoisted.
+            let current = Arc::clone(&session.document);
+            let saved = session.saved_document.clone().expect("saved");
+            let mut control_dirty = false;
+            let began = Instant::now();
+            for _ in 0..POLLS {
+                let live: &Document = black_box(current.as_ref());
+                let baseline: &Document = black_box(saved.as_ref());
+                control_dirty |= black_box(live != baseline);
+            }
+            let control_ms = began.elapsed().as_secs_f64() * 1_000.0;
+            black_box(&current);
+            black_box(&saved);
+
+            assert!(
+                !control_dirty,
+                "the {lane} control agrees the pair is clean"
+            );
+            assert!(
+                !session.is_dirty(),
+                "the {lane} memoized verdict still agrees"
+            );
+            println!(
+                "{}",
+                serde_json::json!({
+                    "test": "is_dirty_memoized_poll",
+                    "lane": lane,
+                    "clips": clips,
+                    "polls": POLLS,
+                    "memoized_ms": memoized_ms,
+                    "deep_control_ms": control_ms,
+                    "memoized_dirty": false,
+                    "control_dirty": control_dirty,
+                })
+            );
+            shutdown_test_session(&mut session);
+        }
     }
 }

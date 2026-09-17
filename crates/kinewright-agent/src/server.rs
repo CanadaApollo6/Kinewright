@@ -5,7 +5,7 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     thread,
@@ -129,6 +129,45 @@ pub const INVESTIGATOR_BROKER_TIMEOUT: Duration = Duration::from_secs(5);
 /// workers cut about eighteen of the twenty-two and make the cap of two a
 /// policy choice instead of a resource one.
 pub const INVESTIGATOR_WORKER_THREADS: usize = 2;
+
+/// The default Tokio worker count for every MCP server runtime.
+///
+/// Probe-2 measured one more `McpServer` at **+22 OS threads** on a 20-CPU
+/// machine with `new_multi_thread`'s default of one worker per CPU. Every
+/// `tools/call` already runs on the blocking pool
+/// (`tokio::task::spawn_blocking` in `ServerHandler::call_tool`) and the
+/// export queue owns a dedicated worker thread, so the async workers only
+/// drive the streamable-HTTP transport: two is enough, and an explicit
+/// override still wins (see [`INVESTIGATOR_WORKER_THREADS`]).
+const DEFAULT_WORKER_THREADS: usize = 2;
+
+/// Resolve the Tokio worker count for one server runtime: an explicit
+/// override wins, otherwise the bounded [`DEFAULT_WORKER_THREADS`].
+#[must_use]
+fn resolve_worker_threads(worker_threads: Option<usize>) -> usize {
+    worker_threads.unwrap_or(DEFAULT_WORKER_THREADS)
+}
+
+/// Build one server's Tokio runtime with its resolved worker count.
+///
+/// Split out of `run_server` so the default/override contract is pinned
+/// against the runtime's own metrics instead of only against the resolver.
+///
+/// # Panics
+///
+/// Panics when the Tokio runtime cannot start, exactly as `run_server`'s
+/// inlined builder did.
+#[must_use]
+fn build_server_runtime(worker_threads: Option<usize>) -> tokio::runtime::Runtime {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
+        .enable_all()
+        .thread_name("kinewright-mcp-worker")
+        .worker_threads(resolve_worker_threads(worker_threads));
+    builder
+        .build()
+        .expect("Kinewright MCP Tokio runtime must start")
+}
 
 /// How long a server asked to stop waits for a client that is still connected
 /// (erratum D-R67).
@@ -921,17 +960,13 @@ fn run_server(
     shutdown: oneshot::Receiver<()>,
     worker_threads: Option<usize>,
 ) {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.enable_all().thread_name("kinewright-mcp-worker");
-    // IN2 §3.3 rule 13: an investigator server bounds its runtime instead of
-    // taking `new_multi_thread`'s default of one worker per CPU. Every other
-    // server passes `None` and is byte-for-byte unchanged.
-    if let Some(workers) = worker_threads {
-        builder.worker_threads(workers);
-    }
-    let runtime = builder
-        .build()
-        .expect("Kinewright MCP Tokio runtime must start");
+    // IN2 §3.3 rule 13 bounded only the investigator's runtime; every other
+    // server took `new_multi_thread`'s default of one worker per CPU. The
+    // default is now the bounded [`DEFAULT_WORKER_THREADS`], and an explicit
+    // override (the investigator's [`INVESTIGATOR_WORKER_THREADS`]) still
+    // wins. Blocking work never sat on these workers: `tools/call` runs on
+    // the blocking pool and the export queue owns its own thread.
+    let runtime = build_server_runtime(worker_threads);
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::from_std(listener)
             .expect("validated MCP listener must enter Tokio");
@@ -1069,11 +1104,23 @@ impl KinewrightMcp {
         Ok(tools)
     }
 
+    /// The 7 served tools, built directly from the shared compact
+    /// authority instead of by building the whole 141-tool registry and
+    /// discarding all but [`crate::runtime::COMPACT_TOOL_NAMES`].
+    ///
+    /// Every `start` / `list_tools` / `get_tool` call used to pay for 54
+    /// generated operation schemas plus 87 inspector schemas to serve 7
+    /// tools. The descriptors are byte-for-byte the registry's — the same
+    /// constructors feed `inspector_tools()`, pinned by
+    /// `served_tools_equal_serialized_filtered_registry` — and the serving
+    /// order is the filtered registry order, which is
+    /// [`crate::runtime::COMPACT_TOOL_NAMES`] order. The `Result` stays so
+    /// call sites keep their shape; the compact path builds no operation
+    /// schema and cannot fail, while [`Self::capability_tools`] still
+    /// surfaces [`SchemaError`] where the full registry is genuinely needed.
+    #[allow(clippy::unnecessary_wraps)] // Preserve the existing schema-result interface.
     fn served_tools() -> Result<Vec<Tool>, SchemaError> {
-        Ok(Self::capability_tools()?
-            .into_iter()
-            .filter(|tool| crate::runtime::COMPACT_TOOL_NAMES.contains(&tool.name.as_ref()))
-            .collect())
+        Ok(compact_tools_cached())
     }
 
     #[cfg(test)]
@@ -13032,15 +13079,141 @@ struct TranscriptsArgs {
     asset_ids: Vec<AssetId>,
 }
 
-#[allow(clippy::too_many_lines)]
-fn inspector_tools() -> Vec<Tool> {
-    let read_only = || {
+/// The read-only inspector annotations, shared by the compact authority
+/// and the full registry so the two cannot drift apart.
+fn read_only_annotations() -> ToolAnnotations {
+    ToolAnnotations::new()
+        .read_only(true)
+        .destructive(false)
+        .idempotent(true)
+        .open_world(false)
+}
+
+/// The shared descriptor authority for the 7 compact tools.
+///
+/// Each constructor below is the single home of its tool's name,
+/// description bytes, input schema, and annotations: `inspector_tools()`
+/// calls them at their registry positions, and `served_tools()` serves them
+/// directly without building the other 134 descriptors. Served order is the
+/// filtered registry order. Descriptions are `&'static str` and
+/// `schema_object` returns `Arc<JsonObject>`, so a cached `Tool` clones
+/// cheaply.
+fn compact_get_timeline_state_tool() -> Tool {
+    Tool::new(
+        "get_timeline_state",
+        "Return the compact live project state and its exact timeline_revision. Every mutation must send that revision as expected_revision; inspect again after a conflict.",
+        schema_object::<EmptyArgs>(),
+    )
+    .with_annotations(read_only_annotations())
+}
+
+fn compact_search_capabilities_tool() -> Tool {
+    Tool::new(
+        "search_capabilities",
+        "Search only unnamed editing, perception, proof, or delivery needs. Skip exact names in the user request; batch independent terms.",
+        schema_object::<CapabilitySearchArgs>(),
+    )
+    .with_annotations(read_only_annotations())
+}
+
+fn compact_get_capability_tool() -> Tool {
+    Tool::new(
+        "get_capability",
+        "Open schemas for exact names from the user request or search results. Batch all workflow names; no prior search is required.",
+        schema_object::<CapabilityArgs>(),
+    )
+    .with_annotations(read_only_annotations())
+}
+
+fn compact_invoke_capability_tool() -> Tool {
+    Tool::new(
+        "invoke_capability",
+        "Invoke one discovered non-edit capability with arguments matching the schema returned by get_capability. Timeline edit operations must use prepare_edit_plan and commit_edit_plan.",
+        schema_object::<InvokeCapabilityArgs>(),
+    )
+    .with_annotations(
         ToolAnnotations::new()
-            .read_only(true)
+            .read_only(false)
+            .destructive(true)
+            .idempotent(false)
+            .open_world(false),
+    )
+}
+
+fn compact_prepare_edit_plan_tool() -> Tool {
+    Tool::new(
+        "prepare_edit_plan",
+        "Decode and atomically validate ordered compact edit operations against one exact timeline revision. Returns an opaque plan id and deterministic before/after preview without changing the timeline.",
+        schema_object::<PrepareEditPlanArgs>(),
+    )
+    .with_annotations(
+        ToolAnnotations::new()
+            .read_only(false)
+            .destructive(false)
+            .idempotent(false)
+            .open_world(false),
+    )
+}
+
+fn compact_commit_edit_plan_tool() -> Tool {
+    Tool::new(
+        "commit_edit_plan",
+        "Commit one previously prepared plan as a single revision-gated undo entry. Stale, missing, invalid, or unconfirmed destructive plans are rejected.",
+        schema_object::<CommitEditPlanArgs>(),
+    )
+    .with_annotations(
+        ToolAnnotations::new()
+            .read_only(false)
+            .destructive(true)
+            .idempotent(false)
+            .open_world(false),
+    )
+}
+
+fn compact_discard_edit_plan_tool() -> Tool {
+    Tool::new(
+        "discard_edit_plan",
+        "Discard one opaque prepared plan without changing the timeline.",
+        schema_object::<DiscardEditPlanArgs>(),
+    )
+    .with_annotations(
+        ToolAnnotations::new()
+            .read_only(false)
             .destructive(false)
             .idempotent(true)
-            .open_world(false)
-    };
+            .open_world(false),
+    )
+}
+
+/// Build the 7 compact descriptors in served (filtered-registry) order.
+fn compact_tools_uncached() -> Vec<Tool> {
+    vec![
+        compact_get_timeline_state_tool(),
+        compact_search_capabilities_tool(),
+        compact_get_capability_tool(),
+        compact_invoke_capability_tool(),
+        compact_prepare_edit_plan_tool(),
+        compact_commit_edit_plan_tool(),
+        compact_discard_edit_plan_tool(),
+    ]
+}
+
+/// The 7 compact descriptors, built once. Every `start` / `list_tools` /
+/// `get_tool` call after the first is seven cheap `Arc`-cloning clones
+/// instead of seven schemars builds — and instead of the 141 the legacy
+/// full-registry-filtered path built.
+static COMPACT_TOOLS_CACHE: OnceLock<Vec<Tool>> = OnceLock::new();
+
+/// The 7 served descriptors in served order.
+fn compact_tools_cached() -> Vec<Tool> {
+    COMPACT_TOOLS_CACHE
+        .get_or_init(compact_tools_uncached)
+        .clone()
+}
+
+#[allow(clippy::too_many_lines)]
+fn inspector_tools() -> Vec<Tool> {
+    let read_only = read_only_annotations;
     vec![
         // IN1 §6.4 rule 20: both descriptions are normative bytes, measured at
         // 492 B and 365 B, with self-contained first sentences because
@@ -13087,12 +13260,10 @@ fn inspector_tools() -> Vec<Tool> {
                 .idempotent(false)
                 .open_world(false),
         ),
-        Tool::new(
-            "get_timeline_state",
-            "Return the compact live project state and its exact timeline_revision. Every mutation must send that revision as expected_revision; inspect again after a conflict.",
-            schema_object::<EmptyArgs>(),
-        )
-        .with_annotations(read_only()),
+        // Compact authority: the served `get_timeline_state` descriptor lives
+        // in `compact_get_timeline_state_tool`, called here at its registry
+        // position so the full registry and the served surface cannot drift.
+        compact_get_timeline_state_tool(),
         Tool::new(
             "get_color_context",
             "Return the project working, monitoring, and delivery colour descriptions, source metadata, managed-profile status, ordered CC1 stages, and legacy-stage warnings at the exact timeline revision. Each clip carries its ordered managed colour-node stack across all five node kinds - technical_lut, primary_correction, color_wheels, color_curves, creative_look - with role, color_stage, stage_index, bypass, active, inactive_reason, and resolved values; LUT nodes add lut_asset_id, lut_title, lut_sha256, lut_size, lut_kind, lut_provenance, lut_availability, lut_store_path, mix_basis_points, input_encoding, and may_be_active. legacy_look_conversions lists every legacy look_lut/cube_lut with status ready, needs_import, or unconvertible, the exact operations, and a recovery_action naming convert_legacy_look. The default status matches the executed application D65 profile assumption; use raw_only for unassumed classifier evidence. Metadata remains unchanged. Use render_color_proof for an isolated mapped BEFORE/AFTER frame.",
@@ -13225,66 +13396,15 @@ fn inspector_tools() -> Vec<Tool> {
                 .idempotent(false)
                 .open_world(true),
         ),
-        Tool::new(
-            "search_capabilities",
-            "Search only unnamed editing, perception, proof, or delivery needs. Skip exact names in the user request; batch independent terms.",
-            schema_object::<CapabilitySearchArgs>(),
-        )
-        .with_annotations(read_only()),
-        Tool::new(
-            "get_capability",
-            "Open schemas for exact names from the user request or search results. Batch all workflow names; no prior search is required.",
-            schema_object::<CapabilityArgs>(),
-        )
-        .with_annotations(read_only()),
-        Tool::new(
-            "invoke_capability",
-            "Invoke one discovered non-edit capability with arguments matching the schema returned by get_capability. Timeline edit operations must use prepare_edit_plan and commit_edit_plan.",
-            schema_object::<InvokeCapabilityArgs>(),
-        )
-        .with_annotations(
-            ToolAnnotations::new()
-                .read_only(false)
-                .destructive(true)
-                .idempotent(false)
-                .open_world(false),
-        ),
-        Tool::new(
-            "prepare_edit_plan",
-            "Decode and atomically validate ordered compact edit operations against one exact timeline revision. Returns an opaque plan id and deterministic before/after preview without changing the timeline.",
-            schema_object::<PrepareEditPlanArgs>(),
-        )
-        .with_annotations(
-            ToolAnnotations::new()
-                .read_only(false)
-                .destructive(false)
-                .idempotent(false)
-                .open_world(false),
-        ),
-        Tool::new(
-            "commit_edit_plan",
-            "Commit one previously prepared plan as a single revision-gated undo entry. Stale, missing, invalid, or unconfirmed destructive plans are rejected.",
-            schema_object::<CommitEditPlanArgs>(),
-        )
-        .with_annotations(
-            ToolAnnotations::new()
-                .read_only(false)
-                .destructive(true)
-                .idempotent(false)
-                .open_world(false),
-        ),
-        Tool::new(
-            "discard_edit_plan",
-            "Discard one opaque prepared plan without changing the timeline.",
-            schema_object::<DiscardEditPlanArgs>(),
-        )
-        .with_annotations(
-            ToolAnnotations::new()
-                .read_only(false)
-                .destructive(false)
-                .idempotent(true)
-                .open_world(false),
-        ),
+        // Compact authority: the six served dispatcher descriptors live in
+        // their `compact_*_tool` constructors, called here at their registry
+        // positions so the full registry and the served surface cannot drift.
+        compact_search_capabilities_tool(),
+        compact_get_capability_tool(),
+        compact_invoke_capability_tool(),
+        compact_prepare_edit_plan_tool(),
+        compact_commit_edit_plan_tool(),
+        compact_discard_edit_plan_tool(),
         Tool::new(
             "get_silences",
             "Return cached windowed-RMS silence spans for one asset in exact source frames and seconds, or background analysis status. For safe cutting, reported spans are clamped against cached transcribed words plus a 100 ms fps-aware margin; when no transcript is cached, the existing fixed 100 ms margin is used. Cached detector spans remain unchanged.",
@@ -27777,6 +27897,14 @@ mod tests {
     ///
     /// 157 + 434 + 539 = 1 130, which is the whole of the growth: nothing else
     /// in the registry moved.
+    ///
+    /// **Perf follow-up:** `served_tools()` no longer filters
+    /// `capability_tools()`; it builds the same 7 descriptors directly from
+    /// the shared compact authority (`compact_*_tool`), served from a
+    /// `OnceLock` cache. The pins below are unchanged — that is the proof
+    /// the refactor is byte-for-byte — and
+    /// `served_tools_equal_serialized_filtered_registry` pins the equality
+    /// explicitly.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -34078,5 +34206,95 @@ mod tests {
                 .starts_with("propose_fix rejected:"),
             "{result:?}"
         );
+    }
+
+    /// Perf follow-up: the direct served path is byte-for-byte the legacy
+    /// full-registry-filtered path — the same 7 descriptors in the same
+    /// served order, compared as serialized JSON so no field can drift
+    /// silently while the shared `compact_*_tool` authority feeds both.
+    #[test]
+    fn served_tools_equal_serialized_filtered_registry() {
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        let expected = registry
+            .into_iter()
+            .filter(|tool| crate::runtime::COMPACT_TOOL_NAMES.contains(&tool.name.as_ref()))
+            .map(|tool| serde_json::to_value(&tool).unwrap())
+            .collect::<Vec<_>>();
+        let served = KinewrightMcp::served_tools().unwrap();
+        let actual = served
+            .iter()
+            .map(|tool| serde_json::to_value(tool).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        let names = served
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(names, crate::runtime::COMPACT_TOOL_NAMES);
+        assert_eq!(served.len(), 7);
+    }
+
+    /// Ignored release microbenchmark: the legacy full-registry-filtered
+    /// path vs the direct cached served path, 100 iterations each.
+    ///
+    /// Run it in release and read the elapsed JSON from stdout:
+    /// `cargo test -p kinewright-agent --release
+    /// served_tools_direct_vs_legacy_filtered_microbench -- --ignored
+    /// --nocapture`. It asserts nothing about speed — timing assertions
+    /// flake — it reports.
+    #[test]
+    #[ignore = "manual release performance measurement"]
+    fn served_tools_direct_vs_legacy_filtered_microbench() {
+        use std::hint::black_box;
+
+        const ITERATIONS: usize = 100;
+        // Steady state: `start()` itself warms this cache on every real
+        // server, so warm it here to keep the comparison deterministic.
+        black_box(KinewrightMcp::served_tools().unwrap());
+
+        let legacy_start = Instant::now();
+        for _ in 0..ITERATIONS {
+            let filtered = KinewrightMcp::capability_tools()
+                .unwrap()
+                .into_iter()
+                .filter(|tool| crate::runtime::COMPACT_TOOL_NAMES.contains(&tool.name.as_ref()))
+                .collect::<Vec<_>>();
+            black_box(filtered);
+        }
+        let legacy_elapsed = legacy_start.elapsed();
+
+        let direct_start = Instant::now();
+        for _ in 0..ITERATIONS {
+            black_box(KinewrightMcp::served_tools().unwrap());
+        }
+        let direct_elapsed = direct_start.elapsed();
+
+        let report = serde_json::json!({
+            "iterations": ITERATIONS,
+            "legacy_filtered_elapsed_us": u64::try_from(legacy_elapsed.as_micros())
+                .unwrap_or(u64::MAX),
+            "direct_served_elapsed_us": u64::try_from(direct_elapsed.as_micros())
+                .unwrap_or(u64::MAX),
+        });
+        println!("{report}");
+    }
+
+    /// Perf follow-up: every server runtime is bounded to 2 async workers
+    /// by default while an explicit override still wins, pinned against
+    /// the runtime's own worker metrics rather than only the resolver.
+    #[test]
+    fn runtime_worker_config_defaults_to_two_and_honors_override() {
+        assert_eq!(DEFAULT_WORKER_THREADS, 2);
+        assert_eq!(resolve_worker_threads(None), DEFAULT_WORKER_THREADS);
+        assert_eq!(
+            resolve_worker_threads(Some(INVESTIGATOR_WORKER_THREADS)),
+            INVESTIGATOR_WORKER_THREADS
+        );
+        assert_eq!(resolve_worker_threads(Some(4)), 4);
+
+        let default_runtime = build_server_runtime(None);
+        assert_eq!(default_runtime.metrics().num_workers(), 2);
+        let override_runtime = build_server_runtime(Some(1));
+        assert_eq!(override_runtime.metrics().num_workers(), 1);
     }
 }

@@ -1326,6 +1326,111 @@ mod tests {
         }
     }
 
+    /// Batch rollback and error ordering must match individual operations.
+    #[test]
+    fn batch_preserves_sequential_failure_order_and_rolls_back() {
+        let valid = generated_document(&[30, 30], &[0]);
+        let mut invalid = valid.clone();
+        invalid.duration = TimeCode::ZERO;
+        let slip = |clip, frame| Operation::SlipClip {
+            clip: ClipId(clip),
+            new_source_in: TimeCode(frame),
+        };
+        for initial in [valid, invalid] {
+            for operations in [
+                vec![],
+                vec![slip(1, 10), slip(2, 20)],
+                vec![slip(1, 290), slip(1, 0)],
+                vec![slip(1, 10), slip(2, 290)],
+                vec![slip(99, 0)],
+            ] {
+                let mut sequential = initial.clone();
+                let expected = if operations.is_empty() {
+                    Err(BatchError::Empty)
+                } else {
+                    operations.iter().enumerate().try_for_each(|(index, op)| {
+                        op.apply(&mut sequential)
+                            .map_err(|error| BatchError::OperationFailed {
+                                op_number: index + 1,
+                                error,
+                            })
+                    })
+                };
+                let mut actual = initial.clone();
+                assert_eq!(apply_batch(&mut actual, &operations), expected);
+                assert_eq!(
+                    actual,
+                    if expected.is_ok() {
+                        sequential
+                    } else {
+                        initial.clone()
+                    }
+                );
+            }
+        }
+    }
+
+    /// Release-only measurement, deliberately excluded from correctness CI.
+    #[test]
+    #[ignore = "manual release performance measurement"]
+    fn performance_batch_workloads() {
+        use std::{hint::black_box, time::Instant};
+
+        for (lane, clips) in [("typical", 48), ("heavy", 480), ("agent", 1_200)] {
+            let document = generated_document(&vec![30; clips], &[0]);
+            let operations: Vec<_> = (0..20)
+                .map(|index| Operation::SlipClip {
+                    clip: ClipId(index + 1),
+                    new_source_in: TimeCode(10),
+                })
+                .collect();
+            let mut optimized = document.clone();
+            apply_batch(&mut optimized, &operations).unwrap();
+            let mut sequential = document.clone();
+            for operation in &operations {
+                operation.apply(&mut sequential).unwrap();
+            }
+            assert_eq!(optimized, sequential);
+
+            let mut results = Vec::new();
+            for optimized_path in [false, true] {
+                let mut samples = Vec::new();
+                for iteration in 0..105 {
+                    let mut target = black_box(document.clone());
+                    let began = Instant::now();
+                    if optimized_path {
+                        apply_batch(black_box(&mut target), black_box(&operations)).unwrap();
+                    } else {
+                        // The original atomic batch path: one candidate clone,
+                        // followed by a transactional clone for every operation.
+                        let mut candidate = target.clone();
+                        for operation in black_box(&operations) {
+                            operation.apply(&mut candidate).unwrap();
+                        }
+                        target = candidate;
+                    }
+                    let elapsed = began.elapsed().as_secs_f64() * 1_000.0;
+                    black_box(&target);
+                    if iteration >= 5 {
+                        samples.push(elapsed);
+                    }
+                }
+                samples.sort_by(f64::total_cmp);
+                results.push(serde_json::json!({
+                    "path": if optimized_path { "batch" } else { "legacy_batch" },
+                    "median_ms": samples[49], "p95_ms": samples[94],
+                }));
+            }
+            println!(
+                "{}",
+                serde_json::json!({
+                    "lane": lane, "clips": clips, "operations": 20,
+                    "samples": 100, "results": results,
+                })
+            );
+        }
+    }
+
     proptest! {
         #[test]
         fn batch_matches_sequential_application(

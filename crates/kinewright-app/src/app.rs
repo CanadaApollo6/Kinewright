@@ -347,6 +347,7 @@ pub(crate) struct KinewrightApp {
     pub(crate) look_ab_hold: Option<crate::inspector_ui::MirroredAbHold>,
     /// Whether the held card reported itself during the previous frame.
     pub(crate) look_ab_hold_seen: bool,
+    performance: Option<crate::performance::PerformanceProbe>,
 }
 
 impl KinewrightApp {
@@ -547,6 +548,7 @@ impl KinewrightApp {
             edit_gesture: 0,
             look_ab_hold: None,
             look_ab_hold_seen: false,
+            performance: None,
         };
         app.publish_focused_lut_library();
         app.playback
@@ -2131,6 +2133,7 @@ impl KinewrightApp {
 
 impl eframe::App for KinewrightApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let measured_frame = self.performance.as_ref().map(|_| std::time::Instant::now());
         self.update_window_title(ui.ctx());
         self.handle_close_request(ui.ctx());
         self.poll_background(ui.ctx());
@@ -2181,6 +2184,12 @@ impl eframe::App for KinewrightApp {
         crate::incident_ui::show_incidents_panel(self, ui.ctx());
         self.show_unsaved_confirmation(ui.ctx());
         self.screenshot.update(ui.ctx());
+        if let (Some(probe), Some(began)) = (&mut self.performance, measured_frame)
+            && probe.frame(ui.ctx(), began, self.texture.is_some())
+        {
+            self.allow_close = true;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 }
 
@@ -2807,6 +2816,7 @@ fn native_wgpu_configuration() -> eframe::WgpuConfiguration {
 }
 
 pub(crate) fn run() -> eframe::Result {
+    let started = std::time::Instant::now();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([size::WINDOW_WIDTH, size::WINDOW_HEIGHT])
         .with_min_inner_size([size::WINDOW_MIN_WIDTH, size::WINDOW_MIN_HEIGHT]);
@@ -2836,8 +2846,11 @@ pub(crate) fn run() -> eframe::Result {
             let media = Arc::new(
                 FfmpegMediaEngine::new_with_gpu(gpu).expect("FFmpeg media engine must initialize"),
             );
+            let repaint_context = creation_context.egui_ctx.clone();
+            media.set_event_wakeup(move || repaint_context.request_repaint());
             let startup = std::env::args().nth(1).map(PathBuf::from);
-            let app = KinewrightApp::new(media, startup);
+            let mut app = KinewrightApp::new(media, startup);
+            app.performance = crate::performance::PerformanceProbe::from_environment(started);
             Ok(Box::new(app))
         }),
     )
@@ -4625,6 +4638,7 @@ pub(crate) mod in1_tests {
             edit_gesture: 0,
             look_ab_hold: None,
             look_ab_hold_seen: false,
+            performance: None,
         };
         (app, engine)
     }
