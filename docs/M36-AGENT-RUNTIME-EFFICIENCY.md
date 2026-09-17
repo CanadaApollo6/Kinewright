@@ -130,6 +130,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-15, after IN1 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-16, after IN1 Part B) | 140 | 1,551,301 B | 1,407,012 B | 121,315 B |
 | Served MCP runtime (2026-09-16, after IN1 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-16, after IN2 Part A) | 141 | 1,552,431 B | 1,407,446 B | 121,854 B |
+| Served MCP runtime (2026-09-16, after IN2 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 
 IN1 Part A adds two capabilities, `get_incidents` and `resolve_incident`,
 reached through `invoke_capability` and served as no tool: the registry grows
@@ -143,6 +145,20 @@ operation and no schema byte: incidents grow from 12 codes to 67 and from one
 subject kind to eight, but every addition is output-only, so the registry
 sextuple and the served quad are both unchanged for the seventeenth
 consecutive measurement (IN1b §6.4), asserted in three pin sites.
+
+IN2 Part A adds one capability, `propose_fix`, registry-only like the two
+before it, and flips three `destructiveHint` annotations to `true`
+(`remove_bin`, `remove_string_out` and `remove_sync_group` join the
+seven-variant destructive gate; twelve `true` annotations become fifteen).
+The registry grows by 1,130 B serialized (1,551,301 → 1,552,431): +434 B
+of the two-field `ProposeFixArgs` input schema, +539 B of description text
+and +157 B fixed — the +160 B name-and-envelope cost of a row less 3 B for
+the three `false` → `true` flips, each one byte shorter. The served quad
+is byte-identical for the eighteenth consecutive measurement at 7 /
+5,660 B / 3,510 B / 998 B (IN2 §6.4), asserted in three value sites and
+re-worded in five counter-word sites. The investigator's own server serves
+a six-name subset of the seven through a per-instance allowlist; the chat
+server's list is unchanged.
 
 AU6 Part A adds no capability and no operation; the registry is
 unchanged and the served quad is byte-identical at 7 / 5,660 B /

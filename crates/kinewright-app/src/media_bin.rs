@@ -13,7 +13,11 @@ use crate::{
         source_color_display,
     },
     icons::{self, Icon},
-    incident_ui::{card_action_outcome, incident_card, show_incident_card},
+    incident_ui::{
+        CardPress, append_investigating_rows, card_action_outcome, incident_card,
+        show_incident_card, show_proposal_card,
+    },
+    investigator::{ProposalAction, proposal_card_with_reinvestigate, shows_proposal_card},
     media_workflow::{paint_source_status, source_display_state},
     theme::{self, color, radius, size, space, type_size},
     timeline_ui::format_timecode,
@@ -443,12 +447,18 @@ impl KinewrightApp {
     /// audit line is in the log — so it takes no more wall space. At most one
     /// press is sent per frame.
     fn show_asset_incidents(&mut self, ui: &mut egui::Ui, asset_id: AssetId) {
-        let pressed = {
+        let project_index = self.focused_project;
+        let investigating = self.investigating_card_for_project(project_index);
+        let session_pairs = self.investigator_session_pairs_for_project(project_index);
+        let (pressed, reinvestigate, mute, proposal_press) = {
             let handle = Arc::clone(&self.focused().incidents);
             let log = handle
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut pressed: Option<(IncidentId, Operation, IncidentOutcome)> = None;
+            let mut reinvestigate = None;
+            let mut mute = None;
+            let mut proposal_press = None;
             // `IN1b` §5.5 rule 31: the `==` is deliberate and stays. After
             // Part B every subject kind opens incidents, and the Media panel
             // shows exactly the ones that belong beside an asset; every other
@@ -458,10 +468,8 @@ impl KinewrightApp {
             // `IncidentSubject` — so the filter says so in words.
             for incident in log.all().filter(|incident| {
                 incident.subject == IncidentSubject::Asset(asset_id)
-                    && matches!(
-                        incident.state,
-                        IncidentState::Open | IncidentState::Resolved(IncidentOutcome::Applied)
-                    )
+                    && (incident.state.is_open()
+                        || incident.state == IncidentState::Resolved(IncidentOutcome::Applied))
             }) {
                 // `IN1b` §5.5 rule 28: colour is the one code that ships a
                 // revert, and its condition is the asset still carrying the
@@ -471,24 +479,75 @@ impl KinewrightApp {
                     .document
                     .asset(asset_id)
                     .is_some_and(|asset| asset.assumed_from.is_some());
-                let view = incident_card(incident, revert_available);
-                if let Some(index) = show_incident_card(ui, &view) {
-                    let action = &view.actions[index];
-                    if let RecoveryKind::Operation(operation) = &action.recovery.kind {
-                        pressed = Some((
+                let mut view = incident_card(incident, revert_available);
+                if let Some(card) = investigating
+                    && card.id == incident.id
+                {
+                    append_investigating_rows(&mut view, &card);
+                }
+                match show_incident_card(ui, &view) {
+                    Some(CardPress::Action(index)) => {
+                        let action = &view.actions[index];
+                        if let RecoveryKind::Operation(operation) = &action.recovery.kind {
+                            pressed = Some((
+                                incident.id,
+                                operation.clone(),
+                                card_action_outcome(incident, action),
+                            ));
+                            break;
+                        }
+                    }
+                    Some(CardPress::Reinvestigate) => {
+                        reinvestigate = Some(incident.id);
+                        break;
+                    }
+                    Some(CardPress::NeverInvestigate) => {
+                        mute = Some(incident.code);
+                        break;
+                    }
+                    None => {}
+                }
+                if shows_proposal_card(incident)
+                    && let Some(proposal) = incident.proposal.as_ref()
+                {
+                    let view = proposal_card_with_reinvestigate(
+                        incident,
+                        proposal,
+                        session_pairs.can_reinvestigate(
                             incident.id,
-                            operation.clone(),
-                            card_action_outcome(incident, action),
-                        ));
+                            incident.code,
+                            incident.subject,
+                        ),
+                    );
+                    if let Some(action) = show_proposal_card(ui, &view) {
+                        proposal_press = Some((incident.id, action));
                         break;
                     }
                 }
             }
-            pressed
+            (pressed, reinvestigate, mute, proposal_press)
         };
         if let Some((id, operation, outcome)) = pressed {
-            let project_index = self.focused_project;
             self.send_incident_recovery(project_index, id, operation, outcome);
+        }
+        if let Some(id) = reinvestigate {
+            self.reinvestigate(project_index, id);
+        }
+        if let Some(code) = mute {
+            self.mute_investigator_code(project_index, code);
+        }
+        if let Some((id, action)) = proposal_press {
+            match action {
+                ProposalAction::Approve => {
+                    self.approve_investigator_proposal(project_index, id);
+                }
+                ProposalAction::Reject => {
+                    self.reject_investigator_proposal(project_index, id);
+                }
+                ProposalAction::Reinvestigate => {
+                    self.reinvestigate(project_index, id);
+                }
+            }
         }
     }
 }

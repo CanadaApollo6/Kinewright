@@ -832,10 +832,19 @@ slices own: the Cursor ACP driver reports no cost categories and the Codex drive
 reports categories but no dollar cost, so IN4's per-harness efficiency gate needs
 driver work that IN3 owns; and the confirmation broker carries only a tool name
 and a description, so approval cards with a typed incident payload are IN2's.
-IN2 is the next primary slice; its Part A contract is promoted
+IN2 is the current primary slice; its Part A contract is promoted
 (`IN2-INVESTIGATOR-SESSIONS.md`, revision 2 after one brief critique, one
 contract critique and two probes) and lands in two parts on two contracts, Part B
-(`IN2B-INCIDENT-PERSISTENCE.md`) drafted after Part A lands.
+(`IN2B-INCIDENT-PERSISTENCE.md`) drafted after Part A lands. **Part A landed
+2026-09-16 in three stages — core (2410fd6), agent (fbaf52e) and the app
+(branch `in2/stage-c`): the 54-code allowlist, headless sessions on a branch
+core inside three visible budgets, `propose_fix` and the approval card applied
+through the live core with an undo entry, the seven-variant destructive gate,
+`ScriptedDriver`, `IncidentState::Investigating` with every non-person end
+returning to `Open` unsuppressed, and three `Explain` codes resolvable by
+button; the served quad is unchanged for the eighteenth consecutive
+measurement.** The hand-run checklist (IN2 §11) against a real harness is
+still owed.
 
 ## Programme scorecard
 

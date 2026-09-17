@@ -843,6 +843,11 @@ impl McpServer {
             })
             .transpose()?;
         let tool_surface_metrics = ToolSurfaceMetrics::measure(&KinewrightMcp::served_tools()?);
+        let served_tool_allowlist = if investigator.is_some() {
+            Some(&crate::runtime::INVESTIGATOR_TOOL_NAMES as &'static [&'static str])
+        } else {
+            None
+        };
         let handler = KinewrightMcp::configured(
             core,
             playback,
@@ -854,7 +859,8 @@ impl McpServer {
             Arc::clone(&incidents),
         )
         .with_capability_denylist(capability_denylist)
-        .with_investigator_context(investigator);
+        .with_investigator_context(investigator)
+        .with_served_tool_allowlist(served_tool_allowlist);
         let server_thread = thread::Builder::new()
             .name("kinewright-mcp".to_owned())
             .spawn(move || run_server(listener, handler, shutdown_rx, worker_threads))
@@ -1025,6 +1031,13 @@ struct KinewrightMcp {
     /// See [`InvestigatorSessionContext`]. `None` for every server but an
     /// investigator's, and `propose_fix` refuses without it.
     investigator: Option<InvestigatorSessionContext>,
+    /// Per-instance served-tool allowlist (H0, lead ruling §8.1b). `None`
+    /// serves the static [`Self::served_tools`] surface; the investigator
+    /// constructor sets `Some(&INVESTIGATOR_TOOL_NAMES)` so its `list_tools`
+    /// serves exactly the six session tools. Every other constructor leaves
+    /// `None`, which is what leaves every other server byte-for-byte
+    /// unchanged.
+    served_tool_allowlist: Option<&'static [&'static str]>,
 }
 
 impl KinewrightMcp {
@@ -1072,6 +1085,7 @@ impl KinewrightMcp {
             incidents,
             capability_denylist: &[],
             investigator: None,
+            served_tool_allowlist: None,
         }
     }
 
@@ -1092,6 +1106,16 @@ impl KinewrightMcp {
         investigator: Option<InvestigatorSessionContext>,
     ) -> Self {
         self.investigator = investigator;
+        self
+    }
+
+    /// The same handler, serving only `allowlist` from `list_tools`.
+    ///
+    /// A builder beside `with_capability_denylist`, so the nine existing
+    /// `configured` call sites keep their shape and a server that does not
+    /// ask for an allowlist cannot accidentally be given one.
+    fn with_served_tool_allowlist(mut self, allowlist: Option<&'static [&'static str]>) -> Self {
+        self.served_tool_allowlist = allowlist;
         self
     }
 
@@ -1121,6 +1145,19 @@ impl KinewrightMcp {
     #[allow(clippy::unnecessary_wraps)] // Preserve the existing schema-result interface.
     fn served_tools() -> Result<Vec<Tool>, SchemaError> {
         Ok(compact_tools_cached())
+    }
+
+    /// This instance's served tools: the static served surface, filtered
+    /// through the per-instance allowlist when one is set (H0).
+    fn served_tools_for_instance(&self) -> Result<Vec<Tool>, SchemaError> {
+        let tools = Self::served_tools()?;
+        match self.served_tool_allowlist {
+            Some(allowlist) => Ok(tools
+                .into_iter()
+                .filter(|tool| allowlist.contains(&tool.name.as_ref()))
+                .collect()),
+            None => Ok(tools),
+        }
     }
 
     #[cfg(test)]
@@ -11670,7 +11707,8 @@ impl ServerHandler for KinewrightMcp {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        let result = Self::served_tools()
+        let result = self
+            .served_tools_for_instance()
             .map(ListToolsResult::with_all_items)
             .map_err(|error| McpError::internal_error(error.to_string(), None));
         std::future::ready(result)
@@ -33766,6 +33804,75 @@ mod tests {
     /// measurement (§10 figure 5) and not a `cargo test` assertion — the
     /// process runs many servers in parallel. What a bounded runtime risks is
     /// **liveness**, and that is what four real round trips through it prove.
+    ///
+    /// H0 via lead ruling §8.1b: the investigator constructor's own server
+    /// serves exactly `INVESTIGATOR_TOOL_NAMES` from `list_tools` over
+    /// loopback, while the static served surface — the one the chat server
+    /// and every registry pin measure — still serves seven.
+    #[test]
+    fn in2_the_investigator_server_serves_exactly_the_six_session_tools() {
+        use rmcp::ServiceExt as _;
+        use rmcp::transport::StreamableHttpClientTransport;
+
+        let (branch, playback, analysis, incidents, id) = in2_investigator_parts();
+        let server = McpServer::start_investigator_session(
+            branch,
+            playback,
+            analysis,
+            Arc::new(NoopExporter),
+            Arc::new(RwLock::new(None)),
+            Arc::clone(&incidents),
+            &INVESTIGATOR_CAPABILITY_DENYLIST,
+            INVESTIGATOR_WORKER_THREADS,
+            InvestigatorSessionContext {
+                incident: id,
+                base_revision: IN2_BASE_REVISION,
+            },
+        )
+        .expect("the investigator server starts");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a client runtime");
+        let names = runtime.block_on(async {
+            let service = ()
+                .serve(StreamableHttpClientTransport::from_uri(
+                    server.endpoint().to_owned(),
+                ))
+                .await
+                .expect("the client connects");
+            let names = service
+                .list_tools(None)
+                .await
+                .expect("list_tools answers")
+                .tools
+                .into_iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<Vec<_>>();
+            let _ = service.cancel().await;
+            names
+        });
+        assert_eq!(names.len(), 6, "the six session tools, no more");
+        assert_eq!(
+            names.iter().map(String::as_str).collect::<Vec<_>>(),
+            crate::runtime::INVESTIGATOR_TOOL_NAMES,
+            "the investigator server serves exactly the six names"
+        );
+
+        // The chat surface is untouched: the static served list still holds
+        // seven in compact order.
+        let chat = KinewrightMcp::served_tools().expect("served tools");
+        assert_eq!(chat.len(), 7);
+        assert_eq!(
+            chat.iter()
+                .map(|tool| tool.name.as_ref())
+                .collect::<Vec<_>>(),
+            crate::runtime::COMPACT_TOOL_NAMES,
+        );
+        server.shutdown();
+    }
+
     #[test]
     // One end-to-end session: build the branch, start the real server,
     // drive four round trips through the pump and read the shared log.

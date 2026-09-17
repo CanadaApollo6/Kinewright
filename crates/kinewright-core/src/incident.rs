@@ -3160,6 +3160,34 @@ impl IncidentLog {
         Ok(())
     }
 
+    /// Mark the entry's proposal stale without touching anything else.
+    ///
+    /// The seventh narrow writer: the app calls it when an approval fails
+    /// terminally — the proposal conflicted twice against the live timeline,
+    /// or the branch comparison failed — so the card stops offering Approve
+    /// and offers Re-investigate instead (IN2 §4.4 rule 19, lead ruling §8.2).
+    /// True when the entry exists, is `Open` or `Investigating`, and carries
+    /// a non-stale proposal; false — with nothing written — otherwise.
+    pub fn mark_proposal_stale(&mut self, id: IncidentId) -> bool {
+        let Some(incident) = self.entries.iter_mut().find(|incident| incident.id == id) else {
+            return false;
+        };
+        if !matches!(
+            incident.state,
+            IncidentState::Open | IncidentState::Investigating
+        ) {
+            return false;
+        }
+        let Some(proposal) = incident.proposal.as_mut() else {
+            return false;
+        };
+        if proposal.stale {
+            return false;
+        }
+        proposal.stale = true;
+        true
+    }
+
     /// How many incidents are still outstanding.
     ///
     /// A different quantity from the audit log's length: this counts *problems
@@ -5555,6 +5583,68 @@ mod tests {
         ));
         assert!(log.get(id).unwrap().telemetry.resolver.is_none());
         assert!(!log.end_investigation(IncidentId(9_999), IncidentResolver::Person));
+    }
+
+    /// Lead ruling §8.2, IN2 §4.4 rule 19: `mark_proposal_stale` writes the
+    /// flag and nothing else, on `Open` or `Investigating` entries carrying a
+    /// non-stale proposal.
+    #[test]
+    fn in2_mark_proposal_stale_writes_the_flag_and_nothing_else() {
+        fn proposal() -> IncidentProposal {
+            IncidentProposal {
+                operations: Vec::new(),
+                operation_count: 0,
+                summary: String::new(),
+                explanation: "mark it".to_owned(),
+                base_revision: TimelineRevision::default(),
+                stale: false,
+            }
+        }
+
+        let probed = untagged_mp4_probe();
+        let mut marked = 0_usize;
+        for state in ["investigating", "open"] {
+            let mut log = IncidentLog::with_start(Instant::now());
+            let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+                panic!("the first observation must open an incident");
+            };
+            assert!(log.begin_investigation(id));
+            log.record_proposal(id, proposal()).unwrap();
+            if state == "open" {
+                assert!(log.end_investigation(id, IncidentResolver::Person));
+            }
+            let before = log.get(id).unwrap().clone();
+
+            assert!(log.mark_proposal_stale(id));
+            let after = log.get(id).unwrap();
+            assert!(after.proposal.as_ref().unwrap().stale);
+            assert_eq!(after.state, before.state);
+            assert_eq!(after.telemetry, before.telemetry);
+            assert_eq!(after.count, before.count);
+            assert_eq!(after.revision, before.revision);
+            assert_eq!(
+                log.observe(unknown_primaries_observation(&probed)),
+                Observed::Deduped(id),
+                "`mark_proposal_stale` must not suppress"
+            );
+            marked += 1;
+        }
+        assert_eq!(marked, 2);
+
+        // Already stale, no proposal, resolved, and unknown: all false, all
+        // writing nothing.
+        let mut log = IncidentLog::with_start(Instant::now());
+        let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+            panic!("the first observation must open an incident");
+        };
+        assert!(log.begin_investigation(id));
+        assert!(!log.mark_proposal_stale(id), "no proposal to mark");
+        log.record_proposal(id, proposal()).unwrap();
+        assert!(log.mark_proposal_stale(id));
+        assert!(!log.mark_proposal_stale(id), "already stale");
+        assert!(log.resolve(id, IncidentOutcome::Rejected));
+        assert!(!log.mark_proposal_stale(id), "resolved entries stay shut");
+        assert!(!log.mark_proposal_stale(IncidentId(9_999)));
     }
 
     /// IN2 §9.1 item 5, §4.5 rule 22: the one end that resolves.
