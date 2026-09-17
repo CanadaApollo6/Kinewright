@@ -672,10 +672,11 @@ mod tests {
         // Both pipes are at EOF immediately, so give the reader time to
         // reach its wait before probing — otherwise the probe wins the race
         // and the lock looks free whatever the reader does with it. The
-        // child lives for five seconds, so anything that answers well
-        // inside that proves the wait is not holding the lock.
+        // child lives for five seconds and the buggy reader held the lock
+        // for all of them, so a window that closes at three still tells the
+        // two apart with room for a loaded runner.
         thread::sleep(Duration::from_millis(700));
-        let deadline = Instant::now() + Duration::from_millis(800);
+        let deadline = Instant::now() + Duration::from_millis(2300);
         let mut free = false;
         while Instant::now() < deadline {
             if handle.try_lock().is_ok() {
@@ -686,7 +687,8 @@ mod tests {
         }
         assert!(
             free,
-            "the reader held the child lock while waiting on the child"
+            "the reader held the child lock for more than three seconds, \
+             which is the child's whole life: it is waiting under the lock"
         );
         if let Ok(mut child) = handle.lock()
             && let Some(child) = child.as_mut()

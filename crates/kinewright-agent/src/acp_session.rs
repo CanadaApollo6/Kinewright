@@ -135,7 +135,11 @@ fn restore_writes(overwritten: &OverwrittenConfig) -> Vec<(String, Value)> {
 /// One long-lived ACP agent session: a single child process, a single ACP
 /// session in an empty scratch directory, and one prompt at a time.
 pub(crate) struct GenericAcpSession {
-    client: AcpClient,
+    /// The transport handle. `None` only from the moment `Drop` hands it to
+    /// the teardown worker, which is after the last caller has gone: the
+    /// frame thread must never be left holding the final clone, because
+    /// dropping that is where the child would be killed and reaped.
+    client: Option<AcpClient>,
     session_id: String,
     requested: SessionConfig,
     spec: AcpSessionSpec,
@@ -187,8 +191,9 @@ impl GenericAcpSession {
         let (events_tx, events_rx) = unbounded();
         let done = Arc::new(AtomicBool::new(true));
         let incoming = client.incoming();
+        let events_client = client.clone();
         let session = Self {
-            client,
+            client: Some(client),
             session_id,
             requested,
             spec,
@@ -207,13 +212,13 @@ impl GenericAcpSession {
         // restore handle the turn thread does; on failure `Drop` cancels,
         // kills and removes the scratch directory.
         spawn_acp_incoming(
-            session.client.clone(),
+            events_client.clone(),
             incoming,
             session.session_id.clone(),
             session.events_tx.clone(),
             Arc::clone(&session.done),
             spec.label,
-            session.turn_restore(),
+            session.turn_restore_for(events_client),
         )?;
         Ok(session)
     }
@@ -238,42 +243,60 @@ impl GenericAcpSession {
         Ok(())
     }
 
+    /// The transport, while the session still owns it.
+    fn client(&self) -> Result<&AcpClient, AgentError> {
+        self.client.as_ref().ok_or_else(|| {
+            AgentError::Harness(format!("the {} session is closing", self.spec.label))
+        })
+    }
+
     fn restore_configuration(&self) {
-        self.turn_restore().run();
+        if let Some(client) = self.client.as_ref() {
+            self.turn_restore_for(client.clone()).run();
+        }
     }
 
     /// Wind the session down off the caller's thread: wait briefly for the
     /// turn to settle, put a leased configuration back (bounded by
     /// [`CONFIG_RESTORE_BUDGET`]), kill the child, then remove `paths`.
-    /// The client is cloned in, so the child is still killed when the
-    /// session itself is dropped first.
-    fn spawn_teardown(&self, paths: Vec<PathBuf>) {
-        let client = self.client.clone();
-        let restore = self.turn_restore();
+    ///
+    /// `client` is moved in, not cloned. `Drop` hands over the session's own
+    /// handle, so once this returns the caller holds none and cannot end up
+    /// running `AcpInner`'s drop — killing and reaping a child — on the egui
+    /// frame thread.
+    fn spawn_teardown(&self, client: AcpClient, paths: Vec<PathBuf>) {
+        let restore = self.turn_restore_for(client.clone());
+        // A spare set for the out-of-threads path: the worker's closure
+        // takes the originals, so there is nothing left to retry with.
+        let spare = (client.clone(), restore.clone(), paths.clone());
         let done = Arc::clone(&self.done);
-        let teardown = move || {
-            for _ in 0..20 {
-                if done.load(Ordering::Acquire) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(25));
-            }
-            restore.run();
-            client.kill();
-            for path in paths {
-                if !path.as_os_str().is_empty() {
-                    let _ = fs::remove_dir_all(path);
-                }
-            }
-        };
-        if let Err(error) = thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name(format!("kinewright-acp-teardown-{}", self.spec.label))
-            .spawn(teardown)
-        {
-            // Out of threads: a stalled frame beats a leaked child.
-            drop(error);
-            self.restore_configuration();
-            self.client.kill();
+            .spawn(move || run_teardown(&client, &restore, &done, &paths));
+        if spawned.is_err() {
+            // Out of threads: a stalled caller beats a leaked child.
+            let (client, restore, paths) = spare;
+            run_teardown(&client, &restore, &self.done, &paths);
+        }
+    }
+}
+
+/// Wait briefly for the turn to settle, put a leased configuration back
+/// (bounded by [`CONFIG_RESTORE_BUDGET`]), kill the child, then remove the
+/// session's directories — in that order, because the restore has to reach a
+/// live child and the directories are its working set.
+fn run_teardown(client: &AcpClient, restore: &TurnRestore, done: &AtomicBool, paths: &[PathBuf]) {
+    for _ in 0..20 {
+        if done.load(Ordering::Acquire) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    restore.run();
+    client.kill();
+    for path in paths {
+        if !path.as_os_str().is_empty() {
+            let _ = fs::remove_dir_all(path);
         }
     }
 }
@@ -377,8 +400,9 @@ impl AgentSession for GenericAcpSession {
             )));
         }
         self.acquire_config_lease()?;
+        let client = self.client()?.clone();
         if let Err(error) = apply_requested_configuration(
-            &self.client,
+            &client,
             &self.session_id,
             &self.requested,
             &self.config_options,
@@ -394,7 +418,7 @@ impl AgentSession for GenericAcpSession {
         } else {
             text
         };
-        let pending = match self.client.begin_request(
+        let pending = match client.begin_request(
             "session/prompt",
             &json!({
                 "sessionId": self.session_id,
@@ -413,7 +437,7 @@ impl AgentSession for GenericAcpSession {
         let events = self.events_tx.clone();
         let done = Arc::clone(&self.done);
         let label = self.spec.label;
-        let restore = self.turn_restore();
+        let restore = self.turn_restore_for(client);
         thread::Builder::new()
             .name(format!("kinewright-acp-turn-{label}"))
             .spawn(move || {
@@ -456,14 +480,16 @@ impl AgentSession for GenericAcpSession {
     /// killing the child all move to a teardown worker.
     fn interrupt(&mut self) {
         let was_running = !self.done.load(Ordering::Acquire);
-        if was_running {
-            let _ = self
-                .client
-                .notify("session/cancel", &json!({"sessionId": self.session_id}));
-            // Before `Done`, so the transcript reads in the order it happened.
-            let _ = self.events_tx.send(AgentEvent::Text("Stopped.".to_owned()));
+        let client = self.client.clone();
+        if let Some(client) = client.as_ref() {
+            if was_running {
+                let _ = client.notify("session/cancel", &json!({"sessionId": self.session_id}));
+                // Before `Done`, so the transcript reads in the order it
+                // happened.
+                let _ = self.events_tx.send(AgentEvent::Text("Stopped.".to_owned()));
+            }
+            self.spawn_teardown(client.clone(), Vec::new());
         }
-        self.spawn_teardown(Vec::new());
         send_done(&self.events_tx, &self.done);
     }
 }
@@ -474,19 +500,23 @@ impl Drop for GenericAcpSession {
     /// order, because the restore has to reach a live child and the
     /// directories are the child's working set.
     fn drop(&mut self) {
+        let Some(client) = self.client.take() else {
+            return;
+        };
         if !self.done.load(Ordering::Acquire) {
-            let _ = self
-                .client
-                .notify("session/cancel", &json!({"sessionId": self.session_id}));
+            let _ = client.notify("session/cancel", &json!({"sessionId": self.session_id}));
         }
         let mut paths = vec![std::mem::take(&mut self.scratch_directory)];
         paths.append(&mut self.cleanup_paths);
-        self.spawn_teardown(paths);
+        // `client` is moved in, so this thread is left holding no handle at
+        // all and cannot be the one that kills and reaps the child.
+        self.spawn_teardown(client, paths);
     }
 }
 
 /// Everything the turn thread needs to hand a leased configuration back,
 /// without borrowing the session it belongs to.
+#[derive(Clone)]
 struct TurnRestore {
     client: AcpClient,
     session_id: String,
@@ -510,9 +540,9 @@ impl TurnRestore {
 }
 
 impl GenericAcpSession {
-    fn turn_restore(&self) -> TurnRestore {
+    fn turn_restore_for(&self, client: AcpClient) -> TurnRestore {
         TurnRestore {
-            client: self.client.clone(),
+            client,
             session_id: self.session_id.clone(),
             overwritten: Arc::clone(&self.overwritten),
             has_lease: Arc::clone(&self.turn_has_config_lease),
@@ -1063,6 +1093,18 @@ mod tests {
     #[cfg(unix)]
     const STOP_DEADLINE: Duration = Duration::from_secs(15);
 
+    /// What a call on the caller's thread — the egui frame, in the app — may
+    /// take. Generous on purpose: a small, busy CI runner can leave a thread
+    /// off-CPU for a good fraction of a second, and this number only has to
+    /// tell a stalled frame from a scheduling gap. Everything it guards
+    /// against costs whole seconds: a mute harness's `set_config_option`
+    /// waits `ACP_REQUEST_TIMEOUT` (30 s), the restore around it
+    /// `CONFIG_RESTORE_BUDGET` (5 s), and the old inline teardown was
+    /// measured at 5.0 s. The mechanism assertions beside these bounds are
+    /// what actually pin the property; this is the coarse net.
+    #[cfg(unix)]
+    const FRAME_BOUND: Duration = Duration::from_secs(1);
+
     /// Real Cursor answers `session/new` with only `mode` and `model`; `fast`
     /// and `effort` are per-model and appear in the ladder a
     /// `set_config_option` reply restates. The fake host is shaped that way
@@ -1247,8 +1289,9 @@ mod tests {
         session.interrupt();
         let elapsed = started.elapsed();
         assert!(
-            elapsed < Duration::from_millis(100),
-            "interrupt blocked the frame for {elapsed:?}"
+            elapsed < FRAME_BOUND,
+            "interrupt blocked the frame for {elapsed:?}; the turn is \
+             unanswered, so a cancel that waited would cost 30 s"
         );
 
         assert_eq!(
@@ -1265,9 +1308,12 @@ mod tests {
         );
         let started = Instant::now();
         drop(session);
+        let elapsed = started.elapsed();
         assert!(
-            started.elapsed() < Duration::from_millis(100),
-            "Drop blocked the frame"
+            elapsed < FRAME_BOUND,
+            "Drop blocked the frame for {elapsed:?}; see \
+             `a_stop_against_a_mute_harness_returns_at_once_and_bounds_the_restore` \
+             for the mechanism this bound backs up"
         );
         fs::remove_dir_all(scratch).unwrap();
     }
@@ -1345,15 +1391,38 @@ mod tests {
 
         let started = Instant::now();
         session.interrupt();
+        let elapsed = started.elapsed();
         assert!(
-            started.elapsed() < Duration::from_millis(100),
-            "interrupt blocked the frame for {:?}",
-            started.elapsed()
+            elapsed < FRAME_BOUND,
+            "interrupt blocked the frame for {elapsed:?}; against this host a \
+             cancel or a restore that waited would cost 5 s or more"
         );
-        // The session is still alive here on purpose: dropping it would kill
-        // the child, which would fail every pending restore request at once
-        // and hide an unbounded budget. A literal deadline, not one derived
-        // from `CONFIG_RESTORE_BUDGET`, so widening the budget fails here.
+
+        // Dropped while the worker is still inside the restore, on purpose:
+        // that is precisely when waiting for the worker, or for the child it
+        // kills, costs seconds.
+        let session_scratch = session.scratch_directory.clone();
+        assert!(session_scratch.is_dir(), "the session owns a directory");
+        let started = Instant::now();
+        drop(session);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < FRAME_BOUND,
+            "Drop blocked the frame for {elapsed:?}; the worker is mid-restore \
+             against a mute host, so waiting for it would cost 5 s or more"
+        );
+        // The mechanism rather than the clock: the worker removes that
+        // directory last — after the restore this host stalls for the whole
+        // budget, and after the kill. Still finding it proves the frame
+        // waited for neither, whatever the runner's scheduler was doing.
+        assert!(
+            session_scratch.exists(),
+            "the teardown had already finished, so this run proves nothing \
+             about what the frame waited for"
+        );
+
+        // A literal deadline, not one derived from `CONFIG_RESTORE_BUDGET`,
+        // so widening that budget fails here.
         let deadline = Instant::now() + STOP_DEADLINE;
         while MUTE_TEST_LEASE.load(Ordering::Acquire) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(25));
@@ -1362,13 +1431,16 @@ mod tests {
             !MUTE_TEST_LEASE.load(Ordering::Acquire),
             "the lease was still held {STOP_DEADLINE:?} after Stop"
         );
-
-        let started = Instant::now();
-        drop(session);
+        // And the worker does get there: the child is reaped and its
+        // directory removed once the bounded restore gives up.
+        let deadline = Instant::now() + STOP_DEADLINE;
+        while session_scratch.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
         assert!(
-            started.elapsed() < Duration::from_millis(100),
-            "Drop blocked the frame for {:?}",
-            started.elapsed()
+            !session_scratch.exists(),
+            "the teardown never finished: {} is still there",
+            session_scratch.display()
         );
         fs::remove_dir_all(scratch).unwrap();
     }

@@ -836,6 +836,16 @@ mod tests {
     #[cfg(unix)]
     use std::time::Instant;
 
+    /// What a call on the caller's thread — the egui frame, in the app — may
+    /// take. Generous on purpose: a small, busy CI runner can leave a thread
+    /// off-CPU for a good fraction of a second, and this number only has to
+    /// tell a stalled frame from a scheduling gap. Both behaviours it guards
+    /// against cost whole seconds: the fake host below delays its ack by
+    /// three, and a `turn/cancel` that waited would cost
+    /// `MSP_REQUEST_TIMEOUT` (30 s, measured at 30.0 s before the fix).
+    #[cfg(unix)]
+    const FRAME_BOUND: Duration = Duration::from_secs(1);
+
     use super::*;
 
     #[test]
@@ -1103,7 +1113,8 @@ mod tests {
         ));
     }
 
-    /// A minimal MSP host that admits a turn only after a delay. Unix only:
+    /// A minimal MSP host that admits a turn only after three seconds. Unix
+    /// only:
     /// it is a POSIX shell script, and `cmd.exe` has no equivalent one-liner
     /// that reads a JSON-RPC line and answers it.
     #[cfg(unix)]
@@ -1113,7 +1124,7 @@ mod tests {
         "case \"$line\" in ",
         r#"*'"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"grantedCapabilities":["sessionMcp"]}}\n' "$id" ;; "#,
         r#"*'"session/start"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"session":{"sessionId":"s1"}}}\n' "$id" ;; "#,
-        r#"*'"turn/start"'*) sleep 2; printf '{"jsonrpc":"2.0","id":%s,"result":{"commandId":"c1","turnId":"t1","status":"accepted","disposition":"started","startedNewTurn":true}}\n' "$id" ;; "#,
+        r#"*'"turn/start"'*) sleep 3; printf '{"jsonrpc":"2.0","id":%s,"result":{"commandId":"c1","turnId":"t1","status":"accepted","disposition":"started","startedNewTurn":true}}\n' "$id" ;; "#,
         "esac; done",
     );
 
@@ -1147,8 +1158,9 @@ mod tests {
             .expect("the turn is submitted");
         let elapsed = started.elapsed();
         assert!(
-            elapsed < Duration::from_millis(500),
-            "send_user_message blocked for {elapsed:?} waiting for the ack"
+            elapsed < FRAME_BOUND,
+            "send_user_message blocked the frame for {elapsed:?} waiting for \
+             an ack this host holds back for three seconds"
         );
         assert!(!session.done.load(Ordering::Acquire), "the turn is running");
 
@@ -1255,8 +1267,9 @@ mod tests {
         session.interrupt();
         let elapsed = started.elapsed();
         assert!(
-            elapsed < Duration::from_millis(100),
-            "interrupt blocked the frame for {elapsed:?}"
+            elapsed < FRAME_BOUND,
+            "interrupt blocked the frame for {elapsed:?}; this host never \
+             answers `turn/cancel`, so waiting for it costs the full 30 s"
         );
         assert_eq!(
             events.recv_timeout(Duration::from_secs(5)).unwrap(),

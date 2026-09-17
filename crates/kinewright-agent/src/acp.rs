@@ -236,13 +236,24 @@ impl AcpClient {
 }
 
 impl Drop for AcpInner {
+    /// Kill, never wait.
+    ///
+    /// This runs on whichever thread happens to hold the last handle, and
+    /// that is not always a worker: a session's own clone can outlive its
+    /// teardown thread, and then the last drop lands on the caller — the
+    /// egui frame. `waitpid` there is an unbounded wait on somebody else's
+    /// process. Reaping belongs to [`AcpClient::kill`], which every teardown
+    /// worker and every catalog probe calls; by the time this runs the child
+    /// is normally already reaped, and the `try_wait` below collects it.
     fn drop(&mut self) {
         self.interrupted.store(true, Ordering::Release);
-        if let Ok(child) = self.child.get_mut() {
-            if child.try_wait().ok().flatten().is_none() {
-                let _ = child.kill();
-            }
-            let _ = child.wait();
+        if let Ok(child) = self.child.get_mut()
+            && child.try_wait().ok().flatten().is_none()
+        {
+            let _ = child.kill();
+            // One non-blocking reap for the usual case where the signal has
+            // already landed. Anything slower is the worker's to collect.
+            let _ = child.try_wait();
         }
     }
 }
