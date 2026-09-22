@@ -7753,6 +7753,8 @@ pub(crate) mod in1_tests {
                     assumption: None,
                 },
                 revision: app.projects[0].revision,
+                name: None,
+                transient: false,
             };
             app.note_observation(observation);
             app.route_incidents();
@@ -8610,6 +8612,8 @@ pub(crate) mod in1_tests {
                 assumption: None,
             },
             revision: app.projects[0].revision,
+            name: None,
+            transient: false,
         };
         let id = {
             let mut log = app.projects[0].incidents.write().unwrap();

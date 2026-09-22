@@ -122,6 +122,8 @@ impl BranchError {
             allowed: None,
             evidence,
             revision,
+            name: None,
+            transient: false,
         }
     }
 }

@@ -976,6 +976,8 @@ mod tests {
                 assumption: None,
             },
             revision: TimelineRevision(1),
+            name: None,
+            transient: false,
         }
     }
 

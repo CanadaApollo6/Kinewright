@@ -202,6 +202,8 @@ impl SourceEditRejection {
                 reason: self.message().to_owned(),
             },
             revision,
+            name: None,
+            transient: false,
         }
     }
 }
@@ -417,6 +419,8 @@ impl RelinkRejection {
                 reason: self.message(asset),
             },
             revision,
+            name: None,
+            transient: false,
         }
     }
 
@@ -2034,6 +2038,8 @@ impl KinewrightApp {
                 message: error.to_string(),
             },
             revision: self.focused().revision,
+            name: None,
+            transient: false,
         }
     }
 

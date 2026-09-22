@@ -186,9 +186,9 @@ pub use incident::{
     IncidentProposal, IncidentResolver, IncidentSeverity, IncidentState, IncidentSubject,
     IncidentTelemetry, LabelIncident, MediaIncident, Observed, POLICY, PolicyClass, PolicyEntry,
     PolicyPredicate, RecordProposalError, RecoveryAction, RecoveryKind, RejectionIncident,
-    SourceColorIncident, assume_rec709_operation, deterministic_recovery, explain_body,
-    json_escaped_len, policy_class, policy_recovery, rec709_compatible, recovery_description,
-    should_flush, truncate_to_serialized_bytes,
+    SUBJECT_NAME_CEILING_BYTES, SourceColorIncident, assume_rec709_operation,
+    deterministic_recovery, explain_body, json_escaped_len, policy_class, policy_recovery,
+    rec709_compatible, recovery_description, should_flush, truncate_to_serialized_bytes,
 };
 pub use journal::JournalCommand;
 pub use media::{

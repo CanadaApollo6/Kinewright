@@ -121,6 +121,8 @@ impl ProjectSaveError {
                 reason: self.to_string(),
             },
             revision,
+            name: None,
+            transient: false,
         }
     }
 }

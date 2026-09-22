@@ -27039,6 +27039,8 @@ mod tests {
                 assumption: None,
             },
             revision: TimelineRevision(1),
+            name: None,
+            transient: false,
         }
     }
 
@@ -27476,6 +27478,8 @@ mod tests {
             ),
             evidence: in1b_worst_evidence(code, probed),
             revision: TimelineRevision(u64::MAX),
+            name: None,
+            transient: false,
         }
     }
 
@@ -27773,6 +27777,8 @@ mod tests {
                 message: "clip 4 is outside the timeline".to_owned(),
             },
             revision: TimelineRevision(1),
+            name: None,
+            transient: false,
         });
         assert_eq!(bounds.code.code(), "operation_bounds");
         for outcome in [
@@ -27807,6 +27813,8 @@ mod tests {
                     reason: "could not write the project file".to_owned(),
                 },
                 revision: TimelineRevision(1),
+                name: None,
+                transient: false,
             });
             assert!(
                 verify_claimed_outcome(&incident, &empty, ResolveIncidentOutcome::Applied)
@@ -27833,6 +27841,8 @@ mod tests {
                 assumption: None,
             },
             revision: TimelineRevision(1),
+            name: None,
+            transient: false,
         });
         assert!(
             verify_claimed_outcome(

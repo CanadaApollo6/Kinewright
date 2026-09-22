@@ -705,11 +705,16 @@ impl InvestigatorSession {
     }
 
     /// Take the refused operation stashed for `observation`, if any.
+    ///
+    /// Keyed on `(code, subject, observed)` only (`IN2B` §3 rule 13, N2/S-3):
+    /// `name` and `transient` are ignored, so a renamed re-observation still
+    /// reunites with the stash its unnamed twin left.
     pub(crate) fn take_refused(&mut self, observation: &IncidentObservation) -> Option<Operation> {
-        let index = self
-            .pending_refused
-            .iter()
-            .position(|pending| &pending.observation == observation)?;
+        let index = self.pending_refused.iter().position(|pending| {
+            pending.observation.code == observation.code
+                && pending.observation.subject == observation.subject
+                && pending.observation.observed == observation.observed
+        })?;
         Some(self.pending_refused.swap_remove(index).op)
     }
 

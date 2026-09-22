@@ -970,7 +970,9 @@ pub enum IncidentSubject {
 }
 
 impl IncidentSubject {
-    /// A short human label for a card or a log line, for example `Asset 1`.
+    /// A short human label for a card or a log line, for example `Asset 1`;
+    /// when the incident carries `subject_name`, the card renders it beside
+    /// this label.
     ///
     /// The asset's human *name* is deliberately not on the incident: an
     /// incident carries no document view (IN1 §2.3c rule 31, §13 D15,
@@ -1359,6 +1361,11 @@ pub struct IncidentProposal {
 /// are on the record, and it is removed from the *type* rather than hidden with
 /// `#[serde(skip)]`: a field nobody reads is a field that drifts
 /// (IN1 §2.3 rule 12).
+/// The serialised-bytes ceiling for an observed subject name (`IN2B` §0.4
+/// d15): `observe` truncates through [`truncate_to_serialized_bytes`], so
+/// the wire arm is at most `,"subject_name":"<64>"` = 82 B.
+pub const SUBJECT_NAME_CEILING_BYTES: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Incident {
     /// Session-unique identifier.
@@ -1372,6 +1379,15 @@ pub struct Incident {
     pub severity: IncidentSeverity,
     /// What the incident is about.
     pub subject: IncidentSubject,
+    /// The subject's name at observe time, truncated to
+    /// [`SUBJECT_NAME_CEILING_BYTES`] serialised bytes (`IN2B` §9 rule 5).
+    /// Captured at open and kept — dedup never refreshes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_name: Option<String>,
+    /// Copied from the opening observation (`IN2B` §3 rule 12). Skipped on
+    /// the wire: provenance decides the write, never the record.
+    #[serde(skip)]
+    pub transient: bool,
     /// Always `code.field()`; assigned at exactly one site.
     pub field: &'static str,
     /// The offending value, from a core accessor.
@@ -1422,6 +1438,16 @@ pub struct IncidentObservation {
     pub evidence: IncidentEvidence,
     /// The timeline revision the failure was observed at.
     pub revision: TimelineRevision,
+    /// The subject's name at observe time, when the router captured one
+    /// (`IN2B` §9 rule 5, d19). Every builder sets `None`; the router sets
+    /// `Some` before the funnel call, and `observe` truncates and stores.
+    pub name: Option<String>,
+    /// Whether the note describes run-local state rather than history
+    /// (`IN2B` §9 rule 5, N2/B-3). Set at note time by the §7 drains, the
+    /// recovery modals, the open-time aggregates and every §5 note;
+    /// `observe` copies it onto the [`Incident`], and `records()` drops
+    /// open entries with the bit set.
+    pub transient: bool,
 }
 
 impl IncidentObservation {
@@ -1443,6 +1469,8 @@ impl IncidentObservation {
             allowed: None,
             evidence: IncidentEvidence::Plain,
             revision,
+            name: None,
+            transient: false,
         }
     }
 
@@ -1468,6 +1496,8 @@ impl IncidentObservation {
                 message: error.to_string(),
             },
             revision,
+            name: None,
+            transient: false,
         }
     }
 
@@ -1507,6 +1537,8 @@ impl IncidentObservation {
                 message: error.to_string(),
             },
             revision,
+            name: None,
+            transient: false,
         }
     }
 
@@ -1527,6 +1559,8 @@ impl IncidentObservation {
             allowed: Some(expected.to_string()),
             evidence: IncidentEvidence::Revision { expected, actual },
             revision: actual,
+            name: None,
+            transient: false,
         }
     }
 
@@ -1543,6 +1577,13 @@ impl IncidentObservation {
     /// none; [`MediaError::SourceColorForAsset`] overrides it with the asset it
     /// carries, which is the only variant that knows its own subject.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per MediaError variant; IN1 §2.3b rule 22 requires \
+                  the match be exhaustive with no wildcard, so the length is \
+                  the contract's and splitting it would hide the \
+                  exhaustiveness the type system is checking"
+    )]
     pub fn from_media_error(
         error: &MediaError,
         subject: IncidentSubject,
@@ -1561,6 +1602,8 @@ impl IncidentObservation {
                     assumption: refusal.assumption,
                 },
                 revision,
+                name: None,
+                transient: false,
             },
             // The bare refusal with no subject. `contextual_managed_decode_error`
             // turns every one of these into a `SourceColorForAsset` before it
@@ -1579,6 +1622,8 @@ impl IncidentObservation {
                     IncidentCode::SourceColor(SourceColorIncident::from_source_error(inner)),
                 ),
                 revision,
+                name: None,
+                transient: false,
             },
             // `observed` is the whole rendered refusal and `allowed` is `None`,
             // matching the `Backend` arm below rather than half-splitting the
@@ -1595,6 +1640,8 @@ impl IncidentObservation {
                     allowed: None,
                     evidence: media_evidence(error, code),
                     revision,
+                    name: None,
+                    transient: false,
                 }
             }
             MediaError::DeliveryColor(inner) => {
@@ -1607,6 +1654,8 @@ impl IncidentObservation {
                     allowed: Some(inner.allowed_values()),
                     evidence: media_evidence(error, code),
                     revision,
+                    name: None,
+                    transient: false,
                 }
             }
             MediaError::DeliveryVerification(inner) => {
@@ -1620,6 +1669,8 @@ impl IncidentObservation {
                     allowed: Some(inner.allowed_values()),
                     evidence: media_evidence(error, code),
                     revision,
+                    name: None,
+                    transient: false,
                 }
             }
             MediaError::ColorQc(inner) => {
@@ -1631,6 +1682,8 @@ impl IncidentObservation {
                     allowed: Some(inner.allowed_values()),
                     evidence: media_evidence(error, code),
                     revision,
+                    name: None,
+                    transient: false,
                 }
             }
             // The two matte enums and the two stores mint **no** `IncidentCode`
@@ -1656,6 +1709,8 @@ impl IncidentObservation {
                     allowed: None,
                     evidence: media_evidence(error, code),
                     revision,
+                    name: None,
+                    transient: false,
                 }
             }
         }
@@ -1722,6 +1777,8 @@ impl CaptionPlanError {
                 reason: self.to_string(),
             },
             revision,
+            name: None,
+            transient: false,
         }
     }
 }
@@ -1778,6 +1835,8 @@ impl DeliveryVariantError {
             allowed: None,
             evidence,
             revision,
+            name: None,
+            transient: false,
         }
     }
 }
@@ -2973,7 +3032,8 @@ pub fn rec709_compatible(probed: &ColorDescription) -> bool {
 ///
 /// Session state: it is never persisted, and the only durable residue of a
 /// resolved incident is the asset's written `color_description` and
-/// `MediaAsset::assumed_from` (IN1 §1 item 3, §2.3c rule 30).
+/// `MediaAsset::assumed_from` (IN1 §1 item 3, §2.3c rule 30). Entries persist
+/// as sidecar records (§2); names are captured evidence, not a document view.
 #[derive(Debug)]
 pub struct IncidentLog {
     started: Instant,
@@ -3095,6 +3155,11 @@ impl IncidentLog {
             class,
             severity: policy_severity(observation.code),
             subject: observation.subject,
+            subject_name: observation
+                .name
+                .as_deref()
+                .map(|name| truncate_to_serialized_bytes(name, SUBJECT_NAME_CEILING_BYTES)),
+            transient: observation.transient,
             field: observation.code.field(),
             observed: observation.observed,
             allowed: observation.allowed,
@@ -3439,6 +3504,8 @@ mod tests {
                 assumption: None,
             },
             revision: TimelineRevision(1),
+            name: None,
+            transient: false,
         }
     }
 
@@ -4801,6 +4868,111 @@ mod tests {
         }
     }
 
+    /// IN2B §12 item 10, §9 rule 5 (d15/d19): observed names truncate on
+    /// **serialised** length at `observe`, on a `char` boundary, and every
+    /// builder defaults the new fields.
+    #[test]
+    fn in2b_observed_names_truncate_on_serialised_length_at_observe() {
+        let revision = TimelineRevision(1);
+        // Every `IncidentObservation` builder sets the new fields to their
+        // defaults (the one literal pass, B-3).
+        for observation in [
+            IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::Project),
+                IncidentSubject::Project,
+                "observed",
+                revision,
+            ),
+            IncidentObservation::from_op_error(
+                &OpError::MissingClip(ClipId(4)),
+                IncidentSubject::Clip(ClipId(4)),
+                revision,
+            ),
+            IncidentObservation::from_batch_error(
+                &BatchError::Empty,
+                IncidentSubject::Project,
+                revision,
+            ),
+            IncidentObservation::revision_conflict(
+                IncidentSubject::Project,
+                TimelineRevision(1),
+                TimelineRevision(2),
+            ),
+            IncidentObservation::from_media_error(
+                &MediaError::Backend("backend".to_owned()),
+                IncidentSubject::ExportJob,
+                revision,
+            ),
+            CaptionPlanError::NoCues.incident_observation(IncidentSubject::Project, revision),
+            DeliveryVariantError::EffectIdExhausted
+                .incident_observation(IncidentSubject::Project, revision),
+        ] {
+            assert_eq!(observation.name, None);
+            assert!(!observation.transient);
+        }
+
+        // Truncation happens at `observe`, through the production path: one
+        // log, distinct `observed` strings so every row opens its own
+        // incident. Expected values are exact, not bounds.
+        let rows = [
+            ("n".repeat(64), "n".repeat(64)),
+            ("n".repeat(65), "n".repeat(64)),
+            ("n".repeat(240), "n".repeat(64)),
+            ("\u{0}".repeat(240), "\u{0}".repeat(10)),
+            ("é".repeat(40), "é".repeat(32)),
+            ("a".repeat(63) + "é", "a".repeat(63)),
+            (String::new(), String::new()),
+            ("   ".to_owned(), "   ".to_owned()),
+            ("a\"b".repeat(40), "a\"b".repeat(16)),
+        ];
+        let mut log = IncidentLog::with_start(Instant::now());
+        for (index, (name, expected)) in rows.iter().enumerate() {
+            let mut observation = IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::Project),
+                IncidentSubject::Project,
+                format!("row-{index}"),
+                revision,
+            );
+            observation.name = Some(name.clone());
+            let Observed::Opened(id) = log.observe(observation) else {
+                panic!("row {index} must open");
+            };
+            let stored = log.get(id).unwrap().subject_name.clone().unwrap();
+            assert_eq!(stored, *expected, "row {index}");
+            assert!(
+                json_escaped_len(&stored) <= SUBJECT_NAME_CEILING_BYTES,
+                "row {index} stores {} serialised bytes",
+                json_escaped_len(&stored)
+            );
+        }
+
+        // The saturated ASCII row's wire arm is the contract's 82 B figure.
+        let saturated = log
+            .get(IncidentId(3))
+            .unwrap()
+            .subject_name
+            .clone()
+            .unwrap();
+        assert_eq!(saturated, "n".repeat(64));
+        let wire = serde_json::to_string(log.get(IncidentId(3)).unwrap()).unwrap();
+        let arm = format!(r#","subject_name":"{}""#, "n".repeat(64));
+        assert_eq!(arm.len(), 82);
+        assert!(wire.contains(&arm), "{wire}");
+
+        // An unnamed observation stores `None`, and the key skips the wire.
+        let Observed::Opened(unnamed) = log.observe(IncidentObservation::plain(
+            IncidentCode::Label(LabelIncident::Project),
+            IncidentSubject::Project,
+            "unnamed",
+            revision,
+        )) else {
+            panic!("the unnamed row must open");
+        };
+        assert_eq!(log.get(unnamed).unwrap().subject_name, None);
+        let wire = serde_json::to_string(log.get(unnamed).unwrap()).unwrap();
+        assert!(!wire.contains("subject_name"), "{wire}");
+    }
+
     /// `IN1b` §3.4 rule 24: evidence follows the code for every delegating
     /// producer core owns. `BranchError::InvalidBase` is the agent crate's half
     /// of the same rule.
@@ -5279,6 +5451,8 @@ mod tests {
             allowed: Some("a".repeat(70)),
             evidence: worst_evidence(code, probed),
             revision: TimelineRevision(u64::MAX),
+            name: None,
+            transient: false,
         }
     }
 
@@ -6006,6 +6180,8 @@ mod tests {
                 allowed: None,
                 evidence: evidence.clone(),
                 revision: TimelineRevision(1),
+                name: None,
+                transient: false,
             }) else {
                 panic!("a fresh log must open {}", code.code());
             };

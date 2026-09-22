@@ -9868,6 +9868,8 @@ fn in1_untagged_observation(revision: u64) -> kinewright_core::IncidentObservati
             assumption: None,
         },
         revision: kinewright_core::TimelineRevision(revision),
+        name: None,
+        transient: false,
     }
 }
 
