@@ -668,6 +668,14 @@ impl From<MatteCoverageError> for MediaError {
     }
 }
 
+impl From<crate::ScopeError> for MediaError {
+    /// Carried typed rather than flattened into [`MediaError::Backend`]
+    /// (`IN2B` §6 rule 2, d16 — the rule 36 precedent).
+    fn from(error: crate::ScopeError) -> Self {
+        Self::Scope(error)
+    }
+}
+
 /// Number of buckets in a [`MatteCoverageStatistics`] coverage histogram.
 pub const MATTE_COVERAGE_HISTOGRAM_BUCKETS: usize = 16;
 
@@ -1842,6 +1850,16 @@ pub enum MediaError {
     /// [`Self::MatteProof`] is.
     #[error(transparent)]
     MatteCoverage(MatteCoverageError),
+    /// A scopes measurement was refused with a typed reason (`IN2B` §6 rule 2,
+    /// d16 — the `IN1b` §3.9 rule 36 precedent, which the matte arms above
+    /// are).
+    ///
+    /// Transparent like the matte arms, so the rendered text is the inner
+    /// error's text verbatim — and [`Self::recovery_code`] answers `None`,
+    /// which routes to `media_backend_unclassified` per `IN1b` §5.1 rule 11
+    /// step 1.
+    #[error(transparent)]
+    Scope(crate::ScopeError),
     /// A LUT-store or room-tone-store failure, carried with the store's own
     /// stable code (`IN1b` §6.2 rule 4, ruling N4/CR-D1).
     ///
@@ -1873,10 +1891,11 @@ pub enum MediaError {
 impl MediaError {
     /// Return the machine-readable recovery code, when this error has one.
     ///
-    /// `Some` for **9 of 14** variants after `IN1b` §3.9 rule 36 and the
-    /// N4/CR-D1 addendum: the five that answer `None` are `NotImplemented`,
-    /// `Cancelled`, the two mix-range refusals and `Backend`, and `IN1b` §5.1
-    /// rule 11 step 1 routes those to `media_backend_unclassified`.
+    /// `Some` for **9 of 15** variants after `IN1b` §3.9 rule 36, the
+    /// N4/CR-D1 addendum and `IN2B` §6 rule 2: the six that answer `None` are
+    /// `NotImplemented`, `Cancelled`, the two mix-range refusals, `Backend`
+    /// and `Scope`, and `IN1b` §5.1 rule 11 step 1 routes those to
+    /// `media_backend_unclassified`.
     #[must_use]
     pub const fn recovery_code(&self) -> Option<&'static str> {
         match self {
@@ -1893,6 +1912,7 @@ impl MediaError {
             | Self::Cancelled
             | Self::MixSpectrumRangeTooShort { .. }
             | Self::MixLoudnessRangeTooShort { .. }
+            | Self::Scope(_)
             | Self::Backend(_) => None,
         }
     }
@@ -2649,7 +2669,10 @@ pub trait Export: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Clip, ClipContent, ColorSourceError, MediaKind, Rational, Track, TrackKind};
+    use crate::{
+        Clip, ClipContent, ColorSourceError, IncidentCode, IncidentObservation, IncidentSubject,
+        MediaIncident, MediaKind, Rational, ScopeError, TimelineRevision, Track, TrackKind,
+    };
 
     /// IN1 §9 clause 11's template: the rendered `Display` of the managed-decode
     /// failure on `in1_untagged.mp4` at `c3a5814`, with the per-run temp path
@@ -3200,12 +3223,12 @@ mod tests {
         }
     }
 
-    /// `IN1b` §9 clause 15: `recovery_code()` is `Some` for **9 of 14**
-    /// variants after the N4/CR-D1 addendum added `Store`, both matte enums
-    /// survive their `From` impls typed, and the rendered text is the inner
-    /// error's text verbatim — the same code token it carried as a `Backend`
-    /// string, with no wrapper label (`IN1b` §3.9 rule 36; the label itself is
-    /// gone after `IN2B` §8 D-B4).
+    /// `IN1b` §9 clause 15: `recovery_code()` is `Some` for **9 of 15**
+    /// variants after the N4/CR-D1 addendum added `Store` and `IN2B` §6 rule 2
+    /// added the codeless `Scope`, both matte enums survive their `From` impls
+    /// typed, and the rendered text is the inner error's text verbatim — the
+    /// same code token it carried as a `Backend` string, with no wrapper label
+    /// (`IN1b` §3.9 rule 36; the label itself is gone after `IN2B` §8 D-B4).
     /// The clause's own figure of 8 of 13 is amended by erratum `IN1b`-A-R12.
     #[test]
     fn in1b_matte_failures_keep_their_code_through_media_error() {
@@ -3231,7 +3254,7 @@ mod tests {
         assert_eq!(carried_coverage.to_string(), coverage.to_string());
         assert!(carried_coverage.to_string().starts_with(coverage.code()));
 
-        // Eight of thirteen carry a code; the five that do not are the ones
+        // Nine of fifteen carry a code; the six that do not are the ones
         // `IN1b` §5.1 rule 11 step 1 routes to `media_backend_unclassified`.
         let every_variant = [
             MediaError::NotImplemented,
@@ -3273,13 +3296,14 @@ mod tests {
             })),
             MediaError::MatteProof(proof),
             MediaError::MatteCoverage(coverage),
+            MediaError::Scope(crate::ScopeError::EmptyFrames),
             MediaError::Store {
                 code: "lut_store_root_invalid",
                 message: String::new(),
             },
             MediaError::Backend(String::new()),
         ];
-        assert_eq!(every_variant.len(), 14);
+        assert_eq!(every_variant.len(), 15);
         assert_eq!(
             every_variant
                 .iter()
@@ -3287,5 +3311,26 @@ mod tests {
                 .count(),
             9
         );
+    }
+
+    /// `IN2B` §12 item 13 (`IN2B` §6 rule 2, d16): the scope error rides typed
+    /// to unclassified.
+    #[test]
+    fn in2b_the_scope_error_rides_typed_to_unclassified() {
+        let inner = ScopeError::EmptyFrames;
+        let error = MediaError::Scope(inner.clone());
+        assert_eq!(error.to_string(), inner.to_string());
+        assert_eq!(error.recovery_code(), None);
+        assert_eq!(MediaError::from(inner), error);
+        let observation = IncidentObservation::from_media_error(
+            &error,
+            IncidentSubject::Project,
+            TimelineRevision(1),
+        );
+        assert_eq!(
+            observation.code,
+            IncidentCode::Media(MediaIncident::BackendUnclassified)
+        );
+        assert_eq!(observation.code.code(), "media_backend_unclassified");
     }
 }

@@ -434,7 +434,8 @@ fn lut_preflight(
 ///
 /// **The typed path is the only path.** The code is always
 /// [`kinewright_core::MediaError::recovery_code`]'s answer — `Some` for 9 of
-/// the 14 variants after `IN1b` §3.9 rule 36 and the N4/CR-D1 addendum — and
+/// the 15 variants after `IN1b` §3.9 rule 36, the N4/CR-D1 addendum and
+/// `IN2B` §6 rule 2 (whose `Scope` answers `None`) — and
 /// this function never reads a code out of rendered text. `LutStoreError`'s
 /// eleven codes and `RoomToneStoreError`'s ten now arrive typed on
 /// `MediaError::Store { code, message }`, built by the two `From` impls at

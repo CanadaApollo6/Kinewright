@@ -1692,12 +1692,15 @@ impl IncidentObservation {
             // The two matte enums and the two stores mint **no** `IncidentCode`
             // (`IN1b` §0.2/e, §3.9 rule 37, and the code table of §3.2 rule 12,
             // which declares none of their 21 + 10 strings), so they share the
-            // unclassified media code with the five code-less variants — and so
-            // does their evidence, because one incident carries one code. Their
-            // own code is not lost: it is the first token of every one of their
-            // rendered refusals and therefore the first word of `observed`.
+            // unclassified media code with the six code-less variants — the
+            // five `IN1b` ones plus `Scope`, whose `recovery_code` is `None`
+            // (`IN2B` §6 rule 2, d16) — and so does their evidence, because one
+            // incident carries one code. Their own code is not lost: it is the
+            // first token of every one of their rendered refusals and therefore
+            // the first word of `observed`.
             MediaError::MatteProof(_)
             | MediaError::MatteCoverage(_)
+            | MediaError::Scope(_)
             | MediaError::Store { .. }
             | MediaError::NotImplemented
             | MediaError::Cancelled
@@ -1729,7 +1732,7 @@ impl IncidentObservation {
 /// exists to remove (review-2 S2). For every variant that declares a code of
 /// its own the two strings are equal anyway — asserted by
 /// `in1b_from_media_error_is_total_and_keeps_the_asset_scoped_subject` — and
-/// for the two matte variants and the five code-less ones the engine's own
+/// for the two matte variants and the six code-less ones the engine's own
 /// token survives as the first word of `observed`.
 fn media_evidence(error: &MediaError, code: IncidentCode) -> IncidentEvidence {
     IncidentEvidence::MediaError {
@@ -5203,8 +5206,9 @@ mod tests {
     /// constructor is total and there is no `None` to assert (erratum
     /// `IN1b`-R9).
     #[test]
-    // The list is the point: one arm per `MediaError` variant, written out so a
-    // reader can see that the constructor is total over all thirteen.
+    // The list is the point: one arm per `MediaError` variant — fourteen of
+    // fifteen (`Store` rides the shared arm unpinned since N4/CR-D1) — written
+    // out so a reader can see that the constructor is total.
     #[allow(clippy::too_many_lines)]
     fn in1b_from_media_error_is_total_and_keeps_the_asset_scoped_subject() {
         let probed = untagged_mp4_probe();
@@ -5243,7 +5247,7 @@ mod tests {
         );
 
         // Every other variant takes the caller's subject and its own code; the
-        // five code-less ones share `media_backend_unclassified`, and the two
+        // six code-less ones share `media_backend_unclassified`, and the two
         // matte enums take it too while keeping their own code on the evidence
         // (`IN1b` §3.9 rule 37, as deviated from in erratum `IN1b`-A-R2).
         for (other, expected) in [
@@ -5290,6 +5294,10 @@ mod tests {
                 MediaError::MatteCoverage(crate::MatteCoverageError::ArithmeticOverflow {
                     operation: "sum",
                 }),
+                IncidentCode::Media(MediaIncident::BackendUnclassified),
+            ),
+            (
+                MediaError::Scope(crate::ScopeError::EmptyFrames),
                 IncidentCode::Media(MediaIncident::BackendUnclassified),
             ),
             (
