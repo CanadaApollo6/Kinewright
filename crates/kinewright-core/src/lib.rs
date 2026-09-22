@@ -183,11 +183,12 @@ pub use incident::{
     ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, INVESTIGATOR_ALLOWLIST,
     INVESTIGATOR_EXPLANATION_CEILING_BYTES, INVESTIGATOR_MAX_PROPOSAL_OPERATIONS, Incident,
     IncidentCode, IncidentEvidence, IncidentId, IncidentLog, IncidentObservation, IncidentOutcome,
-    IncidentProposal, IncidentResolver, IncidentSeverity, IncidentState, IncidentSubject,
-    IncidentTelemetry, LabelIncident, MediaIncident, Observed, POLICY, PolicyClass, PolicyEntry,
-    PolicyPredicate, RecordProposalError, RecoveryAction, RecoveryKind, RejectionIncident,
-    SUBJECT_NAME_CEILING_BYTES, SourceColorIncident, assume_rec709_operation,
-    deterministic_recovery, explain_body, json_escaped_len, policy_class, policy_recovery,
+    IncidentProposal, IncidentRecord, IncidentResolver, IncidentSeverity, IncidentState,
+    IncidentSubject, IncidentTelemetry, LabelIncident, MediaIncident, Observed, POLICY,
+    PolicyClass, PolicyEntry, PolicyPredicate, RecordProposalError, RecoveryAction, RecoveryKind,
+    RejectionIncident, RestoreReport, RunningInvestigation, STOPS, SUBJECT_NAME_CEILING_BYTES,
+    SourceColorIncident, WriteReport, assume_rec709_operation, deterministic_recovery,
+    explain_body, from_code, json_escaped_len, persisted_stop, policy_class, policy_recovery,
     rec709_compatible, recovery_description, should_flush, truncate_to_serialized_bytes,
 };
 pub use journal::JournalCommand;
