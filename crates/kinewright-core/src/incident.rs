@@ -598,12 +598,14 @@ impl RejectionIncident {
 }
 
 /// One code per source label the application still reports under
-/// (`IN1b` §3.2 rule 12).
+/// (`IN1b` §3.2 rule 12), plus the seven `IN2B` §5 rows.
 ///
 /// Fifteen are placeholders — the label's failures have no typed payload yet —
 /// and two are not: `look_incomplete` and `media_incomplete` exist because
 /// their label's sites disagree about severity, and a code declares one
-/// severity (`IN1b` §3.6 rule 30).
+/// severity (`IN1b` §3.6 rule 30). Labels carry untyped `Plain` evidence —
+/// the §5 rows are labels because no typed payload exists for them, not
+/// because they name a source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LabelIncident {
     /// `Operations`, with no typed payload.
@@ -640,6 +642,20 @@ pub enum LabelIncident {
     MediaCache,
     /// `Timeline`, reachable only through the inspector's dynamic site.
     Timeline,
+    /// `Panel worker error`, with no typed payload (`IN2B` §5).
+    PanelWorkerError,
+    /// `Recovery damage`, with no typed payload (`IN2B` §5).
+    RecoveryDamage,
+    /// `Recovery unavailable`, with no typed payload (`IN2B` §5).
+    RecoveryUnavailable,
+    /// `Newer project format`, with no typed payload (`IN2B` §5).
+    ProjectNewerFormat,
+    /// `Sidecar unknown codes`, with no typed payload (`IN2B` §5).
+    SidecarUnknownCodes,
+    /// `Sidecar refused`, with no typed payload (`IN2B` §5).
+    SidecarRefused,
+    /// `Sidecar write failed`, with no typed payload (`IN2B` §5).
+    SidecarWriteFailed,
 }
 
 impl LabelIncident {
@@ -664,6 +680,13 @@ impl LabelIncident {
             Self::Mixer => "mixer_unclassified",
             Self::MediaCache => "media_cache_unclassified",
             Self::Timeline => "timeline_unclassified",
+            Self::PanelWorkerError => "panel_worker_error",
+            Self::RecoveryDamage => "recovery_damage",
+            Self::RecoveryUnavailable => "recovery_unavailable",
+            Self::ProjectNewerFormat => "project_newer_format",
+            Self::SidecarUnknownCodes => "sidecar_unknown_codes",
+            Self::SidecarRefused => "sidecar_refused",
+            Self::SidecarWriteFailed => "sidecar_write_failed",
         }
     }
 
@@ -681,11 +704,16 @@ impl LabelIncident {
             Self::Media | Self::MediaIncomplete => "media",
             Self::Agent => "agent",
             Self::Recording => "recording",
-            Self::Project => "project",
+            Self::Project | Self::ProjectNewerFormat => "project",
             Self::Captions => "captions",
             Self::Mixer => "mixer",
             Self::MediaCache => "media_cache",
             Self::Timeline => "timeline",
+            Self::PanelWorkerError => "panel",
+            Self::RecoveryDamage | Self::RecoveryUnavailable => "recovery",
+            Self::SidecarUnknownCodes | Self::SidecarRefused | Self::SidecarWriteFailed => {
+                "sidecar"
+            }
         }
     }
 
@@ -708,19 +736,26 @@ impl LabelIncident {
             Self::Mixer => 14,
             Self::MediaCache => 15,
             Self::Timeline => 16,
+            Self::PanelWorkerError => 17,
+            Self::RecoveryDamage => 18,
+            Self::RecoveryUnavailable => 19,
+            Self::ProjectNewerFormat => 20,
+            Self::SidecarUnknownCodes => 21,
+            Self::SidecarRefused => 22,
+            Self::SidecarWriteFailed => 23,
         }
     }
 }
 
 /// The exhaustive set of incident codes Kinewright declares.
 ///
-/// **67 codes** (`IN1b` §3.2 rule 12): thirteen source-colour, two media, four
-/// delivery-colour, five delivery-verification, six colour-QC, eleven operation
-/// families, the minted LUT-asset and revision-conflict rows, seven typed
-/// rejections and seventeen source labels. Fifty-six are reachable from one of
-/// the 129 measured error paths; the eleven delivery-verification and colour-QC
-/// rows are declared under `IN1b` §3.2 rule 13's exemption, because dropping
-/// them would make [`Self::code`]'s delegation partial.
+/// **74 codes** (`IN1b` §3.2 rule 12, `IN2B` E-B9): thirteen source-colour,
+/// two media, four delivery-colour, five delivery-verification, six colour-QC,
+/// eleven operation families, the minted LUT-asset and revision-conflict rows,
+/// seven typed rejections and twenty-four source labels. All seventy-four are
+/// reachable: the eleven delivery-verification and colour-QC rows through the
+/// `IN2B` §6 seams and the seven §5 labels through their notes, so `IN1b` §3.2
+/// rule 13's exemption is spent and the count reads 74/0.
 ///
 /// There is no catch-all, no `Unclassified` and no `Other(String)` (IN1 §2.2
 /// rule 9). It also carries no `#[non_exhaustive]`, because that would force a
@@ -1841,21 +1876,22 @@ pub struct PolicyEntry {
 /// The declared policy for every [`IncidentCode`], one row per code, in the
 /// enum's declaration order (`IN1b` §3.6 rule 28).
 ///
-/// **67 rows**: 3 `AutoApply`, 0 `AskFirst`, 64 `Explain`; 54 `Blocks`,
-/// 13 `Degrades`, 0 `Informs`. A row's severity answers one question — *did
+/// **74 rows**: 3 `AutoApply`, 0 `AskFirst`, 71 `Explain`; 57 `Blocks`,
+/// 17 `Degrades`, 0 `Informs`. A row's severity answers one question — *did
 /// the thing the person asked for happen?* — derived from the site's own
-/// control flow and declared once per code (`IN1b` §3.6 rule 30). The thirteen
+/// control flow and declared once per code (`IN1b` §3.6 rule 30). The seventeen
 /// `Degrades` rows are the five delivery-verification rows (the export **was**
-/// written), the six colour-QC rows (nothing was mutated), and
+/// written), the six colour-QC rows (nothing was mutated),
 /// `look_incomplete`/`media_incomplete` (the project opened or saved without
-/// all of its looks or media). `Informs` has no Part B row and stays declared
-/// for IN3.
+/// all of its looks or media), and the four `IN2B` §5 project/sidecar rows
+/// (the project opened or saved — only the history or the save-into-downgrade
+/// degraded). `Informs` has no Part B row and stays declared for IN3.
 ///
 /// IN1 §9 clause 1's "every row `Blocks`" is superseded by erratum `IN1b`-R1a:
 /// it was true of a twelve-row table in which every row stopped a managed
-/// decode, and is false of a sixty-seven-row table in which thirteen rows
+/// decode, and is false of a seventy-four-row table in which seventeen rows
 /// report work that completed with a loss.
-pub const POLICY: [PolicyEntry; 67] = [
+pub const POLICY: [PolicyEntry; 74] = [
     PolicyEntry {
         code: IncidentCode::SourceColor(SourceColorIncident::UnknownPrimaries),
         class: PolicyClass::AutoApply,
@@ -2260,6 +2296,55 @@ pub const POLICY: [PolicyEntry; 67] = [
         predicate: PolicyPredicate::Always,
         severity: IncidentSeverity::Blocks,
     },
+    // Row 68 — `IN2B` §5 rule 1 #1: the panel asked, the worker failed.
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::PanelWorkerError),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    // Row 69 — rule 1 #2: an earlier run left damage; the dialog asks what to do.
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::RecoveryDamage),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    // Row 70 — rule 1 #3: recording stopped, so a future crash would lose work.
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::RecoveryUnavailable),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Blocks,
+    },
+    // Row 71 — rule 1 #4: the project opens; only overwrite-save is refused.
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::ProjectNewerFormat),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    // Row 72 — rule 1 #5: some history skipped; everything else loaded.
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::SidecarUnknownCodes),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    // Row 73 — rule 1 #6: the project opens with an empty history.
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::SidecarRefused),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
+    // Row 74 — rule 1 #7: the save succeeded; the history write failed.
+    PolicyEntry {
+        code: IncidentCode::Label(LabelIncident::SidecarWriteFailed),
+        class: PolicyClass::Explain,
+        predicate: PolicyPredicate::Always,
+        severity: IncidentSeverity::Degrades,
+    },
 ];
 
 /// The codes an investigator session may start for, and no other
@@ -2351,18 +2436,18 @@ pub const INVESTIGATOR_ALLOWLIST: [IncidentCode; 54] = [
 
 /// The plain-language body every `Explain` recovery carries.
 ///
-/// Exhaustive with **no wildcard arm**, so a sixty-eighth code breaks the
+/// Exhaustive with **no wildcard arm**, so a seventy-fifth code breaks the
 /// build. **Twenty-eight** codes delegate to a shipped `recovery_action()` and
 /// no string of theirs is restated here (`IN1b` §3.7 rule 34); the delegated
 /// set carries **16** distinct sentences, because
 /// `ColorSourceError::recovery_action()` is a `const fn` with no `match` and
 /// returns one sentence for all thirteen source-colour codes. Rewriting those
 /// thirteen per code is IN1 §13 D8 and is owned by IN3. The remaining
-/// **39** bodies are written in `IN1b` §5.6 and are copied here verbatim, so
-/// the whole table carries 55 distinct sentences over 67 codes and the 54
-/// non-colour bodies are pairwise distinct.
+/// **46** bodies are written — 39 in `IN1b` §5.6, 7 in `IN2B` §5 rule 1 —
+/// and are copied here verbatim, so the whole table carries 62 distinct
+/// sentences over 74 codes and the 61 non-colour bodies are pairwise distinct.
 #[must_use]
-// 67 arms carrying 39 written sentences: the bodies are the deliverable and
+// 74 arms carrying 46 written sentences: the bodies are the deliverable and
 // they are read as prose, so splitting the table across helper functions would
 // scatter the thing a reviewer is asked to read in one pass (`IN1b` §5.6, N0/Q4).
 #[allow(clippy::too_many_lines)]
@@ -2492,6 +2577,28 @@ pub fn explain_body(code: IncidentCode) -> &'static str {
         IncidentCode::Label(LabelIncident::Timeline) => {
             "The timeline gesture did not complete. The message is the only description Kinewright has; re-select what the gesture needed and make it again."
         }
+        // Written (`IN2B` §5 rule 1), one per code with no accessor behind it.
+        IncidentCode::Label(LabelIncident::PanelWorkerError) => {
+            "One of the panels could not show its result because the worker behind it failed. The message is the worker's own and names what went wrong; fix what it names and the panel will show its result on its own."
+        }
+        IncidentCode::Label(LabelIncident::RecoveryDamage) => {
+            "Kinewright found unsaved work or damage from an earlier run. The message names what was found; the dialog beside this card asks what to do with it. If you recover, the recovered document starts a new history — the incident history beside it is loaded from the last save."
+        }
+        IncidentCode::Label(LabelIncident::RecoveryUnavailable) => {
+            "Crash recovery is not recording in this run, so a future crash would lose unsaved work. The message is the journal recorder's own error; save now — work already saved is unaffected, but edits made while this warning stands may not survive a crash."
+        }
+        IncidentCode::Label(LabelIncident::ProjectNewerFormat) => {
+            "This project file was written by a newer Kinewright than this one. It opens so nothing is lost, but saving over it is disabled — saving would silently drop what the newer version added. Use Save As to keep working in a copy, or open the project in the newer Kinewright."
+        }
+        IncidentCode::Label(LabelIncident::SidecarUnknownCodes) => {
+            "Some of this project's saved incident history used codes this Kinewright does not know, so those records were skipped and everything else loaded. The count is on the card; open the project in a newer Kinewright to see the full history."
+        }
+        IncidentCode::Label(LabelIncident::SidecarRefused) => {
+            "This project's saved incident history could not be loaded. The message names why — a damaged file, a newer writer, or a history file that belongs to a different project. The project itself opens normally with an empty history, and the unreadable file is kept beside it, never deleted."
+        }
+        IncidentCode::Label(LabelIncident::SidecarWriteFailed) => {
+            "The project saved, but its incident history could not be written beside it. The message names why. The history is still live in this run and will be written again on the next save, or when the project closes."
+        }
     }
 }
 
@@ -2590,9 +2697,9 @@ pub fn policy_recovery(
 /// The deterministic recovery an `Explain` row offers, when one is buildable
 /// from the evidence the incident already carries (IN2 §7).
 ///
-/// An **exhaustive match with no wildcard**, so a sixty-eighth code cannot
-/// silently default to "no button": every code is named, and the fifty-one that
-/// IN2 §7's table does not discuss return `None` through one explicit
+/// An **exhaustive match with no wildcard**, so a seventy-fifth code cannot
+/// silently default to "no button": every code is named, and the fifty-eight
+/// that IN2 §7's table does not discuss return `None` through one explicit
 /// `|`-joined arm.
 ///
 /// **Three rows build one**, and they are the three `unknown_source_*` rows
@@ -2647,9 +2754,10 @@ pub fn deterministic_recovery(
 /// Whether [`deterministic_recovery`] has a builder for this code at all.
 ///
 /// The **exhaustive match with no wildcard** IN2 §7 rule 2 requires: every one
-/// of the sixty-seven codes is named, so a sixty-eighth cannot silently default
-/// to "no button". The `false` arm's groups are named in order, and the reason
-/// each group is `false` is in [`deterministic_recovery`]'s own documentation.
+/// of the seventy-four codes is named, so a seventy-fifth cannot silently
+/// default to "no button". The `false` arm's groups are named in order, and the
+/// reason each group is `false` is in [`deterministic_recovery`]'s own
+/// documentation.
 const fn has_deterministic_recovery(code: IncidentCode) -> bool {
     match code {
         // IN2 §7 rows 1-3: buildable, under `rec709_compatible`.
@@ -2751,7 +2859,17 @@ const fn has_deterministic_recovery(code: IncidentCode) -> bool {
             | LabelIncident::Captions
             | LabelIncident::Mixer
             | LabelIncident::MediaCache
-            | LabelIncident::Timeline,
+            | LabelIncident::Timeline
+            // The seven `IN2B` §5 labels: `Plain` evidence carries no
+            // buildable operation either — and no session (off the allowlist,
+            // IN2 §3.1 reason 2).
+            | LabelIncident::PanelWorkerError
+            | LabelIncident::RecoveryDamage
+            | LabelIncident::RecoveryUnavailable
+            | LabelIncident::ProjectNewerFormat
+            | LabelIncident::SidecarUnknownCodes
+            | LabelIncident::SidecarRefused
+            | LabelIncident::SidecarWriteFailed,
         ) => false,
     }
 }
@@ -3370,7 +3488,7 @@ mod tests {
         ]
     }
 
-    /// One arm per code with no wildcard in either position: a sixty-eighth
+    /// One arm per code with no wildcard in either position: a seventy-fifth
     /// code cannot compile until `POLICY` grows a row for it (IN1 §2.4 rule 35,
     /// erratum `IN1b`-R15).
     const fn ordinal(code: IncidentCode) -> usize {
@@ -3457,19 +3575,27 @@ mod tests {
                 LabelIncident::Mixer => 64,
                 LabelIncident::MediaCache => 65,
                 LabelIncident::Timeline => 66,
+                LabelIncident::PanelWorkerError => 67,
+                LabelIncident::RecoveryDamage => 68,
+                LabelIncident::RecoveryUnavailable => 69,
+                LabelIncident::ProjectNewerFormat => 70,
+                LabelIncident::SidecarUnknownCodes => 71,
+                LabelIncident::SidecarRefused => 72,
+                LabelIncident::SidecarWriteFailed => 73,
             },
         }
     }
 
-    /// `IN1b` §9 clause 2: 67 rows, an explicit no-wildcard `ordinal()`, every
+    /// `IN1b` §9 clause 2: 74 rows, an explicit no-wildcard `ordinal()`, every
     /// **colour** row `Blocks`, and every row's severity equal to `IN1b` §3.6
-    /// rule 31's table. Replaces Part A's
+    /// rule 31's table plus the four `IN2B` §5 `Degrades` rows. Replaces Part
+    /// A's
     /// `in1_policy_covers_every_incident_code_exactly_once_and_every_row_blocks`,
     /// whose "every row `Blocks`" is erratum `IN1b`-R1a.
     #[test]
     fn in1b_policy_covers_every_incident_code_exactly_once_with_its_declared_severity() {
-        assert_eq!(POLICY.len(), 67);
-        let mut seen = [0_usize; 67];
+        assert_eq!(POLICY.len(), 74);
+        let mut seen = [0_usize; 74];
         let mut blocks = 0_usize;
         let mut degrades = 0_usize;
         let mut informs = 0_usize;
@@ -3485,7 +3611,12 @@ mod tests {
                 IncidentCode::DeliveryVerification(_)
                 | IncidentCode::ColorQc(_)
                 | IncidentCode::Label(
-                    LabelIncident::LookIncomplete | LabelIncident::MediaIncomplete,
+                    LabelIncident::LookIncomplete
+                    | LabelIncident::MediaIncomplete
+                    | LabelIncident::ProjectNewerFormat
+                    | LabelIncident::SidecarUnknownCodes
+                    | LabelIncident::SidecarRefused
+                    | LabelIncident::SidecarWriteFailed,
                 ) => IncidentSeverity::Degrades,
                 _ => IncidentSeverity::Blocks,
             };
@@ -3517,13 +3648,13 @@ mod tests {
             seen.iter().all(|count| *count == 1),
             "every code must have exactly one POLICY row, got {seen:?}"
         );
-        assert_eq!((blocks, degrades, informs), (54, 13, 0));
-        assert_eq!((auto_apply, ask_first, explain), (3, 0, 64));
+        assert_eq!((blocks, degrades, informs), (57, 17, 0));
+        assert_eq!((auto_apply, ask_first, explain), (3, 0, 71));
     }
 
     #[test]
     fn in1_policy_rows_are_declared_in_table_order() {
-        assert_eq!(POLICY.len(), 67, "erratum `IN1b`-R15");
+        assert_eq!(POLICY.len(), 74, "erratum `IN1b`-R15");
         for (index, entry) in POLICY.iter().enumerate() {
             assert_eq!(
                 ordinal(entry.code),
@@ -4290,7 +4421,7 @@ mod tests {
     /// Every declared code, in `POLICY`'s own order. Written out rather than
     /// read from `POLICY`, so a test that quantifies over the code set cannot
     /// be satisfied by a table that lost a row.
-    const EVERY_INCIDENT_CODE: [IncidentCode; 67] = [
+    const EVERY_INCIDENT_CODE: [IncidentCode; 74] = [
         IncidentCode::SourceColor(SourceColorIncident::UnknownPrimaries),
         IncidentCode::SourceColor(SourceColorIncident::UnknownTransfer),
         IncidentCode::SourceColor(SourceColorIncident::UnknownMatrix),
@@ -4358,6 +4489,13 @@ mod tests {
         IncidentCode::Label(LabelIncident::Mixer),
         IncidentCode::Label(LabelIncident::MediaCache),
         IncidentCode::Label(LabelIncident::Timeline),
+        IncidentCode::Label(LabelIncident::PanelWorkerError),
+        IncidentCode::Label(LabelIncident::RecoveryDamage),
+        IncidentCode::Label(LabelIncident::RecoveryUnavailable),
+        IncidentCode::Label(LabelIncident::ProjectNewerFormat),
+        IncidentCode::Label(LabelIncident::SidecarUnknownCodes),
+        IncidentCode::Label(LabelIncident::SidecarRefused),
+        IncidentCode::Label(LabelIncident::SidecarWriteFailed),
     ];
 
     /// The **eight** subject variants of `IN1b` §3.3 rule 17 as amended by
@@ -4380,7 +4518,7 @@ mod tests {
     }
 
     /// `IN1b` §7 item 6 and erratum `IN1b`-R14: accessor against accessor over
-    /// every delegating code, and `field` equal to `code.field()` over all 67.
+    /// every delegating code, and `field` equal to `code.field()` over all 74.
     #[test]
     fn in1b_every_code_delegates_its_string_to_the_accessor_that_owns_it() {
         let mut delegating = 0_usize;
@@ -4465,7 +4603,7 @@ mod tests {
             };
             assert_eq!(log.get(id).unwrap().field, code.field());
         }
-        assert_eq!(strings.len(), 67);
+        assert_eq!(strings.len(), 74);
     }
 
     /// `IN1b` §9 clause 3: a predicated row reached with no probed description
@@ -4522,7 +4660,7 @@ mod tests {
         );
     }
 
-    /// `IN1b` §9 clause 4: every one of the 67 codes reaches a body, the 54
+    /// `IN1b` §9 clause 4: every one of the 74 codes reaches a body, the 61
     /// non-colour bodies are pairwise distinct, the 13 colour bodies are each
     /// `ColorSourceError::recovery_action()`'s one sentence, and the 15
     /// non-colour delegating rows equal their own accessor's string.
@@ -4568,8 +4706,99 @@ mod tests {
             assert_eq!(recoveries[0].kind, RecoveryKind::Explain(body));
         }
         assert_eq!(colour, 13);
-        assert_eq!(non_colour.len(), 54);
+        assert_eq!(non_colour.len(), 61);
         assert_eq!(delegated, 15);
+    }
+
+    /// IN2B §12 item 11, §5 rules 1–3: the seven new codes carry written
+    /// bodies, tail `POLICY` rows in declaration order, and the allowlist is
+    /// untouched.
+    ///
+    /// The seven `label_headline` arms live in the app crate, so their exact
+    /// strings are pinned by the re-pinned headline test there (`IN2B` §5
+    /// rule 1); this test pins everything core owns — the §5 table values,
+    /// the bodies, the tail rows and the allowlist slice.
+    #[test]
+    fn in2b_the_seven_new_codes_carry_written_bodies_headlines_and_tail_rows() {
+        let seven = [
+            (
+                LabelIncident::PanelWorkerError,
+                "panel_worker_error",
+                "panel",
+                IncidentSeverity::Blocks,
+            ),
+            (
+                LabelIncident::RecoveryDamage,
+                "recovery_damage",
+                "recovery",
+                IncidentSeverity::Blocks,
+            ),
+            (
+                LabelIncident::RecoveryUnavailable,
+                "recovery_unavailable",
+                "recovery",
+                IncidentSeverity::Blocks,
+            ),
+            (
+                LabelIncident::ProjectNewerFormat,
+                "project_newer_format",
+                "project",
+                IncidentSeverity::Degrades,
+            ),
+            (
+                LabelIncident::SidecarUnknownCodes,
+                "sidecar_unknown_codes",
+                "sidecar",
+                IncidentSeverity::Degrades,
+            ),
+            (
+                LabelIncident::SidecarRefused,
+                "sidecar_refused",
+                "sidecar",
+                IncidentSeverity::Degrades,
+            ),
+            (
+                LabelIncident::SidecarWriteFailed,
+                "sidecar_write_failed",
+                "sidecar",
+                IncidentSeverity::Degrades,
+            ),
+        ];
+        let mut bodies = BTreeSet::new();
+        for (index, (incident, code, field, severity)) in seven.iter().enumerate() {
+            let code_value = IncidentCode::Label(*incident);
+            assert_eq!(incident.code(), *code);
+            assert_eq!(incident.field(), *field);
+            assert_eq!(code_value.table_index(), 67 + index);
+            assert_eq!(code_value.field(), *field);
+            let body = explain_body(code_value);
+            assert!(!body.is_empty(), "{code} has no body");
+            assert!(
+                bodies.insert(body),
+                "{code} shares its body with another new code"
+            );
+            let row = &POLICY[67 + index];
+            assert_eq!(
+                row.code,
+                code_value,
+                "tail row {} names its code",
+                68 + index
+            );
+            assert_eq!(row.class, PolicyClass::Explain);
+            assert_eq!(row.predicate, PolicyPredicate::Always);
+            assert_eq!(row.severity, *severity);
+        }
+        assert_eq!(bodies.len(), 7);
+        assert_eq!(POLICY.len(), 74);
+        assert_eq!(INVESTIGATOR_ALLOWLIST.len(), 54);
+        let rows: Vec<IncidentCode> = POLICY[13..67].iter().map(|entry| entry.code).collect();
+        assert_eq!(INVESTIGATOR_ALLOWLIST.to_vec(), rows);
+        for (incident, code, _, _) in &seven {
+            assert!(
+                !INVESTIGATOR_ALLOWLIST.contains(&IncidentCode::Label(*incident)),
+                "{code} stays off the allowlist (IN2 §3.1 reason 2)"
+            );
+        }
     }
 
     /// `IN1b` §3.4 rule 24: evidence follows the code for every delegating
@@ -4847,16 +5076,16 @@ mod tests {
     }
 
     /// The worst serialised incident over IN2 §4.2 rule 11's product, measured
-    /// against the implementation rather than a prototype: the **67** declared
+    /// against the implementation rather than a prototype: the **74** declared
     /// codes times the **eight** subject variants of `IN1b` §3.3 rule 17 as
     /// amended by erratum `IN1b`-A-R13, times **two probes**, times
     /// {no proposal, a proposal at the cap}, times {open, investigating,
     /// resolved with all telemetry, resolved without the two new fields} —
-    /// **8 576** shapes.
+    /// **9 472** shapes.
     ///
     /// The probe is an axis because the recoveries array is part of the wire
-    /// body and IN2 §7 rule 1 put a **second** action on three of the sixty-
-    /// seven rows. A Rec.709-incompatible probe demotes every predicated row to
+    /// body and IN2 §7 rule 1 put a **second** action on three of the seventy-
+    /// four rows. A Rec.709-incompatible probe demotes every predicated row to
     /// `Explain` and builds no operation at all, so a loop with that probe
     /// alone cannot see the one thing this slice changed about the record
     /// (IN2 erratum A-R9). The loop therefore measures both, and asserts a
@@ -4877,7 +5106,7 @@ mod tests {
     #[test]
     fn in2_every_code_fits_the_re_measured_ceiling_on_every_subject_shape() {
         // The core twin of `in1b_every_code_fits_the_measured_ceiling`, grown
-        // over IN2 §4.2 rule 11's product: 67 codes x 8 subject shapes x
+        // over IN2 §4.2 rule 11's product: 74 codes x 8 subject shapes x
         // 2 probes x {no proposal, a proposal at the cap} x {open,
         // investigating, resolved with all telemetry, resolved without the two
         // new fields}.
@@ -4964,7 +5193,7 @@ mod tests {
         );
         assert_eq!(
             measured,
-            67 * 8 * 2 * 2 * 4,
+            74 * 8 * 2 * 2 * 4,
             "IN2 §4.2 rule 11's shapes, with the probe axis erratum A-R9 adds"
         );
         // The one thing IN2 changes about the wire body's `recoveries` array is

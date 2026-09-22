@@ -156,9 +156,10 @@ pub(crate) fn card_action_outcome(incident: &Incident, action: &CardAction) -> I
 /// both containers" a type-level fact rather than a hope. The asset identity
 /// lives in `subject_label` and the probed tuple in `details`.
 ///
-/// The table has **seventy** rows for sixty-seven codes because the three
-/// `Rec709Compatible` codes are reachable under both `AutoApply` and `Explain`;
-/// the other sixty-four are reachable only as `Explain` (`IN1b` §5.5 rule 30).
+/// The table has **seventy-seven** rows for seventy-four codes because the
+/// three `Rec709Compatible` codes are reachable under both `AutoApply` and
+/// `Explain`; the other seventy-one are reachable only as `Explain`
+/// (`IN1b` §5.5 rule 30).
 /// The match carries no wildcard arm in either position, so a new code or a new
 /// class breaks the build (IN1 §5.3 rules 25–27).
 ///
@@ -396,10 +397,12 @@ const fn rejection_headline(incident: RejectionIncident) -> &'static str {
     }
 }
 
-/// The seventeen source-label rows. Fifteen are placeholders — the label's
-/// failures carry no typed payload yet — and `look_incomplete` and
-/// `media_incomplete` are not: their work finished with something missing,
-/// which is why they are declared apart from their labels' blocking twins.
+/// The twenty-four source-label rows. Fifteen are placeholders — the label's
+/// failures carry no typed payload yet — `look_incomplete` and
+/// `media_incomplete` are not (their work finished with something missing,
+/// which is why they are declared apart from their labels' blocking twins),
+/// and seven are the `IN2B` §5 notes: untyped panel, recovery, project and
+/// sidecar failures a session would only restate.
 const fn label_headline(incident: LabelIncident) -> &'static str {
     match incident {
         LabelIncident::Operations => "This edit was not applied.",
@@ -429,6 +432,21 @@ const fn label_headline(incident: LabelIncident) -> &'static str {
         LabelIncident::Mixer => "The mixer could not do what was asked.",
         LabelIncident::MediaCache => "The media cache could not be cleared.",
         LabelIncident::Timeline => "The timeline gesture did not complete.",
+        LabelIncident::PanelWorkerError => {
+            "A panel could not show its result because the worker behind it failed."
+        }
+        LabelIncident::RecoveryDamage => {
+            "Kinewright found unsaved work or damage from an earlier run."
+        }
+        LabelIncident::RecoveryUnavailable => "Crash recovery stopped recording in this run.",
+        LabelIncident::ProjectNewerFormat => "This project was written by a newer Kinewright.",
+        LabelIncident::SidecarUnknownCodes => {
+            "Some saved incident history used codes this Kinewright does not know."
+        }
+        LabelIncident::SidecarRefused => {
+            "The project's saved incident history could not be loaded."
+        }
+        LabelIncident::SidecarWriteFailed => "The project's incident history could not be written.",
     }
 }
 
@@ -1032,22 +1050,24 @@ mod tests {
         );
     }
 
-    /// `IN1b` §5.5 rule 30 and §9 clause 18: the headline table is **seventy**
-    /// rows over sixty-seven codes, every row distinct, and every row is a
-    /// headline rather than a body.
+    /// `IN1b` §5.5 rule 30 and §9 clause 18: the headline table is
+    /// **seventy-seven** rows over seventy-four codes, every row distinct,
+    /// and every row is a headline rather than a body.
     ///
     /// The last clause is what erratum `IN1b`-A-R10 asks for. Stage A left a
     /// shim at `incident_headline` returning `explain_body(code)` for every
-    /// non-colour code, and core already proves the 54 non-colour bodies
+    /// non-colour code, and core already proves the 61 non-colour bodies
     /// pairwise distinct — so the distinctness half passed for the wrong
-    /// reason on 54 of its 70 rows. Asserting
+    /// reason on 61 of its 77 rows. Asserting
     /// `incident_headline(code, class) != explain_body(code)` row by row fails
     /// against the shim and passes against the table, which is the only
     /// difference between the two that a test can see.
     ///
     /// A headline says what happened; a body says what the person must change.
     /// Part A's fifteen colour rows are unchanged byte for byte, so IN1 §9
-    /// clause 3's pinned headline still holds.
+    /// clause 3's pinned headline still holds. The seven `IN2B` §5 arms are
+    /// pinned to their rule-1 strings below — the headline half of §12 item
+    /// 11, which core's test cannot reach.
     #[test]
     fn in1b_every_headline_row_is_distinct_and_covers_the_whole_table() {
         let mut headlines = Vec::new();
@@ -1057,8 +1077,48 @@ mod tests {
                 headlines.push(incident_headline(entry.code, PolicyClass::AutoApply));
             }
         }
-        assert_eq!(POLICY.len(), 67, "sixty-seven declared codes");
-        assert_eq!(headlines.len(), 70, "seventy rows for sixty-seven codes");
+        assert_eq!(POLICY.len(), 74, "seventy-four declared codes");
+        assert_eq!(
+            headlines.len(),
+            77,
+            "seventy-seven rows for seventy-four codes"
+        );
+        for (incident, headline) in [
+            (
+                LabelIncident::PanelWorkerError,
+                "A panel could not show its result because the worker behind it failed.",
+            ),
+            (
+                LabelIncident::RecoveryDamage,
+                "Kinewright found unsaved work or damage from an earlier run.",
+            ),
+            (
+                LabelIncident::RecoveryUnavailable,
+                "Crash recovery stopped recording in this run.",
+            ),
+            (
+                LabelIncident::ProjectNewerFormat,
+                "This project was written by a newer Kinewright.",
+            ),
+            (
+                LabelIncident::SidecarUnknownCodes,
+                "Some saved incident history used codes this Kinewright does not know.",
+            ),
+            (
+                LabelIncident::SidecarRefused,
+                "The project's saved incident history could not be loaded.",
+            ),
+            (
+                LabelIncident::SidecarWriteFailed,
+                "The project's incident history could not be written.",
+            ),
+        ] {
+            assert_eq!(
+                label_headline(incident),
+                headline,
+                "`IN2B` §5 rule 1 pins this headline"
+            );
+        }
         let mut sorted = headlines.clone();
         sorted.sort_unstable();
         sorted.dedup();

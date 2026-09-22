@@ -1095,6 +1095,179 @@ fn effect_references_lut_asset(effect: &Effect, id: LutAssetId) -> bool {
             })
 }
 
+/// The project-file format version this build writes (`IN2B` §4 rule 1).
+///
+/// Core-owned so the app-side envelope (`ProjectFile`) and the eval binary —
+/// which has no app dependency — gate on the one reader,
+/// [`project_format_version`]. Every file written before the envelope is
+/// version 1 by definition; bumping this constant is a format change with a
+/// migration story, not a flag day.
+pub const PROJECT_FORMAT_VERSION: u32 = 1;
+
+/// The `format_version` of serialised project-file bytes (`IN2B` §4 rule 1).
+///
+/// Missing key → 1 (every legacy file); present → its value, last wins on a
+/// duplicated key (moot — the caller's `serde` parse rejects duplicates, so
+/// the real parse decides there too). Never fails: malformed bytes read as 1
+/// and the real parse — the caller's — decides `Corrupt`.
+///
+/// A dependency-free scan, not `serde_json` (core carries none outside
+/// dev-dependencies — the `json_escaped_len` precedent): it walks the
+/// top-level members with string and depth tracking, so a nested value that
+/// mentions the key — an asset name, a transcript word, a whole embedded
+/// document — cannot spoof the gate.
+#[must_use]
+pub fn project_format_version(bytes: &[u8]) -> u32 {
+    top_level_format_version(bytes).unwrap_or(1)
+}
+
+/// The top-level `format_version` member, when the bytes parse that far.
+/// `None` covers the missing key and every malformation alike.
+fn top_level_format_version(bytes: &[u8]) -> Option<u32> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let bytes = text.as_bytes();
+    let mut index = skip_ascii_whitespace(bytes, 0);
+    if bytes.get(index) != Some(&b'{') {
+        return None;
+    }
+    index += 1;
+    let mut found = None;
+    loop {
+        index = skip_ascii_whitespace(bytes, index);
+        while bytes.get(index) == Some(&b',') {
+            index = skip_ascii_whitespace(bytes, index + 1);
+        }
+        match bytes.get(index) {
+            // Truncated mid-scan: doubt reads as 1.
+            None => return None,
+            Some(b'"') => {}
+            // `}` ends the scan; anything else after valid members is
+            // malformed, which is moot — the caller's parse decides
+            // `Corrupt` on any malformed file.
+            Some(_) => return found,
+        }
+        let (key, next) = json_string_contents(bytes, index)?;
+        index = skip_ascii_whitespace(bytes, next);
+        if bytes.get(index) != Some(&b':') {
+            return None;
+        }
+        index = skip_ascii_whitespace(bytes, index + 1);
+        if key == "format_version" {
+            let start = index;
+            while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                index += 1;
+            }
+            found = Some(text.get(start..index)?.parse::<u32>().ok()?);
+        } else {
+            index = skip_json_value(bytes, index)?;
+        }
+    }
+}
+
+/// Past any run of JSON whitespace starting at `index`.
+fn skip_ascii_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    index
+}
+
+/// A JSON string's unescaped contents starting at its opening quote, plus the
+/// index just past its closing quote.
+///
+/// Surrogate halves decode lossily: exotic keys never equal
+/// `format_version`, and an escaped ASCII key decodes exactly, which is all
+/// the comparison needs.
+fn json_string_contents(bytes: &[u8], index: usize) -> Option<(String, usize)> {
+    if bytes.get(index) != Some(&b'"') {
+        return None;
+    }
+    let mut out = String::new();
+    let mut index = index + 1;
+    loop {
+        let byte = *bytes.get(index)?;
+        index += 1;
+        match byte {
+            b'"' => return Some((out, index)),
+            b'\\' => {
+                let escaped = *bytes.get(index)?;
+                index += 1;
+                match escaped {
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'/' => out.push('/'),
+                    b'b' => out.push('\u{8}'),
+                    b'f' => out.push('\u{c}'),
+                    b'n' => out.push('\n'),
+                    b'r' => out.push('\r'),
+                    b't' => out.push('\t'),
+                    b'u' => {
+                        let hex = std::str::from_utf8(bytes.get(index..index + 4)?).ok()?;
+                        let unit = u32::from_str_radix(hex, 16).ok()?;
+                        index += 4;
+                        out.push(char::from_u32(unit).unwrap_or('\u{FFFD}'));
+                    }
+                    _ => return None,
+                }
+            }
+            0x00..=0x1F => return None,
+            _ => {
+                let rest = std::str::from_utf8(bytes.get(index - 1..)?).ok()?;
+                let character = rest.chars().next()?;
+                out.push(character);
+                index += character.len_utf8() - 1;
+            }
+        }
+    }
+}
+
+/// Past the JSON value opening at `index`, without consuming its terminator.
+///
+/// Depth tracking, not structural parsing: valid JSON skips exactly, and
+/// anything malformed aborts the scan (the caller's parse decides `Corrupt`).
+fn skip_json_value(bytes: &[u8], index: usize) -> Option<usize> {
+    if bytes.get(index) == Some(&b'"') {
+        return skip_json_string(bytes, index);
+    }
+    let mut depth = 0_usize;
+    let mut index = index;
+    loop {
+        match bytes.get(index)? {
+            b'"' => index = skip_json_string(bytes, index)?,
+            b'{' | b'[' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' | b']' | b',' => {
+                if depth == 0 {
+                    return Some(index);
+                }
+                depth -= 1;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+}
+
+/// Past the closing quote of the JSON string opening at `index`.
+fn skip_json_string(bytes: &[u8], index: usize) -> Option<usize> {
+    if bytes.get(index) != Some(&b'"') {
+        return None;
+    }
+    let mut index = index + 1;
+    loop {
+        match bytes.get(index)? {
+            b'"' => return Some(index + 1),
+            b'\\' => {
+                bytes.get(index + 1)?;
+                index += 2;
+            }
+            _ => index += 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Document {
     /// Video and audio tracks, ordered z-bottom to top.
@@ -1505,5 +1678,67 @@ mod tests {
         assert_eq!(decoded.name, "future_effect_v2");
         let round_trip = serde_json::to_value(decoded).expect("future effect should serialize");
         assert_eq!(round_trip["name"], "future_effect_v2");
+    }
+
+    /// IN2B §4 rule 1: the dependency-free version reader answers the gate
+    /// question — missing key → 1, present → its value — and agrees with
+    /// `serde_json` on every valid document, including nested decoys and an
+    /// escaped key spelling.
+    ///
+    /// Not a §12 item: a unit test for the new reader, which stage C2's
+    /// envelope tests and stage D2's eval test drive through real files.
+    #[test]
+    fn project_format_version_reads_the_top_level_key() {
+        assert_eq!(PROJECT_FORMAT_VERSION, 1);
+        // Valid documents, differentially checked against `serde_json`.
+        for document in [
+            "{}",
+            "  {  }  ",
+            r#"{"tracks":[]}"#,
+            r#"{"format_version":1}"#,
+            r#"{"format_version":999}"#,
+            "{\n  \"format_version\" : 2,\n  \"tracks\": []\n}",
+            r#"{"tracks":[],"format_version":2}"#,
+            r#"{"asset":{"format_version":999}}"#,
+            r#"{"name":"format_version: 999"}"#,
+            r#"{"tracks":[{"format_version":999}],"format_version":2}"#,
+            r#"{"note":"}{,\"","format_version":3}"#,
+            r#"{"f\u006Frmat_version":7}"#,
+            r#"{"format_version":1,"document":{"tracks":[],"markers":[]}}"#,
+        ] {
+            let parsed: serde_json::Value = serde_json::from_str(document).unwrap();
+            let expected = parsed
+                .get("format_version")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|version| u32::try_from(version).ok())
+                .unwrap_or(1);
+            assert_eq!(
+                project_format_version(document.as_bytes()),
+                expected,
+                "{document}"
+            );
+        }
+        // A duplicated key is moot (the caller's parse rejects it); the
+        // reader answers last-wins and never fails.
+        assert_eq!(
+            project_format_version(br#"{"format_version":999,"format_version":2}"#),
+            2
+        );
+        // Malformed bytes read as 1; the caller's parse decides `Corrupt`.
+        for document in [
+            "",
+            "not json",
+            "[1,2]",
+            r#"{"format_version":}"#,
+            r#"{"format_version":null}"#,
+            r#"{"format_version":"2"}"#,
+            r#"{"format_version": 99"#,
+            r#"{"format_version":4294967296}"#,
+            r#"{"format_version":-1}"#,
+            r#"{"tracks":[]"#, // truncated
+        ] {
+            assert_eq!(project_format_version(document.as_bytes()), 1, "{document}");
+        }
+        assert_eq!(project_format_version(b"\xff\xfe{\xff"), 1);
     }
 }

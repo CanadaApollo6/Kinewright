@@ -17142,9 +17142,9 @@ fn dollars_to_millionths(cost_usd: f64) -> Option<i64> {
 pub const IN1_INCIDENT_SERIALIZED_BYTES: usize = 819;
 
 /// IN2 §4.2 rule 11: the ceiling every incident this policy table can produce
-/// stays under, asserted `<=` over all **67** codes across all **eight**
+/// stays under, asserted `<=` over all **74** codes across all **eight**
 /// subject shapes, **two** probes, {no proposal, a proposal at the cap} and
-/// four state-and-telemetry shapes — **8 576** measurements.
+/// four state-and-telemetry shapes — **9 472** measurements.
 ///
 /// **Moved from 2 048 to 4 096, and the cause is the proposal alone.** The
 /// worst shape without either new telemetry field already measures over 2 048,
@@ -17328,7 +17328,7 @@ fn color_provenance_label(provenance: &ColorProvenance) -> String {
 /// Returns the typed refusal when it does not, and `None` when the claim
 /// holds. `explained` carries no document check, because nothing was applied.
 ///
-/// After Part B there are 67 codes and seven subject shapes, and exactly one
+/// After Part B there are 74 codes and seven subject shapes, and exactly one
 /// code group has a claim this capability can check against the document the
 /// caller resolved at: a source-colour incident on an asset subject, whose
 /// evidence carries the probed description the revert restores. Every other
@@ -27184,16 +27184,16 @@ mod tests {
     ///
     /// The agent twin of core's
     /// `in2_every_code_fits_the_re_measured_ceiling_on_every_subject_shape`,
-    /// grown from `IN1b`'s 536 pairs to IN2's product: the **67** declared
+    /// grown from `IN1b`'s 536 pairs to IN2's product: the **74** declared
     /// codes times the **eight** subject variants of `IN1b` §3.3 rule 17 as
     /// amended by erratum `IN1b`-A-R13, times **two probes**, times
     /// {no proposal, a proposal at the cap}, times {open, investigating,
     /// resolved with all telemetry, resolved without the two new fields} —
-    /// **8 576** shapes.
+    /// **9 472** shapes.
     ///
     /// **The probe is an axis, and erratum A-R9 is why.** The wire body's
     /// `recoveries` array is the one thing IN2 §7 rule 1 changed about the
-    /// record, putting a **second** action on three of the sixty-seven rows. A
+    /// record, putting a **second** action on three of the seventy-four rows. A
     /// Rec.709-incompatible probe demotes every predicated row to `Explain`
     /// and builds no operation at all, so a loop with that probe alone
     /// re-pins the ceiling over a population that cannot see the slice's own
@@ -27328,11 +27328,11 @@ mod tests {
         );
         assert_eq!(
             measured,
-            67 * 8 * 2 * 2 * 4,
+            74 * 8 * 2 * 2 * 4,
             "IN2 §4.2 rule 11's shapes, with the probe axis erratum A-R9 adds"
         );
-        assert_eq!(POLICY.len(), 67);
-        // Part A's thirteen classifier variants are thirteen of the 67 rows
+        assert_eq!(POLICY.len(), 74);
+        // Part A's thirteen classifier variants are thirteen of the 74 rows
         // after erratum `IN1b`-R4, and the loop above measured every one of
         // them: the ceiling did not widen by dropping the colour codes it was
         // originally set from.
