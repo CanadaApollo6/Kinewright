@@ -565,8 +565,8 @@ fn matte_proof_failures_carry_stable_codes() {
         other => panic!("expected a typed matte-proof error, got {other:?}"),
     }
     assert_eq!(media.recovery_code(), Some("matte_proof_node_inactive"));
-    // The rendered sentence is unchanged apart from the lost
-    // `media backend error: ` prefix the `Backend` wrapper used to add.
+    // The rendered sentence is the inner error's text verbatim: no wrapper
+    // adds a label (`IN2B` §8 D-B4 removed the last one).
     assert_eq!(media.to_string(), inactive.to_string());
 }
 

@@ -415,9 +415,7 @@ fn lut_preflight(
                 // `IN1b`-D-R66). The pre-change line was `strip_prefix` alone;
                 // §6.2 rule 4's table describes all three as `strip_prefix`
                 // then `split_once`, which was never true of this one.
-                return Err(ExportQueueError::LutStoreRootInvalid {
-                    reason: media_refusal_payload(&rendered).to_owned(),
-                });
+                return Err(ExportQueueError::LutStoreRootInvalid { reason: rendered });
             }
             return Ok(ExportLutPreflightReport {
                 checked_lut_assets: Vec::new(),
@@ -429,27 +427,6 @@ fn lut_preflight(
         document,
         &store.availability_resolver(),
     ))
-}
-
-/// One media refusal's rendered text, with [`MediaError::Backend`]'s own label
-/// removed (`IN1b` §6.2 rules 4-5).
-///
-/// The **one** place in this crate that knows the label, replacing the three
-/// hand-written parsers of `IN1b` §6.2 rule 4. The label itself does not move:
-/// removing it from the `#[error]` template is `IN1b` §13 D-B4, owned by IN2,
-/// and IN1 §9 clause 11's 750 B template plus its two pinned literals depend on
-/// it being there.
-///
-/// Still needed after N4/CR-D1: `MediaError::Store`'s template keeps the label
-/// deliberately, so IN1 §9 clause 11's 750 B template, its two pinned literals
-/// and the agent's served text do not move. Some typed variants carry no label
-/// at all — the matte passthroughs of `IN1b` §3.9 rule 36 are
-/// `#[error(transparent)]` — so the strip is a no-op for them and the rendered
-/// text is returned unchanged.
-fn media_refusal_payload(rendered: &str) -> &str {
-    rendered
-        .strip_prefix("media backend error: ")
-        .unwrap_or(rendered)
 }
 
 /// The code a media refusal carries, and the rest of its rendered text
@@ -465,11 +442,12 @@ fn media_refusal_payload(rendered: &str) -> &str {
 /// `IN1b` §12 cut item 2 is **not** cut and §9 clause 14 is fully discharged
 /// for both code-consuming sites. Erratum `IN1b`-D-R61 is withdrawn.
 ///
-/// `Store`'s `#[error]` template keeps `Backend`'s `media backend error: `
-/// label and its `message` is the store's own `"<code>: <detail>; observed=…;
-/// allowed=…"` rendering, so the label strip and the `"<code>: "` strip below
-/// leave exactly the remainder the trailing-key readers already expected: the
-/// served body is byte-identical to the one the hand-written parsers produced.
+/// `Store`'s `#[error]` template renders the bare `message` — the store's own
+/// `"<code>: <detail>; observed=…; allowed=…"` rendering, with no label — so
+/// the `"<code>: "` strip below leaves exactly the remainder the trailing-key
+/// readers already expected: the served body is byte-identical to the one the
+/// hand-written parsers produced. (`IN2B` §8 D-B4 deleted the label strip; the
+/// rendering it stripped is gone from every template.)
 ///
 /// `fallback` is the calling tool's own label, used when the error declares no
 /// code at all. After CR-D2 landed alongside CR-D1, **every LUT family reaching
@@ -486,14 +464,13 @@ pub(crate) fn media_refusal_code<'a>(
     rendered: &'a str,
     fallback: &'a str,
 ) -> (&'a str, &'a str) {
-    let payload = media_refusal_payload(rendered);
     let Some(code) = error.recovery_code() else {
-        return (fallback, payload);
+        return (fallback, rendered);
     };
-    let remainder = payload
+    let remainder = rendered
         .strip_prefix(code)
         .and_then(|rest| rest.strip_prefix(": "))
-        .unwrap_or(payload);
+        .unwrap_or(rendered);
     (code, remainder)
 }
 

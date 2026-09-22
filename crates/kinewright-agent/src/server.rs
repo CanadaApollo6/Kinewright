@@ -14675,8 +14675,9 @@ fn export_queue_error_result(error: ExportQueueError) -> CallToolResult {
 /// `lut_import_failed` label is left for a `MediaError` that declares no code at
 /// all. The trailing keys are still split out with anchored readers so an agent
 /// reads the same typed `field`/`observed`/`allowed`/`recovery_action` shape
-/// every other CC1-CC4 rejection uses, and `Store` keeping `Backend`'s
-/// `media backend error: ` template is what makes that byte-identical.
+/// every other CC1-CC4 rejection uses, and both `Store` and `Backend`
+/// rendering the bare message is what makes that byte-identical
+/// (`IN2B` §8 D-B4: no label remains on any template).
 fn lut_store_error_result(tool: &str, error: &kinewright_core::MediaError) -> CallToolResult {
     let rendered = error.to_string();
     let (code, remainder) = media_refusal_code(error, &rendered, "lut_import_failed");
@@ -30528,10 +30529,8 @@ mod tests {
         };
         assert_eq!(store.recovery_code(), Some("lut_store_root_invalid"));
         assert!(
-            store
-                .to_string()
-                .starts_with("media backend error: lut_store_root_invalid: "),
-            "Store keeps Backend's label so no pinned text moves"
+            store.to_string().starts_with("lut_store_root_invalid: "),
+            "Store renders the bare payload, with no label, so no pinned text moves"
         );
         let structured = lut_store_error_result("import_lut_asset", &store)
             .structured_content
@@ -30626,10 +30625,8 @@ mod tests {
             "CR-D2: the parse code crosses the media boundary as data"
         );
         assert!(
-            error
-                .to_string()
-                .starts_with("media backend error: unsupported_lut_format: "),
-            "Store keeps Backend's label, so no pinned text moves: {error}"
+            error.to_string().starts_with("unsupported_lut_format: "),
+            "Store renders the bare payload, with no label, so no pinned text moves: {error}"
         );
 
         let structured = lut_store_error_result("import_lut_asset", &error)

@@ -126,9 +126,9 @@ impl From<LutParseError> for MediaError {
     /// file it imports: a malformed `.cube` handed to the `import_lut_asset`
     /// tool otherwise reaches the agent with `recovery_code() == None` and is
     /// served under the tool label instead of its own code (D-R67). `message`
-    /// is the rendering without the `media backend error: ` label, which
-    /// [`MediaError::Store`]'s template supplies, so the rendered text is
-    /// byte-identical to the `Backend` string this replaces.
+    /// is the whole rendering — [`MediaError::Store`]'s template adds no
+    /// label — so the rendered text is byte-identical to the `Backend`
+    /// string this replaces.
     fn from(error: LutParseError) -> Self {
         Self::Store {
             code: error.code.as_str(),
@@ -928,8 +928,12 @@ DOMAIN_MAX 2 2 2
                 before.to_string(),
                 "the rendered text must not move"
             );
-            assert!(after.to_string().starts_with("media backend error: "));
-            // `message` is the payload: the label lives in `Store`'s template.
+            assert_eq!(
+                after.to_string(),
+                rendered,
+                "Store renders the bare payload, with no label"
+            );
+            // `message` is the whole rendering: `Store`'s template adds no label.
             let MediaError::Store { message, .. } = &after else {
                 unreachable!("just constructed")
             };

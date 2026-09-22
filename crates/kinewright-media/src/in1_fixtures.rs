@@ -19,8 +19,9 @@
 //!   the caller with its recovery code intact, that the tagged twin decodes,
 //!   and that `MediaError::SourceColor` and `MediaError::SourceColorForAsset`
 //!   each have exactly one construction site in the crate;
-//! * §9 clause 11 — the 750 B message template, pinned with the per-run temp
-//!   path replaced at both of its two occurrences;
+//! * §9 clause 11 — the 708 B message template (`IN2B` §8 D-B4, erratum
+//!   E-B5), pinned with the per-run temp path replaced at both of its two
+//!   occurrences;
 //! * §3 rule 14's fixture 9 — that the recovery actually recovers: after
 //!   `recovery_description`, the same decode of the same file succeeds.
 //!
@@ -61,12 +62,12 @@ use crate::{
 /// `replace` form pins every byte that is not the path and survives Windows'
 /// `\` separators.
 ///
-/// The same 750 bytes are pinned on the core side against
+/// The same 708 bytes are pinned on the core side against
 /// `SourceColorRefusal`'s `#[error(...)]` template; this copy is what proves
 /// the **production path** renders them, which is the half core cannot see.
 const IN1_MANAGED_DECODE_REFUSAL: &str = concat!(
-    r#"media backend error: managed decode for asset 1 ({path}) failed: media backend "#,
-    r#"error: managed source profile rejected for {path} (assumption=None): source colour "#,
+    r#"managed decode for asset 1 ({path}) failed: managed source profile rejected "#,
+    r#"for {path} (assumption=None): source colour "#,
     r#"primaries are unknown [source_color=unknown_source_primaries, field=primaries, "#,
     r#"observed=unknown, allowed=bt709 or srgb in a supported CC1 profile, recovery=Apply "#,
     r#"an explicit supported source-colour override or relink to compatible media., "#,
@@ -296,7 +297,7 @@ fn in1_the_refusal_message_is_byte_identical_to_c3a5814() {
         "the historical sentence interpolates the path twice: {message}"
     );
     assert_eq!(message.replace(&path, "{path}"), IN1_MANAGED_DECODE_REFUSAL);
-    assert_eq!(IN1_MANAGED_DECODE_REFUSAL.len(), 750);
+    assert_eq!(IN1_MANAGED_DECODE_REFUSAL.len(), 708);
     println!(
         "IN1 rendered refusal: {} B with a {} B path twice; template {} B",
         message.len(),

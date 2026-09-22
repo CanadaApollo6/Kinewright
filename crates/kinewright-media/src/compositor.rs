@@ -6189,8 +6189,8 @@ mod tests {
         let inactive = render_coverage(&compositor, &frame, &stack, 1)
             .expect_err("an inactive node cannot be proved");
         // `IN1b` §3.9 rule 36: a matte-proof refusal travels typed rather than
-        // flattened into `MediaError::Backend`, and its rendered text is
-        // unchanged apart from the lost `media backend error: ` prefix.
+        // flattened into `MediaError::Backend`, and its rendered text is the
+        // inner error's text verbatim (`IN2B` §8 D-B4 removed the last label).
         let MediaError::MatteProof(inactive) = inactive else {
             panic!("expected a typed matte-proof error");
         };

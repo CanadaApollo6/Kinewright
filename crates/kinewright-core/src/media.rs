@@ -1706,12 +1706,10 @@ pub struct AnalysisJobStatus {
 /// (IN1 §4.1 rule 2).
 ///
 /// The `#[error]` attribute carries the **entire** historical sentence the two
-/// nested formats used to build, including its two `media backend error: `
-/// fragments and the path twice, so a log reader, a screenshot and a prose
+/// nested formats used to build, minus the two label fragments `IN2B` §8 D-B4
+/// removed, and the path twice, so a log reader, a screenshot and a prose
 /// assertion see no change on the day the type changed underneath them
-/// (IN1 §4.1 rules 2–3). The leading fragment is the old `Backend` wrapper's
-/// own prefix and is vestigial on purpose; dropping it is a visible-text change
-/// and belongs elsewhere (§13 D16). The status fields are derived from the
+/// (IN1 §4.1 rules 2–3). The status fields are derived from the
 /// carried [`crate::ColorSourceError`] accessors as trailing format arguments,
 /// never by re-running the classifier.
 ///
@@ -1721,8 +1719,8 @@ pub struct AnalysisJobStatus {
 /// allow.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error(
-    "media backend error: managed decode for asset {asset} ({}) failed: \
-media backend error: managed source profile rejected for {} (assumption={assumption:?}): \
+    "managed decode for asset {asset} ({}) failed: \
+managed source profile rejected for {} (assumption={assumption:?}): \
 {error} [source_color={}, field={}, observed={}, allowed={}, recovery={}, \
 assumption={assumption:?}, description={description:?}]. Recovery: apply an explicit \
 supported source-colour override, transcode to a supported integer format, or relink to \
@@ -1834,9 +1832,9 @@ pub enum MediaError {
     ///
     /// Transparent, and passed through rather than flattened into
     /// [`Self::Backend`], so `recovery_code()` still answers with
-    /// [`MatteProofError::code`]. The rendered text is unchanged apart from the
-    /// lost `media backend error: ` prefix: the code string is already the
-    /// first token of every `#[error]` template on the inner enum.
+    /// [`MatteProofError::code`]. The rendered text is the inner error's text
+    /// verbatim: the code string is already the first token of every
+    /// `#[error]` template on the inner enum.
     #[error(transparent)]
     MatteProof(MatteProofError),
     /// A coverage measurement was refused with a typed reason
@@ -1854,14 +1852,13 @@ pub enum MediaError {
     /// typed path: the code travels as data and
     /// [`Self::recovery_code`] answers with it.
     ///
-    /// The template keeps [`Self::Backend`]'s `media backend error: ` label, so
-    /// the rendered text is byte-identical to the string this variant replaces
-    /// and IN1 §9 clause 11's 750 B template, its two pinned literals and the
-    /// agent's served text do not move. `message` is therefore the **payload**
-    /// and not the whole rendering, which is what lets every existing caller
-    /// read it the way it read `Backend`'s `String`. Dropping the label is
-    /// `IN1b` §13 D-B4, owned by IN2, and it stays a one-line template edit.
-    #[error("media backend error: {message}")]
+    /// The template renders the bare `message`, with no label: `message` is
+    /// the **whole rendering**, which is what lets every existing caller read
+    /// it the way it read `Backend`'s `String`. The label `IN1b` §13 D-B4
+    /// named is gone, removed by `IN2B` §8; IN1 §9 clause 11's template is
+    /// 708 B after the removal (erratum E-B5) and the agent's served text
+    /// does not move.
+    #[error("{message}")]
     Store {
         /// The store's own stable code, from `LutStoreErrorCode::as_str` or
         /// `RoomToneStoreErrorCode::as_str`.
@@ -1869,7 +1866,7 @@ pub enum MediaError {
         /// The store's own rendered refusal, without the label.
         message: String,
     },
-    #[error("media backend error: {0}")]
+    #[error("{0}")]
     Backend(String),
 }
 
@@ -2661,8 +2658,8 @@ mod tests {
     /// so the path differs per run and per operating system — and the `replace`
     /// form pins every byte that is not the path.
     const IN1_MANAGED_DECODE_REFUSAL: &str = concat!(
-        r#"media backend error: managed decode for asset 1 ({path}) failed: media backend "#,
-        r#"error: managed source profile rejected for {path} (assumption=None): source colour "#,
+        r#"managed decode for asset 1 ({path}) failed: managed source profile rejected "#,
+        r#"for {path} (assumption=None): source colour "#,
         r#"primaries are unknown [source_color=unknown_source_primaries, field=primaries, "#,
         r#"observed=unknown, allowed=bt709 or srgb in a supported CC1 profile, recovery=Apply "#,
         r#"an explicit supported source-colour override or relink to compatible media., "#,
@@ -2757,7 +2754,108 @@ mod tests {
             message.replace(&path.display().to_string(), "{path}"),
             IN1_MANAGED_DECODE_REFUSAL
         );
-        assert_eq!(IN1_MANAGED_DECODE_REFUSAL.len(), 750);
+        assert_eq!(IN1_MANAGED_DECODE_REFUSAL.len(), 708);
+    }
+
+    /// IN2B §12 item 35, §8: no rendering, log line, audit entry or agent
+    /// payload in the tree still carries the removed label, and the only
+    /// occurrences left are the five kept absence asserts of §8 rule 5.
+    ///
+    /// The needle is built with `concat!` so this test's own source never
+    /// spells the bytes it counts (S-9: a literal needle would self-match).
+    /// Files under `tests/` directories count as test source wholesale; every
+    /// other file splits at its `#[cfg(test)]` line.
+    #[test]
+    fn in2b_no_rendered_prefix_remains() {
+        fn collect_rust_sources(path: &Path, paths: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(path)
+                .expect("the workspace source directory reads")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("every source entry reads")
+            {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rust_sources(&path, paths);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    paths.push(path);
+                }
+            }
+        }
+
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest
+            .ancestors()
+            .nth(2)
+            .expect("kinewright-core lives two levels under the workspace root");
+        assert!(
+            root.join("Cargo.toml").is_file() && root.join("crates").is_dir(),
+            "the walk starts at the workspace root, not nowhere: {}",
+            root.display()
+        );
+        let needle = concat!("media backend error", ": ");
+        let mut paths = Vec::new();
+        collect_rust_sources(&root.join("crates"), &mut paths);
+        paths.sort();
+        assert!(
+            paths.len() >= 100,
+            "the test read {} files, not the tree",
+            paths.len()
+        );
+
+        let mut production_hits: Vec<String> = Vec::new();
+        let mut test_hits: Vec<String> = Vec::new();
+        for path in &paths {
+            let text = std::fs::read_to_string(path).expect("every source file reads");
+            // IN1b N6's Windows lesson: match line-ending agnostically.
+            let text = text.replace("\r\n", "\n");
+            let normalised = path.to_string_lossy().replace('\\', "/");
+            let (production_region, test_region) = if normalised.contains("/tests/") {
+                ("", text.as_str())
+            } else {
+                match text.split_once("#[cfg(test)]") {
+                    Some((head, tail)) => (head, tail),
+                    None => (text.as_str(), ""),
+                }
+            };
+            for (index, line) in production_region.lines().enumerate() {
+                if line.contains(needle) {
+                    production_hits.push(format!("{}:{}", normalised, index + 1));
+                }
+            }
+            let offset = production_region.lines().count();
+            for (index, line) in test_region.lines().enumerate() {
+                if line.contains(needle) {
+                    test_hits.push(format!("{}:{}:{line}", normalised, offset + index + 1));
+                }
+            }
+        }
+        assert!(
+            production_hits.is_empty(),
+            "no rendering keeps the removed label: {production_hits:?}"
+        );
+        assert_eq!(
+            test_hits.len(),
+            5,
+            "exactly the five kept absence asserts name the removed label: {test_hits:?}"
+        );
+        for hit in &test_hits {
+            assert!(
+                hit.contains("assert!(!"),
+                "every remaining occurrence is a kept absence assert: {hit}"
+            );
+        }
+        for expected in [
+            "kinewright-core/src/media.rs",
+            "kinewright-media/src/lut.rs",
+            "kinewright-media/src/lut_store.rs",
+            "kinewright-media/src/room_tone_store.rs",
+            "kinewright-agent/src/server.rs",
+        ] {
+            assert!(
+                test_hits.iter().any(|hit| hit.contains(expected)),
+                "the kept absence assert in {expected} still names the removed label: {test_hits:?}"
+            );
+        }
     }
 
     #[test]
@@ -3104,9 +3202,10 @@ mod tests {
 
     /// `IN1b` §9 clause 15: `recovery_code()` is `Some` for **9 of 14**
     /// variants after the N4/CR-D1 addendum added `Store`, both matte enums
-    /// survive their `From` impls typed, and the rendered text keeps the same
-    /// code token it carried as a `Backend` string — the one visible change
-    /// being the lost `media backend error: ` prefix (`IN1b` §3.9 rule 36).
+    /// survive their `From` impls typed, and the rendered text is the inner
+    /// error's text verbatim — the same code token it carried as a `Backend`
+    /// string, with no wrapper label (`IN1b` §3.9 rule 36; the label itself is
+    /// gone after `IN2B` §8 D-B4).
     /// The clause's own figure of 8 of 13 is amended by erratum `IN1b`-A-R12.
     #[test]
     fn in1b_matte_failures_keep_their_code_through_media_error() {

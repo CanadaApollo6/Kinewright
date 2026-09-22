@@ -158,12 +158,12 @@ impl From<LutStoreError> for MediaError {
     /// `MediaError::recovery_code()` as data instead of being reconstructed
     /// from the rendered text at the agent surface.
     ///
-    /// `message` is the store's own rendering and carries no label: the
-    /// `media backend error: ` prefix lives in `MediaError::Store`'s template,
-    /// exactly where `MediaError::Backend` kept it, so the rendered text is
+    /// `message` is the store's own rendering and the whole of it:
+    /// [`MediaError::Store`]'s template adds no label, exactly as
+    /// [`MediaError::Backend`]'s adds none, so the rendered text is
     /// byte-identical and every caller that read `Backend`'s `String` reads
-    /// `message` the same way. Dropping the label is `IN1b` §13 D-B4, owned by
-    /// IN2.
+    /// `message` the same way. The label `IN1b` §13 D-B4 named is gone,
+    /// removed by `IN2B` §8.
     fn from(error: LutStoreError) -> Self {
         Self::Store {
             code: error.code().as_str(),
@@ -2583,8 +2583,8 @@ DOMAIN_MAX 1 1 1
     /// `IN1b` §6.2 rule 4 and ruling N4/CR-D1: the lut store's own code
     /// reaches `MediaError::recovery_code()` as **data**, and the rendered text
     /// is byte-identical to the `MediaError::Backend` string it replaced, so
-    /// IN1 §9 clause 11's 750 B template and the agent's pinned served text do
-    /// not move (`IN1b` §13 D-B4).
+    /// the agent's pinned served text does not move. (IN1 §9 clause 11's
+    /// template is 708 B after `IN2B` §8 D-B4, erratum E-B5.)
     #[test]
     fn in1b_the_lut_store_refusal_reaches_media_error_typed() {
         let error = LutStoreError::new(
@@ -2619,9 +2619,12 @@ DOMAIN_MAX 1 1 1
             before.to_string(),
             "the rendered text must not move"
         );
-        assert!(after.to_string().starts_with("media backend error: "));
-        // `message` is the payload, not the whole rendering: the label lives in
-        // `MediaError::Store`'s template, where `Backend` kept it.
+        assert_eq!(
+            after.to_string(),
+            rendered,
+            "Store renders the bare payload, with no label"
+        );
+        // `message` is the whole rendering: `Store`'s template adds no label.
         let MediaError::Store { message, .. } = &after else {
             unreachable!("just constructed")
         };
