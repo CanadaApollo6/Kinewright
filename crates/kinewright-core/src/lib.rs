@@ -188,7 +188,7 @@ pub use incident::{
     PolicyPredicate, RecordProposalError, RecoveryAction, RecoveryKind, RejectionIncident,
     SourceColorIncident, assume_rec709_operation, deterministic_recovery, explain_body,
     json_escaped_len, policy_class, policy_recovery, rec709_compatible, recovery_description,
-    truncate_to_serialized_bytes,
+    should_flush, truncate_to_serialized_bytes,
 };
 pub use journal::JournalCommand;
 pub use media::{

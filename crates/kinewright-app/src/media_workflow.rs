@@ -199,7 +199,7 @@ impl SourceEditRejection {
             observed: self.message().to_owned(),
             allowed: None,
             evidence: IncidentEvidence::SourceEdit {
-                reason: self.message(),
+                reason: self.message().to_owned(),
             },
             revision,
         }
@@ -2030,7 +2030,7 @@ impl KinewrightApp {
             observed,
             allowed: None,
             evidence: IncidentEvidence::MediaError {
-                code: code.code(),
+                code: code.code().to_owned(),
                 message: error.to_string(),
             },
             revision: self.focused().revision,

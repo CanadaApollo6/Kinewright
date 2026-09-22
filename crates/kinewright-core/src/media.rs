@@ -7,7 +7,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -1169,13 +1169,13 @@ pub struct LoudnessSnapshot {
 /// [`AudioChain::Master`] slots exist only from AU2 Part B; Part A emits
 /// [`AudioChain::Bus`] keys only.
 ///
-/// `PartialOrd`, `Ord` and `Serialize` are on the derive list because
-/// `IncidentSubject::Chain` carries an `AudioChain` and the incident dedup key
-/// is ordered (`IN1b` §3.3 rule 19). `AudioBusId` already derives all three, so
-/// no wrapper is needed, and `AudioChain` is serialised nowhere else, so the
-/// addition moves no byte. `Deserialize` and `JsonSchema` are deliberately not
-/// added: `IncidentSubject` carries neither.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+/// `PartialOrd`, `Ord`, `Serialize` and `Deserialize` are on the derive list
+/// because `IncidentSubject::Chain` carries an `AudioChain` and the incident
+/// dedup key is ordered (`IN1b` §3.3 rule 19). `AudioBusId` already derives
+/// them all, so no wrapper is needed, and `AudioChain` is serialised nowhere
+/// else, so the additions move no byte. `JsonSchema` is deliberately not
+/// added: `IncidentSubject` carries none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioChain {
     Bus(AudioBusId),

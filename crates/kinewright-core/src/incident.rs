@@ -906,7 +906,7 @@ pub enum IncidentSeverity {
 /// (`{"asset":1}`, `{"lut_asset":5}`), a one-key object over a nested union
 /// (`{"chain":{"bus":3}}` or `{"chain":"master"}`), and a bare string
 /// (`"export_job"`, `"project"`, `"agent"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncidentSubject {
     /// One media file that keeps refusing.
@@ -961,7 +961,7 @@ impl IncidentSubject {
 /// **Evidence follows the code, by rule** (`IN1b` §3.4 rule 24): where a
 /// producer resolves its code at run time, the evidence variant is resolved
 /// with it, and a delegating variant never falls back to a `reason` string.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncidentEvidence {
     /// A CC1 source-colour refusal on the managed decode path.
@@ -992,8 +992,10 @@ pub enum IncidentEvidence {
     /// A typed media failure that is not a source-colour one.
     MediaError {
         /// [`MediaError::recovery_code`]'s answer, or the incident's own code
-        /// when the failure carries none.
-        code: &'static str,
+        /// when the failure carries none. Owned so the evidence deserialises
+        /// whole (`IN2B` §0.4 d13); wire-identical, `str` and `String`
+        /// serialise the same.
+        code: String,
         /// The rendered failure.
         message: String,
     },
@@ -1006,8 +1008,9 @@ pub enum IncidentEvidence {
     },
     /// A Source-monitor edit refused before anything was applied.
     SourceEdit {
-        /// The app's own rendered reason.
-        reason: &'static str,
+        /// The app's own rendered reason. Owned so the evidence deserialises
+        /// whole (`IN2B` §0.4 d13); wire-identical.
+        reason: String,
     },
     /// A relink candidate refused.
     Relink {
@@ -1064,7 +1067,7 @@ impl IncidentEvidence {
 ///
 /// `Approved` and `Rejected` are not IN1 outcomes; they arrive with the typed
 /// broker (IN1 §6.3 rule 17, §13 D6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncidentOutcome {
     /// The recovery was applied.
@@ -1091,7 +1094,7 @@ pub enum IncidentOutcome {
 ///
 /// `Investigating` has the same single-key shape, `"state":"investigating"`,
 /// and is declared between `Open` and `Resolved` (IN2 §3.6 rule 32).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "outcome")]
 pub enum IncidentState {
     /// Outstanding.
@@ -1120,7 +1123,7 @@ impl IncidentState {
 ///
 /// **Not [`Copy`]** since IN2 §5.4 rule 12: [`IncidentResolver::Session`]
 /// carries owned strings. Probe-2 measured the fallout at zero sites.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct IncidentTelemetry {
     /// Wall time from observation to resolution, measured at the router.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1166,7 +1169,7 @@ pub struct IncidentTelemetry {
 ///
 /// A router-resolved incident costs **zero** extra keys, which is IN1 §8
 /// rule 4's shape.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncidentResolver {
     /// The deterministic router applied the recovery itself.
@@ -1278,7 +1281,7 @@ pub enum RecordProposalError {
 }
 
 /// A typed fix an investigator session proposes for one incident (IN2 §4).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncidentProposal {
     /// The branch's applied operations, in order. **Never serialised**:
     /// [`Operation`] has 57 variants and several carry unbounded payloads, so a
@@ -1637,7 +1640,7 @@ impl IncidentObservation {
 /// token survives as the first word of `observed`.
 fn media_evidence(error: &MediaError, code: IncidentCode) -> IncidentEvidence {
     IncidentEvidence::MediaError {
-        code: code.code(),
+        code: code.code().to_owned(),
         message: error.to_string(),
     }
 }
@@ -2859,12 +2862,30 @@ pub struct IncidentLog {
     next_id: u64,
     entries: Vec<Incident>,
     suppressed: BTreeSet<(IncidentCode, IncidentSubject)>,
+    /// Mutations performed through this log's writers, from zero. The sidecar
+    /// flusher's change signal: [`Self::generation`] reads it and the pure
+    /// [`should_flush`] compares it (`IN2B` §2 rule 4).
+    generation: u64,
 }
 
 impl Default for IncidentLog {
     fn default() -> Self {
         Self::with_start(Instant::now())
     }
+}
+
+/// Whether the log holds changes the sidecar does not (`IN2B` §2 rule 4).
+///
+/// Pure over generations: `last_change` is [`IncidentLog::generation`] as the
+/// flusher last saw it, `last_written_gen` the generation the last flush
+/// wrote. The 2 s debounce lives in the caller's timer (edge-triggered: the
+/// timer fires after a change and asks here whether anything is new), so this
+/// comparison reads no clock and `now` is unused — it stays in the signature
+/// because the rule fixes the call shape the flush scheduler uses.
+#[must_use]
+pub fn should_flush(last_change: u64, last_written_gen: u64, now: Instant) -> bool {
+    let _ = now;
+    last_change > last_written_gen
 }
 
 impl IncidentLog {
@@ -2877,7 +2898,32 @@ impl IncidentLog {
             next_id: 1,
             entries: Vec::new(),
             suppressed: BTreeSet::new(),
+            generation: 0,
         }
+    }
+
+    /// Mutations performed through this log's writers, from zero (`IN2B` §2
+    /// rule 4, N2/S-6).
+    ///
+    /// Bumped by **every** `&mut` writer on the log — [`Self::observe`],
+    /// [`Self::resolve`], [`Self::note_auto_applied`],
+    /// [`Self::refresh_revision`], [`Self::begin_investigation`],
+    /// [`Self::end_investigation`], [`Self::record_proposal`],
+    /// [`Self::mark_proposal_stale`] and [`Self::telemetry_mut`] (and
+    /// `restore`, when it lands) — whenever it mutates or hands out
+    /// mutation capability. Paths that change nothing (a suppressed
+    /// observation, an unknown id, an already-terminal state) do not move
+    /// it: the flusher asks "anything new since the last write", and a
+    /// no-op is not news. The MCP threads mutate through the same handle,
+    /// so they count too.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// One mutation happened.
+    fn bump_generation(&mut self) {
+        self.generation = self.generation.saturating_add(1);
     }
 
     /// Record one observation.
@@ -2915,7 +2961,9 @@ impl IncidentLog {
         }) {
             existing.count = existing.count.saturating_add(1);
             existing.revision = observation.revision;
-            return Observed::Deduped(existing.id);
+            let deduped = existing.id;
+            self.bump_generation();
+            return Observed::Deduped(deduped);
         }
 
         let id = IncidentId(self.next_id);
@@ -2941,6 +2989,7 @@ impl IncidentLog {
             telemetry: IncidentTelemetry::default(),
             proposal: None,
         });
+        self.bump_generation();
         Observed::Opened(id)
     }
 
@@ -2975,6 +3024,9 @@ impl IncidentLog {
     /// keeps the record's identity, classification and state owned by this
     /// type.
     pub fn telemetry_mut(&mut self, id: IncidentId) -> Option<&mut IncidentTelemetry> {
+        if self.entries.iter().any(|incident| incident.id == id) {
+            self.bump_generation();
+        }
         self.entries
             .iter_mut()
             .find(|incident| incident.id == id)
@@ -2997,6 +3049,7 @@ impl IncidentLog {
         incident.telemetry.resolved_after = Some(self.started.elapsed());
         let key = (incident.code, incident.subject);
         self.suppressed.insert(key);
+        self.bump_generation();
         true
     }
 
@@ -3013,6 +3066,7 @@ impl IncidentLog {
         };
         let key = (incident.code, incident.subject);
         self.suppressed.insert(key);
+        self.bump_generation();
         true
     }
 
@@ -3045,6 +3099,7 @@ impl IncidentLog {
             return false;
         }
         incident.revision = revision;
+        self.bump_generation();
         true
     }
 
@@ -3081,6 +3136,7 @@ impl IncidentLog {
         if let Some(proposal) = incident.proposal.as_mut() {
             proposal.stale = true;
         }
+        self.bump_generation();
         true
     }
 
@@ -3107,6 +3163,7 @@ impl IncidentLog {
         }
         incident.state = IncidentState::Open;
         incident.telemetry.resolver = Some(stopped_reason);
+        self.bump_generation();
         true
     }
 
@@ -3157,6 +3214,7 @@ impl IncidentLog {
             return Err(RecordProposalError::AlreadyRecorded);
         }
         incident.proposal = Some(proposal);
+        self.bump_generation();
         Ok(())
     }
 
@@ -3185,6 +3243,7 @@ impl IncidentLog {
             return false;
         }
         proposal.stale = true;
+        self.bump_generation();
         true
     }
 
@@ -5078,7 +5137,7 @@ mod tests {
             | IncidentCode::DeliveryColor(_)
             | IncidentCode::DeliveryVerification(_)
             | IncidentCode::ColorQc(_) => IncidentEvidence::MediaError {
-                code: "delivery_verification_frame_count_out_of_range",
+                code: "delivery_verification_frame_count_out_of_range".to_owned(),
                 message: worst_media_error().to_string(),
             },
             IncidentCode::Operation(family) => IncidentEvidence::OpError {
@@ -5115,7 +5174,7 @@ mod tests {
             },
             IncidentCode::Rejection(RejectionIncident::SourceEdit) => {
                 IncidentEvidence::SourceEdit {
-                    reason: WORST_SOURCE_EDIT_REASON,
+                    reason: WORST_SOURCE_EDIT_REASON.to_owned(),
                 }
             }
             IncidentCode::Rejection(RejectionIncident::Relink) => IncidentEvidence::Relink {
@@ -6198,6 +6257,229 @@ mod tests {
         };
         let encoded = serde_json::to_string(&empty).unwrap();
         assert!(encoded.contains(r#""investigator":{}"#));
+    }
+
+    /// IN2B §2 rule 4 (N2/S-6): `generation()` moves on every mutation and
+    /// on no no-op, and the pure `should_flush` compares generations.
+    ///
+    /// Not a §12 item (stage A2 lands none): a unit test for the new public
+    /// surface, which stage C1's flush tests build on.
+    #[test]
+    fn generation_moves_on_mutation_and_should_flush_compares_generations() {
+        let mut log = IncidentLog::with_start(Instant::now());
+        assert_eq!(log.generation(), 0);
+        let now = Instant::now();
+        assert!(!should_flush(log.generation(), 0, now));
+
+        let observation = || {
+            IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::Project),
+                IncidentSubject::Project,
+                "could not read the project file",
+                TimelineRevision(1),
+            )
+        };
+        let Observed::Opened(id) = log.observe(observation()) else {
+            panic!("a fresh log must open");
+        };
+        assert_eq!(log.generation(), 1);
+        assert!(should_flush(log.generation(), 0, now));
+        assert!(!should_flush(log.generation(), 1, now));
+
+        assert_eq!(log.observe(observation()), Observed::Deduped(id));
+        assert_eq!(log.generation(), 2);
+
+        assert!(log.refresh_revision(id, TimelineRevision(2)));
+        assert_eq!(log.generation(), 3);
+        assert!(!log.refresh_revision(IncidentId(999), TimelineRevision(2)));
+        assert_eq!(log.generation(), 3, "an unknown id changes nothing");
+
+        let telemetry = log.telemetry_mut(id);
+        assert!(telemetry.is_some());
+        assert_eq!(log.generation(), 4);
+        assert!(log.telemetry_mut(IncidentId(999)).is_none());
+        assert_eq!(log.generation(), 4, "an unknown id hands out nothing");
+
+        assert!(log.begin_investigation(id));
+        assert_eq!(log.generation(), 5);
+        assert!(!log.begin_investigation(id));
+        assert_eq!(log.generation(), 5, "a refused begin changes nothing");
+
+        let proposal = || IncidentProposal {
+            operations: Vec::new(),
+            operation_count: 0,
+            summary: "summary".to_owned(),
+            explanation: "explanation".to_owned(),
+            base_revision: TimelineRevision(1),
+            stale: false,
+        };
+        assert!(log.record_proposal(id, proposal()).is_ok());
+        assert_eq!(log.generation(), 6);
+        assert_eq!(
+            log.record_proposal(id, proposal()),
+            Err(RecordProposalError::AlreadyRecorded)
+        );
+        assert_eq!(log.generation(), 6, "a refused record changes nothing");
+
+        assert!(log.mark_proposal_stale(id));
+        assert_eq!(log.generation(), 7);
+        assert!(!log.mark_proposal_stale(id));
+        assert_eq!(log.generation(), 7, "an already-stale mark changes nothing");
+
+        assert!(log.end_investigation(id, IncidentResolver::Person));
+        assert_eq!(log.generation(), 8);
+        assert!(!log.end_investigation(id, IncidentResolver::Person));
+        assert_eq!(log.generation(), 8, "ending a non-session changes nothing");
+
+        assert!(log.note_auto_applied(id));
+        assert_eq!(log.generation(), 9);
+
+        assert!(log.resolve(id, IncidentOutcome::Explained));
+        assert_eq!(log.generation(), 10);
+        assert!(!log.resolve(IncidentId(999), IncidentOutcome::Explained));
+        assert_eq!(log.generation(), 10, "an unknown id changes nothing");
+
+        assert_eq!(log.observe(observation()), Observed::Suppressed);
+        assert_eq!(log.generation(), 10, "a suppressed observation is not news");
+    }
+
+    fn assert_json_round_trip<T>(value: &T)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let body = serde_json::to_string(value).unwrap();
+        let decoded: T = serde_json::from_str(&body).unwrap();
+        assert_eq!(&decoded, value, "{body}");
+    }
+
+    /// IN2B stage A2: the new `Deserialize` derives round-trip through real
+    /// JSON — the groundwork A6's record/restore items build on.
+    ///
+    /// Not a §12 item (stage A2 lands none): unit tests proving the derives
+    /// expand to working deserialisers, not only to compiling ones.
+    #[test]
+    fn incident_subject_and_evidence_round_trip_through_json() {
+        for subject in [
+            IncidentSubject::Asset(AssetId(3)),
+            IncidentSubject::LutAsset(crate::LutAssetId(5)),
+            IncidentSubject::Clip(crate::ClipId(9)),
+            IncidentSubject::Track(crate::TrackId(2)),
+            IncidentSubject::Chain(AudioChain::Bus(crate::AudioBusId(3))),
+            IncidentSubject::Chain(AudioChain::Master),
+            IncidentSubject::ExportJob,
+            IncidentSubject::Project,
+            IncidentSubject::Agent,
+        ] {
+            assert_json_round_trip(&subject);
+        }
+
+        let probed = untagged_webm_probe();
+        for evidence in [
+            IncidentEvidence::SourceColor {
+                probed: probed.clone(),
+                assumption: Some(ColorSourceProfileAssumption::D65),
+            },
+            IncidentEvidence::Plain,
+            IncidentEvidence::OpError {
+                family: IncidentFamily::Bounds,
+                op_number: Some(3),
+                message: "message".to_owned(),
+            },
+            IncidentEvidence::MediaError {
+                code: "media_backend_unclassified".to_owned(),
+                message: "message".to_owned(),
+            },
+            IncidentEvidence::Revision {
+                expected: TimelineRevision(7),
+                actual: TimelineRevision(9),
+            },
+            IncidentEvidence::SourceEdit {
+                reason: "reason".to_owned(),
+            },
+            IncidentEvidence::Relink {
+                reason: "reason".to_owned(),
+            },
+            IncidentEvidence::ProjectSave {
+                reason: "reason".to_owned(),
+            },
+            IncidentEvidence::Branch {
+                reason: "reason".to_owned(),
+            },
+            IncidentEvidence::CaptionPlan {
+                reason: "reason".to_owned(),
+            },
+            IncidentEvidence::DeliveryVariant {
+                reason: "reason".to_owned(),
+            },
+        ] {
+            assert_json_round_trip(&evidence);
+        }
+    }
+
+    /// IN2B stage A2, second half: outcomes, states, resolvers, telemetry
+    /// and proposals round-trip through real JSON.
+    #[test]
+    fn incident_state_telemetry_and_proposal_round_trip_through_json() {
+        for outcome in [
+            IncidentOutcome::Applied,
+            IncidentOutcome::Reverted,
+            IncidentOutcome::Explained,
+            IncidentOutcome::Rejected,
+        ] {
+            assert_json_round_trip(&outcome);
+            assert_json_round_trip(&IncidentState::Resolved(outcome));
+        }
+        assert_json_round_trip(&IncidentState::Open);
+        assert_json_round_trip(&IncidentState::Investigating);
+
+        assert_json_round_trip(&IncidentResolver::Router);
+        assert_json_round_trip(&IncidentResolver::Person);
+        assert_json_round_trip(&IncidentResolver::Session {
+            harness: "harness".to_owned(),
+            model: Some("model".to_owned()),
+            stop: "stop".to_owned(),
+        });
+
+        assert_json_round_trip(&IncidentTelemetry::default());
+        assert_json_round_trip(&IncidentTelemetry {
+            resolved_after: Some(Duration::from_secs(9)),
+            tool_calls: 3,
+            input_tokens: Some(100),
+            cached_input_tokens: Some(10),
+            cache_creation_input_tokens: Some(11),
+            output_tokens: Some(50),
+            reasoning_output_tokens: Some(5),
+            cost_usd_millionths: Some(42),
+            turns: Some(9),
+            resolver: Some(IncidentResolver::Session {
+                harness: "harness".to_owned(),
+                model: None,
+                stop: "stop".to_owned(),
+            }),
+        });
+
+        let proposal = IncidentProposal {
+            operations: Vec::new(),
+            operation_count: 2,
+            summary: "summary".to_owned(),
+            explanation: "explanation".to_owned(),
+            base_revision: TimelineRevision(41),
+            stale: false,
+        };
+        let body = serde_json::to_string(&proposal).unwrap();
+        assert!(
+            !body.contains("operations"),
+            "operations never serialise: {body}"
+        );
+        assert_json_round_trip(&proposal);
+        // `#[serde(skip)]` ignores the key even when a hand-written record
+        // carries it: operations never resurrect through the derive.
+        let decoded = serde_json::from_str::<IncidentProposal>(
+            r#"{"operations":[1,2,3],"operation_count":2,"summary":"s","explanation":"e","base_revision":41,"stale":false}"#,
+        )
+        .unwrap();
+        assert!(decoded.operations.is_empty());
+        assert_eq!(decoded.operation_count, 2);
     }
 
     /// FNV-1a 64, the digest `tests/contracts.rs` pins the legacy round trip

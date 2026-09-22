@@ -27567,7 +27567,7 @@ mod tests {
             | Code::DeliveryColor(_)
             | Code::DeliveryVerification(_)
             | Code::ColorQc(_) => IncidentEvidence::MediaError {
-                code: "delivery_verification_frame_count_out_of_range",
+                code: "delivery_verification_frame_count_out_of_range".to_owned(),
                 message: in1b_worst_media_error().to_string(),
             },
             Code::Operation(family) => IncidentEvidence::OpError {
@@ -27603,7 +27603,7 @@ mod tests {
                 ),
             },
             Code::Rejection(RejectionIncident::SourceEdit) => IncidentEvidence::SourceEdit {
-                reason: IN1B_WORST_SOURCE_EDIT_REASON,
+                reason: IN1B_WORST_SOURCE_EDIT_REASON.to_owned(),
             },
             Code::Rejection(RejectionIncident::Relink) => IncidentEvidence::Relink {
                 reason: in1b_worst_relink_reason(),

@@ -4922,7 +4922,7 @@ fn validate_catalog(doc: &Document) -> Result<(), OpError> {
 /// serde's `snake_case` short name (`"bounds"`), never the code string, so the
 /// family and the incident's own `code` do not say the same word twice
 /// (erratum `IN1b`-A-R3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncidentFamily {
     /// Set the value inside the range the message names.
