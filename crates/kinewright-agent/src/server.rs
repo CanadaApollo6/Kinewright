@@ -27225,7 +27225,7 @@ mod tests {
         // untagged-`WebM` observation fed twice so `count` is 2 without an
         // engine, and read while still `Open` so no `Duration` reaches the wire.
         let probed = in1_untagged_webm_probe();
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(in1_observation(
             &ColorSourceError::UnknownPrimaries,
             &probed,
@@ -27257,7 +27257,7 @@ mod tests {
         for entry in POLICY {
             for subject in in1b_every_subject_shape() {
                 for probe in [in1b_worst_probe(), in2_rec709_compatible_worst_probe()] {
-                    let mut log = IncidentLog::with_start(Instant::now());
+                    let mut log = IncidentLog::with_start(Instant::now(), None);
                     let Observed::Opened(id) =
                         log.observe(in1b_worst_observation(entry.code, subject, &probe))
                     else {
@@ -27657,7 +27657,7 @@ mod tests {
 
     /// One incident of one code and subject, opened through the real log.
     fn in1b_incident(observation: IncidentObservation) -> Incident {
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(observation) else {
             panic!("a fresh log must open the incident");
         };
@@ -32886,7 +32886,7 @@ mod tests {
         };
         let branch = Core::spawn_at((*document).clone(), IN2_BASE_REVISION).unwrap();
         let incidents: IncidentLogHandle =
-            Arc::new(RwLock::new(IncidentLog::with_start(Instant::now())));
+            Arc::new(RwLock::new(IncidentLog::with_start(Instant::now(), None)));
         let id = {
             let mut log = incidents.write().unwrap();
             let Observed::Opened(id) = log.observe(in1b_worst_observation(
@@ -33775,7 +33775,7 @@ mod tests {
         };
         let branch = Core::spawn_at((*document).clone(), IN2_BASE_REVISION).unwrap();
         let incidents: IncidentLogHandle =
-            Arc::new(RwLock::new(IncidentLog::with_start(Instant::now())));
+            Arc::new(RwLock::new(IncidentLog::with_start(Instant::now(), None)));
         let id = {
             let mut log = incidents.write().unwrap();
             let Observed::Opened(id) = log.observe(in1b_worst_observation(

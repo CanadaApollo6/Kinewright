@@ -4,6 +4,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Instant, SystemTime},
 };
 
 use kinewright_core::{
@@ -402,8 +403,12 @@ impl ProjectSession {
         let (library, statuses) = LutLibrary::build(&document.lut_assets, lut_store.as_ref());
         let agent_project_path: ProjectPathHandle =
             std::sync::Arc::new(std::sync::RwLock::new(project_path.clone()));
-        let incidents: IncidentLogHandle =
-            std::sync::Arc::new(std::sync::RwLock::new(IncidentLog::default()));
+        // The wall origin is injected at session creation (`IN2B` §3 rule 14,
+        // N1/B4, N-8): wall stamps derive at sidecar write as origin +
+        // `opened_at`, and no other construction site passes one.
+        let incidents: IncidentLogHandle = std::sync::Arc::new(std::sync::RwLock::new(
+            IncidentLog::with_start(Instant::now(), Some(SystemTime::now())),
+        ));
         let session = Self {
             id,
             name,

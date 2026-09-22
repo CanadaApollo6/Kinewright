@@ -16,8 +16,8 @@
 //! named session origin is the only honest session-scoped stamp.
 
 use std::{
-    collections::BTreeSet,
-    time::{Duration, Instant},
+    collections::{BTreeMap, BTreeSet},
+    time::{Duration, Instant, SystemTime},
 };
 
 use serde::{Deserialize, Serialize, Serializer};
@@ -3044,11 +3044,26 @@ pub struct IncidentLog {
     /// flusher's change signal: [`Self::generation`] reads it and the pure
     /// [`should_flush`] compares it (`IN2B` §2 rule 4).
     generation: u64,
+    /// The wall-clock reading of [`Self::started`], injected by the caller
+    /// (`IN2B` §3 rule 14, N1/B4). `None` for origin-less logs (tests,
+    /// handles that never write a sidecar): wall stamps derive only where
+    /// an origin exists, and no test reads a clock.
+    // Unread until stage A6 wires `records()`/`restore`; the `expect`
+    // fails the build if the wiring never lands.
+    #[expect(dead_code, reason = "read by A6's record builder")]
+    wall_origin: Option<SystemTime>,
+    /// Carried wall stamps by id, filled by `restore` from each record's
+    /// `opened_wall_millis` (`IN2B` §3 rule 14, N2/B-2). Off the wire and
+    /// consulted only at sidecar write, where the builder prefers a carried
+    /// wall over re-deriving one — a new origin must never make a 3-day-old
+    /// incident read as minutes old.
+    #[expect(dead_code, reason = "filled and read by A6's restore/builder")]
+    loaded_wall: BTreeMap<IncidentId, Option<i64>>,
 }
 
 impl Default for IncidentLog {
     fn default() -> Self {
-        Self::with_start(Instant::now())
+        Self::with_start(Instant::now(), None)
     }
 }
 
@@ -3070,13 +3085,23 @@ impl IncidentLog {
     /// A log whose session origin is pinned, so a test can read `opened_at`
     /// deterministically (IN1 §2.3 rule 18).
     #[must_use]
-    pub fn with_start(started: Instant) -> Self {
+    /// A log whose monotonic origin is `started` and whose wall reading of
+    /// that origin is `wall_origin` (`IN2B` §3 rule 14, N1/B4).
+    ///
+    /// The origin is injected, never read: the app passes
+    /// `Some(SystemTime::now())` at session creation, tests pass `None` (or
+    /// a fixed origin where the wall math is under test), and wall stamps
+    /// derive at sidecar write as `wall_origin + opened_at` — or `None`
+    /// where no origin exists.
+    pub fn with_start(started: Instant, wall_origin: Option<SystemTime>) -> Self {
         Self {
             started,
             next_id: 1,
             entries: Vec::new(),
             suppressed: BTreeSet::new(),
             generation: 0,
+            wall_origin,
+            loaded_wall: BTreeMap::new(),
         }
     }
 
@@ -3781,7 +3806,7 @@ mod tests {
                 let IncidentCode::SourceColor(colour) = entry.code else {
                     continue;
                 };
-                let mut log = IncidentLog::with_start(Instant::now());
+                let mut log = IncidentLog::with_start(Instant::now(), None);
                 // Built from the row's own canonical failure, so `observed` and
                 // `allowed` belong to the code under test rather than to a
                 // borrowed `UnknownPrimaries` fixture.
@@ -3887,7 +3912,7 @@ mod tests {
     #[test]
     fn in1_identical_observations_dedup_and_a_new_observed_opens_a_second_incident() {
         let probed = untagged_mp4_probe();
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
 
         let Observed::Opened(first) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
@@ -3918,7 +3943,7 @@ mod tests {
 
     #[test]
     fn in1_a_webm_evidence_difference_does_not_split_the_incident() {
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(first) =
             log.observe(unknown_primaries_observation(&untagged_mp4_probe()))
         else {
@@ -3934,7 +3959,7 @@ mod tests {
 
     #[test]
     fn in1_the_fixture_incident_serialises_to_the_pinned_wire_body() {
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let probed = untagged_webm_probe();
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
@@ -3956,7 +3981,7 @@ mod tests {
             IncidentOutcome::Explained,
         ] {
             let probed = untagged_mp4_probe();
-            let mut log = IncidentLog::with_start(Instant::now());
+            let mut log = IncidentLog::with_start(Instant::now(), None);
             let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
                 panic!("the first observation must open an incident");
             };
@@ -3970,14 +3995,14 @@ mod tests {
             );
             assert_eq!(log.len(), 1);
         }
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         assert!(!log.resolve(IncidentId(7), IncidentOutcome::Applied));
     }
 
     #[test]
     fn in1_a_noted_auto_apply_suppresses_the_undo_reopen() {
         let probed = untagged_mp4_probe();
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
         };
@@ -4011,7 +4036,7 @@ mod tests {
     #[test]
     fn in1_refresh_revision_moves_only_the_revision_of_an_open_incident() {
         let probed = untagged_mp4_probe();
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
         };
@@ -4056,7 +4081,7 @@ mod tests {
     #[test]
     fn in1_telemetry_mut_is_the_only_write_path_for_the_cost_mirrors() {
         let probed = untagged_mp4_probe();
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
         };
@@ -4102,7 +4127,7 @@ mod tests {
     #[test]
     fn in1_opened_at_is_measured_from_the_pinned_session_start() {
         let probed = untagged_mp4_probe();
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(first) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
         };
@@ -4659,7 +4684,7 @@ mod tests {
                 "{} is declared twice",
                 code.code()
             );
-            let mut log = IncidentLog::with_start(Instant::now());
+            let mut log = IncidentLog::with_start(Instant::now(), None);
             let Observed::Opened(id) = log.observe(IncidentObservation::plain(
                 code,
                 IncidentSubject::Project,
@@ -4925,7 +4950,7 @@ mod tests {
             ("   ".to_owned(), "   ".to_owned()),
             ("a\"b".repeat(40), "a\"b".repeat(16)),
         ];
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         for (index, (name, expected)) in rows.iter().enumerate() {
             let mut observation = IncidentObservation::plain(
                 IncidentCode::Label(LabelIncident::Project),
@@ -5186,7 +5211,7 @@ mod tests {
     /// the same body; this one also pins its length at 819 B.
     #[test]
     fn in1b_the_part_a_wire_body_is_byte_identical() {
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let probed = untagged_webm_probe();
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
@@ -5204,7 +5229,7 @@ mod tests {
     /// a project-subject and a chain-subject incident, pinned byte for byte.
     #[test]
     fn in1b_a_project_and_a_chain_subject_incident_serialise_to_their_pinned_bodies() {
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(project) = log.observe(IncidentObservation::plain(
             IncidentCode::Label(LabelIncident::Project),
             IncidentSubject::Project,
@@ -5299,7 +5324,7 @@ mod tests {
         for code in EVERY_INCIDENT_CODE {
             for subject in every_subject_shape() {
                 for probed in [worst_probe(), rec709_compatible_worst_probe()] {
-                    let mut log = IncidentLog::with_start(Instant::now());
+                    let mut log = IncidentLog::with_start(Instant::now(), None);
                     let Observed::Opened(id) =
                         log.observe(worst_observation(code, subject, &probed))
                     else {
@@ -5904,7 +5929,7 @@ mod tests {
         }
 
         let probed = untagged_mp4_probe();
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
         };
@@ -5934,7 +5959,7 @@ mod tests {
     #[test]
     fn in2_begin_investigation_writes_one_field_and_only_on_an_open_entry() {
         let probed = untagged_mp4_probe();
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
         };
@@ -5969,7 +5994,7 @@ mod tests {
             IncidentOutcome::Explained,
             IncidentOutcome::Rejected,
         ] {
-            let mut log = IncidentLog::with_start(Instant::now());
+            let mut log = IncidentLog::with_start(Instant::now(), None);
             let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
                 panic!("the first observation must open an incident");
             };
@@ -5996,7 +6021,7 @@ mod tests {
         ];
         let mut ended = 0_usize;
         for stop in stops {
-            let mut log = IncidentLog::with_start(Instant::now());
+            let mut log = IncidentLog::with_start(Instant::now(), None);
             let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
                 panic!("the first observation must open an incident");
             };
@@ -6031,7 +6056,7 @@ mod tests {
         assert_eq!(ended, stops.len());
 
         // Only on an `Investigating` entry.
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
         };
@@ -6066,7 +6091,7 @@ mod tests {
         let probed = untagged_mp4_probe();
         let mut marked = 0_usize;
         for state in ["investigating", "open"] {
-            let mut log = IncidentLog::with_start(Instant::now());
+            let mut log = IncidentLog::with_start(Instant::now(), None);
             let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
                 panic!("the first observation must open an incident");
             };
@@ -6095,7 +6120,7 @@ mod tests {
 
         // Already stale, no proposal, resolved, and unknown: all false, all
         // writing nothing.
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
         };
@@ -6113,7 +6138,7 @@ mod tests {
     #[test]
     fn in2_an_explicit_reject_resolves_and_suppresses() {
         let probed = untagged_mp4_probe();
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
         };
@@ -6172,7 +6197,7 @@ mod tests {
 
             // The no-harness fallback is the same value, by construction: the
             // incident stores exactly what `policy_recovery` returned.
-            let mut log = IncidentLog::with_start(Instant::now());
+            let mut log = IncidentLog::with_start(Instant::now(), None);
             let Observed::Opened(id) = log.observe(IncidentObservation {
                 code,
                 subject,
@@ -6373,7 +6398,7 @@ mod tests {
     #[test]
     fn in2_a_recorded_proposal_never_serialises_its_operations() {
         let probed = untagged_mp4_probe();
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
         };
@@ -6415,7 +6440,7 @@ mod tests {
         assert!(body.contains(r#""stale":false"#));
 
         // Resolved entries refuse it too.
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
         };
@@ -6436,7 +6461,7 @@ mod tests {
     #[test]
     fn in2_a_second_session_marks_the_old_proposal_stale_and_replaces_it() {
         let probed = untagged_mp4_probe();
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
         };
@@ -6577,7 +6602,7 @@ mod tests {
     /// `IN1_INCIDENT_SERIALIZED_BYTES` cannot move.
     #[test]
     fn in2_the_proposal_and_the_new_telemetry_fields_skip_when_absent() {
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         let probed = untagged_webm_probe();
         let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
             panic!("the first observation must open an incident");
@@ -6671,7 +6696,7 @@ mod tests {
     /// surface, which stage C1's flush tests build on.
     #[test]
     fn generation_moves_on_mutation_and_should_flush_compares_generations() {
-        let mut log = IncidentLog::with_start(Instant::now());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
         assert_eq!(log.generation(), 0);
         let now = Instant::now();
         assert!(!should_flush(log.generation(), 0, now));
