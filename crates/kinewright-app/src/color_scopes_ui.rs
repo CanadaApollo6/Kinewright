@@ -17,13 +17,14 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    Analysis, Document, MatteRegionDescription, MonitorProof, NormalizedRoi, RgbaImage,
+    Analysis, Document, MatteRegionDescription, MediaError, MonitorProof, NormalizedRoi, RgbaImage,
     ScopeComparison, ScopeEvidence, ScopeRequest, ScopeResolution, ScopeStage, TimeCode,
     compare_scope_evidence, matte_coverage_statistics, matte_scoped_frame, measure_scope,
 };
 
 use crate::{
     app::KinewrightApp,
+    error_ui::WorkerError,
     matte_overlay_ui::{AnalysisMatteProofSource, MatteProofSource, MatteTarget},
     theme::{self, color, radius, type_size},
 };
@@ -167,7 +168,7 @@ struct ReferenceMeasurement {
 struct ScopeResponse {
     generation: u64,
     key: ScopeRequestKey,
-    result: Result<ScopeMeasurement, String>,
+    result: Result<ScopeMeasurement, WorkerError>,
 }
 
 #[derive(Debug)]
@@ -252,6 +253,13 @@ impl std::fmt::Debug for QueuedSample {
 /// Naming it as a trait keeps the panel's single-flight policy testable
 /// without standing up a whole `Analysis` backend: a test can supply a source
 /// that blocks on command and counts how many renders actually started.
+///
+/// The seventh seam (`IN2B` §6 rule 3): this keeps returning `String`
+/// deliberately — probe BP2's drive + override census + static closure
+/// proved no `DeliveryVerification`/`ColorQc` value can arrive through it,
+/// so it is not load-bearing for 74/0. Its strings flow as
+/// `WorkerError::Untyped` at the worker below: honestly untyped, never
+/// silently reclassified.
 trait ScopeProofSource: Send + Sync + 'static {
     fn monitor_proof(
         &self,
@@ -290,7 +298,7 @@ impl WorkerCompletion {
         self.cancelled.load(Ordering::Acquire)
     }
 
-    fn deliver(&mut self, result: Result<ScopeMeasurement, String>) {
+    fn deliver(&mut self, result: Result<ScopeMeasurement, WorkerError>) {
         if self.delivered {
             return;
         }
@@ -308,9 +316,9 @@ impl WorkerCompletion {
 
 impl Drop for WorkerCompletion {
     fn drop(&mut self) {
-        self.deliver(Err(
+        self.deliver(Err(WorkerError::Untyped(
             "the full-resolution scope worker stopped before it delivered a proof".to_owned(),
-        ));
+        )));
     }
 }
 
@@ -332,7 +340,7 @@ pub(crate) struct ColorScopesState {
     generation: u64,
     response_tx: mpsc::Sender<ScopeResponse>,
     response_rx: mpsc::Receiver<ScopeResponse>,
-    pub(crate) error: Option<String>,
+    pub(crate) error: Option<WorkerError>,
     /// True when the last ROI the user typed had to be clamped into range.
     pub(crate) roi_clamped: bool,
     /// Whether the next measurement is scoped to a matte (CC5 §4.3).
@@ -593,6 +601,7 @@ impl ColorScopesState {
                 }
                 let result = source
                     .monitor_proof(Arc::clone(&document), frame)
+                    .map_err(WorkerError::Untyped)
                     .and_then(|proof| {
                         let coverage = matte
                             .as_ref()
@@ -606,16 +615,20 @@ impl ColorScopesState {
                                         matte.target.effect,
                                     )
                                     .map(|proof| (matte.target, proof.coverage))
+                                    .map_err(WorkerError::from)
                             })
                             .transpose()?;
                         scope_measurement_from_proof(proof, key, roi, expected_resolution, coverage)
+                            .map_err(WorkerError::from)
                     });
                 completion.deliver(result);
             });
         let Ok(handle) = spawn_result else {
             self.pending = None;
             self.active = None;
-            self.error = Some("Could not start the full-resolution scope worker".to_owned());
+            self.error = Some(WorkerError::Untyped(
+                "Could not start the full-resolution scope worker".to_owned(),
+            ));
             return;
         };
         #[cfg(test)]
@@ -1061,7 +1074,7 @@ fn scope_measurement_from_proof(
     roi: ScopeRoi,
     expected_resolution: (u32, u32),
     matte: Option<(MatteTarget, RgbaImage)>,
-) -> Result<ScopeMeasurement, String> {
+) -> Result<ScopeMeasurement, MediaError> {
     let request = ScopeRequest {
         stage: ScopeStage::MonitoringPostComposite,
         roi: roi.to_core(),
@@ -1069,10 +1082,8 @@ fn scope_measurement_from_proof(
     };
     let (image, region) = match matte {
         Some((target, coverage)) => {
-            let statistics =
-                matte_coverage_statistics(&coverage).map_err(|error| error.to_string())?;
-            let scoped =
-                matte_scoped_frame(&proof.image, &coverage).map_err(|error| error.to_string())?;
+            let statistics = matte_coverage_statistics(&coverage)?;
+            let scoped = matte_scoped_frame(&proof.image, &coverage)?;
             (
                 scoped,
                 Some(MatteRegionDescription::new(
@@ -1084,8 +1095,7 @@ fn scope_measurement_from_proof(
         }
         None => (proof.image, None),
     };
-    let mut evidence =
-        measure_scope(&image, key.frame.0, &request).map_err(|error| error.to_string())?;
+    let mut evidence = measure_scope(&image, key.frame.0, &request)?;
     evidence.metadata.matte_region = region;
     Ok(ScopeMeasurement {
         key,
@@ -1808,12 +1818,8 @@ mod tests {
 
         assert!(!state.is_pending());
         assert!(state.current.is_none());
-        assert!(
-            state
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("stopped before it delivered"))
-        );
+        assert!(matches!(&state.error, Some(WorkerError::Untyped(message))
+                if message.contains("stopped before it delivered")));
     }
 
     #[test]
@@ -1943,8 +1949,8 @@ mod tests {
     ///
     /// `ColorScopesState` holds no `Core` handle, no `Command`/`Operation`
     /// sender, and no document: its only channel carries `ScopeResponse`,
-    /// whose payload is `Result<ScopeMeasurement, String>`. There is therefore
-    /// no operation channel to intercept, and the assertion is by
+    /// whose payload is `Result<ScopeMeasurement, WorkerError>`. There is
+    /// therefore no operation channel to intercept, and the assertion is by
     /// construction. This test drives the real accept/capture path to prove
     /// those entry points only ever move evidence between panel fields.
     #[test]
@@ -2139,7 +2145,14 @@ mod tests {
         )
         .expect_err("a mismatched coverage raster must fail");
         assert!(
-            error.contains("matte coverage raster"),
+            matches!(
+                error,
+                MediaError::Scope(kinewright_core::ScopeError::MatteRegionRasterMismatch { .. })
+            ),
+            "the refusal is typed: {error}"
+        );
+        assert!(
+            error.to_string().contains("matte coverage raster"),
             "the refusal names the mismatch: {error}"
         );
     }

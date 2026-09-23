@@ -4,6 +4,7 @@ use eframe::egui;
 
 use kinewright_core::{
     Incident, IncidentCode, IncidentFamily, IncidentObservation, IncidentSubject, LabelIncident,
+    MediaError,
 };
 
 use crate::{
@@ -69,6 +70,36 @@ impl ErrorLog {
 
     fn clear(&mut self) {
         self.entries.clear();
+    }
+}
+
+/// A panel worker's failure, typed when the seam is typed (`IN2B` §6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkerError {
+    /// A string with no typed error behind it: a proof error flattened at
+    /// the excluded seventh seam, a worker panic, or a containment
+    /// collapse. Notes `panel_worker_error` — never a session (§5 rule 4).
+    Untyped(String),
+    /// A typed media failure. Notes `from_media_error` — per allowlist.
+    /// (`MediaError::Cancelled` travels as `Media` and maps to *no note*,
+    /// §7 rule 7 — the one `Media` arm that is not a failure.)
+    Media(MediaError),
+}
+
+impl std::fmt::Display for WorkerError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Renders interpolate the same text as today: the string, or
+            // the typed error's own rendering.
+            Self::Untyped(message) => formatter.write_str(message),
+            Self::Media(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl From<MediaError> for WorkerError {
+    fn from(error: MediaError) -> Self {
+        Self::Media(error)
     }
 }
 
@@ -210,6 +241,26 @@ impl KinewrightApp {
 mod tests {
     use std::{fs, path::Path};
 
+    use super::*;
+
+    /// Renders interpolate the same text as today: the untouched string, or
+    /// the typed error's own rendering.
+    #[test]
+    fn worker_error_renders_the_string_or_the_typed_error() {
+        assert_eq!(
+            WorkerError::Untyped("the renderer fell over".to_owned()).to_string(),
+            "the renderer fell over"
+        );
+        assert_eq!(
+            WorkerError::Media(MediaError::Cancelled).to_string(),
+            MediaError::Cancelled.to_string()
+        );
+        assert_eq!(
+            WorkerError::from(MediaError::Cancelled),
+            WorkerError::Media(MediaError::Cancelled)
+        );
+    }
+
     /// Every `.rs` file under this crate's `src`, read once, as
     /// `(path relative to `src`, contents)`.
     ///
@@ -279,10 +330,10 @@ mod tests {
     /// reaches a person through the chat panel and only 22 of which carry a
     /// `code` key; they are a different population and are deferred by name as
     /// `IN1b` §13 D-B1. The app's own panel-local labels, its two crash-recovery
-    /// modals, its LUT-store tooltips (D-B2) and its four `Result<_, String>`
-    /// seams (D-B3) are invisible here too. 0 / 0 / 1 / 1 means *the log, the
-    /// status bar and the chat transcript*, not *no untyped refusal reaches a
-    /// person*.
+    /// modals, its LUT-store tooltips (D-B2) and its four retyped seams (D-B3,
+    /// `WorkerError` after `IN2B` §6) are invisible here too. 0 / 0 / 1 / 1
+    /// means *the log, the status bar and the chat transcript*, not *no
+    /// untyped refusal reaches a person*.
     #[test]
     fn in1b_the_sink_gate_counts_are_zero_zero_one_one() {
         let sources = crate_sources();

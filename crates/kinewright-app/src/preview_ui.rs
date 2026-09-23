@@ -9,6 +9,7 @@ use kinewright_core::{
 use crate::{
     app::KinewrightApp,
     color_qc_ui::{AnalysisColorQcSource, ColorQcSource, WorkingProofCache, WorkingProofKey},
+    error_ui::WorkerError,
     icons::Icon,
     inspector_ui::{InspectorEdits, matte_gesture_coalesce_key, matte_window_drag_operations},
     matte_overlay_ui::{
@@ -279,13 +280,13 @@ pub(crate) enum QcMaskStatus {
     PausedOnly,
     Pending,
     Ready,
-    Unavailable(String),
+    Unavailable(WorkerError),
 }
 
 struct QcMaskResponse {
     generation: u64,
     key: QcMaskKey,
-    result: Result<kinewright_core::RgbaImage, String>,
+    result: Result<kinewright_core::RgbaImage, WorkerError>,
 }
 
 struct QcMaskRequest {
@@ -320,7 +321,7 @@ impl QcMaskCompletion {
         self.cancelled.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    fn deliver(&mut self, result: Result<kinewright_core::RgbaImage, String>) {
+    fn deliver(&mut self, result: Result<kinewright_core::RgbaImage, WorkerError>) {
         if self.delivered {
             return;
         }
@@ -338,9 +339,9 @@ impl QcMaskCompletion {
 
 impl Drop for QcMaskCompletion {
     fn drop(&mut self) {
-        self.deliver(Err(
+        self.deliver(Err(WorkerError::Untyped(
             "the QC clipping mask worker stopped before it delivered a proof".to_owned(),
-        ));
+        )));
     }
 }
 
@@ -354,7 +355,7 @@ pub(crate) struct QcMaskState {
     view: QcMaskView,
     mask: Option<(QcMaskKey, kinewright_core::RgbaImage)>,
     texture: Option<(QcMaskKey, egui::TextureHandle)>,
-    error: Option<String>,
+    error: Option<WorkerError>,
     last_key: Option<QcMaskKey>,
     pending: Option<(u64, QcMaskKey)>,
     active: Option<QcMaskWorker>,
@@ -599,12 +600,15 @@ impl QcMaskState {
                 completion.deliver(
                     cache
                         .proof(source.as_ref(), document, key.proof_key())
-                        .map(|proof| qc_mask_image(&proof.image)),
+                        .map(|proof| qc_mask_image(&proof.image))
+                        .map_err(WorkerError::from),
                 );
             });
         let Ok(handle) = spawn_result else {
             self.pending = None;
-            self.error = Some("Could not start the QC clipping mask worker".to_owned());
+            self.error = Some(WorkerError::Untyped(
+                "Could not start the QC clipping mask worker".to_owned(),
+            ));
             return;
         };
         #[cfg(test)]
@@ -1580,7 +1584,7 @@ impl KinewrightApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kinewright_core::{Document, Track};
+    use kinewright_core::{Document, MediaError, Track};
 
     fn document() -> Document {
         Document {
@@ -1974,7 +1978,7 @@ mod tests {
             &self,
             _document: Arc<kinewright_core::Document>,
             _key: WorkingProofKey,
-        ) -> Result<kinewright_core::WorkingProof, String> {
+        ) -> Result<kinewright_core::WorkingProof, MediaError> {
             assert!(!self.panics, "the renderer fell over");
             self.renders
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -2003,7 +2007,7 @@ mod tests {
                 kinewright_core::ColorQcReport,
                 kinewright_core::WorkingProofMetadata,
             ),
-            String,
+            MediaError,
         > {
             unreachable!("the mask never measures a report");
         }
@@ -2214,12 +2218,13 @@ mod tests {
         settle(&mut state, mask_key(), conditions);
 
         assert!(!state.is_pending(), "nothing is in flight");
-        let QcMaskStatus::Unavailable(message) = state.status(mask_key(), conditions) else {
+        let QcMaskStatus::Unavailable(error) = state.status(mask_key(), conditions) else {
             panic!("a panicking render is reported as unavailable");
         };
         assert!(
-            message.contains("stopped before it delivered"),
-            "the message says what happened: {message}"
+            matches!(&error, WorkerError::Untyped(message)
+                if message.contains("stopped before it delivered")),
+            "the message says what happened: {error}"
         );
     }
 

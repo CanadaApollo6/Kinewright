@@ -42,10 +42,10 @@ use kinewright_core::{
     Analysis, ClipId, Document, EffectId, MATTE_WINDOW_CENTER_MAX_BASIS_POINTS,
     MATTE_WINDOW_CENTER_MIN_BASIS_POINTS, MATTE_WINDOW_HALF_EXTENT_MAX_BASIS_POINTS,
     MATTE_WINDOW_HALF_EXTENT_MIN_BASIS_POINTS, MATTE_WINDOW_ROTATION_LIMIT_CENTIDEGREES,
-    MatteParams, MatteProof, MatteWindowParams, RgbaImage, TimeCode,
+    MatteParams, MatteProof, MatteWindowParams, MediaError, RgbaImage, TimeCode,
 };
 
-use crate::theme::color;
+use crate::{error_ui::WorkerError, theme::color};
 
 /// Pointer distance, in screen pixels, at which a handle is grabbed (CC5 §6).
 pub(crate) const MATTE_HANDLE_RADIUS_PX: f32 = 8.0;
@@ -88,16 +88,18 @@ pub(crate) trait MatteProofSource: Send + Sync + 'static {
     ///
     /// # Errors
     ///
-    /// Returns the backend's message when no coverage can be produced — the
-    /// node is inactive, carries no matte, or the backend does not implement
-    /// matte proofs yet.
+    /// Returns the backend's typed refusal when no coverage can be produced
+    /// — the node is inactive, carries no matte, or the backend does not
+    /// implement matte proofs yet (`IN2B` §6 seam 1: the backend's
+    /// `MediaError`, unflattened — `MatteProofError` values arrive in its
+    /// `MatteProof` arm).
     fn matte_proof(
         &self,
         document: Arc<Document>,
         at: TimeCode,
         clip: ClipId,
         effect: EffectId,
-    ) -> Result<MatteProof, String>;
+    ) -> Result<MatteProof, MediaError>;
 }
 
 /// The production source: the live analysis backend's matte proof.
@@ -110,10 +112,8 @@ impl MatteProofSource for AnalysisMatteProofSource {
         at: TimeCode,
         clip: ClipId,
         effect: EffectId,
-    ) -> Result<MatteProof, String> {
-        self.0
-            .matte_proof_for_document(document, at, clip, effect)
-            .map_err(|error| error.to_string())
+    ) -> Result<MatteProof, MediaError> {
+        self.0.matte_proof_for_document(document, at, clip, effect)
     }
 }
 
@@ -693,14 +693,14 @@ pub(crate) enum MatteViewStatus {
     Pending,
     /// Coverage is ready for the requested frame.
     Ready,
-    /// The backend refused, with its typed message.
-    Unavailable(String),
+    /// The backend refused, with its typed error.
+    Unavailable(WorkerError),
 }
 
 struct MatteViewResponse {
     generation: u64,
     key: MatteViewKey,
-    result: Result<MatteProof, String>,
+    result: Result<MatteProof, WorkerError>,
 }
 
 struct MatteViewRequest {
@@ -740,7 +740,7 @@ pub(crate) struct MatteOverlayState {
     drag: Option<MatteDrag>,
     coverage: Option<(MatteViewKey, RgbaImage)>,
     texture: Option<(MatteViewKey, egui::TextureHandle)>,
-    error: Option<String>,
+    error: Option<WorkerError>,
     /// The most recent key a render was requested for, so a sticky refusal is
     /// attributable to the frame identity it refused.
     last_key: Option<MatteViewKey>,
@@ -917,8 +917,8 @@ impl MatteOverlayState {
         if !self.matte_view {
             return MatteViewStatus::Off;
         }
-        if let Some(message) = &self.error {
-            return MatteViewStatus::Unavailable(message.clone());
+        if let Some(error) = &self.error {
+            return MatteViewStatus::Unavailable(error.clone());
         }
         if self.coverage_for(key).is_some() {
             return MatteViewStatus::Ready;
@@ -1032,12 +1032,14 @@ impl MatteOverlayState {
                 let _ = response_tx.send(MatteViewResponse {
                     generation,
                     key,
-                    result,
+                    result: result.map_err(WorkerError::from),
                 });
             });
         let Ok(handle) = spawn_result else {
             self.pending = None;
-            self.error = Some("Could not start the matte coverage worker".to_owned());
+            self.error = Some(WorkerError::Untyped(
+                "Could not start the matte coverage worker".to_owned(),
+            ));
             return;
         };
         #[cfg(test)]
@@ -1070,10 +1072,10 @@ impl MatteOverlayState {
                     self.coverage = Some((response.key, proof.coverage));
                     self.error = None;
                 }
-                Err(message) => {
+                Err(error) => {
                     self.coverage = None;
                     self.texture = None;
-                    self.error = Some(message);
+                    self.error = Some(error);
                 }
             }
         }
@@ -1116,7 +1118,7 @@ pub(crate) fn coverage_color_image(coverage: &RgbaImage) -> egui::ColorImage {
 mod tests {
     use super::*;
     use eframe::egui::{pos2, vec2};
-    use kinewright_core::MatteProofMetadata;
+    use kinewright_core::{MatteProofError, MatteProofMetadata};
 
     /// The CC5 §9.1 raster: 64 × 36, aspect 16/9.
     const RASTER_WIDTH: f32 = 64.0;
@@ -1681,8 +1683,8 @@ mod tests {
             _at: TimeCode,
             _clip: ClipId,
             _effect: EffectId,
-        ) -> Result<MatteProof, String> {
-            Err("matte proofs are not implemented by this backend".to_owned())
+        ) -> Result<MatteProof, MediaError> {
+            Err(MediaError::MatteProof(MatteProofError::NoMatte))
         }
     }
 
@@ -1695,7 +1697,7 @@ mod tests {
             _at: TimeCode,
             clip: ClipId,
             effect: EffectId,
-        ) -> Result<MatteProof, String> {
+        ) -> Result<MatteProof, MediaError> {
             Ok(MatteProof {
                 coverage: RgbaImage {
                     width: 1,
@@ -1766,9 +1768,9 @@ mod tests {
         settle(&mut state, key);
         assert_eq!(
             state.view_status(key),
-            MatteViewStatus::Unavailable(
-                "matte proofs are not implemented by this backend".to_owned()
-            )
+            MatteViewStatus::Unavailable(WorkerError::Media(MediaError::MatteProof(
+                MatteProofError::NoMatte
+            )))
         );
         assert!(
             !state.needs_view(key),

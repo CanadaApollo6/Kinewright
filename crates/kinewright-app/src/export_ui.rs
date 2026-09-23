@@ -22,6 +22,7 @@ use kinewright_media::{BuiltinLook, LutStore, LutStoreError, LutStoreErrorCode};
 use crate::{
     app::KinewrightApp,
     color_ui::{color_pipeline_summary, managed_sdr_reset_needed},
+    error_ui::WorkerError,
     icons::Icon,
     theme::{self, color, size, space},
 };
@@ -59,7 +60,10 @@ pub(crate) struct ExportDialog {
     /// stats every source file. That is far too much to redo on every
     /// immediate-mode repaint of an open dialog, and none of it can change
     /// unless one of the keyed inputs does.
-    pub(crate) conformance_cache: Option<(ConformanceKey, Result<ExportConformance, String>)>,
+    pub(crate) conformance_cache: Option<(
+        ConformanceKey,
+        Result<ExportConformance, DeliveryVariantError>,
+    )>,
     /// The delivery lane the next export encodes (CC6 §4.1/§8.4).
     ///
     /// A **job** parameter, not a document edit: the project keeps declaring
@@ -100,7 +104,7 @@ pub(crate) enum ExportVerification {
     Measured(Box<DeliveryVerification>),
     /// Verification could not run at all, with the reason. It never invents a
     /// pass and never attributes the fact to a later measurement.
-    Unavailable(String),
+    Unavailable(WorkerError),
 }
 
 /// The outcome of the post-export decoded audio measurement (AU3 §6.6).
@@ -113,7 +117,7 @@ pub(crate) enum ExportAudioVerification {
     /// The written file's audio was decoded at 48 kHz stereo and measured.
     Measured(Box<DeliveryAudioVerification>),
     /// The measurement could not run at all, with the reason.
-    Unavailable(String),
+    Unavailable(WorkerError),
 }
 
 /// Everything `export_conformance` reads, plus the raster the gate is claiming
@@ -265,10 +269,13 @@ impl ExportConformance {
 /// 8-bit report is never served for a 10-bit key, and the only thing that
 /// guarantees that is `ConformanceKey`'s equality.
 fn cached_conformance(
-    cache: &mut Option<(ConformanceKey, Result<ExportConformance, String>)>,
+    cache: &mut Option<(
+        ConformanceKey,
+        Result<ExportConformance, DeliveryVariantError>,
+    )>,
     key: ConformanceKey,
-    compute: impl FnOnce(ConformanceKey) -> Result<ExportConformance, String>,
-) -> Result<ExportConformance, String> {
+    compute: impl FnOnce(ConformanceKey) -> Result<ExportConformance, DeliveryVariantError>,
+) -> Result<ExportConformance, DeliveryVariantError> {
     if let Some((cached_key, cached)) = cache.as_ref()
         && *cached_key == key
     {
@@ -1041,7 +1048,7 @@ fn worker_verification<T>(
     Some(
         match contained_measurement(encode, cancellation, "delivery verification", measure)? {
             Ok(verification) => ExportVerification::Measured(Box::new(verification)),
-            Err(reason) => ExportVerification::Unavailable(reason),
+            Err(error) => ExportVerification::Unavailable(error),
         },
     )
 }
@@ -1062,7 +1069,7 @@ fn worker_audio_verification<T>(
     Some(
         match contained_measurement(encode, cancellation, "delivery audio verification", measure)? {
             Ok(verification) => ExportAudioVerification::Measured(Box::new(verification)),
-            Err(reason) => ExportAudioVerification::Unavailable(reason),
+            Err(error) => ExportAudioVerification::Unavailable(error),
         },
     )
 }
@@ -1079,21 +1086,24 @@ fn contained_measurement<T, V>(
     cancellation: &ExportCancellation,
     what: &str,
     measure: impl FnOnce() -> Result<V, MediaError>,
-) -> Option<Result<V, String>> {
+) -> Option<Result<V, WorkerError>> {
     if encode.is_err() {
         return None;
     }
-    if let Some(reason) = cancelled_before_verification(cancellation) {
-        return Some(Err(reason.to_owned()));
+    if cancelled_before_verification(cancellation).is_some() {
+        // The cancellation collapse travels typed (§7 rule 7): a cancelled
+        // verification notes nothing, and only the `Cancelled` value — never
+        // a string — can carry that.
+        return Some(Err(WorkerError::Media(MediaError::Cancelled)));
     }
     Some(
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(measure)) {
             Ok(Ok(measured)) => Ok(measured),
-            Ok(Err(error)) => Err(error.to_string()),
-            Err(payload) => Err(format!(
+            Ok(Err(error)) => Err(WorkerError::Media(error)),
+            Err(payload) => Err(WorkerError::Untyped(format!(
                 "{what} panicked: {}",
                 panic_message(payload.as_ref())
-            )),
+            ))),
         },
     )
 }
@@ -1220,7 +1230,7 @@ pub(crate) fn verification_block(
 struct ExportDialogBodyContext<'a> {
     project_color_pipeline: &'a [String],
     color_pipeline_reset_needed: bool,
-    conformance: &'a Result<ExportConformance, String>,
+    conformance: &'a Result<ExportConformance, DeliveryVariantError>,
     export_blocked: bool,
     caption_cues: &'a Result<Vec<CaptionCue>, String>,
     /// The running export's latest progress, when one is running.
@@ -1634,9 +1644,11 @@ impl KinewrightApp {
     /// that on the UI thread every frame. `start_export` re-validates
     /// independently, so a stale cache can never admit an export.
     ///
-    /// The error is kept as a `String`: `DeliveryVariantError` is not `Clone`,
-    /// and the dialog only ever renders it.
-    fn cached_export_conformance(&mut self) -> Result<ExportConformance, String> {
+    /// The error stays typed (`IN2B` §6 seam 8): `DeliveryVariantError` is
+    /// `Clone`, so the cache keeps the refusal `export_conformance` already
+    /// returns, and the render interpolates its `Display` — the same text
+    /// the label shows today.
+    fn cached_export_conformance(&mut self) -> Result<ExportConformance, DeliveryVariantError> {
         let key = ConformanceKey {
             revision: self.focused().revision.0,
             aspect: self.export_dialog.delivery_aspect,
@@ -1655,7 +1667,6 @@ impl KinewrightApp {
                 key.focus_x_percent,
                 key.focus_y_percent,
             )
-            .map_err(|error| error.to_string())
         })
     }
 
@@ -2689,8 +2700,9 @@ mod tests {
         let passing = verification(true, true);
         let over_budget = verification(true, false);
         let tag_mismatch = verification(false, true);
-        let unavailable =
-            ExportVerification::Unavailable("no GPU adapter for the reference render".to_owned());
+        let unavailable = ExportVerification::Unavailable(WorkerError::Untyped(
+            "no GPU adapter for the reference render".to_owned(),
+        ));
 
         let statuses = [
             Some(&passing),
@@ -2876,7 +2888,7 @@ mod tests {
         let reason =
             cancelled_before_verification(&cancellation).expect("a cancelled export skips it");
         assert_eq!(reason, EXPORT_CANCELLED_BEFORE_VERIFICATION);
-        let verification = ExportVerification::Unavailable(reason.to_owned());
+        let verification = ExportVerification::Unavailable(WorkerError::Untyped(reason.to_owned()));
         assert_eq!(
             verification_status(Some(&verification)).label,
             "NOT VERIFIED",
@@ -2921,12 +2933,10 @@ mod tests {
             panic!("a panic invents no measurement: {contained:?}");
         };
         assert!(
-            reason.contains("delivery verification panicked"),
-            "the reason names what happened: {reason}"
-        );
-        assert!(
-            reason.contains("the delivery verifier fell over"),
-            "with the backend's own words: {reason}"
+            matches!(reason, WorkerError::Untyped(message)
+                if message.contains("delivery verification panicked")
+                    && message.contains("the delivery verifier fell over")),
+            "the reason names what happened, with the backend's own words: {reason}"
         );
         assert_eq!(
             verification_status(Some(&contained)).label,
@@ -2954,10 +2964,10 @@ mod tests {
         );
         assert_eq!(
             worker_verification(&Ok(()), &cancellation, || Err(MediaError::NotImplemented)),
-            Some(ExportVerification::Unavailable(
-                MediaError::NotImplemented.to_string()
-            )),
-            "and a refusal is reported as its own reason"
+            Some(ExportVerification::Unavailable(WorkerError::Media(
+                MediaError::NotImplemented
+            ))),
+            "and a refusal is reported as its own typed reason"
         );
         assert_eq!(
             worker_verification(
@@ -2975,9 +2985,10 @@ mod tests {
             worker_verification(&Ok(()), &cancelled, || panic!(
                 "a cancelled export starts no verification"
             )),
-            Some(ExportVerification::Unavailable(
-                EXPORT_CANCELLED_BEFORE_VERIFICATION.to_owned()
-            ))
+            Some(ExportVerification::Unavailable(WorkerError::Media(
+                MediaError::Cancelled
+            ))),
+            "a cancellation travels typed, so §7 rule 7 can silence it"
         );
     }
 
@@ -3180,6 +3191,37 @@ mod tests {
         let back = cached_conformance(&mut cache, eight, compute).expect("recomputed");
         assert_eq!(computed.get(), 3);
         assert_eq!(back.advisory[0].message, "eight");
+    }
+
+    /// Seam 8 keeps the refusal typed: a `DeliveryVariantError` caches and
+    /// re-serves like a report (the error is `Clone`), and the render
+    /// interpolates the same text the label shows today.
+    #[test]
+    fn the_conformance_cache_serves_a_typed_refusal() {
+        let key = ConformanceKey {
+            revision: 3,
+            aspect: None,
+            focus_x_percent: 50,
+            focus_y_percent: 50,
+            width: 1920,
+            height: 1080,
+            delivery_bit_depth: DeliveryEncodeDepth::Eight,
+        };
+        let computed = Cell::new(0_usize);
+        let compute = |_: ConformanceKey| {
+            computed.set(computed.get() + 1);
+            Err::<ExportConformance, _>(DeliveryVariantError::InvalidFocus { x: 101, y: 50 })
+        };
+        let mut cache = None;
+        let first = cached_conformance(&mut cache, key, compute).expect_err("refused");
+        assert_eq!(computed.get(), 1);
+        assert_eq!(
+            first.to_string(),
+            "delivery focal point (101, 50) must stay inside 0..=100 percent"
+        );
+        let cached = cached_conformance(&mut cache, key, compute).expect_err("still refused");
+        assert_eq!(computed.get(), 1, "a refusal caches like a report");
+        assert_eq!(cached, first);
     }
 
     /// CC6 §11.2.19 (R11): the dialog keeps its inline `ExportSettings` and
@@ -3711,8 +3753,9 @@ mod tests {
         let off_target = audio_verification(Some(target), Some(-1_800), Some(-150));
         let over_ceiling = audio_verification(Some(target), Some(-1_400), Some(40));
         let measured_only = audio_verification(None, Some(-1_950), Some(-320));
-        let unavailable =
-            ExportAudioVerification::Unavailable("the file has no audio stream".to_owned());
+        let unavailable = ExportAudioVerification::Unavailable(WorkerError::Untyped(
+            "the file has no audio stream".to_owned(),
+        ));
 
         let statuses = [
             Some(&on_target),
@@ -3815,8 +3858,9 @@ mod tests {
         let off_target = audio_verification(Some(target), Some(-1_800), Some(-150));
         let over_ceiling = audio_verification(Some(target), Some(-1_400), Some(40));
         let measured_only = audio_verification(None, Some(-1_950), Some(-320));
-        let unavailable =
-            ExportAudioVerification::Unavailable("the file has no audio stream".to_owned());
+        let unavailable = ExportAudioVerification::Unavailable(WorkerError::Untyped(
+            "the file has no audio stream".to_owned(),
+        ));
         let report = audio_report(640, 1, 0, true);
 
         let text = audio_text(Some(&measured_only), None, DeliveryProfile::Youtube1080p);

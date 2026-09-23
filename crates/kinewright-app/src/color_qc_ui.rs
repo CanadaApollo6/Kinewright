@@ -30,6 +30,7 @@ use kinewright_core::{
 use crate::{
     app::KinewrightApp,
     color_scopes_ui::ScopeRoi,
+    error_ui::WorkerError,
     matte_overlay_ui::{AnalysisMatteProofSource, MatteProofSource, MatteTarget},
     theme::{self, color, type_size},
 };
@@ -98,14 +99,14 @@ impl WorkingProofCache {
     ///
     /// # Errors
     ///
-    /// Returns the source's own message when the render fails. A failure is
+    /// Returns the source's own error when the render fails. A failure is
     /// not cached: the next caller asks again.
     pub(crate) fn proof(
         &self,
         source: &dyn ColorQcSource,
         document: Arc<Document>,
         key: WorkingProofKey,
-    ) -> Result<Arc<WorkingProof>, String> {
+    ) -> Result<Arc<WorkingProof>, MediaError> {
         self.proof_with(key, move || source.working_proof(document, key))
     }
 
@@ -134,8 +135,8 @@ impl WorkingProofCache {
     fn proof_with(
         &self,
         key: WorkingProofKey,
-        render: impl FnOnce() -> Result<WorkingProof, String>,
-    ) -> Result<Arc<WorkingProof>, String> {
+        render: impl FnOnce() -> Result<WorkingProof, MediaError>,
+    ) -> Result<Arc<WorkingProof>, MediaError> {
         let mut entry = self.entry.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some((stored, proof)) = entry.as_ref()
             && *stored == key
@@ -164,7 +165,7 @@ pub(crate) trait ColorQcSource: Send + Sync + 'static {
         &self,
         document: Arc<Document>,
         key: WorkingProofKey,
-    ) -> Result<WorkingProof, String>;
+    ) -> Result<WorkingProof, MediaError>;
 
     /// The report, its per-node attribution, and the provenance of the render
     /// they were both measured on (CC6 §3.7).
@@ -179,7 +180,7 @@ pub(crate) trait ColorQcSource: Send + Sync + 'static {
         document: Arc<Document>,
         key: WorkingProofKey,
         request: &ColorQcRequest,
-    ) -> Result<(ColorQcReport, WorkingProofMetadata), String>;
+    ) -> Result<(ColorQcReport, WorkingProofMetadata), MediaError>;
 }
 
 /// The production source: the live analysis backend.
@@ -199,10 +200,9 @@ impl ColorQcSource for AnalysisColorQcSource {
         &self,
         document: Arc<Document>,
         key: WorkingProofKey,
-    ) -> Result<WorkingProof, String> {
+    ) -> Result<WorkingProof, MediaError> {
         self.analysis
             .working_proof_for_document(document, key.frame)
-            .map_err(|error| error.to_string())
     }
 
     fn measure_with_nodes(
@@ -210,7 +210,7 @@ impl ColorQcSource for AnalysisColorQcSource {
         document: Arc<Document>,
         key: WorkingProofKey,
         request: &ColorQcRequest,
-    ) -> Result<(ColorQcReport, WorkingProofMetadata), String> {
+    ) -> Result<(ColorQcReport, WorkingProofMetadata), MediaError> {
         let analysis = BaselineProofAnalysis {
             inner: Arc::clone(&self.analysis),
             cache: Arc::clone(&self.cache),
@@ -220,13 +220,29 @@ impl ColorQcSource for AnalysisColorQcSource {
         };
         let report = kinewright_core::nodes::measure_color_qc_with_nodes(
             &analysis, document, key.frame, request,
-        )
-        .map_err(|error| error.to_string())?;
-        let metadata = analysis.baseline_metadata().ok_or_else(|| {
-            "the per-node pass finished without rendering a baseline working proof".to_owned()
-        })?;
+        )?;
+        let metadata = analysis
+            .baseline_metadata()
+            .ok_or_else(missing_baseline_refusal)?;
         Ok((report, metadata))
     }
+}
+
+/// d18: the per-node pass finished without rendering a baseline — the
+/// measurement's required input does not exist. The nearest typed neighbor
+/// is the missing-proof refusal, with the original sentence surviving
+/// verbatim in `observed`, so the approximation costs nothing on the card
+/// and gains a typed code, a policy row, and an allowlisted session.
+///
+/// Defensive: `BaselineProofAnalysis` records provenance on every
+/// successful proof, so a successful pass always has one — but the arm
+/// must refuse *something* typed, and this is the honest something.
+fn missing_baseline_refusal() -> MediaError {
+    MediaError::ColorQc(kinewright_core::ColorQcError::ProxyProofRefused {
+        observed: "the per-node pass finished without rendering a baseline working proof"
+            .to_owned(),
+        allowed: "a rendered baseline working proof",
+    })
 }
 
 /// An [`Analysis`] that shares the **baseline** working proof with the rest of
@@ -267,14 +283,9 @@ impl Analysis for BaselineProofAnalysis {
     ) -> Result<WorkingProof, MediaError> {
         let proof = if at == self.key.frame && Arc::ptr_eq(&document, &self.document) {
             let inner = Arc::clone(&self.inner);
-            let shared = self
-                .cache
-                .proof_with(self.key, move || {
-                    inner
-                        .working_proof_for_document(document, at)
-                        .map_err(|error| error.to_string())
-                })
-                .map_err(MediaError::Backend)?;
+            let shared = self.cache.proof_with(self.key, move || {
+                inner.working_proof_for_document(document, at)
+            })?;
             (*shared).clone()
         } else {
             self.inner.working_proof_for_document(document, at)?
@@ -613,7 +624,7 @@ pub(crate) struct ColorQcMeasurement {
 struct ColorQcResponse {
     generation: u64,
     key: ColorQcKey,
-    result: Result<Box<ColorQcMeasurement>, String>,
+    result: Result<Box<ColorQcMeasurement>, WorkerError>,
 }
 
 /// A request the window accepted while a worker was still rendering.
@@ -657,7 +668,7 @@ impl WorkerCompletion {
         self.cancelled.load(Ordering::Acquire)
     }
 
-    fn deliver(&mut self, result: Result<Box<ColorQcMeasurement>, String>) {
+    fn deliver(&mut self, result: Result<Box<ColorQcMeasurement>, WorkerError>) {
         if self.delivered {
             return;
         }
@@ -675,9 +686,9 @@ impl WorkerCompletion {
 
 impl Drop for WorkerCompletion {
     fn drop(&mut self) {
-        self.deliver(Err(
+        self.deliver(Err(WorkerError::Untyped(
             "the colour QC worker stopped before it delivered a measurement".to_owned(),
-        ));
+        )));
     }
 }
 
@@ -704,7 +715,7 @@ pub(crate) struct ColorQcState {
     generation: u64,
     response_tx: mpsc::Sender<ColorQcResponse>,
     response_rx: mpsc::Receiver<ColorQcResponse>,
-    error: Option<String>,
+    error: Option<WorkerError>,
     #[cfg(test)]
     spawned_workers: u64,
 }
@@ -784,8 +795,8 @@ impl ColorQcState {
     }
 
     #[must_use]
-    pub(crate) fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+    pub(crate) fn error(&self) -> Option<&WorkerError> {
+        self.error.as_ref()
     }
 
     /// The last report's per-node contributions, for the inspector's node
@@ -922,7 +933,9 @@ impl ColorQcState {
         let Ok(handle) = spawn_result else {
             self.pending = None;
             self.active = None;
-            self.error = Some("Could not start the colour QC worker".to_owned());
+            self.error = Some(WorkerError::Untyped(
+                "Could not start the colour QC worker".to_owned(),
+            ));
             return;
         };
         #[cfg(test)]
@@ -955,9 +968,9 @@ impl ColorQcState {
                     self.current = Some(*measurement);
                     self.error = None;
                 }
-                Err(message) => {
+                Err(error) => {
                     self.current = None;
-                    self.error = Some(message);
+                    self.error = Some(error);
                 }
             }
         }
@@ -1007,16 +1020,13 @@ fn measure_on_worker(
     document: Arc<Document>,
     key: ColorQcKey,
     mut request: ColorQcRequest,
-) -> Result<Box<ColorQcMeasurement>, String> {
+) -> Result<Box<ColorQcMeasurement>, WorkerError> {
     if let (Some(target), Some(matte_source)) = (key.matte, matte_source) {
-        let proof = matte_source.matte_proof(
-            Arc::clone(&document),
-            key.frame,
-            target.clip,
-            target.effect,
-        )?;
-        let statistics =
-            matte_coverage_statistics(&proof.coverage).map_err(|error| error.to_string())?;
+        let proof = matte_source
+            .matte_proof(Arc::clone(&document), key.frame, target.clip, target.effect)
+            .map_err(WorkerError::from)?;
+        let statistics = matte_coverage_statistics(&proof.coverage)
+            .map_err(|error| WorkerError::Media(error.into()))?;
         request.matte_region = Some(MatteRegionScope {
             description: MatteRegionDescription::new(
                 target.clip,
@@ -1028,10 +1038,15 @@ fn measure_on_worker(
     }
     let proof_key = key.proof_key();
     let (report, metadata) = if key.per_node {
-        source.measure_with_nodes(document, proof_key, &request)?
+        source
+            .measure_with_nodes(document, proof_key, &request)
+            .map_err(WorkerError::from)?
     } else {
-        let proof = cache.proof(source, document, proof_key)?;
-        let report = measure_color_qc(&proof, &request).map_err(|error| error.to_string())?;
+        let proof = cache
+            .proof(source, document, proof_key)
+            .map_err(WorkerError::from)?;
+        let report =
+            measure_color_qc(&proof, &request).map_err(|error| WorkerError::Media(error.into()))?;
         (report, proof.metadata.clone())
     };
     Ok(Box::new(ColorQcMeasurement {
@@ -1171,7 +1186,7 @@ impl KinewrightApp {
         let mut depth = self.color_qc.depth();
         let measurement = self.color_qc.current().cloned();
         let pending = self.color_qc.is_pending();
-        let error = self.color_qc.error().map(str::to_owned);
+        let error = self.color_qc.error().map(ToString::to_string);
         egui::Window::new("Colour QC")
             .open(&mut open)
             .default_width(560.0)
@@ -1836,7 +1851,7 @@ mod tests {
             &self,
             _document: Arc<Document>,
             _key: WorkingProofKey,
-        ) -> Result<WorkingProof, String> {
+        ) -> Result<WorkingProof, MediaError> {
             if let Some(gate) = &self.gate {
                 let _ = gate.lock().unwrap().recv();
             }
@@ -1849,11 +1864,10 @@ mod tests {
             _document: Arc<Document>,
             _key: WorkingProofKey,
             request: &ColorQcRequest,
-        ) -> Result<(ColorQcReport, WorkingProofMetadata), String> {
+        ) -> Result<(ColorQcReport, WorkingProofMetadata), MediaError> {
             self.calls.lock().unwrap().push("measure_with_nodes");
             let baseline = self.render();
-            let mut report =
-                measure_color_qc(&baseline, request).map_err(|error| error.to_string())?;
+            let mut report = measure_color_qc(&baseline, request)?;
             let baseline_range = report.range.clamped_basis_points;
             let baseline_gamut = report.gamut.out_of_gamut_basis_points;
             let nodes = (0..self.candidates)
@@ -1894,7 +1908,7 @@ mod tests {
             &self,
             _document: Arc<Document>,
             _key: WorkingProofKey,
-        ) -> Result<WorkingProof, String> {
+        ) -> Result<WorkingProof, MediaError> {
             panic!("the renderer fell over");
         }
 
@@ -1903,7 +1917,7 @@ mod tests {
             _document: Arc<Document>,
             _key: WorkingProofKey,
             _request: &ColorQcRequest,
-        ) -> Result<(ColorQcReport, WorkingProofMetadata), String> {
+        ) -> Result<(ColorQcReport, WorkingProofMetadata), MediaError> {
             panic!("the renderer fell over");
         }
     }
@@ -2230,6 +2244,32 @@ mod tests {
         );
     }
 
+    /// d18 pins the missing-baseline refusal: the `ProxyProofRefused` code,
+    /// the original sentence verbatim in `observed`, and the allowed proof
+    /// beside it. The arm is defensive (a successful pass always records a
+    /// baseline), so the value is what is pinned, not the path.
+    #[test]
+    fn the_missing_baseline_refusal_carries_the_verbatim_sentence() {
+        let MediaError::ColorQc(kinewright_core::ColorQcError::ProxyProofRefused {
+            observed,
+            allowed,
+        }) = missing_baseline_refusal()
+        else {
+            panic!("d18 refuses as ProxyProofRefused");
+        };
+        assert_eq!(
+            observed,
+            "the per-node pass finished without rendering a baseline working proof"
+        );
+        assert_eq!(allowed, "a rendered baseline working proof");
+        assert_eq!(
+            missing_baseline_refusal().to_string(),
+            "color_qc_proxy_proof_refused: working proof claims full_resolution=the per-node \
+             pass finished without rendering a baseline working proof, allowed a rendered \
+             baseline working proof"
+        );
+    }
+
     /// A worker that unwinds still resolves the window: with an error, with
     /// nothing pending, and with no measurement claiming to describe anything.
     ///
@@ -2266,7 +2306,8 @@ mod tests {
             );
             let error = state.error().expect("the failure is reported");
             assert!(
-                error.contains("stopped before it delivered"),
+                matches!(error, WorkerError::Untyped(message)
+                    if message.contains("stopped before it delivered")),
                 "the message says what happened: {error}"
             );
         }
