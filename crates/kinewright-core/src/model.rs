@@ -1106,10 +1106,12 @@ pub const PROJECT_FORMAT_VERSION: u32 = 1;
 
 /// The `format_version` of serialised project-file bytes (`IN2B` §4 rule 1).
 ///
-/// Missing key → 1 (every legacy file); present → its value, last wins on a
-/// duplicated key (moot — the caller's `serde` parse rejects duplicates, so
-/// the real parse decides there too). Never fails: malformed bytes read as 1
-/// and the real parse — the caller's — decides `Corrupt`.
+/// Missing key → 1 (every legacy file); present → its value, saturating to
+/// `u32::MAX` past the u32 range (oversize is newer than every gate, never
+/// legacy-1 — N4 F9); last wins on a duplicated key (moot — the caller's
+/// `serde` parse rejects duplicates, so the real parse decides there too).
+/// Never fails: malformed bytes read as 1 and the real parse — the caller's —
+/// decides `Corrupt`.
 ///
 /// A dependency-free scan, not `serde_json` (core carries none outside
 /// dev-dependencies — the `json_escaped_len` precedent): it walks the
@@ -1157,7 +1159,14 @@ fn top_level_format_version(bytes: &[u8]) -> Option<u32> {
             while bytes.get(index).is_some_and(u8::is_ascii_digit) {
                 index += 1;
             }
-            found = Some(text.get(start..index)?.parse::<u32>().ok()?);
+            let digits = text.get(start..index)?;
+            if digits.is_empty() {
+                return None;
+            }
+            // Oversize saturates: a version past the u32 range is newer than
+            // every gate, never legacy-1 (N4 F9). The slice is non-empty ASCII
+            // digits, so `parse` fails only on overflow.
+            found = Some(digits.parse::<u32>().unwrap_or(u32::MAX));
         } else {
             index = skip_json_value(bytes, index)?;
         }
@@ -1733,12 +1742,25 @@ mod tests {
             r#"{"format_version":null}"#,
             r#"{"format_version":"2"}"#,
             r#"{"format_version": 99"#,
-            r#"{"format_version":4294967296}"#,
             r#"{"format_version":-1}"#,
             r#"{"tracks":[]"#, // truncated
         ] {
             assert_eq!(project_format_version(document.as_bytes()), 1, "{document}");
         }
         assert_eq!(project_format_version(b"\xff\xfe{\xff"), 1);
+        // Oversize saturates to `u32::MAX` (N4 F9): a version past the u32
+        // range is newer than every gate, never legacy-1. `serde_json` has no
+        // saturation, so these assert directly rather than differentially.
+        for (document, expected) in [
+            (r#"{"format_version":4294967295}"#, u32::MAX),
+            (r#"{"format_version":4294967296}"#, u32::MAX),
+            (r#"{"format_version":99999999999999999999999}"#, u32::MAX),
+        ] {
+            assert_eq!(
+                project_format_version(document.as_bytes()),
+                expected,
+                "{document}"
+            );
+        }
     }
 }

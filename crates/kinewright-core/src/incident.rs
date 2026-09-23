@@ -1163,10 +1163,11 @@ impl IncidentState {
 pub struct IncidentTelemetry {
     /// Wall time from observation to resolution, measured at the router.
     ///
-    /// Never serialised: it is log-origin-relative, meaningless across runs,
-    /// so the sidecar record never carries it and restore reads `None` until
-    /// the incident is resolved again (`IN2B` §2 rule 3, N-9).
-    #[serde(skip)]
+    /// Served on the wire while set (IN1 §2.5) but never in a sidecar record:
+    /// it is log-origin-relative, meaningless across runs, so the record
+    /// builder clears it and restore reads `None` until the incident is
+    /// resolved again (`IN2B` §2 rule 3, N-9; N4 F1).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_after: Option<Duration>,
     /// Tool calls the resolver made, when an agent resolved it.
     pub tool_calls: u32,
@@ -1354,6 +1355,11 @@ pub struct IncidentProposal {
     pub stale: bool,
 }
 
+/// The serialised-bytes ceiling for an observed subject name (`IN2B` §0.4
+/// d15): `observe` truncates through [`truncate_to_serialized_bytes`], so
+/// the wire arm is at most `,"subject_name":"<64>"` = 82 B.
+pub const SUBJECT_NAME_CEILING_BYTES: usize = 64;
+
 /// One classified problem, with its evidence and its typed recoveries.
 ///
 /// There is no `message` field. It used to be
@@ -1364,11 +1370,6 @@ pub struct IncidentProposal {
 /// are on the record, and it is removed from the *type* rather than hidden with
 /// `#[serde(skip)]`: a field nobody reads is a field that drifts
 /// (IN1 §2.3 rule 12).
-/// The serialised-bytes ceiling for an observed subject name (`IN2B` §0.4
-/// d15): `observe` truncates through [`truncate_to_serialized_bytes`], so
-/// the wire arm is at most `,"subject_name":"<64>"` = 82 B.
-pub const SUBJECT_NAME_CEILING_BYTES: usize = 64;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Incident {
     /// Session-unique identifier.
@@ -3179,7 +3180,8 @@ pub struct IncidentRecord {
     #[serde(flatten)]
     pub state: IncidentState,
     /// Spend accounting, verbatim modulo the rule-14 stop category — and never
-    /// `resolved_after`, which is log-origin-relative (`#[serde(skip)]`, N-9).
+    /// `resolved_after`, which is log-origin-relative (the builder clears it,
+    /// N-9; N4 F1).
     pub telemetry: IncidentTelemetry,
     /// The pending decision, minus operations, forced stale at load.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3227,6 +3229,10 @@ pub struct RestoreReport {
     pub carried: Vec<String>,
     /// Every record's `refused_op`, keyed by the record's `id` (§3 rule 13).
     pub refused: BTreeMap<IncidentId, Operation>,
+    /// Records skipped for an unusable id: the second and later records
+    /// sharing an id (the first wins), and any record with id `u64::MAX`,
+    /// which admits no resume above it (N4 F4).
+    pub duplicate_ids: usize,
 }
 
 /// Fixed prefix of the unknown-code aggregate's `observed`; the skipped total
@@ -3253,15 +3259,16 @@ const REFUSED_STASH_CEILING_BYTES: usize = 4_096;
 /// cannot call `to_string`; this counting serializer reproduces compact
 /// `serde_json` output's length instead. Exact for nulls, bools, integers,
 /// strings (via [`json_escaped_len`]), chars, options, units, sequences, maps,
-/// structs and every enum shape — and an upper bound for floats, which count
-/// their Rust `Debug` length plus one where `serde_json` writes a `+` after a
-/// bare `e`. Both render shortest-round-trip (`Debug` round-trips and always
-/// carries a decimal point, so it is never shorter than `serde_json`'s
-/// rendering plus its `.0`); the count is exact wherever the two forms
-/// coincide and over-counts where they do not, never under. Non-finite floats
-/// count 4, the `null` `serde_json` writes. Byte slices cannot occur in an
-/// [`Operation`] (no byte
-/// field anywhere in it); that arm counts a bounded array-of-numbers fallback.
+/// structs and every enum shape. Floats count their Rust `Debug` length plus
+/// one where `serde_json` writes a `+` after a bare `e` — and that is NOT an
+/// upper bound in general (N4 F8): `serde_json` 1.0.151 renders plain decimals
+/// for exponents −5..=15, so `1e-5` counts 4 (`1e-5`) against a true 7
+/// (`0.00001`). Exactness holds for [`Operation`], the only caller, because it
+/// carries no floats at all: it derives `Eq`, which `f32`/`f64` cannot satisfy,
+/// and the `operation_has_no_float_fields` test fails to compile the day a
+/// float field is added. Non-finite floats count 4, the `null` `serde_json`
+/// writes. Byte slices cannot occur in an [`Operation`] either (no byte field
+/// anywhere in it); that arm counts a bounded array-of-numbers fallback.
 /// A serialisation failure — unreachable, every arm below is infallible —
 /// degrades to `usize::MAX`, the elide side.
 fn compact_json_len(value: &impl Serialize) -> usize {
@@ -3811,16 +3818,15 @@ pub fn should_flush(last_change: u64, last_written_gen: u64, now: Instant) -> bo
 
 impl IncidentLog {
     /// A log whose session origin is pinned, so a test can read `opened_at`
-    /// deterministically (IN1 §2.3 rule 18).
-    #[must_use]
-    /// A log whose monotonic origin is `started` and whose wall reading of
-    /// that origin is `wall_origin` (`IN2B` §3 rule 14, N1/B4).
+    /// deterministically (IN1 §2.3 rule 18), and whose wall reading of that
+    /// origin is `wall_origin` (`IN2B` §3 rule 14, N1/B4).
     ///
     /// The origin is injected, never read: the app passes
     /// `Some(SystemTime::now())` at session creation, tests pass `None` (or
     /// a fixed origin where the wall math is under test), and wall stamps
     /// derive at sidecar write as `wall_origin + opened_at` — or `None`
     /// where no origin exists.
+    #[must_use]
     pub fn with_start(started: Instant, wall_origin: Option<SystemTime>) -> Self {
         Self {
             started,
@@ -3894,6 +3900,9 @@ impl IncidentLog {
         }) {
             existing.count = existing.count.saturating_add(1);
             existing.revision = observation.revision;
+            // Durability absorbs: one durable observation of the key makes the
+            // incident durable, whichever order the two arrive in (N4 F5).
+            existing.transient &= observation.transient;
             let deduped = existing.id;
             self.bump_generation();
             return Observed::Deduped(deduped);
@@ -4271,7 +4280,11 @@ impl IncidentLog {
         running: Option<&RunningInvestigation>,
         refused_op: Option<&Operation>,
     ) -> IncidentRecord {
-        let (state, telemetry) = Self::record_state_and_telemetry(entry, running);
+        let (state, mut telemetry) = Self::record_state_and_telemetry(entry, running);
+        // The record never carries it (N-9): log-origin-relative, meaningless
+        // across runs. Cleared here, in the builder — not with `#[serde(skip)]`,
+        // which would also strip it from the served wire payload (N4 F1).
+        telemetry.resolved_after = None;
         IncidentRecord {
             id: entry.id,
             code: entry.code.code().to_owned(),
@@ -4375,25 +4388,40 @@ impl IncidentLog {
 
     /// Restore records into this log (`IN2B` §3 rules 1–10, 13–14).
     ///
-    /// Writes into this log, never swapping it; requires an empty log
-    /// (`debug_assert!`) and runs before any note. Everything derived is
-    /// recomputed from the *current* policy table and nothing derived is
-    /// trusted; `revision`/`base_revision` rebase to `opening`; `opened_at`
-    /// is set from the stored offset and the wall filed in `loaded_wall`;
-    /// `next_id` resumes above the loaded maximum. Unknown code strings are
-    /// skipped, counted, and reported once through a single
-    /// `sidecar_unknown_codes` aggregate noted last, after the resume, so its
-    /// id can neither collide with a restored id nor disturb the order.
-    /// `carried` passes through untouched. Restore enqueues nothing, resolves
-    /// nothing and notifies nothing.
+    /// Writes into this log, never swapping it; requires an empty log and runs
+    /// before any note. Everything derived is recomputed from the *current*
+    /// policy table and nothing derived is trusted; `revision`/`base_revision`
+    /// rebase to `opening`; `opened_at` is set from the stored offset and the
+    /// wall filed in `loaded_wall`. Hand-written strings restore under
+    /// observe's serialised-length caps (`subject_name`, proposal
+    /// summary/explanation); `observed` has no cap at observe and restores
+    /// verbatim (N4 F6). `next_id` resumes above EVERY id in the file —
+    /// restored, unknown-code, and the `id_floor` the app computed from the raw
+    /// carried values — via `checked_add`, so it never saturates onto a live id
+    /// (N4 F2). Unknown code strings are skipped, counted, and reported once
+    /// through a single `sidecar_unknown_codes` aggregate noted last, after
+    /// the resume, so its id can neither collide with a restored id nor
+    /// disturb the order. Duplicate ids keep the first record and count the
+    /// rest; `u64::MAX` admits no resume above it and is skipped and counted
+    /// (N4 F4). `carried` passes through untouched. Restore enqueues nothing,
+    /// resolves nothing and notifies nothing.
+    ///
+    /// # Panics
+    ///
+    /// Panics in every build, not just debug, when the log is non-empty:
+    /// restore runs once, into an empty log, before any note (N4 F7).
     #[must_use]
     pub fn restore(
         &mut self,
         records: Vec<IncidentRecord>,
         carried: Vec<String>,
         opening: TimelineRevision,
+        id_floor: Option<u64>,
     ) -> RestoreReport {
-        debug_assert!(self.entries.is_empty());
+        assert!(
+            self.entries.is_empty(),
+            "restore runs once, into an empty log, before any note"
+        );
         let mut report = RestoreReport {
             restored_open: 0,
             restored_resolved: 0,
@@ -4401,20 +4429,40 @@ impl IncidentLog {
             rebased: 0,
             carried,
             refused: BTreeMap::new(),
+            duplicate_ids: 0,
         };
         let mut skipped = 0_usize;
         let mut max_id: Option<u64> = None;
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
         for stored in records {
+            let id = stored.id.0;
+            // `u64::MAX` admits no resume above it: skipped and counted (N4 F4).
+            if id == u64::MAX {
+                report.duplicate_ids += 1;
+                continue;
+            }
             let Some(code) = from_code(&stored.code) else {
                 Self::count_unknown(&mut report.unknown_codes, stored.code);
+                max_id = Some(max_id.map_or(id, |max| max.max(id)));
                 skipped += 1;
                 continue;
             };
-            max_id = Some(max_id.map_or(stored.id.0, |max| max.max(stored.id.0)));
+            // Duplicate ids keep the first record and count the rest (N4 F4).
+            if !seen.insert(id) {
+                report.duplicate_ids += 1;
+                continue;
+            }
+            max_id = Some(max_id.map_or(id, |max| max.max(id)));
             self.restore_one(code, stored, opening, &mut report);
         }
-        if let Some(max) = max_id {
-            self.next_id = max.saturating_add(1);
+        // Above EVERY id in the file: restored, unknown-code, and the raw
+        // carried values' floor from the app. `checked_add`, never
+        // `saturating_add`: on overflow — only via `id_floor`, records past
+        // `u64::MAX - 1` never restore — `next_id` stays put rather than
+        // landing on a live id (N4 F2, F4).
+        let ceiling = max_id.into_iter().chain(id_floor).max();
+        if let Some(next) = ceiling.and_then(|max| max.checked_add(1)) {
+            self.next_id = next;
         }
         if skipped > 0 {
             let mut aggregate = IncidentObservation::plain(
@@ -4473,12 +4521,22 @@ impl IncidentLog {
         }
         // Rule 9: rebase to the opening revision, counting every field that
         // moved; rule 7: every loaded proposal is stale with no operations.
+        // Hand-written strings restore under the caps the live paths enforce
+        // (N4 F6): the 240 B ceiling `propose_fix` truncates to.
         let mut rebased = usize::from(record.revision != opening);
         let proposal = record.proposal.map(|mut proposal| {
             rebased += usize::from(proposal.base_revision != opening);
             proposal.base_revision = opening;
             proposal.stale = true;
             proposal.operations.clear();
+            proposal.summary = truncate_to_serialized_bytes(
+                &proposal.summary,
+                INVESTIGATOR_EXPLANATION_CEILING_BYTES,
+            );
+            proposal.explanation = truncate_to_serialized_bytes(
+                &proposal.explanation,
+                INVESTIGATOR_EXPLANATION_CEILING_BYTES,
+            );
             proposal
         });
         report.rebased += rebased;
@@ -4497,7 +4555,10 @@ impl IncidentLog {
             class,
             severity: policy_severity(code),
             subject: record.subject,
-            subject_name: record.subject_name,
+            // Hand-written names restore under observe's 64 B cap (N4 F6).
+            subject_name: record
+                .subject_name
+                .map(|name| truncate_to_serialized_bytes(&name, SUBJECT_NAME_CEILING_BYTES)),
             // Consumed at write: restored entries are never transient (§2
             // rule 12 — transient opens never reach a record).
             transient: false,
@@ -7924,9 +7985,8 @@ mod tests {
         });
 
         assert_json_round_trip(&IncidentTelemetry::default());
-        // `resolved_after` is `#[serde(skip)]` (`IN2B` §2 rule 3, N-9): it is
-        // log-origin-relative and the record never carries it, so a saturated
-        // telemetry round-trips to itself minus that one field.
+        // `resolved_after` stays on the wire when present (IN1 §2.5) but never
+        // in a record (N-9): the builder clears it (N4 F1).
         let saturated = IncidentTelemetry {
             resolved_after: Some(Duration::from_secs(9)),
             tool_calls: 3,
@@ -7944,27 +8004,29 @@ mod tests {
             }),
         };
         let body = serde_json::to_string(&saturated).unwrap();
-        assert!(
-            !body.contains("resolved_after"),
-            "log-origin-relative, never on the wire: {body}"
-        );
+        assert!(body.contains("resolved_after"), "served while set: {body}");
         let decoded: IncidentTelemetry = serde_json::from_str(&body).unwrap();
-        assert!(decoded.resolved_after.is_none());
-        assert_eq!(decoded.tool_calls, saturated.tool_calls);
-        assert_eq!(decoded.input_tokens, saturated.input_tokens);
-        assert_eq!(decoded.cached_input_tokens, saturated.cached_input_tokens);
-        assert_eq!(
-            decoded.cache_creation_input_tokens,
-            saturated.cache_creation_input_tokens
+        assert_eq!(decoded, saturated);
+
+        let mut log = IncidentLog::with_start(Instant::now(), None);
+        let Observed::Opened(id) = log.observe(IncidentObservation::plain(
+            IncidentCode::EditRevisionConflict,
+            IncidentSubject::Project,
+            "revision 9",
+            TimelineRevision(9),
+        )) else {
+            panic!("the first observation must open");
+        };
+        assert!(log.resolve(id, IncidentOutcome::Applied));
+        assert!(log.get(id).unwrap().telemetry.resolved_after.is_some());
+        let (records, _) = log.records(None, &BTreeMap::new());
+        assert_eq!(records.len(), 1);
+        assert!(records[0].telemetry.resolved_after.is_none());
+        let record_body = serde_json::to_string(&records[0]).unwrap();
+        assert!(
+            !record_body.contains("resolved_after"),
+            "log-origin-relative, never in a record: {record_body}"
         );
-        assert_eq!(decoded.output_tokens, saturated.output_tokens);
-        assert_eq!(
-            decoded.reasoning_output_tokens,
-            saturated.reasoning_output_tokens
-        );
-        assert_eq!(decoded.cost_usd_millionths, saturated.cost_usd_millionths);
-        assert_eq!(decoded.turns, saturated.turns);
-        assert_eq!(decoded.resolver, saturated.resolver);
 
         let proposal = IncidentProposal {
             operations: Vec::new(),
@@ -8033,6 +8095,26 @@ mod tests {
                 serde_json::from_str(&body).unwrap()
             })
             .collect()
+    }
+
+    /// Parse records after arming each with `resolved_after`, so item 2's
+    /// `is_none` check is falsifiable rather than vacuous (N4 F10): the assert
+    /// proves the field actually survived JSON this far.
+    fn parsed_records_with_resolved_after(stored: Vec<IncidentRecord>) -> Vec<IncidentRecord> {
+        let armed = stored
+            .into_iter()
+            .map(|mut record| {
+                record.telemetry.resolved_after = Some(Duration::from_secs(9));
+                record
+            })
+            .collect();
+        let parsed = parsed_records(armed);
+        assert!(
+            parsed
+                .iter()
+                .all(|record| record.telemetry.resolved_after.is_some())
+        );
+        parsed
     }
 
     /// A live-looking proposal: recorded, counted, and not yet stale — the
@@ -8122,11 +8204,17 @@ mod tests {
         let mut conflict = stored_record(12, IncidentCode::EditRevisionConflict.code());
         conflict.opened_wall_millis = Some(1_758_624_000_123);
 
+        // Every record carries `resolved_after` into restore, so the `is_none`
+        // check below is falsifiable rather than vacuous (N4 F10).
+        let parsed =
+            parsed_records_with_resolved_after(vec![auto_apply.clone(), explained, conflict]);
+
         let mut log = IncidentLog::with_start(Instant::now(), None);
         let report = log.restore(
-            parsed_records(vec![auto_apply.clone(), explained, conflict]),
+            parsed,
             vec!["{\"carried\":true}".to_owned()],
             TimelineRevision(100),
+            None,
         );
         assert_eq!(report.restored_open, 2);
         assert_eq!(report.restored_resolved, 1);
@@ -8204,6 +8292,7 @@ mod tests {
             parsed_records(vec![first, second, third]),
             Vec::new(),
             TimelineRevision(100),
+            None,
         );
         assert_eq!(report.restored_open, 0);
         assert_eq!(report.restored_resolved, 0);
@@ -8222,6 +8311,12 @@ mod tests {
             "incidents used codes this build does not know — 3 skipped"
         );
         assert_eq!(aggregate.count, 1);
+        // The aggregate is transient and the next write drops it, to be
+        // re-aggregated at the next load (N4 F10).
+        assert!(aggregate.transient);
+        let (_, write_report) = log.records(None, &BTreeMap::new());
+        assert_eq!(write_report.written_open, 0);
+        assert_eq!(write_report.dropped_transient_open, 1);
     }
 
     /// `IN2B` §12 item 4 (`IN2B` §3 rule 7): every loaded proposal is stale
@@ -8235,6 +8330,7 @@ mod tests {
             parsed_records(vec![stored]),
             Vec::new(),
             TimelineRevision(100),
+            None,
         );
         assert_eq!(report.restored_open, 1);
         let loaded = log.get(IncidentId(5)).unwrap();
@@ -8260,6 +8356,7 @@ mod tests {
             parsed_records(vec![first, second]),
             Vec::new(),
             TimelineRevision(100),
+            None,
         );
         assert_eq!(report.restored_resolved, 2);
         let Observed::Opened(fresh) = log.observe(IncidentObservation::plain(
@@ -8293,6 +8390,7 @@ mod tests {
             parsed_records(vec![first, second]),
             Vec::new(),
             TimelineRevision(100),
+            None,
         );
         assert_eq!(report.rebased, 4);
         for id in [IncidentId(1), IncidentId(2)] {
@@ -8534,7 +8632,12 @@ mod tests {
         assert_eq!(first_records[1].opened_wall_millis, Some(1_000_002_500));
         let origin_two = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
         let mut second_log = IncidentLog::with_start(Instant::now(), Some(origin_two));
-        let _ = second_log.restore(first_records.clone(), Vec::new(), TimelineRevision(100));
+        let _ = second_log.restore(
+            first_records.clone(),
+            Vec::new(),
+            TimelineRevision(100),
+            None,
+        );
         let (second_records, _) = second_log.records(None, &BTreeMap::new());
         assert_eq!(second_records.len(), 2);
         for (first, second) in first_records.iter().zip(second_records.iter()) {
@@ -8619,5 +8722,263 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].refused_op, Some(small));
         assert_eq!(records[1].refused_op, None);
+    }
+
+    /// N4 F5: dedup absorbs durability in either order — a durable observation
+    /// deduping into a transient open (or a transient one into a durable
+    /// incident) leaves a durable incident, so persistence never depends on
+    /// arrival order.
+    #[test]
+    fn dedup_absorbs_durability_in_either_order() {
+        for (first_transient, second_transient) in
+            [(true, false), (false, true), (true, true), (false, false)]
+        {
+            let mut log = IncidentLog::with_start(Instant::now(), None);
+            let code = IncidentCode::EditRevisionConflict;
+            let mut first = IncidentObservation::plain(
+                code,
+                IncidentSubject::Project,
+                "revision 9",
+                TimelineRevision(9),
+            );
+            first.transient = first_transient;
+            let Observed::Opened(id) = log.observe(first) else {
+                panic!("the first observation must open");
+            };
+            let mut second = IncidentObservation::plain(
+                code,
+                IncidentSubject::Project,
+                "revision 9",
+                TimelineRevision(9),
+            );
+            second.transient = second_transient;
+            assert!(matches!(log.observe(second), Observed::Deduped(deduped) if deduped == id));
+            assert_eq!(
+                log.get(id).unwrap().transient,
+                first_transient && second_transient
+            );
+        }
+        // The reported defect: transient-then-durable persists at the next write.
+        let mut log = IncidentLog::with_start(Instant::now(), None);
+        let code = IncidentCode::EditRevisionConflict;
+        let mut transient = IncidentObservation::plain(
+            code,
+            IncidentSubject::Project,
+            "revision 9",
+            TimelineRevision(9),
+        );
+        transient.transient = true;
+        let Observed::Opened(id) = log.observe(transient) else {
+            panic!("the first observation must open");
+        };
+        let durable = IncidentObservation::plain(
+            code,
+            IncidentSubject::Project,
+            "revision 9",
+            TimelineRevision(9),
+        );
+        assert!(matches!(log.observe(durable), Observed::Deduped(_)));
+        let (records, report) = log.records(None, &BTreeMap::new());
+        assert_eq!(report.written_open, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, id);
+    }
+
+    /// N4 F6: restore applies observe's serialised-length caps — a hand-written
+    /// over-cap `subject_name` or proposal string restores truncated, as live
+    /// notes do. (`observed` has no cap at observe, so it restores verbatim.)
+    #[test]
+    fn restore_applies_observe_length_caps() {
+        let mut stored = stored_record(1, IncidentCode::EditRevisionConflict.code());
+        stored.subject_name = Some("\u{1}".repeat(5000));
+        stored.observed = "o".repeat(5000);
+        stored.proposal = Some(IncidentProposal {
+            operations: Vec::new(),
+            operation_count: 1,
+            summary: "s".repeat(500),
+            explanation: "\u{1}".repeat(500),
+            base_revision: TimelineRevision(5),
+            stale: false,
+        });
+        let mut log = IncidentLog::with_start(Instant::now(), None);
+        let _ = log.restore(
+            parsed_records(vec![stored]),
+            Vec::new(),
+            TimelineRevision(100),
+            None,
+        );
+        let loaded = log.get(IncidentId(1)).unwrap();
+        let name = loaded.subject_name.as_ref().unwrap();
+        assert!(json_escaped_len(name) <= SUBJECT_NAME_CEILING_BYTES);
+        assert!(!name.is_empty());
+        assert_eq!(loaded.observed, "o".repeat(5000));
+        let proposal = loaded.proposal.as_ref().unwrap();
+        assert!(json_escaped_len(&proposal.summary) <= INVESTIGATOR_EXPLANATION_CEILING_BYTES);
+        assert!(json_escaped_len(&proposal.explanation) <= INVESTIGATOR_EXPLANATION_CEILING_BYTES);
+        assert!(!proposal.summary.is_empty() && !proposal.explanation.is_empty());
+    }
+
+    /// N4 F2: `next_id` resumes above EVERY id in the file — restored,
+    /// unknown-code, and the `id_floor` the app computed from the raw carried
+    /// values core cannot parse.
+    #[test]
+    fn restore_resumes_above_every_id_in_the_file() {
+        // Unknown-code ids count toward the resume (the aggregate consumes the
+        // resumed id, so the first fresh open lands one above it).
+        let known = stored_record(7, IncidentCode::EditRevisionConflict.code());
+        let unknown = stored_record(500, "code_from_the_future");
+        let mut log = IncidentLog::with_start(Instant::now(), None);
+        let report = log.restore(
+            parsed_records(vec![known, unknown]),
+            Vec::new(),
+            TimelineRevision(1),
+            None,
+        );
+        assert_eq!(report.restored_open, 1);
+        assert_eq!(
+            report.unknown_codes,
+            vec![("code_from_the_future".to_owned(), 1)]
+        );
+        let Observed::Opened(fresh) = log.observe(IncidentObservation::plain(
+            IncidentCode::EditRevisionConflict,
+            IncidentSubject::Asset(AssetId(77)),
+            "fresh",
+            TimelineRevision(1),
+        )) else {
+            panic!("a fresh observation must open");
+        };
+        assert_eq!(fresh, IncidentId(502));
+
+        // The app's floor covers the raw carried values.
+        let known = stored_record(7, IncidentCode::EditRevisionConflict.code());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
+        let report = log.restore(
+            parsed_records(vec![known]),
+            vec![r#"{"id":902}"#.to_owned()],
+            TimelineRevision(1),
+            Some(902),
+        );
+        assert_eq!(report.carried, vec![r#"{"id":902}"#.to_owned()]);
+        let Observed::Opened(fresh) = log.observe(IncidentObservation::plain(
+            IncidentCode::EditRevisionConflict,
+            IncidentSubject::Asset(AssetId(77)),
+            "fresh",
+            TimelineRevision(1),
+        )) else {
+            panic!("a fresh observation must open");
+        };
+        assert_eq!(fresh, IncidentId(903));
+    }
+
+    /// N4 F4: duplicate ids keep the first record and count the rest; an id of
+    /// `u64::MAX` admits no resume above it and is skipped and counted, so
+    /// `next_id` never saturates onto a live id.
+    #[test]
+    fn restore_skips_duplicate_and_maximum_ids_and_counts_them() {
+        let first = stored_record(1, IncidentCode::EditRevisionConflict.code());
+        let mut second = stored_record(
+            1,
+            IncidentCode::Label(LabelIncident::PanelWorkerError).code(),
+        );
+        second.observed = "other".to_owned();
+        let mut maxed = stored_record(1, IncidentCode::EditRevisionConflict.code());
+        maxed.id = IncidentId(u64::MAX);
+        let third = stored_record(2, IncidentCode::EditRevisionConflict.code());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
+        let report = log.restore(
+            parsed_records(vec![first, second, maxed, third]),
+            Vec::new(),
+            TimelineRevision(1),
+            None,
+        );
+        assert_eq!(report.restored_open, 2);
+        assert_eq!(report.duplicate_ids, 2);
+        let loaded = log.get(IncidentId(1)).unwrap();
+        assert_eq!(loaded.code, IncidentCode::EditRevisionConflict);
+        assert_eq!(loaded.observed, "observed 1");
+        let Observed::Opened(fresh) = log.observe(IncidentObservation::plain(
+            IncidentCode::EditRevisionConflict,
+            IncidentSubject::Asset(AssetId(77)),
+            "fresh",
+            TimelineRevision(1),
+        )) else {
+            panic!("a fresh observation must open");
+        };
+        assert_eq!(fresh, IncidentId(3));
+    }
+
+    /// N4 F10 (`IN2B` §3 rule 5): a record-`Investigating` (hand-written only —
+    /// the writer never emits it) loads as `Open` with the interrupted stop,
+    /// keeping a hand-written harness identity when the record carries one.
+    #[test]
+    fn restored_investigating_record_becomes_open_with_the_interrupted_stop() {
+        let mut with_session = stored_record(1, IncidentCode::EditRevisionConflict.code());
+        with_session.state = IncidentState::Investigating;
+        with_session.telemetry.resolver = Some(IncidentResolver::Session {
+            harness: "hand".to_owned(),
+            model: Some("model".to_owned()),
+            stop: "hand-written".to_owned(),
+        });
+        let mut without_session = stored_record(2, IncidentCode::EditRevisionConflict.code());
+        without_session.state = IncidentState::Investigating;
+        let mut log = IncidentLog::with_start(Instant::now(), None);
+        let report = log.restore(
+            parsed_records(vec![with_session, without_session]),
+            Vec::new(),
+            TimelineRevision(1),
+            None,
+        );
+        assert_eq!(report.restored_open, 2);
+        let loaded = log.get(IncidentId(1)).unwrap();
+        assert_eq!(loaded.state, IncidentState::Open);
+        let Some(IncidentResolver::Session {
+            harness,
+            model,
+            stop,
+        }) = &loaded.telemetry.resolver
+        else {
+            panic!("a restored investigating record carries a session resolver");
+        };
+        assert_eq!(harness, "hand");
+        assert_eq!(model, &Some("model".to_owned()));
+        assert_eq!(stop, "interrupted: Kinewright closed");
+        let loaded = log.get(IncidentId(2)).unwrap();
+        assert_eq!(loaded.state, IncidentState::Open);
+        let Some(IncidentResolver::Session {
+            harness,
+            model,
+            stop,
+        }) = &loaded.telemetry.resolver
+        else {
+            panic!("a resolver-less investigating record takes the defensive arm");
+        };
+        assert_eq!(harness, "");
+        assert!(model.is_none());
+        assert_eq!(stop, "interrupted: Kinewright closed");
+    }
+
+    /// N4 F7: restore into a non-empty log panics in every build.
+    #[test]
+    #[should_panic(expected = "restore runs once")]
+    fn restore_into_a_non_empty_log_panics() {
+        let mut log = IncidentLog::with_start(Instant::now(), None);
+        let Observed::Opened(_) = log.observe(IncidentObservation::plain(
+            IncidentCode::EditRevisionConflict,
+            IncidentSubject::Project,
+            "revision 9",
+            TimelineRevision(9),
+        )) else {
+            panic!("the first observation must open");
+        };
+        let _ = log.restore(Vec::new(), Vec::new(), TimelineRevision(9), None);
+    }
+
+    /// N4 F8: [`compact_json_len`] is exact for [`Operation`] because it
+    /// carries no floats — `f32`/`f64` are not `Eq`, so this fails to compile
+    /// the day a float field is added.
+    #[test]
+    fn operation_has_no_float_fields() {
+        fn require_eq<T: Eq>() {}
+        require_eq::<Operation>();
     }
 }
