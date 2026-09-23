@@ -27078,6 +27078,28 @@ mod tests {
         ]
     }
 
+    /// N5/G3: `get_incidents`' exact rule-1a/1b tails. A same-length
+    /// substitution keeps every byte pin green by design (IN0), so the words
+    /// themselves are pinned here, beside the byte test that calls it.
+    fn in2b_rule_1_tails(
+        published: &str,
+        input_schema: &serde_json::Map<String, serde_json::Value>,
+    ) {
+        assert!(
+            published.ends_with(
+                "include_resolved to see resolved incidents including ones restored from earlier sessions."
+            ),
+            "rule-1a tail moved: {published}"
+        );
+        assert_eq!(
+            input_schema["properties"]["include_resolved"]["description"].as_str(),
+            Some(
+                "Include incidents already resolved, including ones restored from earlier sessions."
+            ),
+            "rule-1b tail moved"
+        );
+    }
+
     /// IN1 §6.1 rules 1–3, §6.3 rule 13, §6.4 rule 20 and §6.7 rule 33: both
     /// capabilities are registry-only, classified without an override, and
     /// cost exactly the bytes probe-2 measured on these schemas.
@@ -27143,6 +27165,10 @@ mod tests {
                 !crate::runtime::COMPACT_TOOL_NAMES.contains(&name),
                 "{name} must not join the served surface"
             );
+
+            if name == "get_incidents" {
+                in2b_rule_1_tails(published, &tool.input_schema);
+            }
         }
 
         assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
@@ -27224,7 +27250,7 @@ mod tests {
     /// §9 clause 2's core test is what proves the table is exhaustive over the
     /// enum, and this test inherits that proof rather than repeating it.
     #[test]
-    // The loop is five nested axes over 8 576 shapes plus the pinned fixture;
+    // The loop is six nested axes over 18 944 shapes plus the pinned fixture;
     // splitting it would put the measurement and its assertions in different
     // functions, which is exactly what makes a pin easy to weaken by accident.
     #[allow(clippy::too_many_lines)]
@@ -27260,6 +27286,12 @@ mod tests {
         let mut worst_shape = String::new();
         let mut with_operation_worst = 0_usize;
         let mut with_operation_shape = String::new();
+        // N5/G1: the name arm's own pin — a loop whose saturated arm never
+        // lands (deleted, `None`, or short) must fail here, not pass on the
+        // unnamed shapes alone.
+        let mut named_count = 0_usize;
+        let mut named_worst = 0_usize;
+        let mut unnamed_worst = 0_usize;
         let mut with_operation = 0_usize;
         let mut measured = 0_usize;
         for entry in POLICY {
@@ -27314,6 +27346,17 @@ mod tests {
                                 widest.subject_name = name.clone();
                                 let bytes = serde_json::to_vec(&widest).unwrap().len();
                                 measured += 1;
+                                // N5/G1: counted by serialised length, not by
+                                // arm — a short or missing saturation scores 0.
+                                if name.as_ref().is_some_and(|candidate| {
+                                    kinewright_core::json_escaped_len(candidate)
+                                        == kinewright_core::SUBJECT_NAME_CEILING_BYTES
+                                }) {
+                                    named_count += 1;
+                                    named_worst = named_worst.max(bytes);
+                                } else {
+                                    unnamed_worst = unnamed_worst.max(bytes);
+                                }
                                 assert!(
                                     bytes <= IN1_INCIDENT_SERIALIZED_CEILING_BYTES,
                                     "{} on {subject:?} / {shape} serialises to {bytes} B, over the ceiling",
@@ -27350,6 +27393,18 @@ mod tests {
             measured,
             74 * 8 * 2 * 2 * 4 * 2,
             "IN2 §4.2 rule 11's shapes, with the probe axis erratum A-R9 adds and the IN2B §10 rule 5 name arm"
+        );
+        // N5/G1: exactly half the shapes carry a name saturated at the
+        // ceiling, and the saturated arm is the worst — the arm cannot be
+        // `None`, deleted, or short without failing here.
+        assert_eq!(
+            named_count,
+            measured / 2,
+            "the name arm must saturate exactly half the shapes"
+        );
+        assert!(
+            named_worst > unnamed_worst,
+            "the saturated name must reach the wire: named worst {named_worst} vs unnamed worst {unnamed_worst}"
         );
         assert_eq!(POLICY.len(), 74);
         // Part A's thirteen classifier variants are thirteen of the 74 rows
@@ -27940,7 +27995,8 @@ mod tests {
     ///
     /// **Pin site 1 of 3 (`IN1b` §6.4 rules 7–8, erratum `IN1b`-R3).** Part B
     /// moved neither the quad nor the sextuple; **IN2 Part A moves the
-    /// sextuple and not the quad**, for the **nineteenth** consecutive
+    /// sextuple and not the quad**; and **IN2B Part B rewords two texts and
+    /// re-pins the sextuple**, for the **nineteenth** consecutive
     /// measurement of the served surface. IN2 adds no served tool, no
     /// `Operation` variant and no `Document`-bearing schema, and
     /// `served_tools()` still filters `capability_tools()` by
@@ -27972,7 +28028,9 @@ mod tests {
     /// description bytes, +34 B of `include_resolved` schema text (rule 1b)
     /// into serialized and input-schema bytes — pinned one by one in
     /// `in1_the_two_capabilities_are_registry_only_and_cost_their_measured_bytes`.
-    /// Counts stay `141 / 54 / 87`: no new capability, no new tool.
+    /// The arithmetic: 1 552 431 + 72 = **1 552 503**, 1 407 446 + 34 =
+    /// **1 407 480**, 121 854 + 38 = **121 892**. Counts stay `141 / 54 /
+    /// 87`: no new capability, no new tool.
     ///
     /// **Perf follow-up:** `served_tools()` no longer filters
     /// `capability_tools()`; it builds the same 7 descriptors directly from
@@ -33075,10 +33133,17 @@ mod tests {
         )));
 
         // 1 — `incident_not_found`: an id no log holds.
-        codes.push(in2_refusal_code(&in2_propose(
+        let not_found = in2_propose(
             &service,
             &json!({"incident_id": u64::MAX, "explanation": "who?"}),
-        )));
+        );
+        // N5/G3: the one rule-1c message assertion — the code pin above
+        // cannot see a same-length text revert.
+        assert_eq!(
+            not_found.content[0].as_text().unwrap().text.as_str(),
+            "propose_fix rejected: no incident 18446744073709551615 is open or resolved for this project"
+        );
+        codes.push(in2_refusal_code(&not_found));
 
         // 4 — `proposal_too_large`: nine operations on the branch.
         for at in 1..=(INVESTIGATOR_MAX_PROPOSAL_OPERATIONS + 1) {

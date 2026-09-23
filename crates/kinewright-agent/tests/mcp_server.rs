@@ -2426,10 +2426,11 @@ async fn cc7_prepare_commit_and_compare(
 ///
 /// **Pin site 2 of 3 (`IN1b` §6.4 rules 7–8, erratum `IN1b`-R3).** The served
 /// quad does not move for the **nineteenth** measurement: `IN1b` added no
-/// served tool, no capability and no schema field, and IN2 Part A adds one
+/// served tool, no capability and no schema field, IN2 Part A adds one
 /// **registry-only** capability, `propose_fix`, which `served_tools()`'s
-/// `COMPACT_TOOL_NAMES` filter never publishes. The registry sextuple does
-/// move, to `141 / 54 / 87`, which is the two assertions below.
+/// `COMPACT_TOOL_NAMES` filter never publishes, and IN2B Part B rewords two
+/// registry-only texts, which the filter never publishes either. The registry
+/// sextuple does move, to `141 / 54 / 87`, which is the two assertions below.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {

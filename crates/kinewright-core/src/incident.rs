@@ -6405,8 +6405,9 @@ mod tests {
     /// codes times the **eight** subject variants of `IN1b` §3.3 rule 17 as
     /// amended by erratum `IN1b`-A-R13, times **two probes**, times
     /// {no proposal, a proposal at the cap}, times {open, investigating,
-    /// resolved with all telemetry, resolved without the two new fields} —
-    /// **9 472** shapes.
+    /// resolved with all telemetry, resolved without the two new fields},
+    /// times `IN2B` §10 rule 5's {no name, a name at the cap} — **18 944**
+    /// shapes.
     ///
     /// The probe is an axis because the recoveries array is part of the wire
     /// body and IN2 §7 rule 1 put a **second** action on three of the seventy-
@@ -6429,6 +6430,11 @@ mod tests {
     /// sets, and implementer **D moves it from 2 048 to 4 096** with a twin of
     /// the loop below, whose probe axis it needs too (IN2 §4.2 rule 11).
     #[test]
+    // The twin measures six nested axes over 18 944 shapes plus the pinned
+    // fixture; splitting it would put the measurement and its assertions in
+    // different functions, which is exactly what makes a pin easy to weaken
+    // by accident.
+    #[allow(clippy::too_many_lines)]
     fn in2b_the_ceiling_holds_with_names_saturated_and_819_unmoved_on_every_subject_shape() {
         // The core twin of `in1b_every_code_fits_the_measured_ceiling`, grown
         // over IN2 §4.2 rule 11's product: 74 codes x 8 subject shapes x
@@ -6443,12 +6449,40 @@ mod tests {
         // moves with it, 2 048 -> 4 096.
         const CEILING: usize = 4_096;
 
+        // N5/G4: the twin earns the `_and_819_unmoved` in its name — the same
+        // named fixture the agent loop pins, built from core's own twin
+        // helpers, so the two constructions cross-check each other's 819. The
+        // literal twins `IN1_INCIDENT_SERIALIZED_BYTES`, as `CEILING` does.
+        let probed = untagged_webm_probe();
+        let mut log = IncidentLog::with_start(Instant::now(), None);
+        let Observed::Opened(id) = log.observe(unknown_primaries_observation(&probed)) else {
+            panic!("the first observation must open an incident");
+        };
+        assert_eq!(
+            log.observe(unknown_primaries_observation(&probed)),
+            Observed::Deduped(id)
+        );
+        let incident = log.get(id).unwrap();
+        assert_eq!(incident.count, 2);
+        assert_eq!(incident.state, IncidentState::Open);
+        assert_eq!(
+            serde_json::to_vec(incident).unwrap().len(),
+            819,
+            "the fixture incident moved off its pinned budget"
+        );
+
         let mut worst = 0_usize;
         let mut worst_shape = String::new();
         let mut with_operation_worst = 0_usize;
         let mut with_operation_shape = String::new();
         let mut with_operation = 0_usize;
         let mut measured = 0_usize;
+        // N5/G1: the name arm's own pin — a loop whose saturated arm never
+        // lands (deleted, `None`, or short) must fail here, not pass on the
+        // unnamed shapes alone.
+        let mut named_count = 0_usize;
+        let mut named_worst = 0_usize;
+        let mut unnamed_worst = 0_usize;
         for code in EVERY_INCIDENT_CODE {
             for subject in every_subject_shape() {
                 for probed in [worst_probe(), rec709_compatible_worst_probe()] {
@@ -6496,6 +6530,16 @@ mod tests {
                                 widest.subject_name = name.clone();
                                 let bytes = serde_json::to_vec(&widest).unwrap().len();
                                 measured += 1;
+                                // N5/G1: counted by serialised length, not by
+                                // arm — a short or missing saturation scores 0.
+                                if name.as_ref().is_some_and(|candidate| {
+                                    json_escaped_len(candidate) == SUBJECT_NAME_CEILING_BYTES
+                                }) {
+                                    named_count += 1;
+                                    named_worst = named_worst.max(bytes);
+                                } else {
+                                    unnamed_worst = unnamed_worst.max(bytes);
+                                }
                                 let label = format!(
                                     "{} / {subject:?} / {shape} / recoveries={} / proposal={}",
                                     code.code(),
@@ -6527,6 +6571,18 @@ mod tests {
             measured,
             74 * 8 * 2 * 2 * 4 * 2,
             "IN2 §4.2 rule 11's shapes, with the probe axis erratum A-R9 adds and the IN2B §10 rule 5 name arm"
+        );
+        // N5/G1: exactly half the shapes carry a name saturated at the
+        // ceiling, and the saturated arm is the worst — the arm cannot be
+        // `None`, deleted, or short without failing here.
+        assert_eq!(
+            named_count,
+            measured / 2,
+            "the name arm must saturate exactly half the shapes"
+        );
+        assert!(
+            named_worst > unnamed_worst,
+            "the saturated name must reach the wire: named worst {named_worst} vs unnamed worst {unnamed_worst}"
         );
         // The one thing IN2 changes about the wire body's `recoveries` array is
         // §7 rule 1's second action, and a loop that never builds an operation

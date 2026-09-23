@@ -5251,6 +5251,20 @@ mod tests {
             format!("{error}").contains("newer format_version 999 > 1"),
             "unexpected refusal text: {error}"
         );
+        // N5/G2: the boundary is exact — v2 refuses, and the u32 ceiling and
+        // past-u32 oversize refuse through N4/F9's saturation, naming the
+        // saturated version.
+        for (bytes, named) in [
+            (&br#"{"format_version": 2}"#[..], "2"),
+            (&br#"{"format_version": 4294967295}"#[..], "4294967295"),
+            (&br#"{"format_version": 99999999999}"#[..], "4294967295"),
+        ] {
+            let error = check_saved_document_format(bytes).unwrap_err();
+            assert!(
+                format!("{error}").contains(&format!("newer format_version {named} > 1")),
+                "unexpected refusal text for {named}: {error}"
+            );
+        }
 
         // The gate is wired into the rerender path: a newer file on disk
         // refuses before parsing, so minimal bytes suffice.
