@@ -1278,10 +1278,10 @@ fn floor_char_boundary(text: &str, index: usize) -> usize {
 /// bytes (IN2 §4.1 rule 5).
 ///
 /// JSON escaping is not length-preserving — 240 bytes of control characters
-/// serialise to about 1 440 — and `IN1_INCIDENT_SERIALIZED_CEILING_BYTES` is an
-/// `assert` in production code over a string a **model** supplies. Capping the
-/// raw length would therefore be a bet on which 240 bytes arrive; capping the
-/// serialised length is a property.
+/// serialise to about 1 440 — and `IN1_INCIDENT_SERIALIZED_CEILING_BYTES` is
+/// asserted over strings a **model** supplies in tests, not production code.
+/// Capping the raw length would therefore be a bet on which 240 bytes arrive;
+/// capping the serialised length is a property.
 ///
 /// Each pass shrinks proportionally and then backs off to a `char` boundary, so
 /// the loop strictly shrinks and terminates; the empty string escapes to zero.
@@ -3230,9 +3230,10 @@ pub struct RestoreReport {
     /// Every record's `refused_op`, keyed by the record's `id` (§3 rule 13).
     pub refused: BTreeMap<IncidentId, Operation>,
     /// Records skipped for an unusable id: the second and later records
-    /// sharing an id (the first wins), and any record with id `u64::MAX`,
-    /// which admits no resume above it (N4 F4).
-    pub duplicate_ids: usize,
+    /// sharing an id (the first wins), and any record with an id past
+    /// [`MAX_RESTORED_ID`] (N4 F4, N4.1). Over-ceiling records with an unknown
+    /// code are counted in [`Self::unknown_codes`] instead, per F3.
+    pub invalid_ids: usize,
 }
 
 /// Fixed prefix of the unknown-code aggregate's `observed`; the skipped total
@@ -3246,6 +3247,14 @@ const UNKNOWN_CODES_OBSERVED_PREFIX: &str = "incidents used codes this build doe
 /// `next_id` resumes above the loaded maximum, while cross-run wall offsets
 /// are incomparable once the origin changes. Open incidents are never pruned.
 const MAX_PERSISTED_RESOLVED: usize = 256;
+
+/// The highest id that can restore (N4.1).
+///
+/// Records past it are skipped and counted — resuming above them could
+/// overflow `next_id` or saturate `observe` onto a live id — and an `id_floor`
+/// past it is clamped to it, so `next_id` after restore is at most
+/// `MAX_RESTORED_ID + 1` and `observe` never saturates in practice.
+const MAX_RESTORED_ID: u64 = u64::MAX / 2;
 
 /// Past this many compact-JSON bytes the refused-op stash is omitted from the
 /// record (`IN2B` §0.4 d5): IN2 §3.4 rule 23's elision, reused rather than
@@ -4395,16 +4404,18 @@ impl IncidentLog {
     /// wall filed in `loaded_wall`. Hand-written strings restore under
     /// observe's serialised-length caps (`subject_name`, proposal
     /// summary/explanation); `observed` has no cap at observe and restores
-    /// verbatim (N4 F6). `next_id` resumes above EVERY id in the file —
-    /// restored, unknown-code, and the `id_floor` the app computed from the raw
-    /// carried values — via `checked_add`, so it never saturates onto a live id
-    /// (N4 F2). Unknown code strings are skipped, counted, and reported once
-    /// through a single `sidecar_unknown_codes` aggregate noted last, after
-    /// the resume, so its id can neither collide with a restored id nor
-    /// disturb the order. Duplicate ids keep the first record and count the
-    /// rest; `u64::MAX` admits no resume above it and is skipped and counted
-    /// (N4 F4). `carried` passes through untouched. Restore enqueues nothing,
-    /// resolves nothing and notifies nothing.
+    /// verbatim (N4 F6). `next_id` resumes above every restorable id in the
+    /// file — restored, unknown-code, and the `id_floor` the app computed from
+    /// the raw carried values, clamped to `MAX_RESTORED_ID` — via `checked_add`,
+    /// so it never overflows onto a live id (N4 F2, N4.1). Unknown code strings
+    /// are skipped, counted, and reported once through a single
+    /// `sidecar_unknown_codes` aggregate noted last, after the resume, so its
+    /// id can neither collide with a restored id nor disturb the order.
+    /// Duplicate ids keep the first record and count the rest; records past
+    /// `MAX_RESTORED_ID` are skipped and counted (unknown-code ones in the
+    /// unknown-codes aggregate, others in `invalid_ids`) (N4 F4, N4.1).
+    /// `carried` passes through untouched. Restore enqueues nothing, resolves
+    /// nothing and notifies nothing.
     ///
     /// # Panics
     ///
@@ -4429,39 +4440,42 @@ impl IncidentLog {
             rebased: 0,
             carried,
             refused: BTreeMap::new(),
-            duplicate_ids: 0,
+            invalid_ids: 0,
         };
         let mut skipped = 0_usize;
         let mut max_id: Option<u64> = None;
         let mut seen: BTreeSet<u64> = BTreeSet::new();
         for stored in records {
             let id = stored.id.0;
-            // `u64::MAX` admits no resume above it: skipped and counted (N4 F4).
-            if id == u64::MAX {
-                report.duplicate_ids += 1;
-                continue;
-            }
+            let over_ceiling = id > MAX_RESTORED_ID;
             let Some(code) = from_code(&stored.code) else {
+                // Unknown-code records count in the aggregate whether or not
+                // they are restorable — but only restorable ids count toward
+                // the resume (N4.1).
                 Self::count_unknown(&mut report.unknown_codes, stored.code);
-                max_id = Some(max_id.map_or(id, |max| max.max(id)));
+                if !over_ceiling {
+                    max_id = Some(max_id.map_or(id, |max| max.max(id)));
+                }
                 skipped += 1;
                 continue;
             };
-            // Duplicate ids keep the first record and count the rest (N4 F4).
-            if !seen.insert(id) {
-                report.duplicate_ids += 1;
+            // Past the ceiling, or a duplicate: skipped and counted (N4 F4,
+            // N4.1). The first record with an id wins.
+            if over_ceiling || !seen.insert(id) {
+                report.invalid_ids += 1;
                 continue;
             }
             max_id = Some(max_id.map_or(id, |max| max.max(id)));
             self.restore_one(code, stored, opening, &mut report);
         }
-        // Above EVERY id in the file: restored, unknown-code, and the raw
-        // carried values' floor from the app. `checked_add`, never
-        // `saturating_add`: on overflow — only via `id_floor`, records past
-        // `u64::MAX - 1` never restore — `next_id` stays put rather than
-        // landing on a live id (N4 F2, F4).
-        let ceiling = max_id.into_iter().chain(id_floor).max();
-        if let Some(next) = ceiling.and_then(|max| max.checked_add(1)) {
+        // Above EVERY restorable id in the file: restored, unknown-code, and
+        // the raw carried values' floor from the app, clamped to the ceiling.
+        // `checked_add`, never `saturating_add` — overflow is impossible by
+        // construction now, and the checked form documents that rather than
+        // trusting it (N4 F2, N4.1).
+        let floor = id_floor.map(|floor| floor.min(MAX_RESTORED_ID));
+        let highest = max_id.into_iter().chain(floor).max();
+        if let Some(next) = highest.and_then(|max| max.checked_add(1)) {
             self.next_id = next;
         }
         if skipped > 0 {
@@ -8870,11 +8884,11 @@ mod tests {
         assert_eq!(fresh, IncidentId(903));
     }
 
-    /// N4 F4: duplicate ids keep the first record and count the rest; an id of
-    /// `u64::MAX` admits no resume above it and is skipped and counted, so
+    /// N4 F4, N4.1: unusable ids keep the first record and count the rest — a
+    /// duplicate id, and an id past `MAX_RESTORED_ID` (`u64::MAX` here) — so
     /// `next_id` never saturates onto a live id.
     #[test]
-    fn restore_skips_duplicate_and_maximum_ids_and_counts_them() {
+    fn restore_skips_invalid_ids_and_counts_them() {
         let first = stored_record(1, IncidentCode::EditRevisionConflict.code());
         let mut second = stored_record(
             1,
@@ -8892,7 +8906,7 @@ mod tests {
             None,
         );
         assert_eq!(report.restored_open, 2);
-        assert_eq!(report.duplicate_ids, 2);
+        assert_eq!(report.invalid_ids, 2);
         let loaded = log.get(IncidentId(1)).unwrap();
         assert_eq!(loaded.code, IncidentCode::EditRevisionConflict);
         assert_eq!(loaded.observed, "observed 1");
@@ -8980,5 +8994,62 @@ mod tests {
     fn operation_has_no_float_fields() {
         fn require_eq<T: Eq>() {}
         require_eq::<Operation>();
+    }
+
+    /// N4.1: the restorable id ceiling — records past `MAX_RESTORED_ID` are
+    /// skipped and counted, and an `id_floor` past it is clamped to it, so
+    /// `next_id` never overflows onto a live id.
+    #[test]
+    fn restore_enforces_the_id_ceiling() {
+        // A floor of `u64::MAX` clamps to the ceiling: the fresh id lands
+        // above every file id instead of colliding with restored id 1.
+        let known = stored_record(1, IncidentCode::EditRevisionConflict.code());
+        let mut log = IncidentLog::with_start(Instant::now(), None);
+        let _ = log.restore(
+            parsed_records(vec![known]),
+            Vec::new(),
+            TimelineRevision(1),
+            Some(u64::MAX),
+        );
+        let Observed::Opened(fresh) = log.observe(IncidentObservation::plain(
+            IncidentCode::EditRevisionConflict,
+            IncidentSubject::Asset(AssetId(77)),
+            "fresh",
+            TimelineRevision(1),
+        )) else {
+            panic!("a fresh observation must open");
+        };
+        assert_eq!(fresh, IncidentId(MAX_RESTORED_ID + 1));
+
+        // `u64::MAX - 1` refuses: known-code to `invalid_ids`, unknown-code to
+        // the aggregate — neither restores, neither counts toward the resume.
+        let mut refused = stored_record(1, IncidentCode::EditRevisionConflict.code());
+        refused.id = IncidentId(u64::MAX - 1);
+        let mut strange = stored_record(2, "code_from_the_future");
+        strange.id = IncidentId(u64::MAX - 1);
+        let mut log = IncidentLog::with_start(Instant::now(), None);
+        let report = log.restore(
+            parsed_records(vec![refused, strange]),
+            Vec::new(),
+            TimelineRevision(1),
+            None,
+        );
+        assert_eq!(report.restored_open, 0);
+        assert_eq!(report.invalid_ids, 1);
+        assert_eq!(
+            report.unknown_codes,
+            vec![("code_from_the_future".to_owned(), 1)]
+        );
+        assert!(log.get(IncidentId(u64::MAX - 1)).is_none());
+        let Observed::Opened(fresh) = log.observe(IncidentObservation::plain(
+            IncidentCode::EditRevisionConflict,
+            IncidentSubject::Asset(AssetId(77)),
+            "fresh",
+            TimelineRevision(1),
+        )) else {
+            panic!("a fresh observation must open");
+        };
+        // The resume is untouched by the refused ids: the aggregate took 1.
+        assert_eq!(fresh, IncidentId(2));
     }
 }
