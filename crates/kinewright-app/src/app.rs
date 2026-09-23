@@ -33,7 +33,7 @@ use crate::{
         ProjectFile, ProjectSaveError, ProjectSaveReport, ProjectSession, can_overwrite_save,
         canonical_session_key, derive_lut_store, focus_publishes_lut_library, index_after_close,
         project_name, project_newer_format_observation, serialize_project_document,
-        session_index_by_id, write_project_bytes,
+        session_index_by_id, write_file_atomic, write_project_bytes,
     },
     recovery::{RestoreRequest, recovery_damage_observation, recovery_unavailable_observation},
     sidecar::{
@@ -375,6 +375,25 @@ pub(crate) struct KinewrightApp {
     performance: Option<crate::performance::PerformanceProbe>,
 }
 
+/// N6/H12 rollback, split from [`KinewrightApp::write_project`]: the sidecar
+/// flushed above the failed project write pairs with bytes that never
+/// landed — restore the prior bytes, or remove the sidecar when none
+/// preceded the save. Best-effort: the save already failed, and the pair's
+/// previous arm still loads a newer-than-project sidecar, so a failed
+/// rollback degrades to a re-flush, not a refusal.
+fn rollback_sidecar_write(sidecar: Option<PathBuf>, bytes: Option<Vec<u8>>) {
+    if let Some(sidecar) = sidecar {
+        match bytes {
+            Some(bytes) => {
+                let _ = write_file_atomic(&sidecar, &bytes);
+            }
+            None => {
+                let _ = fs::remove_file(sidecar);
+            }
+        }
+    }
+}
+
 impl KinewrightApp {
     // Construction keeps all channel subscriptions and coupled UI state initialization together.
     #[allow(clippy::too_many_lines)]
@@ -657,7 +676,9 @@ impl KinewrightApp {
             } else {
                 // Appendix B row 2: `media_incomplete`, because the project
                 // **did** open — only some of its media is elsewhere.
-                app.note_label(
+                // N6/H8: transient, like File → Open — a per-run note must
+                // never persist `Open` against a later open.
+                app.note_transient_label(
                     LabelIncident::MediaIncomplete,
                     IncidentSubject::Project,
                     format!("Missing media after open: {}", missing.join(", ")),
@@ -883,6 +904,13 @@ impl KinewrightApp {
         if save_as {
             self.focused_mut().sidecar_suspended = false;
         }
+        // N6/H12: the sidecar lands before the project bytes — snapshot it
+        // first, so a failed project write rolls the sidecar back instead
+        // of leaving it paired with bytes that never landed.
+        let rollback_sidecar = sidecar_path_for_project(self.focused().project_path.as_deref());
+        let rollback_bytes = rollback_sidecar
+            .as_deref()
+            .and_then(|sidecar| fs::read(sidecar).ok());
         // `IN2B` §2 rule 6: a sidecar write failure never fails the project
         // save — exactly one incident, then the save carries on.
         if let Err(error) = self
@@ -898,6 +926,7 @@ impl KinewrightApp {
         let report = match write_project_bytes(&json, to_write, path, previous_store.as_ref()) {
             Ok(report) => report,
             Err(error) => {
+                rollback_sidecar_write(rollback_sidecar, rollback_bytes);
                 self.focused_mut().project_path = old_path;
                 self.focused_mut().sidecar_suspended = was_suspended;
                 return Err(error);
@@ -12788,6 +12817,147 @@ mod in2b_tests {
         );
         in2_cleanup(&mut app);
         in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H8: the startup missing-media aggregate is transient, like
+    /// File → Open — a per-run note must never persist `Open` against a
+    /// later open. Driven through the production startup path.
+    #[test]
+    fn in2b_startup_missing_media_aggregate_is_transient() {
+        use kinewright_core::{
+            AssetId, ColorDescription, MediaAsset, MediaKind, MediaSourceFingerprint, Rational,
+            TimeCode,
+        };
+
+        let temp = TempDirectory::new("in2b-h8-startup");
+        let project_path = temp.path("edit.kinewright");
+        let mut document = Document::default();
+        document.media_pool.push(MediaAsset {
+            id: AssetId(1),
+            path: temp.path("nowhere.mov"),
+            name: "gone.mov".to_owned(),
+            duration: TimeCode(30),
+            fps: Rational::new(30, 1).expect("30 fps"),
+            kind: MediaKind::AudioVideo,
+            resolution: Some((1_920, 1_080)),
+            source_fingerprint: MediaSourceFingerprint::unknown(),
+            color_description: ColorDescription::default(),
+            assumed_from: None,
+        });
+        fs::write(
+            &project_path,
+            serde_json::to_string_pretty(&ProjectFile {
+                format_version: PROJECT_FORMAT_VERSION,
+                document,
+            })
+            .expect("the project serialises"),
+        )
+        .expect("the project file writes");
+        let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
+        let mut app = KinewrightApp::new(engine.clone(), Some(project_path));
+        app.route_incidents();
+        {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let aggregate = log
+                .all()
+                .find(|incident| {
+                    incident.code == IncidentCode::Label(LabelIncident::MediaIncomplete)
+                })
+                .expect("the startup aggregate notes");
+            assert!(
+                aggregate.transient,
+                "the startup aggregate is transient, like File → Open"
+            );
+        }
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H12: a project write that fails after the sidecar write rolls the
+    /// sidecar back — the previous bytes are restored, and neither half
+    /// litters a temp.
+    #[test]
+    fn in2b_failed_project_write_restores_the_prior_sidecar() {
+        let temp = TempDirectory::new("in2b-h12-restore");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, _engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 1, 41);
+        app.write_project(&project_path).expect("the save succeeds");
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
+        let before_sidecar = fs::read(&sidecar).expect("the sidecar reads");
+        let saved_digest = app.projects[0].saved_digest.clone();
+        // One more note, so the save below rewrites the sidecar; then a
+        // directory takes the project's place, failing temp + rename on
+        // both lanes (a rename onto a directory never succeeds).
+        in2b_observe_opens(app.focused(), 1, 51);
+        let stash_path = temp.path("edit.kinewright.stashed");
+        fs::rename(&project_path, &stash_path).expect("the project file moves aside");
+        fs::create_dir(&project_path).expect("a directory takes its place");
+        assert!(
+            matches!(
+                app.write_project(&project_path),
+                Err(ProjectSaveError::Write(_))
+            ),
+            "the project write fails"
+        );
+        assert_eq!(
+            fs::read(&sidecar).expect("the sidecar re-reads"),
+            before_sidecar,
+            "the sidecar rolls back to its prior bytes"
+        );
+        assert_eq!(
+            app.projects[0].saved_digest, saved_digest,
+            "the session keeps its old digest"
+        );
+        assert_eq!(
+            app.projects[0].project_path.as_deref(),
+            Some(project_path.as_path()),
+            "and its path"
+        );
+        for entry in fs::read_dir(temp.root()).expect("the dir reads") {
+            let entry = entry.expect("a readable entry");
+            let litter = entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"));
+            assert!(
+                !litter,
+                "no temp litter: {}",
+                entry.file_name().to_string_lossy()
+            );
+        }
+        fs::remove_dir(&project_path).expect("cleanup");
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H12: when no sidecar bytes preceded the failed save, the rollback
+    /// removes the flushed sidecar instead of restoring.
+    #[test]
+    fn in2b_failed_save_as_removes_the_unpaired_sidecar() {
+        let temp = TempDirectory::new("in2b-h12-remove");
+        let (mut app, _engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 1, 41);
+        let dir_path = temp.path("target.kinewright");
+        fs::create_dir(&dir_path).expect("a directory takes the target");
+        let sidecar = sidecar_path_for_project(Some(&dir_path)).expect("derived");
+        assert!(!sidecar.exists(), "no sidecar precedes the save");
+        assert!(
+            matches!(
+                app.write_project(&dir_path),
+                Err(ProjectSaveError::Write(_))
+            ),
+            "the project write fails"
+        );
+        assert!(
+            !sidecar.exists(),
+            "the rollback removes the flushed sidecar"
+        );
+        fs::remove_dir(&dir_path).expect("cleanup");
         in2b_shutdown(&mut app);
     }
 }

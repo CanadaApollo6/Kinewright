@@ -627,6 +627,15 @@ fn ack_ok(job: WriterJob) {
     }
 }
 
+/// The temp file one job lands through (N6/H9): beside the sidecar, so
+/// the rename is atomic — with the process id and the job sequence, so no
+/// two processes share a temp name.
+fn sidecar_temp_path(sidecar_path: &Path, seq: u64) -> PathBuf {
+    let mut temp = sidecar_path.as_os_str().to_owned();
+    temp.push(format!(".{}.{seq}.tmp", std::process::id()));
+    PathBuf::from(temp)
+}
+
 /// Land one job: per-job unique temp file, then rename over the sidecar.
 ///
 /// The temp lives beside the sidecar so the rename is atomic on both lanes; a
@@ -639,10 +648,11 @@ fn write_one_job(
     bytes: &[u8],
     rename_hook: &RenameHook,
 ) -> io::Result<()> {
-    let mut temp = sidecar_path.as_os_str().to_owned();
-    temp.push(format!(".{seq}.tmp"));
-    let temp = PathBuf::from(temp);
+    let temp = sidecar_temp_path(sidecar_path, seq);
     fs::write(&temp, bytes)?;
+    // N6/H9: the temp's bytes reach the disk before the rename does, so a
+    // crash between the two cannot surface torn bytes.
+    fs::File::open(&temp)?.sync_all()?;
     if let Ok(slot) = rename_hook.lock()
         && let Some(hook) = slot.clone()
     {
@@ -700,6 +710,19 @@ mod tests {
             Some(PathBuf::from("edit.kinewright-incidents"))
         );
         assert_eq!(sidecar_path_for_project(Some(Path::new("/"))), None);
+    }
+
+    /// N6/H9: temp names carry the process id and the job sequence — no two
+    /// processes share a temp name.
+    #[test]
+    fn sidecar_temp_names_carry_pid_and_sequence() {
+        assert_eq!(
+            sidecar_temp_path(Path::new("/tmp/x/edit.kinewright-incidents"), 7),
+            PathBuf::from(format!(
+                "/tmp/x/edit.kinewright-incidents.{}.7.tmp",
+                std::process::id()
+            ))
+        );
     }
 
     #[test]

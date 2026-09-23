@@ -344,6 +344,22 @@ pub(crate) fn write_project_document(
 }
 
 /// Write pre-serialised project bytes: the write half of
+/// Write bytes atomically: temp beside the target, then rename (N6/H12).
+/// A failed rename removes its temp, best-effort, so failures do not
+/// litter the project directory. The temp carries the process id; project
+/// writes are synchronous, so no sequence is needed.
+pub(crate) fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(format!(".{}.tmp", std::process::id()));
+    let temp = PathBuf::from(temp);
+    fs::write(&temp, contents)?;
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// [`write_project_document`], split so the save path can flush the sidecar
 /// (which needs the digest) between serialising and writing, with one
 /// serialisation total (`IN2B` §4 rule 2, §2 rule 9).
@@ -356,7 +372,8 @@ pub(crate) fn write_project_bytes(
     path: &Path,
     previous_store: Option<&LutStore>,
 ) -> Result<ProjectSaveReport, ProjectSaveError> {
-    fs::write(path, json).map_err(|error| ProjectSaveError::Write(error.to_string()))?;
+    write_file_atomic(path, json.as_bytes())
+        .map_err(|error| ProjectSaveError::Write(error.to_string()))?;
     let (next_store, lut_store_error) = match derive_lut_store(Some(path)) {
         Ok(store) => (store, None),
         Err(reason) => (None, Some(reason)),
