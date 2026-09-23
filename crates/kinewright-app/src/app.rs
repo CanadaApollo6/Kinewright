@@ -7,7 +7,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use eframe::egui;
@@ -32,6 +32,10 @@ use crate::{
         ProjectSaveError, ProjectSaveReport, ProjectSession, derive_lut_store,
         focus_publishes_lut_library, index_after_close, project_name, session_index_by_id,
         write_project_document,
+    },
+    sidecar::{
+        SidecarMode, SidecarWriter, digest_bytes, sidecar_path_for_project,
+        sidecar_write_failed_observation,
     },
     theme::{self, color, size, space},
     timeline_ui::is_internal_marker,
@@ -274,6 +278,12 @@ pub(crate) struct KinewrightApp {
     /// IN1 §5.2/§5.4: incident recoveries the router sent and is still
     /// waiting to hear back about.
     pending_router_applies: Vec<RouterApply>,
+    /// The ONE sidecar writer thread, shared by every project session
+    /// (`IN2B` §2 rule 5, N2/B-5).
+    pub(crate) sidecar_writer: Arc<SidecarWriter>,
+    /// When the debounced background sidecar flush last submitted (`IN2B` §2
+    /// rule 4): at most 2 s after the last log change.
+    sidecar_last_submit: Instant,
     pub(crate) media_cache_dialog_open: bool,
     pub(crate) media_cache_inventory: Option<kinewright_core::MediaCacheInventory>,
     pub(crate) media_cache_clear_pending: Option<kinewright_core::MediaCacheFamily>,
@@ -396,6 +406,7 @@ impl KinewrightApp {
         let analysis: Arc<dyn Analysis> = media.clone();
         let exporter: Arc<dyn Export> = media.clone();
         let lut_publisher = media;
+        let sidecar_writer = SidecarWriter::new();
         let mut project = ProjectSession::create(
             1,
             name,
@@ -404,6 +415,8 @@ impl KinewrightApp {
             &playback,
             &analysis,
             &exporter,
+            SidecarMode::Load,
+            Some(Arc::clone(&sidecar_writer)),
         )
         .expect("startup project session must be valid");
         if project_path.is_some() {
@@ -479,6 +492,8 @@ impl KinewrightApp {
             pending_router_conflicts: Vec::new(),
             pending_router_landings: Vec::new(),
             pending_router_applies: Vec::new(),
+            sidecar_writer,
+            sidecar_last_submit: Instant::now(),
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             media_cache_clear_pending: None,
@@ -639,12 +654,14 @@ impl KinewrightApp {
         name: String,
         document: Document,
         project_path: Option<PathBuf>,
+        sidecar_mode: SidecarMode,
     ) -> Result<ProjectSession, String> {
         let id = self.next_project_id;
         self.next_project_id = self
             .next_project_id
             .checked_add(1)
             .ok_or_else(|| "project session identity space is exhausted".to_owned())?;
+        let writer = Arc::clone(&self.sidecar_writer);
         let mut session = ProjectSession::create(
             id,
             name,
@@ -653,6 +670,8 @@ impl KinewrightApp {
             &self.playback,
             &self.analysis,
             &self.exporter,
+            sidecar_mode,
+            Some(writer),
         )?;
         // The investigator settings are app-wide: a new project inherits the
         // focused copy rather than re-reading the file. Mutes stay
@@ -742,7 +761,62 @@ impl KinewrightApp {
             snapshot = injected;
             &snapshot
         };
-        let report = write_project_document(to_write, path, previous_store.as_ref())?;
+        // `IN2B` §2 rule 9: the sidecar lands *before* the project bytes,
+        // carrying the digest the project file is about to have plus the one
+        // it had. The digest needs the serialised bytes first, so this
+        // serialises once here (C2's envelope makes `write_project_document`
+        // return its digest, removing the second serialisation).
+        let new_digest = {
+            let json = serde_json::to_string_pretty(to_write)
+                .map_err(|error| ProjectSaveError::Serialize(error.to_string()))?;
+            digest_bytes(json.as_bytes())
+        };
+        let save_as = self.focused().project_path.as_deref() != Some(path);
+        if save_as {
+            // N2/B-4: the newer-format note was about the old path's bytes —
+            // a live-log removal, not a resolution, before the fresh sidecar
+            // is written so the new stem carries no false card.
+            let incidents = Arc::clone(&self.focused().incidents);
+            let mut log = incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ =
+                log.remove_open_with_code(IncidentCode::Label(LabelIncident::ProjectNewerFormat));
+        }
+        // Same sidecar stem, same previous save; a new stem has no previous.
+        let previous_digest = if sidecar_path_for_project(self.focused().project_path.as_deref())
+            == sidecar_path_for_project(Some(path))
+        {
+            self.focused().saved_digest.clone()
+        } else {
+            String::new()
+        };
+        // The session takes the new path BEFORE the sidecar flush, so the
+        // flush derives the new stem: a Save As must carry the live log to
+        // the new sidecar (leaving the old one in place), and a first save
+        // must write a sidecar at all. Restored below if the project write
+        // fails, so a failed save claims no path.
+        let old_path = self.focused().project_path.clone();
+        self.focused_mut().project_path = Some(path.to_path_buf());
+        // `IN2B` §2 rule 6: a sidecar write failure never fails the project
+        // save — exactly one incident, then the save carries on.
+        if let Err(error) = self
+            .focused_mut()
+            .flush_incidents(&new_digest, &previous_digest)
+        {
+            let revision = self.focused().revision;
+            self.note_observation(sidecar_write_failed_observation(
+                error.to_string(),
+                revision,
+            ));
+        }
+        let report = match write_project_document(to_write, path, previous_store.as_ref()) {
+            Ok(report) => report,
+            Err(error) => {
+                self.focused_mut().project_path = old_path;
+                return Err(error);
+            }
+        };
         let name = project_name(Some(path), &self.focused().name);
         let (store, store_error) = match derive_lut_store(Some(path)) {
             Ok(store) => (store, None),
@@ -751,6 +825,7 @@ impl KinewrightApp {
         let session = self.focused_mut();
         session.name = name;
         session.project_path = Some(path.to_path_buf());
+        session.saved_digest.clone_from(&new_digest);
         session.set_lut_store(store, store_error);
         session.saved_document = Some(Arc::clone(&session.document));
         if let Some(investigator) = session.investigator.as_mut() {
@@ -834,7 +909,12 @@ impl KinewrightApp {
 
     pub(crate) fn new_project(&mut self) {
         let name = format!("Project {}", self.next_project_id);
-        let session = match self.create_project_session(name, default_project_document(), None) {
+        let session = match self.create_project_session(
+            name,
+            default_project_document(),
+            None,
+            SidecarMode::None,
+        ) {
             Ok(session) => session,
             Err(error) => {
                 // Appendix B row 6.
@@ -872,19 +952,23 @@ impl KinewrightApp {
             .collect();
         let fallback = format!("Project {}", self.next_project_id);
         let name = project_name(Some(path), &fallback);
-        let mut session =
-            match self.create_project_session(name, document, Some(path.to_path_buf())) {
-                Ok(session) => session,
-                // Appendix B row 8.
-                Err(error) => {
-                    self.note_label(
-                        LabelIncident::Project,
-                        IncidentSubject::Project,
-                        format!("Could not open {}: {error}", path.display()),
-                    );
-                    return;
-                }
-            };
+        let mut session = match self.create_project_session(
+            name,
+            document,
+            Some(path.to_path_buf()),
+            SidecarMode::Load,
+        ) {
+            Ok(session) => session,
+            // Appendix B row 8.
+            Err(error) => {
+                self.note_label(
+                    LabelIncident::Project,
+                    IncidentSubject::Project,
+                    format!("Could not open {}: {error}", path.display()),
+                );
+                return;
+            }
+        };
         session.saved_document = Some(Arc::clone(&session.document));
         let assets = session.document.media_pool.clone();
         let store_refusal = session.lut_store_error.clone();
@@ -1175,6 +1259,31 @@ impl KinewrightApp {
     /// on an `Open` entry. Nothing is re-sent — a send happens only for a
     /// newly opened incident — and a card press always reads the live
     /// revision, so the person can still apply or revert from the card.
+    ///
+    /// `IN2B` §2 rule 4's background half: at most 2 s after the last log
+    /// change on any open project, submit each changed project's bytes to the
+    /// ONE writer thread without joining, then drain async failures into one
+    /// `sidecar_write_failed` note each. The notes queue to the focused
+    /// project — the D14-consistent attribution every `note_*` shorthand
+    /// shares — with the failing path in the message.
+    fn poll_sidecar_flush(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.sidecar_last_submit) < Duration::from_secs(2) {
+            return;
+        }
+        self.sidecar_last_submit = now;
+        for project in &mut self.projects {
+            project.queue_incidents_flush();
+        }
+        for (path, error) in self.sidecar_writer.take_errors() {
+            let revision = self.focused().revision;
+            self.note_observation(sidecar_write_failed_observation(
+                format!("{}: {error}", path.display()),
+                revision,
+            ));
+        }
+    }
+
     pub(crate) fn route_incidents(&mut self) {
         let observations = std::mem::take(&mut self.pending_observations);
         let conflicts = std::mem::take(&mut self.pending_router_conflicts);
@@ -2038,6 +2147,9 @@ impl KinewrightApp {
         // IN1 §5.2b rule 16: the incident router runs once per update, after
         // both event drains, and never from inside either.
         self.route_incidents();
+        // `IN2B` §2 rule 4: the debounced sidecar flush runs after the router,
+        // so the generations it compares have settled for this tick.
+        self.poll_sidecar_flush();
 
         let mut newest_frame = None;
         while let Ok(frame) = self.frames.try_recv() {
@@ -2219,7 +2331,12 @@ impl eframe::App for KinewrightApp {
             let journal_path = request.journal_path;
             let name = project_name(request.project_path.as_deref(), "Recovered project");
             let result = self
-                .create_project_session(name, request.document, request.project_path)
+                .create_project_session(
+                    name,
+                    request.document,
+                    request.project_path,
+                    SidecarMode::RecoveryNoDigest,
+                )
                 .map(|session| {
                     let assets = session.document.media_pool.clone();
                     self.projects.push(session);
@@ -4605,9 +4722,18 @@ pub(crate) mod in1_tests {
         let playback: Arc<dyn Playback> = engine.clone();
         let analysis: Arc<dyn Analysis> = engine.clone();
         let exporter: Arc<dyn Export> = engine.clone();
-        let project =
-            ProjectSession::create(1, "IN1", document, None, &playback, &analysis, &exporter)
-                .expect("the test session builds");
+        let project = ProjectSession::create(
+            1,
+            "IN1",
+            document,
+            None,
+            &playback,
+            &analysis,
+            &exporter,
+            SidecarMode::None,
+            None,
+        )
+        .expect("the test session builds");
         let (probe_tx, probe_rx) = std::sync::mpsc::channel();
         let (relink_probe_tx, relink_probe_rx) = std::sync::mpsc::channel();
         let (lut_import_tx, lut_import_rx) = std::sync::mpsc::channel();
@@ -4656,6 +4782,8 @@ pub(crate) mod in1_tests {
             pending_router_conflicts: Vec::new(),
             pending_router_landings: Vec::new(),
             pending_router_applies: Vec::new(),
+            sidecar_writer: SidecarWriter::new(),
+            sidecar_last_submit: Instant::now(),
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             media_cache_clear_pending: None,
@@ -7522,6 +7650,8 @@ pub(crate) mod in1_tests {
             &app.playback,
             &app.analysis,
             &app.exporter,
+            SidecarMode::None,
+            None,
         )
         .expect("the second IN2 project builds");
         app.projects.push(project);
@@ -9012,5 +9142,509 @@ pub(crate) mod in1_tests {
             "every returned-open pair dedups on a later observation"
         );
         in2_cleanup(&mut app);
+    }
+}
+
+/// `IN2B` §12 items over the real save/close/reopen paths, headless.
+///
+/// The smallest real app that can save: one project session on a real `Core`
+/// actor with a project path, a real engine behind the trait arcs (the save
+/// path publishes the LUT library through the concrete engine), and the app's
+/// single shared sidecar writer. No window, no model, no audio device — the
+/// same terms §12 lays down. Save/close/reopen run through the production
+/// methods (`write_project`, `stop_threads`, `ProjectSession::create` with
+/// `SidecarMode::Load`), so no test here can pass with the sidecar plumbing
+/// absent.
+#[cfg(test)]
+mod in2b_tests {
+    use std::fs;
+
+    use kinewright_core::{
+        IncidentCode, IncidentId, IncidentObservation, IncidentOutcome, IncidentProposal,
+        IncidentSubject, LabelIncident, Observed, TimelineRevision,
+    };
+    use kinewright_media::{FfmpegMediaEngine, test_support::TempDirectory};
+
+    use super::*;
+    use crate::sidecar::{FlushOutcome, SidecarLoad, load_sidecar, sidecar_matches_project};
+
+    /// The smallest real app that can save, on an optional project path.
+    #[allow(clippy::too_many_lines)]
+    fn in2b_harness(
+        document: Document,
+        project_path: Option<PathBuf>,
+    ) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
+        let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
+        let playback: Arc<dyn Playback> = engine.clone();
+        let analysis: Arc<dyn Analysis> = engine.clone();
+        let exporter: Arc<dyn Export> = engine.clone();
+        let writer = SidecarWriter::new();
+        let mode = if project_path.is_some() {
+            SidecarMode::Load
+        } else {
+            SidecarMode::None
+        };
+        let project = ProjectSession::create(
+            1,
+            "IN2B",
+            document,
+            project_path,
+            &playback,
+            &analysis,
+            &exporter,
+            mode,
+            Some(Arc::clone(&writer)),
+        )
+        .expect("the test session builds");
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let (relink_probe_tx, relink_probe_rx) = std::sync::mpsc::channel();
+        let (lut_import_tx, lut_import_rx) = std::sync::mpsc::channel();
+        let (lut_restore_tx, lut_restore_rx) = std::sync::mpsc::channel();
+        let (media_status_tx, media_status_rx) = std::sync::mpsc::channel();
+        let (cache_clear_tx, cache_clear_rx) = std::sync::mpsc::channel();
+        let (room_tone_tx, room_tone_rx) = std::sync::mpsc::channel();
+        let (_frames_tx, frames) = crossbeam_channel::unbounded();
+        let (_media_tx, media_events) = crossbeam_channel::unbounded();
+        let app = KinewrightApp {
+            projects: vec![project],
+            focused_project: 0,
+            next_project_id: 2,
+            next_command_token: 1,
+            playback,
+            analysis,
+            exporter,
+            lut_publisher: Arc::clone(&engine),
+            frames,
+            media_events,
+            visual_cache: crate::visual_cache::VisualCache::new(engine.visual_asset_results()),
+            harness: std::array::from_fn(|_| crate::chat_ui::HarnessUiState::default()),
+            harness_update_rx: None,
+            show_thread_rail: true,
+            settings_open: false,
+            probe_tx,
+            probe_rx,
+            relink_probe_tx,
+            relink_probe_rx,
+            relink_probe_pending: 0,
+            lut_import_tx,
+            lut_import_rx,
+            lut_restore_tx,
+            lut_restore_rx,
+            lut_worker_pending: 0,
+            lut_import_reservation: None,
+            look_browser: crate::look_browser_ui::LookBrowserState::default(),
+            media_status_tx,
+            media_status_rx,
+            cache_clear_tx,
+            cache_clear_rx,
+            media_statuses: crate::media_workflow::MediaStatusStore::default(),
+            pending_source_edit: None,
+            pending_legacy_relink: None,
+            pending_observations: Vec::new(),
+            pending_router_conflicts: Vec::new(),
+            pending_router_landings: Vec::new(),
+            pending_router_applies: Vec::new(),
+            sidecar_writer: writer,
+            sidecar_last_submit: Instant::now(),
+            media_cache_dialog_open: false,
+            media_cache_inventory: None,
+            media_cache_clear_pending: None,
+            media_cache_clear_result: None,
+            texture: None,
+            color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
+            color_qc: crate::color_qc_ui::ColorQcState::default(),
+            noise_learn: NoiseLearnState::default(),
+            room_tone_tx,
+            room_tone_rx,
+            room_tone_pending: 0,
+            qc_mask: crate::preview_ui::QcMaskState::default(),
+            working_proof_cache: Arc::default(),
+            matte_overlay: crate::matte_overlay_ui::MatteOverlayState::default(),
+            playing: false,
+            meter_levels: [0.0; 2],
+            mixer_levels: crate::mixer_ui::MixerMeterLevels::default(),
+            mixer_selection: None,
+            resume_after_scrub: false,
+            transcript_scope: TranscriptScope::default(),
+            material_tab: MaterialTab::default(),
+            show_material_strip: false,
+            show_media_rail: false,
+            pending_project_action: None,
+            exit_discarded_projects: Vec::new(),
+            allow_close: false,
+            last_window_title: String::new(),
+            status: "Ready".to_owned(),
+            export_dialog: ExportDialog {
+                open: false,
+                output: "export.mp4".to_owned(),
+                width: 320,
+                height: 180,
+                fps_numerator: 25,
+                fps_denominator: 1,
+                delivery_aspect: None,
+                focus_x_percent: 50,
+                focus_y_percent: 50,
+                conformance_cache: None,
+                delivery_bit_depth: kinewright_core::DeliveryEncodeDepth::default(),
+                normalize_loudness: false,
+                verification: None,
+                audio_verification: None,
+                audio_report: None,
+            },
+            export_job: None,
+            help_open: false,
+            ripple_mode: false,
+            error_log: ErrorLog::default(),
+            error_log_open: false,
+            incidents_open: false,
+            screenshot: crate::screenshot::ScreenshotCapture::from_environment(),
+            recording: None,
+            record_dialog: crate::recording::RecordDialog::default(),
+            edit_gesture: 0,
+            look_ab_hold: None,
+            look_ab_hold_seen: false,
+            performance: None,
+        };
+        (app, engine)
+    }
+
+    fn in2b_shutdown(app: &mut KinewrightApp) {
+        super::in1_tests::in1_shutdown(app);
+    }
+
+    fn in2b_shutdown_session(session: &mut ProjectSession) {
+        for thread in &mut session.threads {
+            if let Some(server) = thread.mcp_server.take() {
+                server.shutdown();
+            }
+        }
+    }
+
+    /// Observe `count` distinct open incidents into a session's log, at
+    /// distinct non-default revisions so the restore rebase is visible.
+    fn in2b_observe_opens(session: &ProjectSession, count: usize, first_revision: u64) {
+        let mut log = session
+            .incidents
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for n in 0..count {
+            let observed = log.observe(IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::Project),
+                IncidentSubject::Project,
+                format!("in2b live incident {first_revision}-{n}"),
+                TimelineRevision(first_revision + n as u64),
+            ));
+            assert!(
+                matches!(observed, Observed::Opened(_)),
+                "distinct observations open distinctly"
+            );
+        }
+    }
+
+    /// Item 14: a proposal recorded after the last document save survives a
+    /// close without saving, and the reopen restores every record with its
+    /// digest pair verifying — plus the B-5 gate box.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2b_a_proposal_after_the_last_save_survives_close_reopen() {
+        let temp = TempDirectory::new("in2b-close-reopen");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, _engine) = in2b_harness(Document::default(), Some(project_path.clone()));
+
+        // Three open plus two resolved.
+        in2b_observe_opens(&app.projects[0], 5, 41);
+        let proposal_id = {
+            let mut log = app.projects[0]
+                .incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let ids: Vec<IncidentId> = log.all().map(|incident| incident.id).collect();
+            assert_eq!(ids.len(), 5);
+            assert!(log.resolve(ids[3], IncidentOutcome::Explained));
+            assert!(log.resolve(ids[4], IncidentOutcome::Explained));
+            assert_eq!(log.open_count(), 3);
+            ids[0]
+        };
+
+        // Save; the sidecar carries every record.
+        app.write_project(&project_path).expect("the save succeeds");
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
+        assert!(sidecar.is_file(), "the save writes a sidecar");
+        let SidecarLoad::Current(before_load) = load_sidecar(&sidecar) else {
+            panic!("the saved sidecar parses");
+        };
+        assert_eq!(before_load.records.len(), 5);
+
+        // A proposal recorded after the last document save.
+        {
+            let mut log = app.projects[0]
+                .incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(log.begin_investigation(proposal_id));
+            log.record_proposal(
+                proposal_id,
+                IncidentProposal {
+                    operations: vec![Operation::SetTrackMix {
+                        track: TrackId(1),
+                        gain_tenth_db: -60,
+                        pan_percent: 25,
+                        mute: false,
+                        solo: true,
+                    }],
+                    operation_count: 1,
+                    summary: "in2b post-save proposal".to_owned(),
+                    explanation: "recorded after the last document save".to_owned(),
+                    base_revision: TimelineRevision(99),
+                    stale: false,
+                },
+            )
+            .expect("the proposal records");
+        }
+
+        // Close without saving, driving `stop_threads`: the sidecar bytes
+        // change — read before/after, never mtime.
+        let before = fs::read(&sidecar).expect("the sidecar reads");
+        app.projects[0].stop_threads("the project was closed");
+        let after = fs::read(&sidecar).expect("the sidecar re-reads");
+        assert_ne!(before, after, "the close flushed the post-save proposal");
+
+        // Reopen through `ProjectSession::create` with `SidecarMode::Load`.
+        let document = load_document(&project_path).expect("the project re-reads");
+        let playback = Arc::clone(&app.playback);
+        let analysis = Arc::clone(&app.analysis);
+        let exporter = Arc::clone(&app.exporter);
+        let writer = Arc::clone(&app.sidecar_writer);
+        let mut reopened = ProjectSession::create(
+            7,
+            "reopened",
+            document,
+            Some(project_path.clone()),
+            &playback,
+            &analysis,
+            &exporter,
+            SidecarMode::Load,
+            Some(writer),
+        )
+        .expect("the reopen builds");
+        let report = reopened
+            .last_restore_report
+            .as_ref()
+            .expect("the reopen reports");
+        assert_eq!(report.restored_open, 3);
+        assert_eq!(report.restored_resolved, 2);
+        {
+            let log = reopened
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // The badge counter reads the open count.
+            assert_eq!(log.open_count(), 3);
+            assert_eq!(log.len(), 5);
+            let proposal = log
+                .all()
+                .find_map(|incident| incident.proposal.clone())
+                .expect("the proposal survived");
+            assert!(proposal.stale, "loaded proposals are stale");
+            assert!(proposal.operation_count >= 1);
+            assert!(proposal.operations.is_empty());
+            // Every restored revision rebases to the opening (a fresh
+            // session opens at the default); the base revision with them.
+            for incident in log.all() {
+                assert_eq!(incident.revision, TimelineRevision::default());
+            }
+        }
+        assert_eq!(
+            report.rebased, 6,
+            "five revisions plus the proposal base revision"
+        );
+        // The digest pair verifies against the bytes on disk.
+        let digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
+        let SidecarLoad::Current(loaded) = load_sidecar(&sidecar) else {
+            panic!("the closed sidecar parses");
+        };
+        assert!(
+            sidecar_matches_project(&loaded, &digest),
+            "the digest pair verifies"
+        );
+        // A re-flush of the restored log agrees with the restore report.
+        let outcome = reopened
+            .flush_incidents(&digest, &digest)
+            .expect("the re-flush lands");
+        let FlushOutcome::Written(written) = outcome else {
+            panic!("the restored log has content to write");
+        };
+        assert_eq!(written.written_open, 3);
+        assert_eq!(written.written_resolved, 2);
+
+        // B-5 gate box: a save during an in-flight background write leaves
+        // the save's digest pair, never the stale job's bytes.
+        let stale =
+            crate::sidecar::build_sidecar_bytes(&[], &[], "aaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaa")
+                .expect("the stale snapshot builds");
+        app.sidecar_writer.submit(sidecar.clone(), stale);
+        app.write_project(&project_path).expect("the save succeeds");
+        let landed_digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
+        let SidecarLoad::Current(landed) = load_sidecar(&sidecar) else {
+            panic!("the saved sidecar parses");
+        };
+        assert_eq!(landed.project_digest, landed_digest);
+        assert_ne!(landed.project_digest, "aaaaaaaaaaaaaaaa");
+
+        in2b_shutdown_session(&mut reopened);
+        in2b_shutdown(&mut app);
+    }
+
+    /// Item 16: Save As writes a fresh sidecar at the new stem carrying the
+    /// live log with a fresh digest, leaves the old sidecar byte-identical,
+    /// and drops the open `project_newer_format` note (B-4) — so a
+    /// newer-format session's copy reopens with 0 incidents.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2b_save_as_carries_the_live_log_and_leaves_the_old_sidecar() {
+        // The carry: two live incidents follow the project to its new stem.
+        let temp = TempDirectory::new("in2b-save-as");
+        let a_path = temp.path("a.kinewright");
+        let (mut app, _engine) = in2b_harness(Document::default(), Some(a_path.clone()));
+        in2b_observe_opens(&app.projects[0], 2, 11);
+        app.write_project(&a_path).expect("the first save succeeds");
+        let a_sidecar = sidecar_path_for_project(Some(&a_path)).expect("derived");
+        let a_bytes = fs::read(&a_sidecar).expect("the old sidecar reads");
+
+        let b_path = temp.path("b.kinewright");
+        app.write_project(&b_path).expect("Save As succeeds");
+        assert_eq!(
+            fs::read(&a_sidecar).expect("the old sidecar re-reads"),
+            a_bytes,
+            "Save As leaves the old sidecar byte-identical"
+        );
+        {
+            let log = app.projects[0]
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 2, "the live log is intact");
+        }
+        let b_sidecar = sidecar_path_for_project(Some(&b_path)).expect("derived");
+        let b_digest = digest_bytes(&fs::read(&b_path).expect("the copy reads"));
+        let SidecarLoad::Current(b_loaded) = load_sidecar(&b_sidecar) else {
+            panic!("the new sidecar parses");
+        };
+        assert_eq!(b_loaded.records.len(), 2, "the live log carried");
+        assert_eq!(b_loaded.project_digest, b_digest, "fresh digest");
+        assert!(
+            b_loaded.previous_digest.is_empty(),
+            "a new stem has no previous save"
+        );
+
+        // The B-4 drop: a session whose only incident is the newer-format
+        // note (stood in by direct observe — C2's gate notes it) saves a
+        // copy that reopens with 0 incidents. A second project on the SAME
+        // engine: one engine per test, because a second `FfmpegMediaEngine`
+        // crashes inside the NVIDIA driver during concurrent GPU init
+        // (coredump 2182070: `Compositor::new` → `create_render_pipeline` →
+        // `libnvidia-glcore` SEGV on the media worker).
+        let c_path = temp.path("c.kinewright");
+        let id = app.next_project_id;
+        app.next_project_id += 1;
+        let playback = Arc::clone(&app.playback);
+        let analysis = Arc::clone(&app.analysis);
+        let exporter = Arc::clone(&app.exporter);
+        let writer = Arc::clone(&app.sidecar_writer);
+        let second = ProjectSession::create(
+            id,
+            "second",
+            Document::default(),
+            Some(c_path.clone()),
+            &playback,
+            &analysis,
+            &exporter,
+            SidecarMode::Load,
+            Some(writer),
+        )
+        .expect("the second project builds");
+        app.projects.push(second);
+        app.focused_project = 1;
+        {
+            let mut log = app.projects[1]
+                .incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            log.observe(IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::ProjectNewerFormat),
+                IncidentSubject::Project,
+                "stood-in newer-format note",
+                TimelineRevision::default(),
+            ));
+        }
+        let d_path = temp.path("d.kinewright");
+        app.write_project(&d_path).expect("Save As succeeds");
+        {
+            let log = app.projects[1]
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 0, "Save As drops the newer-format note");
+            assert_eq!(log.len(), 0, "a removal, not a resolution");
+        }
+        let document = load_document(&d_path).expect("the copy re-reads");
+        let playback = Arc::clone(&app.playback);
+        let analysis = Arc::clone(&app.analysis);
+        let exporter = Arc::clone(&app.exporter);
+        let writer = Arc::clone(&app.sidecar_writer);
+        let mut reopened = ProjectSession::create(
+            9,
+            "copy",
+            document,
+            Some(d_path),
+            &playback,
+            &analysis,
+            &exporter,
+            SidecarMode::Load,
+            Some(writer),
+        )
+        .expect("the copy reopens");
+        {
+            let log = reopened
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 0);
+        }
+        in2b_shutdown_session(&mut reopened);
+        in2b_shutdown(&mut app);
+    }
+
+    /// Item 36: a sidecar write failure notes exactly one
+    /// `sidecar_write_failed` and the project save returns success anyway.
+    /// The failure is portable across lanes: the sidecar path occupied by a
+    /// directory, so temp + rename fails with no chmod.
+    #[test]
+    fn in2b_a_sidecar_write_failure_notes_once_and_saves_anyway() {
+        let temp = TempDirectory::new("in2b-write-failed");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, _engine) = in2b_harness(Document::default(), Some(project_path.clone()));
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
+        fs::create_dir(&sidecar).expect("the sidecar path is occupied");
+
+        app.write_project(&project_path)
+            .expect("the save succeeds despite the sidecar failure");
+        assert!(project_path.is_file(), "the project bytes landed");
+        assert!(sidecar.is_dir(), "the failed rename clobbers nothing");
+
+        app.route_incidents();
+        let log = app.projects[0]
+            .incidents
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(log.open_count(), 1);
+        let only = log.all().next().expect("the failure noted");
+        assert_eq!(
+            only.code,
+            IncidentCode::Label(LabelIncident::SidecarWriteFailed)
+        );
+        assert!(only.transient, "every §5 note is transient");
+        drop(log);
+        in2b_shutdown(&mut app);
     }
 }

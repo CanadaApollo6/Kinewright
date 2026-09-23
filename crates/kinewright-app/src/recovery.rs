@@ -812,7 +812,10 @@ fn scan_directory(directory: &Path) -> Vec<PendingJournal> {
 
 /// FNV-1a, chosen over the standard hasher because journal names must stay
 /// stable across builds and Rust versions to find their project again.
-fn fnv1a_64(bytes: &[u8]) -> u64 {
+///
+/// Shared with the sidecar pairing digest (`IN2B` §0.4 d2), which needs the
+/// same stability for the same reason: one implementation, two callers.
+pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &byte in bytes {
         hash ^= u64::from(byte);

@@ -9,9 +9,10 @@ use std::{
 
 use kinewright_core::{
     Analysis, AssetId, ClipId, Core, Document, Event, Export, IncidentCode, IncidentEvidence,
-    IncidentLog, IncidentObservation, IncidentSubject, LutAssetId, LutAvailabilityKind,
-    LutAvailabilityStatus, MarkerId, MediaKind, Playback, RejectionIncident, TimeCode,
-    TimelineRevision, TrackId, TrackKind,
+    IncidentId, IncidentLog, IncidentObservation, IncidentSubject, LutAssetId, LutAvailabilityKind,
+    LutAvailabilityStatus, MarkerId, MediaKind, Operation, Playback, RejectionIncident,
+    RestoreReport, RunningInvestigation, TimeCode, TimelineRevision, TrackId, TrackKind,
+    should_flush,
 };
 use kinewright_media::{LutLibrary, LutStore};
 
@@ -19,6 +20,11 @@ use crate::{
     chat_ui::{AgentHarnessChoice, AgentThread, ChatEntry},
     investigator::InvestigatorSession,
     recovery::Recovery,
+    sidecar::{
+        FlushOutcome, SidecarLoad, SidecarMode, SidecarWriter, build_sidecar_bytes, digest_bytes,
+        load_sidecar, refuse_sidecar, sidecar_matches_project, sidecar_path_for_project,
+        sidecar_refused_observation, sidecar_write_failed_observation,
+    },
     transcript_ui::TranscriptSelection,
 };
 
@@ -293,6 +299,30 @@ pub(crate) struct ProjectSession {
     /// The incident log every MCP server in this session shares, in the shape
     /// `agent_project_path` already uses (CC4 §2.2).
     pub(crate) incidents: IncidentLogHandle,
+    /// The digest of the project bytes on disk as this session last saw them
+    /// (`IN2B` §2 rule 9). `""` when no save is known (unsaved projects,
+    /// refused loads, recovery restores); updated on every save.
+    pub(crate) saved_digest: String,
+    /// The app's ONE sidecar writer thread, shared by every session (N2/B-5).
+    /// Headless tests that pass `None` get a private writer for isolation.
+    pub(crate) sidecar_writer: Arc<SidecarWriter>,
+    /// Raw sidecar record texts carried verbatim across this run (`IN2B` §2
+    /// rule 8b, N4/F3): re-emitted byte-equal on every write, never pruned.
+    pub(crate) carried_sidecar_records: Vec<String>,
+    /// Refused opening-context operations by incident id (`IN2B` §3 rule 13):
+    /// filled from `RestoreReport.refused` at load; the queue drain fills it
+    /// at write, and the first session for the incident consumes it (C5).
+    pub(crate) refused_by_id: BTreeMap<IncidentId, Operation>,
+    /// The log generation the last flush wrote, for [`should_flush`].
+    pub(crate) last_written_gen: u64,
+    /// What the open-time sidecar load did, when one ran. `None` for new
+    /// projects and refused loads; the report's `carried`/`refused` halves
+    /// move into the fields above, the counts stay here for the gate.
+    ///
+    /// Read by the gate (item 14) and by nothing else: production consumes
+    /// the halves, not the counts.
+    #[allow(dead_code)]
+    pub(crate) last_restore_report: Option<RestoreReport>,
     /// Runtime, never-serialized LUT availability, one entry per document
     /// asset, refreshed whenever the library is rebuilt (CC4 §2.3).
     pub(crate) lut_availability: BTreeMap<LutAssetId, LutAvailabilityStatus>,
@@ -367,8 +397,123 @@ struct SourceMonitorState {
     source_audio_target: Option<TrackId>,
 }
 
+/// What the open-time sidecar load hands the new session (`IN2B` §2 rule 5).
+struct LoadedSessionSidecar {
+    saved_digest: String,
+    carried: Vec<String>,
+    refused: BTreeMap<IncidentId, Operation>,
+    last_written_gen: u64,
+    report: Option<RestoreReport>,
+}
+
+impl LoadedSessionSidecar {
+    fn empty() -> Self {
+        Self {
+            saved_digest: String::new(),
+            carried: Vec::new(),
+            refused: BTreeMap::new(),
+            last_written_gen: 0,
+            report: None,
+        }
+    }
+}
+
+/// Load a session's history at creation: parse, gate, restore or refuse.
+///
+/// Every arm opens the project — incidents are recoverable state, the
+/// timeline is not — and no arm deletes a sidecar it cannot read (rule 8).
+/// Refusals rename to first-free `.bak` and note exactly one
+/// `sidecar_refused` directly into the still-private log (the router is not
+/// running yet; the code is off-allowlist, so no session could start
+/// anyway). Restore runs before any note (N4.1).
+///
+/// `Load` recomputes the project digest over the file bytes; C2 threads it
+/// from `load_document` instead of this second read. A `Load` whose project
+/// bytes cannot be re-read loads ungated — the document is already in memory,
+/// so the file vanished in a race, and history is better loaded than dropped.
+/// `RecoveryNoDigest` skips the gate by rule; version arms still apply.
+fn load_session_sidecar(
+    mode: SidecarMode,
+    project_path: Option<&Path>,
+    incidents: &IncidentLogHandle,
+    opening: TimelineRevision,
+) -> LoadedSessionSidecar {
+    if mode == SidecarMode::None {
+        return LoadedSessionSidecar::empty();
+    }
+    let Some(project_path) = project_path else {
+        return LoadedSessionSidecar::empty();
+    };
+    let Some(sidecar_path) = sidecar_path_for_project(Some(project_path)) else {
+        return LoadedSessionSidecar::empty();
+    };
+    let project_digest = (mode == SidecarMode::Load)
+        .then(|| {
+            fs::read(project_path)
+                .ok()
+                .map(|bytes| digest_bytes(&bytes))
+        })
+        .flatten();
+    let mut loaded = LoadedSessionSidecar::empty();
+    if let Some(digest) = &project_digest {
+        loaded.saved_digest.clone_from(digest);
+    }
+    let refused = |reason: String| {
+        let _ = refuse_sidecar(&sidecar_path);
+        let mut log = incidents
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = log.observe(sidecar_refused_observation(reason, opening));
+    };
+    match load_sidecar(&sidecar_path) {
+        SidecarLoad::Absent => {}
+        SidecarLoad::Newer(version) => refused(format!(
+            "the sidecar was written by a newer Kinewright (format_version {version}); \
+             the project opens with an empty history and the file is kept beside it"
+        )),
+        SidecarLoad::Corrupt(reason) => refused(format!(
+            "the sidecar could not be read ({reason}); \
+             the project opens with an empty history and the file is kept beside it"
+        )),
+        SidecarLoad::Current(current) => {
+            let gated = match &project_digest {
+                Some(digest) => sidecar_matches_project(&current, digest),
+                None => true,
+            };
+            if !gated {
+                refused(
+                    "the sidecar belongs to a different project file (neither digest matches); \
+                     the project opens with an empty history and the file is kept beside it"
+                        .to_owned(),
+                );
+                return loaded;
+            }
+            let mut log = incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let report = log.restore(current.records, current.carried, opening, current.id_floor);
+            // The disk now matches memory (carried bytes included — a
+            // carried-only restore moves no generation, and must not force a
+            // rewrite of bytes already on disk), so the flush baseline is the
+            // post-restore generation, whatever it is.
+            loaded.last_written_gen = log.generation();
+            loaded.carried.clone_from(&report.carried);
+            loaded.refused.clone_from(&report.refused);
+            loaded.report = Some(report);
+        }
+    }
+    loaded
+}
+
 impl ProjectSession {
     /// Build every actor, channel, recovery recorder, and initial thread for a project.
+    ///
+    /// `sidecar_mode` decides the open-time history load (`IN2B` §2 rule 5,
+    /// N2/B-1): startup reopen and `open_project` pass `Load`, recovery
+    /// restore passes `RecoveryNoDigest`, new projects pass `None`.
+    /// `sidecar_writer` is the app's shared writer; `None` spawns a private
+    /// one for headless-test isolation.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create(
         id: u64,
         name: impl Into<String>,
@@ -377,6 +522,8 @@ impl ProjectSession {
         playback: &Arc<dyn Playback>,
         analysis: &Arc<dyn Analysis>,
         exporter: &Arc<dyn Export>,
+        sidecar_mode: SidecarMode,
+        sidecar_writer: Option<Arc<SidecarWriter>>,
     ) -> Result<Self, String> {
         let name = name.into();
         let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
@@ -409,6 +556,16 @@ impl ProjectSession {
         let incidents: IncidentLogHandle = std::sync::Arc::new(std::sync::RwLock::new(
             IncidentLog::with_start(Instant::now(), Some(SystemTime::now())),
         ));
+        // The open-time history load runs here, before any note and before
+        // the log handle is shared with the first agent thread below (N4.1):
+        // restore requires an empty log and no id may collide with it.
+        let sidecar_writer = sidecar_writer.unwrap_or_else(SidecarWriter::new);
+        let loaded = load_session_sidecar(
+            sidecar_mode,
+            project_path.as_deref(),
+            &incidents,
+            TimelineRevision::default(),
+        );
         let session = Self {
             id,
             name,
@@ -421,6 +578,12 @@ impl ProjectSession {
             lut_store_error,
             agent_project_path: std::sync::Arc::clone(&agent_project_path),
             incidents: std::sync::Arc::clone(&incidents),
+            saved_digest: loaded.saved_digest,
+            sidecar_writer,
+            carried_sidecar_records: loaded.carried,
+            refused_by_id: loaded.refused,
+            last_written_gen: loaded.last_written_gen,
+            last_restore_report: loaded.report,
             lut_availability: statuses.into_iter().collect(),
             lut_library: Arc::new(library),
             saved_document: None,
@@ -571,6 +734,114 @@ impl ProjectSession {
         }
     }
 
+    /// Build this session's sidecar bytes without writing them (`IN2B` §2
+    /// rule 5).
+    ///
+    /// Records are built on the caller under a read lock; the running
+    /// session's turns and visible counters flush into an `Investigating`
+    /// entry exactly as a live end would (§3 rule 4), the restored stash
+    /// rides by id (rule 13), and carried texts re-emit verbatim (rule 8b).
+    /// Both the joining flush and the background submit build through here,
+    /// so one builder means one bytes shape.
+    pub(crate) fn sidecar_bytes_for_save(
+        &self,
+        project_digest: &str,
+        previous_digest: &str,
+    ) -> Result<(Vec<u8>, kinewright_core::WriteReport), String> {
+        let running: Option<RunningInvestigation> = self
+            .investigator
+            .as_ref()
+            .and_then(InvestigatorSession::running_investigation);
+        let log = self
+            .incidents
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (records, report) = log.records(running.as_ref(), &self.refused_by_id);
+        let bytes = build_sidecar_bytes(
+            &records,
+            &self.carried_sidecar_records,
+            project_digest,
+            previous_digest,
+        )?;
+        Ok((bytes, report))
+    }
+
+    /// The one synchronous sidecar seam: build every write and land it
+    /// through the writer thread, joining (`IN2B` §2 rules 4–5).
+    ///
+    /// `Ok` after a successful temp + rename (report populated), `Err` after
+    /// a failed one — the caller notes `sidecar_write_failed` per rule 6 and
+    /// carries on. Unsaved projects report `Skipped` and attempt no IO
+    /// (rule 10, N-5).
+    pub(crate) fn flush_incidents(
+        &mut self,
+        project_digest: &str,
+        previous_digest: &str,
+    ) -> std::io::Result<FlushOutcome> {
+        let Some(sidecar_path) = sidecar_path_for_project(self.project_path.as_deref()) else {
+            return Ok(FlushOutcome::Skipped);
+        };
+        let (bytes, report) = self
+            .sidecar_bytes_for_save(project_digest, previous_digest)
+            .map_err(std::io::Error::other)?;
+        self.sidecar_writer.submit_and_join(sidecar_path, bytes)?;
+        self.last_written_gen = self
+            .incidents
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation();
+        Ok(FlushOutcome::Written(report))
+    }
+
+    /// [`Self::flush_incidents`] when the log moved since the last write,
+    /// `Skipped` otherwise — the close/exit and background shape (`IN2B` §2
+    /// rule 4).
+    ///
+    /// A flush that finds `generation() == last_written_gen` skips the IO
+    /// entirely: the digest pair would be identical anyway. Saves do not call
+    /// this — a save always rewrites the pair over new bytes.
+    pub(crate) fn flush_incidents_if_changed(&mut self) -> std::io::Result<FlushOutcome> {
+        if self.project_path.is_none() {
+            return Ok(FlushOutcome::Skipped);
+        }
+        let generation = self
+            .incidents
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation();
+        if !should_flush(generation, self.last_written_gen, Instant::now()) {
+            return Ok(FlushOutcome::Skipped);
+        }
+        let digest = self.saved_digest.clone();
+        self.flush_incidents(&digest, &digest)
+    }
+
+    /// Queue a debounced background flush without joining (`IN2B` §2 rule 4).
+    ///
+    /// Unchanged logs and unsaved projects queue nothing. Failures surface
+    /// through [`SidecarWriter::take_errors`], which the frame thread drains
+    /// into `sidecar_write_failed` notes. The baseline advances optimistically
+    /// at submit: a failed submit's incident is the retry signal, not a
+    /// 2 s resubmit churn.
+    pub(crate) fn queue_incidents_flush(&mut self) {
+        let Some(sidecar_path) = sidecar_path_for_project(self.project_path.as_deref()) else {
+            return;
+        };
+        let generation = self
+            .incidents
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation();
+        if !should_flush(generation, self.last_written_gen, Instant::now()) {
+            return;
+        }
+        let digest = self.saved_digest.clone();
+        if let Ok((bytes, _)) = self.sidecar_bytes_for_save(&digest, &digest) {
+            self.sidecar_writer.submit(sidecar_path, bytes);
+            self.last_written_gen = generation;
+        }
+    }
+
     /// Cue an asset in the Source viewer without changing the Program
     /// playhead. New source selections start with the complete source range
     /// and deterministic first-compatible patch destinations.
@@ -617,6 +888,22 @@ impl ProjectSession {
         if let Some(investigator) = self.investigator.as_mut() {
             let incidents = std::sync::Arc::clone(&self.incidents);
             investigator.shutdown_for_close(reason, &incidents);
+        }
+        // `IN2B` §2 rule 4 (N2/B-5): the sidecar flushes after
+        // `shutdown_for_close` — close-time records already carry the real
+        // close reason — whether or not the project is dirty. A failed flush
+        // notes one `sidecar_write_failed` directly (the router is not
+        // running on this path) and never fails the close.
+        if let Err(error) = self.flush_incidents_if_changed() {
+            let revision = self.revision;
+            let mut log = self
+                .incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = log.observe(sidecar_write_failed_observation(
+                error.to_string(),
+                revision,
+            ));
         }
         for thread in &mut self.threads {
             if let Some(session) = &mut thread.session {
@@ -798,8 +1085,8 @@ mod tests {
     use super::*;
     use kinewright_core::{
         Clip, ClipContent, ColorDescription, Document, Effect, EffectId, LUT_ASSET_ID_PARAMETER,
-        LutAsset, MediaAsset, MediaSourceFingerprint, Operation, ParamValue, Rational, Track,
-        apply_batch,
+        LabelIncident, LutAsset, MediaAsset, MediaSourceFingerprint, Operation, ParamValue,
+        Rational, Track, apply_batch,
     };
     use kinewright_media::{BuiltinLook, LutAssetImport, test_support::TempDirectory};
 
@@ -1732,6 +2019,8 @@ mod tests {
             &playback,
             &analysis,
             &exporter,
+            SidecarMode::None,
+            None,
         )
         .expect("the dirty-test session builds")
     }
@@ -1927,5 +2216,533 @@ mod tests {
             );
             shutdown_test_session(&mut session);
         }
+    }
+
+    /// A session on a project file with the digest-gated load, behind the stub
+    /// media backends. Each caller shuts its session down.
+    fn sidecar_session(id: u64, path: &Path) -> ProjectSession {
+        let playback: Arc<dyn Playback> = Arc::new(StubMedia);
+        let analysis: Arc<dyn Analysis> = Arc::new(StubMedia);
+        let exporter: Arc<dyn Export> = Arc::new(StubMedia);
+        ProjectSession::create(
+            id,
+            "sidecar-test",
+            Document::default(),
+            Some(path.to_path_buf()),
+            &playback,
+            &analysis,
+            &exporter,
+            SidecarMode::Load,
+            None,
+        )
+        .expect("the sidecar-test session builds")
+    }
+
+    fn sorted_entries(directory: &Path) -> Vec<String> {
+        let mut entries: Vec<String> = fs::read_dir(directory)
+            .expect("the watched directory reads")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    /// Item 17: an unsaved project derives no sidecar path, reports `Skipped`,
+    /// and writes nothing on close.
+    #[test]
+    fn in2b_an_unsaved_project_does_no_sidecar_io() {
+        // Asserted, not assumed (N-5).
+        assert_eq!(sidecar_path_for_project(None), None);
+
+        let mut session = dirty_test_session(Document::default());
+        // Give the flush something it would write, so `Skipped` is a decision.
+        {
+            let mut log = session
+                .incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            log.observe(IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::Project),
+                IncidentSubject::Project,
+                "in2b unsaved flush",
+                TimelineRevision::default(),
+            ));
+            assert!(log.generation() > 0);
+        }
+        assert_eq!(
+            session
+                .flush_incidents("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
+                .expect("an unsaved flush reports"),
+            FlushOutcome::Skipped
+        );
+        assert_eq!(
+            session
+                .flush_incidents_if_changed()
+                .expect("an unsaved conditional flush reports"),
+            FlushOutcome::Skipped
+        );
+        // Close performs zero filesystem writes, watched.
+        let watched = TempDirectory::new("in2b-unsaved-io");
+        let before = sorted_entries(watched.root());
+        session.stop_threads("in2b test close");
+        assert_eq!(sorted_entries(watched.root()), before);
+        // And no failure incident: nothing failed, nothing was attempted.
+        let log = session
+            .incidents
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(log.open_count(), 1);
+        drop(log);
+        shutdown_test_session(&mut session);
+    }
+
+    /// One fresh sidecar-test project file in `dir`.
+    fn sidecar_project_file(dir: &TempDirectory, name: &str) -> PathBuf {
+        let path = dir.path(name);
+        write_project_document(&Document::default(), &path, None).expect("project writes");
+        path
+    }
+
+    /// The pairing digest of project bytes on disk.
+    fn project_digest_of(path: &Path) -> String {
+        digest_bytes(&fs::read(path).expect("the project file reads"))
+    }
+
+    /// Two records through the production builder, with distinct revisions so
+    /// the rebase is visible.
+    fn two_records() -> Vec<kinewright_core::IncidentRecord> {
+        let mut log = IncidentLog::with_start(
+            std::time::Instant::now(),
+            Some(std::time::SystemTime::UNIX_EPOCH),
+        );
+        for (n, revision) in [41u64, 42].into_iter().enumerate() {
+            log.observe(IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::Project),
+                IncidentSubject::Project,
+                format!("in2b arm record {n}"),
+                TimelineRevision(revision),
+            ));
+        }
+        let (records, _) = log.records(None, &BTreeMap::new());
+        assert_eq!(records.len(), 2);
+        records
+    }
+
+    /// Item 15: every sidecar arm behaves — missing, corrupt, versionless,
+    /// newer, mismatched, older, second refusal, carried records, torn-read
+    /// window, oversize version, and the carried-only generation rule.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2b_each_sidecar_arm_behaves() {
+        use crate::sidecar::SidecarLoad;
+
+        // Missing → `Absent`: empty log, silent.
+        let missing_dir = TempDirectory::new("in2b-arm-missing");
+        let missing_project = sidecar_project_file(&missing_dir, "edit.kinewright");
+        let missing_sidecar =
+            sidecar_path_for_project(Some(&missing_project)).expect("a saved project derives");
+        assert_eq!(load_sidecar(&missing_sidecar), SidecarLoad::Absent);
+        let mut session = sidecar_session(21, &missing_project);
+        {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(log.is_empty());
+            assert_eq!(log.open_count(), 0);
+        }
+        assert!(session.last_restore_report.is_none());
+        shutdown_test_session(&mut session);
+
+        // Truncated → `Corrupt`: 1 `sidecar_refused`, the project opens, the
+        // refused bytes move to first-free `.bak`.
+        let corrupt_dir = TempDirectory::new("in2b-arm-corrupt");
+        let corrupt_project = sidecar_project_file(&corrupt_dir, "edit.kinewright");
+        let corrupt_sidecar =
+            sidecar_path_for_project(Some(&corrupt_project)).expect("a saved project derives");
+        fs::write(&corrupt_sidecar, b"{ truncated").expect("the torn sidecar writes");
+        assert!(matches!(
+            load_sidecar(&corrupt_sidecar),
+            SidecarLoad::Corrupt(_)
+        ));
+        let mut session = sidecar_session(22, &corrupt_project);
+        {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 1);
+            let only = log.all().next().expect("the refusal noted");
+            assert_eq!(
+                only.code,
+                IncidentCode::Label(LabelIncident::SidecarRefused)
+            );
+        }
+        let bak = corrupt_sidecar.with_extension("kinewright-incidents.bak");
+        assert!(!corrupt_sidecar.exists(), "the refused file moves away");
+        assert_eq!(fs::read(&bak).expect("bak reads"), b"{ truncated");
+        // A second refusal lands `.bak.1`, leaving `.bak` byte-identical.
+        fs::write(&corrupt_sidecar, b"truncated again").expect("the second torn sidecar writes");
+        shutdown_test_session(&mut session);
+        let mut session = sidecar_session(23, &corrupt_project);
+        let mut bak1_name = corrupt_sidecar.as_os_str().to_owned();
+        bak1_name.push(".bak.1");
+        let bak1 = PathBuf::from(bak1_name);
+        assert_eq!(fs::read(&bak).expect("first bak reads"), b"{ truncated");
+        assert_eq!(
+            fs::read(&bak1).expect("second bak reads"),
+            b"truncated again"
+        );
+        shutdown_test_session(&mut session);
+
+        // Versionless → `Corrupt("missing format_version")` + `.bak`.
+        let versionless_dir = TempDirectory::new("in2b-arm-versionless");
+        let versionless_project = sidecar_project_file(&versionless_dir, "edit.kinewright");
+        let versionless_sidecar =
+            sidecar_path_for_project(Some(&versionless_project)).expect("a saved project derives");
+        fs::write(
+            &versionless_sidecar,
+            r#"{"project_digest":"aa","previous_digest":"aa","records":[]}"#,
+        )
+        .expect("the versionless sidecar writes");
+        assert_eq!(
+            load_sidecar(&versionless_sidecar),
+            SidecarLoad::Corrupt("missing format_version".to_owned())
+        );
+        let mut session = sidecar_session(24, &versionless_project);
+        {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 1);
+        }
+        assert!(!versionless_sidecar.exists());
+        shutdown_test_session(&mut session);
+
+        // Newer → `Newer(999)`: 1 incident, `.bak` keeps the original bytes.
+        let newer_dir = TempDirectory::new("in2b-arm-newer");
+        let newer_project = sidecar_project_file(&newer_dir, "edit.kinewright");
+        let newer_sidecar =
+            sidecar_path_for_project(Some(&newer_project)).expect("a saved project derives");
+        let newer_bytes =
+            r#"{"format_version":999,"project_digest":"aa","previous_digest":"aa","records":[]}"#;
+        fs::write(&newer_sidecar, newer_bytes).expect("the newer sidecar writes");
+        assert_eq!(load_sidecar(&newer_sidecar), SidecarLoad::Newer(999));
+        let mut session = sidecar_session(25, &newer_project);
+        {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 1);
+            let only = log.all().next().expect("the refusal noted");
+            assert!(
+                only.observed.contains("newer Kinewright"),
+                "the card names the newer writer: {}",
+                only.observed
+            );
+        }
+        let newer_bak = newer_sidecar.with_extension("kinewright-incidents.bak");
+        assert_eq!(
+            fs::read(&newer_bak).expect("bak reads"),
+            newer_bytes.as_bytes()
+        );
+        assert!(!newer_sidecar.exists(), "the original path is gone");
+        shutdown_test_session(&mut session);
+
+        // Both digests swapped → refused with 1 incident + `.bak`.
+        let mismatch_dir = TempDirectory::new("in2b-arm-mismatch");
+        let mismatch_project = sidecar_project_file(&mismatch_dir, "edit.kinewright");
+        let mismatch_sidecar =
+            sidecar_path_for_project(Some(&mismatch_project)).expect("a saved project derives");
+        let records = two_records();
+        let mismatch_bytes =
+            build_sidecar_bytes(&records, &[], "0000000000000000", "ffffffffffffffff")
+                .expect("the mismatched sidecar builds");
+        fs::write(&mismatch_sidecar, &mismatch_bytes).expect("the mismatched sidecar writes");
+        let mut session = sidecar_session(26, &mismatch_project);
+        {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 1);
+            let only = log.all().next().expect("the refusal noted");
+            assert_eq!(
+                only.code,
+                IncidentCode::Label(LabelIncident::SidecarRefused)
+            );
+            assert!(
+                only.observed.contains("different project"),
+                "the card names the mix-up: {}",
+                only.observed
+            );
+        }
+        let mismatch_bak = mismatch_sidecar.with_extension("kinewright-incidents.bak");
+        assert_eq!(fs::read(&mismatch_bak).expect("bak reads"), mismatch_bytes);
+        shutdown_test_session(&mut session);
+
+        // Version 0 → `Current`: loads, 0 incidents.
+        let zero_dir = TempDirectory::new("in2b-arm-zero");
+        let zero_project = sidecar_project_file(&zero_dir, "edit.kinewright");
+        let zero_sidecar =
+            sidecar_path_for_project(Some(&zero_project)).expect("a saved project derives");
+        let digest = project_digest_of(&zero_project);
+        let zero_bytes =
+            build_sidecar_bytes(&records, &[], &digest, &digest).expect("the v0 body builds");
+        let zero_text = String::from_utf8(zero_bytes)
+            .expect("sidecars are UTF-8")
+            .replacen("\"format_version\": 1", "\"format_version\": 0", 1);
+        fs::write(&zero_sidecar, &zero_text).expect("the v0 sidecar writes");
+        let mut session = sidecar_session(27, &zero_project);
+        {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 2);
+            assert_eq!(log.len(), 2);
+        }
+        let report = session
+            .last_restore_report
+            .as_ref()
+            .expect("a version-0 load reports");
+        assert_eq!(report.restored_open, 2);
+        shutdown_test_session(&mut session);
+
+        // One unparseable record among good ones → `Current`: the good load,
+        // the carried bytes re-emit verbatim, and the floor resumes above the
+        // carried id (F2) — with no aggregate when no code is unknown.
+        let carry_dir = TempDirectory::new("in2b-arm-carry");
+        let carry_project = sidecar_project_file(&carry_dir, "edit.kinewright");
+        let carry_sidecar =
+            sidecar_path_for_project(Some(&carry_project)).expect("a saved project derives");
+        let digest = project_digest_of(&carry_project);
+        let good_text = serde_json::to_string(&records[0]).expect("the good record serialises");
+        let bad_text = r#"{"id": 9000, "bogus": [1, 2, {"nested": true}]}"#;
+        let envelope = format!(
+            "{{\"format_version\": 1, \"project_digest\": \"{digest}\", \
+             \"previous_digest\": \"{digest}\", \"records\": [{good_text}, {bad_text}]}}"
+        );
+        fs::write(&carry_sidecar, &envelope).expect("the carrying sidecar writes");
+        let mut session = sidecar_session(28, &carry_project);
+        {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 1, "the good record loads");
+            assert!(
+                log.all().all(|incident| incident.code
+                    != IncidentCode::Label(LabelIncident::SidecarUnknownCodes)),
+                "no unknown code, no aggregate"
+            );
+        }
+        assert_eq!(
+            session.carried_sidecar_records,
+            vec![bad_text.to_owned()],
+            "the unparseable record carries"
+        );
+        // The floor resumes above the carried id: the restored record holds
+        // id 1, so without the floor the fresh id would be 2.
+        let fresh = {
+            let mut log = session
+                .incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            log.observe(IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::Project),
+                IncidentSubject::Project,
+                "in2b after carried floor",
+                TimelineRevision::default(),
+            ))
+        };
+        assert_eq!(fresh, kinewright_core::Observed::Opened(IncidentId(9001)));
+        // The carried bytes re-emit verbatim on the next write.
+        let outcome = session
+            .flush_incidents(&digest, &digest)
+            .expect("the carrying flush lands");
+        assert!(matches!(outcome, FlushOutcome::Written(_)));
+        let rewritten = fs::read(&carry_sidecar).expect("the rewritten sidecar reads");
+        let rewritten = String::from_utf8(rewritten).expect("sidecars are UTF-8");
+        assert!(
+            rewritten.contains(bad_text),
+            "carried bytes re-emit verbatim"
+        );
+        shutdown_test_session(&mut session);
+
+        // Unknown-code records carry verbatim AND aggregate (N4/F3): the raw
+        // text rides in `carried` while `restore` still counts the aggregate,
+        // so body #5 stays true.
+        let unknown_dir = TempDirectory::new("in2b-arm-unknown");
+        let unknown_project = sidecar_project_file(&unknown_dir, "edit.kinewright");
+        let unknown_sidecar =
+            sidecar_path_for_project(Some(&unknown_project)).expect("a saved project derives");
+        let digest = project_digest_of(&unknown_project);
+        let mut unknown_record = records[1].clone();
+        unknown_record.code = "no_such_code_xyz".to_owned();
+        let unknown_text =
+            serde_json::to_string(&unknown_record).expect("the unknown record serialises");
+        let envelope = format!(
+            "{{\"format_version\": 1, \"project_digest\": \"{digest}\", \
+             \"previous_digest\": \"{digest}\", \"records\": [{unknown_text}]}}"
+        );
+        fs::write(&unknown_sidecar, &envelope).expect("the unknown sidecar writes");
+        let mut session = sidecar_session(29, &unknown_project);
+        {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 1);
+            let only = log.all().next().expect("the aggregate noted");
+            assert_eq!(
+                only.code,
+                IncidentCode::Label(LabelIncident::SidecarUnknownCodes)
+            );
+        }
+        assert_eq!(
+            session.carried_sidecar_records,
+            vec![unknown_text.clone()],
+            "the unknown-code raw text carries verbatim"
+        );
+        let report = session
+            .last_restore_report
+            .as_ref()
+            .expect("an unknown-code load reports");
+        assert_eq!(
+            report.unknown_codes,
+            vec![("no_such_code_xyz".to_owned(), 1)]
+        );
+        shutdown_test_session(&mut session);
+
+        // Carried-only restore moves no generation, and the first write-back
+        // of carried bytes does not rely on it: the conditional flush skips
+        // (nothing new), while the joining flush writes the carried bytes.
+        let carried_only_dir = TempDirectory::new("in2b-arm-carried-only");
+        let carried_only_project = sidecar_project_file(&carried_only_dir, "edit.kinewright");
+        let carried_only_sidecar =
+            sidecar_path_for_project(Some(&carried_only_project)).expect("a saved project derives");
+        let digest = project_digest_of(&carried_only_project);
+        let lone_text = r#"{"id": 5, "future": {"shape": true}}"#;
+        let envelope = format!(
+            "{{\"format_version\": 1, \"project_digest\": \"{digest}\", \
+             \"previous_digest\": \"{digest}\", \"records\": [{lone_text}]}}"
+        );
+        fs::write(&carried_only_sidecar, &envelope).expect("the carried-only sidecar writes");
+        let mut session = sidecar_session(30, &carried_only_project);
+        {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(log.is_empty());
+            assert_eq!(log.generation(), 0, "carried-only restore moves nothing");
+        }
+        assert_eq!(
+            session
+                .flush_incidents_if_changed()
+                .expect("the conditional flush reports"),
+            FlushOutcome::Skipped
+        );
+        assert!(matches!(
+            session
+                .flush_incidents(&digest, &digest)
+                .expect("the joining flush lands"),
+            FlushOutcome::Written(_)
+        ));
+        let rewritten = fs::read(&carried_only_sidecar).expect("the rewritten sidecar reads");
+        assert!(
+            String::from_utf8(rewritten)
+                .expect("sidecars are UTF-8")
+                .contains(lone_text),
+            "the write-back carries without relying on generation"
+        );
+        shutdown_test_session(&mut session);
+
+        // S-12 box: a load paused between the temp write and the rename
+        // returns the prior `Current`, never torn bytes.
+        let torn_dir = TempDirectory::new("in2b-arm-torn");
+        let torn_project = sidecar_project_file(&torn_dir, "edit.kinewright");
+        let torn_sidecar =
+            sidecar_path_for_project(Some(&torn_project)).expect("a saved project derives");
+        let digest = project_digest_of(&torn_project);
+        let prior =
+            build_sidecar_bytes(&records, &[], &digest, &digest).expect("the prior sidecar builds");
+        fs::write(&torn_sidecar, &prior).expect("the prior sidecar writes");
+        let writer = SidecarWriter::new();
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        writer.set_rename_hook(Arc::new(move || {
+            let _ = paused_tx.send(());
+            if let Ok(slot) = release_rx.lock() {
+                let _ = slot.recv();
+            }
+        }));
+        let next =
+            build_sidecar_bytes(&[], &[], &digest, &digest).expect("the next sidecar builds");
+        let writer_thread = {
+            let writer = Arc::clone(&writer);
+            let torn_sidecar = torn_sidecar.clone();
+            std::thread::spawn(move || writer.submit_and_join(torn_sidecar, next))
+        };
+        paused_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the writer pauses between temp write and rename");
+        // The load in the window: captured now, asserted after the release so
+        // a failure cannot strand the writer thread mid-hook.
+        let in_window = load_sidecar(&torn_sidecar);
+        let _ = release_tx.send(());
+        writer_thread
+            .join()
+            .expect("the writer thread joins")
+            .expect("the paused write lands");
+        let SidecarLoad::Current(prior_loaded) = in_window else {
+            panic!("the in-window load returns the prior Current, got {in_window:?}");
+        };
+        assert_eq!(prior_loaded.records.len(), 2, "prior bytes, never torn");
+        assert!(
+            sidecar_matches_project(&prior_loaded, &digest),
+            "the prior pair still verifies in the window"
+        );
+        assert_eq!(
+            fs::read(&torn_sidecar).expect("the landed sidecar reads"),
+            build_sidecar_bytes(&[], &[], &digest, &digest).expect("the next sidecar rebuilds"),
+            "the release lands the new bytes"
+        );
+
+        // BR40 at open: an oversize `format_version` refuses as `Corrupt`
+        // (never `Newer`), with 1 incident and the bytes kept in `.bak`.
+        let oversize_dir = TempDirectory::new("in2b-arm-oversize");
+        let oversize_project = sidecar_project_file(&oversize_dir, "edit.kinewright");
+        let oversize_sidecar =
+            sidecar_path_for_project(Some(&oversize_project)).expect("a saved project derives");
+        let oversize_bytes = r#"{"format_version":99999999999,"project_digest":"aa","previous_digest":"aa","records":[]}"#;
+        fs::write(&oversize_sidecar, oversize_bytes).expect("the oversize sidecar writes");
+        assert!(matches!(
+            load_sidecar(&oversize_sidecar),
+            SidecarLoad::Corrupt(_)
+        ));
+        let mut session = sidecar_session(31, &oversize_project);
+        {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 1);
+            assert_eq!(
+                log.all().next().expect("the refusal noted").code,
+                IncidentCode::Label(LabelIncident::SidecarRefused)
+            );
+        }
+        let oversize_bak = oversize_sidecar.with_extension("kinewright-incidents.bak");
+        assert_eq!(
+            fs::read(&oversize_bak).expect("bak reads"),
+            oversize_bytes.as_bytes()
+        );
+        shutdown_test_session(&mut session);
     }
 }

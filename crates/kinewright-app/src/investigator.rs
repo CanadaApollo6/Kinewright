@@ -38,7 +38,7 @@ use kinewright_core::{
     AgentDriver, AgentEvent, AuthenticationStatus, Command, Event, INVESTIGATOR_ALLOWLIST,
     Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome, IncidentProposal,
     IncidentResolver, IncidentState, IncidentSubject, LabelIncident, Operation, Query, QueryResult,
-    SessionConfig, TimelineRevision,
+    RunningInvestigation, SessionConfig, TimelineRevision,
 };
 use serde::{Deserialize, Serialize};
 
@@ -726,6 +726,35 @@ impl InvestigatorSession {
     /// Whether a session is running on this project.
     pub(crate) fn is_running(&self) -> bool {
         self.running.is_some()
+    }
+
+    /// The running session as the sidecar record builder reads it (`IN2B` §3
+    /// rule 4).
+    ///
+    /// Harness and model come from the session's config, turns and the two
+    /// plain token sums from its shared counters; the token sums ride only
+    /// once a cost event has been seen (the card's `tokens_known` rule), and
+    /// the four cached/reasoning/cost mirrors stay `None` — the accumulated
+    /// `SessionCost` lives on the session thread and mirrors once, at the end
+    /// (D-R64), so no mid-run store exists to read. `None` when no session
+    /// runs, in which case an `Investigating` entry writes the defensive
+    /// empty-harness resolver.
+    pub(crate) fn running_investigation(&self) -> Option<RunningInvestigation> {
+        let running = self.running.as_ref()?;
+        let counters = running.counters.snapshot();
+        let tokens_known = running.cost_events.load(Ordering::Relaxed) > 0;
+        Some(RunningInvestigation {
+            id: running.id,
+            harness: running.harness.clone(),
+            model: running.model.clone(),
+            turns: counters.turns,
+            input_tokens: tokens_known.then_some(counters.input_tokens),
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            output_tokens: tokens_known.then_some(counters.output_tokens),
+            reasoning_output_tokens: None,
+            cost_usd_millionths: None,
+        })
     }
 
     #[cfg(test)]

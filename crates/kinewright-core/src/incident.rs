@@ -4026,6 +4026,28 @@ impl IncidentLog {
         true
     }
 
+    /// Drop every open entry carrying `code`, returning how many went.
+    ///
+    /// A live-log removal, not a resolution (`IN2B` §2 rule 7, N2/B-4): Save As
+    /// drops the open `project_newer_format` note because it was about the old
+    /// path's bytes, and carrying it would badge a clean copy with a false
+    /// card. No `Resolved` is recorded, no suppression is written, and resolved
+    /// entries with the code are left alone. Carried walls for dropped ids go
+    /// with them. Bumps the generation when anything was dropped, like every
+    /// `&mut` writer.
+    pub fn remove_open_with_code(&mut self, code: IncidentCode) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|entry| !(entry.state.is_open() && entry.code == code));
+        let dropped = before - self.entries.len();
+        if dropped > 0 {
+            let live: BTreeSet<IncidentId> = self.entries.iter().map(|entry| entry.id).collect();
+            self.loaded_wall.retain(|id, _| live.contains(id));
+            self.bump_generation();
+        }
+        dropped
+    }
+
     /// Point an open incident at the revision it is now stated against.
     ///
     /// The third narrowly typed writer, beside [`Self::telemetry_mut`] and
