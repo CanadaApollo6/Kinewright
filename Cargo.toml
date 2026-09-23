@@ -43,6 +43,10 @@ whisper-rs = "=0.16.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# Kani proof harnesses live under `#[cfg(kani)]` beside the code they prove
+# (`cargo kani` passes `--cfg kani`); declare it so the unexpected_cfgs lint
+# stays quiet in normal builds.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.lints.clippy]
 all = "warn"

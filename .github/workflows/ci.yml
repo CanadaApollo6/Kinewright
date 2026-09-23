@@ -87,3 +87,52 @@ jobs:
           readelf -d target/debug/kinewright-eval | grep -F '[libavcodec.so.62]' || exit 1
           cargo test --workspace || exit 1
           cargo clippy --workspace --all-targets -- -D warnings || exit 1
+
+  kani:
+    name: Kani proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Default key includes rustc (host/release/hash) and a hash of every
+      # Cargo.lock / Cargo.toml, so a lockfile or toolchain bump misses.
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      # `cargo kani setup` downloads the pinned toolchain + CBMC bundle and
+      # no-ops when it is already present, so this cache skips the big
+      # download on warm runners. Both paths: `~/.kani/kani-<version>/
+      # toolchain` is a symlink into the rustup toolchain dir, so caching
+      # only `~/.kani` would restore a dangling link. The toolchain dir
+      # name comes with the Kani version — bump both together.
+      - name: Cache Kani
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.kani
+            ~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu
+          key: kani-0.68.0
+
+      # No native-deps step: kinewright-core is pure Rust (ab_glyph,
+      # crossbeam-channel, schemars, serde, thiserror), and the Kani bundle
+      # ships prebuilt binaries (compiler, CBMC, solvers).
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier --version 0.68.0
+          cargo kani setup
+
+      # Only the named, admitted harnesses (each < 5 min / < 6 GB per the
+      # admission rule in incident.rs): never bare `cargo kani`, which would
+      # also pick up future proofs that do not meet the rule.
+      - name: Verify admitted proofs
+        run: |
+          set -euo pipefail
+          cargo kani -p kinewright-core --harness kani_restore_id_resume || exit 1
+          cargo kani -p kinewright-core --harness kani_compact_json_len_anchor || exit 1
+          cargo kani -p kinewright-core --harness kani_compact_json_len_symbolic || exit 1

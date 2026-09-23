@@ -3256,6 +3256,51 @@ const MAX_PERSISTED_RESOLVED: usize = 256;
 /// `MAX_RESTORED_ID + 1` and `observe` never saturates in practice.
 const MAX_RESTORED_ID: u64 = u64::MAX / 2;
 
+/// The id-relevant outcome of scanning restore's records (N4.1).
+struct RestoreIdResume {
+    /// The value `next_id` resumes to; `None` when nothing restorable was
+    /// seen and no floor was given, in which case `restore` leaves `next_id`
+    /// put (an empty log's is 1).
+    next_id: Option<u64>,
+    /// How many unknown-code records were skipped: `restore` notes its
+    /// rule-6 aggregate — consuming one fresh id — exactly when nonzero.
+    unknown_skipped: usize,
+}
+
+/// Pure id resume for [`IncidentLog::restore`]: above every restorable id in
+/// `ids` — at or below `MAX_RESTORED_ID`, known- or unknown-coded alike —
+/// and the `id_floor` clamped to the ceiling, via `checked_add`.
+///
+/// Split out so Kani can prove the resume arithmetic without the serde and
+/// heap machinery of `restore`; `restore` is its only caller. Each pair is
+/// `(id, code_known)`; unknown-code records always reach the scan (they
+/// count toward `unknown_skipped` whether or not their id is restorable),
+/// while over-ceiling and duplicate known ids never do — the former must
+/// not move the maximum, the latter cannot — exactly as the inline loop did
+/// (N4 F2, F4, N4.1).
+fn restore_id_resume(ids: &[(u64, bool)], id_floor: Option<u64>) -> RestoreIdResume {
+    let mut max_id: Option<u64> = None;
+    let mut unknown_skipped = 0_usize;
+    for &(id, known) in ids {
+        if !known {
+            unknown_skipped += 1;
+        }
+        if id <= MAX_RESTORED_ID {
+            max_id = Some(max_id.map_or(id, |max| max.max(id)));
+        }
+    }
+    // Above EVERY restorable id: restored, unknown-code, and the raw carried
+    // values' floor from the app, clamped to the ceiling. `checked_add`, never
+    // `saturating_add` — overflow is impossible by construction now, and the
+    // checked form documents that rather than trusting it (N4 F2, N4.1).
+    let floor = id_floor.map(|floor| floor.min(MAX_RESTORED_ID));
+    let highest = max_id.into_iter().chain(floor).max();
+    RestoreIdResume {
+        next_id: highest.and_then(|max| max.checked_add(1)),
+        unknown_skipped,
+    }
+}
+
 /// Past this many compact-JSON bytes the refused-op stash is omitted from the
 /// record (`IN2B` §0.4 d5): IN2 §3.4 rule 23's elision, reused rather than
 /// re-minted, so one number means "an op too big to ship" everywhere it ships
@@ -4483,8 +4528,12 @@ impl IncidentLog {
             refused: BTreeMap::new(),
             invalid_ids: 0,
         };
-        let mut skipped = 0_usize;
-        let mut max_id: Option<u64> = None;
+        // The id-relevant scan of the records, collected for the pure
+        // resume below: `(id, code_known)`. Unknown-code records always reach
+        // it (they count toward the aggregate whether or not their id is
+        // restorable); over-ceiling and duplicate known ids never do — the
+        // first record with an id wins (N4 F4, N4.1).
+        let mut id_inputs: Vec<(u64, bool)> = Vec::new();
         let mut seen: BTreeSet<u64> = BTreeSet::new();
         for stored in records {
             let id = stored.id.0;
@@ -4494,10 +4543,7 @@ impl IncidentLog {
                 // they are restorable — but only restorable ids count toward
                 // the resume (N4.1).
                 Self::count_unknown(&mut report.unknown_codes, stored.code);
-                if !over_ceiling {
-                    max_id = Some(max_id.map_or(id, |max| max.max(id)));
-                }
-                skipped += 1;
+                id_inputs.push((id, false));
                 continue;
             };
             // Past the ceiling, or a duplicate: skipped and counted (N4 F4,
@@ -4506,24 +4552,21 @@ impl IncidentLog {
                 report.invalid_ids += 1;
                 continue;
             }
-            max_id = Some(max_id.map_or(id, |max| max.max(id)));
+            id_inputs.push((id, true));
             self.restore_one(code, stored, opening, &mut report);
         }
-        // Above EVERY restorable id in the file: restored, unknown-code, and
-        // the raw carried values' floor from the app, clamped to the ceiling.
-        // `checked_add`, never `saturating_add` — overflow is impossible by
-        // construction now, and the checked form documents that rather than
-        // trusting it (N4 F2, N4.1).
-        let floor = id_floor.map(|floor| floor.min(MAX_RESTORED_ID));
-        let highest = max_id.into_iter().chain(floor).max();
-        if let Some(next) = highest.and_then(|max| max.checked_add(1)) {
+        let resume = restore_id_resume(&id_inputs, id_floor);
+        if let Some(next) = resume.next_id {
             self.next_id = next;
         }
-        if skipped > 0 {
+        if resume.unknown_skipped > 0 {
             let mut aggregate = IncidentObservation::plain(
                 IncidentCode::Label(LabelIncident::SidecarUnknownCodes),
                 IncidentSubject::Project,
-                format!("{UNKNOWN_CODES_OBSERVED_PREFIX}{skipped} skipped"),
+                format!(
+                    "{UNKNOWN_CODES_OBSERVED_PREFIX}{} skipped",
+                    resume.unknown_skipped
+                ),
                 opening,
             );
             // Every note with a §5 code is transient (§5 rule 1): the load
@@ -9187,5 +9230,220 @@ mod tests {
         };
         // The resume is untouched by the refused ids: the aggregate took 1.
         assert_eq!(fresh, IncidentId(2));
+    }
+}
+
+/// Kani proof harnesses: compiled only under `cargo kani`, which passes
+/// `--cfg kani`. Never compiled into normal builds.
+///
+/// Admission rule (adopt-narrowly verdict, spike report
+/// `target/review/kani/spike-report.md`): a proof is admitted only if it
+/// completes in < 5 min and < 6 GB. Symbolic strings (UTF-8 validation
+/// dominates past any bound) and map containers (`BTreeMap` internals OOM
+/// even at 1 entry) are out of scope — the string/byte-scan targets were
+/// tried and dropped as infeasible. One `kani::assert` per harness
+/// wherever a failure must not mask another check: a failing assert aborts
+/// the path, so the concrete anchor lives in its own harness rather than
+/// ahead of the symbolic one.
+#[cfg(kani)]
+mod kani_proofs {
+    /// Small no-float shape exercising the counter's struct, sequence,
+    /// option, map, integer, boolean, string and unit/newtype/struct-variant
+    /// enum arms — the value shapes `Operation` uses.
+    #[derive(serde::Serialize)]
+    struct KaniShape<'a> {
+        id: u32,
+        flag: bool,
+        maybe: Option<u8>,
+        pair: [u16; 2],
+        name: &'a str,
+        meta: KaniMap,
+        kind: KaniKind,
+    }
+
+    /// One-entry `{"k": value}` map with a manual `Serialize` impl: it
+    /// drives exactly the counter's `serialize_map` / `serialize_entry`
+    /// arms, without `BTreeMap`'s prover-hostile navigate/dealloc
+    /// machinery (a 1-entry `BTreeMap` field OOMs past 6 GB — spike
+    /// report §4). What is under test is the counter's accounting, which
+    /// sees only `Serializer` calls, never the driver's container.
+    struct KaniMap(u32);
+
+    impl serde::Serialize for KaniMap {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_entry("k", &self.0)?;
+            map.end()
+        }
+    }
+
+    #[derive(serde::Serialize)]
+    enum KaniKind {
+        Unit,
+        Newtype(u32),
+        Pair { x: u8, y: bool },
+    }
+
+    /// Decimal width of `value` (≤ `u32::MAX`, so ≤ 10 digits).
+    fn kani_digits(mut value: u32) -> usize {
+        let mut len = 1;
+        while value >= 10 {
+            value /= 10;
+            len += 1;
+        }
+        len
+    }
+
+    /// Independent copy of the `serde_json` escape table (see
+    /// `json_escaped_byte_len`), exercised here only on the empty string:
+    /// the escape table gets no symbolic coverage — the existing
+    /// `serde_json` differential unit tests anchor the table itself on real
+    /// data.
+    fn kani_escape_len(bytes: &[u8]) -> usize {
+        let mut len = 0;
+        for &byte in bytes {
+            len += match byte {
+                b'"' | b'\\' | 0x08 | 0x09 | 0x0a | 0x0c | 0x0d => 2,
+                0x00..=0x1f => 6,
+                _ => 1,
+            };
+        }
+        len
+    }
+
+    /// N4.1: the resume id lands above every restorable input id and above
+    /// the clamped floor, and the next `observe` id stays far below
+    /// `u64::MAX`. The resume id itself is the checked one — the rule-6
+    /// aggregate takes it and is pushed into `entries`, so it is a live id
+    /// the moment one is noted — and the floor half is checked explicitly,
+    /// since dropping it leaves a `fresh > id`-only harness green.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn kani_restore_id_resume() {
+        const N: usize = 4;
+        let count: usize = kani::any();
+        kani::assume(count <= N);
+        let ids: [(u64, bool); N] = kani::any();
+        let id_floor: Option<u64> = kani::any();
+        let resume = super::restore_id_resume(&ids[..count], id_floor);
+        // `restore` requires an empty log, whose `next_id` is 1 — and only
+        // `observe`'s open arm moves `next_id`, always alongside an
+        // `entries.push`, so empty means 1 exactly.
+        let resumed = resume.next_id.unwrap_or(1);
+        let fresh = resumed + u64::from(resume.unknown_skipped > 0);
+        // One assert over the whole conjunction: the resume clears every
+        // restorable id and the clamped floor, and the next observe id
+        // keeps headroom below `u64::MAX` (`observe`'s `saturating_add`
+        // never sticks; Kani also checks the `+ 1` above for overflow).
+        let mut ok = fresh <= super::MAX_RESTORED_ID + 2;
+        for i in 0..count {
+            ok &= ids[i].0 > super::MAX_RESTORED_ID || resumed > ids[i].0;
+        }
+        if let Some(floor) = id_floor {
+            ok &= resumed > floor.min(super::MAX_RESTORED_ID);
+        }
+        kani::assert(
+            ok,
+            "resume clears every restorable id and the clamped floor; next observe keeps headroom",
+        );
+    }
+
+    /// BR2: [`super::compact_json_len`] is exact for no-float shapes. This
+    /// anchor pins the hand-written oracle formula itself against a
+    /// hand-counted value; it caught the swapped `serialize_bool` widths
+    /// the spike found (spike report §4, fixed on main).
+    #[kani::proof]
+    fn kani_compact_json_len_anchor() {
+        // `{"id":0,"flag":false,"maybe":null,"pair":[0,0],"name":"",
+        // "meta":{"k":0},"kind":"Unit"}` is 86 bytes by hand count.
+        let anchor = KaniShape {
+            id: 0,
+            flag: false,
+            maybe: None,
+            pair: [0, 0],
+            name: "",
+            meta: KaniMap(0),
+            kind: KaniKind::Unit,
+        };
+        kani::assert(
+            super::compact_json_len(&anchor) == 86,
+            "oracle formula matches the hand-computed anchor",
+        );
+    }
+
+    /// The symbolic half of the BR2 exactness check: the counter's
+    /// structural accounting, integer widths and enum shapes over all small
+    /// values (the string field is concrete-empty — a symbolic `&str`
+    /// OOMs; see below). The escape table gets no symbolic coverage here —
+    /// the `serde_json` differential unit tests remain its anchor.
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn kani_compact_json_len_symbolic() {
+        let id: u32 = kani::any();
+        let flag: bool = kani::any();
+        let maybe_some: bool = kani::any();
+        let maybe_v: u8 = kani::any();
+        let maybe = maybe_some.then_some(maybe_v);
+        let pair: [u16; 2] = kani::any();
+        // Concrete empty string: a symbolic `&str` (even ≤ 4 bytes) OOMs
+        // past 6 GB — std UTF-8 validation dominates, the same wall target
+        // 2 hit (spike report §4). Escape accounting therefore stays with
+        // the `serde_json` differential unit tests; this harness proves the
+        // structural accounting, integer widths and enum shapes.
+        let nslice: &[u8] = b"";
+        let name = "";
+        let v: u32 = kani::any();
+        let meta = KaniMap(v);
+        let which: u8 = kani::any();
+        kani::assume(which < 3);
+        let n: u32 = kani::any();
+        let x: u8 = kani::any();
+        let y: bool = kani::any();
+        let kind = match which {
+            0 => KaniKind::Unit,
+            1 => KaniKind::Newtype(n),
+            _ => KaniKind::Pair { x, y },
+        };
+        let shape = KaniShape {
+            id,
+            flag,
+            maybe,
+            pair,
+            name,
+            meta,
+            kind,
+        };
+
+        let flag_len = if flag { 4 } else { 5 };
+        let maybe_len = maybe.map_or(4, |m| kani_digits(u32::from(m)));
+        let pair_len = 3 + kani_digits(u32::from(pair[0])) + kani_digits(u32::from(pair[1]));
+        let name_len = 2 + kani_escape_len(nslice);
+        let meta_len = 6 + kani_digits(v);
+        let kind_len = match &shape.kind {
+            KaniKind::Unit => 6,
+            KaniKind::Newtype(n) => 12 + kani_digits(*n),
+            KaniKind::Pair { x, y } => 20 + kani_digits(u32::from(*x)) + if *y { 4 } else { 5 },
+        };
+        // `{`, one `"key":value` per field, commas, `}`.
+        let expected = 1
+            + (5 + kani_digits(id))
+            + 1
+            + (7 + flag_len)
+            + 1
+            + (8 + maybe_len)
+            + 1
+            + (7 + pair_len)
+            + 1
+            + (7 + name_len)
+            + 1
+            + (7 + meta_len)
+            + 1
+            + (7 + kind_len)
+            + 1;
+        kani::assert(
+            super::compact_json_len(&shape) == expected,
+            "compact_json_len is exact on small no-float shapes",
+        );
     }
 }
