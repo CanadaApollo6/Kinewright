@@ -7,8 +7,9 @@ use std::{
 
 use eframe::egui;
 use kinewright_agent::{
-    BranchApplyOutcome, CODEX_SANDBOX_NOTICE, CURSOR_SANDBOX_NOTICE, ConfirmationBroker,
-    ConfirmationRequest, McpServer, TimelineBranch, compact_tool_names, harness_driver,
+    BranchApplyOutcome, BranchComparison, BranchError, CODEX_SANDBOX_NOTICE, CURSOR_SANDBOX_NOTICE,
+    ConfirmationBroker, ConfirmationRequest, McpServer, TimelineBranch, compact_tool_names,
+    harness_driver,
 };
 use kinewright_core::{
     AgentError, AgentEvent, AgentSession, Analysis, AuthenticationStatus, Command, Document, Event,
@@ -415,6 +416,29 @@ impl UsageAccumulator {
     }
 }
 
+/// Site 6's note (`IN2B` §7 rule 1): the branch comparison's error over
+/// the chat panel's own subject, edged by the last noted message —
+/// `compare()` runs per frame (BP5), so novelty is the caller's memory
+/// and this fn only shapes. `Ok` clears. Pure: no clock, no document,
+/// no log.
+pub(crate) fn chat_panel_observation(
+    last_noted: Option<&String>,
+    compare: &Result<BranchComparison, BranchError>,
+    revision: TimelineRevision,
+) -> (Option<IncidentObservation>, Option<String>) {
+    let Err(error) = compare else {
+        return (None, None);
+    };
+    let message = error.to_string();
+    if last_noted.map(String::as_str) == Some(message.as_str()) {
+        return (None, last_noted.cloned());
+    }
+    let mut observation = error.incident_observation(IncidentSubject::Agent, revision);
+    observation.observed = format!("Branch: {}", observation.observed);
+    observation.transient = true;
+    (Some(observation), Some(message))
+}
+
 pub(crate) struct AgentThread {
     pub(crate) name: String,
     pub(crate) harness: AgentHarnessChoice,
@@ -425,6 +449,9 @@ pub(crate) struct AgentThread {
     pub(crate) usage: UsageAccumulator,
     pub(crate) chat: Vec<ChatEntry>,
     pub(crate) branch: TimelineBranch,
+    /// The last noted `compare()` failure (§7 rule 3): `None` at thread
+    /// creation and after any success, `Some(m)` after noting `m`.
+    pub(crate) branch_compare_noted: Option<String>,
     pub(crate) mcp_server: Option<McpServer>,
     pub(crate) confirmations: Option<ConfirmationBroker>,
     pub(crate) pending_confirmations: Vec<ConfirmationRequest>,
@@ -529,6 +556,7 @@ impl AgentThread {
             pending_confirmations: Vec::new(),
             selected_operations: BTreeSet::new(),
             provenance: BranchProvenance::default(),
+            branch_compare_noted: None,
             last_activity: Instant::now(),
         })
     }
@@ -1554,9 +1582,26 @@ impl KinewrightApp {
             .branch
             .compare()
         {
-            Ok(comparison) => comparison,
+            Ok(comparison) => {
+                // Site 6's edge clears on success: a later failure is a new
+                // episode and notes again (`IN2B` §7 rule 3).
+                self.projects[project_index].threads[thread_index].branch_compare_noted = None;
+                comparison
+            }
             Err(error) => {
                 ui.colored_label(color::STATUS_DANGER, format!("Branch unavailable: {error}"));
+                let revision = self.focused().revision;
+                let compared: Result<BranchComparison, BranchError> = Err(error);
+                let thread = &mut self.projects[project_index].threads[thread_index];
+                let (observation, next) = chat_panel_observation(
+                    thread.branch_compare_noted.as_ref(),
+                    &compared,
+                    revision,
+                );
+                thread.branch_compare_noted = next;
+                if let Some(observation) = observation {
+                    self.note_observation(observation);
+                }
                 return;
             }
         };

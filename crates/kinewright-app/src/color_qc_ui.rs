@@ -22,15 +22,15 @@ use std::{
 use eframe::egui;
 use kinewright_core::{
     Analysis, ClipId, ColorQcCheck, ColorQcReport, ColorQcRequest, DeliveryEncodeDepth, Document,
-    EffectId, MatteRegionDescription, MatteRegionScope, MediaError, QaSeverity, TimeCode,
-    WorkingProof, WorkingProofMetadata, delivery_color_for_depth, matte_coverage_statistics,
-    measure_color_qc,
+    EffectId, IncidentObservation, IncidentSubject, MatteRegionDescription, MatteRegionScope,
+    MediaError, QaSeverity, TimeCode, TimelineRevision, WorkingProof, WorkingProofMetadata,
+    delivery_color_for_depth, matte_coverage_statistics, measure_color_qc,
 };
 
 use crate::{
     app::KinewrightApp,
     color_scopes_ui::ScopeRoi,
-    error_ui::WorkerError,
+    error_ui::{WorkerError, worker_error_observation},
     matte_overlay_ui::{AnalysisMatteProofSource, MatteProofSource, MatteTarget},
     theme::{self, color, type_size},
 };
@@ -627,6 +627,16 @@ struct ColorQcResponse {
     result: Result<Box<ColorQcMeasurement>, WorkerError>,
 }
 
+/// Site 2's note (`IN2B` §7 rule 1): the QC drain's `WorkerError` over
+/// the document-wide subject. Pure: the drain calls it once per
+/// delivered `Err`, never for `Ok`, never from a render body.
+pub(crate) fn qc_panel_observation(
+    error: &WorkerError,
+    revision: TimelineRevision,
+) -> Option<IncidentObservation> {
+    worker_error_observation(error, IncidentSubject::Project, "QC: ", revision)
+}
+
 /// A request the window accepted while a worker was still rendering.
 struct QueuedMeasurement {
     generation: u64,
@@ -955,7 +965,13 @@ impl ColorQcState {
 
     /// Drain worker responses, accepting only the live generation and key.
     /// This is also where a parked request starts.
-    pub(crate) fn poll(&mut self) {
+    /// Drain all worker responses, accepting only the still-live
+    /// generation. Returns the site-2 note for a delivered `Err` (`IN2B`
+    /// §7 rule 3): one delivery is one note, idle polls return `None`,
+    /// and the caller queues. Single-flight, so at most one delivery
+    /// lands per call.
+    pub(crate) fn poll(&mut self, revision: TimelineRevision) -> Option<IncidentObservation> {
+        let mut noted = None;
         while let Ok(response) = self.response_rx.try_recv() {
             if self.pending != Some((response.generation, response.key))
                 || self.current_context != Some(Self::context_of(response.key))
@@ -970,6 +986,7 @@ impl ColorQcState {
                 }
                 Err(error) => {
                     self.current = None;
+                    noted = qc_panel_observation(&error, revision);
                     self.error = Some(error);
                 }
             }
@@ -980,6 +997,7 @@ impl ColorQcState {
         {
             self.spawn(measurement);
         }
+        noted
     }
 
     fn invalidate(&mut self) {
@@ -1931,7 +1949,7 @@ mod tests {
 
     fn poll_until(state: &mut ColorQcState, mut done: impl FnMut(&ColorQcState) -> bool) {
         for _ in 0..2_000 {
-            state.poll();
+            state.poll(TimelineRevision::default());
             if done(state) {
                 return;
             }
@@ -2152,7 +2170,7 @@ mod tests {
             "the mask has no picture yet, so it asks for one"
         );
         for _ in 0..2_000 {
-            mask.poll();
+            mask.poll(TimelineRevision::default());
             if matches!(mask.status(mask_key, conditions), QcMaskStatus::Ready) {
                 break;
             }
@@ -2181,7 +2199,7 @@ mod tests {
             moved,
         );
         for _ in 0..2_000 {
-            mask.poll();
+            mask.poll(TimelineRevision::default());
             if matches!(mask.status(moved, conditions), QcMaskStatus::Ready) {
                 break;
             }

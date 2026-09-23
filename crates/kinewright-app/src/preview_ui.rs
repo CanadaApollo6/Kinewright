@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use eframe::egui;
 use kinewright_core::{
-    Clip, EffectUniform, IncidentSubject, LabelIncident, MatteParams, MediaKind, ThreePointMode,
-    TimeCode, TrackId, TrackKind,
+    Clip, EffectUniform, IncidentObservation, IncidentSubject, LabelIncident, MatteParams,
+    MediaKind, ThreePointMode, TimeCode, TimelineRevision, TrackId, TrackKind,
 };
 
 use crate::{
     app::KinewrightApp,
     color_qc_ui::{AnalysisColorQcSource, ColorQcSource, WorkingProofCache, WorkingProofKey},
-    error_ui::WorkerError,
+    error_ui::{WorkerError, worker_error_observation},
     icons::Icon,
     inspector_ui::{InspectorEdits, matte_gesture_coalesce_key, matte_window_drag_operations},
     matte_overlay_ui::{
@@ -287,6 +287,16 @@ struct QcMaskResponse {
     generation: u64,
     key: QcMaskKey,
     result: Result<kinewright_core::RgbaImage, WorkerError>,
+}
+
+/// Site 3's note (`IN2B` §7 rule 1): the QC-mask drain's `WorkerError`
+/// over the document-wide subject. Pure: the drain calls it once per
+/// delivered `Err`, never for `Ok`, never from a render body.
+pub(crate) fn mask_panel_observation(
+    error: &WorkerError,
+    revision: TimelineRevision,
+) -> Option<IncidentObservation> {
+    worker_error_observation(error, IncidentSubject::Project, "QC mask: ", revision)
 }
 
 struct QcMaskRequest {
@@ -630,7 +640,13 @@ impl QcMaskState {
     }
 
     /// Drain mask responses, accepting only the live generation and key.
-    pub(crate) fn poll(&mut self) {
+    /// Drain all worker responses, accepting only the still-live
+    /// generation. Returns the site-3 note for a delivered `Err` (`IN2B`
+    /// §7 rule 3): one delivery is one note, idle polls return `None`,
+    /// and the caller queues. Single-flight, so at most one delivery
+    /// lands per call.
+    pub(crate) fn poll(&mut self, revision: TimelineRevision) -> Option<IncidentObservation> {
+        let mut noted = None;
         while let Ok(response) = self.response_rx.try_recv() {
             if self.pending != Some((response.generation, response.key)) {
                 continue;
@@ -641,10 +657,11 @@ impl QcMaskState {
                     self.mask = Some((response.key, mask));
                     self.error = None;
                 }
-                Err(message) => {
+                Err(error) => {
                     self.mask = None;
                     self.texture = None;
-                    self.error = Some(message);
+                    noted = mask_panel_observation(&error, revision);
+                    self.error = Some(error);
                 }
             }
         }
@@ -654,6 +671,7 @@ impl QcMaskState {
         {
             self.spawn(request);
         }
+        noted
     }
 
     fn invalidate(&mut self) {
@@ -824,8 +842,13 @@ impl KinewrightApp {
         let blocked = playhead_state
             .as_ref()
             .is_some_and(|(state, _)| state.blocks_preview());
-        self.matte_overlay.poll();
-        self.qc_mask.poll();
+        let note_revision = self.focused().revision;
+        if let Some(observation) = self.matte_overlay.poll(note_revision) {
+            self.note_observation(observation);
+        }
+        if let Some(observation) = self.qc_mask.poll(note_revision) {
+            self.note_observation(observation);
+        }
         let overlay = self.matte_overlay_context();
         let matte_texture = overlay
             .as_ref()
@@ -2023,7 +2046,7 @@ mod tests {
 
     fn settle(state: &mut QcMaskState, key: QcMaskKey, conditions: QcMaskConditions) {
         for _ in 0..2_000 {
-            state.poll();
+            state.poll(TimelineRevision::default());
             if !state.is_pending() {
                 return;
             }

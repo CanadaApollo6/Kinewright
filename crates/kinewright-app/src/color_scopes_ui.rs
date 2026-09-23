@@ -17,14 +17,15 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    Analysis, Document, MatteRegionDescription, MediaError, MonitorProof, NormalizedRoi, RgbaImage,
-    ScopeComparison, ScopeEvidence, ScopeRequest, ScopeResolution, ScopeStage, TimeCode,
-    compare_scope_evidence, matte_coverage_statistics, matte_scoped_frame, measure_scope,
+    Analysis, Document, IncidentObservation, IncidentSubject, MatteRegionDescription, MediaError,
+    MonitorProof, NormalizedRoi, RgbaImage, ScopeComparison, ScopeEvidence, ScopeRequest,
+    ScopeResolution, ScopeStage, TimeCode, TimelineRevision, compare_scope_evidence,
+    matte_coverage_statistics, matte_scoped_frame, measure_scope,
 };
 
 use crate::{
     app::KinewrightApp,
-    error_ui::WorkerError,
+    error_ui::{WorkerError, worker_error_observation},
     matte_overlay_ui::{AnalysisMatteProofSource, MatteProofSource, MatteTarget},
     theme::{self, color, radius, type_size},
 };
@@ -169,6 +170,16 @@ struct ScopeResponse {
     generation: u64,
     key: ScopeRequestKey,
     result: Result<ScopeMeasurement, WorkerError>,
+}
+
+/// Site 1's note (`IN2B` §7 rule 1): the scopes drain's `WorkerError`
+/// over the document-wide subject. Pure: the drain calls it once per
+/// delivered `Err`, never for `Ok`, never from a render body.
+pub(crate) fn scopes_panel_observation(
+    error: &WorkerError,
+    revision: TimelineRevision,
+) -> Option<IncidentObservation> {
+    worker_error_observation(error, IncidentSubject::Project, "Scopes: ", revision)
 }
 
 #[derive(Debug)]
@@ -671,7 +682,12 @@ impl ColorScopesState {
     ///
     /// This is also where a parked request starts, once the thread it was
     /// waiting behind has finished.
-    pub(crate) fn poll(&mut self) {
+    ///
+    /// Returns the site-1 note for a delivered `Err` (`IN2B` §7 rule 3):
+    /// one delivery is one note, idle polls return `None`, and the caller
+    /// queues. Single-flight, so at most one delivery lands per call.
+    pub(crate) fn poll(&mut self, revision: TimelineRevision) -> Option<IncidentObservation> {
+        let mut noted = None;
         while let Ok(response) = self.response_rx.try_recv() {
             if !self.response_matches_pending(&response) {
                 continue;
@@ -684,6 +700,7 @@ impl ColorScopesState {
                 }
                 Err(error) => {
                     self.current = None;
+                    noted = scopes_panel_observation(&error, revision);
                     self.error = Some(error);
                 }
             }
@@ -694,6 +711,7 @@ impl ColorScopesState {
         {
             self.spawn_sample(sample);
         }
+        noted
     }
 
     fn response_matches_pending(&self, response: &ScopeResponse) -> bool {
@@ -783,7 +801,10 @@ impl KinewrightApp {
         let frame = self.focused().position;
         self.color_scopes
             .observe_context(session_id, revision, frame);
-        self.color_scopes.poll();
+        let note_revision = self.focused().revision;
+        if let Some(observation) = self.color_scopes.poll(note_revision) {
+            self.note_observation(observation);
+        }
 
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("SCOPES").font(theme::semibold(type_size::CAPTION)));
@@ -1427,7 +1448,7 @@ mod tests {
     fn poll_until(state: &mut ColorScopesState, done: impl Fn(&ColorScopesState) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            state.poll();
+            state.poll(TimelineRevision::default());
             if done(state) {
                 return;
             }
@@ -1490,7 +1511,7 @@ mod tests {
         assert!(state.is_pending(), "the panel reflects the newest request");
 
         // Polling cannot start the parked request while the worker runs.
-        state.poll();
+        state.poll(TimelineRevision::default());
         assert_eq!(state.spawned_workers, 1);
 
         source.release();
@@ -1707,7 +1728,7 @@ mod tests {
             .response_tx
             .send(late_response)
             .expect("the panel still owns the receiver");
-        state.poll();
+        state.poll(TimelineRevision::default());
         assert!(state.current.is_none());
         assert!(state.is_pending());
     }
@@ -1780,7 +1801,7 @@ mod tests {
             })
             .expect("the live response must always be deliverable");
 
-        state.poll();
+        state.poll(TimelineRevision::default());
 
         assert!(!state.is_pending(), "the panel must not stay pending");
         assert_eq!(
@@ -1814,7 +1835,7 @@ mod tests {
             cancelled,
             delivered: false,
         });
-        state.poll();
+        state.poll(TimelineRevision::default());
 
         assert!(!state.is_pending());
         assert!(state.current.is_none());
@@ -1853,7 +1874,7 @@ mod tests {
         });
         state.generation = 2;
         state.pending = Some(PendingScope { generation: 2, key });
-        state.poll();
+        state.poll(TimelineRevision::default());
 
         assert!(state.is_pending(), "a retired worker cannot resolve gen 2");
         assert!(state.error.is_none());
@@ -1981,7 +2002,7 @@ mod tests {
             })
             .expect("synthetic worker response");
 
-        state.poll();
+        state.poll(TimelineRevision::default());
         assert_eq!(
             state.current.as_ref().map(|measurement| measurement.key),
             Some(key)

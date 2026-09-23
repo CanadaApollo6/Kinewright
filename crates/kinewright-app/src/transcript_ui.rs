@@ -2,7 +2,8 @@ use std::{ops::RangeInclusive, time::Duration};
 
 use eframe::egui;
 use kinewright_core::{
-    ClipId, MediaAsset, TimeCode, TimelineTranscriptWord, TranscriptStatus, is_filler_word,
+    AssetId, ClipId, IncidentCode, IncidentObservation, IncidentSubject, LabelIncident, MediaAsset,
+    TimeCode, TimelineRevision, TimelineTranscriptWord, TranscriptStatus, is_filler_word,
 };
 
 use crate::{
@@ -17,6 +18,30 @@ pub(crate) enum TranscriptScope {
     Asset,
     #[default]
     Timeline,
+}
+
+/// Site 5's note (`IN2B` §7 rule 1): the whisper backend's string over
+/// the failed asset — `panel_worker_error`, since nothing typed stands
+/// behind it (§5). `Some` always: the caller edges novelty, this fn only
+/// shapes. Pure: no clock, no document, no log.
+///
+/// The `Option` is the seam's uniform shape — every `*_panel_observation`
+/// answers `None` for "nothing to note" — even though this site's caller
+/// edges novelty itself and this fn never returns it.
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn transcript_panel_observation(
+    error: &str,
+    asset: AssetId,
+    revision: TimelineRevision,
+) -> Option<IncidentObservation> {
+    let mut observation = IncidentObservation::plain(
+        IncidentCode::Label(LabelIncident::PanelWorkerError),
+        IncidentSubject::Asset(asset),
+        format!("Transcript: {error}"),
+        revision,
+    );
+    observation.transient = true;
+    Some(observation)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -109,6 +134,11 @@ impl KinewrightApp {
             asset.fps.denominator()
         ));
         let status = self.analysis.transcript_status(&asset);
+        if !matches!(status, TranscriptStatus::Failed(_)) {
+            // Site 5's edge clears off-failure (`IN2B` §7 rule 3): a retry
+            // or recovery makes the next `Failed` a new episode.
+            self.transcript_noted = None;
+        }
         match status {
             TranscriptStatus::NotRequested => {
                 self.analysis.request_transcription(asset);
@@ -164,6 +194,18 @@ impl KinewrightApp {
                     color::STATUS_DANGER,
                     format!("Transcription failed: {error}"),
                 );
+                // Site 5 (`IN2B` §7 rule 3): the engine owns the status
+                // store, so novelty is the app's memory — note on change.
+                let episode = (asset.id, error.clone());
+                if self.transcript_noted.as_ref() != Some(&episode) {
+                    let revision = self.focused().revision;
+                    if let Some(observation) =
+                        transcript_panel_observation(&error, asset.id, revision)
+                    {
+                        self.note_observation(observation);
+                    }
+                    self.transcript_noted = Some(episode);
+                }
                 if ui.button("Retry").clicked() {
                     self.analysis.request_transcription(asset);
                 }

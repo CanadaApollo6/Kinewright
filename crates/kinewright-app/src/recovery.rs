@@ -550,6 +550,51 @@ struct PendingJournal {
     state: PendingState,
 }
 
+/// Site-modal note 1 (`IN2B` §7 rule 6): modal 1's damage label over
+/// the project. Pure: the app edges first-render-per-run, this fn only
+/// shapes.
+pub(crate) fn recovery_damage_observation(
+    damage: &str,
+    revision: TimelineRevision,
+) -> IncidentObservation {
+    let mut observation = IncidentObservation::plain(
+        IncidentCode::Label(LabelIncident::RecoveryDamage),
+        IncidentSubject::Project,
+        format!("Recovery: {damage}"),
+        revision,
+    );
+    observation.transient = true;
+    observation
+}
+
+/// Site-modal note 2 (`IN2B` §7 rule 6): modal 2's message over the
+/// project. Pure: the app edges first-render-per-run, this fn only
+/// shapes.
+pub(crate) fn recovery_unavailable_observation(
+    message: &str,
+    revision: TimelineRevision,
+) -> IncidentObservation {
+    let mut observation = IncidentObservation::plain(
+        IncidentCode::Label(LabelIncident::RecoveryUnavailable),
+        IncidentSubject::Project,
+        format!("Recovery: {message}"),
+        revision,
+    );
+    observation.transient = true;
+    observation
+}
+
+/// What one `show_dialog` frame decided and rendered.
+pub(crate) struct RecoveryDialogOutcome {
+    /// The restore the person chose, if any.
+    pub(crate) restore: Option<RestoreRequest>,
+    /// The first damage label modal 1 rendered this frame, if any
+    /// (`IN2B` §7 rule 6).
+    pub(crate) damage_rendered: Option<String>,
+    /// The message modal 2 rendered this frame, if any (`IN2B` §7 rule 6).
+    pub(crate) unavailable_rendered: Option<String>,
+}
+
 /// A restore the user chose from the recovery dialog. The pending file
 /// survives until `consume_pending` confirms the restore actually landed.
 pub(crate) struct RestoreRequest {
@@ -651,14 +696,25 @@ impl Recovery {
     /// a restore request when the user picks one. The pending file survives
     /// until `consume_pending` confirms the restore landed, so a failed
     /// restore can still be recovered at the next launch.
-    pub(crate) fn show_dialog(&mut self, ctx: &egui::Context) -> Option<RestoreRequest> {
+    ///
+    /// One frame fn past clippy's 100 lines: the two damage/unavailable
+    /// renders plus their first-render edging live here rather than split
+    /// across helpers a frame would call once each.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn show_dialog(&mut self, ctx: &egui::Context) -> RecoveryDialogOutcome {
+        let mut outcome = RecoveryDialogOutcome {
+            restore: None,
+            damage_rendered: None,
+            unavailable_rendered: None,
+        };
         if std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some() {
             self.pending.clear();
-            return None;
+            return outcome;
         }
         let mut restore: Option<usize> = None;
         let mut discard: Option<usize> = None;
         if !self.pending.is_empty() {
+            let damage_rendered = &mut outcome.damage_rendered;
             egui::Window::new("Recover unsaved work?")
                 .collapsible(false)
                 .resizable(false)
@@ -684,10 +740,11 @@ impl Recovery {
                                     }
                                 ));
                                 if let Some(damage) = &report.damage {
-                                    ui.colored_label(
-                                        egui::Color32::YELLOW,
-                                        damage_description(damage),
-                                    );
+                                    let description = damage_description(damage);
+                                    ui.colored_label(egui::Color32::YELLOW, &description);
+                                    if damage_rendered.is_none() {
+                                        *damage_rendered = Some(description);
+                                    }
                                 }
                             }
                             PendingState::Unusable(damage) => {
@@ -695,7 +752,11 @@ impl Recovery {
                                     egui::Color32::YELLOW,
                                     "This journal's initial snapshot is unavailable.",
                                 );
-                                ui.label(damage_description(damage));
+                                let description = damage_description(damage);
+                                ui.label(&description);
+                                if damage_rendered.is_none() {
+                                    *damage_rendered = Some(description);
+                                }
                             }
                         }
                         ui.horizontal(|ui| {
@@ -719,6 +780,7 @@ impl Recovery {
         let runtime_message = lock_unpoisoned(&self.runtime_error).clone();
         let mut dismiss_runtime_error = false;
         if let Some(message) = runtime_message {
+            outcome.unavailable_rendered = Some(message.clone());
             egui::Window::new("Crash recovery unavailable")
                 .collapsible(false)
                 .resizable(false)
@@ -737,21 +799,21 @@ impl Recovery {
         if let Some(index) = discard {
             let entry = self.pending.remove(index);
             remove_file_best_effort(&entry.journal_path, &self.runtime_error);
-            return None;
+            return outcome;
         }
         if let Some(index) = restore {
             let entry = &self.pending[index];
             let PendingState::Recoverable(report) = &entry.state else {
-                return None;
+                return outcome;
             };
-            return Some(RestoreRequest {
+            outcome.restore = Some(RestoreRequest {
                 document: report.document.clone(),
                 project_path: report.project_path.clone(),
                 journal_path: entry.journal_path.clone(),
                 writer_format_version: report.writer_format_version,
             });
         }
-        None
+        outcome
     }
 
     /// A chosen restore landed: the crash journal has served its purpose.
@@ -1802,5 +1864,112 @@ mod tests {
         };
         assert_eq!(report.writer_format_version, 999);
         assert_eq!(report.recovered_commands, 0);
+    }
+
+    /// Item 23: both recovery modals note damage-only. The constructors
+    /// shape code/subject/tag/transient; the headless dialog reports
+    /// damage renders — and a clean prompt reports none, because the
+    /// normal prompt has no constructor (`IN2B` §7 rule 6).
+    #[test]
+    fn in2b_both_recovery_modals_note_damage_only() {
+        let revision = TimelineRevision(7);
+        let damage = recovery_damage_observation("stopped at byte 12", revision);
+        assert_eq!(
+            damage.code,
+            IncidentCode::Label(LabelIncident::RecoveryDamage)
+        );
+        assert_eq!(damage.subject, IncidentSubject::Project);
+        assert_eq!(damage.observed, "Recovery: stopped at byte 12");
+        assert!(damage.transient);
+        let unavailable = recovery_unavailable_observation("no directory", revision);
+        assert_eq!(
+            unavailable.code,
+            IncidentCode::Label(LabelIncident::RecoveryUnavailable)
+        );
+        assert_eq!(unavailable.subject, IncidentSubject::Project);
+        assert_eq!(unavailable.observed, "Recovery: no directory");
+        assert!(unavailable.transient);
+
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        // One headless frame per dialog: the pass initialises the font
+        // system the labels lay out against.
+        let drive = |dialog: &mut Recovery| {
+            ctx.begin_pass(egui::RawInput::default());
+            let outcome = dialog.show_dialog(&ctx);
+            let _ = ctx.end_pass();
+            outcome
+        };
+        let idle = || Recovery {
+            directory: PathBuf::from("recovery"),
+            path: PathBuf::from("recovery").join("active.journal"),
+            recorder: None,
+            pending: Vec::new(),
+            runtime_error: Arc::new(Mutex::new(None)),
+        };
+        let pending = |state| PendingJournal {
+            journal_path: PathBuf::from("pending.journal"),
+            project_path: None,
+            state,
+        };
+        let report = |damage| RecoveryReport {
+            project_path: None,
+            document: Document::default(),
+            writer_format_version: PROJECT_FORMAT_VERSION,
+            recovered_commands: 3,
+            damage,
+        };
+
+        // The normal prompt: recoverable, no damage — nothing to note.
+        let mut clean = idle();
+        clean
+            .pending
+            .push(pending(PendingState::Recoverable(report(None))));
+        let outcome = drive(&mut clean);
+        assert!(outcome.restore.is_none(), "no click restores nothing");
+        assert_eq!(
+            outcome.damage_rendered, None,
+            "the normal prompt has no constructor"
+        );
+        assert_eq!(outcome.unavailable_rendered, None);
+
+        // A damaged recovery reports its damage string.
+        let mut damaged = idle();
+        damaged
+            .pending
+            .push(pending(PendingState::Recoverable(report(Some(Damage {
+                offset: 12,
+                ignored_bytes: 4,
+                reason: "torn".to_owned(),
+            })))));
+        let outcome = drive(&mut damaged);
+        assert_eq!(
+            outcome.damage_rendered.as_deref(),
+            Some("Recovery stopped at byte 12: torn. 4 trailing bytes were ignored."),
+        );
+
+        // An unusable journal reports its damage string too.
+        let mut unusable = idle();
+        unusable
+            .pending
+            .push(pending(PendingState::Unusable(Damage {
+                offset: 0,
+                ignored_bytes: 1,
+                reason: "no snapshot".to_owned(),
+            })));
+        let outcome = drive(&mut unusable);
+        assert_eq!(
+            outcome.damage_rendered.as_deref(),
+            Some("Recovery stopped at byte 0: no snapshot. 1 trailing byte were ignored."),
+        );
+
+        // A broken runtime reports its message.
+        let mut broken = idle();
+        broken.runtime_error = Arc::new(Mutex::new(Some("no directory".to_owned())));
+        let outcome = drive(&mut broken);
+        assert_eq!(
+            outcome.unavailable_rendered.as_deref(),
+            Some("no directory"),
+        );
     }
 }

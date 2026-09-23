@@ -39,13 +39,17 @@ use std::{
 
 use eframe::egui::{self, Pos2, Rect, pos2, vec2};
 use kinewright_core::{
-    Analysis, ClipId, Document, EffectId, MATTE_WINDOW_CENTER_MAX_BASIS_POINTS,
-    MATTE_WINDOW_CENTER_MIN_BASIS_POINTS, MATTE_WINDOW_HALF_EXTENT_MAX_BASIS_POINTS,
-    MATTE_WINDOW_HALF_EXTENT_MIN_BASIS_POINTS, MATTE_WINDOW_ROTATION_LIMIT_CENTIDEGREES,
-    MatteParams, MatteProof, MatteWindowParams, MediaError, RgbaImage, TimeCode,
+    Analysis, ClipId, Document, EffectId, IncidentObservation, IncidentSubject,
+    MATTE_WINDOW_CENTER_MAX_BASIS_POINTS, MATTE_WINDOW_CENTER_MIN_BASIS_POINTS,
+    MATTE_WINDOW_HALF_EXTENT_MAX_BASIS_POINTS, MATTE_WINDOW_HALF_EXTENT_MIN_BASIS_POINTS,
+    MATTE_WINDOW_ROTATION_LIMIT_CENTIDEGREES, MatteParams, MatteProof, MatteWindowParams,
+    MediaError, RgbaImage, TimeCode, TimelineRevision,
 };
 
-use crate::{error_ui::WorkerError, theme::color};
+use crate::{
+    error_ui::{WorkerError, worker_error_observation},
+    theme::color,
+};
 
 /// Pointer distance, in screen pixels, at which a handle is grabbed (CC5 §6).
 pub(crate) const MATTE_HANDLE_RADIUS_PX: f32 = 8.0;
@@ -703,6 +707,19 @@ struct MatteViewResponse {
     result: Result<MatteProof, WorkerError>,
 }
 
+/// Site 4's note (`IN2B` §7 rule 1): the matte drain's `WorkerError`
+/// over the failed clip. Pure: the drain calls it once per delivered
+/// `Err`, never for `Ok`, never from a render body. Matte values route
+/// to `media_backend_unclassified` through `from_media_error` — the
+/// table's outcome via the shared mechanism.
+pub(crate) fn matte_panel_observation(
+    error: &WorkerError,
+    clip: ClipId,
+    revision: TimelineRevision,
+) -> Option<IncidentObservation> {
+    worker_error_observation(error, IncidentSubject::Clip(clip), "Matte view: ", revision)
+}
+
 struct MatteViewRequest {
     generation: u64,
     key: MatteViewKey,
@@ -1061,20 +1078,28 @@ impl MatteOverlayState {
     }
 
     /// Drain coverage responses, accepting only the live generation and key.
-    pub(crate) fn poll(&mut self) {
+    /// Drain all worker responses, accepting only the still-live
+    /// generation. Returns the site-4 note for a delivered `Err` (`IN2B`
+    /// §7 rule 3): one delivery is one note, idle polls return `None`,
+    /// and the caller queues. Single-flight, so at most one delivery
+    /// lands per call.
+    pub(crate) fn poll(&mut self, revision: TimelineRevision) -> Option<IncidentObservation> {
+        let mut noted = None;
         while let Ok(response) = self.response_rx.try_recv() {
             if self.pending != Some((response.generation, response.key)) {
                 continue;
             }
             self.pending = None;
+            let key = response.key;
             match response.result {
                 Ok(proof) => {
-                    self.coverage = Some((response.key, proof.coverage));
+                    self.coverage = Some((key, proof.coverage));
                     self.error = None;
                 }
                 Err(error) => {
                     self.coverage = None;
                     self.texture = None;
+                    noted = matte_panel_observation(&error, key.target.clip, revision);
                     self.error = Some(error);
                 }
             }
@@ -1085,6 +1110,7 @@ impl MatteOverlayState {
         {
             self.spawn(request);
         }
+        noted
     }
 
     fn invalidate_view(&mut self) {
@@ -1738,13 +1764,56 @@ mod tests {
 
     fn settle(state: &mut MatteOverlayState, key: MatteViewKey) {
         for _ in 0..2_000 {
-            state.poll();
+            state.poll(TimelineRevision::default());
             if !matches!(state.view_status(key), MatteViewStatus::Pending) {
                 return;
             }
             thread::sleep(std::time::Duration::from_millis(1));
         }
         panic!("the matte view never resolved");
+    }
+
+    /// Item 22: a standing error notes exactly once — one delivery is one
+    /// note, and 25 idle polls after it note nothing (`IN2B` §7 rule 3,
+    /// OQ3). Headless over the real drain: no GPU, no app harness.
+    #[test]
+    fn in2b_a_standing_error_notes_exactly_once() {
+        let mut state = MatteOverlayState::default();
+        let key = view_key();
+        state.set_matte_view(true);
+        state.request_view(
+            Arc::new(RefusingProofSource),
+            Arc::new(Document::default()),
+            key,
+        );
+        let mut noted = Vec::new();
+        for _ in 0..2_000 {
+            noted.extend(state.poll(TimelineRevision::default()));
+            if !matches!(state.view_status(key), MatteViewStatus::Pending) {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            !matches!(state.view_status(key), MatteViewStatus::Pending),
+            "the matte view resolved"
+        );
+        for _ in 0..25 {
+            noted.extend(state.poll(TimelineRevision::default()));
+        }
+        assert_eq!(noted.len(), 1, "one delivery is one note");
+        assert_eq!(
+            noted[0].code,
+            kinewright_core::IncidentCode::Media(
+                kinewright_core::MediaIncident::BackendUnclassified
+            ),
+            "the note carries the typed refusal's code"
+        );
+        assert_eq!(
+            noted[0].subject,
+            kinewright_core::IncidentSubject::Clip(key.target.clip),
+            "the note carries the failed clip"
+        );
     }
 
     /// A backend without matte proofs — which is every backend until the media

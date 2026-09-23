@@ -12,13 +12,14 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    Analysis, AudioChain, Command, CommandToken, Document, Effect, EffectId, Event, Export,
-    Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome, IncidentSubject,
-    InvestigatorPreferences, JournalCommand, LabelIncident, LiveAudioChange, MediaAsset,
-    MediaError, MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint, NOISE_PROFILE_BAND_COUNT,
-    NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation, PROJECT_FORMAT_VERSION, ParamValue,
-    Playback, PlaybackState, PolicyClass, Rational, RecoveryKind, SilenceStatus, TimeCode,
-    TimelineRevision, Track, TrackId, TrackKind, recovery_description,
+    Analysis, AssetId, AudioChain, Command, CommandToken, Document, Effect, EffectId, Event,
+    Export, Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome,
+    IncidentSubject, InvestigatorPreferences, JournalCommand, LabelIncident, LiveAudioChange,
+    MediaAsset, MediaError, MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint,
+    NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation,
+    PROJECT_FORMAT_VERSION, ParamValue, Playback, PlaybackState, PolicyClass, Rational,
+    RecoveryKind, SilenceStatus, TimeCode, TimelineRevision, Track, TrackId, TrackKind,
+    recovery_description,
 };
 use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits};
 
@@ -34,7 +35,7 @@ use crate::{
         project_name, project_newer_format_observation, serialize_project_document,
         session_index_by_id, write_project_bytes,
     },
-    recovery::RestoreRequest,
+    recovery::{RestoreRequest, recovery_damage_observation, recovery_unavailable_observation},
     sidecar::{
         SidecarMode, SidecarWriter, digest_bytes, sidecar_path_for_project,
         sidecar_write_failed_observation,
@@ -263,6 +264,18 @@ pub(crate) struct KinewrightApp {
     /// IN1 §5.2: playback observations waiting for the next `route_incidents`
     /// tick, which attributes them to the focused project.
     pub(crate) pending_observations: Vec<IncidentObservation>,
+    /// Site 5's edge (`IN2B` §7 rule 3): the last noted transcription
+    /// failure, keyed by asset — the engine owns the status store, so the
+    /// app edges at the read. Keyed (not site 6's bare `Option<String>`)
+    /// because the panel switches assets: a bare message would swallow a
+    /// second asset's identical failure.
+    pub(crate) transcript_noted: Option<(AssetId, String)>,
+    /// Modal 1's edge (`IN2B` §7 rule 6): the damage note fires on the
+    /// first damage render per run, never again.
+    pub(crate) recovery_damage_noted: bool,
+    /// Modal 2's edge (`IN2B` §7 rule 6): the unavailable note fires on
+    /// the first message render per run, never again.
+    pub(crate) recovery_unavailable_noted: bool,
     /// IN1 §5.2b: revision conflicts the core drain noted this frame for the
     /// router to reconcile.
     pending_router_conflicts: Vec<RouterConflict>,
@@ -524,6 +537,9 @@ impl KinewrightApp {
             pending_source_edit: None,
             pending_legacy_relink: None,
             pending_observations: Vec::new(),
+            transcript_noted: None,
+            recovery_damage_noted: false,
+            recovery_unavailable_noted: false,
             pending_router_conflicts: Vec::new(),
             pending_router_landings: Vec::new(),
             pending_router_applies: Vec::new(),
@@ -1120,7 +1136,7 @@ impl KinewrightApp {
         if let Some(reason) = store_refusal {
             // Appendix B row 9: the session is pushed and focused *before*
             // this refusal, so the project opened — a degraded result.
-            self.note_label(
+            self.note_transient_label(
                 LabelIncident::LookIncomplete,
                 IncidentSubject::Project,
                 format!(
@@ -1135,7 +1151,7 @@ impl KinewrightApp {
             // open with *n* unavailable looks is one problem. It used to push
             // straight into a window it never opened, so the person saw only
             // the status line.
-            self.note_label(
+            self.note_transient_label(
                 LabelIncident::LookIncomplete,
                 IncidentSubject::Project,
                 format!(
@@ -1154,7 +1170,7 @@ impl KinewrightApp {
         // the expression that also writes `status` is a write the router then
         // overwrites in the same frame.
         if !missing.is_empty() {
-            self.note_label(
+            self.note_transient_label(
                 LabelIncident::MediaIncomplete,
                 IncidentSubject::Project,
                 format!("Missing media after open: {}", missing.join(", ")),
@@ -2038,7 +2054,10 @@ impl KinewrightApp {
                 revision,
                 frame: position,
             });
-        self.color_qc.poll();
+        let note_revision = self.focused().revision;
+        if let Some(observation) = self.color_qc.poll(note_revision) {
+            self.note_observation(observation);
+        }
         if self.color_qc.is_pending() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -2535,12 +2554,31 @@ impl eframe::App for KinewrightApp {
         self.poll_background(ui.ctx());
         self.keyboard_shortcuts(ui.ctx());
         self.import_dropped_files(ui.ctx());
-        let restore = self
-            .projects
-            .first_mut()
-            .and_then(|project| project.recovery.show_dialog(ui.ctx()));
-        if let Some(request) = restore {
-            self.apply_restore_request(request);
+        let outcome = self.projects.first_mut().map(|project| {
+            let ctx = ui.ctx().clone();
+            project.recovery.show_dialog(&ctx)
+        });
+        if let Some(outcome) = outcome {
+            // Modal damage notes (`IN2B` §7 rule 6): each modal's first
+            // damage render per run notes once — the bools edge, the
+            // outcome carries the rendered strings.
+            if let Some(damage) = outcome.damage_rendered.as_deref()
+                && !self.recovery_damage_noted
+            {
+                self.recovery_damage_noted = true;
+                let revision = self.focused().revision;
+                self.note_observation(recovery_damage_observation(damage, revision));
+            }
+            if let Some(message) = outcome.unavailable_rendered.as_deref()
+                && !self.recovery_unavailable_noted
+            {
+                self.recovery_unavailable_noted = true;
+                let revision = self.focused().revision;
+                self.note_observation(recovery_unavailable_observation(message, revision));
+            }
+            if let Some(request) = outcome.restore {
+                self.apply_restore_request(request);
+            }
         }
 
         self.app_top_bar(ui);
@@ -4976,6 +5014,9 @@ pub(crate) mod in1_tests {
             pending_source_edit: None,
             pending_legacy_relink: None,
             pending_observations: Vec::new(),
+            transcript_noted: None,
+            recovery_damage_noted: false,
+            recovery_unavailable_noted: false,
             pending_router_conflicts: Vec::new(),
             pending_router_landings: Vec::new(),
             pending_router_applies: Vec::new(),
@@ -6073,9 +6114,9 @@ pub(crate) mod in1_tests {
             .expect("the aggregate's block ends")
             .0;
         assert_eq!(
-            body.matches("note_label(").count(),
+            body.matches("note_transient_label(").count(),
             1,
-            "one open with n unavailable looks queues one observation"
+            "one open with n unavailable looks queues one transient observation"
         );
         assert!(
             body.contains("LabelIncident::LookIncomplete"),
@@ -7397,14 +7438,14 @@ pub(crate) mod in1_tests {
     // IN2 stage C: the app-side investigator sessions.
     // ------------------------------------------------------------------
 
-    fn in2_call(tool: &str, arguments: serde_json::Value) -> ScriptedCall {
+    pub(crate) fn in2_call(tool: &str, arguments: serde_json::Value) -> ScriptedCall {
         ScriptedCall {
             tool: tool.to_owned(),
             arguments,
         }
     }
 
-    fn in2_cost(input_tokens: u64, output_tokens: u64) -> ScriptedCost {
+    pub(crate) fn in2_cost(input_tokens: u64, output_tokens: u64) -> ScriptedCost {
         ScriptedCost {
             input_tokens,
             output_tokens,
@@ -7464,7 +7505,7 @@ pub(crate) mod in1_tests {
         id
     }
 
-    fn in2_configure_scripted_at(
+    pub(crate) fn in2_configure_scripted_at(
         app: &mut KinewrightApp,
         project_index: usize,
         driver: ScriptedDriver,
@@ -7838,7 +7879,7 @@ pub(crate) mod in1_tests {
         )
     }
 
-    fn in2_default_budgets() -> crate::investigator::InvestigatorBudgets {
+    pub(crate) fn in2_default_budgets() -> crate::investigator::InvestigatorBudgets {
         crate::investigator::InvestigatorBudgets {
             max_turns: 6,
             max_wall_time_seconds: 30,
@@ -7863,7 +7904,11 @@ pub(crate) mod in1_tests {
         app.projects.push(project);
     }
 
-    fn in2_happy_turn(id: IncidentId, revision: TimelineRevision, track: u64) -> ScriptedTurn {
+    pub(crate) fn in2_happy_turn(
+        id: IncidentId,
+        revision: TimelineRevision,
+        track: u64,
+    ) -> ScriptedTurn {
         ScriptedTurn::new(
             vec![
                 in2_call("get_timeline_state", serde_json::json!({})),
@@ -7918,7 +7963,7 @@ pub(crate) mod in1_tests {
         )
     }
 
-    fn in2_pump_until_finished(app: &mut KinewrightApp) {
+    pub(crate) fn in2_pump_until_finished(app: &mut KinewrightApp) {
         let expiry = Instant::now() + IN1_APP_DEADLINE;
         loop {
             app.pump_investigator_sessions();
@@ -7934,7 +7979,7 @@ pub(crate) mod in1_tests {
         }
     }
 
-    fn in2_cleanup(app: &mut KinewrightApp) {
+    pub(crate) fn in2_cleanup(app: &mut KinewrightApp) {
         let mut detached_reaper_needed = false;
         for project in &mut app.projects {
             let incidents = Arc::clone(&project.incidents);
@@ -7957,7 +8002,7 @@ pub(crate) mod in1_tests {
         }
     }
 
-    fn in2_incident(app: &KinewrightApp, id: IncidentId) -> Incident {
+    pub(crate) fn in2_incident(app: &KinewrightApp, id: IncidentId) -> Incident {
         in1_incident(app, id)
     }
 
@@ -7977,7 +8022,7 @@ pub(crate) mod in1_tests {
         matches!(log.observe(observation), Observed::Deduped(found) if found == id)
     }
 
-    fn in2_next_incident_id(app: &KinewrightApp) -> IncidentId {
+    pub(crate) fn in2_next_incident_id(app: &KinewrightApp) -> IncidentId {
         let next = app.projects[0]
             .incidents
             .read()
@@ -9453,6 +9498,9 @@ mod in2b_tests {
             pending_source_edit: None,
             pending_legacy_relink: None,
             pending_observations: Vec::new(),
+            transcript_noted: None,
+            recovery_damage_noted: false,
+            recovery_unavailable_noted: false,
             pending_router_conflicts: Vec::new(),
             pending_router_landings: Vec::new(),
             pending_router_applies: Vec::new(),
@@ -9522,6 +9570,45 @@ mod in2b_tests {
 
     fn in2b_shutdown(app: &mut KinewrightApp) {
         super::in1_tests::in1_shutdown(app);
+    }
+
+    /// Start a scripted session on a seam-produced observation (item 31):
+    /// the observation is observed as built — never re-typed by hand —
+    /// then the incident is pre-registered (`begin_investigation`) and
+    /// the session spawns directly. No router, no auto-investigation.
+    fn in2b_start_seam_session(
+        app: &mut KinewrightApp,
+        driver: kinewright_agent::ScriptedDriver,
+        observation: IncidentObservation,
+        prompts: Vec<String>,
+    ) -> IncidentId {
+        use super::in1_tests::{in2_configure_scripted_at, in2_default_budgets};
+        in2_configure_scripted_at(app, 0, driver, in2_default_budgets());
+        let code = observation.code;
+        let subject = observation.subject;
+        let id = {
+            let mut log = app.projects[0]
+                .incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Observed::Opened(id) = log.observe(observation) else {
+                panic!("the seam observation opens a fresh incident");
+            };
+            assert!(
+                log.begin_investigation(id),
+                "the direct fixture enters investigating"
+            );
+            id
+        };
+        let queued = crate::investigator::QueuedIncident {
+            id,
+            code,
+            subject,
+            refused: None,
+        };
+        app.spawn_investigator_session(0, &queued, "scripted", prompts, Vec::new())
+            .expect("the investigator branch and server start");
+        id
     }
 
     /// Park the engine worker before teardown: every `focus_project` ends in
@@ -10257,6 +10344,1026 @@ mod in2b_tests {
         }
         in2b_quiesce_engine(&engine);
         in2b_shutdown(&mut app);
+    }
+
+    /// Item 21: each `panel_observation` maps its error to `Some` and its
+    /// clean states to `None` — 9 sites × 6 asserts over the 8 fns. The
+    /// `WorkerError` six share one box shape (both arms' code, subject,
+    /// tag, transient, revision, plus `Cancelled → None`, which is both
+    /// the clean and the cancelled box for a `WorkerError` input);
+    /// sites 5 and 7 shape unconditionally (`Some` always); site 6 edges
+    /// on the last noted message.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2b_each_panel_observation_maps_error_to_some_and_clean_to_none() {
+        use crate::{
+            chat_ui::chat_panel_observation,
+            color_qc_ui::qc_panel_observation,
+            color_scopes_ui::scopes_panel_observation,
+            error_ui::WorkerError,
+            export_ui::{
+                ExportVerificationKind, conformance_panel_observation, export_panel_observation,
+            },
+            matte_overlay_ui::matte_panel_observation,
+            preview_ui::mask_panel_observation,
+            transcript_ui::transcript_panel_observation,
+        };
+        use kinewright_agent::BranchError;
+        use kinewright_core::{
+            AssetId, ClipId, ColorQcError, ColorQcIncident, DeliveryVariantError,
+            DeliveryVerificationError, DeliveryVerificationIncident, MatteCoverageError,
+            MatteProofError, MediaIncident, ScopeError,
+        };
+
+        let untyped = WorkerError::Untyped("the worker fell over".to_owned());
+        let cancelled = WorkerError::Media(MediaError::Cancelled);
+
+        // Site 1: scopes over the document.
+        let revision = TimelineRevision(41);
+        let typed = WorkerError::Media(MediaError::Scope(ScopeError::EmptyFrames));
+        let untyped_note = scopes_panel_observation(&untyped, revision).expect("Untyped notes");
+        let typed_note = scopes_panel_observation(&typed, revision).expect("Media notes");
+        assert!(
+            untyped_note.code == IncidentCode::Label(LabelIncident::PanelWorkerError)
+                && typed_note.code == IncidentCode::Media(MediaIncident::BackendUnclassified),
+            "site 1 codes: panel_worker_error / media_backend_unclassified"
+        );
+        assert!(
+            untyped_note.subject == IncidentSubject::Project
+                && typed_note.subject == IncidentSubject::Project,
+            "site 1 subjects"
+        );
+        assert!(
+            untyped_note.observed.starts_with("Scopes: ")
+                && typed_note.observed.starts_with("Scopes: "),
+            "site 1 tags"
+        );
+        assert!(
+            untyped_note.transient && typed_note.transient,
+            "site 1 provenance"
+        );
+        assert!(
+            untyped_note.revision == revision && typed_note.revision == revision,
+            "site 1 revisions"
+        );
+        assert_eq!(
+            scopes_panel_observation(&cancelled, revision),
+            None,
+            "site 1 Cancelled notes nothing"
+        );
+
+        // Site 2: QC over the document.
+        let revision = TimelineRevision(42);
+        let typed = WorkerError::Media(MediaError::ColorQc(ColorQcError::ProxyProofRefused {
+            observed: "a proxy".to_owned(),
+            allowed: "a proof",
+        }));
+        let untyped_note = qc_panel_observation(&untyped, revision).expect("Untyped notes");
+        let typed_note = qc_panel_observation(&typed, revision).expect("Media notes");
+        assert!(
+            untyped_note.code == IncidentCode::Label(LabelIncident::PanelWorkerError)
+                && typed_note.code == IncidentCode::ColorQc(ColorQcIncident::ProxyProofRefused),
+            "site 2 codes"
+        );
+        assert!(
+            untyped_note.subject == IncidentSubject::Project
+                && typed_note.subject == IncidentSubject::Project,
+            "site 2 subjects"
+        );
+        assert!(
+            untyped_note.observed.starts_with("QC: ") && typed_note.observed.starts_with("QC: "),
+            "site 2 tags"
+        );
+        assert!(
+            untyped_note.transient && typed_note.transient,
+            "site 2 provenance"
+        );
+        assert!(
+            untyped_note.revision == revision && typed_note.revision == revision,
+            "site 2 revisions"
+        );
+        assert_eq!(
+            qc_panel_observation(&cancelled, revision),
+            None,
+            "site 2 Cancelled notes nothing"
+        );
+
+        // Site 3: the mask over the document.
+        let revision = TimelineRevision(43);
+        let typed = WorkerError::Media(MediaError::MatteCoverage(
+            MatteCoverageError::InvalidDimensions {
+                observed: "2x1".to_owned(),
+                allowed: "the frame's dimensions",
+            },
+        ));
+        let untyped_note = mask_panel_observation(&untyped, revision).expect("Untyped notes");
+        let typed_note = mask_panel_observation(&typed, revision).expect("Media notes");
+        assert!(
+            untyped_note.code == IncidentCode::Label(LabelIncident::PanelWorkerError)
+                && typed_note.code == IncidentCode::Media(MediaIncident::BackendUnclassified),
+            "site 3 codes"
+        );
+        assert!(
+            untyped_note.subject == IncidentSubject::Project
+                && typed_note.subject == IncidentSubject::Project,
+            "site 3 subjects"
+        );
+        assert!(
+            untyped_note.observed.starts_with("QC mask: ")
+                && typed_note.observed.starts_with("QC mask: "),
+            "site 3 tags"
+        );
+        assert!(
+            untyped_note.transient && typed_note.transient,
+            "site 3 provenance"
+        );
+        assert!(
+            untyped_note.revision == revision && typed_note.revision == revision,
+            "site 3 revisions"
+        );
+        assert_eq!(
+            mask_panel_observation(&cancelled, revision),
+            None,
+            "site 3 Cancelled notes nothing"
+        );
+
+        // Site 4: the matte over its clip.
+        let revision = TimelineRevision(44);
+        let clip = ClipId(7);
+        let typed = WorkerError::Media(MediaError::MatteProof(MatteProofError::NoMatte));
+        let untyped_note =
+            matte_panel_observation(&untyped, clip, revision).expect("Untyped notes");
+        let typed_note = matte_panel_observation(&typed, clip, revision).expect("Media notes");
+        assert!(
+            untyped_note.code == IncidentCode::Label(LabelIncident::PanelWorkerError)
+                && typed_note.code == IncidentCode::Media(MediaIncident::BackendUnclassified),
+            "site 4 codes"
+        );
+        assert!(
+            untyped_note.subject == IncidentSubject::Clip(clip)
+                && typed_note.subject == IncidentSubject::Clip(clip),
+            "site 4 subjects"
+        );
+        assert!(
+            untyped_note.observed.starts_with("Matte view: ")
+                && typed_note.observed.starts_with("Matte view: "),
+            "site 4 tags"
+        );
+        assert!(
+            untyped_note.transient && typed_note.transient,
+            "site 4 provenance"
+        );
+        assert!(
+            untyped_note.revision == revision && typed_note.revision == revision,
+            "site 4 revisions"
+        );
+        assert_eq!(
+            matte_panel_observation(&cancelled, clip, revision),
+            None,
+            "site 4 Cancelled notes nothing"
+        );
+
+        // Site 5: the whisper string over its asset. `Some` always — the
+        // caller edges novelty, so the None boxes become verbatim-shape
+        // asserts instead.
+        let revision = TimelineRevision(45);
+        let asset = AssetId(9);
+        let note =
+            transcript_panel_observation("whisper boom", asset, revision).expect("a failure notes");
+        assert_eq!(
+            note.code,
+            IncidentCode::Label(LabelIncident::PanelWorkerError),
+            "site 5 code"
+        );
+        assert_eq!(
+            note.subject,
+            IncidentSubject::Asset(asset),
+            "site 5 subject"
+        );
+        assert!(note.observed.starts_with("Transcript: "), "site 5 tag");
+        assert!(note.transient, "site 5 provenance");
+        assert_eq!(note.revision, revision, "site 5 revision");
+        assert!(
+            note.observed.contains("whisper boom"),
+            "site 5 carries the string verbatim: {}",
+            note.observed
+        );
+
+        // Site 6: the branch error over the chat panel, edged.
+        let revision = TimelineRevision(46);
+        let failure: Result<kinewright_agent::BranchComparison, BranchError> =
+            Err(BranchError::UnexpectedResponse);
+        let (note, stored) = chat_panel_observation(None, &failure, revision);
+        let note = note.expect("a new failure notes");
+        assert_eq!(
+            note.code,
+            BranchError::UnexpectedResponse.incident_code(),
+            "site 6 code"
+        );
+        assert_eq!(note.subject, IncidentSubject::Agent, "site 6 subject");
+        assert!(note.observed.starts_with("Branch: "), "site 6 tag");
+        assert!(note.transient, "site 6 provenance");
+        let (repeat, stored_again) = chat_panel_observation(stored.as_ref(), &failure, revision);
+        let changed: Result<kinewright_agent::BranchComparison, BranchError> =
+            Err(BranchError::InvalidOperationIndex {
+                index: 9,
+                maximum: 3,
+            });
+        assert!(
+            repeat.is_none()
+                && stored_again == stored
+                && chat_panel_observation(stored.as_ref(), &changed, revision)
+                    .0
+                    .is_some(),
+            "site 6 repeats stay silent, changes note again"
+        );
+        let compared = kinewright_agent::BranchComparison {
+            name: Arc::from("test"),
+            base_revision: TimelineRevision(0),
+            branch_revision: TimelineRevision(1),
+            base_document: Arc::new(Document::default()),
+            document: Arc::new(Document::default()),
+            operations: Arc::new(Vec::new()),
+        };
+        let cleared = chat_panel_observation(stored.as_ref(), &Ok(compared), revision);
+        assert_eq!(cleared, (None, None), "site 6 success clears");
+
+        // Site 7: the conformance refusal, untagged. `Some` always — the
+        // cache miss is the novelty.
+        let revision = TimelineRevision(47);
+        let refusal = DeliveryVariantError::InvalidFocus { x: 101, y: 50 };
+        let note = conformance_panel_observation(&refusal, revision);
+        assert_eq!(note.code, refusal.incident_code(), "site 7 code");
+        assert_eq!(note.subject, IncidentSubject::ExportJob, "site 7 subject");
+        assert_eq!(
+            note.observed,
+            refusal.to_string(),
+            "site 7 is untagged, deduping with the refusal note"
+        );
+        assert!(note.transient, "site 7 provenance");
+        assert_eq!(note.revision, revision, "site 7 revision");
+        let exhausted = DeliveryVariantError::EffectIdExhausted;
+        assert_eq!(
+            conformance_panel_observation(&exhausted, revision).code,
+            exhausted.incident_code(),
+            "site 7 codes every variant through the builder"
+        );
+
+        // Sites 8–9: the job verifications over the attempt, tags apart.
+        for (kind, tag, number) in [
+            (
+                ExportVerificationKind::Verification,
+                "Export verification: ",
+                48,
+            ),
+            (
+                ExportVerificationKind::AudioVerification,
+                "Export audio verification: ",
+                49,
+            ),
+        ] {
+            let revision = TimelineRevision(number);
+            let typed = WorkerError::Media(MediaError::DeliveryVerification(
+                DeliveryVerificationError::NotFullResolution {
+                    observed: "a sample".to_owned(),
+                    allowed: "full resolution",
+                },
+            ));
+            let untyped_note =
+                export_panel_observation(&untyped, kind, revision).expect("Untyped notes");
+            let typed_note = export_panel_observation(&typed, kind, revision).expect("Media notes");
+            assert!(
+                untyped_note.code == IncidentCode::Label(LabelIncident::PanelWorkerError)
+                    && typed_note.code
+                        == IncidentCode::DeliveryVerification(
+                            DeliveryVerificationIncident::NotFullResolution
+                        ),
+                "site 8/9 codes"
+            );
+            assert!(
+                untyped_note.subject == IncidentSubject::ExportJob
+                    && typed_note.subject == IncidentSubject::ExportJob,
+                "site 8/9 subjects"
+            );
+            assert!(
+                untyped_note.observed.starts_with(tag) && typed_note.observed.starts_with(tag),
+                "site 8/9 tags"
+            );
+            assert!(
+                untyped_note.transient && typed_note.transient,
+                "site 8/9 provenance"
+            );
+            assert!(
+                untyped_note.revision == revision && typed_note.revision == revision,
+                "site 8/9 revisions"
+            );
+            assert_eq!(
+                export_panel_observation(&cancelled, kind, revision),
+                None,
+                "site 8/9 Cancelled notes nothing"
+            );
+        }
+    }
+
+    /// Item 31: three seam-produced sessions each end — ≥ 1 proposal, ≥ 1
+    /// `Explained`, ≥ 1 either — over exactly two newly reachable codes.
+    /// Every observation is a worker error through `panel_observation`
+    /// into `observe` (never hand-built — S13's binding), driven by
+    /// `ScriptedDriver` through the production router + pump; the
+    /// incidents are pre-registered and the sessions spawn directly, so
+    /// no auto-investigation is involved.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2b_three_seam_produced_sessions_end_over_two_newly_reachable_codes() {
+        use super::in1_tests::{
+            in2_call, in2_happy_turn, in2_incident, in2_next_incident_id, in2_pump_until_finished,
+        };
+        use kinewright_agent::{ScriptedDriver, ScriptedTurn};
+        use kinewright_core::{
+            ColorQcError, ColorQcIncident, DeliveryVerificationError, DeliveryVerificationIncident,
+            IncidentState,
+        };
+
+        use crate::error_ui::WorkerError;
+
+        let (mut app, _engine) = in2b_harness(Document::default(), None);
+
+        // Session 1: a QC worker error through site 2 → proposal end.
+        let revision = app.projects[0].revision;
+        let expected = in2_next_incident_id(&app);
+        let observation = crate::color_qc_ui::qc_panel_observation(
+            &WorkerError::Media(MediaError::ColorQc(ColorQcError::NodeBudgetExceeded {
+                observed: "9".to_owned(),
+                allowed: "4",
+            })),
+            revision,
+        )
+        .expect("the QC error notes");
+        let first = in2b_start_seam_session(
+            &mut app,
+            ScriptedDriver::new(vec![in2_happy_turn(expected, revision, 71)]),
+            observation,
+            vec!["opening".to_owned()],
+        );
+        assert_eq!(first, expected);
+        in2_pump_until_finished(&mut app);
+        assert!(
+            in2_incident(&app, first).proposal.is_some(),
+            "the first session ends with a proposal"
+        );
+
+        // Session 2: a verification worker error through site 8 →
+        // `Explained` end.
+        let revision = app.projects[0].revision;
+        let expected = in2_next_incident_id(&app);
+        let observation = crate::export_ui::export_panel_observation(
+            &WorkerError::Media(MediaError::DeliveryVerification(
+                DeliveryVerificationError::FrameCountOutOfRange {
+                    observed: "70000".to_owned(),
+                    allowed: "1..=65535",
+                },
+            )),
+            crate::export_ui::ExportVerificationKind::Verification,
+            revision,
+        )
+        .expect("the verification error notes");
+        let second = in2b_start_seam_session(
+            &mut app,
+            ScriptedDriver::new(vec![ScriptedTurn::new(
+                vec![in2_call("get_timeline_state", serde_json::json!({}))],
+                "no honest fix exists",
+            )]),
+            observation,
+            vec!["opening".to_owned()],
+        );
+        assert_eq!(second, expected);
+        in2_pump_until_finished(&mut app);
+        assert_eq!(
+            in2_incident(&app, second).state,
+            IncidentState::Resolved(IncidentOutcome::Explained),
+            "the second session ends Explained"
+        );
+
+        // Session 3: the QC code again with a different worker message —
+        // a distinct incident over the same newly reachable code.
+        let revision = app.projects[0].revision;
+        let expected = in2_next_incident_id(&app);
+        let observation = crate::color_qc_ui::qc_panel_observation(
+            &WorkerError::Media(MediaError::ColorQc(ColorQcError::NodeBudgetExceeded {
+                observed: "12".to_owned(),
+                allowed: "4",
+            })),
+            revision,
+        )
+        .expect("the second QC error notes");
+        let third = in2b_start_seam_session(
+            &mut app,
+            ScriptedDriver::new(vec![in2_happy_turn(expected, revision, 73)]),
+            observation,
+            vec!["opening".to_owned()],
+        );
+        assert_eq!(third, expected);
+        in2_pump_until_finished(&mut app);
+        assert!(
+            in2_incident(&app, third).proposal.is_some(),
+            "the third session ends with a proposal"
+        );
+
+        // Exactly two newly reachable codes carry the three sessions.
+        let codes = [first, second, third]
+            .into_iter()
+            .map(|id| in2_incident(&app, id).code)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            codes,
+            std::collections::BTreeSet::from([
+                IncidentCode::ColorQc(ColorQcIncident::NodeBudgetExceeded),
+                IncidentCode::DeliveryVerification(
+                    DeliveryVerificationIncident::FrameCountOutOfRange
+                ),
+            ]),
+            "two newly reachable codes, three sessions"
+        );
+        super::in1_tests::in2_cleanup(&mut app);
+    }
+
+    /// Item 32: the re-measurement of `IN1b` §3.2 rule 13 — 74 codes, 74
+    /// producers, 0 exempt (`IN2B` §6 rule 7, E-B9). Three parts:
+    ///
+    /// 1. Every `ColorQcError` variant (6) and every `DeliveryVerificationError`
+    ///    variant (5) is driven through its real §6 seam mapping to its code.
+    ///    A seventh variant breaks `from_media_error`'s totality at compile
+    ///    time; extending this table is then the author's review-level
+    ///    obligation — the ratchet's handle, not its teeth.
+    /// 2. The 7 §5 codes are produced through their real note constructors
+    ///    (§5 rule 4): the seam-7 shared body, the two recovery shapers, the
+    ///    newer-format shaper, `restore` itself (the unknown-code aggregate
+    ///    has no named constructor — the inline note in `restore` is it),
+    ///    and the two sidecar shapers. Each asserts code plus `transient`.
+    /// 3. The remaining 56 cite their existing producers (`IN1b` §3.2's
+    ///    inventory, i.e. Appendix B's rows, cited per code below) and each
+    ///    citation is re-verified by grep with a positive count: the
+    ///    producer-side symbol (the error variant for mapped codes, the
+    ///    `IncidentFamily` arm for families, the note-site label for labels)
+    ///    must appear on a non-comment source line somewhere under `crates/`.
+    ///    The table stores each pattern as two fragments joined at run time,
+    ///    so the table itself never matches its own grep; `Look`/`Media`/
+    ///    `Agent` carry a trailing comma so `LookIncomplete`, `MediaIncomplete`
+    ///    and `AgentBranch` lines do not inflate their counts. Positions are
+    ///    deliberately not pinned (that audit belongs to the §11 suite):
+    ///    existence is what rule 13 claims.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2b_every_declared_code_has_a_producer() {
+        use crate::{
+            color_qc_ui::qc_panel_observation,
+            error_ui::{WorkerError, worker_error_observation},
+            export_ui::{ExportVerificationKind, export_panel_observation},
+            project::project_newer_format_observation,
+            recovery::{recovery_damage_observation, recovery_unavailable_observation},
+            sidecar::{sidecar_refused_observation, sidecar_write_failed_observation},
+        };
+        use kinewright_core::{
+            ClipId, ColorQcError, ColorQcIncident, DeliveryVerificationError,
+            DeliveryVerificationIncident, EffectId, IncidentEvidence, IncidentId, IncidentLog,
+            IncidentRecord, IncidentState, IncidentTelemetry,
+        };
+
+        fn rs_lines(dir: &std::path::Path, out: &mut Vec<String>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|error| panic!("{} reads: {error}", dir.display()));
+            for entry in entries {
+                let path = entry
+                    .unwrap_or_else(|error| panic!("a dir entry reads: {error}"))
+                    .path();
+                if path.is_dir() {
+                    rs_lines(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path)
+                        .unwrap_or_else(|error| panic!("{} reads: {error}", path.display()));
+                    out.extend(
+                        text.lines()
+                            .filter(|line| !line.trim_start().starts_with("//"))
+                            .map(str::to_owned),
+                    );
+                }
+            }
+        }
+
+        let revision = TimelineRevision(50);
+
+        // Part 1a: all six QC refusals through the QC seam to their codes.
+        let qc_cases = [
+            (
+                ColorQcError::ProxyProofRefused {
+                    observed: "a proxy".to_owned(),
+                    allowed: "a proof",
+                },
+                ColorQcIncident::ProxyProofRefused,
+            ),
+            (
+                ColorQcError::RasterLengthMismatch {
+                    observed: "3".to_owned(),
+                    allowed: "4".to_owned(),
+                },
+                ColorQcIncident::RasterLengthMismatch,
+            ),
+            (
+                ColorQcError::EmptyPopulation {
+                    observed: "empty".to_owned(),
+                    allowed: "nonempty",
+                },
+                ColorQcIncident::EmptyPopulation,
+            ),
+            (
+                ColorQcError::NodeBudgetExceeded {
+                    observed: "9".to_owned(),
+                    allowed: "8",
+                },
+                ColorQcIncident::NodeBudgetExceeded,
+            ),
+            (
+                ColorQcError::MatteRegionRasterMismatch {
+                    observed: "2x1".to_owned(),
+                    allowed: "2x2".to_owned(),
+                },
+                ColorQcIncident::MatteRegionRasterMismatch,
+            ),
+            (
+                ColorQcError::NodeRemovalRejected {
+                    clip: ClipId(1),
+                    effect: EffectId(2),
+                    reason: "the clone refused".to_owned(),
+                },
+                ColorQcIncident::NodeRemovalRejected,
+            ),
+        ];
+        assert_eq!(qc_cases.len(), 6, "all six QC variants");
+        for (error, incident) in qc_cases {
+            let wrapped = WorkerError::Media(MediaError::ColorQc(error));
+            let note = qc_panel_observation(&wrapped, revision).expect("every QC variant notes");
+            assert_eq!(
+                note.code,
+                IncidentCode::ColorQc(incident),
+                "QC variant maps to its own code"
+            );
+        }
+
+        // Part 1b: all five verification refusals through the export seam.
+        let dv_cases = [
+            (
+                DeliveryVerificationError::NotFullResolution {
+                    observed: "a sample".to_owned(),
+                    allowed: "full resolution",
+                },
+                DeliveryVerificationIncident::NotFullResolution,
+            ),
+            (
+                DeliveryVerificationError::PlaneOutOfContainer {
+                    observed: "a sample".to_owned(),
+                    allowed: "the container",
+                },
+                DeliveryVerificationIncident::PlaneOutOfContainer,
+            ),
+            (
+                DeliveryVerificationError::FrameCountMismatch {
+                    observed: "3".to_owned(),
+                    allowed: "4".to_owned(),
+                },
+                DeliveryVerificationIncident::FrameCountMismatch,
+            ),
+            (
+                DeliveryVerificationError::FrameCountOutOfRange {
+                    observed: "99".to_owned(),
+                    allowed: "0..=10",
+                },
+                DeliveryVerificationIncident::FrameCountOutOfRange,
+            ),
+            (
+                DeliveryVerificationError::BudgetLaneMismatch {
+                    observed: "lane A".to_owned(),
+                    allowed: "lane B".to_owned(),
+                },
+                DeliveryVerificationIncident::BudgetLaneMismatch,
+            ),
+        ];
+        assert_eq!(dv_cases.len(), 5, "all five DV variants");
+        for (error, incident) in dv_cases {
+            let wrapped = WorkerError::Media(MediaError::DeliveryVerification(error));
+            let note =
+                export_panel_observation(&wrapped, ExportVerificationKind::Verification, revision)
+                    .expect("every DV variant notes");
+            assert_eq!(
+                note.code,
+                IncidentCode::DeliveryVerification(incident),
+                "DV variant maps to its own code"
+            );
+        }
+
+        // Part 2: the seven §5 codes through their real note constructors.
+        let collapsed = WorkerError::Untyped("the worker fell over".to_owned());
+        let panel =
+            worker_error_observation(&collapsed, IncidentSubject::Project, "Scopes: ", revision)
+                .expect("a collapse notes");
+        assert_eq!(
+            panel.code,
+            IncidentCode::Label(LabelIncident::PanelWorkerError),
+            "seam-7 collapse"
+        );
+        assert!(panel.transient, "§5 notes are transient");
+        for (note, code, name) in [
+            (
+                recovery_damage_observation("a torn journal", revision),
+                LabelIncident::RecoveryDamage,
+                "recovery damage",
+            ),
+            (
+                recovery_unavailable_observation("the recorder stopped", revision),
+                LabelIncident::RecoveryUnavailable,
+                "recovery unavailable",
+            ),
+            (
+                project_newer_format_observation(999, revision),
+                LabelIncident::ProjectNewerFormat,
+                "newer format",
+            ),
+            (
+                sidecar_refused_observation("the digest mismatched", revision),
+                LabelIncident::SidecarRefused,
+                "sidecar refused",
+            ),
+            (
+                sidecar_write_failed_observation("the disk is full", revision),
+                LabelIncident::SidecarWriteFailed,
+                "sidecar write failed",
+            ),
+        ] {
+            assert_eq!(note.code, IncidentCode::Label(code), "{name} code");
+            assert!(note.transient, "{name} is transient");
+        }
+        // The aggregate's constructor is `restore` itself: one unknown-code
+        // record in, one transient `sidecar_unknown_codes` note out.
+        let unknown = IncidentRecord {
+            id: IncidentId(1),
+            code: "no_such_code_xyz".to_owned(),
+            subject: IncidentSubject::Project,
+            observed: "observed 1".to_owned(),
+            allowed: None,
+            evidence: IncidentEvidence::Plain,
+            revision: TimelineRevision(7),
+            opened_wall_millis: None,
+            opened_offset_nanos: 1_000,
+            count: 1,
+            state: IncidentState::Open,
+            telemetry: IncidentTelemetry::default(),
+            proposal: None,
+            subject_name: None,
+            refused_op: None,
+        };
+        let mut log = IncidentLog::with_start(std::time::Instant::now(), None);
+        let report = log.restore(vec![unknown], Vec::new(), TimelineRevision(100), None);
+        assert_eq!(
+            report.unknown_codes,
+            vec![("no_such_code_xyz".to_owned(), 1)],
+            "the unknown code reports"
+        );
+        let aggregate = log.open().next().expect("the aggregate noted");
+        assert_eq!(
+            aggregate.code,
+            IncidentCode::Label(LabelIncident::SidecarUnknownCodes),
+            "unknown-code aggregate"
+        );
+        assert!(aggregate.transient, "the aggregate is transient");
+
+        // Part 3: the remaining 56 cite `IN1b` Appendix B; each citation
+        // re-verified by grep with a positive count per code.
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates");
+        let mut lines = Vec::new();
+        rs_lines(&crates, &mut lines);
+        assert!(!lines.is_empty(), "the workspace has source lines");
+        // (code, pattern left, pattern right, Appendix B rows).
+        let census = [
+            (
+                "unknown_source_primaries",
+                "ColorSourceError",
+                "UnknownPrimaries",
+                "B27",
+            ),
+            (
+                "unsupported_source_primaries",
+                "ColorSourceError",
+                "UnsupportedPrimaries",
+                "B27",
+            ),
+            (
+                "unknown_source_transfer",
+                "ColorSourceError",
+                "UnknownTransfer",
+                "B27",
+            ),
+            (
+                "unsupported_source_transfer",
+                "ColorSourceError",
+                "UnsupportedTransfer",
+                "B27",
+            ),
+            (
+                "unknown_source_matrix",
+                "ColorSourceError",
+                "UnknownMatrix",
+                "B27",
+            ),
+            (
+                "unsupported_source_matrix",
+                "ColorSourceError",
+                "UnsupportedMatrix",
+                "B27",
+            ),
+            (
+                "unknown_source_range",
+                "ColorSourceError",
+                "UnknownRange",
+                "B27",
+            ),
+            (
+                "unsupported_source_range",
+                "ColorSourceError",
+                "UnsupportedRange",
+                "B27",
+            ),
+            (
+                "unknown_source_white_point",
+                "ColorSourceError",
+                "UnknownWhitePoint",
+                "B27",
+            ),
+            (
+                "unsupported_source_white_point",
+                "ColorSourceError",
+                "UnsupportedWhitePoint",
+                "B27",
+            ),
+            (
+                "unknown_source_bit_depth",
+                "ColorSourceError",
+                "UnknownBitDepth",
+                "B27",
+            ),
+            (
+                "unsupported_source_bit_depth",
+                "ColorSourceError",
+                "UnsupportedBitDepth",
+                "B27",
+            ),
+            (
+                "unsupported_source_combination",
+                "ColorSourceError",
+                "UnsupportedCombination",
+                "B27",
+            ),
+            (
+                "unsupported_decoder_format",
+                "MediaError",
+                "UnsupportedDecoderFormat",
+                "B27/B46/B61",
+            ),
+            (
+                "media_backend_unclassified",
+                "MediaIncident",
+                "BackendUnclassified",
+                "B27/B46/B61",
+            ),
+            (
+                "unsupported_delivery_codec",
+                "DeliveryColorError",
+                "UnsupportedCodec",
+                "B61",
+            ),
+            (
+                "unsupported_delivery_color",
+                "DeliveryColorError",
+                "UnsupportedField",
+                "B61",
+            ),
+            (
+                "delivery_pixel_format_depth_mismatch",
+                "DeliveryColorError",
+                "PixelFormatDepthMismatch",
+                "B61",
+            ),
+            (
+                "delivery_encoder_pixel_format_unavailable",
+                "DeliveryColorError",
+                "EncoderPixelFormatUnavailable",
+                "B61",
+            ),
+            (
+                "operation_bounds",
+                "IncidentFamily",
+                "Bounds",
+                "B24/B25/B40/B44+App.A",
+            ),
+            (
+                "operation_malformed",
+                "IncidentFamily",
+                "Malformed",
+                "B24/B25/B40/B44+App.A",
+            ),
+            (
+                "operation_duplicate",
+                "IncidentFamily",
+                "Duplicate",
+                "B24/B25/B40/B44+App.A",
+            ),
+            (
+                "operation_placement",
+                "IncidentFamily",
+                "Placement",
+                "B24/B25/B40/B44+App.A",
+            ),
+            (
+                "operation_missing",
+                "IncidentFamily",
+                "Missing",
+                "B24/B25/B40/B44+App.A",
+            ),
+            (
+                "operation_structure",
+                "IncidentFamily",
+                "Structure",
+                "B24/B25/B40/B44+App.A",
+            ),
+            (
+                "operation_relink",
+                "IncidentFamily",
+                "Relink",
+                "B24/B25/B40/B44+App.A",
+            ),
+            (
+                "operation_unrepresentable",
+                "IncidentFamily",
+                "Unrepresentable",
+                "B24/B25/B40/B44+App.A",
+            ),
+            (
+                "operation_unknown_name",
+                "IncidentFamily",
+                "UnknownName",
+                "B24/B25/B40/B44+App.A",
+            ),
+            (
+                "operation_internal",
+                "IncidentFamily",
+                "Internal",
+                "B12/B14-19/B21/B63/B76/B77/B84/B90/B102",
+            ),
+            (
+                "operation_color_policy",
+                "IncidentFamily",
+                "ColorPolicy",
+                "B24/B25/B40/B44+App.A",
+            ),
+            (
+                "lut_asset_policy",
+                "IncidentCode",
+                "LutAssetPolicy",
+                "B24-family+§3.1r6",
+            ),
+            (
+                "edit_revision_conflict",
+                "IncidentCode",
+                "EditRevisionConflict",
+                "B26/B39/B43/B85/B89/B91",
+            ),
+            (
+                "edit_plan_rejected",
+                "RejectionIncident",
+                "EditPlan",
+                "B25/B40/B44",
+            ),
+            (
+                "delivery_variant_rejected",
+                "RejectionIncident",
+                "DeliveryVariant",
+                "B49/B50/B51",
+            ),
+            (
+                "agent_branch_rejected",
+                "RejectionIncident",
+                "AgentBranch",
+                "B41/B42/B45",
+            ),
+            (
+                "source_edit_rejected",
+                "RejectionIncident",
+                "SourceEdit",
+                "B82",
+            ),
+            ("relink_rejected", "RejectionIncident", "Relink", "B86/B93"),
+            (
+                "project_save_failed",
+                "RejectionIncident",
+                "ProjectSave",
+                "B5",
+            ),
+            (
+                "caption_plan_rejected",
+                "RejectionIncident",
+                "CaptionPlan",
+                "B33",
+            ),
+            (
+                "operations_unclassified",
+                "LabelIncident",
+                "Operations",
+                "B64-72/B74/B75/B78/B116-123",
+            ),
+            (
+                "look_unclassified",
+                "LabelIncident",
+                "Look,",
+                "B62/B73/B94-102/B104",
+            ),
+            (
+                "look_incomplete",
+                "LabelIncident",
+                "LookIncomplete",
+                "B3/B4/B9/B10/B103",
+            ),
+            ("export_unclassified", "LabelIncident", "Export", "B52-59"),
+            (
+                "source_monitor_unclassified",
+                "LabelIncident",
+                "SourceMonitor",
+                "B23/B80/B81/B83/B105-110",
+            ),
+            ("relink_unclassified", "LabelIncident", "Relink", "B87/B92"),
+            (
+                "agent_branch_unclassified",
+                "LabelIncident",
+                "AgentBranch",
+                "B38/B48",
+            ),
+            (
+                "transcript_edit_unclassified",
+                "LabelIncident",
+                "TranscriptEdit",
+                "B125-131",
+            ),
+            (
+                "media_unclassified",
+                "LabelIncident",
+                "Media,",
+                "B22/B79/B124/B132",
+            ),
+            (
+                "media_incomplete",
+                "LabelIncident",
+                "MediaIncomplete",
+                "B2/B11/B20",
+            ),
+            (
+                "agent_unclassified",
+                "LabelIncident",
+                "Agent,",
+                "B34-37/B47",
+            ),
+            (
+                "recording_unclassified",
+                "LabelIncident",
+                "Recording",
+                "B111-115",
+            ),
+            (
+                "project_unclassified",
+                "LabelIncident",
+                "Project",
+                "B1/B6-8/B28",
+            ),
+            (
+                "captions_unclassified",
+                "LabelIncident",
+                "Captions",
+                "B32/B60",
+            ),
+            ("mixer_unclassified", "LabelIncident", "Mixer", "B29-31"),
+            (
+                "media_cache_unclassified",
+                "LabelIncident",
+                "MediaCache",
+                "B88",
+            ),
+            ("timeline_unclassified", "LabelIncident", "Timeline", "B62"),
+        ];
+        assert_eq!(census.len(), 56, "56 cited codes");
+        for (code, left, right, rows) in census {
+            let needle = format!("{left}::{right}");
+            let count = lines.iter().filter(|line| line.contains(&needle)).count();
+            assert!(
+                count > 0,
+                "IN1b Appendix B {rows} producer for `{code}` still exists (`{needle}`)"
+            );
+        }
     }
 
     /// N2/S-13: opening an already-open path focuses the live session

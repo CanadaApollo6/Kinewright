@@ -4,7 +4,7 @@ use eframe::egui;
 
 use kinewright_core::{
     Incident, IncidentCode, IncidentFamily, IncidentObservation, IncidentSubject, LabelIncident,
-    MediaError,
+    MediaError, TimelineRevision,
 };
 
 use crate::{
@@ -103,6 +103,42 @@ impl From<MediaError> for WorkerError {
     }
 }
 
+/// The `WorkerError` five's shared body (`IN2B` §7 rule 2): the tag plus
+/// `transient` over `from_media_error`/`plain`.
+///
+/// `Untyped(s)` notes `panel_worker_error` with the worker's string
+/// verbatim behind the tag; `Media(Cancelled)` is the operator saying
+/// "stop working", not a failure (§7 rule 7); every other `Media(e)`
+/// routes through `from_media_error` with the tag prefixed. Every `Some`
+/// arm marks provenance (§7 rule 2, N2/B-3). Pure: no clock, no document,
+/// no log.
+pub(crate) fn worker_error_observation(
+    error: &WorkerError,
+    subject: IncidentSubject,
+    tag: &str,
+    revision: TimelineRevision,
+) -> Option<IncidentObservation> {
+    match error {
+        WorkerError::Untyped(message) => {
+            let mut observation = IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::PanelWorkerError),
+                subject,
+                format!("{tag}{message}"),
+                revision,
+            );
+            observation.transient = true;
+            Some(observation)
+        }
+        WorkerError::Media(MediaError::Cancelled) => None,
+        WorkerError::Media(error) => {
+            let mut observation = IncidentObservation::from_media_error(error, subject, revision);
+            observation.observed = format!("{tag}{}", observation.observed);
+            observation.transient = true;
+            Some(observation)
+        }
+    }
+}
+
 impl KinewrightApp {
     /// The single writer to [`ErrorLog`] after `IN1b` (§5.3 rule 17).
     ///
@@ -126,8 +162,8 @@ impl KinewrightApp {
 
     /// Queue one observation for the incident router (`IN1b` §5.2 rule 16).
     ///
-    /// Every migrated error path in the crate ends here or in one of the three
-    /// shorthands below. The router drains `pending_observations` once per
+    /// Every migrated error path in the crate ends here or in one of the
+    /// four shorthands below. The router drains `pending_observations` once per
     /// update, hands each one to `IncidentLog::observe`, and writes the audit
     /// line through [`Self::note_incident`] — so a site queues a *problem* and
     /// never a rendered line, and the dedup key collapses repeats that a
@@ -173,6 +209,22 @@ impl KinewrightApp {
         observed: impl Into<String>,
     ) {
         self.note_plain(IncidentCode::Label(label), subject, observed);
+    }
+
+    /// [`Self::note_label`] for the three open-time aggregates (`IN2B` §7
+    /// rule 1, rows 9/10/11): they describe the just-completed open, so
+    /// they persist dropped — never pinned `Open` against a later open.
+    pub(crate) fn note_transient_label(
+        &mut self,
+        label: LabelIncident,
+        subject: IncidentSubject,
+        observed: impl Into<String>,
+    ) {
+        let revision = self.focused().revision;
+        let mut observation =
+            IncidentObservation::plain(IncidentCode::Label(label), subject, observed, revision);
+        observation.transient = true;
+        self.note_observation(observation);
     }
 
     /// [`Self::note_plain`] for the fourteen sites whose message begins
@@ -318,11 +370,11 @@ mod tests {
     ///
     /// **What the gate does not claim** (`IN1b` §5.3 rule 22). The four
     /// patterns name `record_error`, `error_log.push` and `note_incident` and
-    /// nothing else, so the four `note_*` shorthands beside `note_incident`
+    /// nothing else, so the five `note_*` shorthands beside `note_incident`
     /// are invisible to every one of them. That is correct today — each one
     /// funnels into `pending_observations` and reaches the person only through
     /// the router, so none is a sink — but it is correct by construction
-    /// rather than by the gate, and a fifth shorthand that wrote `status` or
+    /// rather than by the gate, and a sixth shorthand that wrote `status` or
     /// the log directly would leave all four counts reading 0 / 0 / 1 / 1
     /// (review-app-2 N4). All four counts are also over the app crate only.
     /// `crates/kinewright-agent/src/server.rs` carries

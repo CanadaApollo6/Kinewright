@@ -14,15 +14,15 @@ use kinewright_core::{
     ExportLutPreflightReport, ExportMediaPreflightReport, ExportProgress, ExportReport,
     ExportSettings, IncidentObservation, IncidentSubject, LabelIncident, LoudnessTarget, LutAsset,
     LutAssetSource, LutAvailabilityKind, LutAvailabilityStatus, MediaError, Operation, QaIssue,
-    QaSeverity, Rational, TimeCode, delivery_conformance, document_for_delivery_variant,
-    export_lut_preflight_with, export_media_preflight, srt, vtt,
+    QaSeverity, Rational, TimeCode, TimelineRevision, delivery_conformance,
+    document_for_delivery_variant, export_lut_preflight_with, export_media_preflight, srt, vtt,
 };
 use kinewright_media::{BuiltinLook, LutStore, LutStoreError, LutStoreErrorCode};
 
 use crate::{
     app::KinewrightApp,
     color_ui::{color_pipeline_summary, managed_sdr_reset_needed},
-    error_ui::WorkerError,
+    error_ui::{WorkerError, worker_error_observation},
     icons::Icon,
     theme::{self, color, size, space},
 };
@@ -268,6 +268,48 @@ impl ExportConformance {
 /// provable without a `KinewrightApp`: CC6 §11.2.20 requires that a cached
 /// 8-bit report is never served for a 10-bit key, and the only thing that
 /// guarantees that is `ConformanceKey`'s equality.
+/// Which job verification stored the error: sites 8–9 share
+/// [`export_panel_observation`], but the card names its panel, so the
+/// tag differs per site (`IN2B` §7 rule 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExportVerificationKind {
+    Verification,
+    AudioVerification,
+}
+
+impl ExportVerificationKind {
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Verification => "Export verification: ",
+            Self::AudioVerification => "Export audio verification: ",
+        }
+    }
+}
+
+/// Sites 8–9's note (`IN2B` §7 rule 1): the job verification's
+/// `WorkerError` over the export attempt. Pure: the store calls it once
+/// per `Unavailable`, never for `Measured`, never from a render body.
+pub(crate) fn export_panel_observation(
+    error: &WorkerError,
+    kind: ExportVerificationKind,
+    revision: TimelineRevision,
+) -> Option<IncidentObservation> {
+    worker_error_observation(error, IncidentSubject::ExportJob, kind.tag(), revision)
+}
+
+/// Site 7's note (`IN2B` §7 rule 1): the conformance refusal over the
+/// export attempt — untagged, deduping with `note_delivery_variant_refusal`
+/// ("one export attempt is one problem"). Always `Some`: the cache-miss
+/// compute is the novelty, this fn only shapes. Pure.
+pub(crate) fn conformance_panel_observation(
+    error: &DeliveryVariantError,
+    revision: TimelineRevision,
+) -> IncidentObservation {
+    let mut observation = error.incident_observation(IncidentSubject::ExportJob, revision);
+    observation.transient = true;
+    observation
+}
+
 fn cached_conformance(
     cache: &mut Option<(
         ConformanceKey,
@@ -1658,8 +1700,16 @@ impl KinewrightApp {
             height: self.export_dialog.height,
             delivery_bit_depth: self.export_dialog.delivery_bit_depth,
         };
+        // Site 7's edge (`IN2B` §7 rule 3): a cache hit re-serves
+        // silently — same key, same episode. Only a miss computes, and
+        // only a failed compute notes.
+        if let Some((cached_key, cached)) = self.export_dialog.conformance_cache.as_ref()
+            && *cached_key == key
+        {
+            return cached.clone();
+        }
         let document = Arc::clone(&self.focused().document);
-        cached_conformance(&mut self.export_dialog.conformance_cache, key, |key| {
+        let result = cached_conformance(&mut self.export_dialog.conformance_cache, key, |key| {
             export_conformance(
                 &document,
                 key.aspect,
@@ -1667,7 +1717,12 @@ impl KinewrightApp {
                 key.focus_x_percent,
                 key.focus_y_percent,
             )
-        })
+        });
+        if let Err(error) = &result {
+            let revision = self.focused().revision;
+            self.note_observation(conformance_panel_observation(error, revision));
+        }
+        result
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1877,6 +1932,30 @@ impl KinewrightApp {
                 Ok(report) => {
                     self.export_dialog.verification = verification;
                     self.export_dialog.audio_verification = audio_verification;
+                    // Sites 8–9 (`IN2B` §7 rule 3): the job landed once,
+                    // so a stored `Unavailable` notes once — `Measured`
+                    // notes never, `Cancelled` notes nothing (rule 7).
+                    let revision = self.focused().revision;
+                    if let Some(ExportVerification::Unavailable(error)) =
+                        self.export_dialog.verification.as_ref()
+                        && let Some(observation) = export_panel_observation(
+                            error,
+                            ExportVerificationKind::Verification,
+                            revision,
+                        )
+                    {
+                        self.note_observation(observation);
+                    }
+                    if let Some(ExportAudioVerification::Unavailable(error)) =
+                        self.export_dialog.audio_verification.as_ref()
+                        && let Some(observation) = export_panel_observation(
+                            error,
+                            ExportVerificationKind::AudioVerification,
+                            revision,
+                        )
+                    {
+                        self.note_observation(observation);
+                    }
                     self.export_dialog.audio_report = report.audio;
                     self.status = format!(
                         "Exported {} · {} · {}",
