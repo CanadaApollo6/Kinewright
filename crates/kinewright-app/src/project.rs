@@ -7,12 +7,14 @@ use std::{
     time::{Instant, SystemTime},
 };
 
+use serde::{Deserialize, Serialize};
+
 use kinewright_core::{
     Analysis, AssetId, ClipId, Core, Document, Event, Export, IncidentCode, IncidentEvidence,
-    IncidentId, IncidentLog, IncidentObservation, IncidentSubject, LutAssetId, LutAvailabilityKind,
-    LutAvailabilityStatus, MarkerId, MediaKind, Operation, Playback, RejectionIncident,
-    RestoreReport, RunningInvestigation, TimeCode, TimelineRevision, TrackId, TrackKind,
-    should_flush,
+    IncidentId, IncidentLog, IncidentObservation, IncidentSubject, LabelIncident, LutAssetId,
+    LutAvailabilityKind, LutAvailabilityStatus, MarkerId, MediaKind, Operation,
+    PROJECT_FORMAT_VERSION, Playback, RejectionIncident, RestoreReport, RunningInvestigation,
+    TimeCode, TimelineRevision, TrackId, TrackKind, should_flush,
 };
 use kinewright_media::{LutLibrary, LutStore};
 
@@ -50,6 +52,10 @@ pub(crate) struct ProjectSaveReport {
     /// project still cannot own LUT bytes: reporting `project_not_saved` on a
     /// project that was saved a second ago is a lie (CC4 §2.2).
     pub(crate) lut_store_error: Option<String>,
+    /// The FNV-1a pairing digest over the exact bytes written (`IN2B` §4
+    /// rule 2, §2 rule 9): the save path hands it to the sidecar flush, so
+    /// one serialisation serves both files.
+    pub(crate) digest: String,
 }
 
 impl ProjectSaveReport {
@@ -80,6 +86,12 @@ impl ProjectSaveReport {
 pub(crate) enum ProjectSaveError {
     Serialize(String),
     Write(String),
+    /// Overwrite-save refused: the session read a newer file (`IN2B` §4
+    /// rule 3). The save path re-surfaces the rule-4 card instead of noting,
+    /// so this variant never opens a second incident.
+    NewerFormat {
+        read_version: u32,
+    },
 }
 
 impl std::fmt::Display for ProjectSaveError {
@@ -89,6 +101,11 @@ impl std::fmt::Display for ProjectSaveError {
                 write!(formatter, "could not serialize the project: {reason}")
             }
             Self::Write(reason) => write!(formatter, "could not write the project file: {reason}"),
+            Self::NewerFormat { read_version } => write!(
+                formatter,
+                "saving over this project is disabled: it was written by a newer Kinewright \
+                 (format_version {read_version}) — use Save As"
+            ),
         }
     }
 }
@@ -106,6 +123,7 @@ impl ProjectSaveError {
             Self::Serialize(_) | Self::Write(_) => {
                 IncidentCode::Rejection(RejectionIncident::ProjectSave)
             }
+            Self::NewerFormat { .. } => IncidentCode::Label(LabelIncident::ProjectNewerFormat),
         }
     }
 
@@ -113,12 +131,20 @@ impl ProjectSaveError {
     ///
     /// `ProjectSave { reason }` evidence keeps which half failed —
     /// serialising or writing — which is what the written body tells the
-    /// person to act on.
+    /// person to act on. The newer-format arm builds the shared rule-4
+    /// observation instead (same text as the open-time note, so even a
+    /// double-note dedups) — the save path intercepts the variant before it
+    /// can note, so this arm is belt and braces.
     pub(crate) fn incident_observation(
         &self,
         subject: IncidentSubject,
         revision: TimelineRevision,
     ) -> IncidentObservation {
+        if let Self::NewerFormat { read_version } = self {
+            let mut observation = project_newer_format_observation(*read_version, revision);
+            observation.subject = subject;
+            return observation;
+        }
         IncidentObservation {
             code: self.incident_code(),
             subject,
@@ -192,13 +218,122 @@ pub(crate) const fn focus_publishes_lut_library(
 /// function over borrowed state rather than a method on the app so the
 /// relocatability fixture can drive the exact code the UI runs without an
 /// eframe render state, a GPU adapter, or a window.
+/// The default `format_version`: every legacy file without the key reads as 1
+/// (`IN2B` §4 rule 1). A named fn, so the default is greppable, not magic.
+fn v1() -> u32 {
+    1
+}
+
+/// Whether a version serialises away: v1 writes are byte-identical to the
+/// pre-envelope shape, so the key appears only after the first real bump.
+/// Takes the reference because `skip_serializing_if` mandates `fn(&u32)`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_v1(version: &u32) -> bool {
+    *version == 1
+}
+
+/// A project file on disk: the app-side envelope over the core-owned version
+/// const (`IN2B` §4 rule 1).
+///
+/// `#[serde(flatten)]` keeps the document's fields at top level with the
+/// version key first; missing parses as 1 (every legacy file) and a v1 write
+/// skips the key entirely. No `Document` field, no struct-level serde
+/// attribute on `Document`, no 55-site pass.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ProjectFile {
+    #[serde(default = "v1", skip_serializing_if = "is_v1")]
+    pub format_version: u32,
+    #[serde(flatten)]
+    pub document: Document,
+}
+
+/// Whether the session that read `read_version` may save over its own file
+/// (`IN2B` §4 rule 3).
+///
+/// Newer files open (rule 4) but never overwrite: the in-memory document has
+/// already lost the newer writer's fields at parse, and overwriting would
+/// launder that loss into the original. Save As stays enabled — the loss goes
+/// into a new file the person chose, with the card explaining.
+#[must_use]
+pub(crate) fn can_overwrite_save(read_version: u32) -> bool {
+    read_version <= PROJECT_FORMAT_VERSION
+}
+
+/// The observation a newer-format encounter notes: exactly one
+/// `project_newer_format` per file (`IN2B` §4 rules 4–5, §5 rule 1 #4).
+///
+/// One constructor for the newer-file open, the cross-version recovery
+/// refusal, and the refused overwrite-save — same code, same subject, same
+/// text for the same version, so even a double-note dedups instead of
+/// doubling. Transient, like every §5 note.
+#[must_use]
+pub(crate) fn project_newer_format_observation(
+    read_version: u32,
+    revision: TimelineRevision,
+) -> IncidentObservation {
+    let mut observation = IncidentObservation::plain(
+        IncidentCode::Label(LabelIncident::ProjectNewerFormat),
+        IncidentSubject::Project,
+        format!(
+            "this project was written by a newer Kinewright (format_version {read_version}); \
+             saving over it is disabled — use Save As"
+        ),
+        revision,
+    );
+    observation.transient = true;
+    observation
+}
+
+/// The canonical key two project paths share iff they name one file (N2/S-13).
+///
+/// `canonicalize` resolves symlinks, `.`/`..` and (on Windows) case; when the
+/// file is gone the raw path is the key, which still matches itself.
+#[must_use]
+pub(crate) fn canonical_session_key(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Serialise a document inside the file envelope (`IN2B` §4 rules 1–2).
+///
+/// The writer stamps its own `PROJECT_FORMAT_VERSION` const — never the
+/// session's read version: the bytes are this build's, whatever it opened.
+pub(crate) fn serialize_project_document(document: &Document) -> Result<String, ProjectSaveError> {
+    let file = ProjectFile {
+        format_version: PROJECT_FORMAT_VERSION,
+        document: document.clone(),
+    };
+    serde_json::to_string_pretty(&file)
+        .map_err(|error| ProjectSaveError::Serialize(error.to_string()))
+}
+
+/// Compose the halves: serialize, then write (`IN2B` §4 rule 2).
+///
+/// The fixture-writing tests use this; production `write_project` calls the
+/// halves directly so the sidecar flush (which needs the digest) lands
+/// between them.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn write_project_document(
     document: &Document,
     path: &Path,
     previous_store: Option<&LutStore>,
 ) -> Result<ProjectSaveReport, ProjectSaveError> {
-    let json = serde_json::to_string_pretty(document)
-        .map_err(|error| ProjectSaveError::Serialize(error.to_string()))?;
+    let json = serialize_project_document(document)?;
+    write_project_bytes(&json, document, path, previous_store)
+}
+
+/// Write pre-serialised project bytes: the write half of
+/// [`write_project_document`], split so the save path can flush the sidecar
+/// (which needs the digest) between serialising and writing, with one
+/// serialisation total (`IN2B` §4 rule 2, §2 rule 9).
+///
+/// The digest in the report is over these exact bytes. `document` rides along
+/// for the Save As asset copy only — the bytes on disk come from `json`.
+pub(crate) fn write_project_bytes(
+    json: &str,
+    document: &Document,
+    path: &Path,
+    previous_store: Option<&LutStore>,
+) -> Result<ProjectSaveReport, ProjectSaveError> {
     fs::write(path, json).map_err(|error| ProjectSaveError::Write(error.to_string()))?;
     let (next_store, lut_store_error) = match derive_lut_store(Some(path)) {
         Ok(store) => (store, None),
@@ -225,6 +360,7 @@ pub(crate) fn write_project_document(
         store_root_changed,
         lut_store_copy_failed,
         lut_store_error,
+        digest: digest_bytes(json.as_bytes()),
     })
 }
 
@@ -323,6 +459,17 @@ pub(crate) struct ProjectSession {
     /// the halves, not the counts.
     #[allow(dead_code)]
     pub(crate) last_restore_report: Option<RestoreReport>,
+    /// The `format_version` this session read (`IN2B` §4 rule 3): the
+    /// envelope's version at open, or the journal's writer version after a
+    /// recovery restore. Gates overwrite-save via [`can_overwrite_save`];
+    /// Save As resets it to [`PROJECT_FORMAT_VERSION`] — the bytes on the
+    /// new path are this build's.
+    pub(crate) format_version: u32,
+    /// Sidecar writes suspended: a recovery restore onto an already-open
+    /// path must not clobber the open session's history (`IN2B` §2 rule 10,
+    /// N2/S-13). Loads still run; every flush reports `Skipped` until Save
+    /// As clears this on the new path.
+    pub(crate) sidecar_suspended: bool,
     /// Runtime, never-serialized LUT availability, one entry per document
     /// asset, refreshed whenever the library is rebuilt (CC4 §2.3).
     pub(crate) lut_availability: BTreeMap<LutAssetId, LutAvailabilityStatus>,
@@ -427,33 +574,26 @@ impl LoadedSessionSidecar {
 /// running yet; the code is off-allowlist, so no session could start
 /// anyway). Restore runs before any note (N4.1).
 ///
-/// `Load` recomputes the project digest over the file bytes; C2 threads it
-/// from `load_document` instead of this second read. A `Load` whose project
-/// bytes cannot be re-read loads ungated — the document is already in memory,
-/// so the file vanished in a race, and history is better loaded than dropped.
-/// `RecoveryNoDigest` skips the gate by rule; version arms still apply.
+/// `Load` carries the digest `load_document` read — single read, no TOCTOU
+/// (§4 rule 2). `RecoveryNoDigest` skips the gate by rule; version arms
+/// still apply.
 fn load_session_sidecar(
-    mode: SidecarMode,
+    mode: &SidecarMode,
     project_path: Option<&Path>,
     incidents: &IncidentLogHandle,
     opening: TimelineRevision,
 ) -> LoadedSessionSidecar {
-    if mode == SidecarMode::None {
-        return LoadedSessionSidecar::empty();
-    }
+    let project_digest = match mode {
+        SidecarMode::Load { project_digest } => Some(project_digest.clone()),
+        SidecarMode::RecoveryNoDigest => None,
+        SidecarMode::None => return LoadedSessionSidecar::empty(),
+    };
     let Some(project_path) = project_path else {
         return LoadedSessionSidecar::empty();
     };
     let Some(sidecar_path) = sidecar_path_for_project(Some(project_path)) else {
         return LoadedSessionSidecar::empty();
     };
-    let project_digest = (mode == SidecarMode::Load)
-        .then(|| {
-            fs::read(project_path)
-                .ok()
-                .map(|bytes| digest_bytes(&bytes))
-        })
-        .flatten();
     let mut loaded = LoadedSessionSidecar::empty();
     if let Some(digest) = &project_digest {
         loaded.saved_digest.clone_from(digest);
@@ -509,10 +649,12 @@ impl ProjectSession {
     /// Build every actor, channel, recovery recorder, and initial thread for a project.
     ///
     /// `sidecar_mode` decides the open-time history load (`IN2B` §2 rule 5,
-    /// N2/B-1): startup reopen and `open_project` pass `Load`, recovery
+    /// N2/B-1): startup reopen and `open_project` pass `Load` carrying the
+    /// digest `load_document` read (no second read, §4 rule 2), recovery
     /// restore passes `RecoveryNoDigest`, new projects pass `None`.
     /// `sidecar_writer` is the app's shared writer; `None` spawns a private
-    /// one for headless-test isolation.
+    /// one for headless-test isolation. `format_version` is the envelope
+    /// version the session read (§4 rule 3).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create(
         id: u64,
@@ -522,8 +664,9 @@ impl ProjectSession {
         playback: &Arc<dyn Playback>,
         analysis: &Arc<dyn Analysis>,
         exporter: &Arc<dyn Export>,
-        sidecar_mode: SidecarMode,
+        sidecar_mode: &SidecarMode,
         sidecar_writer: Option<Arc<SidecarWriter>>,
+        format_version: u32,
     ) -> Result<Self, String> {
         let name = name.into();
         let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
@@ -584,6 +727,8 @@ impl ProjectSession {
             refused_by_id: loaded.refused,
             last_written_gen: loaded.last_written_gen,
             last_restore_report: loaded.report,
+            format_version,
+            sidecar_suspended: false,
             lut_availability: statuses.into_iter().collect(),
             lut_library: Arc::new(library),
             saved_document: None,
@@ -772,12 +917,16 @@ impl ProjectSession {
     /// `Ok` after a successful temp + rename (report populated), `Err` after
     /// a failed one — the caller notes `sidecar_write_failed` per rule 6 and
     /// carries on. Unsaved projects report `Skipped` and attempt no IO
-    /// (rule 10, N-5).
+    /// (rule 10, N-5), as do sidecar-suspended recovery restores (§2
+    /// rule 10).
     pub(crate) fn flush_incidents(
         &mut self,
         project_digest: &str,
         previous_digest: &str,
     ) -> std::io::Result<FlushOutcome> {
+        if self.sidecar_suspended {
+            return Ok(FlushOutcome::Skipped);
+        }
         let Some(sidecar_path) = sidecar_path_for_project(self.project_path.as_deref()) else {
             return Ok(FlushOutcome::Skipped);
         };
@@ -801,7 +950,7 @@ impl ProjectSession {
     /// entirely: the digest pair would be identical anyway. Saves do not call
     /// this — a save always rewrites the pair over new bytes.
     pub(crate) fn flush_incidents_if_changed(&mut self) -> std::io::Result<FlushOutcome> {
-        if self.project_path.is_none() {
+        if self.sidecar_suspended || self.project_path.is_none() {
             return Ok(FlushOutcome::Skipped);
         }
         let generation = self
@@ -824,6 +973,9 @@ impl ProjectSession {
     /// at submit: a failed submit's incident is the retry signal, not a
     /// 2 s resubmit churn.
     pub(crate) fn queue_incidents_flush(&mut self) {
+        if self.sidecar_suspended {
+            return;
+        }
         let Some(sidecar_path) = sidecar_path_for_project(self.project_path.as_deref()) else {
             return;
         };
@@ -2019,8 +2171,9 @@ mod tests {
             &playback,
             &analysis,
             &exporter,
-            SidecarMode::None,
+            &SidecarMode::None,
             None,
+            PROJECT_FORMAT_VERSION,
         )
         .expect("the dirty-test session builds")
     }
@@ -2232,8 +2385,11 @@ mod tests {
             &playback,
             &analysis,
             &exporter,
-            SidecarMode::Load,
+            &SidecarMode::Load {
+                project_digest: project_digest_of(path),
+            },
             None,
+            PROJECT_FORMAT_VERSION,
         )
         .expect("the sidecar-test session builds")
     }
@@ -2744,5 +2900,78 @@ mod tests {
             oversize_bytes.as_bytes()
         );
         shutdown_test_session(&mut session);
+    }
+
+    /// `canonical_session_key` collapses non-canonical spellings of one file
+    /// (N2/S-13): `.`/`..` segments resolve, so the one-session guard sees
+    /// through them. A missing file keys by its raw path — still matching
+    /// itself.
+    #[test]
+    fn canonical_session_key_collapses_spellings_of_one_file() {
+        let temporary = TempDirectory::new("in2b-canonical-key");
+        let file = temporary.path("edit.kinewright");
+        fs::write(&file, b"{}").expect("the file writes");
+        fs::create_dir(temporary.path("sub")).expect("the segment exists");
+        let alias = temporary
+            .root()
+            .join("sub")
+            .join("..")
+            .join("edit.kinewright");
+        assert_ne!(alias, file, "the spellings really differ");
+        assert_eq!(
+            canonical_session_key(&alias),
+            canonical_session_key(&file),
+            "one file, one key"
+        );
+        let missing = temporary.path("gone.kinewright");
+        assert_eq!(
+            canonical_session_key(&missing),
+            missing,
+            "a missing file keys by its raw path"
+        );
+    }
+
+    /// `can_overwrite_save` gates on the read version (`IN2B` §4 rule 3):
+    /// current and older overwrite, newer never does.
+    #[test]
+    fn can_overwrite_save_gates_on_the_read_version() {
+        assert!(can_overwrite_save(0));
+        assert!(can_overwrite_save(1));
+        assert!(can_overwrite_save(PROJECT_FORMAT_VERSION));
+        assert!(!can_overwrite_save(PROJECT_FORMAT_VERSION + 1));
+        assert!(!can_overwrite_save(999));
+        assert!(!can_overwrite_save(u32::MAX));
+    }
+
+    /// Item 19: the legacy fixture round-trips to the pinned bytes through
+    /// the envelope — and a v1 write emits no version key at all.
+    #[test]
+    fn in2b_v1_project_bytes_are_identical() {
+        let fixture: &[u8] =
+            include_bytes!("../../kinewright-core/tests/fixtures/pre_m13_project.json");
+        // Through the envelope: legacy bytes parse with the version default.
+        let file: ProjectFile = serde_json::from_slice(fixture).expect("the legacy fixture parses");
+        assert_eq!(file.format_version, 1);
+        assert!(file.document.investigator.is_none());
+        // The pinned round trip (the IN2 §9.1 item 12 shape, now read through
+        // the envelope): compact bytes, pinned length, pinned FNV digest via
+        // the production digest fn.
+        let round_tripped = serde_json::to_vec(&file.document).expect("the document serialises");
+        assert_eq!(round_tripped.len(), 1_215);
+        assert_eq!(
+            digest_bytes(&round_tripped),
+            "c9da3186e131e4fd",
+            "the fixture keeps its pinned digest through the envelope"
+        );
+        // A v1 write is byte-identical to today: the key is skipped.
+        let pretty = serialize_project_document(&file.document).expect("the envelope serialises");
+        assert!(
+            !pretty.contains("format_version"),
+            "v1 writes emit no version key"
+        );
+        let reparsed: ProjectFile =
+            serde_json::from_str(&pretty).expect("the envelope output re-parses");
+        assert_eq!(reparsed.format_version, 1);
+        assert_eq!(reparsed.document, file.document);
     }
 }

@@ -36,7 +36,7 @@ use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use eframe::egui;
 use kinewright_core::{
     Core, Document, Event, IncidentCode, IncidentObservation, IncidentSubject, JournalCommand,
-    LabelIncident, TimelineRevision,
+    LabelIncident, PROJECT_FORMAT_VERSION, TimelineRevision,
 };
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +46,12 @@ const MAGIC: &[u8] = b"KINEWRIGHT-JOURNAL 1\n";
 const FORMAT_VERSION: u32 = 1;
 const CORE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The default project version: journals written before Part B read as 1
+/// (`IN2B` §4 rule 5, N-4 — a named fn, not a bare `default`).
+fn v1() -> u32 {
+    1
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct JournalHeader {
     format_version: u32,
@@ -53,6 +59,14 @@ struct JournalHeader {
     /// with a default so journals from before multi-project still parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project_path: Option<PathBuf>,
+    /// The project `format_version` the writing build stamped: its own
+    /// `PROJECT_FORMAT_VERSION` const, not the session's read version — the
+    /// journal describes the bytes this build wrote (`IN2B` §4 rule 5, N-4).
+    /// The journal's own strict `format_version` gate above is unchanged:
+    /// the two versions answer different questions ("can I parse this
+    /// journal?" vs "can I run this project?").
+    #[serde(default = "v1")]
+    writer_format_version: u32,
     initial_document: Document,
 }
 
@@ -98,6 +112,7 @@ impl JournalWriter {
         let header = serde_json::to_vec(&JournalHeader {
             format_version: FORMAT_VERSION,
             project_path: project_path.map(Path::to_path_buf),
+            writer_format_version: PROJECT_FORMAT_VERSION,
             initial_document: initial_document.clone(),
         })
         .map_err(|error| format!("could not serialize recovery snapshot: {error}"))?;
@@ -150,6 +165,7 @@ struct ParsedCommand {
 struct ParsedJournal {
     project_path: Option<PathBuf>,
     initial_document: Document,
+    writer_format_version: u32,
     commands: Vec<ParsedCommand>,
     #[cfg(test)]
     header_end: usize,
@@ -161,6 +177,7 @@ struct ParsedJournal {
 struct RecoveryReport {
     project_path: Option<PathBuf>,
     document: Document,
+    writer_format_version: u32,
     recovered_commands: usize,
     damage: Option<Damage>,
 }
@@ -252,6 +269,7 @@ fn parse_journal(bytes: &[u8]) -> Result<ParsedJournal, Damage> {
     Ok(ParsedJournal {
         project_path: header.project_path,
         initial_document: header.initial_document,
+        writer_format_version: header.writer_format_version,
         commands,
         #[cfg(test)]
         header_end,
@@ -355,6 +373,7 @@ fn replay(parsed: ParsedJournal) -> Inspection {
     Inspection::Recoverable(RecoveryReport {
         project_path,
         document,
+        writer_format_version: parsed.writer_format_version,
         recovered_commands,
         damage,
     })
@@ -537,6 +556,10 @@ pub(crate) struct RestoreRequest {
     pub(crate) document: Document,
     pub(crate) project_path: Option<PathBuf>,
     pub(crate) journal_path: PathBuf,
+    /// The journal's writer version (`IN2B` §4 rule 5): the restore is
+    /// refused when it exceeds this build's const, before the document is
+    /// trusted.
+    pub(crate) writer_format_version: u32,
 }
 
 /// App-owned recovery lifecycle. All filesystem and UI behavior stays here.
@@ -725,6 +748,7 @@ impl Recovery {
                 document: report.document.clone(),
                 project_path: report.project_path.clone(),
                 journal_path: entry.journal_path.clone(),
+                writer_format_version: report.writer_format_version,
             });
         }
         None
@@ -735,6 +759,15 @@ impl Recovery {
         self.pending
             .retain(|entry| entry.journal_path != journal_path);
         remove_file_best_effort(journal_path, &self.runtime_error);
+    }
+
+    /// A cross-version restore was refused (`IN2B` §4 rule 5): drop the
+    /// pending entry so this run stops offering it, but keep the file — a
+    /// newer build restores it. Unlike `consume_pending`, nothing is
+    /// deleted.
+    pub(crate) fn shelve_pending(&mut self, journal_path: &Path) {
+        self.pending
+            .retain(|entry| entry.journal_path != journal_path);
     }
 
     /// Preserve process-startup restore decisions when their owning project closes.
@@ -1053,6 +1086,7 @@ mod tests {
             serde_json::to_vec(&JournalHeader {
                 format_version: FORMAT_VERSION,
                 project_path: project_path.map(Path::to_path_buf),
+                writer_format_version: PROJECT_FORMAT_VERSION,
                 initial_document: initial.clone(),
             })
             .unwrap(),
@@ -1695,5 +1729,78 @@ mod tests {
         recovery.consume_pending(&journal_path);
         assert_eq!(recovery.pending.len(), 1);
         assert!(!journal_path.exists());
+    }
+
+    /// Craft header-only journal bytes with a chosen writer version line.
+    fn journal_bytes_with_header_line(header_line: &[u8]) -> Vec<u8> {
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(header_line);
+        bytes.push(b'\n');
+        bytes
+    }
+
+    /// `IN2B` §4 rule 5's parse/write halves: pre-Part-B headers (no key)
+    /// read as 1, the writer stamps its own const, and a 999 writer version
+    /// carries through the parse.
+    #[test]
+    fn journal_headers_carry_the_writer_format_version() {
+        // A pre-Part-B header has no `writer_format_version` key at all.
+        let initial = serde_json::to_vec(&Document::default()).expect("the snapshot serialises");
+        // Splice the snapshot in as raw JSON (no re-parse games: the header
+        // is bytes on a wire, built as bytes).
+        let mut old_line = br#"{"format_version":1,"initial_document":"#.to_vec();
+        old_line.extend_from_slice(&initial);
+        old_line.push(b'}');
+        let parsed =
+            parse_journal(&journal_bytes_with_header_line(&old_line)).expect("old headers parse");
+        assert_eq!(parsed.writer_format_version, 1);
+
+        // The writer stamps its own const, not the session's read version.
+        let directory = TestDirectory::new("writer-version");
+        let path = directory.0.join("stamp.journal");
+        drop(JournalWriter::create(&path, None, &Document::default()).expect("journal creates"));
+        let bytes = fs::read(&path).expect("the journal reads");
+        let parsed = parse_journal(&bytes).expect("the stamped journal parses");
+        assert_eq!(parsed.writer_format_version, PROJECT_FORMAT_VERSION);
+
+        // A 999 writer version carries through the parse untouched.
+        let header = serde_json::to_vec(&JournalHeader {
+            format_version: FORMAT_VERSION,
+            project_path: None,
+            writer_format_version: 999,
+            initial_document: Document::default(),
+        })
+        .expect("the 999 header serialises");
+        let parsed =
+            parse_journal(&journal_bytes_with_header_line(&header)).expect("999 headers parse");
+        assert_eq!(parsed.writer_format_version, 999);
+    }
+
+    /// A cross-version journal scans `Recoverable` — the refusal happens at
+    /// restore time (`apply_restore_request` notes the incident), not at
+    /// scan time, so the dialog still offers it and the incident has a
+    /// trigger.
+    #[test]
+    fn cross_version_journals_scan_recoverable_for_the_dialog() {
+        let directory = TestDirectory::new("cross-version-scan");
+        let header = serde_json::to_vec(&JournalHeader {
+            format_version: FORMAT_VERSION,
+            project_path: None,
+            writer_format_version: 999,
+            initial_document: Document::default(),
+        })
+        .expect("the 999 header serialises");
+        fs::write(
+            directory.0.join("cross.journal"),
+            journal_bytes_with_header_line(&header),
+        )
+        .expect("the 999 journal writes");
+        let pending = scan_directory(&directory.0);
+        assert_eq!(pending.len(), 1);
+        let PendingState::Recoverable(report) = &pending[0].state else {
+            panic!("a replayable 999 journal scans Recoverable");
+        };
+        assert_eq!(report.writer_format_version, 999);
+        assert_eq!(report.recovered_commands, 0);
     }
 }

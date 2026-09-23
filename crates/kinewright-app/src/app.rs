@@ -16,9 +16,9 @@ use kinewright_core::{
     Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome, IncidentSubject,
     InvestigatorPreferences, JournalCommand, LabelIncident, LiveAudioChange, MediaAsset,
     MediaError, MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint, NOISE_PROFILE_BAND_COUNT,
-    NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation, ParamValue, Playback, PlaybackState,
-    PolicyClass, Rational, RecoveryKind, SilenceStatus, TimeCode, TimelineRevision, Track, TrackId,
-    TrackKind, recovery_description,
+    NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation, PROJECT_FORMAT_VERSION, ParamValue,
+    Playback, PlaybackState, PolicyClass, Rational, RecoveryKind, SilenceStatus, TimeCode,
+    TimelineRevision, Track, TrackId, TrackKind, recovery_description,
 };
 use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits};
 
@@ -29,10 +29,12 @@ use crate::{
     media_workflow::media_asset_requires_refresh,
     mixer_pane_ui::{LEARN_NO_SILENCE, NoiseLearnRange},
     project::{
-        ProjectSaveError, ProjectSaveReport, ProjectSession, derive_lut_store,
-        focus_publishes_lut_library, index_after_close, project_name, session_index_by_id,
-        write_project_document,
+        ProjectFile, ProjectSaveError, ProjectSaveReport, ProjectSession, can_overwrite_save,
+        canonical_session_key, derive_lut_store, focus_publishes_lut_library, index_after_close,
+        project_name, project_newer_format_observation, serialize_project_document,
+        session_index_by_id, write_project_bytes,
     },
+    recovery::RestoreRequest,
     sidecar::{
         SidecarMode, SidecarWriter, digest_bytes, sidecar_path_for_project,
         sidecar_write_failed_observation,
@@ -365,11 +367,20 @@ impl KinewrightApp {
     #[allow(clippy::too_many_lines)]
     fn new(media: Arc<FfmpegMediaEngine>, startup_path: Option<PathBuf>) -> Self {
         let mut load_error = None;
-        let (name, document, project_path) = match startup_path {
+        let mut newer_note = None;
+        let (name, document, project_path, format_version, project_digest) = match startup_path {
             Some(path) if path.is_file() => match load_document(&path) {
-                Ok(document) => {
+                Ok((document, version, digest)) => {
+                    // `IN2B` §4 rule 4, startup arm: a newer file opens; the
+                    // note queues below, beside `load_error`.
+                    if version > PROJECT_FORMAT_VERSION {
+                        newer_note = Some(project_newer_format_observation(
+                            version,
+                            TimelineRevision::default(),
+                        ));
+                    }
                     let name = project_name(Some(&path), "Project 1");
-                    (name, document, Some(path))
+                    (name, document, Some(path), version, digest)
                 }
                 // `IN1b` §5.4 rule 27: the first dynamic site is not dynamic
                 // in substance — both producers wrote the literal `"Project"` —
@@ -380,7 +391,13 @@ impl KinewrightApp {
                         "Could not open {}: {error}",
                         path.display()
                     )));
-                    ("Project 1".to_owned(), default_project_document(), None)
+                    (
+                        "Project 1".to_owned(),
+                        default_project_document(),
+                        None,
+                        PROJECT_FORMAT_VERSION,
+                        String::new(),
+                    )
                 }
             },
             Some(path) => {
@@ -388,9 +405,21 @@ impl KinewrightApp {
                     "Startup project not found: {}",
                     path.display()
                 )));
-                ("Project 1".to_owned(), default_project_document(), None)
+                (
+                    "Project 1".to_owned(),
+                    default_project_document(),
+                    None,
+                    PROJECT_FORMAT_VERSION,
+                    String::new(),
+                )
             }
-            None => ("Project 1".to_owned(), default_project_document(), None),
+            None => (
+                "Project 1".to_owned(),
+                default_project_document(),
+                None,
+                PROJECT_FORMAT_VERSION,
+                String::new(),
+            ),
         };
         let frames = media.frames();
         let media_events = media.events();
@@ -407,6 +436,11 @@ impl KinewrightApp {
         let exporter: Arc<dyn Export> = media.clone();
         let lut_publisher = media;
         let sidecar_writer = SidecarWriter::new();
+        let sidecar_mode = if project_path.is_some() {
+            SidecarMode::Load { project_digest }
+        } else {
+            SidecarMode::None
+        };
         let mut project = ProjectSession::create(
             1,
             name,
@@ -415,8 +449,9 @@ impl KinewrightApp {
             &playback,
             &analysis,
             &exporter,
-            SidecarMode::Load,
+            &sidecar_mode,
             Some(Arc::clone(&sidecar_writer)),
+            format_version,
         )
         .expect("startup project session must be valid");
         if project_path.is_some() {
@@ -579,6 +614,12 @@ impl KinewrightApp {
         );
         crate::investigator::apply_settings_load_for_run(&mut app, settings_load, settings_durable);
         let opened_path = app.focused().project_path.clone();
+        // The startup newer-file arm (§4 rule 4): the project opened above,
+        // exactly one incident notes it. Queued ahead of the media check so
+        // a newer file still gets both.
+        if let Some(observation) = newer_note {
+            app.note_observation(observation);
+        }
         if let Some(observation) = load_error {
             app.note_observation(observation);
         } else if let Some(path) = opened_path {
@@ -654,7 +695,8 @@ impl KinewrightApp {
         name: String,
         document: Document,
         project_path: Option<PathBuf>,
-        sidecar_mode: SidecarMode,
+        sidecar_mode: &SidecarMode,
+        format_version: u32,
     ) -> Result<ProjectSession, String> {
         let id = self.next_project_id;
         self.next_project_id = self
@@ -672,6 +714,7 @@ impl KinewrightApp {
             &self.exporter,
             sidecar_mode,
             Some(writer),
+            format_version,
         )?;
         // The investigator settings are app-wide: a new project inherits the
         // focused copy rather than re-reading the file. Mutes stay
@@ -727,13 +770,24 @@ impl KinewrightApp {
     ///
     /// # Errors
     ///
-    /// Returns the typed serialize or write failure. A store-root refusal is
+    /// Returns the typed serialize or write failure, or the newer-format
+    /// refusal (`IN2B` §4 rule 3 — no bytes written at all, and the caller
+    /// re-surfaces the rule-4 card instead of noting). A store-root refusal is
     /// not fatal: the project is saved and its imported looks report `missing`
     /// until the root is usable.
     pub(crate) fn write_project(
         &mut self,
         path: &Path,
     ) -> Result<ProjectSaveReport, ProjectSaveError> {
+        let save_as = self.focused().project_path.as_deref() != Some(path);
+        // `IN2B` §4 rule 3: a newer-format session never overwrites its own
+        // file — checked before any IO, so a refused save writes neither
+        // file. Save As stays enabled.
+        if !save_as && !can_overwrite_save(self.focused().format_version) {
+            return Err(ProjectSaveError::NewerFormat {
+                read_version: self.focused().format_version,
+            });
+        }
         let document = Arc::clone(&self.focused().document);
         let previous_store = self.focused().lut_store.clone();
         // The live investigator mutes travel in the saved bytes (IN2 §2.4).
@@ -763,25 +817,13 @@ impl KinewrightApp {
         };
         // `IN2B` §2 rule 9: the sidecar lands *before* the project bytes,
         // carrying the digest the project file is about to have plus the one
-        // it had. The digest needs the serialised bytes first, so this
-        // serialises once here (C2's envelope makes `write_project_document`
-        // return its digest, removing the second serialisation).
-        let new_digest = {
-            let json = serde_json::to_string_pretty(to_write)
-                .map_err(|error| ProjectSaveError::Serialize(error.to_string()))?;
-            digest_bytes(json.as_bytes())
-        };
-        let save_as = self.focused().project_path.as_deref() != Some(path);
+        // it had. One serialisation serves both files (§4 rule 2): the JSON
+        // below is what `write_project_bytes` writes and what the digest
+        // covers.
+        let json = serialize_project_document(to_write)?;
+        let new_digest = digest_bytes(json.as_bytes());
         if save_as {
-            // N2/B-4: the newer-format note was about the old path's bytes —
-            // a live-log removal, not a resolution, before the fresh sidecar
-            // is written so the new stem carries no false card.
-            let incidents = Arc::clone(&self.focused().incidents);
-            let mut log = incidents
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _ =
-                log.remove_open_with_code(IncidentCode::Label(LabelIncident::ProjectNewerFormat));
+            self.drop_newer_format_note_for_save_as();
         }
         // Same sidecar stem, same previous save; a new stem has no previous.
         let previous_digest = if sidecar_path_for_project(self.focused().project_path.as_deref())
@@ -795,9 +837,17 @@ impl KinewrightApp {
         // flush derives the new stem: a Save As must carry the live log to
         // the new sidecar (leaving the old one in place), and a first save
         // must write a sidecar at all. Restored below if the project write
-        // fails, so a failed save claims no path.
+        // fails, so a failed save claims no path. The suspension lifts here
+        // too: a recovery restore onto an open path writes no sidecar
+        // *until Save As* (§2 rule 10, N2/S-13) — the Save As flush below is
+        // the first write the new stem is owed, and `flush_incidents`
+        // skips while suspended.
         let old_path = self.focused().project_path.clone();
+        let was_suspended = self.focused().sidecar_suspended;
         self.focused_mut().project_path = Some(path.to_path_buf());
+        if save_as {
+            self.focused_mut().sidecar_suspended = false;
+        }
         // `IN2B` §2 rule 6: a sidecar write failure never fails the project
         // save — exactly one incident, then the save carries on.
         if let Err(error) = self
@@ -810,34 +860,19 @@ impl KinewrightApp {
                 revision,
             ));
         }
-        let report = match write_project_document(to_write, path, previous_store.as_ref()) {
+        let report = match write_project_bytes(&json, to_write, path, previous_store.as_ref()) {
             Ok(report) => report,
             Err(error) => {
                 self.focused_mut().project_path = old_path;
+                self.focused_mut().sidecar_suspended = was_suspended;
                 return Err(error);
             }
         };
-        let name = project_name(Some(path), &self.focused().name);
-        let (store, store_error) = match derive_lut_store(Some(path)) {
-            Ok(store) => (store, None),
-            Err(reason) => (None, Some(reason)),
-        };
-        let session = self.focused_mut();
-        session.name = name;
-        session.project_path = Some(path.to_path_buf());
-        session.saved_digest.clone_from(&new_digest);
-        session.set_lut_store(store, store_error);
-        session.saved_document = Some(Arc::clone(&session.document));
-        if let Some(investigator) = session.investigator.as_mut() {
-            investigator.note_mutes_saved();
-        }
-        let library = session.rebuild_lut_library();
-        session.publish_project_path_to_agents();
-        let core = session.core.clone();
-        session
-            .recovery
-            .checkpoint(&core, session.project_path.as_deref());
-        self.lut_publisher.set_lut_library(library);
+        debug_assert_eq!(
+            report.digest, new_digest,
+            "one serialisation serves both files"
+        );
+        self.adopt_saved_path(path, &new_digest, save_as);
         if let Some(reason) = &report.lut_store_error {
             // Appendix B row 3: the project **was** saved.
             self.note_label(
@@ -886,6 +921,12 @@ impl KinewrightApp {
                 }
                 true
             }
+            // `IN2B` §4 rule 3: a refused overwrite-save re-surfaces the
+            // rule-4 card — no second incident, exactly one per newer file.
+            Err(ProjectSaveError::NewerFormat { .. }) => {
+                self.resurface_newer_format_card();
+                false
+            }
             // Appendix B row 5: the one typed `Project` site.
             Err(error) => {
                 let revision = self.focused().revision;
@@ -895,6 +936,63 @@ impl KinewrightApp {
                 false
             }
         }
+    }
+
+    /// The project bytes landed: the session adopts the saved path,
+    /// digest, and store, resets the read version on Save As (the bytes on
+    /// the new path are this build's — `IN2B` §4 rule 3), and checkpoints
+    /// the recovery journal onto the new baseline.
+    fn adopt_saved_path(&mut self, path: &Path, new_digest: &str, save_as: bool) {
+        let name = project_name(Some(path), &self.focused().name);
+        let (store, store_error) = match derive_lut_store(Some(path)) {
+            Ok(store) => (store, None),
+            Err(reason) => (None, Some(reason)),
+        };
+        let session = self.focused_mut();
+        session.name = name;
+        session.project_path = Some(path.to_path_buf());
+        new_digest.clone_into(&mut session.saved_digest);
+        if save_as {
+            session.format_version = PROJECT_FORMAT_VERSION;
+        }
+        session.set_lut_store(store, store_error);
+        session.saved_document = Some(Arc::clone(&session.document));
+        if let Some(investigator) = session.investigator.as_mut() {
+            investigator.note_mutes_saved();
+        }
+        let library = session.rebuild_lut_library();
+        session.publish_project_path_to_agents();
+        let core = session.core.clone();
+        session
+            .recovery
+            .checkpoint(&core, session.project_path.as_deref());
+        self.lut_publisher.set_lut_library(library);
+    }
+
+    /// N2/B-4: the newer-format note was about the old path's bytes — a
+    /// live-log removal, not a resolution, before the fresh sidecar is
+    /// written so the new stem carries no false card.
+    fn drop_newer_format_note_for_save_as(&mut self) {
+        let incidents = Arc::clone(&self.focused().incidents);
+        let mut log = incidents
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = log.remove_open_with_code(IncidentCode::Label(LabelIncident::ProjectNewerFormat));
+    }
+
+    /// Re-surface the newer-format card after a refused overwrite-save
+    /// (`IN2B` §4 rule 3): the Incidents panel opens on the rule-4 incident
+    /// — no new incident, no dialog, no toast.
+    ///
+    /// The panel holds no per-card selection state, so opening it *is*
+    /// selecting the card: the newer-format session's card is the one that
+    /// explains the refusal.
+    fn resurface_newer_format_card(&mut self) {
+        self.incidents_open = true;
+        self.status = format!(
+            "Save disabled — this project was written by a newer Kinewright (format_version {}); use Save As",
+            self.focused().format_version
+        );
     }
 
     fn choose_project(&mut self) {
@@ -913,7 +1011,8 @@ impl KinewrightApp {
             name,
             default_project_document(),
             None,
-            SidecarMode::None,
+            &SidecarMode::None,
+            PROJECT_FORMAT_VERSION,
         ) {
             Ok(session) => session,
             Err(error) => {
@@ -931,9 +1030,38 @@ impl KinewrightApp {
         "Ready".clone_into(&mut self.status);
     }
 
+    /// The live session already holding `path`, if any (N2/S-13): the
+    /// one-session-per-path guard reads the live sessions only, so closing
+    /// frees it. Both spellings canonicalise, so `.`/`..` segments and
+    /// symlinks still match.
+    fn session_index_for_path(&self, path: &Path) -> Option<usize> {
+        let key = canonical_session_key(path);
+        self.projects.iter().position(|session| {
+            session
+                .project_path
+                .as_deref()
+                .is_some_and(|open| canonical_session_key(open) == key)
+        })
+    }
+
+    /// A second open focuses the live session instead of duplicating it
+    /// (N2/S-13). Returns whether `path` was already open.
+    fn refocus_if_open(&mut self, path: &Path) -> bool {
+        if let Some(index) = self.session_index_for_path(path) {
+            self.focus_project(index);
+            self.publish_focused_lut_library();
+            self.status = format!("Already open: {}", path.display());
+            return true;
+        }
+        false
+    }
+
     fn open_project(&mut self, path: &Path) {
-        let document = match load_document(path) {
-            Ok(document) => document,
+        if self.refocus_if_open(path) {
+            return;
+        }
+        let (document, format_version, project_digest) = match load_document(path) {
+            Ok(triple) => triple,
             // Appendix B row 7.
             Err(error) => {
                 self.note_label(
@@ -956,7 +1084,8 @@ impl KinewrightApp {
             name,
             document,
             Some(path.to_path_buf()),
-            SidecarMode::Load,
+            &SidecarMode::Load { project_digest },
+            format_version,
         ) {
             Ok(session) => session,
             // Appendix B row 8.
@@ -982,6 +1111,12 @@ impl KinewrightApp {
         self.projects.push(session);
         self.focus_project(self.projects.len() - 1);
         self.publish_focused_lut_library();
+        // `IN2B` §4 rule 4: a newer file opens — exactly one incident notes
+        // it, queued after the focus so it attributes to the new session.
+        if format_version > PROJECT_FORMAT_VERSION {
+            let revision = self.focused().revision;
+            self.note_observation(project_newer_format_observation(format_version, revision));
+        }
         if let Some(reason) = store_refusal {
             // Appendix B row 9: the session is pushed and focused *before*
             // this refusal, so the project opened — a degraded result.
@@ -1034,6 +1169,70 @@ impl KinewrightApp {
                 missing.join(", ")
             )
         };
+    }
+
+    /// Apply a recovery restore the dialog offered (`IN2B` §4 rule 5).
+    ///
+    /// A cross-version journal is refused before its document is trusted: no
+    /// session, the pending entry shelved (the file stays for a newer
+    /// build), and exactly one `project_newer_format` incident. A
+    /// same-version restore loads the saved sidecar digest-less
+    /// (`SidecarMode::RecoveryNoDigest` — the recovered document is
+    /// definitionally newer than the last save); when the target path is
+    /// already open, the restored session suspends sidecar writes until Save
+    /// As (§2 rule 10, N2/S-13 — recovery restore is exempt from
+    /// one-session-per-path because the recovered document needs a home, so
+    /// the suspension keeps it from clobbering the open session's history).
+    fn apply_restore_request(&mut self, request: RestoreRequest) {
+        if request.writer_format_version > PROJECT_FORMAT_VERSION {
+            if let Some(first) = self.projects.first_mut() {
+                first.recovery.shelve_pending(&request.journal_path);
+            }
+            let revision = self.focused().revision;
+            self.note_observation(project_newer_format_observation(
+                request.writer_format_version,
+                revision,
+            ));
+            self.status = format!(
+                "Recovery refused: the journal was written by a newer Kinewright (format_version {})",
+                request.writer_format_version
+            );
+            return;
+        }
+        let journal_path = request.journal_path;
+        let name = project_name(request.project_path.as_deref(), "Recovered project");
+        let suspended = request
+            .project_path
+            .as_deref()
+            .is_some_and(|path| self.session_index_for_path(path).is_some());
+        let format_version = request.writer_format_version;
+        let result = self
+            .create_project_session(
+                name,
+                request.document,
+                request.project_path,
+                &SidecarMode::RecoveryNoDigest,
+                format_version,
+            )
+            .map(|mut session| {
+                session.sidecar_suspended = suspended;
+                let assets = session.document.media_pool.clone();
+                self.projects.push(session);
+                self.focus_project(self.projects.len() - 1);
+                self.queue_media_status_checks_for_project(self.focused_project);
+                for asset in assets {
+                    self.request_asset_analysis(asset);
+                }
+                self.projects[0].recovery.consume_pending(&journal_path);
+            });
+        // `IN1b` §5.7, Appendix B row 28: the third log-bypassing sink.
+        // A failed restore used to be a bare status string; it is now a
+        // `project_unclassified` incident whose written body tells the
+        // person the last saved version is still intact.
+        match crate::recovery::restore_status(result) {
+            Ok(status) => self.status = status,
+            Err(observation) => self.note_observation(*observation),
+        }
     }
 
     fn is_dirty(&self) -> bool {
@@ -1140,6 +1339,9 @@ impl KinewrightApp {
             return;
         };
         let project_name = self.projects[project_index].name.clone();
+        // `IN2B` §4 rule 3: the prompt offers Save As, not overwrite-save,
+        // for a newer-format session — same keybinding, same position.
+        let can_save = can_overwrite_save(self.projects[project_index].format_version);
         let mut save = false;
         let mut discard = false;
         let mut cancel = false;
@@ -1157,7 +1359,7 @@ impl KinewrightApp {
                 ui.horizontal(|ui| {
                     if ui
                         .add(
-                            egui::Button::new("Save")
+                            egui::Button::new(if can_save { "Save" } else { "Save As…" })
                                 .fill(color::ACCENT_WASH)
                                 .stroke(egui::Stroke::new(1.0, color::ACCENT_DIM_BORDER)),
                         )
@@ -1179,7 +1381,7 @@ impl KinewrightApp {
         if save && self.focused_project != project_index {
             self.focus_project(project_index);
         }
-        if (save && self.save_project(false)) || discard {
+        if (save && self.save_project(!can_save)) || discard {
             self.pending_project_action = None;
             match action {
                 ProjectAction::CloseProject(id) => self.close_project(id),
@@ -2194,7 +2396,17 @@ impl KinewrightApp {
                 ui.close();
                 self.choose_project();
             }
-            if ui.button("Save").clicked() {
+            // `IN2B` §4 rule 3: Save greys out for a newer-format session,
+            // with a tooltip naming the version; Save As stays enabled.
+            let can_save = can_overwrite_save(self.focused().format_version);
+            let mut save = ui.add_enabled(can_save, egui::Button::new("Save"));
+            if !can_save {
+                save = save.on_hover_text(format!(
+                    "Saving is disabled: this project was written by a newer Kinewright (format_version {}). Use Save As.",
+                    self.focused().format_version
+                ));
+            }
+            if save.clicked() {
                 ui.close();
                 self.save_project(false);
             }
@@ -2328,33 +2540,7 @@ impl eframe::App for KinewrightApp {
             .first_mut()
             .and_then(|project| project.recovery.show_dialog(ui.ctx()));
         if let Some(request) = restore {
-            let journal_path = request.journal_path;
-            let name = project_name(request.project_path.as_deref(), "Recovered project");
-            let result = self
-                .create_project_session(
-                    name,
-                    request.document,
-                    request.project_path,
-                    SidecarMode::RecoveryNoDigest,
-                )
-                .map(|session| {
-                    let assets = session.document.media_pool.clone();
-                    self.projects.push(session);
-                    self.focus_project(self.projects.len() - 1);
-                    self.queue_media_status_checks_for_project(self.focused_project);
-                    for asset in assets {
-                        self.request_asset_analysis(asset);
-                    }
-                    self.projects[0].recovery.consume_pending(&journal_path);
-                });
-            // `IN1b` §5.7, Appendix B row 28: the third log-bypassing sink.
-            // A failed restore used to be a bare status string; it is now a
-            // `project_unclassified` incident whose written body tells the
-            // person the last saved version is still intact.
-            match crate::recovery::restore_status(result) {
-                Ok(status) => self.status = status,
-                Err(observation) => self.note_observation(*observation),
-            }
+            self.apply_restore_request(request);
         }
 
         self.app_top_bar(ui);
@@ -2973,11 +3159,21 @@ fn default_project_document() -> Document {
     }
 }
 
-fn load_document(path: &Path) -> Result<Document, String> {
-    let json = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let document: Document = serde_json::from_str(&json).map_err(|error| error.to_string())?;
-    document.validate().map_err(|error| error.to_string())?;
-    Ok(document)
+/// Load a project file: one read, one parse (`IN2B` §4 rule 2).
+///
+/// Returns the parsed document with the envelope version it read (missing → 1,
+/// every legacy file) and the FNV-1a digest of the file bytes (§2 rule 9 —
+/// the sidecar gate reuses it, no second read, no TOCTOU). The parse is
+/// `from_slice::<ProjectFile>` then unwrap: the envelope parses legacy files
+/// directly via the default, never probe-then-parse.
+fn load_document(path: &Path) -> Result<(Document, u32, String), String> {
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let file: ProjectFile = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    file.document
+        .validate()
+        .map_err(|error| error.to_string())?;
+    let digest = digest_bytes(&bytes);
+    Ok((file.document, file.format_version, digest))
 }
 
 fn window_icon() -> Option<egui::IconData> {
@@ -4730,8 +4926,9 @@ pub(crate) mod in1_tests {
             &playback,
             &analysis,
             &exporter,
-            SidecarMode::None,
+            &SidecarMode::None,
             None,
+            PROJECT_FORMAT_VERSION,
         )
         .expect("the test session builds");
         let (probe_tx, probe_rx) = std::sync::mpsc::channel();
@@ -7590,7 +7787,11 @@ pub(crate) mod in1_tests {
         let code = in2_allowlisted_code();
         app.mute_investigator_code(0, code);
         app.write_project(&path).expect("the muted project saves");
-        let muted: Document = load_document(&path).expect("the muted project reopens");
+        let (muted, version, _) = load_document(&path).expect("the muted project reopens");
+        assert_eq!(
+            version, 1,
+            "the muted fixture is versionless and reads as 1"
+        );
         assert_eq!(
             muted
                 .investigator
@@ -7602,7 +7803,11 @@ pub(crate) mod in1_tests {
 
         assert!(app.unmute_investigator_code(0, code.code()));
         app.write_project(&path).expect("the unmuted project saves");
-        let reopened: Document = load_document(&path).expect("the unmuted project reopens");
+        let (reopened, version, _) = load_document(&path).expect("the unmuted project reopens");
+        assert_eq!(
+            version, 1,
+            "the unmuted fixture is versionless and reads as 1"
+        );
         assert!(
             reopened.investigator.is_none()
                 || reopened
@@ -7650,8 +7855,9 @@ pub(crate) mod in1_tests {
             &app.playback,
             &app.analysis,
             &app.exporter,
-            SidecarMode::None,
+            &SidecarMode::None,
             None,
+            PROJECT_FORMAT_VERSION,
         )
         .expect("the second IN2 project builds");
         app.projects.push(project);
@@ -9161,7 +9367,7 @@ mod in2b_tests {
 
     use kinewright_core::{
         IncidentCode, IncidentId, IncidentObservation, IncidentOutcome, IncidentProposal,
-        IncidentSubject, LabelIncident, Observed, TimelineRevision,
+        IncidentSubject, LabelIncident, Marker, MarkerId, Observed, TimelineRevision,
     };
     use kinewright_media::{FfmpegMediaEngine, test_support::TempDirectory};
 
@@ -9179,10 +9385,15 @@ mod in2b_tests {
         let analysis: Arc<dyn Analysis> = engine.clone();
         let exporter: Arc<dyn Export> = engine.clone();
         let writer = SidecarWriter::new();
-        let mode = if project_path.is_some() {
-            SidecarMode::Load
-        } else {
-            SidecarMode::None
+        // The digest `load_document` would have read: the file rarely exists
+        // yet at harness time, and an `Absent` sidecar needs no gate.
+        let mode = match &project_path {
+            Some(path) => SidecarMode::Load {
+                project_digest: fs::read(path)
+                    .ok()
+                    .map_or_else(String::new, |bytes| digest_bytes(&bytes)),
+            },
+            None => SidecarMode::None,
         };
         let project = ProjectSession::create(
             1,
@@ -9192,8 +9403,9 @@ mod in2b_tests {
             &playback,
             &analysis,
             &exporter,
-            mode,
+            &mode,
             Some(Arc::clone(&writer)),
+            PROJECT_FORMAT_VERSION,
         )
         .expect("the test session builds");
         let (probe_tx, probe_rx) = std::sync::mpsc::channel();
@@ -9312,6 +9524,37 @@ mod in2b_tests {
         super::in1_tests::in1_shutdown(app);
     }
 
+    /// Park the engine worker before teardown: every `focus_project` ends in
+    /// `set_document` + `request_frame`, and the worker renders
+    /// asynchronously on a detached thread — dropping the engine while it is
+    /// mid-render SEGVs at process exit (`Compositor::readback_for` against
+    /// libnvidia teardown). The worker is FIFO and `request_frame` coalesces
+    /// latest-wins, so a drained receiver plus one sentinel request proves
+    /// quiescence: the sentinel's frame arrives only after every earlier
+    /// render finished, and nothing after this function renders again.
+    /// Tests that never focus (C1's) need no quiesce.
+    fn in2b_quiesce_engine(engine: &FfmpegMediaEngine) {
+        let frames = engine.frames();
+        while frames.try_recv().is_ok() {}
+        // Every focus in these tests requests `ZERO` (no test scrubs), so a
+        // nonzero sentinel is unambiguous — and an empty document renders
+        // every position identically (no clips, no decode).
+        engine.request_frame(TimeCode(1));
+        let expiry = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let Ok((at, _)) = frames.recv_timeout(
+                expiry
+                    .checked_duration_since(std::time::Instant::now())
+                    .unwrap_or_default(),
+            ) else {
+                panic!("the engine worker answered no frame within 10 s");
+            };
+            if at == TimeCode(1) {
+                return;
+            }
+        }
+    }
+
     fn in2b_shutdown_session(session: &mut ProjectSession) {
         for thread in &mut session.threads {
             if let Some(server) = thread.mcp_server.take() {
@@ -9410,7 +9653,9 @@ mod in2b_tests {
         assert_ne!(before, after, "the close flushed the post-save proposal");
 
         // Reopen through `ProjectSession::create` with `SidecarMode::Load`.
-        let document = load_document(&project_path).expect("the project re-reads");
+        let (document, version, digest) =
+            load_document(&project_path).expect("the project re-reads");
+        assert_eq!(version, 1);
         let playback = Arc::clone(&app.playback);
         let analysis = Arc::clone(&app.analysis);
         let exporter = Arc::clone(&app.exporter);
@@ -9423,8 +9668,11 @@ mod in2b_tests {
             &playback,
             &analysis,
             &exporter,
-            SidecarMode::Load,
+            &SidecarMode::Load {
+                project_digest: digest,
+            },
             Some(writer),
+            version,
         )
         .expect("the reopen builds");
         let report = reopened
@@ -9559,8 +9807,11 @@ mod in2b_tests {
             &playback,
             &analysis,
             &exporter,
-            SidecarMode::Load,
+            &SidecarMode::Load {
+                project_digest: String::new(),
+            },
             Some(writer),
+            PROJECT_FORMAT_VERSION,
         )
         .expect("the second project builds");
         app.projects.push(second);
@@ -9587,7 +9838,8 @@ mod in2b_tests {
             assert_eq!(log.open_count(), 0, "Save As drops the newer-format note");
             assert_eq!(log.len(), 0, "a removal, not a resolution");
         }
-        let document = load_document(&d_path).expect("the copy re-reads");
+        let (document, version, digest) = load_document(&d_path).expect("the copy re-reads");
+        assert_eq!(version, 1, "Save As writes current-version bytes");
         let playback = Arc::clone(&app.playback);
         let analysis = Arc::clone(&app.analysis);
         let exporter = Arc::clone(&app.exporter);
@@ -9600,8 +9852,11 @@ mod in2b_tests {
             &playback,
             &analysis,
             &exporter,
-            SidecarMode::Load,
+            &SidecarMode::Load {
+                project_digest: digest,
+            },
             Some(writer),
+            version,
         )
         .expect("the copy reopens");
         {
@@ -9645,6 +9900,410 @@ mod in2b_tests {
         );
         assert!(only.transient, "every §5 note is transient");
         drop(log);
+        in2b_shutdown(&mut app);
+    }
+
+    /// Item 18: a newer file opens with exactly one `project_newer_format`
+    /// incident and no overwrite-save; Save As writes current-version bytes
+    /// that reopen clean; versionless files open silently as v1.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2b_a_newer_file_opens_with_one_incident_and_no_overwrite() {
+        let temp = TempDirectory::new("in2b-newer-file");
+        // Box 1: `load_document` reads the version and digests the file
+        // bytes. Item 18 writes its own 999 files (§4 rule 2 — no committed
+        // newer-than-current fixture).
+        let newer_path = temp.path("newer.kinewright");
+        let written = serde_json::to_string_pretty(&ProjectFile {
+            format_version: 999,
+            document: Document::default(),
+        })
+        .expect("the 999 file serialises");
+        fs::write(&newer_path, &written).expect("the 999 file writes");
+        let (document, version, digest) = load_document(&newer_path).expect("the 999 file loads");
+        assert_eq!(version, 999);
+        assert_eq!(
+            digest,
+            digest_bytes(written.as_bytes()),
+            "the digest covers the file bytes"
+        );
+        assert_eq!(document, Document::default());
+
+        // Boxes 2–4: the headless open opens, notes exactly one incident,
+        // and carries the read version.
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        app.open_project(&newer_path);
+        assert_eq!(app.projects.len(), 2, "the newer file opens");
+        assert_eq!(app.focused().format_version, 999);
+        app.route_incidents();
+        {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.len(), 1, "exactly one incident");
+            let only = log.all().next().expect("the note landed");
+            assert_eq!(
+                only.code,
+                IncidentCode::Label(LabelIncident::ProjectNewerFormat)
+            );
+            assert!(only.transient, "every §5 note is transient");
+        }
+
+        // Box 5: the gate.
+        assert!(!can_overwrite_save(999));
+        assert!(can_overwrite_save(1));
+
+        // Box 6: overwrite-save refuses, re-surfaces the card, writes
+        // nothing, and notes nothing second.
+        assert!(!app.save_project(false), "overwrite-save refuses");
+        assert_eq!(
+            fs::read(&newer_path)
+                .expect("the 999 file re-reads")
+                .as_slice(),
+            written.as_bytes(),
+            "a refused save writes nothing"
+        );
+        assert!(app.incidents_open, "the refusal re-surfaces the card");
+        assert!(
+            app.status.contains("Save As"),
+            "the refusal names the way out: {}",
+            app.status
+        );
+        app.route_incidents();
+        {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.len(), 1, "no second incident");
+        }
+
+        // Box 7: Save As writes current-version bytes that reopen clean.
+        let copy_path = temp.path("copy.kinewright");
+        app.write_project(&copy_path).expect("Save As succeeds");
+        assert_eq!(
+            app.focused().format_version,
+            PROJECT_FORMAT_VERSION,
+            "Save As resets the read version"
+        );
+        app.write_project(&copy_path)
+            .expect("overwrite-save re-enables for the new path");
+        let (copy, copy_version, copy_digest) =
+            load_document(&copy_path).expect("the copy re-reads");
+        assert_eq!(copy_version, 1, "Save As writes current-version bytes");
+        let playback = Arc::clone(&app.playback);
+        let analysis = Arc::clone(&app.analysis);
+        let exporter = Arc::clone(&app.exporter);
+        let writer = Arc::clone(&app.sidecar_writer);
+        let mut reopened = ProjectSession::create(
+            9,
+            "copy",
+            copy,
+            Some(copy_path),
+            &playback,
+            &analysis,
+            &exporter,
+            &SidecarMode::Load {
+                project_digest: copy_digest,
+            },
+            Some(writer),
+            copy_version,
+        )
+        .expect("the copy reopens");
+        {
+            let log = reopened
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.len(), 0, "the copy reopens with 0 incidents");
+        }
+        in2b_shutdown_session(&mut reopened);
+        assert_eq!(
+            fs::read(&newer_path)
+                .expect("the 999 file re-reads")
+                .as_slice(),
+            written.as_bytes(),
+            "the original is never modified"
+        );
+
+        // Box 8: a versionless file reads as 1 and opens silently.
+        let legacy_path = temp.path("legacy.kinewright");
+        fs::write(
+            &legacy_path,
+            serde_json::to_string_pretty(&Document::default()).expect("the legacy file serialises"),
+        )
+        .expect("the legacy file writes");
+        let (_, legacy_version, _) = load_document(&legacy_path).expect("the legacy file loads");
+        assert_eq!(legacy_version, 1);
+        app.open_project(&legacy_path);
+        app.route_incidents();
+        {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.len(), 0, "a versionless file opens silently");
+        }
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// Real journal bytes for the item-20 fixtures: the wire magic plus a
+    /// header line. The apply path consumes only the journal path (a landed
+    /// restore deletes it, a refused one shelves it) — the parse halves
+    /// live in `recovery.rs` — but the bytes are shaped real so a future
+    /// parse-through stays honest.
+    fn journal_fixture_bytes(
+        project_path: &Path,
+        writer_format_version: u32,
+        initial: &Document,
+    ) -> Vec<u8> {
+        let header = serde_json::json!({
+            "format_version": 1,
+            "project_path": project_path,
+            "writer_format_version": writer_format_version,
+            "initial_document": initial,
+        });
+        let mut bytes = b"KINEWRIGHT-JOURNAL 1\n".to_vec();
+        bytes.extend_from_slice(
+            serde_json::to_vec(&header)
+                .expect("the header serialises")
+                .as_slice(),
+        );
+        bytes.push(b'\n');
+        bytes
+    }
+
+    /// Item 20: a journal newer than the last save restores pairing the
+    /// saved sidecar digest-less, with revisions rebased to the opening; a
+    /// 999-writer journal is refused with exactly one
+    /// `project_newer_format`, its file shelved for a newer build. The
+    /// restore targets the already-open path, so sidecar writes suspend
+    /// until Save As (N2/S-13); the Save As half proves the suspension
+    /// lifts onto the new path.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2b_recovery_restores_without_the_digest_gate_and_refuses_cross_version() {
+        let temp = TempDirectory::new("in2b-recovery-gate");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), Some(project_path.clone()));
+        in2b_observe_opens(&app.projects[0], 2, 41);
+        app.write_project(&project_path).expect("the save succeeds");
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
+        let saved_sidecar = fs::read(&sidecar).expect("the saved sidecar reads");
+
+        // The crash story: one post-save edit the journal kept, and a torn
+        // project file (another writer, a partial save) that breaks the
+        // digest pair — the restore must load the saved history anyway.
+        let mut recovered = Document::default();
+        recovered.markers.push(Marker {
+            id: MarkerId(7),
+            position: TimeCode::ZERO,
+            label: "the unsaved edit".to_owned(),
+            color_token: 0,
+        });
+        fs::write(
+            &project_path,
+            serde_json::to_string_pretty(&recovered).expect("the torn bytes serialise"),
+        )
+        .expect("the torn bytes write");
+        let journal_path = temp.path("edit.journal");
+        fs::write(
+            &journal_path,
+            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+        )
+        .expect("the journal writes");
+
+        // The counterfactual, through the production gate: the torn file
+        // matches neither digest, so a gated load would refuse.
+        let SidecarLoad::Current(envelope) = load_sidecar(&sidecar) else {
+            panic!("the saved sidecar parses");
+        };
+        assert!(
+            !sidecar_matches_project(
+                &envelope,
+                &digest_bytes(&fs::read(&project_path).expect("the torn file reads"))
+            ),
+            "the torn file breaks the digest pair"
+        );
+
+        // The restore lands a session, consumes its journal, loads the saved
+        // history digest-less with revisions rebased — and suspends sidecar
+        // writes, because the target path is already open.
+        let projects_before = app.projects.len();
+        app.apply_restore_request(RestoreRequest {
+            document: recovered,
+            project_path: Some(project_path.clone()),
+            journal_path: journal_path.clone(),
+            writer_format_version: PROJECT_FORMAT_VERSION,
+        });
+        assert_eq!(
+            app.projects.len(),
+            projects_before + 1,
+            "the restore lands a session"
+        );
+        assert!(
+            !journal_path.exists(),
+            "a landed restore consumes its journal"
+        );
+        assert!(
+            app.focused().sidecar_suspended,
+            "a restore onto an open path suspends sidecar writes"
+        );
+        assert_eq!(app.focused().format_version, PROJECT_FORMAT_VERSION);
+        {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 2, "the saved sidecar loads digest-less");
+            for incident in log.all() {
+                assert_eq!(
+                    incident.revision,
+                    TimelineRevision::default(),
+                    "restored revisions rebase to the opening"
+                );
+            }
+        }
+        let flushed = app
+            .focused_mut()
+            .flush_incidents_if_changed()
+            .expect("the flush runs");
+        assert!(
+            matches!(flushed, FlushOutcome::Skipped),
+            "a suspended restore skips its flush"
+        );
+        assert_eq!(
+            fs::read(&sidecar).expect("the sidecar re-reads"),
+            saved_sidecar,
+            "a restore onto an open path writes no sidecar"
+        );
+        let again_path = temp.path("again.kinewright");
+        app.write_project(&again_path).expect("Save As succeeds");
+        assert!(
+            !app.focused().sidecar_suspended,
+            "Save As clears the suspension"
+        );
+        let again_sidecar = sidecar_path_for_project(Some(&again_path)).expect("derived");
+        let SidecarLoad::Current(again) = load_sidecar(&again_sidecar) else {
+            panic!("the Save As sidecar parses");
+        };
+        assert_eq!(
+            again.records.len(),
+            2,
+            "Save As writes the restored history to the new path"
+        );
+
+        // The refusal: a 999-writer journal lands no session, shelves its
+        // file, and notes exactly one `project_newer_format`.
+        let cross_path = temp.path("cross.journal");
+        fs::write(
+            &cross_path,
+            journal_fixture_bytes(&project_path, 999, &Document::default()),
+        )
+        .expect("the cross-version journal writes");
+        let projects_before = app.projects.len();
+        let incidents_before = app
+            .focused()
+            .incidents
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        app.apply_restore_request(RestoreRequest {
+            document: Document::default(),
+            project_path: Some(project_path.clone()),
+            journal_path: cross_path.clone(),
+            writer_format_version: 999,
+        });
+        assert_eq!(
+            app.projects.len(),
+            projects_before,
+            "a refused restore lands no session"
+        );
+        assert!(
+            cross_path.exists(),
+            "the refused journal is shelved, not deleted"
+        );
+        assert!(
+            app.status.contains("Recovery refused"),
+            "the refusal says so: {}",
+            app.status
+        );
+        app.route_incidents();
+        {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(
+                log.len(),
+                incidents_before + 1,
+                "the refusal notes exactly one incident"
+            );
+            assert_eq!(
+                log.all()
+                    .filter(|incident| incident.code
+                        == IncidentCode::Label(LabelIncident::ProjectNewerFormat))
+                    .count(),
+                1,
+                "and its code is `project_newer_format`"
+            );
+        }
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N2/S-13: opening an already-open path focuses the live session
+    /// instead of duplicating it — even through a non-canonical spelling of
+    /// the same file. Closing frees the guard, and focusing notes nothing.
+    #[test]
+    fn in2b_opening_an_already_open_path_focuses_it() {
+        let temp = TempDirectory::new("in2b-one-session");
+        let project_path = temp.path("edit.kinewright");
+        fs::write(
+            &project_path,
+            serde_json::to_string_pretty(&Document::default()).expect("the file serialises"),
+        )
+        .expect("the file writes");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        app.open_project(&project_path);
+        assert_eq!(app.projects.len(), 2, "the first open lands a session");
+        let id = app.focused().id;
+
+        // A non-canonical spelling of the same file (`.`/`..` segments —
+        // portable, unlike a symlink).
+        fs::create_dir(temp.path("sub")).expect("the alias segment exists");
+        let alias = temp.root().join("sub").join("..").join("edit.kinewright");
+        app.open_project(&alias);
+        assert_eq!(app.projects.len(), 2, "the second open duplicates nothing");
+        assert_eq!(app.focused().id, id, "the live session focuses");
+        assert!(
+            app.status.starts_with("Already open"),
+            "the focus says so: {}",
+            app.status
+        );
+
+        // Closing frees the guard: the path opens fresh again.
+        app.close_project(id);
+        assert_eq!(app.projects.len(), 1);
+        app.open_project(&project_path);
+        assert_eq!(app.projects.len(), 2, "a closed path reopens");
+
+        app.route_incidents();
+        for session in &app.projects {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.len(), 0, "focusing is silent");
+        }
+        in2b_quiesce_engine(&engine);
         in2b_shutdown(&mut app);
     }
 }

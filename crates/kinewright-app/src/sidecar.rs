@@ -66,10 +66,12 @@ pub(crate) fn sidecar_path_for_project(project_path: Option<&Path>) -> Option<Pa
 }
 
 /// How `ProjectSession::create` treats the sidecar (N2/B-1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SidecarMode {
-    /// Digest-gated load: startup reopen and `open_project`.
-    Load,
+    /// Digest-gated load: startup reopen and `open_project`, carrying the
+    /// digest `load_document` read — single read, no TOCTOU (`IN2B` §4
+    /// rule 2).
+    Load { project_digest: String },
     /// Ungated load: recovery restore, whose document is definitionally newer
     /// than the last save, so the digest cannot match. Version arms still
     /// apply (`IN2B` §4 rule 5).
