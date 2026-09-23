@@ -343,18 +343,74 @@ pub(crate) fn write_project_document(
     write_project_bytes(&json, document, path, previous_store)
 }
 
-/// Write pre-serialised project bytes: the write half of
 /// Write bytes atomically: temp beside the target, then rename (N6/H12).
 /// A failed rename removes its temp, best-effort, so failures do not
 /// litter the project directory. The temp carries the process id; project
 /// writes are synchronous, so no sequence is needed.
+///
+/// N6.1/J6: the write targets the symlink's resolved path, the temp
+/// inherits the existing file's permissions and syncs before the rename,
+/// and a permission/sharing rename failure falls back to the pre-H12
+/// in-place write — never worse than before H12.
 pub(crate) fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let mut temp = path.as_os_str().to_owned();
+    write_file_atomic_with_rename(path, contents, None)
+}
+
+/// Whether a rename failure is the permission/sharing kind the atomic
+/// write falls back from (N6.1/J6).
+fn is_permission_or_sharing(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied || raw_sharing_violation(error)
+}
+
+/// Windows' sharing-violation code, which some builds report under a
+/// non-permission kind (N6.1/J6). No code elsewhere.
+#[cfg(windows)]
+fn raw_sharing_violation(error: &std::io::Error) -> bool {
+    // ERROR_SHARING_VIOLATION.
+    error.raw_os_error() == Some(32)
+}
+
+/// Windows' sharing-violation code, which some builds report under a
+/// non-permission kind (N6.1/J6). No code elsewhere.
+#[cfg(not(windows))]
+fn raw_sharing_violation(_error: &std::io::Error) -> bool {
+    false
+}
+
+/// [`write_file_atomic`] with the rename injected (N6.1/J6): `None`
+/// renames for real. The seam exists so the permission-failure fallback
+/// has a portable test — no portable fixture fails a real rename.
+fn write_file_atomic_with_rename(
+    path: &Path,
+    contents: &[u8],
+    rename: Option<&RefuseRename>,
+) -> std::io::Result<()> {
+    // The write targets the symlink's resolved path — the temp lands
+    // beside the real file and the rename replaces it, so the link
+    // itself survives the save. An unresolvable path writes as given.
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // The temp inherits the existing file's permissions, so the mode
+    // survives the inode swap. A first save keeps fresh-file perms.
+    let permissions = fs::metadata(&target).ok().map(|file| file.permissions());
+    let mut temp = target.as_os_str().to_owned();
     temp.push(format!(".{}.tmp", std::process::id()));
     let temp = PathBuf::from(temp);
     fs::write(&temp, contents)?;
-    if let Err(error) = fs::rename(&temp, path) {
+    if let Some(permissions) = permissions {
+        fs::set_permissions(&temp, permissions)?;
+    }
+    // The temp's bytes reach the disk before the rename does, so a crash
+    // between the two cannot surface torn bytes (the H9 shape).
+    fs::File::open(&temp)?.sync_all()?;
+    let renamed = match rename {
+        Some(hook) => hook(&temp, &target),
+        None => fs::rename(&temp, &target),
+    };
+    if let Err(error) = renamed {
         let _ = fs::remove_file(&temp);
+        if is_permission_or_sharing(&error) {
+            return fs::write(path, contents);
+        }
         return Err(error);
     }
     Ok(())
@@ -529,9 +585,14 @@ pub(crate) struct ProjectSession {
     pub(crate) format_version: u32,
     /// Sidecar writes suspended: a recovery restore onto an already-open
     /// path must not clobber the open session's history (`IN2B` §2 rule 10,
-    /// N2/S-13). Loads still run; every flush reports `Skipped` until Save
-    /// As clears this on the new path.
+    /// N2/S-13), and a refused sidecar the load could not move aside must
+    /// never be overwritten (N6/H3). Loads still run; every flush reports
+    /// `Skipped` until Save As clears this on the new path.
     pub(crate) sidecar_suspended: bool,
+    /// The recovery cause of [`Self::sidecar_suspended`] (N6.1/J5): only a
+    /// recovered copy routes overwrite-save to Save As — an H3 suspension
+    /// blocks sidecar writes, never the project save.
+    pub(crate) recovery_suspended: bool,
     /// Runtime, never-serialized LUT availability, one entry per document
     /// asset, refreshed whenever the library is rebuilt (CC4 §2.3).
     pub(crate) lut_availability: BTreeMap<LutAssetId, LutAvailabilityStatus>,
@@ -690,8 +751,8 @@ fn load_session_sidecar(
             Ok(_) => (reason, false),
             Err(error) => (
                 format!(
-                    "{reason}; the refused file could not be moved aside ({error}), so sidecar \
-                     writes are suspended for this session"
+                    "{reason}; the refused file could not be moved aside ({error}), so the \
+                     incidents file is set aside and sidecar writes are suspended for this session"
                 ),
                 true,
             ),
@@ -926,6 +987,9 @@ impl ProjectSession {
             last_restore_report: loaded.report,
             format_version,
             sidecar_suspended: loaded.suspended,
+            // The load only ever suspends for H3 — the recovery cause is
+            // set by `apply_restore_request` (N6.1/J5).
+            recovery_suspended: false,
             lut_availability: statuses.into_iter().collect(),
             lut_library: Arc::new(library),
             saved_document: None,
@@ -3191,6 +3255,98 @@ mod tests {
             serde_json::from_str(&pretty).expect("the envelope output re-parses");
         assert_eq!(reparsed.format_version, 1);
         assert_eq!(reparsed.document, file.document);
+    }
+
+    /// N6.1/J6: the atomic write resolves symlinks — the temp lands
+    /// beside the real file and the rename replaces it, so the link
+    /// itself survives the save.
+    #[cfg(unix)]
+    #[test]
+    fn project_atomic_write_keeps_the_symlink() {
+        let dir = TempDirectory::new("in2b-j6-symlink");
+        let real = dir.path("real.kinewright");
+        let link = dir.path("link.kinewright");
+        fs::write(&real, b"old").expect("the target writes");
+        std::os::unix::fs::symlink(&real, &link).expect("the link lands");
+        write_file_atomic(&link, b"new").expect("the atomic write succeeds");
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("the link stats")
+                .file_type()
+                .is_symlink(),
+            "the link itself survives the save"
+        );
+        assert_eq!(
+            fs::read(&link).expect("the link reads"),
+            b"new",
+            "the target carries the new bytes"
+        );
+    }
+
+    /// N6.1/J6: the atomic write copies the existing file's permissions
+    /// onto the temp, so the mode survives the inode swap. The 755 mode
+    /// is red on any umask — a fresh temp never carries exec bits.
+    #[cfg(unix)]
+    #[test]
+    fn project_atomic_write_keeps_the_file_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = TempDirectory::new("in2b-j6-permissions");
+        let file = dir.path("edit.kinewright");
+        fs::write(&file, b"old").expect("the file writes");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).expect("chmod 755");
+        write_file_atomic(&file, b"new").expect("the atomic write succeeds");
+        assert_eq!(fs::read(&file).expect("the file reads"), b"new");
+        let mode = fs::metadata(&file)
+            .expect("the file stats")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "the mode survives the save");
+    }
+
+    /// N6.1/J6: a permission/sharing rename failure falls back to the
+    /// pre-H12 in-place write — never worse than before H12 — while any
+    /// other rename error still propagates. The failure is injected: no
+    /// portable fixture fails a real rename.
+    #[test]
+    fn project_atomic_write_falls_back_when_rename_is_refused() {
+        let dir = TempDirectory::new("in2b-j6-fallback");
+        let file = dir.path("edit.kinewright");
+        fs::write(&file, b"old").expect("the file writes");
+        let refused = |_: &Path, _: &Path| -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected sharing violation",
+            ))
+        };
+        write_file_atomic_with_rename(&file, b"new", Some(&refused))
+            .expect("the fallback lands the bytes");
+        assert_eq!(
+            fs::read(&file).expect("the file reads"),
+            b"new",
+            "the in-place fallback lands the bytes"
+        );
+        let torn = |_: &Path, _: &Path| -> std::io::Result<()> {
+            Err(std::io::Error::other("injected unsplittable failure"))
+        };
+        assert!(
+            write_file_atomic_with_rename(&file, b"third", Some(&torn)).is_err(),
+            "a non-permission rename error still propagates"
+        );
+        assert_eq!(
+            fs::read(&file).expect("the file re-reads"),
+            b"new",
+            "the propagated failure writes nothing"
+        );
+        for entry in fs::read_dir(dir.root()).expect("the dir reads") {
+            let entry = entry.expect("a readable entry");
+            assert!(
+                entry.path().extension().is_none_or(|ext| ext != "tmp"),
+                "no temp litter: {}",
+                entry.file_name().to_string_lossy()
+            );
+        }
     }
 
     /// N6/H3: a failed `.bak` rename suspends sidecar writes for the

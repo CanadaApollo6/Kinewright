@@ -38,7 +38,7 @@ use crate::{
     },
     recovery::{RestoreRequest, recovery_damage_observation, recovery_unavailable_observation},
     sidecar::{
-        SidecarMode, SidecarWriter, digest_bytes, sidecar_path_for_project,
+        RefuseRename, SidecarMode, SidecarWriter, digest_bytes, sidecar_path_for_project,
         sidecar_write_failed_observation,
     },
     theme::{self, color, size, space},
@@ -301,6 +301,11 @@ pub(crate) struct KinewrightApp {
     /// When the debounced background sidecar flush last submitted (`IN2B` §2
     /// rule 4): at most 2 s after the last log change.
     sidecar_last_submit: Instant,
+    /// Test hook injecting the open-time `.bak` rename (N6/H3, N6.1/J1):
+    /// `None` renames for real. `Some` replaces the rename for every
+    /// session this app creates while set — tests clear it when done.
+    #[cfg(test)]
+    pub(crate) refuse_rename: Option<Arc<RefuseRename>>,
     pub(crate) media_cache_dialog_open: bool,
     pub(crate) media_cache_inventory: Option<kinewright_core::MediaCacheInventory>,
     pub(crate) media_cache_clear_pending: Option<kinewright_core::MediaCacheFamily>,
@@ -377,22 +382,49 @@ pub(crate) struct KinewrightApp {
     performance: Option<crate::performance::PerformanceProbe>,
 }
 
+/// What the H12 rollback owes the sidecar (N6.1/J3): the prior bytes to
+/// restore, a removal when no sidecar preceded the save, or nothing when
+/// the pre-flush read failed for any reason but absence — an unreadable
+/// sidecar is never deleted.
+enum SidecarRollback {
+    Restore(Vec<u8>),
+    Remove,
+    Skip,
+}
+
 /// N6/H12 rollback, split from [`KinewrightApp::write_project`]: the sidecar
 /// flushed above the failed project write pairs with bytes that never
 /// landed — restore the prior bytes, or remove the sidecar when none
 /// preceded the save. Best-effort: the save already failed, and the pair's
 /// previous arm still loads a newer-than-project sidecar, so a failed
 /// rollback degrades to a re-flush, not a refusal.
-fn rollback_sidecar_write(sidecar: Option<PathBuf>, bytes: Option<Vec<u8>>) {
-    if let Some(sidecar) = sidecar {
-        match bytes {
-            Some(bytes) => {
-                let _ = write_file_atomic(&sidecar, &bytes);
-            }
-            None => {
-                let _ = fs::remove_file(sidecar);
-            }
+/// Snapshot what the H12 rollback owes the sidecar, before the flush
+/// (N6.1/J3): the prior bytes to restore, a removal when no sidecar
+/// preceded the save, or nothing when the read failed for any reason but
+/// absence — an unreadable sidecar is never deleted.
+fn snapshot_sidecar_rollback(sidecar: Option<&Path>) -> SidecarRollback {
+    let Some(sidecar) = sidecar else {
+        return SidecarRollback::Skip;
+    };
+    match fs::read(sidecar) {
+        Ok(bytes) => SidecarRollback::Restore(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SidecarRollback::Remove,
+        Err(_) => SidecarRollback::Skip,
+    }
+}
+
+fn rollback_sidecar_write(sidecar: Option<PathBuf>, plan: SidecarRollback) {
+    let Some(sidecar) = sidecar else {
+        return;
+    };
+    match plan {
+        SidecarRollback::Restore(bytes) => {
+            let _ = write_file_atomic(&sidecar, &bytes);
         }
+        SidecarRollback::Remove => {
+            let _ = fs::remove_file(sidecar);
+        }
+        SidecarRollback::Skip => {}
     }
 }
 
@@ -567,6 +599,8 @@ impl KinewrightApp {
             pending_router_applies: Vec::new(),
             sidecar_writer,
             sidecar_last_submit: Instant::now(),
+            #[cfg(test)]
+            refuse_rename: None,
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             media_cache_clear_pending: None,
@@ -730,6 +764,21 @@ impl KinewrightApp {
             .set_lut_library(Arc::clone(&self.focused().lut_library));
     }
 
+    /// The injected `.bak` rename for the next session creation, if any
+    /// (N6.1/J1). Always `None` outside tests.
+    #[cfg(not(test))]
+    #[allow(clippy::unused_self, reason = "same call shape as the test arm")]
+    fn refuse_rename_hook(&self) -> Option<&RefuseRename> {
+        None
+    }
+
+    /// The injected `.bak` rename for the next session creation, if any
+    /// (N6.1/J1). Always `None` outside tests.
+    #[cfg(test)]
+    fn refuse_rename_hook(&self) -> Option<&RefuseRename> {
+        self.refuse_rename.as_deref()
+    }
+
     fn create_project_session(
         &mut self,
         name: String,
@@ -744,6 +793,7 @@ impl KinewrightApp {
             .checked_add(1)
             .ok_or_else(|| "project session identity space is exhausted".to_owned())?;
         let writer = Arc::clone(&self.sidecar_writer);
+        let refuse_rename = self.refuse_rename_hook();
         let mut session = ProjectSession::create(
             id,
             name,
@@ -755,7 +805,7 @@ impl KinewrightApp {
             sidecar_mode,
             Some(writer),
             format_version,
-            None,
+            refuse_rename,
         )?;
         // The investigator settings are app-wide: a new project inherits the
         // focused copy rather than re-reading the file. Mutes stay
@@ -816,6 +866,10 @@ impl KinewrightApp {
     /// re-surfaces the rule-4 card instead of noting). A store-root refusal is
     /// not fatal: the project is saved and its imported looks report `missing`
     /// until the root is usable.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one save path, like `new` and `create`"
+    )]
     pub(crate) fn write_project(
         &mut self,
         path: &Path,
@@ -840,7 +894,7 @@ impl KinewrightApp {
                 read_version: self.focused().format_version,
             });
         }
-        // N6/H2: a suspended session, or a path open in another session,
+        // N6/H2: a recovered copy, or a path open in another session,
         // routes overwrite-save to Save As — checked before any IO, like
         // the newer-format gate above.
         if !save_as && let Some(notice) = self.overwrite_save_refusal() {
@@ -902,17 +956,21 @@ impl KinewrightApp {
         // skips while suspended.
         let old_path = self.focused().project_path.clone();
         let was_suspended = self.focused().sidecar_suspended;
+        let was_recovery_suspended = self.focused().recovery_suspended;
         self.focused_mut().project_path = Some(path.to_path_buf());
         if save_as {
             self.focused_mut().sidecar_suspended = false;
+            self.focused_mut().recovery_suspended = false;
         }
-        // N6/H12: the sidecar lands before the project bytes — snapshot it
-        // first, so a failed project write rolls the sidecar back instead
-        // of leaving it paired with bytes that never landed.
+        // N6/H12: the sidecar lands before the project bytes — snapshot
+        // it first, so a failed project write rolls back (N6.1/J3: only
+        // absence reads as "no prior sidecar").
         let rollback_sidecar = sidecar_path_for_project(self.focused().project_path.as_deref());
-        let rollback_bytes = rollback_sidecar
-            .as_deref()
-            .and_then(|sidecar| fs::read(sidecar).ok());
+        let rollback_plan = snapshot_sidecar_rollback(rollback_sidecar.as_deref());
+        // N6.1/J2: the flush advances the baselines past bytes the project
+        // write may never land — the failure arm restores the close retry.
+        let pre_flush_last_written = self.focused().last_written_gen;
+        let pre_flush_confirmed = self.focused().confirmed_written_gen;
         // `IN2B` §2 rule 6: a sidecar write failure never fails the project
         // save — exactly one incident, then the save carries on.
         if let Err(error) = self
@@ -928,9 +986,12 @@ impl KinewrightApp {
         let report = match write_project_bytes(&json, to_write, path, previous_store.as_ref()) {
             Ok(report) => report,
             Err(error) => {
-                rollback_sidecar_write(rollback_sidecar, rollback_bytes);
+                rollback_sidecar_write(rollback_sidecar, rollback_plan);
                 self.focused_mut().project_path = old_path;
                 self.focused_mut().sidecar_suspended = was_suspended;
+                self.focused_mut().recovery_suspended = was_recovery_suspended;
+                self.focused_mut().last_written_gen = pre_flush_last_written;
+                self.focused_mut().confirmed_written_gen = pre_flush_confirmed;
                 return Err(error);
             }
         };
@@ -1135,9 +1196,10 @@ impl KinewrightApp {
     }
 
     /// The status notice when the focused session must Save As instead of
-    /// overwriting (N6/H2), `None` when overwrite-save is allowed: suspended
-    /// sessions and paths open in another session route to Save As, as the
-    /// newer-format gate does.
+    /// overwriting (N6/H2), `None` when overwrite-save is allowed: recovered
+    /// copies and paths open in another session route to Save As, as the
+    /// newer-format gate does. N6.1/J5: an H3 suspension blocks sidecar
+    /// writes only, never the project save.
     fn overwrite_save_refusal(&self) -> Option<String> {
         self.overwrite_save_refusal_for(self.focused_project)
     }
@@ -1145,9 +1207,9 @@ impl KinewrightApp {
     /// [`Self::overwrite_save_refusal`] for one session.
     fn overwrite_save_refusal_for(&self, project_index: usize) -> Option<String> {
         let session = &self.projects[project_index];
-        if session.sidecar_suspended {
+        if session.recovery_suspended {
             return Some(
-                "Saving is disabled for this recovered session until it has its own \
+                "Saving is disabled for this recovered copy until it has its own \
                  file — use Save As."
                     .to_owned(),
             );
@@ -1337,7 +1399,11 @@ impl KinewrightApp {
                 format_version,
             )
             .map(|mut session| {
-                session.sidecar_suspended = suspended;
+                // N6.1/J1: the restore adds its suspension, never clears
+                // the load's — a refuse failure during the recovery load
+                // suspends first, and the restore must keep it.
+                session.sidecar_suspended |= suspended;
+                session.recovery_suspended = suspended;
                 let assets = session.document.media_pool.clone();
                 self.projects.push(session);
                 self.focus_project(self.projects.len() - 1);
@@ -5204,6 +5270,8 @@ pub(crate) mod in1_tests {
             pending_router_applies: Vec::new(),
             sidecar_writer: SidecarWriter::new(),
             sidecar_last_submit: Instant::now(),
+            #[cfg(test)]
+            refuse_rename: None,
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             media_cache_clear_pending: None,
@@ -9711,6 +9779,8 @@ mod in2b_tests {
             pending_router_applies: Vec::new(),
             sidecar_writer: writer,
             sidecar_last_submit: Instant::now(),
+            #[cfg(test)]
+            refuse_rename: None,
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             media_cache_clear_pending: None,
@@ -12973,6 +13043,353 @@ mod in2b_tests {
             "the rollback removes the flushed sidecar"
         );
         fs::remove_dir(&dir_path).expect("cleanup");
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6.1/J1: a recovery restore never clears a refuse suspension — the
+    /// injected failing rename fires during the recovery load, and the
+    /// restored session stays suspended even though its path is closed.
+    #[test]
+    fn in2b_restore_does_not_clear_a_refuse_suspension() {
+        let temp = TempDirectory::new("in2b-j1-restore-keeps-suspension");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 1, 41);
+        app.write_project(&project_path).expect("the save succeeds");
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
+        // The crash story, as in H1: a scratch session, so the crash can
+        // close the saved one — the restore lands on a closed path.
+        let scratch_path = temp.path("scratch.kinewright");
+        fs::write(
+            &scratch_path,
+            serde_json::to_string_pretty(&Document::default()).expect("the file serialises"),
+        )
+        .expect("the scratch file writes");
+        app.open_project(&scratch_path);
+        let saved_id = app.projects[0].id;
+        app.close_project(saved_id);
+        // The sidecar corrupts after the crash; the `.bak` rename fails.
+        fs::write(&sidecar, b"{ torn").expect("the sidecar corrupts");
+        let failing = |_: &Path, _: &Path| -> std::io::Result<()> {
+            Err(std::io::Error::other("injected refuse failure"))
+        };
+        let hook: Arc<RefuseRename> = Arc::new(failing);
+        app.refuse_rename = Some(hook);
+        let journal_path = temp.path("edit.journal");
+        fs::write(
+            &journal_path,
+            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+        )
+        .expect("the journal writes");
+        app.apply_restore_request(RestoreRequest {
+            document: Document::default(),
+            project_path: Some(project_path.clone()),
+            journal_path: journal_path.clone(),
+            writer_format_version: PROJECT_FORMAT_VERSION,
+        });
+        app.refuse_rename = None;
+        assert!(
+            app.focused().sidecar_suspended,
+            "the recovery load's refuse failure suspends, and the restore keeps it"
+        );
+        assert_eq!(
+            fs::read(&sidecar).expect("the stem reads"),
+            b"{ torn",
+            "the refused file stays at the stem"
+        );
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6.1/J2: the reviewer's repro — note, save, note, failed save,
+    /// close. The failed save's flush must not advance the confirmed
+    /// baseline past bytes that never landed, so the close flush rewrites
+    /// both records.
+    #[test]
+    fn in2b_failed_save_restores_the_close_flush_baseline() {
+        let temp = TempDirectory::new("in2b-j2-close-rewrites");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 1, 41);
+        app.write_project(&project_path).expect("the save succeeds");
+        in2b_observe_opens(app.focused(), 1, 51);
+        // A directory takes the project's place, failing the project write
+        // on both lanes (the H12 trick).
+        let stash_path = temp.path("edit.kinewright.stashed");
+        fs::rename(&project_path, &stash_path).expect("the project file moves aside");
+        fs::create_dir(&project_path).expect("a directory takes its place");
+        assert!(
+            matches!(
+                app.write_project(&project_path),
+                Err(ProjectSaveError::Write(_))
+            ),
+            "the project write fails"
+        );
+        fs::remove_dir(&project_path).expect("cleanup");
+        fs::rename(&stash_path, &project_path).expect("the project file returns");
+        // Close (a scratch session keeps `close_project` legal), then read
+        // the sidecar the close flush left behind.
+        let scratch_path = temp.path("scratch.kinewright");
+        fs::write(
+            &scratch_path,
+            serde_json::to_string_pretty(&Document::default()).expect("the file serialises"),
+        )
+        .expect("the scratch file writes");
+        app.open_project(&scratch_path);
+        let saved_id = app.projects[0].id;
+        app.close_project(saved_id);
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
+        let SidecarLoad::Current(current) = load_sidecar(&sidecar) else {
+            panic!("the close left a current sidecar");
+        };
+        assert_eq!(
+            current.records.len(),
+            2,
+            "the close flush rewrote both records"
+        );
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6.1/J3: only a missing sidecar reads as "no prior sidecar" — any
+    /// other read error skips the rollback instead of deleting the file.
+    #[cfg(unix)]
+    #[test]
+    fn in2b_rollback_keeps_an_unreadable_sidecar() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = TempDirectory::new("in2b-j3-unreadable");
+        // Root reads through 000: probe first, so the vacate below leaks
+        // no harness (the lut-store shape).
+        let probe = temp.path("probe");
+        fs::write(&probe, b"probe").expect("the probe writes");
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        if fs::read(&probe).is_ok() {
+            fs::set_permissions(&probe, fs::Permissions::from_mode(0o600)).expect("chmod back");
+            return;
+        }
+        fs::remove_file(&probe).expect("the probe removes");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 1, 41);
+        app.write_project(&project_path).expect("the save succeeds");
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
+        in2b_observe_opens(app.focused(), 1, 51);
+        fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        let stash_path = temp.path("edit.kinewright.stashed");
+        fs::rename(&project_path, &stash_path).expect("the project file moves aside");
+        fs::create_dir(&project_path).expect("a directory takes its place");
+        assert!(
+            matches!(
+                app.write_project(&project_path),
+                Err(ProjectSaveError::Write(_))
+            ),
+            "the project write fails"
+        );
+        fs::remove_dir(&project_path).expect("cleanup");
+        assert!(
+            sidecar.exists(),
+            "the rollback never deletes a sidecar it could not read"
+        );
+        fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).expect("chmod back");
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6.1/J4: the H1 disk-digest arm, pinned without a sidecar — with no
+    /// sidecar before the restore, the fallback cannot fire, so the seed
+    /// is the disk file's digest by the disk arm alone.
+    #[test]
+    fn in2b_recovery_without_a_sidecar_seeds_from_the_disk_file() {
+        let temp = TempDirectory::new("in2b-j4-no-sidecar-seed");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        app.write_project(&project_path).expect("the save succeeds");
+        let disk_digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
+        fs::remove_file(&sidecar).expect("no sidecar precedes the restore");
+        // The crash story, as in H1: a scratch session, so the crash can
+        // close the saved one — the restore lands on a closed path.
+        let scratch_path = temp.path("scratch.kinewright");
+        fs::write(
+            &scratch_path,
+            serde_json::to_string_pretty(&Document::default()).expect("the file serialises"),
+        )
+        .expect("the scratch file writes");
+        app.open_project(&scratch_path);
+        let saved_id = app.projects[0].id;
+        app.close_project(saved_id);
+        let journal_path = temp.path("edit.journal");
+        fs::write(
+            &journal_path,
+            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+        )
+        .expect("the journal writes");
+        app.apply_restore_request(RestoreRequest {
+            document: Document::default(),
+            project_path: Some(project_path.clone()),
+            journal_path: journal_path.clone(),
+            writer_format_version: PROJECT_FORMAT_VERSION,
+        });
+        assert_eq!(
+            app.focused().saved_digest,
+            disk_digest,
+            "the seed is the disk file's digest, with no sidecar to fall back on"
+        );
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6.1/J5: an H3 suspension blocks sidecar writes only — the project
+    /// overwrite-save lands, the refused file at the stem is never
+    /// touched, and the note names the set-aside cause.
+    #[test]
+    fn in2b_refuse_suspension_blocks_sidecar_writes_not_project_save() {
+        let temp = TempDirectory::new("in2b-j5-h3-saves");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 1, 41);
+        app.write_project(&project_path).expect("the save succeeds");
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
+        // Close the saved session, corrupt the sidecar, and reopen with
+        // the `.bak` rename failing: the H3 suspension, on the session's
+        // own path with no duplicate.
+        let scratch_path = temp.path("scratch.kinewright");
+        fs::write(
+            &scratch_path,
+            serde_json::to_string_pretty(&Document::default()).expect("the file serialises"),
+        )
+        .expect("the scratch file writes");
+        app.open_project(&scratch_path);
+        let saved_id = app.projects[0].id;
+        app.close_project(saved_id);
+        fs::write(&sidecar, b"{ torn").expect("the sidecar corrupts");
+        let failing = |_: &Path, _: &Path| -> std::io::Result<()> {
+            Err(std::io::Error::other("injected refuse failure"))
+        };
+        let hook: Arc<RefuseRename> = Arc::new(failing);
+        app.refuse_rename = Some(hook);
+        app.open_project(&project_path);
+        app.refuse_rename = None;
+        assert!(
+            app.focused().sidecar_suspended,
+            "the refuse failure suspends"
+        );
+        {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let refused = log
+                .all()
+                .find(|incident| {
+                    incident.code == IncidentCode::Label(LabelIncident::SidecarRefused)
+                })
+                .expect("the refusal notes");
+            assert!(
+                refused.observed.contains("set aside"),
+                "the note names the cause: {}",
+                refused.observed
+            );
+        }
+        let mut document = (*app.focused().document).clone();
+        document.markers.push(Marker {
+            id: MarkerId(9),
+            position: TimeCode::ZERO,
+            label: "the h3 save lands".to_owned(),
+            color_token: 0,
+        });
+        app.projects[app.focused_project].document = Arc::new(document);
+        app.write_project(&project_path)
+            .expect("an H3 suspension never blocks the project save");
+        let landed = fs::read_to_string(&project_path).expect("the project re-reads");
+        assert!(
+            landed.contains("the h3 save lands"),
+            "the project bytes land"
+        );
+        assert_eq!(
+            fs::read(&sidecar).expect("the stem reads"),
+            b"{ torn",
+            "the refused file is never touched"
+        );
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6.1/J5: the H2 refusal names its cause — a recovered copy routes
+    /// to Save As with the recovered-copy wording.
+    #[test]
+    fn in2b_routed_save_names_the_recovered_copy() {
+        let temp = TempDirectory::new("in2b-j5-copy-wording");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 1, 41);
+        app.write_project(&project_path).expect("the save succeeds");
+        // Restore onto the OPEN path: the restored session suspends.
+        let journal_path = temp.path("edit.journal");
+        fs::write(
+            &journal_path,
+            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+        )
+        .expect("the journal writes");
+        app.apply_restore_request(RestoreRequest {
+            document: Document::default(),
+            project_path: Some(project_path.clone()),
+            journal_path: journal_path.clone(),
+            writer_format_version: PROJECT_FORMAT_VERSION,
+        });
+        let Err(ProjectSaveError::SaveAsRequired { notice }) = app.write_project(&project_path)
+        else {
+            panic!("a recovered copy routes to Save As");
+        };
+        assert!(
+            notice.contains("recovered copy"),
+            "worded by cause: {notice}"
+        );
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6.1/J5: H5 compares canonical paths — Save As onto an open path
+    /// through a non-canonical spelling is refused all the same.
+    #[test]
+    fn in2b_save_as_onto_an_open_path_alias_is_refused() {
+        let temp = TempDirectory::new("in2b-j5-alias-target");
+        let first_path = temp.path("first.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 1, 41);
+        app.write_project(&first_path)
+            .expect("the first save succeeds");
+        let second_path = temp.path("second.kinewright");
+        fs::write(
+            &second_path,
+            serde_json::to_string_pretty(&Document::default()).expect("the file serialises"),
+        )
+        .expect("the second file writes");
+        app.open_project(&second_path);
+        in2b_observe_opens(app.focused(), 1, 51);
+        app.write_project(&second_path)
+            .expect("the second save succeeds");
+        let before_project = fs::read(&second_path).expect("the target reads");
+        // A non-canonical spelling of the open path (`.`/`..` segments —
+        // portable, unlike a symlink).
+        fs::create_dir(temp.path("sub")).expect("the alias segment exists");
+        let alias = temp.root().join("sub").join("..").join("second.kinewright");
+        app.focus_project(0);
+        assert!(
+            matches!(
+                app.write_project(&alias),
+                Err(ProjectSaveError::PathOpenElsewhere { .. })
+            ),
+            "Save As onto an open path alias is refused"
+        );
+        assert_eq!(
+            fs::read(&second_path).expect("the target re-reads"),
+            before_project,
+            "the target project bytes survive"
+        );
         in2b_quiesce_engine(&engine);
         in2b_shutdown(&mut app);
     }
