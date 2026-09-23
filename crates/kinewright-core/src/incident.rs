@@ -3544,7 +3544,7 @@ impl<'counter> Serializer for &'counter mut JsonLenCounter {
     type SerializeStructVariant = MapLenCounter<'counter>;
 
     fn serialize_bool(self, value: bool) -> Result<(), Self::Error> {
-        self.push(usize::from(value) + 4);
+        self.push(usize::from(!value) + 4); // "true" = 4, "false" = 5
         Ok(())
     }
 
@@ -8842,6 +8842,15 @@ mod tests {
             tiny: 1e-300,
         };
         assert!(compact_json_len(&extreme) >= serde_json::to_string(&extreme).unwrap().len());
+        // Both bool spellings count exactly ("true" is 4 bytes, "false" 5);
+        // the Kani spike found them swapped, hidden from the cases above by
+        // `skip_serializing_if` on every bool those operations carry.
+        for flag in [true, false] {
+            assert_eq!(
+                compact_json_len(&flag),
+                serde_json::to_string(&flag).unwrap().len()
+            );
+        }
 
         let mut log = IncidentLog::with_start(Instant::now(), None);
         for (index, observed) in [(1_u64, "first"), (2, "second")] {
