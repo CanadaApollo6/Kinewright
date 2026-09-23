@@ -846,7 +846,14 @@ button; the served quad is unchanged for the eighteenth consecutive
 measurement.** The hand-run checklist (IN2 §11) against a real harness is
 still owed. Part A merged as PR #17 at `04651e1`, and the Part B contract
 is promoted 2026-09-22 ([`IN2B-INCIDENT-PERSISTENCE.md`](IN2B-INCIDENT-PERSISTENCE.md),
-contract revision 1).
+contract revision 1). **Part B landed 2026-09-23 in 23 commits on
+`in2b/stage-a` (core/media, agent, app stages with three review rounds):
+incident history survives reopen through the sidecar, newer-format projects
+open read-safe behind the version gate, panel failures note typed incidents
+through retyped seams, cards carry subject names, the `media backend error: `
+prefix is gone, and project saves are atomic; the served quad is unchanged
+for the nineteenth consecutive measurement.** The hands-on checklist
+(IN2B §14) against a real harness is still owed to Riel.
 
 ## Programme scorecard
 

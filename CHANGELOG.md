@@ -148,6 +148,18 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   run).
 
 ### Added
+- IN2 Part B, incident persistence: reopening a project restores every
+  still-open incident with its state, history and proposal intact from a JSON
+  sidecar beside the project file — flushed on change, save, close and exit,
+  paired by a digest of the project bytes, refused to `.bak` on mismatch.
+  Projects written by a newer Kinewright open read-safe with one incident and
+  Save disabled (Save As stays). Panel worker failures, transcription and
+  export failures, and recovery damage note typed incidents through retyped
+  `Result` seams instead of strings; cards carry subject names (`Master`,
+  asset and title names); the `media backend error: ` prefix is gone; project
+  saves are atomic (temp + rename) with sidecar rollback. No served tool is
+  added: the served quad is unchanged for the nineteenth consecutive
+  measurement. See docs/IN2B-INCIDENT-PERSISTENCE.md.
 - IN2 Part A, investigator sessions: when an incident opens on one of a named
   54-code allowlist, Kinewright can start a headless agent session against the
   live project on a branch core — one per project, deduped by code and

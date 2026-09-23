@@ -132,6 +132,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-16, after IN1 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-16, after IN2 Part A) | 141 | 1,552,431 B | 1,407,446 B | 121,854 B |
 | Served MCP runtime (2026-09-16, after IN2 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-23, after IN2 Part B) | 141 | 1,552,503 B | 1,407,480 B | 121,892 B |
+| Served MCP runtime (2026-09-23, after IN2 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
 
 IN1 Part A adds two capabilities, `get_incidents` and `resolve_incident`,
 reached through `invoke_capability` and served as no tool: the registry grows
@@ -159,6 +161,16 @@ is byte-identical for the eighteenth consecutive measurement at 7 /
 re-worded in five counter-word sites. The investigator's own server serves
 a six-name subset of the seven through a per-instance allowlist; the chat
 server's list is unchanged.
+
+IN2 Part B adds no capability, no tool, no operation and no schema field;
+the registry counts stay 141 / 54 / 87. Three session-scoped sentences are
+reworded for restored history (IN2B §10 rule 1): +38 B of `get_incidents`
+description text and +34 B of `GetIncidentsArgs` schema text, moving the
+registry bytes 1,552,431 → 1,552,503 serialized (1,407,446 → 1,407,480
+input schema, 121,854 → 121,892 description), confirmed by re-measurement
+to the byte. The served quad is byte-identical for the nineteenth
+consecutive measurement at 7 / 5,660 B / 3,510 B / 998 B (IN2B §10),
+asserted in three value sites and re-worded in five counter-word sites.
 
 AU6 Part A adds no capability and no operation; the registry is
 unchanged and the served quad is byte-identical at 7 / 5,660 B /
