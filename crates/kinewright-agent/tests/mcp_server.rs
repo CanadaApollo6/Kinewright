@@ -10438,8 +10438,8 @@ async fn in2_the_served_quad_does_not_move_for_the_nineteenth_measurement() {
     // IN1 §6.2 rule 9, `IN1b` §3.11 rule 43 and IN2 §4.2 rule 11: the two
     // token budgets are real constants, not adjectives. 819 does not move —
     // every field IN2 adds carries a `skip_serializing_if` — and the ceiling
-    // moves to the smallest power of two above the worst of the 8 576 shapes
-    // `server::tests::in2_every_code_fits_the_re_measured_ceiling` measures.
+    // moves to the smallest power of two above the worst of the 18 944 shapes
+    // `server::tests::in2b_the_ceiling_holds_with_names_saturated_and_819_unmoved` measures.
     assert_eq!(kinewright_agent::IN1_INCIDENT_SERIALIZED_BYTES, 819);
     assert_eq!(
         kinewright_agent::IN1_INCIDENT_SERIALIZED_CEILING_BYTES,

@@ -6429,12 +6429,12 @@ mod tests {
     /// sets, and implementer **D moves it from 2 048 to 4 096** with a twin of
     /// the loop below, whose probe axis it needs too (IN2 §4.2 rule 11).
     #[test]
-    fn in2_every_code_fits_the_re_measured_ceiling_on_every_subject_shape() {
+    fn in2b_the_ceiling_holds_with_names_saturated_and_819_unmoved_on_every_subject_shape() {
         // The core twin of `in1b_every_code_fits_the_measured_ceiling`, grown
         // over IN2 §4.2 rule 11's product: 74 codes x 8 subject shapes x
         // 2 probes x {no proposal, a proposal at the cap} x {open,
         // investigating, resolved with all telemetry, resolved without the two
-        // new fields}.
+        // new fields} x IN2B §10 rule 5's {no name, a name at the cap}.
         //
         // **The pin is the loop, not a remembered number** (IN2 probe-2
         // disagreement 4): nothing below asserts an intermediate byte figure.
@@ -6482,29 +6482,36 @@ mod tests {
                                 widest_telemetry(false),
                             ),
                         ] {
-                            let mut widest = opened.clone();
-                            widest.id = IncidentId(u64::MAX);
-                            widest.count = u32::MAX;
-                            widest.state = state;
-                            widest.telemetry = telemetry;
-                            widest.proposal = proposal.clone();
-                            let bytes = serde_json::to_vec(&widest).unwrap().len();
-                            measured += 1;
-                            let label = format!(
-                                "{} / {subject:?} / {shape} / recoveries={} / proposal={}",
-                                code.code(),
-                                widest.recoveries.len(),
-                                proposal.is_some()
-                            );
-                            if bytes > worst {
-                                worst = bytes;
-                                worst_shape = label.clone();
-                            }
-                            if carries_operation {
-                                with_operation += 1;
-                                if bytes > with_operation_worst {
-                                    with_operation_worst = bytes;
-                                    with_operation_shape = label;
+                            // IN2B §10 rule 5's name arm: every shape is
+                            // measured with the name absent and saturated at
+                            // the d15 ceiling, so the loop itself carries the
+                            // +82 B and no remembered number does.
+                            for name in [None, Some("n".repeat(SUBJECT_NAME_CEILING_BYTES))] {
+                                let mut widest = opened.clone();
+                                widest.id = IncidentId(u64::MAX);
+                                widest.count = u32::MAX;
+                                widest.state = state;
+                                widest.telemetry = telemetry.clone();
+                                widest.proposal = proposal.clone();
+                                widest.subject_name = name.clone();
+                                let bytes = serde_json::to_vec(&widest).unwrap().len();
+                                measured += 1;
+                                let label = format!(
+                                    "{} / {subject:?} / {shape} / recoveries={} / proposal={}",
+                                    code.code(),
+                                    widest.recoveries.len(),
+                                    proposal.is_some()
+                                );
+                                if bytes > worst {
+                                    worst = bytes;
+                                    worst_shape = label.clone();
+                                }
+                                if carries_operation {
+                                    with_operation += 1;
+                                    if bytes > with_operation_worst {
+                                        with_operation_worst = bytes;
+                                        with_operation_shape = label;
+                                    }
                                 }
                             }
                         }
@@ -6518,8 +6525,8 @@ mod tests {
         );
         assert_eq!(
             measured,
-            74 * 8 * 2 * 2 * 4,
-            "IN2 §4.2 rule 11's shapes, with the probe axis erratum A-R9 adds"
+            74 * 8 * 2 * 2 * 4 * 2,
+            "IN2 §4.2 rule 11's shapes, with the probe axis erratum A-R9 adds and the IN2B §10 rule 5 name arm"
         );
         // The one thing IN2 changes about the wire body's `recoveries` array is
         // §7 rule 1's second action, and a loop that never builds an operation

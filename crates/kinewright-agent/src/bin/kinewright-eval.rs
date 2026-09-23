@@ -30,9 +30,9 @@ use kinewright_core::{
     AgentDriver, Analysis, AssetBeats, AssetId, AssetSceneChanges, AssetSilences, AssetTranscript,
     AuthenticationStatus, BeatStatus, CaptionMotion, Clip, ClipContent, ClipId,
     DeliveryEncodeDepth, DeliveryProfile, Document, FrameRounding, MediaAsset, MediaCatalog,
-    MixSpectrumPoint, NormalizedRoi, Rational, SceneStatus, SilenceStatus, SyncGroup, SyncGroupId,
-    SyncGroupMember, ThreePointMode, TimeCode, TitlePosition, Track, TrackId, TrackKind,
-    TranscriptStatus, TranscriptWord,
+    MixSpectrumPoint, NormalizedRoi, PROJECT_FORMAT_VERSION, Rational, SceneStatus, SilenceStatus,
+    SyncGroup, SyncGroupId, SyncGroupMember, ThreePointMode, TimeCode, TitlePosition, Track,
+    TrackId, TrackKind, TranscriptStatus, TranscriptWord,
     au6_scenarios::{
         AU6_A_DIALOGUE_BUS, AU6_A_MUSIC_BUS, AU6_A_VOICE_A_TRACK, AU6_A_VOICE_B_TRACK,
         AU6_B_VOICE_A_TRACK, AU6_B_VOICE_B_TRACK, AU6_C_REPAIR_BUS, AU6_C_WINDOW_PROGRAMME,
@@ -54,7 +54,7 @@ use kinewright_core::{
         CC7_SOURCE_WIDTH, CC7_TRACK_EXPECTED_LOW_CONFIDENCE_FRAMES,
         CC7_TRACK_SURVIVING_SAMPLE_FRAMES, Cc7Camera, cc7_spec,
     },
-    map_frames_with_rounding, map_source_range_to_project,
+    map_frames_with_rounding, map_source_range_to_project, project_format_version,
 };
 use kinewright_media::{
     FfmpegMediaEngine,
@@ -839,6 +839,21 @@ fn parse_audio_tail_contract(value: &str) -> Result<EvalAudioTailSpec, EvalError
     })
 }
 
+/// IN2B §4 rule 6: refuse a saved document newer than this build before
+/// parsing it. The eval binary cannot use the app-side envelope, so it reads
+/// the top-level `format_version` through core's reader first. A batch tool
+/// has no incident log to note into; erroring out beats the silent downgrade
+/// `from_slice::<Document>` would otherwise perform.
+fn check_saved_document_format(bytes: &[u8]) -> Result<(), EvalError> {
+    let read = project_format_version(bytes);
+    if read > PROJECT_FORMAT_VERSION {
+        return Err(EvalError::Output(format!(
+            "newer format_version {read} > {PROJECT_FORMAT_VERSION}"
+        )));
+    }
+    Ok(())
+}
+
 fn rerender_document(document_path: &Path, options: &Options) -> Result<bool, EvalError> {
     let artifact_directory = options.artifact_directory.as_deref().ok_or_else(|| {
         EvalError::Agent("--artifact-directory is required for rerendering".to_owned())
@@ -849,6 +864,7 @@ fn rerender_document(document_path: &Path, options: &Options) -> Result<bool, Ev
             document_path.display()
         ))
     })?;
+    check_saved_document_format(&bytes)?;
     let document: Document = serde_json::from_slice(&bytes).map_err(|error| {
         EvalError::Output(format!(
             "could not parse saved document {}: {error}",
@@ -5222,6 +5238,40 @@ mod tests {
         assert!(parse_audio_tail_contract("0,-1600,25,-3000,25").is_err());
         assert!(parse_audio_tail_contract("5,1,25,-3000,25").is_err());
         assert!(parse_audio_tail_contract("5,-1600,25,-3000").is_err());
+    }
+
+    #[test]
+    fn in2b_eval_refuses_a_newer_file_and_reads_v1_as_before() {
+        // IN2B §4 rule 6, item 33: the gate passes versionless and v1 bytes
+        // and refuses newer ones naming the version.
+        assert!(check_saved_document_format(br"{}").is_ok());
+        assert!(check_saved_document_format(br#"{"format_version": 1}"#).is_ok());
+        let error = check_saved_document_format(br#"{"format_version": 999}"#).unwrap_err();
+        assert!(
+            format!("{error}").contains("newer format_version 999 > 1"),
+            "unexpected refusal text: {error}"
+        );
+
+        // The gate is wired into the rerender path: a newer file on disk
+        // refuses before parsing, so minimal bytes suffice.
+        let directory = std::env::temp_dir().join(format!(
+            "kinewright-eval-newer-format-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let document_path = directory.join("newer.kinewright");
+        std::fs::write(&document_path, br#"{"format_version": 999}"#).unwrap();
+        let options = Options {
+            artifact_directory: Some(directory.clone()),
+            ..Options::defaults()
+        };
+        let error = rerender_document(&document_path, &options).unwrap_err();
+        assert!(
+            format!("{error}").contains("newer format_version 999 > 1"),
+            "unexpected rerender refusal text: {error}"
+        );
+        std::fs::remove_file(&document_path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
     }
 
     #[test]

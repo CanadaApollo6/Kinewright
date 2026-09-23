@@ -17143,8 +17143,9 @@ pub const IN1_INCIDENT_SERIALIZED_BYTES: usize = 819;
 
 /// IN2 §4.2 rule 11: the ceiling every incident this policy table can produce
 /// stays under, asserted `<=` over all **74** codes across all **eight**
-/// subject shapes, **two** probes, {no proposal, a proposal at the cap} and
-/// four state-and-telemetry shapes — **9 472** measurements.
+/// subject shapes, **two** probes, {no proposal, a proposal at the cap},
+/// four state-and-telemetry shapes and `IN2B` §10 rule 5's
+/// {no name, a name at the cap} — **18 944** measurements.
 ///
 /// **Moved from 2 048 to 4 096, and the cause is the proposal alone.** The
 /// worst shape without either new telemetry field already measures over 2 048,
@@ -17156,14 +17157,14 @@ pub const IN1_INCIDENT_SERIALIZED_BYTES: usize = 819;
 /// serialisation is byte-identical.
 ///
 /// **The pin is the loop, not a remembered number** (IN2 probe-2
-/// disagreement 4). `in2_every_code_fits_the_re_measured_ceiling` in this
-/// file's test module measures the whole product and asserts its own worst
-/// against this constant and the `worst > CEILING / 2` divisor; it asserts no
-/// intermediate byte figure, because the figure is a measurement over chosen
-/// realistic inputs and `observed` is not bounded by the type system
-/// (`IN1b` §3.11 rule 44). Core's
-/// `in2_every_code_fits_the_re_measured_ceiling_on_every_subject_shape` is the
-/// twin, over the same product.
+/// disagreement 4). `in2b_the_ceiling_holds_with_names_saturated_and_819_unmoved`
+/// in this file's test module measures the whole product and asserts its
+/// own worst against this constant and the `worst > CEILING / 2` divisor;
+/// it asserts no intermediate byte figure, because the figure is a
+/// measurement over chosen realistic inputs and `observed` is not bounded
+/// by the type system (`IN1b` §3.11 rule 44). Core's
+/// `in2b_the_ceiling_holds_with_names_saturated_and_819_unmoved_on_every_subject_shape`
+/// is the twin, over the same product.
 ///
 /// **The divisor proves the ceiling is load-bearing** (`IN2B` §0.5 E-B6
 /// corrects the earlier reading, which had the failure mode backwards).
@@ -17171,8 +17172,8 @@ pub const IN1_INCIDENT_SERIALIZED_BYTES: usize = 819;
 /// whole product; `worst > CEILING / 2` fails when the measured worst
 /// *shrinks* below half the ceiling — one more optional string on
 /// [`kinewright_core::Incident`] moves the ceiling assertion, never the
-/// divisor. Measured on this tree: worst 2 457 B, **1 639 B** of
-/// headroom under the ceiling and **409 B** of margin over half; the
+/// divisor. Measured on this tree: worst 2 539 B, **1 557 B** of
+/// headroom under the ceiling and **491 B** of margin over half; the
 /// printed `IN2_CEILING` line is what a reader re-reads when the worst
 /// moves.
 pub const IN1_INCIDENT_SERIALIZED_CEILING_BYTES: usize = 4_096;
@@ -27191,13 +27192,14 @@ mod tests {
     /// token-budget assertions that can fail.
     ///
     /// The agent twin of core's
-    /// `in2_every_code_fits_the_re_measured_ceiling_on_every_subject_shape`,
+    /// `in2b_the_ceiling_holds_with_names_saturated_and_819_unmoved_on_every_subject_shape`,
     /// grown from `IN1b`'s 536 pairs to IN2's product: the **74** declared
     /// codes times the **eight** subject variants of `IN1b` §3.3 rule 17 as
     /// amended by erratum `IN1b`-A-R13, times **two probes**, times
     /// {no proposal, a proposal at the cap}, times {open, investigating,
-    /// resolved with all telemetry, resolved without the two new fields} —
-    /// **9 472** shapes.
+    /// resolved with all telemetry, resolved without the two new fields},
+    /// times `IN2B` §10 rule 5's {no name, a name at the cap} — **18 944**
+    /// shapes.
     ///
     /// **The probe is an axis, and erratum A-R9 is why.** The wire body's
     /// `recoveries` array is the one thing IN2 §7 rule 1 changed about the
@@ -27226,7 +27228,7 @@ mod tests {
     // splitting it would put the measurement and its assertions in different
     // functions, which is exactly what makes a pin easy to weaken by accident.
     #[allow(clippy::too_many_lines)]
-    fn in2_every_code_fits_the_re_measured_ceiling() {
+    fn in2b_the_ceiling_holds_with_names_saturated_and_819_unmoved() {
         // The named largest fixture incident, built deterministically: the
         // untagged-`WebM` observation fed twice so `count` is 2 without an
         // engine, and read while still `Open` so no `Duration` reaches the wire.
@@ -27292,37 +27294,47 @@ mod tests {
                                 in2_widest_telemetry(false),
                             ),
                         ] {
-                            // The widest id and count this session can reach,
-                            // so the measurement is not an artefact of a
-                            // one-incident log.
-                            let mut widest = opened.clone();
-                            widest.id = IncidentId(u64::MAX);
-                            widest.count = u32::MAX;
-                            widest.state = state;
-                            widest.telemetry = telemetry;
-                            widest.proposal = proposal.clone();
-                            let bytes = serde_json::to_vec(&widest).unwrap().len();
-                            measured += 1;
-                            assert!(
-                                bytes <= IN1_INCIDENT_SERIALIZED_CEILING_BYTES,
-                                "{} on {subject:?} / {shape} serialises to {bytes} B, over the ceiling",
-                                entry.code.code()
-                            );
-                            let label = format!(
-                                "{} / {subject:?} / {shape} / recoveries={} / proposal={}",
-                                entry.code.code(),
-                                widest.recoveries.len(),
-                                proposal.is_some()
-                            );
-                            if bytes > worst {
-                                worst = bytes;
-                                worst_shape = label.clone();
-                            }
-                            if carries_operation {
-                                with_operation += 1;
-                                if bytes > with_operation_worst {
-                                    with_operation_worst = bytes;
-                                    with_operation_shape = label;
+                            // IN2B §10 rule 5's name arm: every shape is
+                            // measured with the name absent and saturated at
+                            // the d15 ceiling, so the loop itself carries the
+                            // +82 B and no remembered number does.
+                            for name in [
+                                None,
+                                Some("n".repeat(kinewright_core::SUBJECT_NAME_CEILING_BYTES)),
+                            ] {
+                                // The widest id and count this session can reach,
+                                // so the measurement is not an artefact of a
+                                // one-incident log.
+                                let mut widest = opened.clone();
+                                widest.id = IncidentId(u64::MAX);
+                                widest.count = u32::MAX;
+                                widest.state = state;
+                                widest.telemetry = telemetry.clone();
+                                widest.proposal = proposal.clone();
+                                widest.subject_name = name.clone();
+                                let bytes = serde_json::to_vec(&widest).unwrap().len();
+                                measured += 1;
+                                assert!(
+                                    bytes <= IN1_INCIDENT_SERIALIZED_CEILING_BYTES,
+                                    "{} on {subject:?} / {shape} serialises to {bytes} B, over the ceiling",
+                                    entry.code.code()
+                                );
+                                let label = format!(
+                                    "{} / {subject:?} / {shape} / recoveries={} / proposal={}",
+                                    entry.code.code(),
+                                    widest.recoveries.len(),
+                                    proposal.is_some()
+                                );
+                                if bytes > worst {
+                                    worst = bytes;
+                                    worst_shape = label.clone();
+                                }
+                                if carries_operation {
+                                    with_operation += 1;
+                                    if bytes > with_operation_worst {
+                                        with_operation_worst = bytes;
+                                        with_operation_shape = label;
+                                    }
                                 }
                             }
                         }
@@ -27336,8 +27348,8 @@ mod tests {
         );
         assert_eq!(
             measured,
-            74 * 8 * 2 * 2 * 4,
-            "IN2 §4.2 rule 11's shapes, with the probe axis erratum A-R9 adds"
+            74 * 8 * 2 * 2 * 4 * 2,
+            "IN2 §4.2 rule 11's shapes, with the probe axis erratum A-R9 adds and the IN2B §10 rule 5 name arm"
         );
         assert_eq!(POLICY.len(), 74);
         // Part A's thirteen classifier variants are thirteen of the 74 rows
