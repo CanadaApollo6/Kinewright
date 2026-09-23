@@ -636,6 +636,22 @@ fn sidecar_temp_path(sidecar_path: &Path, seq: u64) -> PathBuf {
     PathBuf::from(temp)
 }
 
+/// Write `bytes` to a fresh file at `path` and flush them to the disk through
+/// the same writable handle. Windows refuses `FlushFileBuffers` on a handle
+/// opened read-only, so reopening the file just to sync fails there with
+/// "access denied". A failed write or sync removes the partial file.
+pub(crate) fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+    let written = fs::File::create(path).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    if written.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    written
+}
+
 /// Land one job: per-job unique temp file, then rename over the sidecar.
 ///
 /// The temp lives beside the sidecar so the rename is atomic on both lanes; a
@@ -649,10 +665,9 @@ fn write_one_job(
     rename_hook: &RenameHook,
 ) -> io::Result<()> {
     let temp = sidecar_temp_path(sidecar_path, seq);
-    fs::write(&temp, bytes)?;
     // N6/H9: the temp's bytes reach the disk before the rename does, so a
     // crash between the two cannot surface torn bytes.
-    fs::File::open(&temp)?.sync_all()?;
+    write_synced(&temp, bytes)?;
     if let Ok(slot) = rename_hook.lock()
         && let Some(hook) = slot.clone()
     {

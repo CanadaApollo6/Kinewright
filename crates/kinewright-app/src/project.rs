@@ -395,13 +395,15 @@ fn write_file_atomic_with_rename(
     let mut temp = target.as_os_str().to_owned();
     temp.push(format!(".{}.tmp", std::process::id()));
     let temp = PathBuf::from(temp);
-    fs::write(&temp, contents)?;
-    if let Some(permissions) = permissions {
-        fs::set_permissions(&temp, permissions)?;
-    }
     // The temp's bytes reach the disk before the rename does, so a crash
     // between the two cannot surface torn bytes (the H9 shape).
-    fs::File::open(&temp)?.sync_all()?;
+    crate::sidecar::write_synced(&temp, contents)?;
+    if let Some(permissions) = permissions
+        && let Err(error) = fs::set_permissions(&temp, permissions)
+    {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
     let renamed = match rename {
         Some(hook) => hook(&temp, &target),
         None => fs::rename(&temp, &target),
