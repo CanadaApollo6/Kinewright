@@ -11769,10 +11769,16 @@ mod in2b_tests {
         let eligible =
             app.investigator_session_eligible(0, IncidentId(2), code_two, incident.subject);
         assert!(eligible, "the shared predicate reports row 2 eligible");
+        let missing = app.projects[0].subject_missing.contains(&IncidentId(2));
         assert_eq!(
-            investigate_action(&incident, is_loaded, eligible),
+            investigate_action(&incident, is_loaded, eligible, missing),
             Some(CardPress::Investigate),
             "row 2 keeps Investigate"
+        );
+        assert_eq!(
+            investigate_action(&incident, is_loaded, eligible, true),
+            None,
+            "N6/H7: no Investigate when the subject is missing"
         );
 
         // The write re-persists the queued incident's op (§3 rule 13): the
@@ -12698,6 +12704,89 @@ mod in2b_tests {
             before_sidecar,
             "and its sidecar"
         );
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H7: Investigate is not offered when the subject is missing — the
+    /// press refuses without queueing, even with a working harness.
+    #[test]
+    fn in2b_investigate_refuses_a_missing_subject() {
+        use super::in1_tests::{in2_cleanup, in2_configure_scripted_at, in2_default_budgets};
+        use kinewright_agent::ScriptedDriver;
+        use kinewright_core::{
+            AssetId, IncidentEvidence, IncidentRecord, IncidentState, IncidentTelemetry,
+        };
+
+        use crate::sidecar::{digest_bytes, sidecar_path_for_project};
+
+        let record = IncidentRecord {
+            id: IncidentId(1),
+            code: IncidentCode::Label(LabelIncident::Look).code().to_owned(),
+            subject: IncidentSubject::Asset(AssetId(999)),
+            observed: "loaded, subject gone".to_owned(),
+            allowed: None,
+            evidence: IncidentEvidence::Plain,
+            revision: TimelineRevision(41),
+            opened_wall_millis: None,
+            opened_offset_nanos: 1_000,
+            count: 1,
+            state: IncidentState::Open,
+            telemetry: IncidentTelemetry::default(),
+            proposal: None,
+            subject_name: None,
+            refused_op: None,
+        };
+        let dir = TempDirectory::new("in2b-h7-missing");
+        let project_path = dir.path("edit.kinewright");
+        fs::write(&project_path, b"{\"timeline\":{}}").expect("the project file writes");
+        let digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
+        let envelope = serde_json::json!({
+            "format_version": 1,
+            "project_digest": digest,
+            "previous_digest": digest,
+            "records": [serde_json::to_value(record).expect("the record")],
+        });
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("a sidecar derives");
+        fs::write(
+            &sidecar,
+            serde_json::to_string(&envelope).expect("the envelope"),
+        )
+        .expect("the sidecar writes");
+
+        let (mut app, engine) = in2b_harness(Document::default(), Some(project_path));
+        assert!(
+            app.projects[0].subject_missing.contains(&IncidentId(1)),
+            "asset 999 resolves to nothing"
+        );
+        assert!(
+            app.projects[0].loaded_open_ids.contains(&IncidentId(1)),
+            "the row loads open"
+        );
+        in2_configure_scripted_at(
+            &mut app,
+            0,
+            ScriptedDriver::new(vec![]),
+            in2_default_budgets(),
+        );
+        assert!(
+            !app.investigate(0, IncidentId(1)),
+            "the press refuses a missing subject"
+        );
+        assert_eq!(
+            app.projects[0]
+                .investigator
+                .as_ref()
+                .expect("investigator state")
+                .queued_count(),
+            0,
+            "nothing queues"
+        );
+        assert!(
+            app.projects[0].loaded_open_ids.contains(&IncidentId(1)),
+            "the refusal consumes nothing"
+        );
+        in2_cleanup(&mut app);
         in2b_quiesce_engine(&engine);
         in2b_shutdown(&mut app);
     }

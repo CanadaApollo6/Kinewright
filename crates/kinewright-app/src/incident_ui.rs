@@ -180,20 +180,24 @@ pub(crate) fn empty_panel_sets() -> LoadedPanelSets<'static> {
 
 /// Whether the card offers Investigate (`IN2B` §3 rule 12, E-C1).
 ///
-/// Pure over `(incident, is_loaded_open, eligibility)`: an open row the
-/// run never re-seen, never investigated (`telemetry.resolver.is_none()` —
-/// a loaded stale proposal has a resolver and offers Re-investigate
-/// instead), and eligible. `Some` carries the press the button reports.
+/// Pure over `(incident, is_loaded_open, eligibility, subject_missing)`: an
+/// open row the run never re-seen, never investigated
+/// (`telemetry.resolver.is_none()` — a loaded stale proposal has a resolver
+/// and offers Re-investigate instead), eligible, and whose subject still
+/// exists (N6/H7 — a gone subject cannot start a paid session). `Some`
+/// carries the press the button reports.
 #[must_use]
 pub(crate) fn investigate_action(
     incident: &Incident,
     is_loaded_open: bool,
     eligible: bool,
+    subject_missing: bool,
 ) -> Option<CardPress> {
     (incident.state == IncidentState::Open
         && is_loaded_open
         && incident.telemetry.resolver.is_none()
-        && eligible)
+        && eligible
+        && !subject_missing)
         .then_some(CardPress::Investigate)
 }
 
@@ -278,7 +282,13 @@ pub(crate) fn incident_card(
                 Some(IncidentResolver::Session { .. })
             ),
         never_investigate: INVESTIGATOR_ALLOWLIST.contains(&incident.code),
-        investigate: investigate_action(incident, flags.is_loaded_open, flags.eligible).is_some(),
+        investigate: investigate_action(
+            incident,
+            flags.is_loaded_open,
+            flags.eligible,
+            flags.subject_missing,
+        )
+        .is_some(),
         subject_display: match incident.subject_name.as_deref() {
             Some(name) => format!("{name} · {}", incident.subject.label()),
             None => incident.subject.label(),

@@ -491,6 +491,11 @@ pub(crate) struct ProjectSession {
     pub(crate) loaded_walls: BTreeMap<IncidentId, Option<i64>>,
     /// The log generation the last flush wrote, for [`should_flush`].
     pub(crate) last_written_gen: u64,
+    /// The log generation the writer confirmed (N6/H6): advanced on a
+    /// joined success, never on submit. Close/exit write-and-wait whenever
+    /// this trails the log, so a failed background flush retries at close
+    /// instead of reading as done.
+    pub(crate) confirmed_written_gen: u64,
     /// What the open-time sidecar load did, when one ran. `None` for new
     /// projects and refused loads; the report's `carried`/`refused` halves
     /// move into the fields above, the counts stay here for the gate.
@@ -746,9 +751,13 @@ fn load_session_sidecar(
 /// Snapshot the loaded sets after the open-time restore (`IN2B` §3 rules 9,
 /// 11, 12, 17).
 ///
-/// Restore runs into an empty log before any note, so every entry present is
-/// a restored one: all ids join `loaded_ids`, open ids join `loaded_open_ids`,
-/// and each subject resolves against the loaded document — unresolvable
+/// Restore runs into an empty log, so every entry present is either a
+/// restored record or a load-time note (the unknown-codes aggregate, a
+/// `sidecar_refused`). Restored records carry no provenance and always
+/// load non-transient; both load-time notes are transient — so excluding
+/// transient entries snapshots exactly the restored ids (N6/H4). All
+/// restored ids join `loaded_ids`, open ones join `loaded_open_ids`, and
+/// each subject resolves against the loaded document — unresolvable
 /// subjects join `subject_missing`.
 ///
 /// `pub(crate)` so item 27 resolves through the production path instead of
@@ -768,6 +777,9 @@ pub(crate) fn capture_loaded_sets(
     let mut loaded_open = BTreeSet::new();
     let mut missing = BTreeSet::new();
     for incident in log.all() {
+        if incident.transient {
+            continue;
+        }
         loaded.insert(incident.id);
         if incident.state == IncidentState::Open {
             loaded_open.insert(incident.id);
@@ -893,6 +905,7 @@ impl ProjectSession {
             subject_missing,
             loaded_walls: loaded.walls,
             last_written_gen: loaded.last_written_gen,
+            confirmed_written_gen: loaded.last_written_gen,
             last_restore_report: loaded.report,
             format_version,
             sidecar_suspended: loaded.suspended,
@@ -1110,21 +1123,29 @@ impl ProjectSession {
             .sidecar_bytes_for_save(project_digest, previous_digest)
             .map_err(std::io::Error::other)?;
         self.sidecar_writer.submit_and_join(sidecar_path, bytes)?;
-        self.last_written_gen = self
+        let generation = self
             .incidents
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .generation();
+        self.last_written_gen = generation;
+        // N6/H6: a joined success confirms; a failure propagates before
+        // either baseline moves, so close retries it.
+        self.confirmed_written_gen = generation;
         Ok(FlushOutcome::Written(report))
     }
 
-    /// [`Self::flush_incidents`] when the log moved since the last write,
-    /// `Skipped` otherwise — the close/exit and background shape (`IN2B` §2
-    /// rule 4).
+    /// [`Self::flush_incidents`] when the writer has not confirmed the
+    /// current generation, `Skipped` otherwise — the close/exit shape
+    /// (`IN2B` §2 rule 4).
     ///
-    /// A flush that finds `generation() == last_written_gen` skips the IO
-    /// entirely: the digest pair would be identical anyway. Saves do not call
-    /// this — a save always rewrites the pair over new bytes.
+    /// Close write-and-waits whenever `confirmed_written_gen` trails the
+    /// log (N6/H6): a failed background flush advanced the submit baseline
+    /// but never confirmed, so it retries here instead of reading as done.
+    /// A successful background flush still lands one redundant identical
+    /// rewrite at close — async jobs carry no ack, and one idempotent write
+    /// per close is cheaper than success tracking. Saves do not call this —
+    /// a save always rewrites the pair over new bytes.
     pub(crate) fn flush_incidents_if_changed(&mut self) -> std::io::Result<FlushOutcome> {
         if self.sidecar_suspended || self.project_path.is_none() {
             return Ok(FlushOutcome::Skipped);
@@ -1134,7 +1155,7 @@ impl ProjectSession {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .generation();
-        if !should_flush(generation, self.last_written_gen, Instant::now()) {
+        if generation == self.confirmed_written_gen {
             return Ok(FlushOutcome::Skipped);
         }
         let digest = self.saved_digest.clone();
@@ -1145,9 +1166,11 @@ impl ProjectSession {
     ///
     /// Unchanged logs and unsaved projects queue nothing. Failures surface
     /// through [`SidecarWriter::take_errors`], which the frame thread drains
-    /// into `sidecar_write_failed` notes. The baseline advances optimistically
-    /// at submit: a failed submit's incident is the retry signal, not a
-    /// 2 s resubmit churn.
+    /// into `sidecar_write_failed` notes. The submit baseline advances
+    /// optimistically at submit — a failed submit's incident is the retry
+    /// signal, not a 2 s resubmit churn — while `confirmed_written_gen`
+    /// waits for a joined success, so close retries what the background
+    /// could not land (N6/H6).
     pub(crate) fn queue_incidents_flush(&mut self) {
         if self.sidecar_suspended {
             return;
@@ -3224,6 +3247,146 @@ mod tests {
             fs::read(&sidecar).expect("the stem re-reads"),
             corrupt,
             "never overwritten"
+        );
+        shutdown_test_session(&mut session);
+    }
+
+    /// N6/H4: the loaded sets hold restored ids only — the unknown-codes
+    /// aggregate the restore noted is not a restored row.
+    #[test]
+    fn in2b_loaded_sets_exclude_the_unknown_codes_aggregate() {
+        use kinewright_core::{IncidentRecord, IncidentTelemetry};
+
+        let dir = TempDirectory::new("in2b-h4-aggregate");
+        let project = sidecar_project_file(&dir, "edit.kinewright");
+        let digest = project_digest_of(&project);
+        let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
+        let mut records = two_records();
+        records.push(IncidentRecord {
+            id: IncidentId(9),
+            code: "zz_unknown_code".to_owned(),
+            subject: IncidentSubject::Project,
+            observed: "from a newer build".to_owned(),
+            allowed: None,
+            evidence: IncidentEvidence::Plain,
+            revision: TimelineRevision(43),
+            opened_wall_millis: None,
+            opened_offset_nanos: 9_000,
+            count: 1,
+            state: IncidentState::Open,
+            telemetry: IncidentTelemetry::default(),
+            proposal: None,
+            subject_name: None,
+            refused_op: None,
+        });
+        let bytes =
+            build_sidecar_bytes(&records, &[], &digest, &digest).expect("the sidecar builds");
+        fs::write(&sidecar, bytes).expect("the sidecar writes");
+        let mut session = sidecar_session(41, &project);
+        let aggregate = {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            log.all()
+                .find(|incident| {
+                    incident.code == IncidentCode::Label(LabelIncident::SidecarUnknownCodes)
+                })
+                .expect("the aggregate noted")
+                .id
+        };
+        assert!(session.loaded_ids.contains(&IncidentId(1)));
+        assert!(session.loaded_ids.contains(&IncidentId(2)));
+        assert_eq!(session.loaded_ids.len(), 2, "two restored rows");
+        assert_eq!(session.loaded_open_ids.len(), 2, "both open");
+        assert!(
+            !session.loaded_ids.contains(&aggregate),
+            "the aggregate is not a restored id"
+        );
+        assert!(
+            !session.loaded_open_ids.contains(&aggregate),
+            "nor a loaded open"
+        );
+        shutdown_test_session(&mut session);
+    }
+
+    /// N6/H4: a refused load restores nothing — the `sidecar_refused` note
+    /// is not a restored row either.
+    #[test]
+    fn in2b_loaded_sets_exclude_the_refusal_note() {
+        let dir = TempDirectory::new("in2b-h4-refused");
+        let project = sidecar_project_file(&dir, "edit.kinewright");
+        let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
+        fs::write(&sidecar, b"{ torn").expect("the corrupt fixture writes");
+        let mut session = sidecar_session(42, &project);
+        {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                log.all()
+                    .any(|incident| incident.code
+                        == IncidentCode::Label(LabelIncident::SidecarRefused)),
+                "the refusal notes"
+            );
+        }
+        assert!(
+            session.loaded_ids.is_empty(),
+            "nothing restored, nothing loaded"
+        );
+        assert!(session.loaded_open_ids.is_empty(), "nor loaded open");
+        shutdown_test_session(&mut session);
+    }
+
+    /// N6/H6: a failed background flush retries at close — close/exit
+    /// write-and-wait whenever the confirmed generation trails the log.
+    #[test]
+    fn in2b_a_failed_background_flush_retries_at_close() {
+        use crate::sidecar::SidecarLoad;
+
+        let dir = TempDirectory::new("in2b-h6-retry");
+        let project = sidecar_project_file(&dir, "edit.kinewright");
+        let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
+        let mut session = sidecar_session(43, &project);
+        {
+            let mut log = session
+                .incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            log.observe(IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::Project),
+                IncidentSubject::Project,
+                "in2b h6 open",
+                TimelineRevision::default(),
+            ));
+        }
+        // The portable failure (item 36's shape): a directory at the stem
+        // fails temp + rename on both lanes.
+        fs::create_dir(&sidecar).expect("the stem blocks");
+        session.queue_incidents_flush();
+        // The background job fails asynchronously: wait for its error, so
+        // the unblock below cannot accidentally let it succeed.
+        let expiry = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if !session.sidecar_writer.take_errors().is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < expiry,
+                "the background write reports its failure"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        fs::remove_dir(&sidecar).expect("the stem unblocks");
+        session.stop_threads("in2b h6 close");
+        let SidecarLoad::Current(current) = load_sidecar(&sidecar) else {
+            panic!("the close retry landed a sidecar");
+        };
+        assert_eq!(
+            current.records.len(),
+            1,
+            "the retried flush carries the history"
         );
         shutdown_test_session(&mut session);
     }

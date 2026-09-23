@@ -2238,7 +2238,8 @@ impl KinewrightApp {
     /// `name`/`transient` never matter. Returns whether anything queued: a
     /// shown button never returns `false`, and the shared predicate is
     /// re-checked here, so a mute flipped between render and press refuses
-    /// honestly without consuming the set.
+    /// honestly without consuming the set. A missing subject refuses too
+    /// (N6/H7): the card hides the button, and the press re-checks.
     pub(crate) fn investigate(&mut self, project_index: usize, id: IncidentId) -> bool {
         let (code, subject, observed, resolver_none) = {
             let log = self.projects[project_index]
@@ -2259,6 +2260,9 @@ impl KinewrightApp {
             return false;
         }
         if !self.projects[project_index].loaded_open_ids.contains(&id) {
+            return false;
+        }
+        if self.projects[project_index].subject_missing.contains(&id) {
             return false;
         }
         if !self.investigator_session_eligible(project_index, id, code, subject) {
