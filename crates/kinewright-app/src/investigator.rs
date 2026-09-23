@@ -2407,6 +2407,15 @@ mod tests {
             self.queue.len()
         }
 
+        /// The queued incidents' refused operations, in queue order (N6/H10
+        /// survivor 4): proves which stash won without starting a session.
+        pub(crate) fn queued_refused_ops(&self) -> Vec<Option<Operation>> {
+            self.queue
+                .iter()
+                .map(|queued| queued.refused.clone())
+                .collect()
+        }
+
         /// Install a fabricated pending session (C5 item-24 rig): the pump
         /// sees a running session whose result never arrives, so queued
         /// incidents wait instead of starting. The caller holds the result

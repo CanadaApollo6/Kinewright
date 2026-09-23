@@ -134,11 +134,6 @@ impl KinewrightApp {
             asset.fps.denominator()
         ));
         let status = self.analysis.transcript_status(&asset);
-        if !matches!(status, TranscriptStatus::Failed(_)) {
-            // Site 5's edge clears off-failure (`IN2B` §7 rule 3): a retry
-            // or recovery makes the next `Failed` a new episode.
-            self.transcript_noted = None;
-        }
         match status {
             TranscriptStatus::NotRequested => {
                 self.analysis.request_transcription(asset);
@@ -194,18 +189,6 @@ impl KinewrightApp {
                     color::STATUS_DANGER,
                     format!("Transcription failed: {error}"),
                 );
-                // Site 5 (`IN2B` §7 rule 3): the engine owns the status
-                // store, so novelty is the app's memory — note on change.
-                let episode = (asset.id, error.clone());
-                if self.transcript_noted.as_ref() != Some(&episode) {
-                    let revision = self.focused().revision;
-                    if let Some(observation) =
-                        transcript_panel_observation(&error, asset.id, revision)
-                    {
-                        self.note_observation(observation);
-                    }
-                    self.transcript_noted = Some(episode);
-                }
                 if ui.button("Retry").clicked() {
                     self.analysis.request_transcription(asset);
                 }
@@ -440,6 +423,35 @@ impl KinewrightApp {
                     .and_then(|asset| self.focused().document.asset(asset))
             })
             .or_else(|| self.focused().document.media_pool.first())
+    }
+
+    /// Poll the selected asset's transcript status for failure transitions
+    /// (N6/H11): the engine owns the store, so the frame poll is the only
+    /// transition source — but the edge lives in
+    /// [`Self::note_transcript_failure`], keyed per asset, not in render.
+    pub(crate) fn poll_transcript_failure(&mut self) {
+        let Some(asset) = self.selected_transcript_asset().cloned() else {
+            return;
+        };
+        let status = self.analysis.transcript_status(&asset);
+        self.note_transcript_failure(asset.id, &status);
+    }
+
+    /// Note one transcript failure episode (N6/H11): the first poll that
+    /// sees `(asset, error)` notes; repeats stay silent until the asset
+    /// leaves `Failed`, which re-arms that asset only.
+    pub(crate) fn note_transcript_failure(&mut self, asset_id: AssetId, status: &TranscriptStatus) {
+        if let TranscriptStatus::Failed(error) = status {
+            if self.transcript_noted.insert((asset_id, error.clone())) {
+                let revision = self.focused().revision;
+                if let Some(note) = transcript_panel_observation(error, asset_id, revision) {
+                    self.note_observation(note);
+                }
+            }
+            return;
+        }
+        self.transcript_noted
+            .retain(|(noted, _)| *noted != asset_id);
     }
 
     fn running_transcript_label(ui: &mut egui::Ui, label: &str, progress: Option<f32>) {

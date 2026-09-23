@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -266,10 +267,11 @@ pub(crate) struct KinewrightApp {
     pub(crate) pending_observations: Vec<IncidentObservation>,
     /// Site 5's edge (`IN2B` §7 rule 3): the last noted transcription
     /// failure, keyed by asset — the engine owns the status store, so the
-    /// app edges at the read. Keyed (not site 6's bare `Option<String>`)
-    /// because the panel switches assets: a bare message would swallow a
-    /// second asset's identical failure.
-    pub(crate) transcript_noted: Option<(AssetId, String)>,
+    /// app edges at the read. A set, not a slot (N6/H11): one slot forgets
+    /// the first asset's episode when the panel switches assets and
+    /// re-notes it on the way back. Each entry is a noted `(asset,
+    /// error)` episode; an asset leaving `Failed` re-arms its own entries.
+    pub(crate) transcript_noted: BTreeSet<(AssetId, String)>,
     /// Modal 1's edge (`IN2B` §7 rule 6): the damage note fires on the
     /// first damage render per run, never again.
     pub(crate) recovery_damage_noted: bool,
@@ -557,7 +559,7 @@ impl KinewrightApp {
             pending_source_edit: None,
             pending_legacy_relink: None,
             pending_observations: Vec::new(),
-            transcript_noted: None,
+            transcript_noted: BTreeSet::new(),
             recovery_damage_noted: false,
             recovery_unavailable_noted: false,
             pending_router_conflicts: Vec::new(),
@@ -2234,6 +2236,9 @@ impl KinewrightApp {
         self.poll_room_tone(ctx);
         self.poll_recording(ctx);
         self.poll_media_workflow(ctx);
+        // Site 5 (`IN2B` §7 rule 3, N6/H11): transcript failures edge here,
+        // per asset, whether the panel is open or not.
+        self.poll_transcript_failure();
         self.recover_stranded_ab_hold(ctx);
         self.release_hidden_monitor_gain();
         if self.poll_lut_workers() {
@@ -5191,7 +5196,7 @@ pub(crate) mod in1_tests {
             pending_source_edit: None,
             pending_legacy_relink: None,
             pending_observations: Vec::new(),
-            transcript_noted: None,
+            transcript_noted: BTreeSet::new(),
             recovery_damage_noted: false,
             recovery_unavailable_noted: false,
             pending_router_conflicts: Vec::new(),
@@ -9698,7 +9703,7 @@ mod in2b_tests {
             pending_source_edit: None,
             pending_legacy_relink: None,
             pending_observations: Vec::new(),
-            transcript_noted: None,
+            transcript_noted: BTreeSet::new(),
             recovery_damage_noted: false,
             recovery_unavailable_noted: false,
             pending_router_conflicts: Vec::new(),
@@ -11916,9 +11921,24 @@ mod in2b_tests {
         .expect("the sidecar writes");
 
         let (mut app, _engine) = in2b_harness(Document::default(), Some(project_path));
+        // N6/H10: the harness is configured BEFORE the load asserts, with a
+        // pump in between — "0 sessions" must hold in a world that could
+        // serve them, not a world without a harness.
+        in2_configure_scripted_at(
+            &mut app,
+            0,
+            ScriptedDriver::new(vec![]),
+            in2_default_budgets(),
+        );
+        app.route_incidents();
         let session = app.projects[0].investigator.as_ref().expect("investigator");
         assert_eq!(session.queued_count(), 0, "load queues nothing");
         assert!(!session.is_running(), "load starts nothing");
+        assert!(
+            app.projects[0].loaded_open_ids.contains(&IncidentId(1))
+                && app.projects[0].loaded_open_ids.contains(&IncidentId(2)),
+            "the pump consumes no loaded row"
+        );
         let stale = in2_incident(&app, IncidentId(2));
         assert!(
             stale
@@ -11936,12 +11956,6 @@ mod in2b_tests {
             "restore kept the session resolver"
         );
 
-        in2_configure_scripted_at(
-            &mut app,
-            0,
-            ScriptedDriver::new(vec![]),
-            in2_default_budgets(),
-        );
         // The pump blocker on a pair of its own, so both presses queue
         // instead of starting.
         let blocker_tx = in2b_install_pump_blocker(
@@ -12885,7 +12899,7 @@ mod in2b_tests {
     fn in2b_failed_project_write_restores_the_prior_sidecar() {
         let temp = TempDirectory::new("in2b-h12-restore");
         let project_path = temp.path("edit.kinewright");
-        let (mut app, _engine) = in2b_harness(Document::default(), None);
+        let (mut app, engine) = in2b_harness(Document::default(), None);
         in2b_observe_opens(&app.projects[0], 1, 41);
         app.write_project(&project_path).expect("the save succeeds");
         let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
@@ -12932,6 +12946,7 @@ mod in2b_tests {
             );
         }
         fs::remove_dir(&project_path).expect("cleanup");
+        in2b_quiesce_engine(&engine);
         in2b_shutdown(&mut app);
     }
 
@@ -12940,7 +12955,7 @@ mod in2b_tests {
     #[test]
     fn in2b_failed_save_as_removes_the_unpaired_sidecar() {
         let temp = TempDirectory::new("in2b-h12-remove");
-        let (mut app, _engine) = in2b_harness(Document::default(), None);
+        let (mut app, engine) = in2b_harness(Document::default(), None);
         in2b_observe_opens(&app.projects[0], 1, 41);
         let dir_path = temp.path("target.kinewright");
         fs::create_dir(&dir_path).expect("a directory takes the target");
@@ -12958,6 +12973,293 @@ mod in2b_tests {
             "the rollback removes the flushed sidecar"
         );
         fs::remove_dir(&dir_path).expect("cleanup");
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H10 survivor 2: a same-stem save writes the previous digest —
+    /// the pair's older arm is the last save, never `""`.
+    #[test]
+    fn in2b_same_stem_save_writes_the_previous_digest() {
+        let temp = TempDirectory::new("in2b-h10-previous");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 1, 41);
+        app.write_project(&project_path).expect("the save succeeds");
+        let first = app.projects[0].saved_digest.clone();
+        let mut second_doc = (*app.projects[0].document).clone();
+        second_doc.markers.push(Marker {
+            id: MarkerId(3),
+            position: TimeCode::ZERO,
+            label: "the second save differs".to_owned(),
+            color_token: 0,
+        });
+        app.projects[0].document = Arc::new(second_doc);
+        app.write_project(&project_path)
+            .expect("the second save succeeds");
+        let second = app.projects[0].saved_digest.clone();
+        assert_ne!(first, second, "the saves differ");
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
+        let envelope: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&sidecar).expect("the sidecar reads"))
+                .expect("the sidecar parses");
+        assert_eq!(
+            envelope["project_digest"].as_str(),
+            Some(second.as_str()),
+            "the pair leads with the new digest"
+        );
+        assert_eq!(
+            envelope["previous_digest"].as_str(),
+            Some(first.as_str()),
+            "and trails with the last save"
+        );
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H10 survivor 3: the Master chain names itself — the observed-name
+    /// capture covers every chain.
+    #[test]
+    fn in2b_master_subject_names_itself() {
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        assert_eq!(
+            app.capture_subject_name(
+                0,
+                &IncidentSubject::Chain(kinewright_core::AudioChain::Master)
+            ),
+            Some("Master".to_owned()),
+            "Master names itself"
+        );
+        assert_eq!(
+            app.capture_subject_name(0, &IncidentSubject::Track(kinewright_core::TrackId(9))),
+            None,
+            "control: tracks stay anonymous"
+        );
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H10 survivor 4: a fresh `take_refused` wins over the restored op
+    /// for the same observation — the drain already held the person's
+    /// latest refusal.
+    #[test]
+    fn in2b_fresh_refused_wins_over_the_restored_op() {
+        use super::in1_tests::{in2_cleanup, in2_configure_scripted_at, in2_default_budgets};
+        use kinewright_agent::ScriptedDriver;
+
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        let observation = IncidentObservation::plain(
+            IncidentCode::Label(LabelIncident::Look),
+            IncidentSubject::Project,
+            "fresh refusal",
+            TimelineRevision(41),
+        );
+        // The pump blocker below opens incident 1, so the route opens
+        // this as incident 2; the restored stash waits under that id, as a
+        // restore would leave it.
+        app.projects[0].refused_by_id.insert(
+            IncidentId(2),
+            Operation::DeleteClip {
+                clip: kinewright_core::ClipId(1),
+            },
+        );
+        let fresh = Operation::DeleteClip {
+            clip: kinewright_core::ClipId(2),
+        };
+        app.projects[0]
+            .investigator
+            .as_mut()
+            .expect("investigator state")
+            .stash_refused(observation.clone(), fresh.clone());
+        in2_configure_scripted_at(
+            &mut app,
+            0,
+            ScriptedDriver::new(vec![]),
+            in2_default_budgets(),
+        );
+        // The pump blocker on a pair of its own, so the route queues
+        // instead of starting.
+        let _blocker = in2b_install_pump_blocker(
+            &mut app,
+            IncidentCode::Label(LabelIncident::Look),
+            IncidentSubject::Asset(kinewright_core::AssetId(77)),
+        );
+        app.pending_observations.push(observation);
+        app.route_incidents();
+        assert_eq!(
+            app.projects[0]
+                .investigator
+                .as_ref()
+                .expect("investigator state")
+                .queued_refused_ops(),
+            [Some(fresh)],
+            "the fresh refusal rides, the restored stash drops"
+        );
+        assert!(
+            !app.projects[0].refused_by_id.contains_key(&IncidentId(2)),
+            "the losing stash is consumed"
+        );
+        in2_cleanup(&mut app);
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H10 survivor 5: every open-time aggregate row is transient —
+    /// rows 9 (store refusal), 10 (unavailable LUTs) and 11 (missing media)
+    /// alike.
+    #[test]
+    fn in2b_open_time_aggregates_are_all_transient() {
+        use kinewright_core::{
+            AssetId, ColorDescription, LutAsset, LutAssetId, LutAssetKind, LutAssetSource,
+            MediaAsset, MediaKind, MediaSourceFingerprint, Rational, TimeCode,
+        };
+
+        let temp = TempDirectory::new("in2b-h10-transient");
+        let project_path = temp.path("edit.kinewright");
+        // Row 9: a file where the `<stem>.kinewright-assets` directory goes
+        // refuses the store, portably, with no chmod.
+        fs::write(temp.path("edit.kinewright-assets"), b"not a directory")
+            .expect("the blocker file writes");
+        let mut document = Document::default();
+        // Row 10: an imported LUT with no store root reads Missing.
+        document.lut_assets.push(LutAsset {
+            id: LutAssetId(1),
+            sha256: "0".repeat(64),
+            title: "unreadable.cube".to_owned(),
+            kind: LutAssetKind::Cube3d,
+            size: 33,
+            byte_len: 1_000,
+            domain_min_millionths: [0, 0, 0],
+            domain_max_millionths: [1_000_000, 1_000_000, 1_000_000],
+            source: LutAssetSource::Imported {
+                source_path: temp.path("unreadable.cube").to_string_lossy().into_owned(),
+            },
+        });
+        // Row 11: media nowhere on disk.
+        document.media_pool.push(MediaAsset {
+            id: AssetId(1),
+            path: temp.path("nowhere.mov"),
+            name: "gone.mov".to_owned(),
+            duration: TimeCode(30),
+            fps: Rational::new(30, 1).expect("30 fps"),
+            kind: MediaKind::AudioVideo,
+            resolution: Some((1_920, 1_080)),
+            source_fingerprint: MediaSourceFingerprint::unknown(),
+            color_description: ColorDescription::default(),
+            assumed_from: None,
+        });
+        fs::write(
+            &project_path,
+            serde_json::to_string_pretty(&ProjectFile {
+                format_version: PROJECT_FORMAT_VERSION,
+                document,
+            })
+            .expect("the project serialises"),
+        )
+        .expect("the project file writes");
+
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        app.open_project(&project_path);
+        app.route_incidents();
+        {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 3, "all three rows note");
+            assert!(
+                log.all().all(|incident| incident.transient),
+                "every open-time aggregate is transient"
+            );
+        }
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H11: transcript failures note once per (asset, error) episode —
+    /// repeats stay silent, other assets note independently without
+    /// forgetting the first, and recovery re-arms only the recovered asset.
+    #[test]
+    fn in2b_transcript_failures_note_once_per_asset_episode() {
+        use kinewright_core::{AssetId, TranscriptStatus};
+
+        fn open_count(app: &KinewrightApp) -> usize {
+            app.focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .open_count()
+        }
+
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        let one = AssetId(1);
+        let two = AssetId(2);
+        let failed = |message: &str| TranscriptStatus::Failed(message.to_owned());
+
+        app.note_transcript_failure(one, &failed("whisper boom"));
+        app.route_incidents();
+        assert_eq!(open_count(&app), 1, "the first sighting notes");
+        app.note_transcript_failure(one, &failed("whisper boom"));
+        app.route_incidents();
+        assert_eq!(open_count(&app), 1, "repeats stay silent");
+        app.note_transcript_failure(two, &failed("whisper boom"));
+        app.route_incidents();
+        assert_eq!(open_count(&app), 2, "another asset notes independently");
+        app.note_transcript_failure(one, &failed("whisper boom"));
+        app.route_incidents();
+        assert_eq!(
+            open_count(&app),
+            2,
+            "the first asset still does not re-note"
+        );
+        {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let row = log
+                .all()
+                .find(|incident| {
+                    incident.subject == IncidentSubject::Asset(one)
+                        && incident.observed.contains("whisper boom")
+                })
+                .expect("asset one's row");
+            assert_eq!(row.count, 1, "no silent re-note behind the dedup");
+        }
+        app.note_transcript_failure(one, &failed("cuda gone"));
+        app.route_incidents();
+        assert_eq!(open_count(&app), 3, "a new error is a new episode");
+        app.note_transcript_failure(one, &TranscriptStatus::NotRequested);
+        app.note_transcript_failure(one, &failed("whisper boom"));
+        app.note_transcript_failure(two, &failed("whisper boom"));
+        app.route_incidents();
+        assert_eq!(open_count(&app), 3, "no new row opens");
+        {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let row_one = log
+                .all()
+                .find(|incident| {
+                    incident.subject == IncidentSubject::Asset(one)
+                        && incident.observed.contains("whisper boom")
+                })
+                .expect("asset one's row");
+            assert_eq!(
+                row_one.count, 2,
+                "the recovered asset re-notes (deduped onto its open row)"
+            );
+            let row_two = log
+                .all()
+                .find(|incident| incident.subject == IncidentSubject::Asset(two))
+                .expect("asset two's row");
+            assert_eq!(row_two.count, 1, "the unrecovered asset stays silent");
+        }
+        in2b_quiesce_engine(&engine);
         in2b_shutdown(&mut app);
     }
 }

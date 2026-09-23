@@ -712,6 +712,70 @@ mod tests {
         assert_eq!(sidecar_path_for_project(Some(Path::new("/"))), None);
     }
 
+    /// N6/H10 survivor 1: the gate accepts a sidecar pairing through
+    /// either digest — `previous_digest` is the crash-between-writes arm.
+    #[test]
+    fn sidecar_matches_project_accepts_either_digest() {
+        let loaded = LoadedSidecar {
+            records: Vec::new(),
+            carried: Vec::new(),
+            id_floor: None,
+            project_digest: "aa".to_owned(),
+            previous_digest: "bb".to_owned(),
+        };
+        assert!(sidecar_matches_project(&loaded, "aa"));
+        assert!(sidecar_matches_project(&loaded, "bb"));
+        assert!(!sidecar_matches_project(&loaded, "cc"));
+    }
+
+    /// N6/H10: the writer coalesces a queued batch to the newest job per
+    /// path — the sequence logic lands a real job, not just the gate box.
+    /// The first job parks in the hook while two more queue behind it; the
+    /// release lands the first, then only the newest of the queued pair.
+    #[test]
+    fn sidecar_writer_coalesces_queued_jobs_to_the_newest() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = TempDirectory::new("in2b-h10-coalesce");
+        let sidecar = dir.path("edit.kinewright-incidents");
+        let landings = Arc::new(AtomicUsize::new(0));
+        let (fired_tx, fired_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer = SidecarWriter::new();
+        {
+            let landings = Arc::clone(&landings);
+            let release_rx = std::sync::Mutex::new(release_rx);
+            writer.set_rename_hook(Arc::new(move || {
+                if landings.fetch_add(1, Ordering::SeqCst) == 0 {
+                    fired_tx.send(()).expect("the test listens");
+                    release_rx
+                        .lock()
+                        .expect("the hook holds its lock")
+                        .recv()
+                        .expect("the test releases");
+                }
+            }));
+        }
+        writer.submit(sidecar.clone(), b"job one".to_vec());
+        fired_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the first job parks in its hook");
+        writer.submit(sidecar.clone(), b"job two".to_vec());
+        writer.submit(sidecar.clone(), b"job three".to_vec());
+        release_tx.send(()).expect("the release sends");
+        drop(writer);
+        assert_eq!(
+            landings.load(Ordering::SeqCst),
+            2,
+            "the first job and the coalesced newest land"
+        );
+        assert_eq!(
+            fs::read(&sidecar).expect("the sidecar reads"),
+            b"job three",
+            "the newest wins"
+        );
+    }
+
     /// N6/H9: temp names carry the process id and the job sequence — no two
     /// processes share a temp name.
     #[test]

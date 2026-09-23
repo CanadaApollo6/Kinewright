@@ -3407,4 +3407,109 @@ mod tests {
         );
         shutdown_test_session(&mut session);
     }
+
+    /// N6/H10 survivor 6: the write drops refused ops for closed incidents —
+    /// only the open ids' stashes ride.
+    #[test]
+    fn in2b_sidecar_bytes_drop_refused_ops_for_closed_incidents() {
+        use kinewright_core::{IncidentOutcome, Operation};
+
+        let dir = TempDirectory::new("in2b-h10-retain");
+        let project = sidecar_project_file(&dir, "edit.kinewright");
+        let mut session = sidecar_session(44, &project);
+        {
+            let mut log = session
+                .incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            log.observe(IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::Project),
+                IncidentSubject::Project,
+                "first open",
+                TimelineRevision(41),
+            ));
+            log.observe(IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::Project),
+                IncidentSubject::Project,
+                "second open",
+                TimelineRevision(42),
+            ));
+            assert!(log.resolve(IncidentId(1), IncidentOutcome::Explained));
+        }
+        session.refused_by_id.insert(
+            IncidentId(1),
+            Operation::DeleteClip {
+                clip: kinewright_core::ClipId(1),
+            },
+        );
+        session.refused_by_id.insert(
+            IncidentId(2),
+            Operation::DeleteClip {
+                clip: kinewright_core::ClipId(2),
+            },
+        );
+        session
+            .sidecar_bytes_for_save("aa", "aa")
+            .expect("the bytes build");
+        assert_eq!(session.refused_by_id.len(), 1, "the closed stash drops");
+        assert!(
+            session.refused_by_id.contains_key(&IncidentId(2)),
+            "the open stash rides"
+        );
+        shutdown_test_session(&mut session);
+    }
+
+    /// N6/H10 survivor 7a: `loaded_walls` snapshots every restored stamp —
+    /// the card's recency reads app-side, never core's private wall.
+    #[test]
+    fn in2b_loaded_walls_snapshot_the_restored_stamps() {
+        let dir = TempDirectory::new("in2b-h10-walls");
+        let project = sidecar_project_file(&dir, "edit.kinewright");
+        let digest = project_digest_of(&project);
+        let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
+        let bytes =
+            build_sidecar_bytes(&two_records(), &[], &digest, &digest).expect("the sidecar builds");
+        fs::write(&sidecar, bytes).expect("the sidecar writes");
+        let mut session = sidecar_session(45, &project);
+        assert_eq!(
+            session.loaded_walls.len(),
+            2,
+            "every restored row snapshots"
+        );
+        assert!(session.loaded_walls.contains_key(&IncidentId(1)));
+        assert!(session.loaded_walls.contains_key(&IncidentId(2)));
+        assert!(
+            session.loaded_walls.values().all(Option::is_some),
+            "stamped rows snapshot stamps"
+        );
+        shutdown_test_session(&mut session);
+    }
+
+    /// N6/H10 survivor 7b: the load baselines the generation it restored —
+    /// no write follows a load with no new notes.
+    #[test]
+    fn in2b_load_baselines_the_generation_it_restored() {
+        let dir = TempDirectory::new("in2b-h10-baseline");
+        let project = sidecar_project_file(&dir, "edit.kinewright");
+        let digest = project_digest_of(&project);
+        let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
+        let bytes =
+            build_sidecar_bytes(&two_records(), &[], &digest, &digest).expect("the sidecar builds");
+        fs::write(&sidecar, bytes).expect("the sidecar writes");
+        let before = fs::read(&sidecar).expect("the sidecar reads");
+        let mut session = sidecar_session(46, &project);
+        assert_eq!(
+            session
+                .flush_incidents_if_changed()
+                .expect("the flush reports"),
+            FlushOutcome::Skipped,
+            "a load with no new notes writes nothing"
+        );
+        assert_eq!(
+            fs::read(&sidecar).expect("the sidecar re-reads"),
+            before,
+            "byte-identical, not just skipped"
+        );
+        shutdown_test_session(&mut session);
+    }
 }
