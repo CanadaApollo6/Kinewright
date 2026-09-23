@@ -260,6 +260,20 @@ pub(crate) fn sidecar_matches_project(loaded: &LoadedSidecar, project_digest: &s
 /// Returns the path the bytes moved to. A newer build never reads a `.bak` on
 /// its own; the person renames it back by hand (N-10).
 pub(crate) fn refuse_sidecar(sidecar_path: &Path) -> io::Result<PathBuf> {
+    refuse_sidecar_with(sidecar_path, &|from, to| fs::rename(from, to))
+}
+
+/// The injected `.bak` rename (N6/H3): `None` renames for real, `Some`
+/// runs the test's failure.
+pub(crate) type RefuseRename = dyn Fn(&Path, &Path) -> io::Result<()>;
+
+/// [`refuse_sidecar`] with the rename injected (N6/H3): a failed `.bak`
+/// rename suspends the session instead of failing silently, and no portable
+/// fixture fails a real rename — the test injects the failure.
+pub(crate) fn refuse_sidecar_with(
+    sidecar_path: &Path,
+    rename: &RefuseRename,
+) -> io::Result<PathBuf> {
     let mut first = sidecar_path.as_os_str().to_owned();
     first.push(".bak");
     let mut candidate = PathBuf::from(first);
@@ -273,7 +287,7 @@ pub(crate) fn refuse_sidecar(sidecar_path: &Path) -> io::Result<PathBuf> {
             }
         }
     }
-    fs::rename(sidecar_path, &candidate)?;
+    rename(sidecar_path, &candidate)?;
     Ok(candidate)
 }
 

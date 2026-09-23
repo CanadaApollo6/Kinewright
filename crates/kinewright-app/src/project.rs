@@ -23,9 +23,9 @@ use crate::{
     investigator::InvestigatorSession,
     recovery::Recovery,
     sidecar::{
-        FlushOutcome, SidecarLoad, SidecarMode, SidecarWriter, build_sidecar_bytes, digest_bytes,
-        load_sidecar, refuse_sidecar, sidecar_matches_project, sidecar_path_for_project,
-        sidecar_refused_observation, sidecar_write_failed_observation,
+        FlushOutcome, RefuseRename, SidecarLoad, SidecarMode, SidecarWriter, build_sidecar_bytes,
+        digest_bytes, load_sidecar, refuse_sidecar, refuse_sidecar_with, sidecar_matches_project,
+        sidecar_path_for_project, sidecar_refused_observation, sidecar_write_failed_observation,
     },
     transcript_ui::TranscriptSelection,
 };
@@ -92,6 +92,18 @@ pub(crate) enum ProjectSaveError {
     NewerFormat {
         read_version: u32,
     },
+    /// Overwrite-save refused: route to Save As (N6/H2 — a suspended
+    /// session, or a path open in another session, cannot overwrite its
+    /// file). The save path posts the notice to the status line instead of
+    /// noting: a refusal, not an incident.
+    SaveAsRequired {
+        notice: String,
+    },
+    /// Save As refused: the target path is open in another session (N6/H5).
+    /// Same status-line treatment as [`Self::SaveAsRequired`].
+    PathOpenElsewhere {
+        notice: String,
+    },
 }
 
 impl std::fmt::Display for ProjectSaveError {
@@ -106,6 +118,9 @@ impl std::fmt::Display for ProjectSaveError {
                 "saving over this project is disabled: it was written by a newer Kinewright \
                  (format_version {read_version}) — use Save As"
             ),
+            Self::SaveAsRequired { notice } | Self::PathOpenElsewhere { notice } => {
+                write!(formatter, "{notice}")
+            }
         }
     }
 }
@@ -120,7 +135,14 @@ impl ProjectSaveError {
     /// and the policy class (IN1 §2.1 rule 2).
     pub(crate) const fn incident_code(&self) -> IncidentCode {
         match self {
-            Self::Serialize(_) | Self::Write(_) => {
+            // The refusal variants are unreachable in practice: the save path
+            // intercepts them before noting (belt and braces, as for
+            // `NewerFormat`). A refusal must never open an incident — they
+            // share the save-failure code only so the type stays total.
+            Self::Serialize(_)
+            | Self::Write(_)
+            | Self::SaveAsRequired { .. }
+            | Self::PathOpenElsewhere { .. } => {
                 IncidentCode::Rejection(RejectionIncident::ProjectSave)
             }
             Self::NewerFormat { .. } => IncidentCode::Label(LabelIncident::ProjectNewerFormat),
@@ -436,8 +458,9 @@ pub(crate) struct ProjectSession {
     /// `agent_project_path` already uses (CC4 §2.2).
     pub(crate) incidents: IncidentLogHandle,
     /// The digest of the project bytes on disk as this session last saw them
-    /// (`IN2B` §2 rule 9). `""` when no save is known (unsaved projects,
-    /// refused loads, recovery restores); updated on every save.
+    /// (`IN2B` §2 rule 9). Recovery restores seed it from the file on disk
+    /// (N6/H1); `""` means no save is known (unsaved projects, refused
+    /// loads, file-less recoveries). Updated on every save.
     pub(crate) saved_digest: String,
     /// The app's ONE sidecar writer thread, shared by every session (N2/B-5).
     /// Headless tests that pass `None` get a private writer for isolation.
@@ -569,6 +592,10 @@ struct LoadedSessionSidecar {
     walls: BTreeMap<IncidentId, Option<i64>>,
     last_written_gen: u64,
     report: Option<RestoreReport>,
+    /// A refused sidecar the load could not move aside (N6/H3): the session
+    /// suspends sidecar writes, so the still-at-the-stem file is never
+    /// overwritten.
+    suspended: bool,
 }
 
 impl LoadedSessionSidecar {
@@ -580,6 +607,7 @@ impl LoadedSessionSidecar {
             walls: BTreeMap::new(),
             last_written_gen: 0,
             report: None,
+            suspended: false,
         }
     }
 }
@@ -601,10 +629,21 @@ fn load_session_sidecar(
     project_path: Option<&Path>,
     incidents: &IncidentLogHandle,
     opening: TimelineRevision,
+    rename: Option<&RefuseRename>,
 ) -> LoadedSessionSidecar {
-    let project_digest = match mode {
-        SidecarMode::Load { project_digest } => Some(project_digest.clone()),
-        SidecarMode::RecoveryNoDigest => None,
+    let (gate_digest, seed) = match mode {
+        SidecarMode::Load { project_digest } => {
+            (Some(project_digest.clone()), Some(project_digest.clone()))
+        }
+        // N6/H1: recovery skips the gate (the recovered document is newer
+        // than the last save), but the seed still comes from the file on
+        // disk — the first flush pairs instead of writing `{"",""}`.
+        SidecarMode::RecoveryNoDigest => (
+            None,
+            project_path
+                .and_then(|path| fs::read(path).ok())
+                .map(|bytes| digest_bytes(&bytes)),
+        ),
         SidecarMode::None => return LoadedSessionSidecar::empty(),
     };
     let Some(project_path) = project_path else {
@@ -614,38 +653,69 @@ fn load_session_sidecar(
         return LoadedSessionSidecar::empty();
     };
     let mut loaded = LoadedSessionSidecar::empty();
-    if let Some(digest) = &project_digest {
+    if let Some(digest) = &seed {
         loaded.saved_digest.clone_from(digest);
     }
-    let refused = |reason: String| {
-        let _ = refuse_sidecar(&sidecar_path);
+    // N6/H3: a failed `.bak` rename suspends the session — the refused
+    // file stays at the stem and must never be overwritten — and the note
+    // carries the IO error. Returns whether the rename failed.
+    let refused = |reason: String| -> bool {
+        let renamed = match rename {
+            Some(injected) => refuse_sidecar_with(&sidecar_path, injected),
+            None => refuse_sidecar(&sidecar_path),
+        };
+        let (reason, failed) = match renamed {
+            Ok(_) => (reason, false),
+            Err(error) => (
+                format!(
+                    "{reason}; the refused file could not be moved aside ({error}), so sidecar \
+                     writes are suspended for this session"
+                ),
+                true,
+            ),
+        };
         let mut log = incidents
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = log.observe(sidecar_refused_observation(reason, opening));
+        failed
     };
+    let mut refuse_failed = false;
     match load_sidecar(&sidecar_path) {
         SidecarLoad::Absent => {}
-        SidecarLoad::Newer(version) => refused(format!(
-            "the sidecar was written by a newer Kinewright (format_version {version}); \
-             the project opens with an empty history and the file is kept beside it"
-        )),
-        SidecarLoad::Corrupt(reason) => refused(format!(
-            "the sidecar could not be read ({reason}); \
-             the project opens with an empty history and the file is kept beside it"
-        )),
+        SidecarLoad::Newer(version) => {
+            refuse_failed |= refused(format!(
+                "the sidecar was written by a newer Kinewright (format_version {version}); \
+                 the project opens with an empty history and the file is kept beside it"
+            ));
+        }
+        SidecarLoad::Corrupt(reason) => {
+            refuse_failed |= refused(format!(
+                "the sidecar could not be read ({reason}); \
+                 the project opens with an empty history and the file is kept beside it"
+            ));
+        }
         SidecarLoad::Current(current) => {
-            let gated = match &project_digest {
+            let gated = match &gate_digest {
                 Some(digest) => sidecar_matches_project(&current, digest),
                 None => true,
             };
             if !gated {
-                refused(
+                refuse_failed |= refused(
                     "the sidecar belongs to a different project file (neither digest matches); \
                      the project opens with an empty history and the file is kept beside it"
                         .to_owned(),
                 );
+                loaded.suspended = refuse_failed;
                 return loaded;
+            }
+            // N6/H1 fallback: no file on disk (an unsaved recovery target)
+            // seeds from the loaded sidecar's own digest instead of `""`.
+            // The `gate_digest.is_none()` guard restricts this to recovery
+            // mode — a gated Load keeps whatever its read seeded, so the
+            // fallback cannot mask a refusal.
+            if loaded.saved_digest.is_empty() && gate_digest.is_none() {
+                loaded.saved_digest.clone_from(&current.project_digest);
             }
             // The loaded wall stamps snapshot before the records move into
             // restore (`IN2B` §3 rule 14): the card's recency derives from
@@ -669,6 +739,7 @@ fn load_session_sidecar(
             loaded.report = Some(report);
         }
     }
+    loaded.suspended = refuse_failed;
     loaded
 }
 
@@ -736,8 +807,9 @@ impl ProjectSession {
     /// digest `load_document` read (no second read, §4 rule 2), recovery
     /// restore passes `RecoveryNoDigest`, new projects pass `None`.
     /// `sidecar_writer` is the app's shared writer; `None` spawns a private
-    /// one for headless-test isolation. `format_version` is the envelope
-    /// version the session read (§4 rule 3).
+    /// one for headless-test isolation. `refuse_rename` injects the `.bak`
+    /// rename (N6/H3); `None` renames for real. `format_version` is the
+    /// envelope version the session read (§4 rule 3).
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_lines)]
     pub(crate) fn create(
@@ -751,6 +823,7 @@ impl ProjectSession {
         sidecar_mode: &SidecarMode,
         sidecar_writer: Option<Arc<SidecarWriter>>,
         format_version: u32,
+        refuse_rename: Option<&RefuseRename>,
     ) -> Result<Self, String> {
         let name = name.into();
         let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
@@ -792,6 +865,7 @@ impl ProjectSession {
             project_path.as_deref(),
             &incidents,
             TimelineRevision::default(),
+            refuse_rename,
         );
         // Restored ids snapshot before the session exists (`IN2B` §3 rules 9,
         // 11, 12, 17): the log holds only restored entries, so every entry
@@ -821,7 +895,7 @@ impl ProjectSession {
             last_written_gen: loaded.last_written_gen,
             last_restore_report: loaded.report,
             format_version,
-            sidecar_suspended: false,
+            sidecar_suspended: loaded.suspended,
             lut_availability: statuses.into_iter().collect(),
             lut_library: Arc::new(library),
             saved_document: None,
@@ -2276,6 +2350,7 @@ mod tests {
             &SidecarMode::None,
             None,
             PROJECT_FORMAT_VERSION,
+            None,
         )
         .expect("the dirty-test session builds")
     }
@@ -2492,6 +2567,7 @@ mod tests {
             },
             None,
             PROJECT_FORMAT_VERSION,
+            None,
         )
         .expect("the sidecar-test session builds")
     }
@@ -3075,5 +3151,80 @@ mod tests {
             serde_json::from_str(&pretty).expect("the envelope output re-parses");
         assert_eq!(reparsed.format_version, 1);
         assert_eq!(reparsed.document, file.document);
+    }
+
+    /// N6/H3: a failed `.bak` rename suspends sidecar writes for the
+    /// session and carries the IO error in the note — the refused file is
+    /// never overwritten. The failure is injected: no portable fixture
+    /// fails a real rename.
+    #[test]
+    fn in2b_failed_bak_rename_suspends_and_keeps_the_file() {
+        let dir = TempDirectory::new("in2b-h3-refuse-fail");
+        let project = sidecar_project_file(&dir, "edit.kinewright");
+        let digest = project_digest_of(&project);
+        let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
+        let corrupt = b"{ torn";
+        fs::write(&sidecar, corrupt).expect("the corrupt fixture writes");
+        let failing = |_: &Path, _: &Path| -> std::io::Result<()> {
+            Err(std::io::Error::other("injected refuse failure"))
+        };
+        let playback: Arc<dyn Playback> = Arc::new(StubMedia);
+        let analysis: Arc<dyn Analysis> = Arc::new(StubMedia);
+        let exporter: Arc<dyn Export> = Arc::new(StubMedia);
+        let mut session = ProjectSession::create(
+            31,
+            "refuse-test",
+            Document::default(),
+            Some(project.clone()),
+            &playback,
+            &analysis,
+            &exporter,
+            &SidecarMode::Load {
+                project_digest: digest.clone(),
+            },
+            None,
+            PROJECT_FORMAT_VERSION,
+            Some(&failing),
+        )
+        .expect("the session builds");
+        assert!(
+            session.sidecar_suspended,
+            "a failed refuse suspends the session"
+        );
+        assert_eq!(
+            fs::read(&sidecar).expect("the stem reads"),
+            corrupt,
+            "the refused file stays at the stem"
+        );
+        {
+            let log = session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let refused = log
+                .all()
+                .find(|incident| {
+                    incident.code == IncidentCode::Label(LabelIncident::SidecarRefused)
+                })
+                .expect("the refusal notes");
+            assert!(
+                refused.observed.contains("injected refuse failure"),
+                "the note carries the IO error: {}",
+                refused.observed
+            );
+        }
+        assert_eq!(
+            session
+                .flush_incidents(&digest, &digest)
+                .expect("the flush reports"),
+            FlushOutcome::Skipped,
+            "a suspended session writes nothing"
+        );
+        assert_eq!(
+            fs::read(&sidecar).expect("the stem re-reads"),
+            corrupt,
+            "never overwritten"
+        );
+        shutdown_test_session(&mut session);
     }
 }

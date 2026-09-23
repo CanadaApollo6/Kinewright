@@ -465,6 +465,7 @@ impl KinewrightApp {
             &sidecar_mode,
             Some(Arc::clone(&sidecar_writer)),
             format_version,
+            None,
         )
         .expect("startup project session must be valid");
         if project_path.is_some() {
@@ -731,6 +732,7 @@ impl KinewrightApp {
             sidecar_mode,
             Some(writer),
             format_version,
+            None,
         )?;
         // The investigator settings are app-wide: a new project inherits the
         // focused copy rather than re-reading the file. Mutes stay
@@ -796,6 +798,17 @@ impl KinewrightApp {
         path: &Path,
     ) -> Result<ProjectSaveReport, ProjectSaveError> {
         let save_as = self.focused().project_path.as_deref() != Some(path);
+        // N6/H5: Save As onto a path another session holds open is refused
+        // before any IO — the target's history is not ours to replace. The
+        // focused session cannot match: Save As always names a new path.
+        if save_as && self.session_index_for_path(path).is_some() {
+            return Err(ProjectSaveError::PathOpenElsewhere {
+                notice: format!(
+                    "Save As refused: {} is open in another session.",
+                    path.display()
+                ),
+            });
+        }
         // `IN2B` §4 rule 3: a newer-format session never overwrites its own
         // file — checked before any IO, so a refused save writes neither
         // file. Save As stays enabled.
@@ -803,6 +816,12 @@ impl KinewrightApp {
             return Err(ProjectSaveError::NewerFormat {
                 read_version: self.focused().format_version,
             });
+        }
+        // N6/H2: a suspended session, or a path open in another session,
+        // routes overwrite-save to Save As — checked before any IO, like
+        // the newer-format gate above.
+        if !save_as && let Some(notice) = self.overwrite_save_refusal() {
+            return Err(ProjectSaveError::SaveAsRequired { notice });
         }
         let document = Arc::clone(&self.focused().document);
         let previous_store = self.focused().lut_store.clone();
@@ -943,6 +962,15 @@ impl KinewrightApp {
                 self.resurface_newer_format_card();
                 false
             }
+            // N6/H2, H5: a routed or refused save posts its notice — a
+            // refusal, not an incident.
+            Err(
+                ProjectSaveError::SaveAsRequired { notice }
+                | ProjectSaveError::PathOpenElsewhere { notice },
+            ) => {
+                notice.clone_into(&mut self.status);
+                false
+            }
             // Appendix B row 5: the one typed `Project` site.
             Err(error) => {
                 let revision = self.focused().revision;
@@ -1058,6 +1086,53 @@ impl KinewrightApp {
                 .as_deref()
                 .is_some_and(|open| canonical_session_key(open) == key)
         })
+    }
+
+    /// Whether a session other than `project_index` holds `path` open
+    /// (N6/H2, H5): recovery restores are exempt from one-session-per-path,
+    /// so a duplicate can exist, and neither side may then overwrite. Takes
+    /// the index because the close prompt renders before it focuses.
+    fn another_session_has_path_for(&self, project_index: usize, path: &Path) -> bool {
+        let key = canonical_session_key(path);
+        self.projects.iter().enumerate().any(|(index, session)| {
+            index != project_index
+                && session
+                    .project_path
+                    .as_deref()
+                    .is_some_and(|open| canonical_session_key(open) == key)
+        })
+    }
+
+    /// The status notice when the focused session must Save As instead of
+    /// overwriting (N6/H2), `None` when overwrite-save is allowed: suspended
+    /// sessions and paths open in another session route to Save As, as the
+    /// newer-format gate does.
+    fn overwrite_save_refusal(&self) -> Option<String> {
+        self.overwrite_save_refusal_for(self.focused_project)
+    }
+
+    /// [`Self::overwrite_save_refusal`] for one session.
+    fn overwrite_save_refusal_for(&self, project_index: usize) -> Option<String> {
+        let session = &self.projects[project_index];
+        if session.sidecar_suspended {
+            return Some(
+                "Saving is disabled for this recovered session until it has its own \
+                 file — use Save As."
+                    .to_owned(),
+            );
+        }
+        if session
+            .project_path
+            .as_deref()
+            .is_some_and(|path| self.another_session_has_path_for(project_index, path))
+        {
+            return Some(
+                "Saving is disabled: this project is open in another session — \
+                 use Save As."
+                    .to_owned(),
+            );
+        }
+        None
     }
 
     /// A second open focuses the live session instead of duplicating it
@@ -1357,7 +1432,9 @@ impl KinewrightApp {
         let project_name = self.projects[project_index].name.clone();
         // `IN2B` §4 rule 3: the prompt offers Save As, not overwrite-save,
         // for a newer-format session — same keybinding, same position.
-        let can_save = can_overwrite_save(self.projects[project_index].format_version);
+        // N6/H2 extends the offer to routed sessions.
+        let can_save = can_overwrite_save(self.projects[project_index].format_version)
+            && self.overwrite_save_refusal_for(project_index).is_none();
         let mut save = false;
         let mut discard = false;
         let mut cancel = false;
@@ -2480,13 +2557,20 @@ impl KinewrightApp {
             }
             // `IN2B` §4 rule 3: Save greys out for a newer-format session,
             // with a tooltip naming the version; Save As stays enabled.
-            let can_save = can_overwrite_save(self.focused().format_version);
+            // N6/H2 greys it out for routed sessions too, with the refusal
+            // notice as the tooltip.
+            let can_save = can_overwrite_save(self.focused().format_version)
+                && self.overwrite_save_refusal().is_none();
             let mut save = ui.add_enabled(can_save, egui::Button::new("Save"));
             if !can_save {
-                save = save.on_hover_text(format!(
-                    "Saving is disabled: this project was written by a newer Kinewright (format_version {}). Use Save As.",
-                    self.focused().format_version
-                ));
+                if let Some(notice) = self.overwrite_save_refusal() {
+                    save = save.on_hover_text(notice);
+                } else {
+                    save = save.on_hover_text(format!(
+                        "Saving is disabled: this project was written by a newer Kinewright (format_version {}). Use Save As.",
+                        self.focused().format_version
+                    ));
+                }
             }
             if save.clicked() {
                 ui.close();
@@ -5030,6 +5114,7 @@ pub(crate) mod in1_tests {
             &SidecarMode::None,
             None,
             PROJECT_FORMAT_VERSION,
+            None,
         )
         .expect("the test session builds");
         let (probe_tx, probe_rx) = std::sync::mpsc::channel();
@@ -7978,6 +8063,7 @@ pub(crate) mod in1_tests {
             &SidecarMode::None,
             None,
             PROJECT_FORMAT_VERSION,
+            None,
         )
         .expect("the second IN2 project builds");
         app.projects.push(project);
@@ -9535,6 +9621,7 @@ mod in2b_tests {
             &mode,
             Some(Arc::clone(&writer)),
             PROJECT_FORMAT_VERSION,
+            None,
         )
         .expect("the test session builds");
         let (probe_tx, probe_rx) = std::sync::mpsc::channel();
@@ -9907,6 +9994,7 @@ mod in2b_tests {
             },
             Some(writer),
             version,
+            None,
         )
         .expect("the reopen builds");
         let report = reopened
@@ -10046,6 +10134,7 @@ mod in2b_tests {
             },
             Some(writer),
             PROJECT_FORMAT_VERSION,
+            None,
         )
         .expect("the second project builds");
         app.projects.push(second);
@@ -10091,6 +10180,7 @@ mod in2b_tests {
             },
             Some(writer),
             version,
+            None,
         )
         .expect("the copy reopens");
         {
@@ -10245,6 +10335,7 @@ mod in2b_tests {
             },
             Some(writer),
             copy_version,
+            None,
         )
         .expect("the copy reopens");
         {
@@ -12361,6 +12452,252 @@ mod in2b_tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(log.len(), 0, "focusing is silent");
         }
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H1: a recovery restore onto a closed path seeds `saved_digest`
+    /// from the project file on disk — closing without saving pairs the
+    /// flush, so the reopen finds its history instead of a mismatch.
+    #[test]
+    fn in2b_recovery_seeds_saved_digest_from_the_file_on_disk() {
+        let temp = TempDirectory::new("in2b-h1-seed");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 2, 41);
+        app.write_project(&project_path).expect("the save succeeds");
+        let disk_digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
+
+        // The crash story: a scratch second session, so the crash can close
+        // the saved one — the restore below must land on a path no session
+        // holds (not suspended), then Discard/close without saving.
+        let scratch_path = temp.path("scratch.kinewright");
+        fs::write(
+            &scratch_path,
+            serde_json::to_string_pretty(&Document::default()).expect("the file serialises"),
+        )
+        .expect("the scratch file writes");
+        app.open_project(&scratch_path);
+        assert_eq!(app.projects.len(), 2);
+        let saved_id = app.projects[0].id;
+        app.close_project(saved_id);
+        assert_eq!(app.projects.len(), 1, "the crash closed the saved session");
+
+        let mut recovered = Document::default();
+        recovered.markers.push(Marker {
+            id: MarkerId(7),
+            position: TimeCode::ZERO,
+            label: "the unsaved edit".to_owned(),
+            color_token: 0,
+        });
+        let journal_path = temp.path("edit.journal");
+        fs::write(
+            &journal_path,
+            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+        )
+        .expect("the journal writes");
+        app.apply_restore_request(RestoreRequest {
+            document: recovered,
+            project_path: Some(project_path.clone()),
+            journal_path: journal_path.clone(),
+            writer_format_version: PROJECT_FORMAT_VERSION,
+        });
+        assert!(
+            !app.focused().sidecar_suspended,
+            "a restore onto a closed path is not suspended"
+        );
+        assert_eq!(
+            app.focused().saved_digest,
+            disk_digest,
+            "the seed is the digest of the file on disk"
+        );
+        {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 2, "the saved history loads digest-less");
+        }
+        in2b_observe_opens(app.focused(), 1, 60);
+        let focused = app.focused_project;
+        app.projects[focused].stop_threads("the project was closed");
+        let restored_id = app.projects[focused].id;
+        app.close_project(restored_id);
+        assert_eq!(app.projects.len(), 1, "the restored session closed");
+        app.open_project(&project_path);
+        app.route_incidents();
+        {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 3, "the close flush paired: history back");
+            assert!(
+                log.all().all(|incident| {
+                    incident.code != IncidentCode::Label(LabelIncident::SidecarRefused)
+                }),
+                "no mismatch refusal on reopen"
+            );
+        }
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H2: a suspended session cannot overwrite-save — it routes to Save
+    /// As, the refused save writes neither file, and the route stays open.
+    #[test]
+    fn in2b_a_suspended_session_routes_overwrite_save_to_save_as() {
+        let temp = TempDirectory::new("in2b-h2-suspended");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 2, 41);
+        app.write_project(&project_path).expect("the save succeeds");
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
+
+        // Restore onto the OPEN path: the restored session suspends.
+        let journal_path = temp.path("edit.journal");
+        fs::write(
+            &journal_path,
+            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+        )
+        .expect("the journal writes");
+        let mut recovered = Document::default();
+        recovered.markers.push(Marker {
+            id: MarkerId(7),
+            position: TimeCode::ZERO,
+            label: "the unsaved edit".to_owned(),
+            color_token: 0,
+        });
+        app.apply_restore_request(RestoreRequest {
+            document: recovered,
+            project_path: Some(project_path.clone()),
+            journal_path: journal_path.clone(),
+            writer_format_version: PROJECT_FORMAT_VERSION,
+        });
+        assert!(
+            app.focused().sidecar_suspended,
+            "a restore onto an open path suspends"
+        );
+        let before_project = fs::read(&project_path).expect("the project reads");
+        let before_sidecar = fs::read(&sidecar).expect("the sidecar reads");
+        assert!(
+            matches!(
+                app.write_project(&project_path),
+                Err(ProjectSaveError::SaveAsRequired { .. })
+            ),
+            "a suspended overwrite-save routes to Save As"
+        );
+        assert_eq!(
+            fs::read(&project_path).expect("the project re-reads"),
+            before_project,
+            "the refused save writes no project bytes"
+        );
+        assert_eq!(
+            fs::read(&sidecar).expect("the sidecar re-reads"),
+            before_sidecar,
+            "and no sidecar bytes"
+        );
+        let copy_path = temp.path("copy.kinewright");
+        app.write_project(&copy_path).expect("Save As succeeds");
+        assert!(
+            !app.focused().sidecar_suspended,
+            "Save As lifts the suspension"
+        );
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H2: the original session cannot overwrite while a recovery
+    /// duplicate holds its path — both sides route to Save As.
+    #[test]
+    fn in2b_a_session_open_elsewhere_routes_overwrite_save_to_save_as() {
+        let temp = TempDirectory::new("in2b-h2-duplicate");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 2, 41);
+        app.write_project(&project_path).expect("the save succeeds");
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("derived");
+
+        let journal_path = temp.path("edit.journal");
+        fs::write(
+            &journal_path,
+            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+        )
+        .expect("the journal writes");
+        app.apply_restore_request(RestoreRequest {
+            document: Document::default(),
+            project_path: Some(project_path.clone()),
+            journal_path: journal_path.clone(),
+            writer_format_version: PROJECT_FORMAT_VERSION,
+        });
+        assert_eq!(app.projects.len(), 2, "the duplicate lands");
+        app.focus_project(0);
+        let before_project = fs::read(&project_path).expect("the project reads");
+        let before_sidecar = fs::read(&sidecar).expect("the sidecar reads");
+        assert!(
+            matches!(
+                app.write_project(&project_path),
+                Err(ProjectSaveError::SaveAsRequired { .. })
+            ),
+            "an overwrite while duplicated routes to Save As"
+        );
+        assert_eq!(
+            fs::read(&project_path).expect("the project re-reads"),
+            before_project,
+            "the refused save writes no project bytes"
+        );
+        assert_eq!(
+            fs::read(&sidecar).expect("the sidecar re-reads"),
+            before_sidecar,
+            "and no sidecar bytes"
+        );
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    /// N6/H5: Save As onto a path open in another session is refused — the
+    /// target's project and sidecar bytes are untouched.
+    #[test]
+    fn in2b_save_as_onto_an_open_path_is_refused() {
+        let temp = TempDirectory::new("in2b-h5-open-target");
+        let first_path = temp.path("first.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        in2b_observe_opens(&app.projects[0], 1, 41);
+        app.write_project(&first_path)
+            .expect("the first save succeeds");
+        let second_path = temp.path("second.kinewright");
+        fs::write(
+            &second_path,
+            serde_json::to_string_pretty(&Document::default()).expect("the file serialises"),
+        )
+        .expect("the second file writes");
+        app.open_project(&second_path);
+        in2b_observe_opens(app.focused(), 1, 51);
+        app.write_project(&second_path)
+            .expect("the second save succeeds");
+        let second_sidecar = sidecar_path_for_project(Some(&second_path)).expect("derived");
+        let before_project = fs::read(&second_path).expect("the target reads");
+        let before_sidecar = fs::read(&second_sidecar).expect("its sidecar reads");
+        app.focus_project(0);
+        assert!(
+            matches!(
+                app.write_project(&second_path),
+                Err(ProjectSaveError::PathOpenElsewhere { .. })
+            ),
+            "Save As onto an open path is refused"
+        );
+        assert_eq!(
+            fs::read(&second_path).expect("the target re-reads"),
+            before_project,
+            "the target project bytes survive"
+        );
+        assert_eq!(
+            fs::read(&second_sidecar).expect("its sidecar re-reads"),
+            before_sidecar,
+            "and its sidecar"
+        );
         in2b_quiesce_engine(&engine);
         in2b_shutdown(&mut app);
     }
