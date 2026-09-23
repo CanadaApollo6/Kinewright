@@ -1666,7 +1666,7 @@ impl KinewrightApp {
                 return_investigation_to_open(
                     &incidents,
                     id,
-                    resolver(&message),
+                    resolver(&format!("harness: {message}")),
                     counters.turns,
                     mirror.as_ref(),
                 );
@@ -1689,7 +1689,7 @@ impl KinewrightApp {
                 return_investigation_to_open(
                     &incidents,
                     id,
-                    resolver(&reason),
+                    resolver(&format!("observer: {reason}")),
                     counters.turns,
                     mirror.as_ref(),
                 );
@@ -2506,6 +2506,304 @@ mod tests {
             "recovery.rs keeps its known waits ({recovery_waits}), allowlisted by name"
         );
         assert_eq!(foreign_waits, 0, "no agent-event loop anywhere else");
+    }
+
+    /// IN2B §12 item 29's call-shape scanner: the text inside the opening
+    /// paren `group` starts with, exclusive of the parens.
+    fn in2b_stops_group(group: &str) -> &str {
+        assert_eq!(
+            group.as_bytes().first(),
+            Some(&b'('),
+            "a stop call shape starts at its paren"
+        );
+        let mut depth = 0_usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (at, byte) in group.bytes().enumerate() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+            } else {
+                match byte {
+                    b'"' => in_string = true,
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &group[1..at];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        panic!("a stop call group is terminated");
+    }
+
+    /// IN2B §12 item 29's argument splitter: the `index`-th top-level
+    /// comma-separated argument, trimmed.
+    fn in2b_stops_arg(args: &str, index: usize) -> &str {
+        let mut depth = 0_usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut start = 0_usize;
+        let mut current = 0_usize;
+        for (at, byte) in args.bytes().enumerate() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+            } else {
+                match byte {
+                    b'"' => in_string = true,
+                    b'(' | b'[' | b'{' => depth += 1,
+                    b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                    b',' if depth == 0 => {
+                        if current == index {
+                            return args[start..at].trim();
+                        }
+                        current += 1;
+                        start = at + 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(current, index, "a stop call carries its stop argument");
+        args[start..].trim()
+    }
+
+    /// IN2B §12 item 29's literal reader: the string literal `text` opens
+    /// with, plus the text after its closing quote.
+    fn in2b_stops_literal(text: &str) -> (String, &str) {
+        let mut literal = String::new();
+        let mut chars = text.char_indices();
+        assert_eq!(
+            chars.next().map(|(_, mark)| mark),
+            Some('"'),
+            "a stop literal opens with a quote"
+        );
+        for (at, mark) in chars {
+            assert!(mark != '\\', "no stop literal carries an escape");
+            if mark == '"' {
+                return (literal, &text[at + 1..]);
+            }
+            literal.push(mark);
+        }
+        panic!("a stop literal is terminated");
+    }
+
+    /// IN2B §12 item 29's scope reader: the `fn` name whose body holds the
+    /// site `before` ends at.
+    fn in2b_stops_enclosing_fn(before: &str) -> String {
+        let mut search = before;
+        while let Some(found) = search.rfind("fn ") {
+            let after = &search[found + "fn ".len()..];
+            let name: String = after
+                .chars()
+                .take_while(|mark| mark.is_alphanumeric() || *mark == '_')
+                .collect();
+            let tail = after[name.len()..].chars().next();
+            if !name.is_empty() && matches!(tail, Some('(' | '<')) {
+                return name;
+            }
+            search = &search[..found];
+        }
+        panic!("every stop site sits inside a function");
+    }
+
+    /// IN2B §12 item 29 (§2 rule 14, N2/S-5): every stop a session end can
+    /// carry is either a `STOPS` literal — which persists verbatim — or a
+    /// prefixed/error payload — which persists as its category.
+    ///
+    /// A source-shape test over this crate's own `investigator.rs`/`app.rs`/
+    /// `project.rs`, in IN2 §9.1 items 35–36's shape: own files through
+    /// `CARGO_MANIFEST_DIR`, CRLF-normalised, each file read only up to its
+    /// own `#[cfg(test)] mod tests`. Every call site of the four stop shapes
+    /// is classified — a `STOPS` literal, the off-switch const, a `harness: `/
+    /// `observer: ` payload, an error payload, or one of the six named
+    /// `stop`/`reason` passthroughs — and anything else fails loudly, so a
+    /// new fixed stop can never slip through to persist as `"session"`. The
+    /// conflict reasons reach `session_resolver` through
+    /// `return_proposal_open_with_stale`'s third argument and the budget
+    /// stops through a `stop` binding, so both ride as named sources with
+    /// their own counts; the interrupted stop is core-stamped (§3 rule 4)
+    /// and never appears as an app argument.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the source-shape census keeps its counts in one audited flow"
+    )]
+    #[test]
+    fn in2b_every_stop_site_argument_is_in_stops_or_categorical() {
+        use kinewright_core::STOPS;
+        /// The stop shapes and the 0-based index of the stop argument.
+        const SHAPES: [(&str, usize); 5] = [
+            ("shutdown_for_close(", 0),
+            ("stop_threads(", 0),
+            ("session_resolver(", 2),
+            ("resolver(", 0),
+            ("return_proposal_open_with_stale(", 2),
+        ];
+        /// Test-only stops, proving the `#[cfg(test)]` exclusion bites: each
+        /// appears once in its file's full text and never above `mod tests`.
+        const EXCLUDED: [(&str, &str); 3] = [
+            ("app.rs", "IN2 test cleanup"),
+            ("app.rs", "the proposal conflicted twice"),
+            ("project.rs", "in2b test close"),
+        ];
+        const TEST_MODULE: &str = "#[cfg(test)]\nmod tests";
+        let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let mut truncated = 0_usize;
+        let mut defs = 0_usize;
+        let mut covered: Vec<String> = Vec::new();
+        let mut prefixed = 0_usize;
+        let mut error_payloads = 0_usize;
+        let mut passthroughs: Vec<String> = Vec::new();
+        for file in ["investigator.rs", "app.rs", "project.rs"] {
+            let whole = fs::read_to_string(root.join(file))
+                .expect("the app reads its own source")
+                .replace("\r\n", "\n");
+            let production = match whole.split_once(TEST_MODULE) {
+                Some((production, _)) => {
+                    truncated += 1;
+                    production
+                }
+                None => whole.as_str(),
+            };
+            for (shape, stop_at) in SHAPES {
+                let mut rest = production;
+                let mut base = 0_usize;
+                while let Some(found) = rest.find(shape) {
+                    let at = base + found;
+                    rest = &rest[found + shape.len()..];
+                    base = at + shape.len();
+                    if shape == "resolver("
+                        && production[..at]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|mark| mark.is_alphanumeric() || mark == '_')
+                    {
+                        continue;
+                    }
+                    let line_start = production[..at].rfind('\n').map_or(0, |past| past + 1);
+                    if production[line_start..at].trim_end().ends_with("fn") {
+                        defs += 1;
+                        continue;
+                    }
+                    let group = in2b_stops_group(&production[at + shape.len() - 1..]);
+                    let arg = in2b_stops_arg(group, stop_at);
+                    let line = production[..at].matches('\n').count() + 1;
+                    if arg.starts_with('"') {
+                        let (literal, tail) = in2b_stops_literal(arg);
+                        assert!(
+                            tail.is_empty(),
+                            "{file}:{line}: a literal stop argument is exactly one literal"
+                        );
+                        assert!(
+                            STOPS.contains(&literal.as_str()),
+                            "{file}:{line}: `{literal}` is not a STOPS member — a new fixed \
+                             stop belongs in core STOPS, a payload wants a prefix"
+                        );
+                        covered.push(literal);
+                    } else if arg == "OFF_SWITCH_STOP" {
+                        covered.push(OFF_SWITCH_STOP.to_owned());
+                    } else if arg.contains("\"harness: ") || arg.contains("\"observer: ") {
+                        prefixed += 1;
+                    } else if arg.contains(".to_string()") || arg.contains(".to_owned()") {
+                        error_payloads += 1;
+                    } else if arg == "stop" || arg == "reason" {
+                        let enclosing = in2b_stops_enclosing_fn(&production[..at]);
+                        passthroughs.push(format!("{file}::{enclosing}::{arg}"));
+                    } else {
+                        panic!(
+                            "{file}:{line}: unclassified stop argument `{arg}` — a STOPS \
+                             literal, the off-switch const, a prefixed payload, an error \
+                             payload, or a named passthrough"
+                        );
+                    }
+                }
+            }
+            if file == "investigator.rs" {
+                assert!(
+                    STOPS.contains(&OFF_SWITCH_STOP),
+                    "the off-switch const stays a STOPS member"
+                );
+                let mut budgets = 0_usize;
+                for (arm, _) in production.match_indices("\"budget: ") {
+                    let (literal, _) = in2b_stops_literal(&production[arm..]);
+                    assert!(
+                        STOPS.contains(&literal.as_str()),
+                        "budget arm `{literal}` stays a STOPS member"
+                    );
+                    covered.push(literal);
+                    budgets += 1;
+                }
+                assert_eq!(budgets, 3, "the three budget arms stay covered");
+            }
+            for (name, needle) in EXCLUDED {
+                if name == file {
+                    assert_eq!(
+                        whole.matches(needle).count(),
+                        1,
+                        "{file} keeps its test-only stop `{needle}`"
+                    );
+                    assert_eq!(
+                        production.matches(needle).count(),
+                        0,
+                        "{file}'s test-only stop `{needle}` stays below `mod tests`"
+                    );
+                }
+            }
+        }
+        assert_eq!(truncated, 3, "every file keeps its tests below `mod tests`");
+        assert_eq!(
+            defs, 4,
+            "the four shape definitions are skipped, not classified"
+        );
+        assert_eq!(
+            prefixed, 2,
+            "the harness and observer payloads stay prefixed"
+        );
+        assert_eq!(
+            error_payloads, 1,
+            "the stale-terminal error payload stays categorical"
+        );
+        passthroughs.sort();
+        assert_eq!(
+            passthroughs,
+            [
+                "investigator.rs::return_proposal_open_with_stale::stop",
+                "investigator.rs::return_proposal_open_with_stale::stop",
+                "investigator.rs::shutdown_for_close::reason",
+                "investigator.rs::write_investigator_end::stop",
+                "investigator.rs::write_investigator_end::stop",
+                "project.rs::stop_threads::reason",
+            ],
+            "the six stop/reason passthroughs are exactly the named set"
+        );
+        assert!(
+            covered.len() >= 17,
+            "at least seventeen covered stop literals, found {}",
+            covered.len()
+        );
+        for stop in STOPS {
+            if stop == "interrupted: Kinewright closed" {
+                continue;
+            }
+            assert!(
+                covered.iter().any(|literal| literal.as_str() == stop),
+                "STOPS member `{stop}` has no covered app literal"
+            );
+        }
     }
 
     /// IN2 §9.1 item 37: the settings file round-trips, defaults off, and
