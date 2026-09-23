@@ -10525,3 +10525,65 @@ async fn in2_the_scripted_driver_and_the_pump_are_public_surface() {
     assert_eq!(kinewright_agent::INVESTIGATOR_TOOL_NAMES.len(), 6);
     server.shutdown();
 }
+
+/// Item 34 (`IN2B` §9 rule 4): `get_incidents` serves the stored
+/// `subject_name`, and omits the key when the incident carries none — no
+/// schema change, the derive's `skip_serializing_if` does it.
+/// Handler-level and headless: two incidents observed straight into the
+/// server's log, read back through the real `invoke_capability` round trip.
+#[tokio::test(flavor = "multi_thread")]
+async fn in2b_get_incidents_returns_the_observed_name() {
+    let core = Core::spawn(Document::default()).unwrap();
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+
+    {
+        let handle = server.incident_log_handle();
+        let mut log = handle.write().unwrap();
+        let mut named = kinewright_core::IncidentObservation::plain(
+            kinewright_core::IncidentCode::Label(kinewright_core::LabelIncident::Look),
+            kinewright_core::IncidentSubject::Project,
+            "named sighting",
+            kinewright_core::TimelineRevision(0),
+        );
+        named.name = Some("Interview A".to_owned());
+        assert!(
+            matches!(log.observe(named), kinewright_core::Observed::Opened(_)),
+            "the named observation opens"
+        );
+        let unnamed = kinewright_core::IncidentObservation::plain(
+            kinewright_core::IncidentCode::Label(kinewright_core::LabelIncident::Look),
+            kinewright_core::IncidentSubject::Project,
+            "plain sighting",
+            kinewright_core::TimelineRevision(0),
+        );
+        assert!(
+            matches!(log.observe(unnamed), kinewright_core::Observed::Opened(_)),
+            "the unnamed observation opens beside it"
+        );
+    }
+
+    let read = invoke_capability(&client, "get_incidents", json!({})).await;
+    assert_eq!(read.is_error, Some(false));
+    let payload = read.structured_content.as_ref().unwrap();
+    let incidents = payload["incidents"].as_array().unwrap();
+    assert_eq!(incidents.len(), 2, "{payload}");
+    let named = incidents
+        .iter()
+        .find(|incident| incident["observed"] == "named sighting")
+        .expect("the named incident serves");
+    assert_eq!(named["subject_name"], "Interview A");
+    let unnamed = incidents
+        .iter()
+        .find(|incident| incident["observed"] == "plain sighting")
+        .expect("the unnamed incident serves");
+    assert!(
+        unnamed.get("subject_name").is_none(),
+        "no schema change: the key is absent, not null"
+    );
+    server.shutdown();
+}

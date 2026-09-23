@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -10,11 +10,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use kinewright_core::{
-    Analysis, AssetId, ClipId, Core, Document, Event, Export, IncidentCode, IncidentEvidence,
-    IncidentId, IncidentLog, IncidentObservation, IncidentSubject, LabelIncident, LutAssetId,
-    LutAvailabilityKind, LutAvailabilityStatus, MarkerId, MediaKind, Operation,
-    PROJECT_FORMAT_VERSION, Playback, RejectionIncident, RestoreReport, RunningInvestigation,
-    TimeCode, TimelineRevision, TrackId, TrackKind, should_flush,
+    Analysis, AssetId, AudioChain, ClipId, Core, Document, Event, Export, IncidentCode,
+    IncidentEvidence, IncidentId, IncidentLog, IncidentObservation, IncidentState, IncidentSubject,
+    LabelIncident, LutAssetId, LutAvailabilityKind, LutAvailabilityStatus, MarkerId, MediaKind,
+    Operation, PROJECT_FORMAT_VERSION, Playback, RejectionIncident, RestoreReport,
+    RunningInvestigation, TimeCode, TimelineRevision, TrackId, TrackKind, should_flush,
 };
 use kinewright_media::{LutLibrary, LutStore};
 
@@ -449,6 +449,23 @@ pub(crate) struct ProjectSession {
     /// filled from `RestoreReport.refused` at load; the queue drain fills it
     /// at write, and the first session for the incident consumes it (C5).
     pub(crate) refused_by_id: BTreeMap<IncidentId, Operation>,
+    /// Every incident id this session's open-time restore loaded (`IN2B`
+    /// §3 rule 9): feeds the card's "from an earlier session" marker.
+    /// Display membership never expires.
+    pub(crate) loaded_ids: BTreeSet<IncidentId>,
+    /// The loaded ids this run has not yet re-seen (`IN2B` §3 rules 11–12):
+    /// consumed by first-dedups and Investigate presses. Queue eligibility
+    /// expires; display membership (above) does not.
+    pub(crate) loaded_open_ids: BTreeSet<IncidentId>,
+    /// Restored ids whose subject resolves to nothing in the loaded
+    /// document (`IN2B` §3 rule 17): the card reads "no longer in this
+    /// project" and offers no enabled operation.
+    pub(crate) subject_missing: BTreeSet<IncidentId>,
+    /// The loaded wall stamp per restored id (`IN2B` §3 rule 14), snapshotted
+    /// from the parsed records at load: the card's recency derives from it
+    /// app-side, so core's `loaded_wall` stays private. A `None` stamp
+    /// shows no recency rather than a lie.
+    pub(crate) loaded_walls: BTreeMap<IncidentId, Option<i64>>,
     /// The log generation the last flush wrote, for [`should_flush`].
     pub(crate) last_written_gen: u64,
     /// What the open-time sidecar load did, when one ran. `None` for new
@@ -549,6 +566,7 @@ struct LoadedSessionSidecar {
     saved_digest: String,
     carried: Vec<String>,
     refused: BTreeMap<IncidentId, Operation>,
+    walls: BTreeMap<IncidentId, Option<i64>>,
     last_written_gen: u64,
     report: Option<RestoreReport>,
 }
@@ -559,6 +577,7 @@ impl LoadedSessionSidecar {
             saved_digest: String::new(),
             carried: Vec::new(),
             refused: BTreeMap::new(),
+            walls: BTreeMap::new(),
             last_written_gen: 0,
             report: None,
         }
@@ -628,6 +647,14 @@ fn load_session_sidecar(
                 );
                 return loaded;
             }
+            // The loaded wall stamps snapshot before the records move into
+            // restore (`IN2B` §3 rule 14): the card's recency derives from
+            // them app-side.
+            loaded.walls = current
+                .records
+                .iter()
+                .map(|record| (record.id, record.opened_wall_millis))
+                .collect();
             let mut log = incidents
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -645,6 +672,62 @@ fn load_session_sidecar(
     loaded
 }
 
+/// Snapshot the loaded sets after the open-time restore (`IN2B` §3 rules 9,
+/// 11, 12, 17).
+///
+/// Restore runs into an empty log before any note, so every entry present is
+/// a restored one: all ids join `loaded_ids`, open ids join `loaded_open_ids`,
+/// and each subject resolves against the loaded document — unresolvable
+/// subjects join `subject_missing`.
+///
+/// `pub(crate)` so item 27 resolves through the production path instead of
+/// a test double (S-15a).
+pub(crate) fn capture_loaded_sets(
+    incidents: &IncidentLogHandle,
+    document: &Document,
+) -> (
+    BTreeSet<IncidentId>,
+    BTreeSet<IncidentId>,
+    BTreeSet<IncidentId>,
+) {
+    let log = incidents
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut loaded = BTreeSet::new();
+    let mut loaded_open = BTreeSet::new();
+    let mut missing = BTreeSet::new();
+    for incident in log.all() {
+        loaded.insert(incident.id);
+        if incident.state == IncidentState::Open {
+            loaded_open.insert(incident.id);
+        }
+        if !subject_resolves(document, &incident.subject) {
+            missing.insert(incident.id);
+        }
+    }
+    (loaded, loaded_open, missing)
+}
+
+/// Whether a restored subject names something in the loaded document
+/// (`IN2B` §3 rule 17: asset/clip/look/bus lookups).
+///
+/// `Track` has no document lookup, and `Chain(Master)`/`ExportJob`/`Project`/
+/// `Agent` name no document member, so those always resolve — only a failed
+/// lookup marks a subject missing.
+fn subject_resolves(document: &Document, subject: &IncidentSubject) -> bool {
+    match subject {
+        IncidentSubject::Asset(id) => document.asset(*id).is_some(),
+        IncidentSubject::LutAsset(id) => document.lut_asset(*id).is_some(),
+        IncidentSubject::Clip(id) => document.clip(*id).is_some(),
+        IncidentSubject::Chain(AudioChain::Bus(id)) => document.audio_mix.bus(*id).is_some(),
+        IncidentSubject::Chain(AudioChain::Master)
+        | IncidentSubject::Track(_)
+        | IncidentSubject::ExportJob
+        | IncidentSubject::Project
+        | IncidentSubject::Agent => true,
+    }
+}
+
 impl ProjectSession {
     /// Build every actor, channel, recovery recorder, and initial thread for a project.
     ///
@@ -656,6 +739,7 @@ impl ProjectSession {
     /// one for headless-test isolation. `format_version` is the envelope
     /// version the session read (§4 rule 3).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn create(
         id: u64,
         name: impl Into<String>,
@@ -709,6 +793,11 @@ impl ProjectSession {
             &incidents,
             TimelineRevision::default(),
         );
+        // Restored ids snapshot before the session exists (`IN2B` §3 rules 9,
+        // 11, 12, 17): the log holds only restored entries, so every entry
+        // present is one.
+        let (loaded_ids, loaded_open_ids, subject_missing) =
+            capture_loaded_sets(&incidents, &document);
         let session = Self {
             id,
             name,
@@ -725,6 +814,10 @@ impl ProjectSession {
             sidecar_writer,
             carried_sidecar_records: loaded.carried,
             refused_by_id: loaded.refused,
+            loaded_ids,
+            loaded_open_ids,
+            subject_missing,
+            loaded_walls: loaded.walls,
             last_written_gen: loaded.last_written_gen,
             last_restore_report: loaded.report,
             format_version,
@@ -889,7 +982,7 @@ impl ProjectSession {
     /// Both the joining flush and the background submit build through here,
     /// so one builder means one bytes shape.
     pub(crate) fn sidecar_bytes_for_save(
-        &self,
+        &mut self,
         project_digest: &str,
         previous_digest: &str,
     ) -> Result<(Vec<u8>, kinewright_core::WriteReport), String> {
@@ -897,10 +990,19 @@ impl ProjectSession {
             .investigator
             .as_ref()
             .and_then(InvestigatorSession::running_investigation);
+        // The queue drain fills the stash at write (`IN2B` §3 rule 13):
+        // queued refused ops ride by id, and entries whose incidents are no
+        // longer open drop — the stash round-trips only until its incident
+        // resolves or its entry is consumed.
+        if let Some(session) = self.investigator.as_ref() {
+            session.copy_queued_refused_into(&mut self.refused_by_id);
+        }
         let log = self
             .incidents
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let open: BTreeSet<IncidentId> = log.open().map(|incident| incident.id).collect();
+        self.refused_by_id.retain(|id, _| open.contains(id));
         let (records, report) = log.records(running.as_ref(), &self.refused_by_id);
         let bytes = build_sidecar_bytes(
             &records,

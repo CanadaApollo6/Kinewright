@@ -12,8 +12,8 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    Analysis, AssetId, AudioChain, Command, CommandToken, Document, Effect, EffectId, Event,
-    Export, Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome,
+    Analysis, AssetId, AudioChain, ClipContent, Command, CommandToken, Document, Effect, EffectId,
+    Event, Export, Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome,
     IncidentSubject, InvestigatorPreferences, JournalCommand, LabelIncident, LiveAudioChange,
     MediaAsset, MediaError, MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint,
     NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation,
@@ -1520,13 +1520,34 @@ impl KinewrightApp {
                 let mut log = handle
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                for observation in observations {
-                    // `Deduped` and `Suppressed` do nothing at all (rule 17).
+                for mut observation in observations {
+                    // Name capture at open only (`IN2B` §9 rule 1): the peek
+                    // keeps dedups and suppressions from costing a document
+                    // read, and `observe` stores the name only on open.
+                    if log.would_open(observation.code, observation.subject, &observation.observed)
+                    {
+                        observation.name = self.capture_subject_name(focused, &observation.subject);
+                    }
                     // The observation is kept beside the id so the
                     // investigator can reunite the open with its refused
                     // operation below.
-                    if let Observed::Opened(id) = log.observe(observation.clone()) {
-                        opened.push((id, observation));
+                    match log.observe(observation.clone()) {
+                        Observed::Opened(id) => {
+                            opened.push((id, observation));
+                        }
+                        Observed::Deduped(id) => {
+                            // N1/B3(ii-a) + N2/S-15b: the first re-observation
+                            // this run of a LOADED open incident joins
+                            // `opened` — audit, auto-apply and enqueue all run
+                            // over it exactly as over a fresh open. Later
+                            // dedups find the id gone from the set: nothing,
+                            // as today (`IN2B` §3 rule 11).
+                            if self.projects[focused].loaded_open_ids.remove(&id) {
+                                opened.push((id, observation));
+                            }
+                        }
+                        // `Suppressed` does nothing at all (rule 17).
+                        Observed::Suppressed => {}
                     }
                 }
             }
@@ -1551,6 +1572,48 @@ impl KinewrightApp {
         // Outside the idle fast path: a finishing session reports through its
         // own channel, never through an observation (IN2 §3.2).
         self.pump_investigator_sessions();
+    }
+
+    /// Capture the subject's name from the focused document (`IN2B` §9
+    /// rules 1–2).
+    ///
+    /// Called once per `Opened` incident, never for dedups or suppressions
+    /// (the `would_open` peek in [`Self::route_incidents`] guarantees it).
+    /// `None` means "no name exists" (tracks, jobs, unit subjects) or "the
+    /// member is gone" — both render the bare [`IncidentSubject::label`].
+    /// Clips resolve via their asset; titles resolve to a bounded prefix
+    /// (empty text is `None`, not `""`); freezes resolve via the held
+    /// asset, whose frame they reference.
+    fn capture_subject_name(
+        &self,
+        project_index: usize,
+        subject: &IncidentSubject,
+    ) -> Option<String> {
+        let document = &self.projects[project_index].document;
+        match subject {
+            IncidentSubject::Asset(id) => document.asset(*id).map(|asset| asset.name.clone()),
+            IncidentSubject::LutAsset(id) => document.lut_asset(*id).map(|lut| lut.title.clone()),
+            IncidentSubject::Clip(id) => {
+                let clip = document.clip(*id)?;
+                match &clip.content {
+                    ClipContent::Title(title) => {
+                        let prefix: String = title.text.chars().take(32).collect();
+                        (!prefix.is_empty()).then_some(prefix)
+                    }
+                    ClipContent::Media | ClipContent::Freeze(_) => {
+                        document.asset(clip.asset).map(|asset| asset.name.clone())
+                    }
+                }
+            }
+            IncidentSubject::Chain(AudioChain::Bus(id)) => {
+                document.audio_mix.bus(*id).map(|bus| bus.name.clone())
+            }
+            IncidentSubject::Chain(AudioChain::Master) => Some("Master".to_owned()),
+            IncidentSubject::Track(_)
+            | IncidentSubject::ExportJob
+            | IncidentSubject::Project
+            | IncidentSubject::Agent => None,
+        }
     }
 
     /// Write one audit line for a newly opened incident and auto-apply it
@@ -4905,7 +4968,7 @@ pub(crate) mod in1_tests {
     };
 
     use super::*;
-    use crate::incident_ui::{REVERT_LABEL, incident_card};
+    use crate::incident_ui::{CardLoadedFlags, REVERT_LABEL, empty_panel_sets, incident_card};
 
     /// IN1 §7 rule 13's deadline, shared by every app-side wait for the same
     /// reason the agent side shares its own: a hang detector that fires only
@@ -6285,8 +6348,12 @@ pub(crate) mod in1_tests {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let session_pairs = crate::investigator::InvestigatorSessionPairs::default();
-        let rows =
-            crate::incident_ui::incident_panel_rows(log.all(), Some(investigating), &session_pairs);
+        let rows = crate::incident_ui::incident_panel_rows(
+            log.all(),
+            Some(investigating),
+            &session_pairs,
+            &empty_panel_sets(),
+        );
         assert_eq!(rows.len(), 5, "every open incident, not only the asset one");
         let labels: Vec<&str> = rows
             .iter()
@@ -6405,7 +6472,7 @@ pub(crate) mod in1_tests {
             "Part A declares no AskFirst code"
         );
         assert_eq!(
-            incident_card(incident, false).headline,
+            incident_card(incident, false, &CardLoadedFlags::default()).headline,
             "Kinewright assumed Rec.709 for this source because its colour primaries were unknown."
         );
         let IncidentSubject::Asset(asset_id) = incident.subject else {
@@ -7405,7 +7472,7 @@ pub(crate) mod in1_tests {
             "no further operation is sent for that asset for the session"
         );
         let incident = in1_incident(&app, id);
-        let view = incident_card(&incident, false);
+        let view = incident_card(&incident, false, &CardLoadedFlags::default());
         assert_eq!(view.actions.len(), 1);
         assert_eq!(view.actions[0].label, REVERT_LABEL);
         assert!(
@@ -7686,8 +7753,12 @@ pub(crate) mod in1_tests {
         );
         let running_card = app.investigating_card_for_project(0);
         let log = app.projects[0].incidents.read().unwrap();
-        let running_rows =
-            crate::incident_ui::incident_panel_rows(log.all(), running_card, &running_pairs);
+        let running_rows = crate::incident_ui::incident_panel_rows(
+            log.all(),
+            running_card,
+            &running_pairs,
+            &empty_panel_sets(),
+        );
         let running_b = running_rows
             .iter()
             .find(|row| row.id == b_id)
@@ -7747,8 +7818,12 @@ pub(crate) mod in1_tests {
         );
         let queued_card = app.investigating_card_for_project(0);
         let log = app.projects[0].incidents.read().unwrap();
-        let queued_rows =
-            crate::incident_ui::incident_panel_rows(log.all(), queued_card, &queued_pairs);
+        let queued_rows = crate::incident_ui::incident_panel_rows(
+            log.all(),
+            queued_card,
+            &queued_pairs,
+            &empty_panel_sets(),
+        );
         let queued_b = queued_rows
             .iter()
             .find(|row| row.id == b_id)
@@ -7793,8 +7868,12 @@ pub(crate) mod in1_tests {
         );
         let finished_card = app.investigating_card_for_project(0);
         let log = app.projects[0].incidents.read().unwrap();
-        let finished_rows =
-            crate::incident_ui::incident_panel_rows(log.all(), finished_card, &finished_pairs);
+        let finished_rows = crate::incident_ui::incident_panel_rows(
+            log.all(),
+            finished_card,
+            &finished_pairs,
+            &empty_panel_sets(),
+        );
         let finished_b = finished_rows
             .iter()
             .find(|row| row.id == b_id)
@@ -8297,7 +8376,12 @@ pub(crate) mod in1_tests {
             .expect("the running session publishes a card");
         let log = app.projects[0].incidents.read().unwrap();
         let session_pairs = app.investigator_session_pairs_for_project(0);
-        let rows = crate::incident_ui::incident_panel_rows(log.all(), Some(card), &session_pairs);
+        let rows = crate::incident_ui::incident_panel_rows(
+            log.all(),
+            Some(card),
+            &session_pairs,
+            &empty_panel_sets(),
+        );
         let row = rows
             .iter()
             .find(|row| row.id == id)
@@ -8342,7 +8426,7 @@ pub(crate) mod in1_tests {
             incident.telemetry.resolver,
             Some(IncidentResolver::Session { .. })
         ));
-        let view = incident_card(&incident, false);
+        let view = incident_card(&incident, false, &CardLoadedFlags::default());
         let stopped_rows = view
             .details
             .iter()
@@ -9006,7 +9090,7 @@ pub(crate) mod in1_tests {
         };
         let incident = in2_incident(&app, id);
         assert_eq!(incident.class, PolicyClass::Explain);
-        let view = incident_card(&incident, true);
+        let view = incident_card(&incident, true, &CardLoadedFlags::default());
         let actions = view.actions.len();
         assert!(actions > 0, "an applied probed asset has a revert control");
         assert_eq!(actions, 1);
@@ -9669,6 +9753,69 @@ mod in2b_tests {
                 "distinct observations open distinctly"
             );
         }
+    }
+
+    /// Hold the pump with a fabricated pending session (items 24–25):
+    /// observes a blocker incident directly into the log (no audit, no
+    /// queue), holds it `Investigating`, and installs a running session
+    /// whose result never arrives — so queued incidents wait instead of
+    /// starting, with no timing and no real model turn. `pair` must differ
+    /// from every pair the test routes. Returns the result sender, which
+    /// the caller holds until cleanup (dropping it reads as `Died`).
+    fn in2b_install_pump_blocker(
+        app: &mut KinewrightApp,
+        code: IncidentCode,
+        subject: IncidentSubject,
+    ) -> crossbeam_channel::Sender<crate::investigator::InvestigatorSessionResult> {
+        use kinewright_agent::{ConfirmationBroker, SharedCounters, TimelineBranch};
+
+        use crate::investigator::RunningSession;
+
+        let revision = app.projects[0].revision;
+        let blocker = {
+            let mut log = app.projects[0]
+                .incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Observed::Opened(id) = log.observe(IncidentObservation::plain(
+                code,
+                subject,
+                "pump blocker",
+                revision,
+            )) else {
+                panic!("the blocker opens");
+            };
+            assert!(log.begin_investigation(id), "the blocker is held");
+            id
+        };
+        let branch = TimelineBranch::new_at(
+            "in2b-block",
+            revision,
+            std::sync::Arc::clone(&app.projects[0].document),
+        )
+        .expect("the blocker branch spawns");
+        let (blocker_tx, blocker_rx) = crossbeam_channel::unbounded();
+        app.projects[0]
+            .investigator
+            .as_mut()
+            .expect("investigator state")
+            .install_pending_test_session(RunningSession {
+                id: blocker,
+                code,
+                subject,
+                harness: "scripted".to_owned(),
+                model: None,
+                branch,
+                server: None,
+                broker: ConfirmationBroker::with_timeout(std::time::Duration::from_secs(5)),
+                thread: None,
+                counters: std::sync::Arc::new(SharedCounters::default()),
+                cost_events: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                result: blocker_rx,
+                budgets: super::in1_tests::in2_default_budgets(),
+            });
+        blocker_tx
     }
 
     /// Item 14: a proposal recorded after the last document save survives a
@@ -11364,6 +11511,810 @@ mod in2b_tests {
                 "IN1b Appendix B {rows} producer for `{code}` still exists (`{needle}`)"
             );
         }
+    }
+
+    /// Item 24: the first dedup into a loaded open joins `opened` — audit,
+    /// auto-apply check and enqueue run exactly as over a fresh open
+    /// (N1/B3(ii-a), N2/S-15b) — while the second dedup is silent and the
+    /// never-re-seen row keeps Investigate (S-4).
+    ///
+    /// The pump is blocked by a fabricated pending session (its result
+    /// never arrives), so the queue still holds the re-observed row when
+    /// the test reads it — no timing, no real model turn.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2b_first_dedup_into_loaded_joins_opened_and_second_does_not() {
+        use super::in1_tests::{
+            in2_cleanup, in2_configure_scripted_at, in2_default_budgets, in2_incident,
+        };
+        use kinewright_agent::ScriptedDriver;
+        use kinewright_core::{
+            INVESTIGATOR_ALLOWLIST, IncidentEvidence, IncidentRecord, IncidentState,
+            IncidentTelemetry,
+        };
+
+        use crate::incident_ui::{CardPress, investigate_action};
+        use crate::sidecar::{digest_bytes, sidecar_path_for_project};
+
+        // Two allowlisted opens on disk.
+        let code_one = IncidentCode::Label(LabelIncident::Look);
+        let code_two = IncidentCode::Label(LabelIncident::MediaIncomplete);
+        assert!(
+            INVESTIGATOR_ALLOWLIST.contains(&code_one)
+                && INVESTIGATOR_ALLOWLIST.contains(&code_two),
+            "both rows are allowlisted"
+        );
+        let record = |id: u64, code: IncidentCode, observed: &str| IncidentRecord {
+            id: IncidentId(id),
+            code: code.code().to_owned(),
+            subject: IncidentSubject::Project,
+            observed: observed.to_owned(),
+            allowed: None,
+            evidence: IncidentEvidence::Plain,
+            revision: TimelineRevision(41),
+            opened_wall_millis: None,
+            opened_offset_nanos: 1_000 * id,
+            count: 1,
+            state: IncidentState::Open,
+            telemetry: IncidentTelemetry::default(),
+            proposal: None,
+            subject_name: None,
+            refused_op: (id == 1).then_some(Operation::DeleteClip {
+                clip: kinewright_core::ClipId(1),
+            }),
+        };
+        let dir = TempDirectory::new("in2b-item-24");
+        let project_path = dir.path("edit.kinewright");
+        fs::write(&project_path, b"{\"timeline\":{}}").expect("the project file writes");
+        let digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
+        let envelope = serde_json::json!({
+            "format_version": 1,
+            "project_digest": digest.clone(),
+            "previous_digest": digest.clone(),
+            "records": [
+                serde_json::to_value(record(1, code_one, "loaded one")).expect("record 1"),
+                serde_json::to_value(record(2, code_two, "loaded two")).expect("record 2"),
+            ],
+        });
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("a sidecar derives");
+        fs::write(
+            &sidecar,
+            serde_json::to_string(&envelope).expect("the envelope"),
+        )
+        .expect("the sidecar writes");
+
+        let (mut app, _engine) = in2b_harness(Document::default(), Some(project_path));
+        assert_eq!(
+            app.projects[0].loaded_open_ids.len(),
+            2,
+            "both rows load re-seeable"
+        );
+        let stashed = Operation::DeleteClip {
+            clip: kinewright_core::ClipId(1),
+        };
+        assert_eq!(
+            app.projects[0].refused_by_id.get(&IncidentId(1)),
+            Some(&stashed),
+            "the restored stash fills from the report"
+        );
+        in2_configure_scripted_at(
+            &mut app,
+            0,
+            ScriptedDriver::new(vec![]),
+            in2_default_budgets(),
+        );
+
+        // The pump blocker on a different pair from both rows.
+        let blocker_tx = in2b_install_pump_blocker(
+            &mut app,
+            code_one,
+            IncidentSubject::Asset(kinewright_core::AssetId(77)),
+        );
+        let revision = app.projects[0].revision;
+
+        // First re-observation of row 1: audit, auto-apply check, enqueue.
+        let audits = app.error_log.count_with_source("Incident");
+        app.pending_observations.push(IncidentObservation::plain(
+            code_one,
+            IncidentSubject::Project,
+            "loaded one",
+            revision,
+        ));
+        app.route_incidents();
+        assert_eq!(
+            app.error_log.count_with_source("Incident"),
+            audits + 1,
+            "the first dedup audits exactly as a fresh open"
+        );
+        assert!(
+            app.pending_router_applies.is_empty(),
+            "the auto-apply check ran and declined the Explain row"
+        );
+        let queued = app.projects[0]
+            .investigator
+            .as_ref()
+            .expect("investigator state")
+            .queued_count();
+        assert_eq!(queued, 1, "the first dedup enqueues");
+        assert!(
+            !app.projects[0].loaded_open_ids.contains(&IncidentId(1))
+                && app.projects[0].loaded_open_ids.contains(&IncidentId(2)),
+            "row 1 is consumed, row 2 stays re-seeable"
+        );
+        assert!(
+            !app.projects[0].refused_by_id.contains_key(&IncidentId(1)),
+            "the first dedup consumes the restored stash into the queued incident"
+        );
+
+        // Second re-observation: silent.
+        app.pending_observations.push(IncidentObservation::plain(
+            code_one,
+            IncidentSubject::Project,
+            "loaded one",
+            revision,
+        ));
+        app.route_incidents();
+        let queued_again = app.projects[0]
+            .investigator
+            .as_ref()
+            .expect("investigator state")
+            .queued_count();
+        assert_eq!(queued_again, 1, "no second enqueue");
+        assert_eq!(
+            app.error_log.count_with_source("Incident"),
+            audits + 1,
+            "no second audit"
+        );
+
+        // Row 2 keeps Investigate: never re-seen, never investigated, and
+        // the shared predicate reports eligible.
+        let incident = in2_incident(&app, IncidentId(2));
+        assert!(
+            incident.telemetry.resolver.is_none(),
+            "no session ever ended on row 2"
+        );
+        let is_loaded = app.projects[0].loaded_open_ids.contains(&IncidentId(2));
+        assert!(is_loaded, "row 2 never re-seen");
+        let eligible =
+            app.investigator_session_eligible(0, IncidentId(2), code_two, incident.subject);
+        assert!(eligible, "the shared predicate reports row 2 eligible");
+        assert_eq!(
+            investigate_action(&incident, is_loaded, eligible),
+            Some(CardPress::Investigate),
+            "row 2 keeps Investigate"
+        );
+
+        // The write re-persists the queued incident's op (§3 rule 13): the
+        // queue drain refills the stash the dedup consumed.
+        app.projects[0]
+            .flush_incidents(&digest, &digest)
+            .expect("the flush lands");
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&sidecar).expect("the sidecar re-reads"))
+                .expect("the sidecar parses");
+        let saved_one = saved["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .find(|record| record["id"] == 1)
+            .expect("row 1 re-persisted");
+        assert_eq!(
+            saved_one["count"], 3,
+            "these are rewritten bytes (1 + 2 dedups), not the loaded ones"
+        );
+        assert!(
+            saved_one["refused_op"].is_object(),
+            "the queued op rides the record"
+        );
+
+        drop(blocker_tx);
+        in2_cleanup(&mut app);
+    }
+
+    /// Item 25: loading never starts a session; the Investigate press
+    /// enqueues through the shared predicate, and Re-investigate on the
+    /// loaded stale proposal queues beside it.
+    ///
+    /// Row 2's proposal and resolver ride the sidecar JSON (typed
+    /// round-trip through `IncidentRecord`), so `restore` — not the test —
+    /// forces staleness: the S-11 trap stays shut.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2b_load_starts_no_session_and_presses_queue() {
+        use super::in1_tests::{
+            in2_cleanup, in2_configure_scripted_at, in2_default_budgets, in2_incident,
+        };
+        use kinewright_agent::ScriptedDriver;
+        use kinewright_core::{
+            IncidentEvidence, IncidentProposal, IncidentRecord, IncidentState, IncidentTelemetry,
+        };
+
+        use crate::sidecar::{digest_bytes, sidecar_path_for_project};
+
+        let code_one = IncidentCode::Label(LabelIncident::Look);
+        let code_two = IncidentCode::Label(LabelIncident::MediaIncomplete);
+        let record = |id: u64, code: IncidentCode, observed: &str| IncidentRecord {
+            id: IncidentId(id),
+            code: code.code().to_owned(),
+            subject: IncidentSubject::Project,
+            observed: observed.to_owned(),
+            allowed: None,
+            evidence: IncidentEvidence::Plain,
+            revision: TimelineRevision(41),
+            opened_wall_millis: None,
+            opened_offset_nanos: 1_000 * id,
+            count: 1,
+            state: IncidentState::Open,
+            telemetry: IncidentTelemetry::default(),
+            proposal: None,
+            subject_name: None,
+            refused_op: None,
+        };
+        // Row 2's stale proposal arrives as JSON: `Session` resolvers have
+        // no public constructor, so the typed round-trip proves the shape.
+        let mut row_two =
+            serde_json::to_value(record(2, code_two, "loaded stale")).expect("record 2 serialises");
+        row_two["proposal"] = serde_json::to_value(&IncidentProposal {
+            operations: Vec::new(),
+            operation_count: 1,
+            summary: "set the gain".to_owned(),
+            explanation: "the take is quiet".to_owned(),
+            base_revision: TimelineRevision(41),
+            stale: false,
+        })
+        .expect("the proposal serialises");
+        row_two["telemetry"]["resolver"] = serde_json::json!({
+            "session": {"harness": "scripted", "model": null, "stop": "done"},
+        });
+        let row_two =
+            serde_json::from_value::<IncidentRecord>(row_two).expect("row 2 parses as a record");
+
+        let dir = TempDirectory::new("in2b-item-25");
+        let project_path = dir.path("edit.kinewright");
+        fs::write(&project_path, b"{\"timeline\":{}}").expect("the project file writes");
+        let digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
+        let envelope = serde_json::json!({
+            "format_version": 1,
+            "project_digest": digest,
+            "previous_digest": digest,
+            "records": [
+                serde_json::to_value(record(1, code_one, "loaded plain")).expect("record 1"),
+                serde_json::to_value(&row_two).expect("record 2"),
+            ],
+        });
+        let sidecar = sidecar_path_for_project(Some(&project_path)).expect("a sidecar derives");
+        fs::write(
+            &sidecar,
+            serde_json::to_string(&envelope).expect("the envelope"),
+        )
+        .expect("the sidecar writes");
+
+        let (mut app, _engine) = in2b_harness(Document::default(), Some(project_path));
+        let session = app.projects[0].investigator.as_ref().expect("investigator");
+        assert_eq!(session.queued_count(), 0, "load queues nothing");
+        assert!(!session.is_running(), "load starts nothing");
+        let stale = in2_incident(&app, IncidentId(2));
+        assert!(
+            stale
+                .proposal
+                .as_ref()
+                .is_some_and(|proposal| proposal.stale)
+                && stale
+                    .proposal
+                    .as_ref()
+                    .is_some_and(|proposal| proposal.operations.is_empty()),
+            "restore forced the loaded proposal stale with no operations"
+        );
+        assert!(
+            stale.telemetry.resolver.is_some(),
+            "restore kept the session resolver"
+        );
+
+        in2_configure_scripted_at(
+            &mut app,
+            0,
+            ScriptedDriver::new(vec![]),
+            in2_default_budgets(),
+        );
+        // The pump blocker on a pair of its own, so both presses queue
+        // instead of starting.
+        let blocker_tx = in2b_install_pump_blocker(
+            &mut app,
+            code_one,
+            IncidentSubject::Asset(kinewright_core::AssetId(77)),
+        );
+
+        assert!(
+            app.investigate(0, IncidentId(1)),
+            "Investigate on the plain row queues"
+        );
+        let queued = app.projects[0]
+            .investigator
+            .as_ref()
+            .expect("investigator state")
+            .queued_count();
+        assert_eq!(queued, 1, "one press, one queued");
+        assert!(
+            !app.projects[0].loaded_open_ids.contains(&IncidentId(1)),
+            "the press consumes the set"
+        );
+        assert!(
+            app.reinvestigate(0, IncidentId(2)),
+            "Re-investigate on the stale row queues"
+        );
+        let queued_both = app.projects[0]
+            .investigator
+            .as_ref()
+            .expect("investigator state")
+            .queued_count();
+        assert_eq!(queued_both, 2, "both presses queued, neither started");
+        assert_eq!(
+            in2_incident(&app, IncidentId(1)).state,
+            IncidentState::Open,
+            "row 1 still open"
+        );
+        assert_eq!(
+            in2_incident(&app, IncidentId(2)).state,
+            IncidentState::Open,
+            "row 2 still open"
+        );
+
+        drop(blocker_tx);
+        in2_cleanup(&mut app);
+    }
+
+    /// Item 26: the seven §5 codes note and open but never start a
+    /// session (BR38 + BR40 + §5 rule 5) — even with a working harness
+    /// configured, so the allowlist (not a missing harness) is what
+    /// refuses them.
+    #[test]
+    fn in2b_the_seven_section_five_codes_start_no_sessions() {
+        use super::in1_tests::{in2_cleanup, in2_configure_scripted_at, in2_default_budgets};
+        use kinewright_agent::ScriptedDriver;
+        use kinewright_core::INVESTIGATOR_ALLOWLIST;
+
+        use crate::error_ui::{WorkerError, worker_error_observation};
+        use crate::project::project_newer_format_observation;
+        use crate::recovery::{recovery_damage_observation, recovery_unavailable_observation};
+        use crate::sidecar::{sidecar_refused_observation, sidecar_write_failed_observation};
+
+        let (mut app, _engine) = in2b_harness(Document::default(), None);
+        in2_configure_scripted_at(
+            &mut app,
+            0,
+            ScriptedDriver::new(vec![]),
+            in2_default_budgets(),
+        );
+        let revision = app.projects[0].revision;
+        let collapsed = WorkerError::Untyped("the worker fell over".to_owned());
+        let observations = [
+            worker_error_observation(&collapsed, IncidentSubject::Project, "Scopes: ", revision)
+                .expect("a collapse notes"),
+            recovery_damage_observation("a torn journal", revision),
+            recovery_unavailable_observation("the recorder stopped", revision),
+            project_newer_format_observation(999, revision),
+            // The aggregate's real constructor is `restore`; the allowlist
+            // gates the code, so a plain triple with it exercises the same
+            // refusal through the rig.
+            IncidentObservation::plain(
+                IncidentCode::Label(LabelIncident::SidecarUnknownCodes),
+                IncidentSubject::Project,
+                "unknown code 'zzz'",
+                revision,
+            ),
+            sidecar_refused_observation("the digest mismatched", revision),
+            sidecar_write_failed_observation("the disk is full", revision),
+        ];
+        assert_eq!(observations.len(), 7, "all seven §5 codes");
+        for observation in &observations {
+            assert!(
+                !INVESTIGATOR_ALLOWLIST.contains(&observation.code),
+                "§5 codes sit off the allowlist"
+            );
+        }
+        app.pending_observations.extend(observations);
+        app.route_incidents();
+
+        let open = app.projects[0]
+            .incidents
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .open_count();
+        assert_eq!(open, 7, "7 incidents opened");
+        let session = app.projects[0].investigator.as_ref().expect("investigator");
+        assert_eq!(session.queued_count(), 0, "no session queued");
+        assert!(!session.is_running(), "no session started");
+
+        in2_cleanup(&mut app);
+    }
+
+    /// Item 27: cards over `restore()`-built incidents (S-11) — the
+    /// loaded stale proposal offers Re-investigate with no Approve and the
+    /// card agrees; the loaded `Resolved(Applied)` asset row offers Revert
+    /// exactly when the production probe says so; and the S-15a gate box:
+    /// a card over a missing `Clip(9)` reads "no longer in this project"
+    /// with no enabled operation.
+    ///
+    /// Resolution runs through production `capture_loaded_sets`, the pair
+    /// check through the real `can_reinvestigate`, and the revert bit
+    /// through the production asset probe — no fixture doubles anywhere.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2b_loaded_cards_offer_reinvestigate_revert_and_the_gate_box() {
+        use kinewright_core::{
+            AssetId, ClipId, ColorDescription, IncidentEvidence, IncidentLog, IncidentProposal,
+            IncidentRecord, IncidentState, MediaAsset, MediaKind, MediaSourceFingerprint, Rational,
+            RecoveryKind, SourceColorIncident, TimeCode,
+        };
+
+        use crate::incident_ui::{
+            CardLoadedFlags, REVERT_LABEL, SUBJECT_MISSING_NOTICE, incident_card,
+            revert_available_for_asset,
+        };
+        use crate::investigator::{
+            InvestigatorSessionPairs, ProposalAction, proposal_card_with_reinvestigate,
+        };
+        use crate::project::{IncidentLogHandle, capture_loaded_sets};
+
+        let look = IncidentCode::Label(LabelIncident::Look);
+        let record = |id: u64, code: IncidentCode, subject: IncidentSubject, observed: &str| {
+            IncidentRecord {
+                id: IncidentId(id),
+                code: code.code().to_owned(),
+                subject,
+                observed: observed.to_owned(),
+                allowed: None,
+                evidence: IncidentEvidence::Plain,
+                revision: TimelineRevision(41),
+                opened_wall_millis: Some(1_700_000_000_000),
+                opened_offset_nanos: 1_000 * id,
+                count: 1,
+                state: IncidentState::Open,
+                telemetry: kinewright_core::IncidentTelemetry::default(),
+                proposal: None,
+                subject_name: None,
+                refused_op: None,
+            }
+        };
+        // Row 1's stale proposal arrives as JSON (as in item 25).
+        let mut row_one =
+            serde_json::to_value(record(1, look, IncidentSubject::Project, "loaded stale"))
+                .expect("record 1 serialises");
+        row_one["proposal"] = serde_json::to_value(&IncidentProposal {
+            operations: Vec::new(),
+            operation_count: 1,
+            summary: "set the gain".to_owned(),
+            explanation: "the take is quiet".to_owned(),
+            base_revision: TimelineRevision(41),
+            stale: false,
+        })
+        .expect("the proposal serialises");
+        row_one["telemetry"]["resolver"] = serde_json::json!({
+            "session": {"harness": "scripted", "model": null, "stop": "done"},
+        });
+        let row_one =
+            serde_json::from_value::<IncidentRecord>(row_one).expect("row 1 parses as a record");
+        // Row 2: resolved-by-apply with probed evidence and a stored name.
+        let mut row_two = record(2, look, IncidentSubject::Asset(AssetId(1)), "graded shot");
+        row_two.state = IncidentState::Resolved(IncidentOutcome::Applied);
+        row_two.evidence = IncidentEvidence::SourceColor {
+            probed: ColorDescription::default(),
+            assumption: None,
+        };
+        row_two.subject_name = Some("graded.mov".to_owned());
+        // Row 3: a clip the document lacks. Row 4: an asset it lacks,
+        // carrying an op-yielding code — the disable mechanism's pin.
+        let row_three = record(3, look, IncidentSubject::Clip(ClipId(9)), "gone clip");
+        let mut row_four = record(
+            4,
+            IncidentCode::SourceColor(SourceColorIncident::UnknownPrimaries),
+            IncidentSubject::Asset(AssetId(9)),
+            "gone asset",
+        );
+        row_four.evidence = IncidentEvidence::SourceColor {
+            probed: ColorDescription::default(),
+            assumption: None,
+        };
+
+        let mut log = IncidentLog::with_start(std::time::Instant::now(), None);
+        let report = log.restore(
+            vec![row_one, row_two, row_three, row_four],
+            Vec::new(),
+            TimelineRevision(100),
+            None,
+        );
+        assert_eq!(report.restored_open, 3, "three opens restore");
+        assert_eq!(report.restored_resolved, 1, "one resolved restores");
+        let handle: IncidentLogHandle = std::sync::Arc::new(std::sync::RwLock::new(log));
+
+        let mut doc_full = Document::default();
+        doc_full.media_pool.push(MediaAsset {
+            id: AssetId(1),
+            path: std::path::PathBuf::from("graded.mov"),
+            name: "graded.mov".to_owned(),
+            duration: TimeCode(30),
+            fps: Rational::new(30, 1).expect("30 fps"),
+            kind: MediaKind::AudioVideo,
+            resolution: Some((1_920, 1_080)),
+            source_fingerprint: MediaSourceFingerprint::unknown(),
+            color_description: ColorDescription::default(),
+            assumed_from: Some(ColorDescription::default()),
+        });
+        let doc_empty = Document::default();
+        let (loaded, loaded_open, missing_full) = capture_loaded_sets(&handle, &doc_full);
+        let (_, _, missing_empty) = capture_loaded_sets(&handle, &doc_empty);
+        assert_eq!(loaded.len(), 4, "every row loaded");
+        assert!(
+            loaded_open.contains(&IncidentId(1)) && !loaded_open.contains(&IncidentId(2)),
+            "opens stay re-seeable, resolved does not"
+        );
+        assert!(
+            missing_full == [IncidentId(3), IncidentId(4)].into_iter().collect(),
+            "clip 9 and asset 9 are gone from the full document"
+        );
+        assert!(
+            missing_empty
+                == [IncidentId(2), IncidentId(3), IncidentId(4)]
+                    .into_iter()
+                    .collect(),
+            "asset 1 joins them in the empty document"
+        );
+        let flags =
+            |id: IncidentId, missing: &std::collections::BTreeSet<IncidentId>| CardLoadedFlags {
+                is_loaded_open: loaded_open.contains(&id),
+                eligible: false,
+                subject_missing: missing.contains(&id),
+                earlier_session: loaded.contains(&id),
+                loaded_wall_millis: Some(1_700_000_000_000),
+            };
+
+        // (A) The loaded stale proposal: Re-investigate, no Approve.
+        let log = handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let one = log.get(IncidentId(1)).cloned().expect("row 1");
+        let pairs = InvestigatorSessionPairs::default();
+        let can = pairs.can_reinvestigate(IncidentId(1), one.code, one.subject);
+        assert!(can, "the real pair check passes the idle pair");
+        let proposal = one.proposal.as_ref().expect("row 1 proposes");
+        assert!(proposal.stale, "restore forced staleness");
+        let proposal_card = proposal_card_with_reinvestigate(&one, proposal, can);
+        assert_eq!(
+            proposal_card.actions,
+            vec![ProposalAction::Reinvestigate],
+            "stale offers Re-investigate with no Approve"
+        );
+        let card_one = incident_card(&one, false, &flags(IncidentId(1), &missing_full));
+        assert!(card_one.reinvestigate, "the card agrees");
+        assert!(card_one.earlier_session, "the earlier-session marker shows");
+        assert_eq!(
+            card_one.recency_millis,
+            Some(1_700_000_000_000),
+            "the wall stamp rides the card"
+        );
+
+        // (B) Revert exactly when the production probe says so.
+        let two = log.get(IncidentId(2)).cloned().expect("row 2");
+        assert!(
+            revert_available_for_asset(&doc_full, AssetId(1)),
+            "asset 1 present with an assumption"
+        );
+        let card_full = incident_card(&two, true, &flags(IncidentId(2), &missing_full));
+        assert_eq!(card_full.actions.len(), 1, "one action");
+        assert_eq!(card_full.actions[0].label, REVERT_LABEL);
+        assert!(card_full.actions[0].enabled, "offered when available");
+        assert_eq!(
+            card_full.subject_display, "graded.mov · Asset 1",
+            "the stored name renders"
+        );
+        assert!(
+            !revert_available_for_asset(&doc_empty, AssetId(1)),
+            "asset 1 missing"
+        );
+        let card_empty = incident_card(&two, false, &flags(IncidentId(2), &missing_empty));
+        assert_eq!(card_empty.actions.len(), 1, "the action still shows");
+        assert!(!card_empty.actions[0].enabled, "disabled when missing");
+
+        // (C) The gate box: clip 9 gone, notice shown, nothing enabled.
+        let three = log.get(IncidentId(3)).cloned().expect("row 3");
+        let card_three = incident_card(&three, false, &flags(IncidentId(3), &missing_full));
+        assert_eq!(
+            card_three.missing_subject_notice,
+            Some(SUBJECT_MISSING_NOTICE),
+            "the card reads 'no longer in this project'"
+        );
+        assert!(
+            card_three.actions.iter().all(|action| !action.enabled),
+            "no enabled operation"
+        );
+        // The mechanism behind it, pinned on an op-yielding row: the same
+        // card with the flag cleared enables the op.
+        let four = log.get(IncidentId(4)).cloned().expect("row 4");
+        let card_four = incident_card(&four, false, &flags(IncidentId(4), &missing_full));
+        assert_eq!(card_four.actions.len(), 1, "one op-yielding action");
+        assert!(
+            matches!(
+                card_four.actions[0].recovery.kind,
+                RecoveryKind::Operation(_)
+            ),
+            "the action is an operation"
+        );
+        assert!(!card_four.actions[0].enabled, "disabled while missing");
+        let mut present = flags(IncidentId(4), &missing_full);
+        present.subject_missing = false;
+        let card_present = incident_card(&four, false, &present);
+        assert!(card_present.actions[0].enabled, "the flag is the switch");
+    }
+
+    /// Item 28 (S-3): rejecting the same asset twice — renamed between the
+    /// rejections — resolves one incident with count 2 and the FIRST name:
+    /// the dedup key is the `(code, subject, observed)` triple, and `observe`
+    /// never restamps a name on a dedup. The reunion half pins the other
+    /// side of S-3: two observations differing only in name hit the same
+    /// ring entry. Then a scripted session proposes over the deduped
+    /// incident, which stays unresolved while its fresh proposal offers
+    /// Re-investigate.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn in2b_branch_rejections_with_new_names_dedup_and_union() {
+        use super::in1_tests::{
+            in2_cleanup, in2_configure_scripted_at, in2_default_budgets, in2_happy_turn,
+            in2_incident, in2_pump_until_finished,
+        };
+        use kinewright_agent::{BranchError, ScriptedDriver};
+        use kinewright_core::{
+            ColorDescription, IncidentResolver, IncidentState, MediaAsset, MediaKind,
+            MediaSourceFingerprint, Rational, TimeCode,
+        };
+
+        use crate::investigator::{
+            ProposalAction, QueuedIncident, proposal_card_with_reinvestigate,
+        };
+
+        // The asset, named "Interview A".
+        let mut document = Document::default();
+        document.media_pool.push(MediaAsset {
+            id: AssetId(5),
+            path: std::path::PathBuf::from("interview.mov"),
+            name: "Interview A".to_owned(),
+            duration: TimeCode(30),
+            fps: Rational::new(30, 1).expect("30 fps"),
+            kind: MediaKind::AudioVideo,
+            resolution: Some((1_920, 1_080)),
+            source_fingerprint: MediaSourceFingerprint::unknown(),
+            color_description: ColorDescription::default(),
+            assumed_from: None,
+        });
+        // No harness yet: half 1 is route mechanics, and without a harness
+        // `consider` refuses everything, so nothing queues.
+        let (mut app, _engine) = in2b_harness(document, None);
+        let revision = app.projects[0].revision;
+        let rejection = BranchError::InvalidOperationIndex {
+            index: 9,
+            maximum: 3,
+        };
+        let subject = IncidentSubject::Asset(AssetId(5));
+
+        // First rejection: opens, capturing "Interview A".
+        app.pending_observations
+            .push(rejection.incident_observation(subject, revision));
+        app.route_incidents();
+        let id = {
+            let log = app.projects[0]
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(log.open_count(), 1, "one incident opened");
+            log.open().next().expect("the open incident").id
+        };
+        assert_eq!(
+            in2_incident(&app, id).subject_name,
+            Some("Interview A".to_owned()),
+            "the open captures the asset's name"
+        );
+
+        // Rename (same branch, same id) and reject again: dedups.
+        std::sync::Arc::make_mut(&mut app.projects[0].document).media_pool[0].name =
+            "Interview B".to_owned();
+        app.pending_observations
+            .push(rejection.incident_observation(subject, revision));
+        app.route_incidents();
+        let deduped = in2_incident(&app, id);
+        assert_eq!(deduped.count, 2, "same triple, second sighting");
+        assert_eq!(
+            deduped.subject_name,
+            Some("Interview A".to_owned()),
+            "the dedup never restamps the name"
+        );
+
+        // Reunion: two observations differing only in name hit the same
+        // ring entry (and, above, the same incident).
+        let operation = Operation::DeleteClip {
+            clip: kinewright_core::ClipId(1),
+        };
+        let mut named_a = rejection.incident_observation(subject, revision);
+        named_a.name = Some("Interview A".to_owned());
+        let mut named_b = rejection.incident_observation(subject, revision);
+        named_b.name = Some("Interview B".to_owned());
+        let mut other_seen = rejection.incident_observation(subject, revision);
+        other_seen.observed = "something else entirely".to_owned();
+        let session = app.projects[0]
+            .investigator
+            .as_mut()
+            .expect("investigator state");
+        session.stash_refused(named_a.clone(), operation.clone());
+        assert_eq!(
+            session.take_refused(&other_seen),
+            None,
+            "a different observed matches nothing; the entry stays"
+        );
+        assert_eq!(
+            session.take_refused(&named_b),
+            Some(operation.clone()),
+            "the same triple reunites under a new name"
+        );
+        assert_eq!(
+            session.take_refused(&named_a),
+            None,
+            "one entry: the first taker consumed it"
+        );
+
+        // A scripted session proposes over the deduped incident: it stays
+        // unresolved, and the fresh proposal offers Re-investigate.
+        let code = deduped.code;
+        let driver = ScriptedDriver::new(vec![in2_happy_turn(id, revision, 71)]);
+        in2_configure_scripted_at(&mut app, 0, driver, in2_default_budgets());
+        {
+            let mut log = app.projects[0]
+                .incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(log.begin_investigation(id), "the session takes it");
+        }
+        let queued = QueuedIncident {
+            id,
+            code,
+            subject,
+            refused: None,
+        };
+        app.spawn_investigator_session(
+            0,
+            &queued,
+            "scripted",
+            vec!["Look into this.".to_owned()],
+            Vec::new(),
+        )
+        .expect("the session spawns");
+        in2_pump_until_finished(&mut app);
+        let proposed = in2_incident(&app, id);
+        // A `Completed`-with-proposal end writes telemetry without changing
+        // the state: the incident stays `Investigating` — unresolved — with
+        // the proposal pending on it.
+        assert_eq!(
+            proposed.state,
+            IncidentState::Investigating,
+            "a proposal leaves the incident unresolved"
+        );
+        let proposal = proposed.proposal.as_ref().expect("the session proposed");
+        assert!(
+            matches!(
+                proposed.telemetry.resolver,
+                Some(IncidentResolver::Session { .. })
+            ),
+            "a session ended on the incident"
+        );
+        let pairs = app.investigator_session_pairs_for_project(0);
+        let card = proposal_card_with_reinvestigate(
+            &proposed,
+            proposal,
+            pairs.can_reinvestigate(id, code, subject),
+        );
+        assert!(
+            card.actions.contains(&ProposalAction::Reinvestigate),
+            "the fresh proposal offers Re-investigate"
+        );
+
+        in2_cleanup(&mut app);
     }
 
     /// N2/S-13: opening an already-open path focuses the live session

@@ -14,7 +14,7 @@
 //!
 //! [`ProjectSession`]: crate::project::ProjectSession
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -814,6 +814,18 @@ impl InvestigatorSession {
         self.queue.clear();
     }
 
+    /// Copy every queued incident's refused op into the write-time stash map
+    /// (`IN2B` §3 rule 13): a close/reopen preserves opening context the
+    /// queued session has not started yet. A copy, never a move — the queue
+    /// item keeps its op for `compose_opening_message` at session start.
+    pub(crate) fn copy_queued_refused_into(&self, map: &mut BTreeMap<IncidentId, Operation>) {
+        for queued in &self.queue {
+            if let Some(op) = &queued.refused {
+                map.insert(queued.id, op.clone());
+            }
+        }
+    }
+
     /// Shut the running session down and return its incident to `Open`: the
     /// hand-resolve path (§3.7 rule 41) and project close share it.
     pub(crate) fn shutdown_for_close(&mut self, reason: &str, incidents: &IncidentLogHandle) {
@@ -1180,6 +1192,36 @@ impl KinewrightApp {
             && self.investigator_harness_key(project_index).is_some()
     }
 
+    /// Whether a session may start for this pair on this project (`IN2B` §3
+    /// rule 12, E-C1): the ONE shared eligibility predicate — allowlisted,
+    /// enabled, unmuted, harness present, pair idle — called by
+    /// `consider_investigator_queue`, the Investigate press path, and the
+    /// card's caller. A shown button never returns `false`. Pair-idle shares
+    /// Re-investigate's rule: a running pair always blocks, a queued pair
+    /// blocks a different incident, and the same already-queued incident is
+    /// the successful no-op.
+    pub(crate) fn investigator_session_eligible(
+        &self,
+        project_index: usize,
+        id: IncidentId,
+        code: IncidentCode,
+        subject: IncidentSubject,
+    ) -> bool {
+        if !INVESTIGATOR_ALLOWLIST.contains(&code) {
+            return false;
+        }
+        let Some(session) = self.projects[project_index].investigator.as_ref() else {
+            return false;
+        };
+        if !session.settings.enabled || session.is_muted(code) {
+            return false;
+        }
+        if self.investigator_harness_key(project_index).is_none() {
+            return false;
+        }
+        session.can_reinvestigate(id, code, subject)
+    }
+
     /// Consider one freshly opened incident for an investigator session
     /// (§3.1 rule 4, §3.2 rule 10).
     pub(crate) fn consider_investigator_queue(
@@ -1187,19 +1229,26 @@ impl KinewrightApp {
         id: IncidentId,
         observation: &IncidentObservation,
     ) {
-        if !INVESTIGATOR_ALLOWLIST.contains(&observation.code) {
-            return;
-        }
         let focused = self.focused_project;
-        {
-            let Some(session) = self.projects[focused].investigator.as_ref() else {
-                return;
-            };
-            if !session.settings.enabled || session.is_muted(observation.code) {
-                return;
-            }
-        }
-        if self.investigator_harness_key(focused).is_none() {
+        self.consider_investigator_queue_for(focused, id, observation);
+    }
+
+    /// [`Self::consider_investigator_queue`] routed at one project: the
+    /// router funnels here for the focused project, the Investigate press
+    /// for the card's. One predicate, three callers, zero drift (§3
+    /// rules 11–12).
+    fn consider_investigator_queue_for(
+        &mut self,
+        project_index: usize,
+        id: IncidentId,
+        observation: &IncidentObservation,
+    ) {
+        if !self.investigator_session_eligible(
+            project_index,
+            id,
+            observation.code,
+            observation.subject,
+        ) {
             return;
         }
         let mut refused = None;
@@ -1211,13 +1260,19 @@ impl KinewrightApp {
                 break;
             }
         }
+        // The restored stash rides second: a fresh `take_refused` wins over
+        // the restored op — fresher evidence (`IN2B` §3 rule 13, N2/S-2).
+        // Consumed (removed) exactly when a session is about to queue for
+        // the incident; an ineligible pass leaves it for a later press.
+        let restored = self.projects[project_index].refused_by_id.remove(&id);
+        let refused = refused.or(restored);
         let queued = QueuedIncident {
             id,
             code: observation.code,
             subject: observation.subject,
             refused,
         };
-        self.projects[focused]
+        self.projects[project_index]
             .investigator
             .get_or_insert_default()
             .enqueue(queued);
@@ -2173,6 +2228,49 @@ impl KinewrightApp {
         log.resolve(id, IncidentOutcome::Rejected)
     }
 
+    /// The Investigate press on a loaded, never-re-seen row (`IN2B` §3
+    /// rule 12): enqueues through `consider_investigator_queue` and removes
+    /// the id from `loaded_open_ids`.
+    ///
+    /// The observation `consider` needs is rebuilt from the incident's own
+    /// triple — only `(code, subject, observed)` is read (queue identity
+    /// plus `take_refused`'s key), so the rebuilt revision and the default
+    /// `name`/`transient` never matter. Returns whether anything queued: a
+    /// shown button never returns `false`, and the shared predicate is
+    /// re-checked here, so a mute flipped between render and press refuses
+    /// honestly without consuming the set.
+    pub(crate) fn investigate(&mut self, project_index: usize, id: IncidentId) -> bool {
+        let (code, subject, observed, resolver_none) = {
+            let log = self.projects[project_index]
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(incident) = log.get(id) else {
+                return false;
+            };
+            (
+                incident.code,
+                incident.subject,
+                incident.observed.clone(),
+                incident.telemetry.resolver.is_none(),
+            )
+        };
+        if !resolver_none {
+            return false;
+        }
+        if !self.projects[project_index].loaded_open_ids.contains(&id) {
+            return false;
+        }
+        if !self.investigator_session_eligible(project_index, id, code, subject) {
+            return false;
+        }
+        let revision = self.projects[project_index].revision;
+        let observation = IncidentObservation::plain(code, subject, observed, revision);
+        self.consider_investigator_queue_for(project_index, id, &observation);
+        self.projects[project_index].loaded_open_ids.remove(&id);
+        true
+    }
+
     /// Re-investigate (§4.4 rule 19): accept an open or completed investigated
     /// incident when no thread for it is running. A completed investigation is
     /// first returned to `Open`; `begin_investigation` then marks the old
@@ -2303,6 +2401,14 @@ mod tests {
         /// Number of incidents waiting behind the app-wide session cap.
         pub(crate) fn queued_count(&self) -> usize {
             self.queue.len()
+        }
+
+        /// Install a fabricated pending session (C5 item-24 rig): the pump
+        /// sees a running session whose result never arrives, so queued
+        /// incidents wait instead of starting. The caller holds the result
+        /// sender — dropping it reads as `Died`.
+        pub(crate) fn install_pending_test_session(&mut self, running: RunningSession) {
+            self.running = Some(running);
         }
     }
 

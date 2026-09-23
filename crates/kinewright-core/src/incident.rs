@@ -3874,6 +3874,25 @@ impl IncidentLog {
         self.generation = self.generation.saturating_add(1);
     }
 
+    /// Whether `observe` would open for this key (`IN2B` §9 rule 1).
+    ///
+    /// The router peeks before reading the focused document, so subject
+    /// names are captured once per open and never for dedups or
+    /// suppressions. Mirrors `observe`'s two early-outs exactly —
+    /// `in2b_would_open_agrees_with_observe` pins the agreement.
+    #[must_use]
+    pub fn would_open(&self, code: IncidentCode, subject: IncidentSubject, observed: &str) -> bool {
+        if self.suppressed.contains(&(code, subject)) {
+            return false;
+        }
+        !self.entries.iter().any(|incident| {
+            incident.state.is_open()
+                && incident.code == code
+                && incident.subject == subject
+                && incident.observed == observed
+        })
+    }
+
     /// Record one observation.
     ///
     /// The dedup key is `(code, subject, observed)`, in that order, and nothing
@@ -6041,6 +6060,29 @@ mod tests {
                 "{code} stays off the allowlist (IN2 §3.1 reason 2)"
             );
         }
+    }
+
+    /// `IN2B` §9 rule 1: `would_open` agrees with `observe` on all three
+    /// outcomes — the router's peek before the focused-document read.
+    #[test]
+    fn in2b_would_open_agrees_with_observe() {
+        let code = IncidentCode::Label(LabelIncident::Project);
+        let subject = IncidentSubject::Project;
+        let revision = TimelineRevision(1);
+        let mut log = IncidentLog::with_start(Instant::now(), None);
+        assert!(log.would_open(code, subject, "seen"));
+        let observation = IncidentObservation::plain(code, subject, "seen", revision);
+        let Observed::Opened(id) = log.observe(observation) else {
+            panic!("the first observation opens");
+        };
+        // An open match dedups: no second open.
+        assert!(!log.would_open(code, subject, "seen"));
+        // A different `observed` opens beside it.
+        assert!(log.would_open(code, subject, "seen differently"));
+        // Resolving suppresses the pair: nothing opens for it again.
+        assert!(log.resolve(id, IncidentOutcome::Explained));
+        assert!(!log.would_open(code, subject, "seen"));
+        assert!(!log.would_open(code, subject, "seen differently"));
     }
 
     /// IN2B §12 item 10, §9 rule 5 (d15/d19): observed names truncate on

@@ -11,12 +11,15 @@
 //! makes IN1 §9 clause 6's equality assertion — "never below the button" —
 //! meaningful rather than aspirational.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use eframe::egui;
 use kinewright_core::{
-    ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, INVESTIGATOR_ALLOWLIST,
-    Incident, IncidentCode, IncidentFamily, IncidentOutcome, IncidentResolver, IncidentSeverity,
-    IncidentState, IncidentSubject, LabelIncident, MediaIncident, Operation, PolicyClass,
-    RecoveryAction, RecoveryKind, RejectionIncident, SourceColorIncident, recovery_description,
+    AssetId, ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, Document,
+    INVESTIGATOR_ALLOWLIST, Incident, IncidentCode, IncidentFamily, IncidentId, IncidentOutcome,
+    IncidentResolver, IncidentSeverity, IncidentState, IncidentSubject, LabelIncident,
+    MediaIncident, Operation, PolicyClass, RecoveryAction, RecoveryKind, RejectionIncident,
+    SourceColorIncident, recovery_description,
 };
 
 use crate::investigator::{
@@ -35,11 +38,24 @@ pub(crate) const REVERT_LABEL: &str = "Revert to probed description";
 /// The stopped card's way back (IN2 §3.7 rule 39).
 pub(crate) const REINVESTIGATE_LABEL: &str = "Re-investigate";
 
+/// The loaded row's way forward (`IN2B` §3 rule 12).
+pub(crate) const INVESTIGATE_LABEL: &str = "Investigate";
+
+/// What a missing subject's card reads beside the stored name (`IN2B` §3
+/// rule 17, N2/S-15a): the operations were recorded against a different
+/// timeline, so none is offered enabled.
+pub(crate) const SUBJECT_MISSING_NOTICE: &str = "no longer in this project";
+
 /// The per-code opt-out (IN2 §2.4 rule 14).
 pub(crate) const NEVER_INVESTIGATE_LABEL: &str = "Never investigate this";
 
 /// Everything the Media panel needs to draw one incident, and nothing that
 /// needs a `Document` or an `egui::Ui` to compute.
+///
+/// Four switches and counting: each gates one independent render, which is
+/// what the struct is for — a flags enum would trade readable fields for
+/// bit tests at every render site.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IncidentCardView {
     /// How badly the problem affects the person's work.
@@ -64,6 +80,22 @@ pub(crate) struct IncidentCardView {
     pub(crate) reinvestigate: bool,
     /// IN2 §2.4 rule 14: an allowlisted code offers Never-investigate-this.
     pub(crate) never_investigate: bool,
+    /// `IN2B` §3 rule 12: a loaded, never-re-seen, not-yet-investigated,
+    /// eligible row offers Investigate.
+    pub(crate) investigate: bool,
+    /// The subject row as drawn: `Name · Label` when the incident carries
+    /// `subject_name` (`IN2B` §9 rule 4), the bare label otherwise —
+    /// pixel-identical for the unnamed majority.
+    pub(crate) subject_display: String,
+    /// `IN2B` §3 rule 9: the incident loaded from an earlier session.
+    pub(crate) earlier_session: bool,
+    /// The loaded wall stamp in millis (`IN2B` §3 rule 14), when the row
+    /// loaded with one: the panel renders recency from it. `None` shows no
+    /// recency rather than a lie.
+    pub(crate) recency_millis: Option<i64>,
+    /// `SUBJECT_MISSING_NOTICE` when the subject resolves to nothing in
+    /// the loaded document (`IN2B` §3 rule 17), `None` otherwise.
+    pub(crate) missing_subject_notice: Option<&'static str>,
 }
 
 /// What the person pressed on a card.
@@ -75,6 +107,8 @@ pub(crate) enum CardPress {
     Reinvestigate,
     /// The Never-investigate-this button.
     NeverInvestigate,
+    /// The Investigate button on a loaded row.
+    Investigate,
 }
 
 /// One control on the card.
@@ -93,6 +127,122 @@ pub(crate) struct CardAction {
     pub(crate) recovery: RecoveryAction,
 }
 
+/// What one card knows about loaded history (`IN2B` §3 C5): plain data,
+/// computed by the caller, so [`incident_card`] stays pure.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CardLoadedFlags {
+    /// The id is still in `loaded_open_ids` (never re-seen this run).
+    pub(crate) is_loaded_open: bool,
+    /// The one shared eligibility predicate reports eligible.
+    pub(crate) eligible: bool,
+    /// The subject resolves to nothing in the loaded document.
+    pub(crate) subject_missing: bool,
+    /// The row loaded from an earlier session (rule 9's marker).
+    pub(crate) earlier_session: bool,
+    /// The loaded wall stamp in millis, when the row loaded with one.
+    pub(crate) loaded_wall_millis: Option<i64>,
+}
+
+/// What the Incidents panel knows about loaded history (`IN2B` §3 C5):
+/// the session's sets, read per row, plus the one shared eligibility
+/// predicate as a closure (the rows builder is a free fn without `&App`).
+pub(crate) struct LoadedPanelSets<'a> {
+    /// Every restored id (rule 9's marker never expires).
+    pub(crate) loaded_ids: &'a BTreeSet<IncidentId>,
+    /// Restored opens this run has not yet re-seen (rules 11–12).
+    pub(crate) loaded_open_ids: &'a BTreeSet<IncidentId>,
+    /// Restored ids whose subject is gone (rule 17).
+    pub(crate) subject_missing: &'a BTreeSet<IncidentId>,
+    /// The loaded wall stamp per restored id (rule 14).
+    pub(crate) loaded_walls: &'a BTreeMap<IncidentId, Option<i64>>,
+    /// The shared `investigator_session_eligible`, borrowed from the app.
+    pub(crate) eligible: &'a dyn Fn(IncidentId, IncidentCode, IncidentSubject) -> bool,
+}
+
+#[cfg(test)]
+pub(crate) fn empty_panel_sets() -> LoadedPanelSets<'static> {
+    static IDS: BTreeSet<IncidentId> = BTreeSet::new();
+    static OPEN: BTreeSet<IncidentId> = BTreeSet::new();
+    static MISSING: BTreeSet<IncidentId> = BTreeSet::new();
+    static WALLS: BTreeMap<IncidentId, Option<i64>> = BTreeMap::new();
+    fn never(_: IncidentId, _: IncidentCode, _: IncidentSubject) -> bool {
+        false
+    }
+    LoadedPanelSets {
+        loaded_ids: &IDS,
+        loaded_open_ids: &OPEN,
+        subject_missing: &MISSING,
+        loaded_walls: &WALLS,
+        eligible: &never,
+    }
+}
+
+/// Whether the card offers Investigate (`IN2B` §3 rule 12, E-C1).
+///
+/// Pure over `(incident, is_loaded_open, eligibility)`: an open row the
+/// run never re-seen, never investigated (`telemetry.resolver.is_none()` —
+/// a loaded stale proposal has a resolver and offers Re-investigate
+/// instead), and eligible. `Some` carries the press the button reports.
+#[must_use]
+pub(crate) fn investigate_action(
+    incident: &Incident,
+    is_loaded_open: bool,
+    eligible: bool,
+) -> Option<CardPress> {
+    (incident.state == IncidentState::Open
+        && is_loaded_open
+        && incident.telemetry.resolver.is_none()
+        && eligible)
+        .then_some(CardPress::Investigate)
+}
+
+/// Render a loaded wall stamp as card recency (`IN2B` §3 rule 14).
+///
+/// Pure over `(stamp, now)` millis so the buckets pin exactly; the panel
+/// passes the real now. A stamp at or ahead of now reads "just now" —
+/// never a future age from clock skew.
+#[must_use]
+pub(crate) fn recency_label(wall_millis: i64, now_millis: i64) -> String {
+    let age_secs = now_millis
+        .saturating_sub(wall_millis)
+        .div_euclid(1000)
+        .max(0);
+    if age_secs < 60 {
+        return "opened just now".to_owned();
+    }
+    if age_secs < 3_600 {
+        let minutes = age_secs.div_euclid(60);
+        return format!(
+            "opened {minutes} minute{} ago",
+            if minutes == 1 { "" } else { "s" }
+        );
+    }
+    if age_secs < 86_400 {
+        let hours = age_secs.div_euclid(3_600);
+        return format!(
+            "opened {hours} hour{} ago",
+            if hours == 1 { "" } else { "s" }
+        );
+    }
+    let days = age_secs.div_euclid(86_400);
+    format!("opened {days} day{} ago", if days == 1 { "" } else { "s" })
+}
+
+/// Whether the asset still carries the assumption a revert would take
+/// back (`IN1b` §5.5 rule 28): look the asset up, missing → `false`,
+/// present → the stored `assumed_from` decides.
+///
+/// The one production probe every `incident_card` caller uses for
+/// `revert_available` — the Media panel and item 27 call this, never a
+/// copy, so the card and its test cannot drift.
+#[must_use]
+pub(crate) fn revert_available_for_asset(document: &Document, asset_id: AssetId) -> bool {
+    document
+        .asset(asset_id)
+        .is_some_and(|asset| asset.assumed_from.is_some())
+}
+
 /// Build the card for one incident.
 ///
 /// `revert_available` is the one document fact the card needs and the incident
@@ -109,14 +259,18 @@ pub(crate) struct CardAction {
 /// Colour supplies `asset.assumed_from.is_some()`; every other code supplies
 /// `false` until it ships a revert of its own.
 #[must_use]
-pub(crate) fn incident_card(incident: &Incident, revert_available: bool) -> IncidentCardView {
+pub(crate) fn incident_card(
+    incident: &Incident,
+    revert_available: bool,
+    flags: &CardLoadedFlags,
+) -> IncidentCardView {
     IncidentCardView {
         severity: incident.severity,
         class: incident.class,
         subject_label: incident.subject.label(),
         headline: incident_headline(incident.code, incident.class),
         state_label: state_label(incident.state),
-        actions: card_actions(incident, revert_available),
+        actions: card_actions(incident, revert_available, flags.subject_missing),
         details: card_details(incident, revert_available),
         reinvestigate: incident.state == IncidentState::Open
             && matches!(
@@ -124,6 +278,14 @@ pub(crate) fn incident_card(incident: &Incident, revert_available: bool) -> Inci
                 Some(IncidentResolver::Session { .. })
             ),
         never_investigate: INVESTIGATOR_ALLOWLIST.contains(&incident.code),
+        investigate: investigate_action(incident, flags.is_loaded_open, flags.eligible).is_some(),
+        subject_display: match incident.subject_name.as_deref() {
+            Some(name) => format!("{name} · {}", incident.subject.label()),
+            None => incident.subject.label(),
+        },
+        earlier_session: flags.earlier_session,
+        recency_millis: flags.loaded_wall_millis,
+        missing_subject_notice: flags.subject_missing.then_some(SUBJECT_MISSING_NOTICE),
     }
 }
 
@@ -472,17 +634,21 @@ const fn state_label(state: IncidentState) -> &'static str {
 /// back. Everything else offers exactly what `policy_recovery` returned, one
 /// `CardAction` per entry, in order, enabled for an operation and disabled for
 /// an explanation (IN1 §5.3 rules 29–30).
-fn card_actions(incident: &Incident, revert_available: bool) -> Vec<CardAction> {
+fn card_actions(
+    incident: &Incident,
+    revert_available: bool,
+    subject_missing: bool,
+) -> Vec<CardAction> {
     // `IN1b` §3.8 break 3 as re-keyed by IN2 N5.1: the revert branch keys on
     // `Resolved(Applied)` plus an asset subject plus probed evidence — not on
     // the stored class — now that three `Explain` rows carry a button of
     // their own. Every other incident falls through to the `policy_recovery`
     // branch below.
-    if incident.state == IncidentState::Resolved(IncidentOutcome::Applied)
+    let mut actions = if incident.state == IncidentState::Resolved(IncidentOutcome::Applied)
         && let (IncidentSubject::Asset(asset), Some(probed)) =
             (incident.subject, incident.evidence.probed())
     {
-        return vec![CardAction {
+        vec![CardAction {
             label: REVERT_LABEL,
             enabled: revert_available,
             recovery: RecoveryAction {
@@ -492,17 +658,29 @@ fn card_actions(incident: &Incident, revert_available: bool) -> Vec<CardAction> 
                     color_description: probed.clone(),
                 }),
             },
-        }];
+        }]
+    } else {
+        incident
+            .recoveries
+            .iter()
+            .map(|recovery| CardAction {
+                label: recovery.label,
+                enabled: matches!(recovery.kind, RecoveryKind::Operation(_)),
+                recovery: recovery.clone(),
+            })
+            .collect()
+    };
+    // A missing subject's operations were recorded against a different
+    // timeline: none is offered enabled, while `Explain` text still shows
+    // (`IN2B` §3 rule 17).
+    if subject_missing {
+        for action in &mut actions {
+            if matches!(action.recovery.kind, RecoveryKind::Operation(_)) {
+                action.enabled = false;
+            }
+        }
     }
-    incident
-        .recoveries
-        .iter()
-        .map(|recovery| CardAction {
-            label: recovery.label,
-            enabled: matches!(recovery.kind, RecoveryKind::Operation(_)),
-            recovery: recovery.clone(),
-        })
-        .collect()
+    actions
 }
 
 /// The typed fields verbatim, in IN1 §5.3 rule 32's fixed order.
@@ -670,11 +848,19 @@ pub(crate) fn incident_panel_rows<'a>(
     incidents: impl Iterator<Item = &'a Incident>,
     investigating: Option<InvestigatingCard>,
     session_pairs: &InvestigatorSessionPairs,
+    loaded: &LoadedPanelSets<'_>,
 ) -> Vec<IncidentPanelRow> {
     incidents
         .filter(|incident| incident.state.is_open())
         .map(|incident| {
-            let mut view = incident_card(incident, false);
+            let flags = CardLoadedFlags {
+                is_loaded_open: loaded.loaded_open_ids.contains(&incident.id),
+                eligible: (loaded.eligible)(incident.id, incident.code, incident.subject),
+                subject_missing: loaded.subject_missing.contains(&incident.id),
+                earlier_session: loaded.loaded_ids.contains(&incident.id),
+                loaded_wall_millis: loaded.loaded_walls.get(&incident.id).copied().flatten(),
+            };
+            let mut view = incident_card(incident, false, &flags);
             if let Some(card) = investigating
                 && card.id == incident.id
             {
@@ -714,11 +900,25 @@ pub(crate) fn show_incident_card(ui: &mut egui::Ui, view: &IncidentCardView) -> 
     theme::card_frame(false).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new(view.subject_label.as_str())
+                egui::RichText::new(view.subject_display.as_str())
                     .font(theme::semibold(type_size::CAPTION)),
             );
             ui.colored_label(color::TEXT_MUTED, view.state_label);
+            if view.earlier_session {
+                ui.colored_label(color::TEXT_MUTED, "from an earlier session");
+            }
+            if let Some(millis) = view.recency_millis {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(millis, |elapsed| {
+                        i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+                    });
+                ui.colored_label(color::TEXT_MUTED, recency_label(millis, now));
+            }
         });
+        if let Some(notice) = view.missing_subject_notice {
+            ui.colored_label(color::TEXT_MUTED, notice);
+        }
         ui.colored_label(severity_color(view.severity), view.headline);
         for (key, value) in &view.details {
             ui.horizontal_wrapped(|ui| {
@@ -747,8 +947,11 @@ pub(crate) fn show_incident_card(ui: &mut egui::Ui, view: &IncidentCardView) -> 
                 }
             }
         });
-        if view.reinvestigate || view.never_investigate {
+        if view.reinvestigate || view.never_investigate || view.investigate {
             ui.horizontal_wrapped(|ui| {
+                if view.investigate && ui.button(INVESTIGATE_LABEL).clicked() {
+                    pressed = Some(CardPress::Investigate);
+                }
                 if view.reinvestigate && ui.button(REINVESTIGATE_LABEL).clicked() {
                     pressed = Some(CardPress::Reinvestigate);
                 }
@@ -825,10 +1028,21 @@ pub(crate) fn show_incidents_panel(app: &mut crate::app::KinewrightApp, ctx: &eg
         let log = handle
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        incident_panel_rows(log.all(), investigating, &session_pairs)
+        let session = &app.projects[project_index];
+        let eligible =
+            |id, code, subject| app.investigator_session_eligible(project_index, id, code, subject);
+        let loaded = LoadedPanelSets {
+            loaded_ids: &session.loaded_ids,
+            loaded_open_ids: &session.loaded_open_ids,
+            subject_missing: &session.subject_missing,
+            loaded_walls: &session.loaded_walls,
+            eligible: &eligible,
+        };
+        incident_panel_rows(log.all(), investigating, &session_pairs, &loaded)
     };
     let mut pressed = None;
     let mut reinvestigate = None;
+    let mut investigate = None;
     let mut mute = None;
     let mut proposal_press = None;
     let mut open = app.incidents_open;
@@ -870,6 +1084,9 @@ pub(crate) fn show_incidents_panel(app: &mut crate::app::KinewrightApp, ctx: &eg
                         Some(CardPress::Reinvestigate) => {
                             reinvestigate = Some(row.id);
                         }
+                        Some(CardPress::Investigate) => {
+                            investigate = Some(row.id);
+                        }
                         Some(CardPress::NeverInvestigate) => {
                             mute = Some(row.id);
                         }
@@ -903,6 +1120,9 @@ pub(crate) fn show_incidents_panel(app: &mut crate::app::KinewrightApp, ctx: &eg
     }
     if let Some(id) = reinvestigate {
         app.reinvestigate(project_index, id);
+    }
+    if let Some(id) = investigate {
+        app.investigate(project_index, id);
     }
     if let Some(id) = mute {
         let code = {
@@ -949,6 +1169,28 @@ mod tests {
     };
 
     use super::*;
+
+    /// `IN2B` §3 rule 14: recency buckets pin exactly over `(stamp, now)`,
+    /// and a stamp at or ahead of now reads "just now" rather than a
+    /// future age from clock skew.
+    #[test]
+    fn recency_labels_bucket_days_hours_minutes() {
+        let now = 1_700_000_000_000_i64;
+        assert_eq!(recency_label(now, now), "opened just now");
+        assert_eq!(recency_label(now + 60_000, now), "opened just now");
+        assert_eq!(recency_label(now - 59_000, now), "opened just now");
+        assert_eq!(recency_label(now - 60_000, now), "opened 1 minute ago");
+        assert_eq!(recency_label(now - 120_000, now), "opened 2 minutes ago");
+        assert_eq!(recency_label(now - 3_599_000, now), "opened 59 minutes ago");
+        assert_eq!(recency_label(now - 3_600_000, now), "opened 1 hour ago");
+        assert_eq!(recency_label(now - 7_200_000, now), "opened 2 hours ago");
+        assert_eq!(recency_label(now - 86_399_000, now), "opened 23 hours ago");
+        assert_eq!(recency_label(now - 86_400_000, now), "opened 1 day ago");
+        assert_eq!(
+            recency_label(now - 3 * 86_400_000, now),
+            "opened 3 days ago"
+        );
+    }
 
     /// IN1 §3 rule 5 row 1: the pinned `in1_untagged.mp4` probe, which is the
     /// canonical evidence for every `POLICY` row (IN1 §9 clauses 2 and 6).
@@ -1004,7 +1246,7 @@ mod tests {
         );
         let incident = log.get(id).expect("the log keeps what it opened");
         assert_eq!(incident.class, PolicyClass::AutoApply);
-        let view = incident_card(incident, false);
+        let view = incident_card(incident, false, &CardLoadedFlags::default());
         assert_eq!(
             view.headline,
             "Kinewright assumed Rec.709 for this source because its colour primaries were unknown."
@@ -1029,8 +1271,18 @@ mod tests {
         let (mp4_log, mp4_id) = opened(code, &mp4);
         let (webm_log, webm_id) = opened(code, &webm);
         assert_eq!(
-            incident_card(mp4_log.get(mp4_id).expect("open"), false).headline,
-            incident_card(webm_log.get(webm_id).expect("open"), false).headline
+            incident_card(
+                mp4_log.get(mp4_id).expect("open"),
+                false,
+                &CardLoadedFlags::default()
+            )
+            .headline,
+            incident_card(
+                webm_log.get(webm_id).expect("open"),
+                false,
+                &CardLoadedFlags::default()
+            )
+            .headline
         );
     }
 
@@ -1047,7 +1299,7 @@ mod tests {
         let incident = log.get(id).expect("open");
         assert_eq!(incident.class, PolicyClass::Explain);
         assert_eq!(
-            incident_card(incident, false).headline,
+            incident_card(incident, false, &CardLoadedFlags::default()).headline,
             "This source does not say what colour primaries it uses, and the rest of its colour metadata rules out Rec.709."
         );
     }
@@ -1199,7 +1451,7 @@ mod tests {
             panic!("a fresh log opens the first observation");
         };
         let incident = log.get(id).expect("the log keeps what it opened");
-        let view = incident_card(incident, false);
+        let view = incident_card(incident, false, &CardLoadedFlags::default());
 
         assert_eq!(view.class, PolicyClass::Explain);
         assert_eq!(view.severity, IncidentSeverity::Blocks);
@@ -1245,7 +1497,7 @@ mod tests {
         let colour = colour_log.get(colour_id).expect("open");
         assert!(colour.evidence.probed().is_some());
 
-        let with_revert: Vec<&str> = incident_card(colour, true)
+        let with_revert: Vec<&str> = incident_card(colour, true, &CardLoadedFlags::default())
             .details
             .iter()
             .map(|(key, _)| *key)
@@ -1256,7 +1508,7 @@ mod tests {
             "a probe and a revert together print the description the revert takes back"
         );
 
-        let without_revert: Vec<&str> = incident_card(colour, false)
+        let without_revert: Vec<&str> = incident_card(colour, false, &CardLoadedFlags::default())
             .details
             .iter()
             .map(|(key, _)| *key)
@@ -1283,11 +1535,12 @@ mod tests {
         let plain = log.get(id).expect("open");
         assert!(plain.evidence.probed().is_none());
         for revert_available in [false, true] {
-            let keys: Vec<&str> = incident_card(plain, revert_available)
-                .details
-                .iter()
-                .map(|(key, _)| *key)
-                .collect();
+            let keys: Vec<&str> =
+                incident_card(plain, revert_available, &CardLoadedFlags::default())
+                    .details
+                    .iter()
+                    .map(|(key, _)| *key)
+                    .collect();
             assert!(!keys.contains(&"probed"));
             assert!(
                 !keys.contains(&"assumed"),
@@ -1305,7 +1558,7 @@ mod tests {
             }
             let (log, id) = opened(entry.code, &probed);
             let incident = log.get(id).expect("open");
-            let view = incident_card(incident, false);
+            let view = incident_card(incident, false, &CardLoadedFlags::default());
             let expected = policy_recovery(entry.code, incident.subject, &incident.evidence);
             let offered = view
                 .actions
@@ -1341,7 +1594,7 @@ mod tests {
             &probed,
         );
         let incident = log.get(id).expect("open");
-        let view = incident_card(incident, false);
+        let view = incident_card(incident, false, &CardLoadedFlags::default());
         assert_eq!(view.actions.len(), 1);
         assert_eq!(view.actions[0].label, "How to fix this");
         assert!(!view.actions[0].enabled);
@@ -1372,7 +1625,7 @@ mod tests {
         assert!(log.resolve(id, IncidentOutcome::Applied));
         let incident = log.get(id).expect("open");
 
-        let live = incident_card(incident, true);
+        let live = incident_card(incident, true, &CardLoadedFlags::default());
         assert_eq!(live.state_label, "Applied");
         assert_eq!(live.actions.len(), 1);
         assert_eq!(live.actions[0].label, REVERT_LABEL);
@@ -1390,7 +1643,7 @@ mod tests {
             IncidentOutcome::Reverted
         );
 
-        let after_undo = incident_card(incident, false);
+        let after_undo = incident_card(incident, false, &CardLoadedFlags::default());
         assert!(
             !after_undo.actions[0].enabled,
             "a global Undo clears assumed_from, so the revert must grey out"
@@ -1406,7 +1659,7 @@ mod tests {
         );
         let incident = log.get(id).expect("open");
 
-        let plain = incident_card(incident, false);
+        let plain = incident_card(incident, false, &CardLoadedFlags::default());
         let keys = plain
             .details
             .iter()
@@ -1427,7 +1680,7 @@ mod tests {
         );
         assert_eq!(plain.details[6].1, "1");
 
-        let assumed = incident_card(incident, true);
+        let assumed = incident_card(incident, true, &CardLoadedFlags::default());
         let keys = assumed
             .details
             .iter()

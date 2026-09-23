@@ -14,8 +14,8 @@ use crate::{
     },
     icons::{self, Icon},
     incident_ui::{
-        CardPress, append_investigating_rows, card_action_outcome, incident_card,
-        show_incident_card, show_proposal_card,
+        CardLoadedFlags, CardPress, append_investigating_rows, card_action_outcome, incident_card,
+        revert_available_for_asset, show_incident_card, show_proposal_card,
     },
     investigator::{ProposalAction, proposal_card_with_reinvestigate, shows_proposal_card},
     media_workflow::{paint_source_status, source_display_state},
@@ -446,17 +446,23 @@ impl KinewrightApp {
     /// explained incident's story is over — its outcome is recorded and its
     /// audit line is in the log — so it takes no more wall space. At most one
     /// press is sent per frame.
+    /// One frame fn past clippy's 100 lines: the per-incident loaded
+    /// flags plus the Investigate press ride beside the existing
+    /// Re-investigate plumbing rather than split across single-call
+    /// helpers.
+    #[allow(clippy::too_many_lines)]
     fn show_asset_incidents(&mut self, ui: &mut egui::Ui, asset_id: AssetId) {
         let project_index = self.focused_project;
         let investigating = self.investigating_card_for_project(project_index);
         let session_pairs = self.investigator_session_pairs_for_project(project_index);
-        let (pressed, reinvestigate, mute, proposal_press) = {
+        let (pressed, reinvestigate, investigate, mute, proposal_press) = {
             let handle = Arc::clone(&self.focused().incidents);
             let log = handle
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut pressed: Option<(IncidentId, Operation, IncidentOutcome)> = None;
             let mut reinvestigate = None;
+            let mut investigate = None;
             let mut mute = None;
             let mut proposal_press = None;
             // `IN1b` §5.5 rule 31: the `==` is deliberate and stays. After
@@ -474,12 +480,22 @@ impl KinewrightApp {
                 // `IN1b` §5.5 rule 28: colour is the one code that ships a
                 // revert, and its condition is the asset still carrying the
                 // assumption the revert would take back.
-                let revert_available = self
-                    .focused()
-                    .document
-                    .asset(asset_id)
-                    .is_some_and(|asset| asset.assumed_from.is_some());
-                let mut view = incident_card(incident, revert_available);
+                let revert_available =
+                    revert_available_for_asset(&self.focused().document, asset_id);
+                let session = self.focused();
+                let flags = CardLoadedFlags {
+                    is_loaded_open: session.loaded_open_ids.contains(&incident.id),
+                    eligible: self.investigator_session_eligible(
+                        project_index,
+                        incident.id,
+                        incident.code,
+                        incident.subject,
+                    ),
+                    subject_missing: session.subject_missing.contains(&incident.id),
+                    earlier_session: session.loaded_ids.contains(&incident.id),
+                    loaded_wall_millis: session.loaded_walls.get(&incident.id).copied().flatten(),
+                };
+                let mut view = incident_card(incident, revert_available, &flags);
                 if let Some(card) = investigating
                     && card.id == incident.id
                 {
@@ -499,6 +515,10 @@ impl KinewrightApp {
                     }
                     Some(CardPress::Reinvestigate) => {
                         reinvestigate = Some(incident.id);
+                        break;
+                    }
+                    Some(CardPress::Investigate) => {
+                        investigate = Some(incident.id);
                         break;
                     }
                     Some(CardPress::NeverInvestigate) => {
@@ -525,13 +545,16 @@ impl KinewrightApp {
                     }
                 }
             }
-            (pressed, reinvestigate, mute, proposal_press)
+            (pressed, reinvestigate, investigate, mute, proposal_press)
         };
         if let Some((id, operation, outcome)) = pressed {
             self.send_incident_recovery(project_index, id, operation, outcome);
         }
         if let Some(id) = reinvestigate {
             self.reinvestigate(project_index, id);
+        }
+        if let Some(id) = investigate {
+            self.investigate(project_index, id);
         }
         if let Some(code) = mute {
             self.mute_investigator_code(project_index, code);
