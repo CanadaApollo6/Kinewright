@@ -1837,7 +1837,7 @@ impl KinewrightMcp {
         let Some(incident) = log.get(id).cloned() else {
             return Ok(incident_error(
                 "incident_not_found",
-                &format!("no incident {id} is open or resolved in this session"),
+                &format!("no incident {id} is open or resolved for this project"),
                 "incident_id",
                 &args.incident_id.to_string(),
                 "an incident id returned by get_incidents",
@@ -11793,9 +11793,9 @@ struct DiscardEditPlanArgs {
 }
 
 // IN1 §6.2 rule 5. The field doc comments below are normative bytes: they are
-// measured into `get_incidents`' 493 B input schema and therefore into the
+// measured into `get_incidents`' 527 B input schema and therefore into the
 // registry pin, and `expected_revision`'s comment stays on *two* source lines
-// because schemars joins them with a literal `\n` that is one of the 493
+// because schemars joins them with a literal `\n` that is one of the 527
 // (IN1 §6.7 rule 34). This comment is deliberately not a doc comment: schemars
 // would publish it as the schema's own `description` and move the pin.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -11805,7 +11805,7 @@ struct GetIncidentsArgs {
     /// read every open incident at the current revision.
     #[serde(default)]
     expected_revision: Option<u64>,
-    /// Include incidents already resolved this session.
+    /// Include incidents already resolved, including ones restored from earlier sessions.
     #[serde(default)]
     include_resolved: bool,
 }
@@ -13254,12 +13254,12 @@ fn inspector_tools() -> Vec<Tool> {
     let read_only = read_only_annotations;
     vec![
         // IN1 §6.4 rule 20: both descriptions are normative bytes, measured at
-        // 492 B and 365 B, with self-contained first sentences because
+        // 530 B and 365 B, with self-contained first sentences because
         // `first_sentence` is what `search_capabilities` and `get_capability`
         // publish.
         Tool::new(
             "get_incidents",
-            "Return the open incidents for this project at one exact timeline revision, each with its stable code, severity, subject, observed and allowed values, the probed source description, and the typed recovery actions its policy class allows. An incident of class auto_apply has already been applied by the application; revert it by sending its probed description back through set_asset_color_description. Pass expected_revision to gate the read, include_resolved to see this session's resolutions.",
+            "Return the open incidents for this project at one exact timeline revision, each with its stable code, severity, subject, observed and allowed values, the probed source description, and the typed recovery actions its policy class allows. An incident of class auto_apply has already been applied by the application; revert it by sending its probed description back through set_asset_color_description. Pass expected_revision to gate the read, include_resolved to see resolved incidents including ones restored from earlier sessions.",
             schema_object::<GetIncidentsArgs>(),
         )
         .with_annotations(read_only()),
@@ -17165,10 +17165,16 @@ pub const IN1_INCIDENT_SERIALIZED_BYTES: usize = 819;
 /// `in2_every_code_fits_the_re_measured_ceiling_on_every_subject_shape` is the
 /// twin, over the same product.
 ///
-/// **The divisor is the assertion worth naming in advance.** One more optional
-/// string on [`kinewright_core::Incident`] and the *divisor* fails while the
-/// ceiling assertion still passes; the printed `IN2_CEILING` line is what a
-/// reader re-reads when that happens.
+/// **The divisor proves the ceiling is load-bearing** (`IN2B` §0.5 E-B6
+/// corrects the earlier reading, which had the failure mode backwards).
+/// The live constraint is `serialised ≤ 4 096`, asserted `<=` over the
+/// whole product; `worst > CEILING / 2` fails when the measured worst
+/// *shrinks* below half the ceiling — one more optional string on
+/// [`kinewright_core::Incident`] moves the ceiling assertion, never the
+/// divisor. Measured on this tree: worst 2 457 B, **1 639 B** of
+/// headroom under the ceiling and **409 B** of margin over half; the
+/// printed `IN2_CEILING` line is what a reader re-reads when the worst
+/// moves.
 pub const IN1_INCIDENT_SERIALIZED_CEILING_BYTES: usize = 4_096;
 
 /// IN1 §6.2 rule 11: the one sentence that stops a model inventing a second
@@ -17236,7 +17242,7 @@ fn record_proposal_refusal(error: RecordProposalError, id: IncidentId) -> CallTo
     match error {
         RecordProposalError::NotFound => propose_fix_error(
             "incident_not_found",
-            &format!("no incident {id} is open or resolved in this session"),
+            &format!("no incident {id} is open or resolved for this project"),
             "incident_id",
             &id.0.to_string(),
             "an incident id returned by get_incidents",
@@ -27083,9 +27089,9 @@ mod tests {
             (
                 "get_incidents",
                 CapabilityKind::Inspector,
-                1_145,
-                493,
-                492,
+                1_217,
+                527,
+                530,
                 236,
             ),
             (
@@ -27922,15 +27928,15 @@ mod tests {
     ///
     /// **Pin site 1 of 3 (`IN1b` §6.4 rules 7–8, erratum `IN1b`-R3).** Part B
     /// moved neither the quad nor the sextuple; **IN2 Part A moves the
-    /// sextuple and not the quad**, for the **eighteenth** consecutive
+    /// sextuple and not the quad**, for the **nineteenth** consecutive
     /// measurement of the served surface. IN2 adds no served tool, no
     /// `Operation` variant and no `Document`-bearing schema, and
     /// `served_tools()` still filters `capability_tools()` by
     /// `COMPACT_TOOL_NAMES`, which IN2 does not touch — so `7 / 5 660 /
     /// 3 510 / 998` is unchanged below.
     ///
-    /// **The sextuple is re-pinned to `141 / 54 / 87 / 1 552 431 / 1 407 446 /
-    /// 121 854`, and it carries its decomposition** (IN2 §0.4 n, §6.4
+    /// **The sextuple is re-pinned to `141 / 54 / 87 / 1 552 503 / 1 407 480 /
+    /// 121 892`, and it carries its decomposition** (IN2 §0.4 n, §6.4
     /// rule 11), because the three byte figures are a function of description
     /// text the contract deliberately does not fix. Measured against `IN1b`'s
     /// `1 551 301 / 1 407 012 / 121 315`, the whole move is
@@ -27946,6 +27952,15 @@ mod tests {
     ///
     /// 157 + 434 + 539 = 1 130, which is the whole of the growth: nothing else
     /// in the registry moved.
+    ///
+    /// **IN2B Part B re-pins the three byte figures to `1 552 503 / 1 407 480
+    /// / 121 892`** (`IN2B` §10 rules 1–4): the whole move is **+72 / +34 /
+    /// +38**, which is exactly the two rule-1 text deltas — +38 B of
+    /// `get_incidents` description text (rule 1a) into serialized and
+    /// description bytes, +34 B of `include_resolved` schema text (rule 1b)
+    /// into serialized and input-schema bytes — pinned one by one in
+    /// `in1_the_two_capabilities_are_registry_only_and_cost_their_measured_bytes`.
+    /// Counts stay `141 / 54 / 87`: no new capability, no new tool.
     ///
     /// **Perf follow-up:** `served_tools()` no longer filters
     /// `capability_tools()`; it builds the same 7 descriptors directly from
@@ -27979,15 +27994,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_552_431, 5_660),
+            (1_552_503, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_407_446,
+            registry_metrics.input_schema_bytes, 1_407_480,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 121_854,
+            registry_metrics.description_bytes, 121_892,
             "registry={registry_metrics:?}"
         );
         assert_eq!(

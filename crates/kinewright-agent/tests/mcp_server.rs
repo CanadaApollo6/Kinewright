@@ -2425,7 +2425,7 @@ async fn cc7_prepare_commit_and_compare(
 /// `COMPACT_TOOL_NAMES` and IN1 touches neither that list nor `Operation`.
 ///
 /// **Pin site 2 of 3 (`IN1b` §6.4 rules 7–8, erratum `IN1b`-R3).** The served
-/// quad does not move for the **eighteenth** measurement: `IN1b` added no
+/// quad does not move for the **nineteenth** measurement: `IN1b` added no
 /// served tool, no capability and no schema field, and IN2 Part A adds one
 /// **registry-only** capability, `propose_fix`, which `served_tools()`'s
 /// `COMPACT_TOOL_NAMES` filter never publishes. The registry sextuple does
@@ -10350,9 +10350,9 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 
 /// IN1 §6.6 and §9 clause 13, `IN1b` §6.4 rules 7–8 and §9 clause 17, and IN2
 /// §6.4 rules 12–13 and §9 clause 19: **three** registry-only capabilities, no
-/// served tool, for the **eighteenth** consecutive measurement.
+/// served tool, for the **nineteenth** consecutive measurement.
 ///
-/// The registry sextuple is `141 / 54 / 87 / 1 552 431 / 1 407 446 / 121 854`,
+/// The registry sextuple is `141 / 54 / 87 / 1 552 503 / 1 407 480 / 121 892`,
 /// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
 /// this test pins the three counts and the served quad over the live endpoint.
@@ -10368,7 +10368,7 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 /// to IN2 §9.1 item 33's name; every IN1 and `IN1b` assertion in it is
 /// unchanged except the two registry counts and the ceiling.
 #[tokio::test(flavor = "multi_thread")]
-async fn in2_the_served_quad_does_not_move_for_the_eighteenth_measurement() {
+async fn in2_the_served_quad_does_not_move_for_the_nineteenth_measurement() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
@@ -10432,7 +10432,7 @@ async fn in2_the_served_quad_does_not_move_for_the_eighteenth_measurement() {
             metrics.description_bytes
         ),
         (7, 5_660, 3_510, 998),
-        "the served quad does not move for the eighteenth consecutive measurement: {metrics:?}"
+        "the served quad does not move for the nineteenth consecutive measurement: {metrics:?}"
     );
 
     // IN1 §6.2 rule 9, `IN1b` §3.11 rule 43 and IN2 §4.2 rule 11: the two
