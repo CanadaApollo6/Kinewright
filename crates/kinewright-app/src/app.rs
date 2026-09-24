@@ -23,6 +23,12 @@ use kinewright_core::{
     recovery_description,
 };
 use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits};
+use kinewright_project::{
+    ProjectSaveError, ProjectSaveReport, RefuseRename, SidecarMode, SidecarWriter,
+    can_overwrite_save, canonical_session_key, derive_lut_store, digest_bytes, load_document,
+    project_newer_format_observation, serialize_project_document, sidecar_path_for_project,
+    sidecar_write_failed_observation, write_file_atomic, write_project_bytes,
+};
 
 use crate::{
     error_ui::ErrorLog,
@@ -31,16 +37,10 @@ use crate::{
     media_workflow::media_asset_requires_refresh,
     mixer_pane_ui::{LEARN_NO_SILENCE, NoiseLearnRange},
     project::{
-        ProjectFile, ProjectSaveError, ProjectSaveReport, ProjectSession, can_overwrite_save,
-        canonical_session_key, derive_lut_store, focus_publishes_lut_library, index_after_close,
-        project_name, project_newer_format_observation, serialize_project_document,
-        session_index_by_id, write_file_atomic, write_project_bytes,
+        ProjectSession, focus_publishes_lut_library, index_after_close, project_name,
+        session_index_by_id,
     },
     recovery::{RestoreRequest, recovery_damage_observation, recovery_unavailable_observation},
-    sidecar::{
-        RefuseRename, SidecarMode, SidecarWriter, digest_bytes, sidecar_path_for_project,
-        sidecar_write_failed_observation,
-    },
     theme::{self, color, size, space},
     timeline_ui::is_internal_marker,
     transcript_ui::TranscriptScope,
@@ -1507,7 +1507,7 @@ impl KinewrightApp {
         // A failed restore used to be a bare status string; it is now a
         // `project_unclassified` incident whose written body tells the
         // person the last saved version is still intact.
-        match crate::recovery::restore_status(result) {
+        match kinewright_project::restore_status(result) {
             Ok(status) => self.status = status,
             Err(observation) => self.note_observation(*observation),
         }
@@ -3661,23 +3661,6 @@ fn default_project_document() -> Document {
         color_context: kinewright_core::ColorContext::default(),
         ..Document::default()
     }
-}
-
-/// Load a project file: one read, one parse (`IN2B` §4 rule 2).
-///
-/// Returns the parsed document with the envelope version it read (missing → 1,
-/// every legacy file) and the FNV-1a digest of the file bytes (§2 rule 9 —
-/// the sidecar gate reuses it, no second read, no TOCTOU). The parse is
-/// `from_slice::<ProjectFile>` then unwrap: the envelope parses legacy files
-/// directly via the default, never probe-then-parse.
-fn load_document(path: &Path) -> Result<(Document, u32, String), String> {
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    let file: ProjectFile = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    file.document
-        .validate()
-        .map_err(|error| error.to_string())?;
-    let digest = digest_bytes(&bytes);
-    Ok((file.document, file.format_version, digest))
 }
 
 fn window_icon() -> Option<egui::IconData> {
@@ -6414,7 +6397,7 @@ pub(crate) mod in1_tests {
     #[test]
     fn in1b_project_produces_its_declared_code_class_and_severity() {
         let (_fixture, mut app) = in1b_app();
-        let status = crate::recovery::restore_status(Err("the journal is truncated".to_owned()));
+        let status = kinewright_project::restore_status(Err("the journal is truncated".to_owned()));
         let observation = status.expect_err("a failed restore returns an observation");
         app.note_observation(*observation);
         let incident = in1b_route_one(&mut app);
@@ -6429,7 +6412,7 @@ pub(crate) mod in1_tests {
             "the sentence the status bar used to carry alone survives in `observed`"
         );
         assert_eq!(
-            crate::recovery::restore_status(Ok(())),
+            kinewright_project::restore_status(Ok(())),
             Ok("Recovered unsaved work".to_owned()),
             "the success arm still returns its string as it always did"
         );
@@ -10163,7 +10146,9 @@ mod in2b_tests {
     use kinewright_media::{FfmpegMediaEngine, test_support::TempDirectory};
 
     use super::*;
-    use crate::sidecar::{FlushOutcome, SidecarLoad, load_sidecar, sidecar_matches_project};
+    use kinewright_project::{
+        FlushOutcome, ProjectFile, SidecarLoad, load_sidecar, sidecar_matches_project,
+    };
 
     /// The smallest real app that can save, on an optional project path.
     #[allow(clippy::too_many_lines)]
@@ -10629,9 +10614,13 @@ mod in2b_tests {
 
         // B-5 gate box: a save during an in-flight background write leaves
         // the save's digest pair, never the stale job's bytes.
-        let stale =
-            crate::sidecar::build_sidecar_bytes(&[], &[], "aaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaa")
-                .expect("the stale snapshot builds");
+        let stale = kinewright_project::build_sidecar_bytes(
+            &[],
+            &[],
+            "aaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaa",
+        )
+        .expect("the stale snapshot builds");
         app.sidecar_writer.submit(sidecar.clone(), stale);
         app.write_project(&project_path).expect("the save succeeds");
         let landed_digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
@@ -11637,14 +11626,16 @@ mod in2b_tests {
             color_qc_ui::qc_panel_observation,
             error_ui::{WorkerError, worker_error_observation},
             export_ui::{ExportVerificationKind, export_panel_observation},
-            project::project_newer_format_observation,
             recovery::{recovery_damage_observation, recovery_unavailable_observation},
-            sidecar::{sidecar_refused_observation, sidecar_write_failed_observation},
         };
         use kinewright_core::{
             ClipId, ColorQcError, ColorQcIncident, DeliveryVerificationError,
             DeliveryVerificationIncident, EffectId, IncidentEvidence, IncidentId, IncidentLog,
             IncidentRecord, IncidentState, IncidentTelemetry,
+        };
+        use kinewright_project::{
+            project_newer_format_observation, sidecar_refused_observation,
+            sidecar_write_failed_observation,
         };
 
         fn rs_lines(dir: &std::path::Path, out: &mut Vec<String>) {
@@ -12205,7 +12196,7 @@ mod in2b_tests {
         };
 
         use crate::incident_ui::{CardPress, investigate_action};
-        use crate::sidecar::{digest_bytes, sidecar_path_for_project};
+        use kinewright_project::{digest_bytes, sidecar_path_for_project};
 
         // Two allowlisted opens on disk.
         let code_one = IncidentCode::Label(LabelIncident::Look);
@@ -12406,7 +12397,7 @@ mod in2b_tests {
             IncidentEvidence, IncidentProposal, IncidentRecord, IncidentState, IncidentTelemetry,
         };
 
-        use crate::sidecar::{digest_bytes, sidecar_path_for_project};
+        use kinewright_project::{digest_bytes, sidecar_path_for_project};
 
         let code_one = IncidentCode::Label(LabelIncident::Look);
         let code_two = IncidentCode::Label(LabelIncident::MediaIncomplete);
@@ -12560,9 +12551,9 @@ mod in2b_tests {
         use kinewright_core::INVESTIGATOR_ALLOWLIST;
 
         use crate::error_ui::{WorkerError, worker_error_observation};
-        use crate::project::project_newer_format_observation;
         use crate::recovery::{recovery_damage_observation, recovery_unavailable_observation};
-        use crate::sidecar::{sidecar_refused_observation, sidecar_write_failed_observation};
+        use kinewright_project::project_newer_format_observation;
+        use kinewright_project::{sidecar_refused_observation, sidecar_write_failed_observation};
 
         let (mut app, _engine) = in2b_harness(Document::default(), None);
         in2_configure_scripted_at(
@@ -13307,7 +13298,7 @@ mod in2b_tests {
             AssetId, IncidentEvidence, IncidentRecord, IncidentState, IncidentTelemetry,
         };
 
-        use crate::sidecar::{digest_bytes, sidecar_path_for_project};
+        use kinewright_project::{digest_bytes, sidecar_path_for_project};
 
         let record = IncidentRecord {
             id: IncidentId(1),

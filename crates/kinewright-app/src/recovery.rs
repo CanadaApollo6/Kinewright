@@ -38,6 +38,7 @@ use kinewright_core::{
     Core, Document, Event, IncidentCode, IncidentObservation, IncidentSubject, JournalCommand,
     LabelIncident, PROJECT_FORMAT_VERSION, TimelineRevision,
 };
+use kinewright_project::{allocate_journal_path, default_recovery_directory};
 use serde::{Deserialize, Serialize};
 
 use crate::theme::{self, type_size};
@@ -866,13 +867,6 @@ fn remove_file_best_effort(path: &Path, runtime_error: &Arc<Mutex<Option<String>
     }
 }
 
-fn default_recovery_directory() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map_or_else(std::env::temp_dir, PathBuf::from)
-        .join("Kinewright")
-        .join("recovery")
-}
-
 /// Every journal found on disk, in deterministic name order.
 fn scan_directory(directory: &Path) -> Vec<PendingJournal> {
     let Ok(entries) = fs::read_dir(directory) else {
@@ -905,81 +899,6 @@ fn scan_directory(directory: &Path) -> Vec<PendingJournal> {
         .collect()
 }
 
-/// FNV-1a, chosen over the standard hasher because journal names must stay
-/// stable across builds and Rust versions to find their project again.
-///
-/// Shared with the sidecar pairing digest (`IN2B` §0.4 d2), which needs the
-/// same stability for the same reason: one implementation, two callers.
-pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
-/// `MyVideo-1a2b3c4d5e6f7081.journal` - readable stem, collision-proof hash.
-fn journal_file_name(project_path: &Path) -> String {
-    let stem: String = project_path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_default()
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-        .take(24)
-        .collect();
-    let stem = if stem.is_empty() {
-        "project".to_owned()
-    } else {
-        stem
-    };
-    let hash = fnv1a_64(project_path.to_string_lossy().as_bytes());
-    format!("{stem}-{hash:016x}.journal")
-}
-
-/// The journal path for a project, never colliding with a reserved (pending)
-/// file: undecided crash data must not be truncated by a new session. An
-/// unsaved project keeps its current `unsaved-N` file across baselines.
-fn allocate_journal_path(
-    directory: &Path,
-    project_path: Option<&Path>,
-    current: &Path,
-    reserved: &[&Path],
-) -> PathBuf {
-    let is_reserved = |candidate: &Path| reserved.contains(&candidate);
-    if let Some(project_path) = project_path {
-        let base = journal_file_name(project_path);
-        let first = directory.join(&base);
-        if !is_reserved(&first) && (first == current || !first.exists()) {
-            return first;
-        }
-        let stem = base.trim_end_matches(".journal");
-        for suffix in 2.. {
-            let candidate = directory.join(format!("{stem}-{suffix}.journal"));
-            if !is_reserved(&candidate) && (candidate == current || !candidate.exists()) {
-                return candidate;
-            }
-        }
-        unreachable!("an unreserved journal suffix always exists");
-    }
-    let keeps_current = current
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("unsaved-"))
-        && !is_reserved(current);
-    if keeps_current {
-        return current.to_path_buf();
-    }
-    for number in 1.. {
-        let candidate = directory.join(format!("unsaved-{number}.journal"));
-        if !is_reserved(&candidate) && !candidate.exists() {
-            return candidate;
-        }
-    }
-    unreachable!("an unreserved unsaved journal name always exists");
-}
-
 fn pending_project_label(project_path: Option<&Path>) -> String {
     project_path.and_then(Path::file_name).map_or_else(
         || "Unsaved project".to_owned(),
@@ -997,31 +916,6 @@ fn damage_description(damage: &Damage) -> String {
     )
 }
 
-/// The status line a finished crash-recovery restore writes, and the
-/// observation a failed one opens (`IN1b` §5.7, Appendix B row 28).
-///
-/// The success arm returns its string as it always did. The `Err` arm returns
-/// **no** string: it used to compose *"Could not restore unsaved work: …"*
-/// straight into `self.status` with no log write on the path at all, which is
-/// the third of the three sinks that reached a person without touching
-/// `ErrorLog`. The caller queues the observation and `note_incident` writes
-/// the status line. The observation is boxed because it is much larger than
-/// the success string and `clippy::result_large_err` is part of the house
-/// `-D warnings` gate.
-pub(crate) fn restore_status(
-    result: Result<(), String>,
-) -> Result<String, Box<IncidentObservation>> {
-    match result {
-        Ok(()) => Ok("Recovered unsaved work".to_owned()),
-        Err(error) => Err(Box::new(IncidentObservation::plain(
-            IncidentCode::Label(LabelIncident::Project),
-            IncidentSubject::Project,
-            format!("Could not restore unsaved work: {error}"),
-            TimelineRevision::default(),
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1034,6 +928,7 @@ mod tests {
         AssetId, ClipId, Command, Effect, EffectId, Event, Marker, MarkerId, MediaAsset, MediaKind,
         Operation, ParamValue, Rational, TimeCode, Title, Track, TrackId, TrackKind,
     };
+    use kinewright_project::journal_file_name;
     use proptest::prelude::*;
 
     use super::*;

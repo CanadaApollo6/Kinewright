@@ -10,7 +10,7 @@
 //! sequence-numbered jobs keyed by path, stale jobs dropped, per-job unique
 //! temp names, temp + rename. Close/exit/save submit and join; the debounced
 //! background flush submits without joining and its failures surface through
-//! [`SidecarWriter::take_errors`].
+//! [`SidecarWriter::take_errors`]. Moved whole from the app in AW1 S1.
 
 use std::{
     collections::HashMap,
@@ -35,17 +35,17 @@ use serde_json::value::RawValue;
 ///
 /// Independent of the project's counter: coupling them would force a sidecar
 /// bump every time the document format moves and vice versa (d11).
-pub(crate) const SIDECAR_FORMAT_VERSION: u32 = 1;
+pub const SIDECAR_FORMAT_VERSION: u32 = 1;
 
 /// The sidecar suffix: `<stem>.kinewright-incidents` (d1).
-pub(crate) const SIDECAR_SUFFIX: &str = "kinewright-incidents";
+pub const SIDECAR_SUFFIX: &str = "kinewright-incidents";
 
 /// FNV-1a 64 over bytes as 16 lowercase hex chars (`IN2B` §0.4 d2).
 ///
 /// The pairing digest: it catches file mix-ups, not adversaries. Shared with
 /// the journal-name hash — one implementation, two callers.
 #[must_use]
-pub(crate) fn digest_bytes(bytes: &[u8]) -> String {
+pub fn digest_bytes(bytes: &[u8]) -> String {
     format!("{:016x}", crate::recovery::fnv1a_64(bytes))
 }
 
@@ -56,7 +56,7 @@ pub(crate) fn digest_bytes(bytes: &[u8]) -> String {
 /// sibling `<stem>.kinewright-incidents`. A path with no file stem (a root, a
 /// parent reference) likewise yields `None` rather than inventing a name.
 #[must_use]
-pub(crate) fn sidecar_path_for_project(project_path: Option<&Path>) -> Option<PathBuf> {
+pub fn sidecar_path_for_project(project_path: Option<&Path>) -> Option<PathBuf> {
     let path = project_path?;
     let stem = path.file_stem()?;
     let mut name = stem.to_os_string();
@@ -67,7 +67,7 @@ pub(crate) fn sidecar_path_for_project(project_path: Option<&Path>) -> Option<Pa
 
 /// How `ProjectSession::create` treats the sidecar (N2/B-1).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SidecarMode {
+pub enum SidecarMode {
     /// Digest-gated load: startup reopen and `open_project`, carrying the
     /// digest `load_document` read — single read, no TOCTOU (`IN2B` §4
     /// rule 2).
@@ -82,7 +82,7 @@ pub(crate) enum SidecarMode {
 
 /// A sidecar that parsed and passed the version gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LoadedSidecar {
+pub struct LoadedSidecar {
     /// Records that parsed, in file order — including unknown-code records,
     /// which `restore` aggregates while their raw texts ride in `carried`
     /// (N4/F3).
@@ -106,7 +106,7 @@ pub(crate) struct LoadedSidecar {
 /// a fifth arm: the caller applies [`sidecar_matches_project`] to `Current`
 /// and refuses on mismatch, same disposition as `Corrupt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SidecarLoad {
+pub enum SidecarLoad {
     /// No file: an empty log, silently.
     Absent,
     /// Parsed and version-gated; the caller still checks the digest pair.
@@ -151,7 +151,7 @@ struct SidecarFile {
 ///   `carried` untouched, and unknown-code records join them (N4/F3) while
 ///   still reaching `restore` for the aggregate — body #5 stays true.
 #[must_use]
-pub(crate) fn load_sidecar(sidecar_path: &Path) -> SidecarLoad {
+pub fn load_sidecar(sidecar_path: &Path) -> SidecarLoad {
     let bytes = match fs::read(sidecar_path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return SidecarLoad::Absent,
@@ -248,7 +248,7 @@ fn carried_raw_id(text: &str) -> Option<u64> {
 /// Either digest accepts: a crash between the sidecar write and the project
 /// write leaves the *previous* digest matching — no false `.bak`.
 #[must_use]
-pub(crate) fn sidecar_matches_project(loaded: &LoadedSidecar, project_digest: &str) -> bool {
+pub fn sidecar_matches_project(loaded: &LoadedSidecar, project_digest: &str) -> bool {
     loaded.project_digest == project_digest || loaded.previous_digest == project_digest
 }
 
@@ -259,21 +259,22 @@ pub(crate) fn sidecar_matches_project(loaded: &LoadedSidecar, project_digest: &s
 /// that does not exist, so a second refusal never overwrites the first.
 /// Returns the path the bytes moved to. A newer build never reads a `.bak` on
 /// its own; the person renames it back by hand (N-10).
-pub(crate) fn refuse_sidecar(sidecar_path: &Path) -> io::Result<PathBuf> {
+/// # Errors
+/// Returns the rename's IO error, with the sidecar left in place.
+pub fn refuse_sidecar(sidecar_path: &Path) -> io::Result<PathBuf> {
     refuse_sidecar_with(sidecar_path, &|from, to| fs::rename(from, to))
 }
 
 /// The injected `.bak` rename (N6/H3): `None` renames for real, `Some`
 /// runs the test's failure.
-pub(crate) type RefuseRename = dyn Fn(&Path, &Path) -> io::Result<()>;
+pub type RefuseRename = dyn Fn(&Path, &Path) -> io::Result<()>;
 
 /// [`refuse_sidecar`] with the rename injected (N6/H3): a failed `.bak`
 /// rename suspends the session instead of failing silently, and no portable
 /// fixture fails a real rename — the test injects the failure.
-pub(crate) fn refuse_sidecar_with(
-    sidecar_path: &Path,
-    rename: &RefuseRename,
-) -> io::Result<PathBuf> {
+/// # Errors
+/// Returns the injected rename's IO error, with the sidecar left in place.
+pub fn refuse_sidecar_with(sidecar_path: &Path, rename: &RefuseRename) -> io::Result<PathBuf> {
     let mut first = sidecar_path.as_os_str().to_owned();
     first.push(".bak");
     let mut candidate = PathBuf::from(first);
@@ -297,7 +298,7 @@ pub(crate) fn refuse_sidecar_with(
 /// Transient, like every §5 note: a per-run note persisted `Open` would badge
 /// a clean reopen with a false card (rule 12, N2/B-4).
 #[must_use]
-pub(crate) fn sidecar_refused_observation(
+pub fn sidecar_refused_observation(
     reason: impl Into<String>,
     revision: TimelineRevision,
 ) -> IncidentObservation {
@@ -315,7 +316,7 @@ pub(crate) fn sidecar_refused_observation(
 /// `sidecar_write_failed`, and the save returns success anyway (`IN2B` §2 rule
 /// 6, §5 rule 1 #7). Transient, like every §5 note.
 #[must_use]
-pub(crate) fn sidecar_write_failed_observation(
+pub fn sidecar_write_failed_observation(
     reason: impl Into<String>,
     revision: TimelineRevision,
 ) -> IncidentObservation {
@@ -336,7 +337,9 @@ pub(crate) fn sidecar_write_failed_observation(
 /// [`RawValue`], so the round trip is byte-equal, not value-equal — a
 /// normalising `Value` pass would rewrite history this build cannot read.
 /// Consecutive writes over an unchanged log are byte-identical.
-pub(crate) fn build_sidecar_bytes(
+/// # Errors
+/// Returns the serialisation failure as a string.
+pub fn build_sidecar_bytes(
     records: &[IncidentRecord],
     carried: &[String],
     project_digest: &str,
@@ -373,7 +376,7 @@ pub(crate) fn build_sidecar_bytes(
 /// unsaved project (no path, no IO — item 17) and the unchanged log (nothing
 /// newer than the last write, no torn-write window opened for nothing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FlushOutcome {
+pub enum FlushOutcome {
     /// Bytes landed via temp + rename; the report counts them.
     Written(kinewright_core::WriteReport),
     /// No IO was attempted.
@@ -416,7 +419,7 @@ type RenameHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 /// sent after shutdown begins is never processed, so `submit_and_join` must
 /// not race the last `Arc` drop — in production every flush happens before
 /// teardown, and tests join before dropping.
-pub(crate) struct SidecarWriter {
+pub struct SidecarWriter {
     tx: Sender<WriterMessage>,
     seq: AtomicU64,
     /// Async-job failures, drained by the frame thread, which notes one
@@ -438,7 +441,7 @@ impl SidecarWriter {
     /// `sidecar_write_failed`) and async jobs queue nowhere. The spawn runs
     /// once per app lifetime, where the OS is not out of threads.
     #[must_use]
-    pub(crate) fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         let (tx, rx) = crossbeam_channel::unbounded();
         let writer = Arc::new(Self {
             tx,
@@ -464,7 +467,7 @@ impl SidecarWriter {
     ///
     /// Best-effort: a send failure means the writer is gone, which only
     /// shutdown does — and shutdown drains before it stops.
-    pub(crate) fn submit(&self, path: PathBuf, bytes: Vec<u8>) {
+    pub fn submit(&self, path: PathBuf, bytes: Vec<u8>) {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         let _ = self.tx.send(WriterMessage::Job(WriterJob {
             path,
@@ -478,7 +481,9 @@ impl SidecarWriter {
     ///
     /// A superseded job still acks `Ok`: a newer job for the same path won,
     /// which is the outcome the caller wanted — the freshest bytes.
-    pub(crate) fn submit_and_join(&self, path: PathBuf, bytes: Vec<u8>) -> io::Result<()> {
+    /// # Errors
+    /// Returns the job's IO error, or a gone-writer error after shutdown.
+    pub fn submit_and_join(&self, path: PathBuf, bytes: Vec<u8>) -> io::Result<()> {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
         let sent = self
@@ -499,7 +504,7 @@ impl SidecarWriter {
     }
 
     /// Drain async-job failures for the frame thread to note.
-    pub(crate) fn take_errors(&self) -> Vec<(PathBuf, String)> {
+    pub fn take_errors(&self) -> Vec<(PathBuf, String)> {
         std::mem::take(
             &mut self
                 .errors
@@ -510,9 +515,10 @@ impl SidecarWriter {
 
     /// Run `hook` between the temp write and the rename of every job until
     /// replaced. Test-only: item 15's S-12 box pauses the writer mid-write and
-    /// loads in the window.
-    #[cfg(test)]
-    pub(crate) fn set_rename_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+    /// loads in the window. Behind `test-util` as well as `cfg(test)` because
+    /// the app's IN2B suite drives it cross-crate.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn set_rename_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         *self
             .rename_hook
             .lock()
@@ -640,7 +646,9 @@ fn sidecar_temp_path(sidecar_path: &Path, seq: u64) -> PathBuf {
 /// the same writable handle. Windows refuses `FlushFileBuffers` on a handle
 /// opened read-only, so reopening the file just to sync fails there with
 /// "access denied". A failed write or sync removes the partial file.
-pub(crate) fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// # Errors
+/// Returns the write or sync IO error, after removing the partial file.
+pub fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
     let written = fs::File::create(path).and_then(|mut file| {
         file.write_all(bytes)?;

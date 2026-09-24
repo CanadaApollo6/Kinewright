@@ -4,6 +4,7 @@ members = [
     "crates/kinewright-media",
     "crates/kinewright-agent",
     "crates/kinewright-app",
+    "crates/kinewright-project",
 ]
 resolver = "3"
 

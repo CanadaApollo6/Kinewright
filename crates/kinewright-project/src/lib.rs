@@ -1,0 +1,34 @@
+//! Shared project IO for the GUI and the headless CLI (AW1 §2), moved
+//! from the app in AW1 S1 (zero logic change except the named
+//! [`SidecarSession`] extraction delta).
+
+pub mod headless;
+pub mod lockfile;
+pub mod project;
+pub mod recovery;
+pub mod session;
+pub mod sidecar;
+
+pub use headless::{HeadlessSaveReport, save_headless};
+pub use lockfile::{
+    AcquiredLock, LOCK_ACQUIRE_ATTEMPTS, LOCK_ACQUIRE_RETRY_DELAY, LOCKFILE_FORMAT_VERSION,
+    LOCKFILE_SUFFIX, LockMode, LockfileClaim, LockfileError, LockfileHandle, ReclaimedOwner,
+    acquire_project_lock, acquire_project_lock_with_policy, lockfile_path_for_project,
+    reclaim_warning_json,
+};
+pub use project::{
+    ProjectFile, ProjectSaveError, ProjectSaveReport, can_overwrite_save, canonical_session_key,
+    derive_lut_store, load_document, project_newer_format_observation, serialize_project_document,
+    write_file_atomic, write_project_bytes, write_project_document,
+};
+pub use recovery::{
+    allocate_journal_path, default_recovery_directory, fnv1a_64, journal_file_name,
+    pending_journal_for_project, restore_status, retire_journal_for_project,
+};
+pub use session::{IncidentLogHandle, LoadedSidecarSession, SidecarSession};
+pub use sidecar::{
+    FlushOutcome, LoadedSidecar, RefuseRename, SIDECAR_FORMAT_VERSION, SIDECAR_SUFFIX, SidecarLoad,
+    SidecarMode, SidecarWriter, build_sidecar_bytes, digest_bytes, load_sidecar, refuse_sidecar,
+    refuse_sidecar_with, sidecar_matches_project, sidecar_path_for_project,
+    sidecar_refused_observation, sidecar_write_failed_observation, write_synced,
+};

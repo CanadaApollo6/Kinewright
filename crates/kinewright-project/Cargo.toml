@@ -1,0 +1,28 @@
+[package]
+name = "kinewright-project"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Test-only IO seams (`SidecarWriter::set_rename_hook`): the app's IN2B tests
+# drive them cross-crate, so they ride the same gate the app already enables
+# on core and media.
+test-util = []
+
+[dependencies]
+crossbeam-channel.workspace = true
+fs2.workspace = true
+kinewright-core = { path = "../kinewright-core" }
+kinewright-media = { path = "../kinewright-media" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# The sidecar round-trip tests persist through `TempDirectory`.
+kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
+
+[lints]
+workspace = true
