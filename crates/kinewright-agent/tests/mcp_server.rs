@@ -2443,7 +2443,8 @@ async fn cc7_prepare_commit_and_compare(
 /// `COMPACT_TOOL_NAMES` filter never publishes, IN2B Part B rewords two
 /// registry-only texts, which the filter never publishes either, and MO1 A4a
 /// adds two **registry-only** generated mutators, which the compact authority
-/// never serves either. The registry sextuple does move, to `143 / 56 / 87`,
+/// never serves either, and MO1 A4b adds three more of the same shape.
+/// The registry sextuple does move, to `146 / 59 / 87`,
 /// which is the two assertions below.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
@@ -2476,7 +2477,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        143,
+        146,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
@@ -2486,17 +2487,19 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          AU5 Part B adds plan_dialogue_repair, capture_room_tone and plan_room_tone_fill; \
          AU6 §5.4 Part A and Part B add no capability at all; \
          IN1 Part A adds get_incidents and resolve_incident as internal capabilities; \
-         MO1 A4a generates upsert_effect_keyframe and remove_effect_keyframe"
+         MO1 A4a generates upsert_effect_keyframe and remove_effect_keyframe; \
+         MO1 A4b generates set_effect_enabled, set_clip_enabled and set_clip_enabled_curve"
     );
     assert_eq!(
         operations.len(),
-        56,
+        59,
         "AU2 Part B generates two more mutators; neither part of AU3 generates one; \
          AU4 Part A generates two more; AU4 Part B generates none; \
          AU5 Part A generates none, because it adds no Operation variant; \
          AU5 Part B generates none either, because capture_room_tone submits an ordinary AddAsset; \
          AU6 adds no Operation variant; IN1 Part A adds none either; \
-         MO1 A4a adds UpsertEffectKeyframe and RemoveEffectKeyframe"
+         MO1 A4a adds UpsertEffectKeyframe and RemoveEffectKeyframe; \
+         MO1 A4b adds SetEffectEnabled, SetClipEnabled and SetClipEnabledCurve"
     );
     for name in [
         "set_track_mix",
@@ -10385,7 +10388,7 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 /// §6.4 rules 12–13 and §9 clause 19: **three** registry-only capabilities, no
 /// served tool, for the **twentieth** consecutive measurement.
 ///
-/// The registry sextuple is `143 / 56 / 87 / 1 716 334 / 1 568 912 / 123 949`,
+/// The registry sextuple is `146 / 59 / 87 / 1 793 716 / 1 645 364 / 124 376`,
 /// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
 /// this test pins the three counts and the served quad over the live endpoint.
@@ -10432,10 +10435,14 @@ async fn mo1_the_served_quad_does_not_move_for_the_twentieth_measurement() {
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        143,
-        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a adds two mutators"
+        146,
+        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a/b add five mutators"
     );
-    assert_eq!(operations.len(), 56, "MO1 A4a adds two Operation variants");
+    assert_eq!(
+        operations.len(),
+        59,
+        "MO1 A4b adds three more Operation variants"
+    );
     assert_eq!(registry.len() - operations.len(), 87);
     let state = registry
         .iter()

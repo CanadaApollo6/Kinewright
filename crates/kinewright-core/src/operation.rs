@@ -315,6 +315,33 @@ pub enum Operation {
         name: String,
         at: TimeCode,
     },
+    /// MO1 R17: write one effect's static `enabled` flag. A linked pair is
+    /// enabled/disabled via an atomic batch of two clip toggles — core stays
+    /// per-clip, so this operation never follows links itself.
+    SetEffectEnabled {
+        clip: ClipId,
+        effect: EffectId,
+        enabled: bool,
+    },
+    /// MO1 R17: write one clip's static `enabled` flag, per-clip like its
+    /// effect twin (linked pairs toggle via a two-operation batch).
+    SetClipEnabled {
+        clip: ClipId,
+        enabled: bool,
+    },
+    /// MO1 R18: replace or clear one clip's enable curve, in clip-local
+    /// frames. `null` clears it; the field is required, so an omitted `curve`
+    /// is an error and never a silent clear.
+    SetClipEnabledCurve {
+        clip: ClipId,
+        /// Values 0..1 under any interpolation, ordered-only with negatives
+        /// legal and no outside check (keep-outside, R5/R13). `null` clears
+        /// it. The field is required: an omitted `curve` is an error, never
+        /// a silent clear.
+        #[serde(deserialize_with = "deserialize_required_curve")]
+        #[schemars(required, with = "RequiredNullableCurve")]
+        curve: Option<AutomationCurve>,
+    },
     /// Replace one legacy `look_lut` / `cube_lut` at its exact vector position
     /// with an equivalent managed `creative_look` node (CC4 §9).
     ///
@@ -1301,6 +1328,15 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
             name,
             at,
         } => remove_effect_keyframe(doc, *clip, *effect, name, *at),
+        Operation::SetEffectEnabled {
+            clip,
+            effect,
+            enabled,
+        } => set_effect_enabled(doc, *clip, *effect, *enabled),
+        Operation::SetClipEnabled { clip, enabled } => set_clip_enabled(doc, *clip, *enabled),
+        Operation::SetClipEnabledCurve { clip, curve } => {
+            set_clip_enabled_curve(doc, *clip, curve.as_ref())
+        }
         Operation::SetTitleParam { clip, name, value } => {
             set_title_param(doc, *clip, name, value.clone())
         }
@@ -3605,6 +3641,11 @@ fn set_effect_keyframes(
             clip: clip_id,
             effect: effect_id,
         })?;
+    if name == ENABLED_CURVE_NAME {
+        validate_enabled_curve(&effect.name, &curve)?;
+        effect.enabled_curve = Some(curve);
+        return Ok(());
+    }
     let descriptor = crate::effect_descriptor(&effect.name)
         .and_then(|descriptor| descriptor.parameter(name))
         .ok_or_else(|| OpError::UnknownEffectParam {
@@ -3644,6 +3685,10 @@ fn clear_effect_keyframes(
             clip: clip_id,
             effect: effect_id,
         })?;
+    if name == ENABLED_CURVE_NAME {
+        effect.enabled_curve = None;
+        return Ok(());
+    }
     if crate::effect_descriptor(&effect.name)
         .and_then(|descriptor| descriptor.parameter(name))
         .is_none()
@@ -3807,6 +3852,51 @@ fn remove_effect_keyframe(
             .keyframes
             .insert(name.to_owned(), AutomationCurve { keyframes: keys });
     }
+    Ok(())
+}
+
+/// MO1 R17: write the static R4 flag. No descriptor, no curve — the effect
+/// only has to exist.
+fn set_effect_enabled(
+    doc: &mut Document,
+    clip_id: ClipId,
+    effect_id: EffectId,
+    enabled: bool,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let effect = doc.tracks[track_index].clips[clip_index]
+        .effects
+        .iter_mut()
+        .find(|effect| effect.id == effect_id)
+        .ok_or(OpError::MissingEffect {
+            clip: clip_id,
+            effect: effect_id,
+        })?;
+    effect.enabled = enabled;
+    Ok(())
+}
+
+/// MO1 R17: write the static R5 flag, per-clip — linked pairs toggle via an
+/// atomic batch of two of these, never by link-following here.
+fn set_clip_enabled(doc: &mut Document, clip_id: ClipId, enabled: bool) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    doc.tracks[track_index].clips[clip_index].enabled = enabled;
+    Ok(())
+}
+
+/// MO1 R18: replace or clear the clip enable curve through the AU4
+/// nullable-required shape (`None` clears). Values 0..1, any interpolation,
+/// ordered-only with negatives legal, no outside check.
+fn set_clip_enabled_curve(
+    doc: &mut Document,
+    clip_id: ClipId,
+    curve: Option<&AutomationCurve>,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    if let Some(curve) = curve {
+        validate_clip_enabled_curve(clip_id, curve)?;
+    }
+    doc.tracks[track_index].clips[clip_index].enabled_curve = curve.cloned();
     Ok(())
 }
 
@@ -4173,12 +4263,13 @@ fn validate_enabled_curve(effect_name: &str, curve: &AutomationCurve) -> Result<
     Ok(())
 }
 
-/// MO1 R5/R13: the clip sibling `enabled_curve` validates ordered-only with
-/// no outside check and no value-range check (any value is stored; the ≥ 1
-/// test resolves every value). Structural violations reuse
-/// `InvalidEffectAutomation` verbatim — R30 admits no fitting clip-scoped
-/// variant, and nothing downstream parses the `effect` field, so the clip
-/// identifier rides there (`"clip 1"`) with the `"enabled"` name.
+/// MO1 R5/R13/R18: the clip sibling `enabled_curve` validates ordered-only
+/// with no outside check, and values 0..1 exactly as the R4 sibling — R5's
+/// "(values 0..1...)" and R18's "Values 0..1" both bind; the ≥ 1 test still
+/// resolves every value at read time. Violations reuse the effect-scoped
+/// variants verbatim — R30 admits no fitting clip-scoped variant, and nothing
+/// downstream parses the `effect` field, so the clip identifier rides there
+/// (`"clip 1"`) with the `"enabled"` name.
 fn validate_clip_enabled_curve(clip: ClipId, curve: &AutomationCurve) -> Result<(), OpError> {
     curve
         .validate_ordered()
@@ -4186,7 +4277,19 @@ fn validate_clip_enabled_curve(clip: ClipId, curve: &AutomationCurve) -> Result<
             effect: format!("clip {}", clip.0),
             name: "enabled".to_owned(),
             reason: error.to_string(),
-        })
+        })?;
+    for keyframe in &curve.keyframes {
+        if !(0..=1).contains(&keyframe.value) {
+            return Err(OpError::EffectParamOutOfRange {
+                effect: format!("clip {}", clip.0),
+                name: "enabled".to_owned(),
+                min: 0,
+                max: 1,
+                actual: keyframe.value,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5469,7 +5572,7 @@ impl Operation {
     /// — [`Self::ConvertLegacyLook`] — answers `Clip`, because a legacy-look
     /// conversion is a refusal about the clip it is converting. The rung is
     /// therefore a statement of where a future variant would land rather than a
-    /// tie-break the current 59 exercise.
+    /// tie-break the current 62 exercise.
     ///
     /// `IN1b` §0.3 D3 names **five** variants that address a track and nothing
     /// narrower; applying the precedence, there are **seven** — D3's
@@ -5478,7 +5581,7 @@ impl Operation {
     /// [`Self::RippleInsertGap`], which name a track and no clip or asset
     /// (erratum `IN1b`-A-R11).
     #[must_use]
-    // 59 arms, one per `Operation` variant, grouped by subject kind: the list
+    // 62 arms, one per `Operation` variant, grouped by subject kind: the list
     // is the deliverable and splitting it would hide the precedence it exists
     // to show.
     #[allow(clippy::too_many_lines)]
@@ -5502,6 +5605,9 @@ impl Operation {
             | Self::ClearEffectKeyframes { clip, .. }
             | Self::UpsertEffectKeyframe { clip, .. }
             | Self::RemoveEffectKeyframe { clip, .. }
+            | Self::SetEffectEnabled { clip, .. }
+            | Self::SetClipEnabled { clip, .. }
+            | Self::SetClipEnabledCurve { clip, .. }
             | Self::ConvertLegacyLook { clip, .. }
             | Self::SetTitleParam { clip, .. }
             | Self::SetClipAudio { clip, .. }
@@ -5582,7 +5688,7 @@ mod tests {
     ///
     /// Reading the source is how a test asserts an **arm count**: the compiler
     /// already proves the match is exhaustive and wildcard-free over
-    /// `OpError`'s 154 and `Operation`'s 59 variants, but it cannot be asked
+    /// `OpError`'s 154 and `Operation`'s 62 variants, but it cannot be asked
     /// how many names each arm groups, and building 154 payload-carrying
     /// rejections to count them would be a fixture, not a measurement.
     fn single_fn_impl_body(signature: &str) -> String {
@@ -5833,13 +5939,13 @@ mod tests {
         ("AssumedFromNotSuppliable", "ColorPolicy"),
     ];
 
-    /// §3.3 rule 20's precedence applied **per variant**: all 59 `Operation`
+    /// §3.3 rule 20's precedence applied **per variant**: all 62 `Operation`
     /// variant names with the subject kind the rule assigns each one.
     ///
     /// Read off `Operation`'s own declaration — which id fields the variant
     /// carries — rather than off the accessor, so a variant that answers with
     /// the wrong kind fails here (review-2 S4).
-    const OPERATION_SUBJECTS: [(&str, &str); 59] = [
+    const OPERATION_SUBJECTS: [(&str, &str); 62] = [
         ("AddAsset", "Asset"),
         ("RelinkAsset", "Asset"),
         ("SetAssetColorDescription", "Asset"),
@@ -5888,6 +5994,9 @@ mod tests {
         ("ClearEffectKeyframes", "Clip"),
         ("UpsertEffectKeyframe", "Clip"),
         ("RemoveEffectKeyframe", "Clip"),
+        ("SetEffectEnabled", "Clip"),
+        ("SetClipEnabled", "Clip"),
+        ("SetClipEnabledCurve", "Clip"),
         ("ConvertLegacyLook", "Clip"),
         ("AddLutAsset", "LutAsset"),
         ("RemoveLutAsset", "LutAsset"),
@@ -6131,7 +6240,7 @@ mod tests {
         }
     }
 
-    /// `IN1b` §9 clause 8 through §3.3 rule 20: the accessor covers all **59**
+    /// `IN1b` §9 clause 8 through §3.3 rule 20: the accessor covers all **62**
     /// `Operation` variants with no wildcard and answers by the declared
     /// precedence `Clip` -> `Asset` -> `Track` -> `Chain` -> `Project`.
     #[test]
@@ -6158,8 +6267,8 @@ mod tests {
             .iter()
             .map(|(variant, kind)| ((*variant).to_owned(), (*kind).to_owned()))
             .collect();
-        assert_eq!(declared.len(), 59, "`Operation` has 59 distinct variants");
-        assert_eq!(implemented.len(), 59, "the accessor covers every variant");
+        assert_eq!(declared.len(), 62, "`Operation` has 62 distinct variants");
+        assert_eq!(implemented.len(), 62, "the accessor covers every variant");
         for (variant, kind) in &declared {
             assert_eq!(
                 implemented.get(variant),

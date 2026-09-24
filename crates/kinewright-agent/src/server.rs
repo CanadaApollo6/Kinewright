@@ -28219,6 +28219,18 @@ mod tests {
     ///   unchanged (`7 / 5 660 / 3 510 / 998`) — the twentieth consecutive
     ///   measurement, and the first whose counter moves for a registry-only
     ///   MO1 addition rather than an IN2 one.
+    ///
+    /// - **A4b (R17/R18 toggles): +77 382 / +76 452 / +427.** Three
+    ///   generated mutators plus the three new `oneOf` branches in
+    ///   `apply_edit_plan` (51 016 → 52 689 serialized, 50 628 → 52 301
+    ///   input, measured against the A4a tree):
+    ///   `set_effect_enabled` 25 190 / 24 881 / 142, `set_clip_enabled`
+    ///   25 119 / 24 814 / 140, `set_clip_enabled_curve` 25 400 / 25 084 /
+    ///   145, `apply_edit_plan` +1 673 / +1 673 / +0. The arithmetic:
+    ///   1 716 334 + 77 382 = **1 793 716**,
+    ///   1 568 912 + 76 452 = **1 645 364**,
+    ///   123 949 + 427 = **124 376**. Counts `146 / 59 / 87`. Served quad
+    ///   unchanged — still the twentieth measurement (one Part-A series).
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28244,15 +28256,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_716_334, 5_660),
+            (1_793_716, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_568_912,
+            registry_metrics.input_schema_bytes, 1_645_364,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 123_949,
+            registry_metrics.description_bytes, 124_376,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -33962,16 +33974,24 @@ mod tests {
     ///
     /// MO1 A4a (R15/R16) grows the generated mutators by two
     /// (`upsert_effect_keyframe`, `remove_effect_keyframe`): counts `143 /
-    /// 56 / 87`. Both are registry-only — served tools come from the compact
+    /// 56 / 87`. A4b (R17/R18) adds three more (`set_effect_enabled`,
+    /// `set_clip_enabled`, `set_clip_enabled_curve`): counts `146 / 59 /
+    /// 87`. All are registry-only — served tools come from the compact
     /// authority, which MO1 does not touch.
     #[test]
     fn in2_the_registry_grows_by_one_capability() {
         let registry = KinewrightMcp::capability_tools().unwrap();
-        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 143);
+        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 146);
         assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
-        assert_eq!(operation_tools().unwrap().len(), 56);
+        assert_eq!(operation_tools().unwrap().len(), 59);
         let generated = operation_tools().unwrap();
-        for name in ["upsert_effect_keyframe", "remove_effect_keyframe"] {
+        for name in [
+            "upsert_effect_keyframe",
+            "remove_effect_keyframe",
+            "set_effect_enabled",
+            "set_clip_enabled",
+            "set_clip_enabled_curve",
+        ] {
             assert!(
                 generated.iter().any(|tool| tool.tool.name == name),
                 "{name} is a generated mutator"

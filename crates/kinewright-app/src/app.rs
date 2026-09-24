@@ -3372,6 +3372,28 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
         Operation::RemoveEffectKeyframe {
             clip, effect, name, ..
         } => format!("Removed a {name} keyframe on effect {effect} for clip {clip}"),
+        Operation::SetEffectEnabled {
+            clip,
+            effect,
+            enabled,
+            ..
+        } => format!(
+            "{} effect {effect} for clip {clip}",
+            if *enabled { "Enabled" } else { "Disabled" }
+        ),
+        Operation::SetClipEnabled { clip, enabled, .. } => format!(
+            "{} clip {clip}",
+            if *enabled { "Enabled" } else { "Disabled" }
+        ),
+        Operation::SetClipEnabledCurve { clip, curve } => curve.as_ref().map_or_else(
+            || format!("Cleared the enable curve on clip {clip}"),
+            |curve| {
+                format!(
+                    "Set {} enable keyframes on clip {clip}",
+                    curve.keyframes.len()
+                )
+            },
+        ),
         Operation::SetTitleParam { clip, name, .. } => {
             format!("Set {name} on title clip {clip}")
         }

@@ -664,6 +664,27 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             name: "exposure_milli_stops".to_owned(),
             at: TimeCode(10),
         },
+        Operation::SetEffectEnabled {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            enabled: false,
+        },
+        Operation::SetClipEnabled {
+            clip: ClipId(1),
+            enabled: false,
+        },
+        Operation::SetClipEnabledCurve {
+            clip: ClipId(1),
+            curve: Some(AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                }],
+            }),
+        },
     ];
 
     for operation in operations {
@@ -6837,4 +6858,49 @@ fn unique_curve(pairs: &[(i64, i64)]) -> AutomationCurve {
             })
             .collect(),
     }
+}
+
+/// MO1 R18: `SetClipEnabledCurve` follows the AU4 nullable-required wire
+/// pattern exactly — omission fails, `null` clears, the schema requires it.
+#[test]
+fn clip_enabled_curve_follows_the_nullable_required_wire_pattern() {
+    let omitted = serde_json::json!({ "SetClipEnabledCurve": { "clip": 1 } });
+    let error = serde_json::from_value::<Operation>(omitted).unwrap_err();
+    assert!(
+        error.to_string().contains("missing field `curve`"),
+        "an omitted curve must be an error, got {error}"
+    );
+    assert_eq!(
+        serde_json::from_value::<Operation>(serde_json::json!({
+            "SetClipEnabledCurve": { "clip": 1, "curve": null }
+        }))
+        .unwrap(),
+        Operation::SetClipEnabledCurve {
+            clip: ClipId(1),
+            curve: None,
+        }
+    );
+
+    let schema = serde_json::to_value(schemars::schema_for!(Operation)).unwrap();
+    let variants = schema["oneOf"].as_array().expect("a oneOf of variants");
+    let payload = variants
+        .iter()
+        .find(|variant| variant["properties"].get("SetClipEnabledCurve").is_some())
+        .unwrap_or_else(|| panic!("SetClipEnabledCurve is a variant"))
+        .get("properties")
+        .and_then(|properties| properties.get("SetClipEnabledCurve"))
+        .expect("the variant's payload");
+    let required = payload["required"]
+        .as_array()
+        .expect("a published required list");
+    assert!(
+        required.iter().any(|entry| entry == "curve"),
+        "SetClipEnabledCurve must publish curve as required, got {required:?}"
+    );
+    // The null branch survives `RequiredNullableCurve` (AU4 §2.5 rule 28).
+    let curve_schema = &payload["properties"]["curve"];
+    assert!(
+        curve_schema.to_string().contains("null"),
+        "the curve schema must keep its null branch, got {curve_schema}"
+    );
 }

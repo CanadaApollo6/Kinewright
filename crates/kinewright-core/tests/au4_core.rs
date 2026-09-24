@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crossbeam_channel::Receiver;
 use kinewright_core::{
-    AssetId, AudioBus, AudioBusId, AudioMaster, AudioMix, AutomationCurve, Clip, ClipId,
-    ColorContext, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect, EffectId, FrameTexture,
+    AssetId, AudioBus, AudioBusId, AudioMaster, AudioMix, AutomationCurve, BatchError, Clip,
+    ClipId, ColorContext, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect, EffectId, FrameTexture,
     Keyframe, KeyframeInterpolation, MediaAsset, MediaCatalog, MediaEvent, MediaKind,
     MediaSourceFingerprint, OpError, Operation, ParamValue, Playback, Rational, RelinkCandidate,
-    TRACK_AUTOMATION_PARAMETERS, TimeCode, Track, TrackId, TrackKind, TrackMix,
+    TRACK_AUTOMATION_PARAMETERS, TimeCode, Track, TrackId, TrackKind, TrackMix, apply_batch,
     clamp_project_curve, envelope_coalesce_key, is_hold_only_parameter, qa_document,
     rebase_clip_curve, track_automation_coalesce_key,
 };
@@ -1945,20 +1945,23 @@ fn keep_outside_effect_curves_accept_negative_and_outside_keys() {
     }
 }
 
-/// MO1 R13: the `Clip.enabled_curve` sibling validates ordered-only with no
-/// outside check and no value-range check — negative, past-the-end, and
-/// out-of-0..1 keys all pass, while empty and unordered curves are refused
-/// (reusing `InvalidEffectAutomation` verbatim per R30, with the clip
-/// identifier in the `effect` field).
+/// MO1 R5/R13/R18: the `Clip.enabled_curve` sibling validates ordered-only
+/// with no outside check — negative and past-the-end keys pass — and values
+/// 0..1 exactly as the R4 sibling. (A4b correction: the A3a any-value reading
+/// contradicted R5's "(values 0..1...)" and R18's "Values 0..1", which both
+/// bind; the ≥ 1 test still resolves every value at read time.) Empty and
+/// unordered curves reuse `InvalidEffectAutomation` verbatim per R30, with the
+/// clip identifier in the `effect` field; range violations reuse
+/// `EffectParamOutOfRange` the same way.
 #[test]
-fn clip_enabled_curve_accepts_any_position_and_value_when_ordered() {
+fn clip_enabled_curve_accepts_any_position_and_zero_to_one_values() {
     for curve in [
         linear(&[(-30, 0), (90, 1)]),
-        linear(&[(0, -3), (9, 5)]),
+        linear(&[(0, 1), (9, 0)]),
         AutomationCurve {
             keyframes: vec![Keyframe {
                 at: TimeCode(-5),
-                value: 7,
+                value: 1,
                 interpolation: KeyframeInterpolation::Hold,
                 tangent_in: 0,
                 tangent_out: 0,
@@ -1987,6 +1990,20 @@ fn clip_enabled_curve_accepts_any_position_and_value_when_ordered() {
                 effect: "clip 1".to_owned(),
                 name: "enabled".to_owned(),
                 reason: reason.to_owned(),
+            }
+        );
+    }
+    for value in [-3, 2, 7] {
+        let mut doc = document_with_one_clip();
+        doc.tracks[0].clips[0].enabled_curve = Some(linear(&[(0, value)]));
+        assert_eq!(
+            doc.validate().unwrap_err(),
+            OpError::EffectParamOutOfRange {
+                effect: "clip 1".to_owned(),
+                name: "enabled".to_owned(),
+                min: 0,
+                max: 1,
+                actual: value,
             }
         );
     }
@@ -2866,5 +2883,280 @@ fn remove_last_key_writes_the_static() {
     let effect = &clip(&doc, ClipId(1)).effects[0];
     assert!(!effect.enabled);
     assert!(effect.enabled_curve.is_none());
+    doc.validate().unwrap();
+}
+
+// ============================================================================
+// MO1 Part A4b — R17/R18 enable toggles and clip enable curve, plus the R4
+// whole-curve "enabled" routing.
+// ============================================================================
+
+/// R17: both toggles write their static flag, and missing owners fail.
+#[test]
+fn effect_and_clip_toggles_write_the_static_flags() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    assert!(clip(&doc, ClipId(1)).effects[0].enabled);
+    assert!(clip(&doc, ClipId(1)).enabled);
+
+    Operation::SetEffectEnabled {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        enabled: false,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(!clip(&doc, ClipId(1)).effects[0].enabled);
+    Operation::SetClipEnabled {
+        clip: ClipId(1),
+        enabled: false,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(!clip(&doc, ClipId(1)).enabled);
+    doc.validate().unwrap();
+
+    let error = Operation::SetEffectEnabled {
+        clip: ClipId(1),
+        effect: EffectId(9),
+        enabled: true,
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::MissingEffect {
+            clip: ClipId(1),
+            effect: EffectId(9),
+        }
+    );
+    let error = Operation::SetClipEnabled {
+        clip: ClipId(9),
+        enabled: true,
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(error, OpError::MissingClip(ClipId(9)));
+}
+
+/// R17 skip half: op-written flags flow into the core reader — a disabled
+/// effect evaluates to `enabled = false`, a disabled clip reads back
+/// disabled at every frame, and re-enabling restores both.
+#[test]
+fn disabled_effects_and_clips_read_back_disabled() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    Operation::SetEffectEnabled {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        enabled: false,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::SetClipEnabled {
+        clip: ClipId(1),
+        enabled: false,
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    let effect = &clip(&doc, ClipId(1)).effects[0];
+    for local in [0, 30, 59] {
+        assert!(!effect.is_enabled_at(TimeCode(local)));
+    }
+    assert!(!effect.evaluated_at(TimeCode(30)).enabled);
+    let clip_ref = clip(&doc, ClipId(1));
+    for local in [0, 30, 59] {
+        assert!(!clip_ref.is_enabled_at(TimeCode(local)));
+    }
+
+    Operation::SetEffectEnabled {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        enabled: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::SetClipEnabled {
+        clip: ClipId(1),
+        enabled: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(clip(&doc, ClipId(1)).effects[0].is_enabled_at(TimeCode(30)));
+    assert!(clip(&doc, ClipId(1)).is_enabled_at(TimeCode(30)));
+    doc.validate().unwrap();
+}
+
+/// R17 linked batch: core stays per-clip, so a linked pair toggles via an
+/// atomic batch of two `SetClipEnabled` — and a failing batch flips neither.
+#[test]
+fn linked_pair_toggles_via_an_atomic_batch() {
+    let mut doc = document_with_three_clips();
+    Operation::LinkClips {
+        clips: vec![ClipId(1), ClipId(2)],
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(clip(&doc, ClipId(1)).link, clip(&doc, ClipId(2)).link);
+
+    apply_batch(
+        &mut doc,
+        &[
+            Operation::SetClipEnabled {
+                clip: ClipId(1),
+                enabled: false,
+            },
+            Operation::SetClipEnabled {
+                clip: ClipId(2),
+                enabled: false,
+            },
+        ],
+    )
+    .unwrap();
+    assert!(!clip(&doc, ClipId(1)).enabled);
+    assert!(!clip(&doc, ClipId(2)).enabled);
+    assert!(clip(&doc, ClipId(3)).enabled);
+
+    // Atomicity: the second toggle names a missing clip, so the first is
+    // rolled back with it.
+    let before = doc.clone();
+    let error = apply_batch(
+        &mut doc,
+        &[
+            Operation::SetClipEnabled {
+                clip: ClipId(3),
+                enabled: false,
+            },
+            Operation::SetClipEnabled {
+                clip: ClipId(9),
+                enabled: false,
+            },
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        BatchError::OperationFailed {
+            op_number: 2,
+            error: OpError::MissingClip(ClipId(9)),
+        }
+    );
+    assert_eq!(doc, before);
+}
+
+/// R4 uniform name: whole-curve operations address the sibling through
+/// `"enabled"` exactly as R15/R16 — storage stays the sibling, never a
+/// `keyframes` entry.
+#[test]
+fn set_and_clear_effect_keyframes_route_enabled_to_the_sibling() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    Operation::SetEffectKeyframes {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: "enabled".to_owned(),
+        curve: hold_toggle(),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        hold_toggle(),
+        "the whole curve parks on the sibling"
+    );
+    assert!(
+        !clip(&doc, ClipId(1)).effects[0]
+            .keyframes
+            .contains_key("enabled"),
+        "storage stays the sibling"
+    );
+
+    let before = doc.clone();
+    let error = Operation::SetEffectKeyframes {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: "enabled".to_owned(),
+        curve: linear(&[(0, 2)]),
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::EffectParamOutOfRange {
+            effect: "primary_correction".to_owned(),
+            name: "enabled".to_owned(),
+            min: 0,
+            max: 1,
+            actual: 2,
+        }
+    );
+    assert_eq!(doc, before);
+
+    Operation::ClearEffectKeyframes {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: "enabled".to_owned(),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(clip(&doc, ClipId(1)).effects[0].enabled_curve.is_none());
+    doc.validate().unwrap();
+}
+
+/// R18: the op writes the curve (values 0..1, negatives legal), `None`
+/// clears it, and the op-written curve survives a trim like any sibling.
+#[test]
+fn clip_enabled_curve_writes_clears_and_survives() {
+    let mut doc = document_with_one_clip();
+    Operation::SetClipEnabledCurve {
+        clip: ClipId(1),
+        curve: Some(hold_toggle()),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(clip_toggle(&doc, ClipId(1)), hold_toggle());
+
+    let before = doc.clone();
+    let error = Operation::SetClipEnabledCurve {
+        clip: ClipId(1),
+        curve: Some(linear(&[(0, 5)])),
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::EffectParamOutOfRange {
+            effect: "clip 1".to_owned(),
+            name: "enabled".to_owned(),
+            min: 0,
+            max: 1,
+            actual: 5,
+        }
+    );
+    assert_eq!(doc, before);
+
+    // Negatives are legal (ordered-only); the written curve then shifts.
+    Operation::SetClipEnabledCurve {
+        clip: ClipId(1),
+        curve: Some(linear(&[(-10, 1), (30, 0)])),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::TrimClip {
+        clip: ClipId(1),
+        new_source: TimeCode(25)..TimeCode(60),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        key_positions(&clip_toggle(&doc, ClipId(1))),
+        vec![(-35, 1), (5, 0)]
+    );
+
+    Operation::SetClipEnabledCurve {
+        clip: ClipId(1),
+        curve: None,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(clip(&doc, ClipId(1)).enabled_curve.is_none());
     doc.validate().unwrap();
 }
