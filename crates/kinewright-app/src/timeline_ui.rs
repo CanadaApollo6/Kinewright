@@ -1851,6 +1851,29 @@ impl KinewrightApp {
                             {
                                 title_text_focus = Some(clip.id);
                             }
+                            // MO1 R25: copy/paste attributes through the same
+                            // `CopyClipAttributes` op the agent sends.
+                            let clipboard = self.clip_attributes_clipboard;
+                            body.context_menu(|ui| {
+                                if ui.button("Copy attributes").clicked() {
+                                    self.clip_attributes_clipboard = Some(clip.id);
+                                    selected_clip = Some(clip.id);
+                                    ui.close();
+                                }
+                                // Labels zip the helper's [with-keys, values-only]
+                                // order, which the paste tests pin.
+                                let pastes = clip_attributes_paste_operations(clipboard, clip.id);
+                                for (operation, label) in pastes.into_iter().zip([
+                                    "Paste attributes (with keys)",
+                                    "Paste attributes (values only)",
+                                ]) {
+                                    if ui.button(label).clicked() {
+                                        pending_operations = Some(vec![operation]);
+                                        selected_clip = Some(clip.id);
+                                        ui.close();
+                                    }
+                                }
+                            });
 
                             let interacting = body.dragged()
                                 || body.drag_stopped()
@@ -3113,6 +3136,24 @@ fn linked_minimum_primary_start(document: &Document, primary: ClipId) -> i64 {
     primary_start.saturating_sub(minimum_member)
 }
 
+/// MO1 R25: the paste operations the clip context menu offers — the with-keys
+/// and values-only `CopyClipAttributes`, or nothing when the clipboard is
+/// empty or holds this same clip.
+fn clip_attributes_paste_operations(clipboard: Option<ClipId>, clip: ClipId) -> Vec<Operation> {
+    let Some(from_clip) = clipboard.filter(|from| *from != clip) else {
+        return Vec::new();
+    };
+    [true, false]
+        .into_iter()
+        .map(|include_keyframes| Operation::CopyClipAttributes {
+            from_clip,
+            to_clip: clip,
+            names: None,
+            include_keyframes,
+        })
+        .collect()
+}
+
 fn linked_move_operations(
     document: &Document,
     primary: ClipId,
@@ -3562,7 +3603,7 @@ fn tick_density(pixels_per_frame: f32, fps: Rational) -> (i64, i64) {
     (major.max(1), minor)
 }
 
-fn nominal_fps(fps: Rational) -> u32 {
+pub(crate) fn nominal_fps(fps: Rational) -> u32 {
     fps.numerator().saturating_add(fps.denominator() / 2) / fps.denominator().max(1)
 }
 
@@ -6778,6 +6819,42 @@ mod tests {
             3,
             "and those are two of the file's three `InspectorEdits`; the third is \
              the envelope's, which keeps the `Look` default"
+        );
+    }
+
+    /// MO1 R25: the clip context menu offers no paste with an empty
+    /// clipboard, or when the clipboard holds this same clip.
+    #[test]
+    fn paste_menu_needs_another_clip_on_the_clipboard() {
+        use kinewright_core::ClipId;
+
+        assert!(clip_attributes_paste_operations(None, ClipId(2)).is_empty());
+        assert!(clip_attributes_paste_operations(Some(ClipId(2)), ClipId(2)).is_empty());
+    }
+
+    /// MO1 R25: pasting copies every effect (`names: None`), with and
+    /// without keyframes — the same `CopyClipAttributes` op either way.
+    #[test]
+    fn paste_menu_offers_keys_and_values_only() {
+        use kinewright_core::{ClipId, Operation};
+
+        let offered = clip_attributes_paste_operations(Some(ClipId(9)), ClipId(2));
+        assert_eq!(
+            offered,
+            vec![
+                Operation::CopyClipAttributes {
+                    from_clip: ClipId(9),
+                    to_clip: ClipId(2),
+                    names: None,
+                    include_keyframes: true,
+                },
+                Operation::CopyClipAttributes {
+                    from_clip: ClipId(9),
+                    to_clip: ClipId(2),
+                    names: None,
+                    include_keyframes: false,
+                },
+            ]
         );
     }
 }

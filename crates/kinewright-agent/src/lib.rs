@@ -55,6 +55,9 @@ pub use models::{
     CLAUDE_ULTRACODE, ModelChoice, ServiceTier, claude_models, codex_default_model, codex_models,
     common_efforts, common_tiers,
 };
+pub use motion::{
+    MOTION_PRESETS, MotionPlan, MotionPlanArgs, MotionPlanError, MotionPreset, plan_motion,
+};
 pub use muse::{MUSE_SANDBOX_NOTICE, MuseDriver, muse_models};
 pub use render::{
     render_asset_transcript, render_clip_info, render_timeline_state, render_timeline_transcript,

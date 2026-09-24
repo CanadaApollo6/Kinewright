@@ -960,6 +960,7 @@ impl KinewrightApp {
                 "Media",
                 &[
                     "mp4", "mov", "mkv", "webm", "avi", "wav", "mp3", "flac", "ogg", "m4a", "aac",
+                    "png", "jpg", "jpeg", "webp", "bmp", "tiff",
                 ],
             )
             .pick_file()

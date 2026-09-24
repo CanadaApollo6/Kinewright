@@ -87,6 +87,8 @@ pub(crate) struct InspectorEdits {
     incident_code: Option<IncidentCode>,
     /// The playhead frame a MOTION nav button requested this frame (MO1 R22).
     playhead_request: Option<TimeCode>,
+    /// The clip a MOTION "Plan move…" button targeted this frame (MO1 R25).
+    motion_plan_request: Option<ClipId>,
     /// Refusals a card produced while building a batch, for the app's error
     /// log.
     ///
@@ -830,6 +832,14 @@ impl KinewrightApp {
         // the document, so it bypasses the operation path entirely.
         if let Some(at) = edits.playhead_request {
             self.focused_mut().position = at;
+        }
+        // MO1 R25: "Plan move…" opens the Apply-confirmation dialog.
+        if let Some(clip) = edits.motion_plan_request {
+            self.motion_plan_dialog = Some(crate::app::MotionPlanDialog {
+                clip,
+                preset: kinewright_agent::MotionPreset::PushIn,
+                replace: false,
+            });
         }
         if !edits.operations.is_empty() {
             match edits.coalesce_key {
@@ -4220,6 +4230,35 @@ pub(crate) fn is_motion_effect(name: &str) -> bool {
     MOTION_EFFECT_NAMES.contains(&name)
 }
 
+/// MO1 R25: every §4 motion operation names its GUI sender(s) — the
+/// op↔GUI parity checklist.
+pub(crate) fn motion_gui_senders(operation: &str) -> Option<&'static [&'static str]> {
+    match operation {
+        "UpsertEffectKeyframe" => Some(&["keyframe editor ('+ Key', auto-key edits)"]),
+        "RemoveEffectKeyframe" => Some(&[
+            "keyframe editor (per-key delete)",
+            "timeline key lane (diamond click)",
+        ]),
+        "SetEffectEnabled" => Some(&["effect card toggle"]),
+        "SetClipEnabled" => Some(&["clip header toggle"]),
+        "SetClipEnabledCurve" => Some(&["clip header ('+ Key at playhead')"]),
+        "CopyClipAttributes" => Some(&["clip context menu (copy/paste)"]),
+        "SetEffectKeyframes" => Some(&[
+            "keyframe editor (row edits)",
+            "opacity rubber band",
+            "plan 'Apply' confirmation",
+        ]),
+        "ClearEffectKeyframes" => Some(&[
+            "keyframe editor ('Clear' buttons)",
+            "plan 'Apply' confirmation",
+        ]),
+        "SetEffectParam" => Some(&["effect editor (static edits)", "plan 'Apply' confirmation"]),
+        "AddEffect" => Some(&["MOTION '+ effect' buttons", "plan 'Apply' confirmation"]),
+        "plan_motion" => Some(&["plan 'Apply' confirmation"]),
+        _ => None,
+    }
+}
+
 /// MO1 R22: the `MOTION` section's caps label.
 pub(crate) const MOTION_SECTION_LABEL: &str = "MOTION";
 /// MO1 R22: the button that upserts one key at the playhead on a motion row.
@@ -4725,6 +4764,11 @@ fn motion_section(
             if add.clicked() {
                 pending.push(add_effect_operation(clip, descriptor));
             }
+        }
+        let plan = ui.small_button("Plan move…");
+        crate::mixer_ui::record_strip_rect("motion_plan_move", plan.rect);
+        if plan.clicked() {
+            pending.motion_plan_request = Some(clip.id);
         }
     });
 }
@@ -10654,6 +10698,111 @@ mod tests {
         assert_eq!(effect.id, EffectId(1));
         assert!(effect.enabled);
         assert_eq!(effect.parameters.len(), 11);
+    }
+
+    /// MO1 R25: pressing "Plan move…" requests the Apply-confirmation dialog
+    /// for this clip, and sends no operations itself.
+    #[test]
+    fn the_plan_move_button_requests_the_dialog() {
+        let clip = media_clip(ClipId(2), AssetId(1), None);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let pressed = press_recorded("motion_plan_move", |events, time| {
+            let mut pending = InspectorEdits::default();
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 400.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let _ = crate::mixer_ui::take_strip_rects();
+                    motion_section(ui, &clip, 9, TimeCode(30), &mut pending);
+                },
+            );
+            (crate::mixer_ui::take_strip_rects(), pending)
+        });
+        assert_eq!(pressed.motion_plan_request, Some(ClipId(2)));
+        assert!(pressed.operations().is_empty());
+    }
+
+    /// MO1 R25: every §4 motion operation names its GUI sender(s) — the
+    /// op↔GUI parity checklist.
+    #[test]
+    fn motion_parity_checklist_is_complete() {
+        let checklist: &[(&str, &[&str])] = &[
+            (
+                "UpsertEffectKeyframe",
+                &["keyframe editor ('+ Key', auto-key edits)"],
+            ),
+            (
+                "RemoveEffectKeyframe",
+                &[
+                    "keyframe editor (per-key delete)",
+                    "timeline key lane (diamond click)",
+                ],
+            ),
+            ("SetEffectEnabled", &["effect card toggle"]),
+            ("SetClipEnabled", &["clip header toggle"]),
+            (
+                "SetClipEnabledCurve",
+                &["clip header ('+ Key at playhead')"],
+            ),
+            ("CopyClipAttributes", &["clip context menu (copy/paste)"]),
+            (
+                "SetEffectKeyframes",
+                &[
+                    "keyframe editor (row edits)",
+                    "opacity rubber band",
+                    "plan 'Apply' confirmation",
+                ],
+            ),
+            (
+                "ClearEffectKeyframes",
+                &[
+                    "keyframe editor ('Clear' buttons)",
+                    "plan 'Apply' confirmation",
+                ],
+            ),
+            (
+                "SetEffectParam",
+                &["effect editor (static edits)", "plan 'Apply' confirmation"],
+            ),
+            (
+                "AddEffect",
+                &["MOTION '+ effect' buttons", "plan 'Apply' confirmation"],
+            ),
+            ("plan_motion", &["plan 'Apply' confirmation"]),
+        ];
+        for (operation, senders) in checklist {
+            assert_eq!(
+                motion_gui_senders(operation),
+                Some(*senders),
+                "{operation} names its GUI sender"
+            );
+        }
+        assert_eq!(motion_gui_senders("NoSuchOp"), None);
+    }
+
+    /// MO1 R25: submitting a plan request opens the Apply-confirmation
+    /// dialog on that clip.
+    #[test]
+    fn submitting_a_plan_request_opens_the_dialog() {
+        let (_fixture, mut app) = crate::app::in1_tests::in1b_app();
+        let clip = app.focused().document.tracks[0].clips[0].id;
+        let edits = InspectorEdits {
+            motion_plan_request: Some(clip),
+            ..Default::default()
+        };
+        app.submit_inspector_edits(edits);
+        let dialog = app.motion_plan_dialog.as_ref().expect("the dialog opens");
+        assert_eq!(dialog.clip, clip);
+        assert!(!dialog.replace);
+        crate::app::in1_tests::in1_shutdown(&mut app);
     }
 
     /// MO1 R17/R18: the clip header's toggle writes the linked batch, and

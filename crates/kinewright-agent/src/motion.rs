@@ -29,6 +29,16 @@ pub(crate) const MOTION_PRESET_NAMES: [&str; 6] = [
     "pip",
 ];
 
+/// MO1 R25: the six presets in registry order, for the in-app plan dialog.
+pub const MOTION_PRESETS: [(MotionPreset, &str); 6] = [
+    (MotionPreset::PushIn, "push_in"),
+    (MotionPreset::PullOut, "pull_out"),
+    (MotionPreset::PanLeft, "pan_left"),
+    (MotionPreset::PanRight, "pan_right"),
+    (MotionPreset::KenBurns, "ken_burns"),
+    (MotionPreset::Pip, "pip"),
+];
+
 /// MO1 R20: the response budget. A proposal serializing past this fails
 /// closed with a summary, never a silently cut curve.
 pub(crate) const MOTION_RESPONSE_BUDGET_BYTES: usize = 4096;
@@ -50,7 +60,7 @@ const PIP_STATICS: [(&str, i64); 3] = [("scale_percent", 25), ("x_percent", 37),
 /// MO1 R20: one `plan_motion` preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MotionPreset {
+pub enum MotionPreset {
     PushIn,
     PullOut,
     PanLeft,
@@ -62,7 +72,7 @@ pub(crate) enum MotionPreset {
 impl MotionPreset {
     /// The wire name, matching [`MOTION_PRESET_NAMES`].
     #[must_use]
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::PushIn => "push_in",
             Self::PullOut => "pull_out",
@@ -80,21 +90,21 @@ impl MotionPreset {
 /// than silently planned as the default — there is no default preset.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MotionPlanArgs {
+pub struct MotionPlanArgs {
     /// The timeline revision the proposal is computed against.
-    pub(crate) expected_revision: TimelineRevision,
+    pub expected_revision: TimelineRevision,
     /// The video-track clip the move lands on.
-    pub(crate) clip_id: ClipId,
+    pub clip_id: ClipId,
     /// Which of the six moves to author.
-    pub(crate) preset: MotionPreset,
+    pub preset: MotionPreset,
     /// Rebuild the target params' curves instead of refusing them.
     #[serde(default)]
-    pub(crate) replace: bool,
+    pub replace: bool,
 }
 
 /// MO1 R20: why a motion proposal was refused.
 #[derive(Debug, Error)]
-pub(crate) enum MotionPlanError {
+pub enum MotionPlanError {
     #[error("timeline revision conflict: expected {expected}, actual {actual}")]
     RevisionConflict {
         expected: TimelineRevision,
@@ -157,15 +167,15 @@ impl MotionPlanError {
 
 /// MO1 R20: one accepted motion proposal — exact operations, nothing applied.
 #[derive(Debug)]
-pub(crate) struct MotionPlan {
-    pub(crate) expected_revision: TimelineRevision,
-    pub(crate) clip_id: ClipId,
-    pub(crate) preset: MotionPreset,
-    pub(crate) operations: Vec<Operation>,
-    pub(crate) target_effect_id: EffectId,
-    pub(crate) created_new_effect: bool,
+pub struct MotionPlan {
+    pub expected_revision: TimelineRevision,
+    pub clip_id: ClipId,
+    pub preset: MotionPreset,
+    pub operations: Vec<Operation>,
+    pub target_effect_id: EffectId,
+    pub created_new_effect: bool,
     /// Parameter name to key count, in emission order.
-    pub(crate) key_counts: Vec<(String, usize)>,
+    pub key_counts: Vec<(String, usize)>,
 }
 
 /// MO1 R20: the animated ramps one preset authors — `(param, from, to)` over
@@ -408,7 +418,13 @@ fn resolve_motion_target(
 /// the snapshot; the proposed operations are verified against a scratch copy
 /// before they are returned, so a proposal the planner emits is one Core
 /// accepts.
-pub(crate) fn plan_motion(
+///
+/// # Errors
+///
+/// Refuses revision conflicts, missing/non-video/too-short clips, existing
+/// curves without `replace`, a missing transform descriptor, and proposals
+/// Core itself rejects (see [`MotionPlanError`]).
+pub fn plan_motion(
     document: &Document,
     actual_revision: TimelineRevision,
     args: &MotionPlanArgs,
@@ -619,6 +635,17 @@ mod tests {
             let decoded: MotionPreset =
                 serde_json::from_value(serde_json::json!(name)).expect("a preset decodes");
             assert_eq!(decoded.as_str(), name);
+        }
+    }
+
+    /// MO1 R25: the in-app plan dialog lists the same six presets in the
+    /// same registry order as the wire enum.
+    #[test]
+    fn gui_preset_list_matches_registry_order() {
+        let listed: Vec<&str> = MOTION_PRESETS.iter().map(|preset| preset.1).collect();
+        assert_eq!(listed, MOTION_PRESET_NAMES);
+        for preset in MOTION_PRESETS {
+            assert_eq!(preset.0.as_str(), preset.1);
         }
     }
 

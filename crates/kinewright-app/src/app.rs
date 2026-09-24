@@ -13,10 +13,10 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    Analysis, AssetId, AudioChain, ClipContent, Command, CommandToken, Document, Effect, EffectId,
-    Event, Export, Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome,
-    IncidentSubject, InvestigatorPreferences, JournalCommand, LabelIncident, LiveAudioChange,
-    MediaAsset, MediaError, MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint,
+    Analysis, AssetId, AudioChain, ClipContent, ClipId, Command, CommandToken, Document, Effect,
+    EffectId, Event, Export, Incident, IncidentCode, IncidentId, IncidentObservation,
+    IncidentOutcome, IncidentSubject, InvestigatorPreferences, JournalCommand, LabelIncident,
+    LiveAudioChange, MediaAsset, MediaError, MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint,
     NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation,
     PROJECT_FORMAT_VERSION, ParamValue, Playback, PlaybackState, PolicyClass, Rational,
     RecoveryKind, SilenceStatus, TimeCode, TimelineRevision, Track, TrackId, TrackKind,
@@ -126,6 +126,14 @@ struct RouterApply {
     token: CommandToken,
     /// Who asked for it (erratum `IN1b`-C-R54).
     origin: RouterSendOrigin,
+}
+
+/// MO1 R25: the plan-a-move dialog's target and picks. The operations are
+/// re-planned every frame, so the preview never goes stale under other edits.
+pub(crate) struct MotionPlanDialog {
+    pub(crate) clip: ClipId,
+    pub(crate) preset: kinewright_agent::MotionPreset,
+    pub(crate) replace: bool,
 }
 
 /// Appendix B row 1: the observation a failed startup open carries.
@@ -262,6 +270,10 @@ pub(crate) struct KinewrightApp {
     /// another edit before the original request resolves fail-closed.
     pub(crate) pending_source_edit: Option<crate::media_workflow::PendingSourceEdit>,
     pub(crate) pending_legacy_relink: Option<crate::media_workflow::PendingLegacyRelink>,
+    /// MO1 R25: the copy-attributes source clip, until the next copy.
+    pub(crate) clip_attributes_clipboard: Option<ClipId>,
+    /// MO1 R25: the open plan-a-move dialog, if any.
+    pub(crate) motion_plan_dialog: Option<MotionPlanDialog>,
     /// IN1 §5.2: playback observations waiting for the next `route_incidents`
     /// tick, which attributes them to the focused project.
     pub(crate) pending_observations: Vec<IncidentObservation>,
@@ -590,6 +602,8 @@ impl KinewrightApp {
             media_statuses: crate::media_workflow::MediaStatusStore::default(),
             pending_source_edit: None,
             pending_legacy_relink: None,
+            clip_attributes_clipboard: None,
+            motion_plan_dialog: None,
             pending_observations: Vec::new(),
             transcript_noted: BTreeSet::new(),
             recovery_damage_noted: false,
@@ -1587,6 +1601,82 @@ impl KinewrightApp {
             if matches!(action, ProjectAction::Exit(_)) {
                 self.exit_discarded_projects.clear();
             }
+        }
+    }
+
+    /// MO1 R25: the plan-a-move Apply confirmation — the exact operations a
+    /// `plan_motion` preset would send, previewed before anything is applied.
+    fn show_motion_plan_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.motion_plan_dialog.take() else {
+            return;
+        };
+        let project = self.focused_project;
+        let document = std::sync::Arc::clone(&self.projects[project].document);
+        let revision = self.projects[project].revision;
+        let mut apply = false;
+        let mut cancel = false;
+        let planned = kinewright_agent::plan_motion(
+            &document,
+            revision,
+            &kinewright_agent::MotionPlanArgs {
+                expected_revision: revision,
+                clip_id: dialog.clip,
+                preset: dialog.preset,
+                replace: dialog.replace,
+            },
+        );
+        egui::Window::new("Plan a move")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(format!("Move for clip {}", dialog.clip));
+                egui::ComboBox::from_id_salt("motion-plan-preset")
+                    .selected_text(dialog.preset.as_str())
+                    .show_ui(ui, |ui| {
+                        for (preset, name) in kinewright_agent::MOTION_PRESETS {
+                            ui.selectable_value(&mut dialog.preset, preset, name);
+                        }
+                    });
+                ui.checkbox(&mut dialog.replace, "Replace existing curves");
+                let plannable = match &planned {
+                    Ok(plan) => {
+                        for operation in &plan.operations {
+                            ui.label(operation_status(operation));
+                            // R25 parity where the person meets the agent:
+                            // each planned op names its by-hand sender.
+                            let variant = format!("{operation:?}");
+                            let variant = variant.split([' ', '(']).next().unwrap_or("");
+                            if let Some(senders) = crate::inspector_ui::motion_gui_senders(variant)
+                            {
+                                ui.colored_label(color::TEXT_MUTED, senders.join(" · "));
+                            }
+                        }
+                        true
+                    }
+                    Err(error) => {
+                        ui.colored_label(color::STATUS_DANGER, error.to_string());
+                        false
+                    }
+                };
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(plannable, egui::Button::new("Apply"))
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if apply {
+            if let Ok(plan) = planned {
+                self.send_operations(plan.operations);
+            }
+        } else if !cancel {
+            self.motion_plan_dialog = Some(dialog);
         }
     }
 
@@ -2843,6 +2933,7 @@ impl eframe::App for KinewrightApp {
         // window it is no longer a count of.
         crate::incident_ui::show_incidents_panel(self, ui.ctx());
         self.show_unsaved_confirmation(ui.ctx());
+        self.show_motion_plan_dialog(ui.ctx());
         self.screenshot.update(ui.ctx());
         if let (Some(probe), Some(began)) = (&mut self.performance, measured_frame)
             && probe.frame(ui.ctx(), began, self.texture.is_some())
@@ -5304,6 +5395,8 @@ pub(crate) mod in1_tests {
             media_statuses: crate::media_workflow::MediaStatusStore::default(),
             pending_source_edit: None,
             pending_legacy_relink: None,
+            clip_attributes_clipboard: None,
+            motion_plan_dialog: None,
             pending_observations: Vec::new(),
             transcript_noted: BTreeSet::new(),
             recovery_damage_noted: false,
@@ -9813,6 +9906,8 @@ mod in2b_tests {
             media_statuses: crate::media_workflow::MediaStatusStore::default(),
             pending_source_edit: None,
             pending_legacy_relink: None,
+            clip_attributes_clipboard: None,
+            motion_plan_dialog: None,
             pending_observations: Vec::new(),
             transcript_noted: BTreeSet::new(),
             recovery_damage_noted: false,
