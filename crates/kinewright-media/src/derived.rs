@@ -965,6 +965,11 @@ where
             let Some(asset) = document.asset(clip.asset) else {
                 continue;
             };
+            // MO1 R8: stills carry no transcript, silence, or scenes — skipped
+            // like M23's speeded clips, not mapped.
+            if asset.kind == MediaKind::Image {
+                continue;
+            }
             let cached_silences = analyses
                 .entry(asset.id)
                 .or_insert_with(|| silences_for(asset));
@@ -1062,6 +1067,11 @@ where
             let Some(asset) = document.asset(clip.asset) else {
                 continue;
             };
+            // MO1 R8: stills carry no transcript, silence, or scenes — skipped
+            // like M23's speeded clips, not mapped.
+            if asset.kind == MediaKind::Image {
+                continue;
+            }
             let cached_scenes = analyses
                 .entry(asset.id)
                 .or_insert_with(|| scenes_for(asset));
@@ -1138,6 +1148,12 @@ where
             let Some(asset) = document.asset(clip.asset) else {
                 continue;
             };
+            // MO1 R8: stills carry no beats either (same rule as the named
+            // transcript/silence/scenes mappings) — skipped like M23's
+            // speeded clips, not mapped.
+            if asset.kind == MediaKind::Image {
+                continue;
+            }
             let cached_beats = analyses.entry(asset.id).or_insert_with(|| beats_for(asset));
             let Some(beats) = cached_beats else {
                 continue;
@@ -1818,6 +1834,80 @@ mod tests {
             map_timeline_beats(&document, None, 5_000, |_| Some(Arc::clone(&beats))).unwrap();
         assert_eq!(mapped[0].project_frame, TimeCode(110));
         assert_eq!(mapped[0].estimated_bpm_milli, 120_000);
+    }
+
+    /// MO1 R8: every derived mapping skips Image clips — both a Media clip
+    /// over a still (hand-built; the R9 ops refuse it) and the real Freeze
+    /// shape — even when analysis is offered for the asset.
+    #[test]
+    fn derived_mappings_skip_image_clips() {
+        let mut document = fixture_document();
+        document.media_pool[0].kind = MediaKind::Image;
+        let silences = Arc::new(AssetSilences {
+            asset: AssetId(1),
+            content_sha256: "fixture".to_owned(),
+            source_fps: Rational::new(24, 1).unwrap(),
+            source_frames: TimeCode(100),
+            threshold_dbfs_hundredths: DEFAULT_SILENCE_THRESHOLD_DBFS_HUNDREDTHS,
+            window_milliseconds: DEFAULT_SILENCE_WINDOW_MILLISECONDS,
+            spans: vec![SilenceSpan {
+                source_start: TimeCode(9),
+                source_end: TimeCode(20),
+            }],
+        });
+        let scenes = Arc::new(AssetSceneChanges {
+            asset: AssetId(1),
+            content_sha256: "fixture".to_owned(),
+            source_fps: Rational::new(24, 1).unwrap(),
+            source_frames: TimeCode(100),
+            proxy_width: DEFAULT_SCENE_PROXY_WIDTH,
+            changes: vec![SceneChange {
+                source_frame: TimeCode(18),
+                confidence_basis_points: 8_000,
+            }],
+        });
+        let beats = Arc::new(AssetBeats {
+            asset: AssetId(1),
+            content_sha256: "fixture".to_owned(),
+            source_fps: Rational::new(24, 1).unwrap(),
+            source_frames: TimeCode(100),
+            estimated_bpm_milli: 120_000,
+            beats: vec![BeatMarker {
+                source_frame: TimeCode(18),
+                strength_basis_points: 9_000,
+            }],
+        });
+
+        for content in [
+            ClipContent::Media,
+            ClipContent::Freeze(kinewright_core::FreezeFrame {
+                source_frame: TimeCode(10),
+            }),
+        ] {
+            document.tracks[0].clips[0].content = content.clone();
+            assert!(
+                map_timeline_silences(&document, None, TimeCode(1), |_| {
+                    Some(Arc::clone(&silences))
+                })
+                .unwrap()
+                .is_empty(),
+                "silences must skip {content:?} over a still"
+            );
+            assert!(
+                map_timeline_scene_changes(&document, None, 1_000, |_| {
+                    Some(Arc::clone(&scenes))
+                })
+                .unwrap()
+                .is_empty(),
+                "scenes must skip {content:?} over a still"
+            );
+            assert!(
+                map_timeline_beats(&document, None, 5_000, |_| Some(Arc::clone(&beats)))
+                    .unwrap()
+                    .is_empty(),
+                "beats must skip {content:?} over a still"
+            );
+        }
     }
 
     fn fixture_document() -> Document {

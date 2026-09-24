@@ -41,6 +41,7 @@ impl VideoRotation {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaError> {
     let source_fingerprint = source_fingerprint(path)?;
     let input = media_input(path)?;
@@ -54,7 +55,7 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
         ensure_decoder(stream, "audio", path)?;
     }
 
-    let kind = match (video.is_some(), audio.is_some()) {
+    let av_kind = match (video.is_some(), audio.is_some()) {
         (true, true) => MediaKind::AudioVideo,
         (true, false) => MediaKind::Video,
         (false, true) => MediaKind::Audio,
@@ -66,7 +67,7 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
         }
     };
 
-    let (fps, resolution, duration, color_description) = if let Some(stream) = video {
+    let (fps, resolution, duration, color_description, kind) = if let Some(stream) = video {
         let timing =
             analyze_video_packets(path, stream.index(), normalized_start(stream.start_time()))?;
         let rate = select_video_rate(path, &stream, &timing)?;
@@ -82,21 +83,64 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
             .decoder()
             .video()
             .map_err(|error| media_error(path, "could not open the video decoder", error))?;
-        let negotiated_pixel_format = negotiated_pixel_format(path, stream.index());
-        let color_description = color_description_from_decoder(&decoder, negotiated_pixel_format);
-        let stream_duration = timestamp_to_grid_ceil(stream.duration(), stream.time_base(), rate);
-        let packet_duration = timing.duration.map_or(0, |duration| {
-            timestamp_to_grid_ceil(duration, stream.time_base(), rate)
-        });
-        let container_duration = duration_us_to_frames(input.duration(), rate);
-        let video_duration = stream_duration.max(packet_duration);
-        let duration = TimeCode(if video_duration > 0 {
-            video_duration
+        // MO1 R7: a video-only still-image stream with exactly one packet is
+        // a still. A still codec WITH audio stays `AudioVideo` (probed as a
+        // one-frame video, exactly as before) so the audio never strands.
+        let still =
+            audio.is_none() && is_still_image_codec(decoder.id()) && timing.packet_count == 1;
+        if still {
+            let orientation = crate::still_orientation::still_file_orientation(path);
+            let rotation = orientation.map_or(rotation, |found| found.rotation);
+            let resolution = rotation.display_dimensions(decoder.width(), decoder.height());
+            if resolution.0 > MAX_STILL_DIMENSION || resolution.1 > MAX_STILL_DIMENSION {
+                return Err(MediaError::Backend(format!(
+                    "still image {} is {}x{} but stills are limited to {MAX_STILL_DIMENSION}px on either axis; downscale it and re-import",
+                    path.display(),
+                    resolution.0,
+                    resolution.1,
+                )));
+            }
+            let reported = color_description_from_decoder(
+                &decoder,
+                negotiated_pixel_format(path, stream.index()),
+            );
+            // Decoder defaults (PNG's GBR matrix, JPEG's full range) are
+            // pixel-format facts, not file tagging: a still whose primaries
+            // AND transfer are both unknown carries `unknown()` into the
+            // source-colour incident path, like any untagged source.
+            let color_description = if reported.primaries == ColorPrimaries::Unknown
+                && reported.transfer == ColorTransfer::Unknown
+            {
+                ColorDescription::unknown()
+            } else {
+                reported
+            };
+            (
+                Rational::default(),
+                Some(resolution),
+                TimeCode(1),
+                color_description,
+                MediaKind::Image,
+            )
         } else {
-            container_duration
-        });
-        let resolution = rotation.display_dimensions(decoder.width(), decoder.height());
-        (rate, Some(resolution), duration, color_description)
+            let negotiated_pixel_format = negotiated_pixel_format(path, stream.index());
+            let color_description =
+                color_description_from_decoder(&decoder, negotiated_pixel_format);
+            let stream_duration =
+                timestamp_to_grid_ceil(stream.duration(), stream.time_base(), rate);
+            let packet_duration = timing.duration.map_or(0, |duration| {
+                timestamp_to_grid_ceil(duration, stream.time_base(), rate)
+            });
+            let container_duration = duration_us_to_frames(input.duration(), rate);
+            let video_duration = stream_duration.max(packet_duration);
+            let duration = TimeCode(if video_duration > 0 {
+                video_duration
+            } else {
+                container_duration
+            });
+            let resolution = rotation.display_dimensions(decoder.width(), decoder.height());
+            (rate, Some(resolution), duration, color_description, av_kind)
+        }
     } else {
         let rate = Rational::default();
         (
@@ -104,6 +148,7 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
             None,
             TimeCode(duration_us_to_frames(input.duration(), rate)),
             ColorDescription::unknown(),
+            av_kind,
         )
     };
 
@@ -625,6 +670,9 @@ fn select_video_rate(
 struct VideoPacketTiming {
     variable: bool,
     duration: Option<i64>,
+    /// Every packet on the stream, pts-bearing or not — MO1 R7's "exactly
+    /// one frame" still test counts packets, not timestamps.
+    packet_count: u64,
 }
 
 fn analyze_video_packets(
@@ -636,10 +684,12 @@ fn analyze_video_packets(
     let mut reference_duration = None;
     let mut duration_variable = false;
     let mut pictures = Vec::new();
+    let mut packet_count = 0_u64;
     for (stream, packet) in input.packets() {
         if stream.index() != stream_index {
             continue;
         }
+        packet_count = packet_count.saturating_add(1);
         let packet_duration = packet.duration();
         if packet_duration > 0 {
             if reference_duration
@@ -690,7 +740,11 @@ fn analyze_video_packets(
     } else {
         duration_variable
     };
-    Ok(VideoPacketTiming { variable, duration })
+    Ok(VideoPacketTiming {
+        variable,
+        duration,
+        packet_count,
+    })
 }
 
 fn timing_values_differ(lhs: i64, rhs: i64) -> bool {
@@ -985,6 +1039,7 @@ pub(crate) trait DecoderFrame: CachedFrame {
         width: u32,
         height: u32,
         rotation: VideoRotation,
+        flip_horizontal: bool,
         managed_source: Option<&ManagedSource>,
     ) -> Result<Self, MediaError>;
 }
@@ -995,6 +1050,7 @@ impl DecoderFrame for FrameTexture {
         width: u32,
         height: u32,
         rotation: VideoRotation,
+        flip_horizontal: bool,
         managed_source: Option<&ManagedSource>,
     ) -> Result<Self, MediaError> {
         if managed_source.is_some() {
@@ -1003,6 +1059,9 @@ impl DecoderFrame for FrameTexture {
             ));
         }
         let pixels = read_plane(rgba, width, height, 4)?;
+        // MO1 R7: EXIF's mirrored orientations flip in stored-pixel space
+        // before the right-angle rotation.
+        let pixels = flip_optional(flip_horizontal, width, height, 4, pixels)?;
         let (width, height, pixels) = rotate_bytes(rotation, width, height, 4, pixels)?;
         Ok(Self {
             width,
@@ -1018,6 +1077,7 @@ impl DecoderFrame for WorkingFrame {
         width: u32,
         height: u32,
         rotation: VideoRotation,
+        flip_horizontal: bool,
         managed_source: Option<&ManagedSource>,
     ) -> Result<Self, MediaError> {
         let source = managed_source.ok_or_else(|| {
@@ -1026,6 +1086,9 @@ impl DecoderFrame for WorkingFrame {
             )
         })?;
         let pixels = read_plane(rgba, width, height, 8)?;
+        // MO1 R7: EXIF's mirrored orientations flip in stored-pixel space
+        // before the right-angle rotation.
+        let pixels = flip_optional(flip_horizontal, width, height, 8, pixels)?;
         let (width, height, pixels) = rotate_bytes(rotation, width, height, 8, pixels)?;
         WorkingFrame::from_rgba64_le(
             width,
@@ -1048,6 +1111,9 @@ pub(crate) struct VideoDecoder {
     stream_start: i64,
     fps: Rational,
     rotation: VideoRotation,
+    /// MO1 R7: EXIF's mirrored orientations (2/4/5/7) flip in stored-pixel
+    /// space before `rotation` runs. Always false for video.
+    flip_horizontal: bool,
     scaled_width: u32,
     scaled_height: u32,
     fallback_index: i64,
@@ -1125,7 +1191,7 @@ impl VideoDecoder {
         let stream_time_base = stream.time_base();
         let stream_start = normalized_start(stream.start_time());
         ensure_decoder(&stream, "video", path)?;
-        let rotation = stream_rotation(&stream).map_err(|error| {
+        let mut rotation = stream_rotation(&stream).map_err(|error| {
             MediaError::Backend(format!(
                 "could not read video orientation for {}: {error}",
                 path.display()
@@ -1146,6 +1212,20 @@ impl VideoDecoder {
         if let Some(source) = &managed_source {
             validate_managed_decoder_depth(path, &decoder, source)?;
         }
+        // MO1 R7: EXIF orientation overrides the (absent, for stills)
+        // container rotation, and only for still-image codecs — containers
+        // fail the file-signature checks inside `still_file_orientation`
+        // anyway, so an MJPEG video can never take this branch by accident.
+        let flip_horizontal = if is_still_image_codec(decoder.id()) {
+            if let Some(orientation) = crate::still_orientation::still_file_orientation(path) {
+                rotation = orientation.rotation;
+                orientation.flip_horizontal
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let source_width = decoder.width();
         let source_height = decoder.height();
         if source_width == 0 || source_height == 0 {
@@ -1209,6 +1289,7 @@ impl VideoDecoder {
             stream_start,
             fps,
             rotation,
+            flip_horizontal,
             scaled_width,
             scaled_height,
             fallback_index: 0,
@@ -1448,6 +1529,7 @@ impl VideoDecoder {
             self.scaled_width,
             self.scaled_height,
             self.rotation,
+            self.flip_horizontal,
             self.managed_source.as_ref(),
         )
     }
@@ -1525,6 +1607,50 @@ fn rotate_bytes(
     Ok((output_width, output_height, rotated))
 }
 
+/// Mirror a stored-pixel buffer left-right (MO1 R7, EXIF 2/4/5/7), or pass
+/// it through untouched when the orientation needs no flip.
+fn flip_optional(
+    flip_horizontal: bool,
+    width: u32,
+    height: u32,
+    bytes_per_pixel: usize,
+    pixels: Vec<u8>,
+) -> Result<Vec<u8>, MediaError> {
+    if !flip_horizontal {
+        return Ok(pixels);
+    }
+    let row_bytes = usize::try_from(width)
+        .unwrap_or_default()
+        .checked_mul(bytes_per_pixel)
+        .ok_or_else(|| MediaError::Backend("flipped frame is too large".to_owned()))?;
+    let expected = row_bytes
+        .checked_mul(usize::try_from(height).unwrap_or_default())
+        .ok_or_else(|| MediaError::Backend("flipped frame is too large".to_owned()))?;
+    if pixels.len() != expected {
+        return Err(MediaError::Backend(
+            "decoded frame size does not match its dimensions".to_owned(),
+        ));
+    }
+    let mut flipped = vec![0_u8; expected];
+    for row in 0..usize::try_from(height).unwrap_or_default() {
+        for column in 0..usize::try_from(width).unwrap_or_default() {
+            let source = row
+                .saturating_mul(row_bytes)
+                .saturating_add(column.saturating_mul(bytes_per_pixel));
+            let mirror = usize::try_from(width)
+                .unwrap_or_default()
+                .saturating_sub(1)
+                .saturating_sub(column);
+            let destination = row
+                .saturating_mul(row_bytes)
+                .saturating_add(mirror.saturating_mul(bytes_per_pixel));
+            flipped[destination..destination + bytes_per_pixel]
+                .copy_from_slice(&pixels[source..source + bytes_per_pixel]);
+        }
+    }
+    Ok(flipped)
+}
+
 pub(crate) fn thumbnail(
     path: &Path,
     fps: Rational,
@@ -1546,6 +1672,17 @@ pub(crate) fn thumbnail(
 
 pub(crate) fn normalized_start(start: i64) -> i64 {
     if start < -1_000_000_000_000 { 0 } else { start }
+}
+
+/// MO1 R7: stills over 8192 px on either axis are refused at probe (named
+/// limit, typed refusal) — a larger still would blow the texture budget the
+/// hold path pins by decoding once.
+pub(crate) const MAX_STILL_DIMENSION: u32 = 8192;
+
+/// MO1 R7: the still-image codec set — PNG and JPEG, per the design's
+/// parenthetical. Other image codecs probe exactly as before (video).
+fn is_still_image_codec(id: ffmpeg::codec::Id) -> bool {
+    matches!(id, ffmpeg::codec::Id::PNG | ffmpeg::codec::Id::MJPEG)
 }
 
 pub(crate) fn backend(error: impl std::fmt::Display) -> MediaError {
@@ -1943,6 +2080,371 @@ mod tests {
                 &eight_bit,
             ),
             (ColorProvenance::StreamMetadata, 10_000)
+        );
+    }
+
+    /// Generate a one-frame still with lavfi (`color` source, PNG or MJPEG).
+    fn still_fixture(
+        directory: &crate::test_support::TempDirectory,
+        name: &str,
+        source: &str,
+        codec: &str,
+    ) -> std::path::PathBuf {
+        let path = directory.path(name);
+        crate::test_support::run_ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                source,
+                "-frames:v",
+                "1",
+                "-c:v",
+                codec,
+                "-an",
+            ],
+            &path,
+        );
+        path
+    }
+
+    /// Table-free CRC-32 (ISO 3309) for hand-built PNG chunks.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFF_u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                let mask = crc & 1;
+                crc >>= 1;
+                if mask == 1 {
+                    crc ^= 0xEDB8_8320;
+                }
+            }
+        }
+        !crc
+    }
+
+    fn png_chunk(kind: [u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut chunk = u32::try_from(data.len()).unwrap().to_be_bytes().to_vec();
+        chunk.extend_from_slice(&kind);
+        chunk.extend_from_slice(data);
+        let mut check = kind.to_vec();
+        check.extend_from_slice(data);
+        chunk.extend_from_slice(&crc32(&check).to_be_bytes());
+        chunk
+    }
+
+    /// Insert `chunk` after IHDR in the PNG at `path`, in place.
+    fn insert_png_chunk_after_ihdr(path: &std::path::Path, chunk: &[u8]) {
+        let bytes = std::fs::read(path).expect("fixture PNG should read");
+        assert_eq!(&bytes[12..16], b"IHDR", "fixture must be a PNG");
+        let mut out = bytes[..33].to_vec();
+        out.extend_from_slice(chunk);
+        out.extend_from_slice(&bytes[33..]);
+        std::fs::write(path, out).expect("chunked PNG should write");
+    }
+
+    /// Minimal little-endian TIFF header with IFD0 carrying Orientation.
+    fn tiff_orientation(orientation: u8) -> Vec<u8> {
+        let mut header = b"II*\0\x08\0\0\0".to_vec();
+        header.extend_from_slice(&1_u16.to_le_bytes());
+        header.extend_from_slice(&0x0112_u16.to_le_bytes());
+        header.extend_from_slice(&3_u16.to_le_bytes());
+        header.extend_from_slice(&1_u32.to_le_bytes());
+        header.extend_from_slice(&[orientation, 0, 0, 0]);
+        header.extend_from_slice(&0_u32.to_le_bytes());
+        header
+    }
+
+    /// Inject a JPEG APP1 EXIF orientation segment after SOI, in place.
+    fn inject_jpeg_orientation(path: &std::path::Path, orientation: u8) {
+        let bytes = std::fs::read(path).expect("fixture JPEG should read");
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "fixture must be a JPEG");
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend_from_slice(&tiff_orientation(orientation));
+        let mut out = bytes[..2].to_vec();
+        out.extend_from_slice(&[0xFF, 0xE1]);
+        out.extend_from_slice(&u16::try_from(app1.len() + 2).unwrap().to_be_bytes());
+        out.extend_from_slice(&app1);
+        out.extend_from_slice(&bytes[2..]);
+        std::fs::write(path, out).expect("oriented JPEG should write");
+    }
+
+    /// MO1 R7: PNG and JPEG stills probe as `Image` with nominal fps and a
+    /// one-frame duration; untagged files carry `unknown()` colour (the
+    /// decoder's GBR-matrix / full-range defaults are pixel-format facts,
+    /// not file tagging).
+    #[test]
+    fn probe_classifies_png_and_jpeg_stills() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");
+        let directory = crate::test_support::TempDirectory::new("probe-stills");
+        let png = still_fixture(
+            &directory,
+            "red.png",
+            "color=c=red:size=64x36:rate=1:duration=1",
+            "png",
+        );
+        let jpeg = still_fixture(
+            &directory,
+            "blue.jpg",
+            "color=c=blue:size=64x36:rate=1:duration=1",
+            "mjpeg",
+        );
+
+        for path in [&png, &jpeg] {
+            let asset = probe_path(path, AssetId(1))
+                .unwrap_or_else(|error| panic!("{} should probe: {error}", path.display()));
+            assert_eq!(asset.kind, MediaKind::Image, "{}", path.display());
+            assert_eq!(asset.fps, Rational::default(), "{}", path.display());
+            assert_eq!(asset.duration, TimeCode(1), "{}", path.display());
+            assert_eq!(asset.resolution, Some((64, 36)), "{}", path.display());
+            assert_eq!(
+                asset.color_description,
+                ColorDescription::unknown(),
+                "untagged {} must enter the incident path as unknown",
+                path.display()
+            );
+        }
+    }
+
+    /// MO1 R7: a tagged still keeps the decoder description exactly as
+    /// video does — only untagged stills collapse to `unknown()`.
+    #[test]
+    fn probe_takes_decoder_colorimetry_for_tagged_stills() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");
+        let directory = crate::test_support::TempDirectory::new("probe-tagged-still");
+        let path = still_fixture(
+            &directory,
+            "red.png",
+            "color=c=red:size=64x36:rate=1:duration=1",
+            "png",
+        );
+        insert_png_chunk_after_ihdr(&path, &png_chunk(*b"sRGB", &[0]));
+
+        let asset = probe_path(&path, AssetId(1)).expect("tagged still should probe");
+        assert_eq!(asset.kind, MediaKind::Image);
+        assert_eq!(asset.color_description.primaries, ColorPrimaries::Bt709);
+        assert_eq!(asset.color_description.transfer, ColorTransfer::Srgb);
+        assert_ne!(asset.color_description, ColorDescription::unknown());
+    }
+
+    /// MO1 R7: stills over 8192 px on either axis are refused at probe with
+    /// the named limit and a recovery; 8192 itself probes.
+    #[test]
+    fn probe_refuses_stills_over_8192_pixels() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");
+        let directory = crate::test_support::TempDirectory::new("probe-still-limit");
+        let big = still_fixture(
+            &directory,
+            "big.png",
+            "color=c=gray:size=8193x16:rate=1:duration=1",
+            "png",
+        );
+        let error = probe_path(&big, AssetId(1)).expect_err("8193 px must refuse");
+        let message = error.to_string();
+        assert!(
+            message.contains("8192"),
+            "the refusal must name the limit: {message}"
+        );
+        assert!(
+            message.contains("downscale"),
+            "the refusal must carry a recovery: {message}"
+        );
+
+        let edge = still_fixture(
+            &directory,
+            "edge.png",
+            "color=c=gray:size=8192x16:rate=1:duration=1",
+            "png",
+        );
+        let asset = probe_path(&edge, AssetId(1)).expect("8192 px must probe");
+        assert_eq!(asset.kind, MediaKind::Image);
+        assert_eq!(asset.resolution, Some((8192, 16)));
+    }
+
+    /// MO1 R7: a still codec beside an audio stream stays `AudioVideo`,
+    /// probed as a one-frame video exactly as before — the audio never
+    /// strands on a kind the segment walk skips.
+    #[test]
+    fn probe_keeps_audio_beside_a_still_codec_stream() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");
+        let directory = crate::test_support::TempDirectory::new("probe-still-audio");
+        let jpeg = still_fixture(
+            &directory,
+            "blue.jpg",
+            "color=c=blue:size=64x36:rate=1:duration=1",
+            "mjpeg",
+        );
+        let muxed = directory.path("motion.mkv");
+        crate::test_support::run_ffmpeg(
+            &[
+                "-i",
+                jpeg.to_str().unwrap(),
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ],
+            &muxed,
+        );
+
+        let asset = probe_path(&muxed, AssetId(1)).expect("muxed still+audio should probe");
+        assert_eq!(asset.kind, MediaKind::AudioVideo);
+    }
+
+    /// MO1 R7: an oriented still probes its DISPLAY dimensions.
+    #[test]
+    fn probe_reports_display_dimensions_for_oriented_stills() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");
+        let directory = crate::test_support::TempDirectory::new("probe-oriented-still");
+        let path = still_fixture(
+            &directory,
+            "blue.jpg",
+            "color=c=blue:size=64x36:rate=1:duration=1",
+            "mjpeg",
+        );
+        inject_jpeg_orientation(&path, 6);
+
+        let asset = probe_path(&path, AssetId(1)).expect("oriented still should probe");
+        assert_eq!(asset.kind, MediaKind::Image);
+        assert_eq!(
+            asset.resolution,
+            Some((36, 64)),
+            "a 90° orientation swaps the probed dimensions"
+        );
+    }
+
+    /// Decode one still frame through the legacy path (RGBA8) for content
+    /// pins without managed-colour conversion in the way.
+    fn decode_still_legacy(path: &std::path::Path) -> FrameTexture {
+        let mut decoder =
+            VideoDecoder::open(path, Rational::default()).expect("still should open to decode");
+        let mut cache: FrameCache<FrameTexture> = FrameCache::new(2);
+        decoder
+            .decode_window(TimeCode::ZERO, TimeCode::ZERO, &mut cache)
+            .expect("still frame should decode");
+        cache
+            .frame_at_or_before(TimeCode::ZERO)
+            .expect("still frame should be cached")
+    }
+
+    fn still_pixel(frame: &FrameTexture, x: u32, y: u32) -> &[u8] {
+        let index = usize::try_from((y * frame.width + x) * 4).unwrap();
+        &frame.rgba[index..index + 4]
+    }
+
+    /// MO1 R7: EXIF orientation applies at decode. The fixture's vertical
+    /// edge (left black, right white) rotates to a horizontal one: with
+    /// orientation 6 (90° CW) display (x, y) = stored (y, 35 − x), so rows
+    /// 0..32 decode black and rows 32..64 white; orientation 2 mirrors in
+    /// place; the transpose (5) flips first, inverting the horizontal edge.
+    #[test]
+    fn still_decode_applies_exif_orientation() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");
+        let directory = crate::test_support::TempDirectory::new("decode-oriented-still");
+        let source =
+            "color=c=black:size=64x36:rate=1:duration=1,drawbox=x=32:y=0:w=32:h=36:c=white:t=fill";
+
+        let rotated = still_fixture(&directory, "edge.png", source, "png");
+        insert_png_chunk_after_ihdr(&rotated, &png_chunk(*b"eXIf", &tiff_orientation(6)));
+        let frame = decode_still_legacy(&rotated);
+        assert_eq!((frame.width, frame.height), (36, 64));
+        assert!(still_pixel(&frame, 0, 0)[0] < 56, "top-left must be black");
+        assert!(
+            still_pixel(&frame, 35, 0)[0] < 56,
+            "top-right must be black"
+        );
+        assert!(still_pixel(&frame, 0, 31)[0] < 56, "row 31 must be black");
+        assert!(still_pixel(&frame, 0, 32)[0] > 200, "row 32 must be white");
+        assert!(
+            still_pixel(&frame, 35, 63)[0] > 200,
+            "bottom-right must be white"
+        );
+
+        let mirrored = still_fixture(&directory, "mirror.png", source, "png");
+        insert_png_chunk_after_ihdr(&mirrored, &png_chunk(*b"eXIf", &tiff_orientation(2)));
+        let frame = decode_still_legacy(&mirrored);
+        assert_eq!((frame.width, frame.height), (64, 36));
+        assert!(
+            still_pixel(&frame, 0, 18)[0] > 200,
+            "mirrored left must be white"
+        );
+        assert!(
+            still_pixel(&frame, 63, 18)[0] < 56,
+            "mirrored right must be black"
+        );
+
+        let transposed = still_fixture(&directory, "transpose.png", source, "png");
+        insert_png_chunk_after_ihdr(&transposed, &png_chunk(*b"eXIf", &tiff_orientation(5)));
+        let frame = decode_still_legacy(&transposed);
+        assert_eq!((frame.width, frame.height), (36, 64));
+        assert!(
+            still_pixel(&frame, 0, 0)[0] > 200,
+            "transposed top-left must be white"
+        );
+        assert!(
+            still_pixel(&frame, 35, 0)[0] > 200,
+            "transposed top-right must be white"
+        );
+        assert!(
+            still_pixel(&frame, 0, 63)[0] < 56,
+            "transposed bottom-left must be black"
+        );
+        assert!(
+            still_pixel(&frame, 35, 63)[0] < 56,
+            "transposed bottom-right must be black"
+        );
+    }
+
+    /// MO1 R7: the mirrored orientations compose flip-before-rotation
+    /// exactly, at the byte level.
+    #[test]
+    fn flip_before_rotation_composes_exactly() {
+        // 2 × 1 stored: [A][B]. EXIF 5 = flip (→ [B][A]) then 90° CW,
+        // which stacks the row into a 1 × 2 column, B over A.
+        let flipped = flip_optional(true, 2, 1, 1, vec![10, 20]).expect("flip should apply");
+        assert_eq!(flipped, vec![20, 10]);
+        let (width, height, pixels) = rotate_bytes(VideoRotation::Clockwise90, 2, 1, 1, flipped)
+            .expect("rotation should apply");
+        assert_eq!((width, height), (1, 2));
+        assert_eq!(pixels, vec![20, 10]);
+
+        // No flip passes the buffer through untouched (same allocation).
+        let pixels = vec![10, 20, 30, 40];
+        let passed = flip_optional(false, 2, 2, 1, pixels).expect("pass-through");
+        assert_eq!(passed, vec![10, 20, 30, 40]);
+
+        // Truncated buffers refuse instead of panicking.
+        assert!(flip_optional(true, 2, 2, 1, vec![1, 2, 3]).is_err());
+    }
+
+    /// MO1 R7: PNG alpha survives the still decode — the hold path composites
+    /// it, so the decoder must not flatten it.
+    #[test]
+    fn still_decode_preserves_png_alpha() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");
+        let directory = crate::test_support::TempDirectory::new("decode-still-alpha");
+        let path = still_fixture(
+            &directory,
+            "half.png",
+            "color=c=red@0.5:size=64x36:rate=1:duration=1,format=rgba",
+            "png",
+        );
+        let frame = decode_still_legacy(&path);
+        assert_eq!((frame.width, frame.height), (64, 36));
+        let alpha = still_pixel(&frame, 32, 18)[3];
+        assert!(
+            (120..=140).contains(&alpha),
+            "half alpha must survive decode, got {alpha}"
         );
     }
 }

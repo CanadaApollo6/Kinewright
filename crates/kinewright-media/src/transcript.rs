@@ -539,6 +539,11 @@ where
             let Some(asset) = document.asset(clip.asset) else {
                 continue;
             };
+            // MO1 R8: stills carry no transcript — skipped like M23's
+            // speeded clips, not mapped.
+            if asset.kind == MediaKind::Image {
+                continue;
+            }
             let transcript = transcripts
                 .entry(asset.id)
                 .or_insert_with(|| transcript_for(asset));
@@ -1023,6 +1028,37 @@ mod tests {
             fps: Rational::new(30, 1).unwrap(),
             resolution: (320, 180),
             duration: TimeCode(100 + clip_duration.0),
+        }
+    }
+
+    /// MO1 R8: the transcript mapping skips Image clips — both a Media clip
+    /// over a still (hand-built; the R9 ops refuse it) and the real Freeze
+    /// shape — even when a transcript is offered for the asset.
+    #[test]
+    fn timeline_words_skip_image_clips() {
+        let mut document = fixture_document(Rational::new(24, 1).unwrap());
+        document.media_pool[0].kind = MediaKind::Image;
+        let transcript = std::sync::Arc::new(fixture_transcript(
+            AssetId(1),
+            "fixture",
+            Rational::new(24, 1).unwrap(),
+        ));
+
+        for content in [
+            ClipContent::Media,
+            ClipContent::Freeze(kinewright_core::FreezeFrame {
+                source_frame: TimeCode(10),
+            }),
+        ] {
+            document.tracks[0].clips[0].content = content.clone();
+            assert!(
+                map_timeline_words(&document, None, |_| Some(std::sync::Arc::clone(
+                    &transcript
+                )))
+                .unwrap()
+                .is_empty(),
+                "words must skip {content:?} over a still"
+            );
         }
     }
 }

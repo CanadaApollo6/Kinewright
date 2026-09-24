@@ -11,9 +11,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use kinewright_core::{
-    AssetId, AutomationCurve, ClipId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries,
-    ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Document, Effect, EffectId,
-    FrameTexture, Keyframe, KeyframeInterpolation, Operation, ParamValue, TimeCode,
+    AssetId, AudioMix, AutomationCurve, Clip, ClipContent, ClipId, ColorBitDepth, ColorContext,
+    ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer,
+    ColorWhitePoint, Document, Effect, EffectId, FrameTexture, FreezeFrame, Keyframe,
+    KeyframeInterpolation, MediaAsset, MediaCatalog, MediaKind, Operation, ParamValue, Rational,
+    TimeCode, Track, TrackId, TrackKind,
 };
 
 use crate::compositor::{Compositor, CompositorLayer};
@@ -200,6 +202,72 @@ fn render_frame(document: &Document, at: TimeCode) -> FrameTexture {
             DecodeStrategy::Seek,
         )
         .expect("the render gate frame should render")
+}
+
+/// Stage a still document: an `Image` asset under a `Freeze` clip spanning
+/// `span_frames` project frames (R8/MR21: the clip's `source_range` spans
+/// the hold; `source_frame` 0 samples the still's one frame).
+fn mo1_still_document(
+    media: &GeneratedMedia,
+    span_frames: i64,
+    resolution: (u32, u32),
+    effects: Vec<Effect>,
+) -> (Document, MediaAsset) {
+    let mut asset = probe_path(media.path(), AssetId(1)).expect("the still should probe");
+    assert_eq!(asset.kind, MediaKind::Image);
+    // The assumed-sRGB stamp an untagged still carries after the agent's
+    // source-colour incident resolves (full-range RGB, not video's
+    // limited-range BT.709).
+    asset.color_description = ColorDescription {
+        primaries: ColorPrimaries::Bt709,
+        transfer: ColorTransfer::Srgb,
+        matrix: ColorMatrix::Rgb,
+        range: ColorRange::Full,
+        white_point: ColorWhitePoint::D65,
+        bit_depth: ColorBitDepth::Eight,
+        confidence_basis_points: 10_000,
+        provenance: ColorProvenance::UserOverride,
+    };
+    let document = Document {
+        investigator: None,
+        catalog: MediaCatalog::default(),
+        audio_mix: AudioMix::default(),
+        color_context: ColorContext::default(),
+        lut_assets: Vec::new(),
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
+                id: ClipId(1),
+                asset: asset.id,
+                source_range: TimeCode::ZERO..TimeCode(span_frames),
+                content: ClipContent::Freeze(FreezeFrame {
+                    source_frame: TimeCode::ZERO,
+                }),
+                timeline_start: TimeCode::ZERO,
+                effects,
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+                audio_gain_curve: None,
+            }],
+        }],
+        media_pool: vec![asset.clone()],
+        markers: Vec::new(),
+        fps: Rational::default(),
+        resolution,
+        duration: TimeCode(span_frames),
+    };
+    document
+        .validate()
+        .expect("the still document should validate");
+    (document, asset)
 }
 
 /// MO1 R26: a transform-less render is byte-identical to pre-MO1. The hash
@@ -824,4 +892,316 @@ fn push_in_survives_trim_in_then_out_on_lavapipe() {
             "restored frame {at} must match its pre-trim bytes"
         );
     }
+}
+
+/// A quadrant still for hold/Ken Burns goldens (patterned: a solid would
+/// hide every transform).
+fn mo1_quadrant_still(label: &str, width: u32, height: u32) -> GeneratedMedia {
+    GeneratedMedia::ffmpeg(
+        label,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!(
+                "color=c=red:size={width}x{height}:rate=1:duration=1,drawbox=x={w}:y=0:w={w}:h={height}:c=green:t=fill,drawbox=x=0:y={h}:w={w}:h={h}:c=blue:t=fill,drawbox=x={w}:y={h}:w={w}:h={h}:c=white:t=fill",
+                w = width / 2,
+                h = height / 2,
+            ),
+            "-frames:v",
+            "1",
+            "-c:v",
+            "png",
+        ],
+        "png",
+    )
+}
+
+/// MO1 R27: a still renders identically across its whole five-second span,
+/// decoding once — the frame cache pins the one still frame (one seek, no
+/// evictions) rather than churning it.
+#[test]
+fn still_hold_parity_across_five_seconds() {
+    crate::initialize_ffmpeg().expect("FFmpeg should initialize");
+    let media = mo1_quadrant_still("mo1-hold", 64, 36);
+    let (document, _) = mo1_still_document(&media, 150, (64, 36), Vec::new());
+    let gpu = fixture_gpu_or_skip().expect("the gate needs an adapter");
+    let mut renderer = FrameRenderer::new(gpu);
+    let render = |renderer: &mut FrameRenderer, at: i64| {
+        renderer
+            .render(
+                &document,
+                TimeCode(at),
+                document.resolution,
+                RenderScale::FullResolution,
+                DecodeStrategy::Seek,
+            )
+            .expect("hold frames should render")
+            .rgba
+            .as_ref()
+            .clone()
+    };
+
+    let first = render(&mut renderer, 0);
+    for at in [1, 2, 3, 37, 74, 75, 112, 148, 149] {
+        assert_eq!(
+            render(&mut renderer, at),
+            first,
+            "hold frame {at} must equal frame 0"
+        );
+    }
+    assert_eq!(
+        renderer.video_seek_count(),
+        1,
+        "the still must decode exactly once across its span"
+    );
+    assert_eq!(
+        renderer.cache_eviction_count(),
+        0,
+        "the pinned still frame must never evict"
+    );
+}
+
+/// §10 gate 3: a fitted still with a 100→120 master ramp over its span —
+/// first frame == the untransformed fit, last frame == the 120% static
+/// render, middle frame different from both.
+#[test]
+fn ken_burns_still_renders() {
+    crate::initialize_ffmpeg().expect("FFmpeg should initialize");
+    // Portrait still in a landscape frame, so the R10 bake is non-trivial:
+    // 32×36 in 64×36 fits 2:1 → (50, 100, 10000).
+    let media = mo1_quadrant_still("mo1-ken-burns", 32, 36);
+    let (baked_x, baked_y, baked_fine) = kinewright_core::scale_to_frame_fit((32, 36), (64, 36));
+    assert_eq!((baked_x, baked_y, baked_fine), (50, 100, 10_000));
+
+    let ramp = {
+        let mut effect = transform_effect(
+            1,
+            &[
+                ("scale_x_percent", baked_x),
+                ("scale_y_percent", baked_y),
+                ("scale_fine_hundredths", baked_fine),
+            ],
+        );
+        effect.keyframes.insert(
+            "scale_percent".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode(0),
+                        value: 100,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                    Keyframe {
+                        at: TimeCode(149),
+                        value: 120,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                ],
+            },
+        );
+        effect
+    };
+    let (document, _) = mo1_still_document(&media, 150, (64, 36), vec![ramp]);
+    let (fit, _) = mo1_still_document(
+        &media,
+        150,
+        (64, 36),
+        vec![transform_effect(
+            1,
+            &[
+                ("scale_x_percent", baked_x),
+                ("scale_y_percent", baked_y),
+                ("scale_fine_hundredths", baked_fine),
+            ],
+        )],
+    );
+    let (pushed, _) = mo1_still_document(
+        &media,
+        150,
+        (64, 36),
+        vec![transform_effect(
+            1,
+            &[
+                ("scale_percent", 120),
+                ("scale_x_percent", baked_x),
+                ("scale_y_percent", baked_y),
+                ("scale_fine_hundredths", baked_fine),
+            ],
+        )],
+    );
+
+    let first = render_frame(&document, TimeCode::ZERO)
+        .rgba
+        .as_slice()
+        .to_vec();
+    let last = render_frame(&document, TimeCode(149))
+        .rgba
+        .as_slice()
+        .to_vec();
+    let middle = render_frame(&document, TimeCode(75))
+        .rgba
+        .as_slice()
+        .to_vec();
+    assert_eq!(
+        first.as_slice(),
+        render_frame(&fit, TimeCode::ZERO).rgba.as_slice(),
+        "the ramp's first frame must equal the untransformed fit"
+    );
+    assert_eq!(
+        last.as_slice(),
+        render_frame(&pushed, TimeCode::ZERO).rgba.as_slice(),
+        "the ramp's last frame must equal the static 120% render"
+    );
+    assert_ne!(middle, first, "the middle frame must move off the fit");
+    assert_ne!(middle, last, "the middle frame must not reach the push");
+}
+
+/// MO1 R7: an untagged still renders nothing until the source-colour
+/// incident resolves — the managed decode refuses with the existing
+/// `SourceColor` incident, and the assumed stamp renders.
+#[test]
+fn untagged_still_reaches_the_source_colour_incident() {
+    crate::initialize_ffmpeg().expect("FFmpeg should initialize");
+    let media = mo1_quadrant_still("mo1-untagged", 64, 36);
+    let (mut document, _) = mo1_still_document(&media, 5, (64, 36), Vec::new());
+    document.media_pool[0].color_description = ColorDescription::unknown();
+
+    let gpu = fixture_gpu_or_skip().expect("the gate needs an adapter");
+    let mut renderer = FrameRenderer::new(gpu);
+    let error = renderer
+        .render(
+            &document,
+            TimeCode::ZERO,
+            document.resolution,
+            RenderScale::FullResolution,
+            DecodeStrategy::Seek,
+        )
+        .expect_err("an untagged still must refuse managed decode");
+    let kinewright_core::MediaError::SourceColorForAsset(refusal) = error else {
+        panic!("the refusal must be the existing source-colour incident, got {error:?}");
+    };
+    assert_eq!(
+        refusal.asset,
+        AssetId(1),
+        "the incident must name the still"
+    );
+    assert_eq!(
+        refusal.error,
+        kinewright_core::ColorSourceError::UnknownPrimaries,
+        "the incident must stay the unknown-source field report, got {:?}",
+        refusal.error
+    );
+    assert!(
+        matches!(refusal.description.primaries, ColorPrimaries::Unknown),
+        "untagged PNG primaries must stay Unknown, got {:?}",
+        refusal.description.primaries
+    );
+
+    // The assumed stamp (what `mo1_still_document` carries) renders.
+    let (document, _) = mo1_still_document(&media, 5, (64, 36), Vec::new());
+    let mut renderer = FrameRenderer::new(fixture_gpu_or_skip().expect("adapter"));
+    renderer
+        .render(
+            &document,
+            TimeCode::ZERO,
+            document.resolution,
+            RenderScale::FullResolution,
+            DecodeStrategy::Seek,
+        )
+        .expect("the assumed still must render");
+}
+
+/// MO1 R7: PNG alpha survives the hold path into alpha-over — a half-red
+/// still over grey video composites the honest blend.
+#[test]
+fn still_alpha_composites_over_video() {
+    crate::initialize_ffmpeg().expect("FFmpeg should initialize");
+    let top = GeneratedMedia::ffmpeg(
+        "mo1-alpha-top",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red@0.5:size=64x36:rate=1:duration=1,format=rgba",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "png",
+        ],
+        "png",
+    );
+    let bottom = mo1_source("mo1-alpha-bottom");
+    let (mut document, _) = mo1_still_document(&top, 10, (64, 36), Vec::new());
+    let mut under = probe_path(bottom.path(), AssetId(2)).expect("video should probe");
+    under.color_description = document.media_pool[0].color_description.clone();
+    // Video stamp: the still's full-range RGB stamp is wrong for YUV —
+    // restamp limited-range BT.709 like `mo1_document`.
+    under.color_description.matrix = ColorMatrix::Bt709;
+    under.color_description.range = ColorRange::Limited;
+    under.color_description.transfer = ColorTransfer::Bt709;
+    document.fps = under.fps;
+    document.media_pool.push(under);
+    document.tracks.insert(
+        0,
+        Track {
+            id: TrackId(2),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
+                id: ClipId(2),
+                asset: AssetId(2),
+                source_range: TimeCode::ZERO..TimeCode(10),
+                content: ClipContent::Media,
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+                audio_gain_curve: None,
+            }],
+        },
+    );
+    // Track order note: `visual_layers_at` composites ascending document
+    // index, so the still (index 1) alpha-overs the video (index 0).
+    document
+        .validate()
+        .expect("the alpha document should validate");
+
+    let frame = render_frame(&document, TimeCode(5));
+    let grey = render_frame(
+        &{
+            let mut solo = document.clone();
+            solo.tracks.remove(1);
+            solo
+        },
+        TimeCode(5),
+    );
+    let (r, g, b) = {
+        let p = pixel(&frame, 32, 18);
+        (p[0], p[1], p[2])
+    };
+    let (gr, gg, gb) = {
+        let p = pixel(&grey, 32, 18);
+        (p[0], p[1], p[2])
+    };
+    // Half red over grey: red rises toward 255, green/blue fall toward the
+    // grey they halve. The blend must sit strictly between the layers —
+    // opaque red (255, 0, 0) fails the red ceiling and the green floor.
+    assert!(r > gr, "red must rise over grey ({r} vs {gr})");
+    assert!(g < gg, "green must fall toward the halve ({g} vs {gg})");
+    assert!(b < gb, "blue must fall toward the halve ({b} vs {gb})");
+    assert!(
+        (150..240).contains(&r) && (40..120).contains(&g) && (40..120).contains(&b),
+        "the blend must be a real mix, got [{r}, {g}, {b}] over [{gr}, {gg}, {gb}]"
+    );
 }

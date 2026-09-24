@@ -268,6 +268,17 @@ impl FrameRenderer {
             .sum()
     }
 
+    /// Total decoder seeks across video sources — the test-only churn
+    /// signal. A pinned still decodes once (one seek) no matter how many
+    /// frames render from it; production decode policy is unchanged.
+    #[cfg(test)]
+    pub(crate) fn video_seek_count(&self) -> u64 {
+        self.video_sources
+            .values()
+            .map(|source| source.decoder.seek_count())
+            .sum()
+    }
+
     /// Composite one project frame for the document's monitoring target.
     ///
     /// CC1 2.2.6 requires the monitor transform to be selected from the

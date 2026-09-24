@@ -1220,7 +1220,14 @@ fn referenced_visual_assets(document: &Document) -> BTreeSet<AssetId> {
         .flat_map(|track| track.clips.iter())
         .filter(|clip| matches!(clip.content, ClipContent::Media | ClipContent::Freeze(_)))
         .filter_map(|clip| document.asset(clip.asset))
-        .filter(|asset| matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo))
+        // MO1 N3: stills reach the source-colour incident path as video
+        // does — an untagged PNG is unknown until assumed, like footage.
+        .filter(|asset| {
+            matches!(
+                asset.kind,
+                MediaKind::Video | MediaKind::AudioVideo | MediaKind::Image
+            )
+        })
         .map(|asset| asset.id)
         .collect()
 }
@@ -1681,7 +1688,13 @@ fn managed_color_clip(
             asset: clip.asset,
         });
     };
-    if !matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo) {
+    // MO1 N3: stills reach the managed-clip gate as video does, so an
+    // untagged still flows into the source-colour incident path instead of
+    // bouncing off the kind filter.
+    if !matches!(
+        asset.kind,
+        MediaKind::Video | MediaKind::AudioVideo | MediaKind::Image
+    ) {
         return Err(ColorClipRejection::WrongAssetKind {
             clip: clip.id,
             asset: asset.id,
@@ -5493,6 +5506,42 @@ mod tests {
             0
         );
         assert_eq!(value["ordered_stage_names"].as_array().unwrap().len(), 8);
+    }
+
+    /// MO1 N3: stills reach the source-colour incident path — the managed
+    /// gate resolves an Image clip (tagged → profile, untagged →
+    /// `UnsupportedSource`, never `WrongAssetKind`), the status lists the
+    /// still as referenced, and non-visual kinds still bounce.
+    #[test]
+    fn stills_reach_the_source_colour_path() {
+        let mut document = document();
+        document.media_pool[0].kind = MediaKind::Image;
+
+        let (clip, profile, assumption) = managed_color_clip(&document, ClipId(1), None)
+            .expect("a tagged still must resolve like video");
+        assert_eq!(clip.id, ClipId(1));
+        assert_eq!(profile, ColorSourceProfile::Rec709Video);
+        assert_eq!(assumption, None);
+
+        document.media_pool[0].color_description = ColorDescription::unknown();
+        let Err(ColorClipRejection::UnsupportedSource { clip, .. }) =
+            managed_color_clip(&document, ClipId(1), None)
+        else {
+            panic!("an untagged still must reach the source-colour incident path");
+        };
+        assert_eq!(clip, ClipId(1));
+
+        let value = color_context_value(TimelineRevision(0), &document);
+        assert_eq!(value["assets"][0]["managed_blocking"], true);
+        assert_eq!(value["managed_blocking_asset_ids"], json!([1]));
+
+        document.media_pool[0].kind = MediaKind::Audio;
+        let Err(ColorClipRejection::WrongAssetKind { kind, .. }) =
+            managed_color_clip(&document, ClipId(1), None)
+        else {
+            panic!("audio must still bounce off the managed-clip gate");
+        };
+        assert_eq!(kind, MediaKind::Audio);
     }
 
     #[test]

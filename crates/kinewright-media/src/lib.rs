@@ -102,6 +102,7 @@ mod gpu_test_support;
 /// no public surface to reach them.
 #[cfg(test)]
 mod mo1_fixtures;
+mod still_orientation;
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::MediaError;
