@@ -881,6 +881,154 @@ for its fixtures and names the render lane per gate. Results pass three
 gates in order — structural, technical, creative — and passing the first
 two is never grounds for calling a result excellent.
 
+## Agent workbench programme` for `docs/ROADMAP-AND-WORKFLOWS.md`
+
+Intended placement: after the motion programme, before the investigator
+programme. Mirrors the colour/audio/motion sections.
+
+---
+
+## Agent workbench programme
+
+Programme design: [`AW0-AGENT-WORKBENCH.md`](AW0-AGENT-WORKBENCH.md) (promoted 2026-09-24;
+slices AW1–AW4). Thesis: Kinewright is to video what a game engine is to games for
+frontier models — an agent inside it does everything video-from-code can, and far
+more, faster, with no bundled Node, Python or Chromium runtime.
+
+### Product boundary
+
+The agent workbench programme makes Kinewright the engine an agent
+would rather drive than code around: any MCP client (Claude Desktop,
+Claude Code, or any other) can drive a real project over stdio —
+proxied to the GUI's live server when the project is open there,
+headless otherwise — apply revision-gated plans, render proofs, and
+hand the same file back to the GUI, while code stays a first-class clip
+source with deterministic cached renders. It owns the headless CLI and
+stdio mode, code-generated clips (SVG, Lottie; native Rust only —
+never a bundled Node/Python/Chromium runtime; Manim/Remotion
+native-only-for-now with a specified-only external adapter),
+aggregate diagnostics, state diffs, frame
+explanation, the sharing contract, the decision log, and the shipped
+skill. It consumes the IN3 row (timeline view, post-render self-check,
+cut defaults, capability packs); it is not a hosted service, not a
+Python/JS SDK, not a sub-agent orchestrator, not generated raster or
+video, and not audio generation or URL fetching.
+
+### Current foundation and limits
+
+The base is M36's compact seven-tool runtime (served quad pinned at
+7 / 5,660 B / 3,510 B / 998 B for nineteen consecutive measurements)
+with its per-instance allowlist, capability denylist, and destructive
+confirmation broker; M31's agent branches with merge, cherry-pick, and
+provenance; the validated `Operation` core with revision gating, undo,
+and journal; the `.kinewright` JSON document with migration discipline;
+the one shared `FrameRenderer` preview/export path that already runs
+headless on lavapipe; and the `kinewright-eval` bin that already drives
+Core, media engines, and real harnesses with no GUI.
+
+The limits are equally clear. No `kinewright` CLI exists; the MCP
+server speaks only in-process Streamable HTTP on an ephemeral port
+with no auth and no stdio transport; undo and branches are in-memory,
+so nothing about them survives a process boundary; project IO is
+`pub(crate)` in the app; no project lifecycle, lockfile, or code-clip
+source exists; plan validation reports only the first failure; and no
+diff, frame explanation, decision log, comparison sheet, or skill exists.
+
+### Agent workbench architecture principles
+
+- **One runtime, every client.** The stdio mode serves the identical
+  seven tools; transport is not surface. No full-surface server mode,
+  ever again.
+- **The served quad does not move.** New capabilities arrive through
+  `invoke_capability`; richer errors ride capped response payloads.
+  Served input schemas are frozen.
+- **Headless inverts the sandbox.** The external host is outside our
+  trust; destructive commits need per-call consent or the explicit
+  flag, with a pre-commit snapshot; file scope is MCP roots.
+- **Code renders are pure functions.** `(source, params, frame)` in,
+  pixels out — no IO, no clock, bounded resources, hashed fonts.
+- **Native Rust only.** No bundled Node, Python, or Chromium runtime,
+  ever by default; AW2 targets capability parity with Remotion/Manim
+  for the common video-from-code jobs, natively.
+- **Memory and CPU are gated.** Every slice pins budgets (headless
+  peak RSS, per-frame code-clip render cost, cache bounds); AW4
+  measures them against the baseline's toolchain footprint.
+- **Same bytes in, same pixels out.** Content-hash caching with the
+  renderer version in the key; CLI proofs equal GUI proofs on the
+  pinned adapter.
+- **Proxy to the live writer.** The lockfile is discovery (endpoint +
+  token), not exclusion; one writer, two clients; contention hands a
+  validated plan across, never a surprise mutation.
+- **Explanation is a view, never a second implementation.**
+  `explain_frame` reads the data the renderer used.
+- **Efficiency is gated against code.** Tokens, tool calls, wall time,
+  and corrections per job are measured against the "video from code in
+  Claude Desktop" baseline, not against our own past.
+
+### Staged implementation
+
+| Stage | Deliverable | Exit gate |
+| --- | --- | --- |
+| AW1 — Headless Kinewright | `kinewright` CLI (new/open/import/save/inspect/schema/apply plan/proof frame/strip/check/export/branch) plus proxy-first stdio with server auth; lockfile discovery; shared project-IO crate; lifecycle capabilities; destructive-consent plumbing; skill v1 + MCPB package | Headless: stdio client opens, splits, commits, proofs; the GUI opens the same file with the change and one CLI commit in provenance. GUI open: the same session proxies live and one GUI undo removes the edit. Destructive without consent refuses naming the flag; proofs equal on the pinned adapter; headless peak RSS inside budget; served quad unchanged |
+| AW3 — Aggregate diagnostics, state diffs, explain-frame | Aggregate `apply_batch` diagnostics with lenient plan parsing under a byte budget; `get_timeline_diff` over revision-indexed snapshots; two-tier `explain_frame`; per-frame hash; decision-log sidecar; comparison sheet with batch proofs | A 50-op plan with three seeded errors returns all three plus fixes in one call; a diff answers a cut-point question inside budget; tier-1 explanation names every stack contributor; two branches render one sheet with diffs, QA, batch proofs, and costs; diff/explain compute inside budget; served quad unchanged |
+| AW2 — Code-generated clips | `ClipContent::Code` with SVG and Lottie sources, declared descriptors, typed bindings, hash-blob store, keyframable parameters, sandbox bounds, and provenance; Typst/WGSL specified but deferred; render-import adapter specified-only and external if ever built; parity with Remotion/Manim for the common jobs | SVG lower third byte-identical across runs and both CI operating systems; Lottie params survive trim-in-then-out; over-budget renders and unbound ids fail closed; per-frame render cost and cache bounds inside budget; parity table green except named gaps; served quad unchanged |
+| AW4 — Workflow evaluation | Scenario authority with synthetic sources, scripted agent/person paths, the Claude Code `-p` both-arms comparison harness against a full-strength baseline (ffmpeg + Remotion/Manim + official skills) measuring tokens, time, corrections, and peak RSS, blinded review; no feature, no tool | All gates green on both OSes with lanes named; N runs per task per arm with setup time counted; engine wins tokens/time/corrections/RSS; human reviewer left only creative questions |
+
+Each slice writes its design doc (≤ ~600 lines) before implementation
+and records deferrals explicitly, as the colour, audio, and motion
+slices did. Order is AW1 → AW3 → AW2 → AW4: external provability first,
+drivability second, code clips on the settled content model third,
+measurement last. AW1 runs parallel with MO1 except the shared-crate
+cutover, which serialises; AW3/MO2 landings at the registry pin sites
+serialise; AW2 starts once MO1's content match arms are stable.
+
+### Agent surface direction
+
+- `open_project`, `save_project`, `undo`, `revert_to_revision`:
+  project lifecycle through the unchanged compact runtime (AW1).
+- `get_timeline_diff`: compact state change since revision N over
+  revision-indexed snapshots, inside a pinned byte budget (AW3).
+- `explain_frame`: tier-1 layer stack at frame t via the render path's
+  own data; tier-2 per-region attribution (AW3).
+- Per-frame hash over a range: the cheap "did anything change" (AW3).
+- Aggregate plan diagnostics arrive inside the existing
+  `prepare_edit_plan` response under a byte budget; the input schema is
+  frozen (AW3).
+- Code-clip mutators arrive as generated operations through the
+  unchanged compact runtime (AW2).
+- The comparison sheet is composed from diffs, QA, and batch proofs as
+  registry capabilities plus CLI output (AW3).
+
+Analysis tools do not mutate. Plan tools return the exact operations
+they intend to apply and require the project revision they analyzed.
+Proof tools identify the render stage and cannot substitute a proxy-only
+result for delivery verification.
+
+### Agent workbench evaluation matrix
+
+Both arms run Claude Code `-p` stream-json; the baseline is full
+strength (ffmpeg scripts plus Remotion/Manim with official skills).
+Same tasks, same fixtures, same model; N runs per task per arm with
+setup time counted; quality blinded. Desktop + MCPB is a manual smoke.
+
+| Fixture | Objective checks | Human question, if any |
+| --- | --- | --- |
+| Silence-cut + captions on a podcast | Tokens, tool calls, corrections vs code; cut-default correctness | Does the pacing feel intentional? |
+| Animated lower third over an interview | Wall time and iterations to accepted graphic; render determinism | Does the animation suit the story? |
+| Reframe 16:9 to 9:16 with caption safety | Crop correctness, focal preservation, safe-area QA | Is the subject preserved; are captions readable? |
+| Two-camera match + tagged delivery | Scope deltas, tag correctness, decoded-output verification | Does the match preserve intentional differences? |
+| Revise after review on any of the above | Revision cost (one branch + plan + undo vs full re-run) | Only the creative judgement, never the mechanics |
+| Agent-authored edit end to end | Scripted real-endpoint runs, token/tool-call budgets | Only the creative choices, never the mechanics |
+
+Undoability, revision gating, explainability, and GUI-openability are
+scored per task on both arms. Results pass structural, technical, then
+creative review in order.
+
+**Current status (2026-09-24): programme design at revision 2 (critic
+`revise` discharged per N1; Riel's answers recorded).** No slice
+briefed yet. AW1 is first, now a three-part slice (proxy + auth +
+shared-crate cutover + lifecycle + consent).
+
 ## Investigator and harness programme
 
 ### Product boundary
