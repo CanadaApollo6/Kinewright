@@ -13,7 +13,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 87] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 88] = [
     "get_timeline_state",
     // IN1 §6.1 rule 1: two internal capabilities, reached only through
     // `invoke_capability` and never added to `COMPACT_TOOL_NAMES`.
@@ -84,6 +84,9 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 87] = [
     "plan_audio_ducking",
     "plan_audio_normalization",
     "plan_clip_fades",
+    // MO1 R20: registered directly after `plan_clip_fades`, matching the
+    // registry position. Registry-only: the served quad does not move.
+    "plan_motion",
     "plan_dialogue_repair",
     "capture_room_tone",
     "plan_room_tone_fill",

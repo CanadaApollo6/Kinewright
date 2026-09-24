@@ -136,6 +136,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-23, after IN2 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-24, after MO1 Part A) | 147 | 1,819,706 B | 1,670,813 B | 124,748 B |
 | Served MCP runtime (2026-09-24, after MO1 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-24, after MO1 Part C plan_motion) | 148 | 1,822,003 B | 1,672,150 B | 125,550 B |
+| Served MCP runtime (2026-09-24, after MO1 Part C plan_motion) | 7 | 5,660 B | 3,510 B | 998 B |
 
 IN1 Part A adds two capabilities, `get_incidents` and `resolve_incident`,
 reached through `invoke_capability` and served as no tool: the registry grows
@@ -189,6 +191,15 @@ embedded `$defs`). The registry lands at 1,819,706 B serialized
 (1,670,813 input schema, 124,748 description) at counts 147 / 60 / 87. The served quad is
 byte-identical for the twentieth consecutive measurement at 7 / 5,660 B /
 3,510 B / 998 B (MO1 R21), asserted in three value sites.
+
+MO1 Part C adds one registry-only planner, `plan_motion`, and nothing else:
+no operation, no model field, no served tool. The registry grows by
+2,297 B serialized (1,819,706 → 1,822,003): +1,337 B of generated
+`MotionPlanArgs` input schema (revision, clip, six-way preset enum,
+replace), +802 B of description text, and +158 B fixed — the envelope
+rule again, 147 B plus the 11 bytes of `plan_motion`. The served quad is
+byte-identical for the twenty-first consecutive measurement at 7 /
+5,660 B / 3,510 B / 998 B (MO1 R21), asserted in three value sites.
 
 AU6 Part A adds no capability and no operation; the registry is
 unchanged and the served quad is byte-identical at 7 / 5,660 B /

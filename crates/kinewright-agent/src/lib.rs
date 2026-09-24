@@ -24,6 +24,7 @@ pub mod export_queue;
 pub mod fixture_pack;
 mod harness;
 mod models;
+mod motion;
 mod muse;
 mod pacing;
 mod protocol;

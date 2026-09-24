@@ -89,6 +89,7 @@ use crate::{
         ExportJobId, ExportJobRecord, ExportQueue, ExportQueueError, QueueExportRequest,
         media_refusal_code,
     },
+    motion::{MotionPlanArgs, MotionPlanError},
     pacing::{DialoguePacingGap, dialogue_pacing_gaps},
     render::{
         cuttable_timeline_silences, render_asset_scene_changes, render_asset_silences,
@@ -1571,6 +1572,10 @@ impl KinewrightMcp {
             "plan_clip_fades" => {
                 let args: ClipFadesPlanArgs = decode_args("plan_clip_fades", arguments)?;
                 self.plan_clip_fades(&args)
+            }
+            "plan_motion" => {
+                let args: MotionPlanArgs = decode_args("plan_motion", arguments)?;
+                self.motion_plan(&args)
             }
             "plan_room_tone_fill" => {
                 let args: RoomToneFillPlanArgs = decode_args("plan_room_tone_fill", arguments)?;
@@ -9764,6 +9769,45 @@ impl KinewrightMcp {
         ))
     }
 
+    /// MO1 R20: propose one transform move as exact, unapplied operations.
+    ///
+    /// Evidence-only like the colour planners (no prepared plan — the caller
+    /// submits the operations through `prepare_edit_plan` itself), with the
+    /// R20 byte budget enforced on the way out: a proposal past 4 KiB fails
+    /// closed with a summary that names the preset, the clip and the bytes,
+    /// never a silently cut curve.
+    fn motion_plan(&self, args: &MotionPlanArgs) -> Result<CallToolResult, McpError> {
+        let (actual_revision, document) = self.snapshot()?;
+        let plan = match crate::motion::plan_motion(&document, actual_revision, args) {
+            Ok(plan) => plan,
+            Err(MotionPlanError::RevisionConflict { expected, actual }) => {
+                return Ok(revision_conflict_text(expected, actual));
+            }
+            Err(error) => {
+                return Ok(error_structured(
+                    format!("plan_motion rejected: {error}"),
+                    serde_json::json!({
+                        "code": error.code(),
+                        "message": error.to_string(),
+                        "details": error.details(),
+                        "evidence_only": true,
+                        "applied": false,
+                    }),
+                ));
+            }
+        };
+        let operations = serde_json::to_value(&plan.operations)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        match crate::motion::motion_response(&plan, operations) {
+            crate::motion::MotionProposal::Fits { text, body } => {
+                Ok(success_structured(text, body))
+            }
+            crate::motion::MotionProposal::OverBudget { text, body } => {
+                Ok(error_structured(text, body))
+            }
+        }
+    }
+
     /// AU5 §5.5: propose butt-joined room-tone fills for one audio track's
     /// leading and interior gaps.
     ///
@@ -13620,6 +13664,15 @@ fn inspector_tools() -> Vec<Tool> {
             "plan_clip_fades",
             "Propose short audio fade-in and fade-out frame counts on media clips whose head or tail window reads above threshold_dbfs_hundredths, emitting set_clip_audio only - never adding a curve, never overwriting a fade that is already non-zero - and skipping any clip that holds no whole window with a per-clip reason in structured content instead of failing the whole plan. The window is the proposed fade itself, clamped to 1000 ms - the audio the ramp would act on - and the decision reads the track stem's RMS level in dBFS over it, measured in one short-window pass per track rather than one render per clip edge. Each proposal carries that clip's existing gain and its untouched fade through, and clamps the pair so fade_in plus fade_out never exceeds the clip duration. Returns an opaque prepared_edit_plan preview; the timeline is unchanged until commit_edit_plan.",
             schema_object::<ClipFadesPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        // MO1 R20: registered directly after `plan_clip_fades`, the
+        // placement IN1 §6.1 used for `get_incidents`. Registry-only, so
+        // the served quad does not move; the registry sextuple does.
+        Tool::new(
+            "plan_motion",
+            "Propose one revision-gated transform move on a video-track clip — push_in, pull_out, pan_left, pan_right, ken_burns, or static pip — refused by name when the target params already carry curves unless replace is true, and failing closed past a 4 KiB response budget. Animated presets author whole-curve SetEffectKeyframes on the fine triple (scale_fine_hundredths, x/y_basis_points) with two EaseInOut keys at the clip ends, so coarse values stay put and the move is sub-pixel; ken_burns zooms while drifting and is allowed on video. pip writes a static bottom-right quarter frame, clearing those params' curves first when replace rebuilds them. A missing transform effect is added neutral first. Returns exact operations; evidence-only, applies nothing until prepare_edit_plan and commit_edit_plan.",
+            schema_object::<MotionPlanArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -23651,7 +23704,7 @@ mod tests {
         }
         // IN1 §6.6: get_incidents and resolve_incident join the registry;
         // IN2 §4.1 rule 2 adds propose_fix beside them.
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
 
         for name in [
             "plan_primary_correction",
@@ -23674,6 +23727,8 @@ mod tests {
             "plan_dialogue_repair",
             "capture_room_tone",
             "plan_room_tone_fill",
+            // MO1 R20: the motion planner joins the same budget.
+            "plan_motion",
         ] {
             let tool = tools.iter().find(|tool| tool.name == name).unwrap();
             let description = tool.description.as_deref().unwrap_or_default();
@@ -27505,7 +27560,7 @@ mod tests {
             }
         }
 
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
         // IN1 §6.1 rule 3: nothing the dispatcher accepted before is now
         // refused, and no generated operation tool became invocable.
         let stranded = crate::schema::INSPECTOR_TOOL_NAMES
@@ -27546,6 +27601,59 @@ mod tests {
         assert_eq!(annotations.destructive_hint, Some(false));
         assert_eq!(annotations.idempotent_hint, Some(false));
         assert_eq!(annotations.open_world_hint, Some(false));
+    }
+
+    /// MO1 R21: `plan_motion` is registry-only and costs its measured row —
+    /// `2 297 / 1 337 / 802` — the whole of Part C's sextuple move.
+    ///
+    /// Registered directly after `plan_clip_fades`, invocable through the
+    /// dispatcher, never served. Read-only: a proposal applies nothing.
+    #[test]
+    fn mo1_plan_motion_costs_its_measured_row() {
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        let tool = registry
+            .iter()
+            .find(|tool| tool.name == "plan_motion")
+            .expect("plan_motion must be registered");
+        let metrics = ToolSurfaceMetrics::measure(std::slice::from_ref(tool));
+        assert_eq!(
+            (
+                metrics.serialized_bytes,
+                metrics.input_schema_bytes,
+                metrics.description_bytes
+            ),
+            (2_297, 1_337, 802),
+            "{metrics:?}"
+        );
+
+        let names = crate::schema::INSPECTOR_TOOL_NAMES;
+        let fades = names
+            .iter()
+            .position(|name| *name == "plan_clip_fades")
+            .unwrap();
+        assert_eq!(
+            names.get(fades + 1),
+            Some(&"plan_motion"),
+            "plan_motion is registered directly after plan_clip_fades"
+        );
+
+        // Registry-only: invocable through the dispatcher, never served.
+        assert!(is_invocable_capability("plan_motion"));
+        assert!(!crate::runtime::COMPACT_TOOL_NAMES.contains(&"plan_motion"));
+        let annotations = tool.annotations.as_ref().unwrap();
+        assert_eq!(annotations.read_only_hint, Some(true));
+        assert_eq!(annotations.destructive_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(true));
+        assert_eq!(annotations.open_world_hint, Some(false));
+        assert_eq!(
+            capabilities(&registry)
+                .iter()
+                .find(|capability| capability.name == "plan_motion")
+                .unwrap()
+                .kind,
+            CapabilityKind::Planner,
+            "no CAPABILITY_KIND_OVERRIDES entry is needed"
+        );
     }
 
     /// IN1 §6.2 rule 9, `IN1b` §3.11 rule 43 and IN2 §4.2 rule 11: the two
@@ -28482,6 +28590,20 @@ mod tests {
     ///   1 671 667 − 854 = **1 670 813**,
     ///   124 520 + 228 = **124 748**. Counts `147 / 60 / 87`. Served quad
     ///   unchanged — still the twentieth measurement.
+    ///
+    /// - **MO1 Part C (R20 `plan_motion`): +2 297 / +1 337 / +802.** One
+    ///   registry-only planner, pinned one by one in
+    ///   `mo1_plan_motion_costs_its_measured_row`: +1 337 B of generated
+    ///   `MotionPlanArgs` input schema (revision, clip, six-way preset enum,
+    ///   replace), +802 B of description text, +158 B of fixed row cost —
+    ///   the M36 envelope rule, 147 B plus the 11 bytes of `plan_motion`.
+    ///   The arithmetic: 1 337 + 802 + 158 = 2 297, and
+    ///   1 819 706 + 2 297 = **1 822 003**,
+    ///   1 670 813 + 1 337 = **1 672 150**,
+    ///   124 748 + 802 = **125 550**. Counts `148 / 60 / 88`. Served quad
+    ///   unchanged (`7 / 5 660 / 3 510 / 998`) — the twenty-first
+    ///   consecutive measurement, and the first whose counter moves for a
+    ///   Part C addition.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28507,15 +28629,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_819_706, 5_660),
+            (1_822_003, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_670_813,
+            registry_metrics.input_schema_bytes, 1_672_150,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 124_748,
+            registry_metrics.description_bytes, 125_550,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -33423,6 +33545,206 @@ mod tests {
         assert!(fades.contains("per-clip reason"), "{fades}");
     }
 
+    /// MO1 R20: one video-track document holding a single `duration`-frame
+    /// freeze clip carrying `effects`, with the asset `apply_batch`'s
+    /// document validation requires.
+    fn mo1_motion_document(duration: i64, effects: Vec<Effect>) -> Document {
+        Document {
+            investigator: None,
+            catalog: kinewright_core::MediaCatalog::default(),
+            audio_mix: kinewright_core::AudioMix::default(),
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
+                    id: ClipId(1),
+                    asset: AssetId(1),
+                    source_range: TimeCode::ZERO..TimeCode(duration),
+                    content: ClipContent::Freeze(kinewright_core::FreezeFrame {
+                        source_frame: TimeCode::ZERO,
+                    }),
+                    timeline_start: TimeCode::ZERO,
+                    effects,
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                    audio_gain_curve: None,
+                }],
+            }],
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: "fixture.mp4".into(),
+                name: "fixture".into(),
+                duration: TimeCode(duration),
+                fps: Rational::new(30, 1).unwrap(),
+                kind: MediaKind::Video,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            }],
+            markers: Vec::new(),
+            fps: Rational::new(30, 1).unwrap(),
+            resolution: (1920, 1080),
+            duration: TimeCode(duration),
+            color_context: kinewright_core::ColorContext::default(),
+            lut_assets: Vec::new(),
+        }
+    }
+
+    fn mo1_motion_request(preset: &str, replace: bool) -> CallToolRequestParams {
+        CallToolRequestParams::new("plan_motion").with_arguments(
+            json!({
+                "expected_revision": 0,
+                "clip_id": 1,
+                "preset": preset,
+                "replace": replace,
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+    }
+
+    /// MO1 R20: the `plan_motion` description stays under the 1 KB M36
+    /// budget and carries its load-bearing clauses in the FIRST sentence —
+    /// the refusal rule and the budget — because the compact surfaces
+    /// publish only the summary.
+    #[test]
+    fn mo1_plan_motion_summary_carries_the_load_bearing_clauses() {
+        let tools = KinewrightMcp::tools().unwrap();
+        let description = tools
+            .iter()
+            .find(|tool| tool.name == "plan_motion")
+            .unwrap()
+            .description
+            .clone()
+            .unwrap()
+            .to_string();
+        assert!(
+            description.len() < 1_024,
+            "plan_motion description is {} bytes",
+            description.len()
+        );
+        let summary = crate::runtime::capabilities(&tools)
+            .into_iter()
+            .find(|capability| capability.name == "plan_motion")
+            .unwrap_or_else(|| panic!("plan_motion is a capability"))
+            .summary;
+        assert!(
+            summary.len() < description.len(),
+            "plan_motion must carry more than its first sentence"
+        );
+        assert!(summary.contains("refused by name"), "{summary}");
+        assert!(summary.contains("replace is true"), "{summary}");
+        assert!(summary.contains("4 KiB"), "{summary}");
+    }
+
+    /// MO1 R20: the push-in golden through the real registry dispatch — exact
+    /// operations, evidence-only markers, inside the byte budget, and the
+    /// document untouched.
+    #[test]
+    fn mo1_plan_motion_push_in_golden_through_the_registry() {
+        let service = au4_service(mo1_motion_document(60, Vec::new()), NoopMedia::default());
+        let planned = service
+            .call_blocking(mo1_motion_request("push_in", false))
+            .unwrap();
+        assert_eq!(planned.is_error, Some(false), "{planned:?}");
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(body["applied"], json!(false));
+        assert_eq!(body["evidence_only"], json!(true));
+        assert_eq!(body["preset"], json!("push_in"));
+        assert_eq!(body["target_effect_id"], json!(1));
+        assert_eq!(body["created_new_effect"], json!(true));
+        assert_eq!(body["key_counts"], json!({"scale_fine_hundredths": 2}));
+        let operations = body["operations"].as_array().unwrap();
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0]["AddEffect"]["clip"], json!(1));
+        assert_eq!(
+            operations[0]["AddEffect"]["effect"]["parameters"]
+                .as_object()
+                .unwrap()
+                .len(),
+            11
+        );
+        let curve = &operations[1]["SetEffectKeyframes"];
+        assert_eq!(curve["name"], json!("scale_fine_hundredths"));
+        assert_eq!(
+            curve["curve"]["keyframes"],
+            json!([
+                {"at": 0, "value": 10000, "interpolation": "ease_in_out"},
+                {"at": 59, "value": 12000, "interpolation": "ease_in_out"},
+            ]),
+            "{curve}"
+        );
+        let text = planned.content[0].as_text().unwrap().text.clone();
+        let bytes = text.len() + body.to_string().len();
+        assert!(
+            bytes < crate::motion::MOTION_RESPONSE_BUDGET_BYTES,
+            "the served push_in renders {bytes} B against a 4 KiB budget"
+        );
+        let (revision, document) = service.snapshot().unwrap();
+        assert_eq!(revision, TimelineRevision(0), "evidence-only plans nothing");
+        assert!(document.tracks[0].clips[0].effects.is_empty());
+    }
+
+    /// MO1 R20: refusals surface typed through the registry — the curves
+    /// refusal names its params and code, a stale revision conflicts.
+    #[test]
+    fn mo1_plan_motion_refusals_surface_typed_through_the_registry() {
+        let mut effect = Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(2),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
+            keyframes: BTreeMap::new(),
+        };
+        effect.keyframes.insert(
+            "scale_fine_hundredths".to_owned(),
+            AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 11_000,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                }],
+            },
+        );
+        let service = au4_service(mo1_motion_document(60, vec![effect]), NoopMedia::default());
+        let refused = service
+            .call_blocking(mo1_motion_request("push_in", false))
+            .unwrap();
+        assert_eq!(refused.is_error, Some(true), "{refused:?}");
+        let body = refused.structured_content.as_ref().unwrap();
+        assert_eq!(body["code"], json!("motion_curves_exist"));
+        assert_eq!(body["applied"], json!(false));
+        let rebuilt = service
+            .call_blocking(mo1_motion_request("push_in", true))
+            .unwrap();
+        assert_eq!(rebuilt.is_error, Some(false), "{rebuilt:?}");
+
+        let stale = CallToolRequestParams::new("plan_motion").with_arguments(
+            json!({
+                "expected_revision": 3,
+                "clip_id": 1,
+                "preset": "push_in",
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let conflicted = service.call_blocking(stale).unwrap();
+        assert_eq!(conflicted.is_error, Some(true), "{conflicted:?}");
+    }
+
     // ---- IN2 §9.1 items 24-31 and 34: the investigator server ----
 
     /// The live revision an investigator branch is seeded at in these tests.
@@ -34228,13 +34550,15 @@ mod tests {
     /// 56 / 87`. A4b (R17/R18) adds three more (`set_effect_enabled`,
     /// `set_clip_enabled`, `set_clip_enabled_curve`): counts `146 / 59 /
     /// 87`. A4c (R19) adds the last one (`copy_clip_attributes`): counts
-    /// `147 / 60 / 87`. All are registry-only — served tools come from the
-    /// compact authority, which MO1 does not touch.
+    /// `147 / 60 / 87`. Part C (R20) adds one inspector planner
+    /// (`plan_motion`): counts `148 / 60 / 88`. All are registry-only —
+    /// served tools come from the compact authority, which MO1 does not
+    /// touch.
     #[test]
     fn in2_the_registry_grows_by_one_capability() {
         let registry = KinewrightMcp::capability_tools().unwrap();
-        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 147);
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
+        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 148);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
         assert_eq!(operation_tools().unwrap().len(), 60);
         let generated = operation_tools().unwrap();
         for name in [
