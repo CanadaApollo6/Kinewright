@@ -2665,3 +2665,206 @@ fn split_copies_keys_to_both_halves() {
     }
     doc.validate().unwrap();
 }
+
+// ============================================================================
+// MO1 Part A4a — R15/R16 single-key operations on effect curves.
+// ============================================================================
+
+fn key(at: i64, value: i64) -> Keyframe {
+    Keyframe {
+        at: TimeCode(at),
+        value,
+        interpolation: KeyframeInterpolation::Linear,
+        tangent_in: 0,
+        tangent_out: 0,
+    }
+}
+
+fn upsert(doc: &mut Document, name: &str, keyframe: Keyframe) -> Result<(), OpError> {
+    Operation::UpsertEffectKeyframe {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: name.to_owned(),
+        key: keyframe,
+    }
+    .apply(doc)
+}
+
+fn remove_key(doc: &mut Document, name: &str, at: i64) -> Result<(), OpError> {
+    Operation::RemoveEffectKeyframe {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: name.to_owned(),
+        at: TimeCode(at),
+    }
+    .apply(doc)
+}
+
+/// R15: insert keeps order, re-upsert at the same frame replaces, and the
+/// operation is naturally idempotent.
+#[test]
+fn upsert_inserts_replaces_and_keeps_order() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    upsert(&mut doc, "exposure_milli_stops", key(30, 2_000)).unwrap();
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(0, 0), (30, 2_000), (59, 4_720)]
+    );
+    upsert(&mut doc, "exposure_milli_stops", key(30, 2_500)).unwrap();
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(0, 0), (30, 2_500), (59, 4_720)]
+    );
+    let once = doc.clone();
+    upsert(&mut doc, "exposure_milli_stops", key(30, 2_500)).unwrap();
+    assert_eq!(doc, once, "re-applying the same key changes nothing");
+    doc.validate().unwrap();
+}
+
+/// R15: the whole-curve chain runs per key — descriptor range, owner-class
+/// structural check (negative `at` legal on keep-outside), and names.
+#[test]
+fn upsert_validates_range_owner_class_and_names() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    let before = doc.clone();
+    let error = upsert(&mut doc, "exposure_milli_stops", key(10, 5_001)).unwrap_err();
+    assert_eq!(
+        error,
+        OpError::EffectParamOutOfRange {
+            effect: "primary_correction".to_owned(),
+            name: "exposure_milli_stops".to_owned(),
+            min: -5_000,
+            max: 5_000,
+            actual: 5_001,
+        }
+    );
+    assert_eq!(doc, before, "a rejected upsert changes nothing");
+
+    // Keep-outside owners validate ordered-only: the trimmed head key passes.
+    upsert(&mut doc, "exposure_milli_stops", key(-20, 100)).unwrap();
+    assert_eq!(key_positions(&colour_curve(&doc, ClipId(1)))[0], (-20, 100));
+    doc.validate().unwrap();
+
+    let error = upsert(&mut doc, "no_such_param", key(0, 0)).unwrap_err();
+    assert_eq!(
+        error,
+        OpError::UnknownEffectParam {
+            effect: "primary_correction".to_owned(),
+            name: "no_such_param".to_owned(),
+        }
+    );
+    let error = Operation::UpsertEffectKeyframe {
+        clip: ClipId(1),
+        effect: EffectId(9),
+        name: "exposure_milli_stops".to_owned(),
+        key: key(0, 0),
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::MissingEffect {
+            clip: ClipId(1),
+            effect: EffectId(9),
+        }
+    );
+    let error = Operation::UpsertEffectKeyframe {
+        clip: ClipId(9),
+        effect: EffectId(1),
+        name: "exposure_milli_stops".to_owned(),
+        key: key(0, 0),
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(error, OpError::MissingClip(ClipId(9)));
+}
+
+/// R15: `"enabled"` routes to the R4 sibling — values 0..1, any
+/// interpolation, created on first upsert.
+#[test]
+fn upsert_routes_enabled_to_the_sibling() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    assert!(clip(&doc, ClipId(1)).effects[0].enabled_curve.is_none());
+    upsert(&mut doc, "enabled", key(10, 1)).unwrap();
+    upsert(
+        &mut doc,
+        "enabled",
+        Keyframe {
+            interpolation: KeyframeInterpolation::Hold,
+            ..key(40, 0)
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        key_positions(&effect_toggle(&doc, ClipId(1))),
+        vec![(10, 1), (40, 0)]
+    );
+    let before = doc.clone();
+    let error = upsert(&mut doc, "enabled", key(20, 2)).unwrap_err();
+    assert_eq!(
+        error,
+        OpError::EffectParamOutOfRange {
+            effect: "primary_correction".to_owned(),
+            name: "enabled".to_owned(),
+            min: 0,
+            max: 1,
+            actual: 2,
+        }
+    );
+    assert_eq!(doc, before);
+    doc.validate().unwrap();
+}
+
+/// R16: remove deletes, and a missing key — or a missing curve — is success
+/// with no change, while unknown names still fail.
+#[test]
+fn remove_deletes_and_missing_is_a_noop() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    upsert(&mut doc, "exposure_milli_stops", key(30, 2_000)).unwrap();
+    remove_key(&mut doc, "exposure_milli_stops", 30).unwrap();
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(0, 0), (59, 4_720)]
+    );
+    let before = doc.clone();
+    remove_key(&mut doc, "exposure_milli_stops", 30).unwrap();
+    assert_eq!(doc, before, "removing a missing key changes nothing");
+    remove_key(&mut doc, "enabled", 0).unwrap();
+    assert_eq!(doc, before, "removing from a missing curve changes nothing");
+    let error = remove_key(&mut doc, "no_such_param", 0).unwrap_err();
+    assert_eq!(
+        error,
+        OpError::UnknownEffectParam {
+            effect: "primary_correction".to_owned(),
+            name: "no_such_param".to_owned(),
+        }
+    );
+    doc.validate().unwrap();
+}
+
+/// R16 + S8: removing the last key writes its value into the static
+/// parameter, then clears the curve; the sibling writes the static flag.
+#[test]
+fn remove_last_key_writes_the_static() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    remove_key(&mut doc, "exposure_milli_stops", 0).unwrap();
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(59, 4_720)]
+    );
+    remove_key(&mut doc, "exposure_milli_stops", 59).unwrap();
+    let effect = &clip(&doc, ClipId(1)).effects[0];
+    assert!(!effect.keyframes.contains_key("exposure_milli_stops"));
+    assert_eq!(
+        effect.parameters["exposure_milli_stops"],
+        ParamValue::Integer(4_720)
+    );
+
+    // The sibling: last key off writes `enabled = false` and clears.
+    upsert(&mut doc, "enabled", key(10, 0)).unwrap();
+    remove_key(&mut doc, "enabled", 10).unwrap();
+    let effect = &clip(&doc, ClipId(1)).effects[0];
+    assert!(!effect.enabled);
+    assert!(effect.enabled_curve.is_none());
+    doc.validate().unwrap();
+}

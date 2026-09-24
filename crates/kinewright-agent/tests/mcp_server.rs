@@ -2437,12 +2437,14 @@ async fn cc7_prepare_commit_and_compare(
 /// `COMPACT_TOOL_NAMES` and IN1 touches neither that list nor `Operation`.
 ///
 /// **Pin site 2 of 3 (`IN1b` §6.4 rules 7–8, erratum `IN1b`-R3).** The served
-/// quad does not move for the **nineteenth** measurement: `IN1b` added no
+/// quad does not move for the **twentieth** measurement: `IN1b` added no
 /// served tool, no capability and no schema field, IN2 Part A adds one
 /// **registry-only** capability, `propose_fix`, which `served_tools()`'s
-/// `COMPACT_TOOL_NAMES` filter never publishes, and IN2B Part B rewords two
-/// registry-only texts, which the filter never publishes either. The registry
-/// sextuple does move, to `141 / 54 / 87`, which is the two assertions below.
+/// `COMPACT_TOOL_NAMES` filter never publishes, IN2B Part B rewords two
+/// registry-only texts, which the filter never publishes either, and MO1 A4a
+/// adds two **registry-only** generated mutators, which the compact authority
+/// never serves either. The registry sextuple does move, to `143 / 56 / 87`,
+/// which is the two assertions below.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
@@ -2474,7 +2476,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        141,
+        143,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
@@ -2483,16 +2485,18 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          AU5 Part A adds get_audio_repair; \
          AU5 Part B adds plan_dialogue_repair, capture_room_tone and plan_room_tone_fill; \
          AU6 §5.4 Part A and Part B add no capability at all; \
-         IN1 Part A adds get_incidents and resolve_incident as internal capabilities"
+         IN1 Part A adds get_incidents and resolve_incident as internal capabilities; \
+         MO1 A4a generates upsert_effect_keyframe and remove_effect_keyframe"
     );
     assert_eq!(
         operations.len(),
-        54,
+        56,
         "AU2 Part B generates two more mutators; neither part of AU3 generates one; \
          AU4 Part A generates two more; AU4 Part B generates none; \
          AU5 Part A generates none, because it adds no Operation variant; \
          AU5 Part B generates none either, because capture_room_tone submits an ordinary AddAsset; \
-         AU6 adds no Operation variant; IN1 Part A adds none either"
+         AU6 adds no Operation variant; IN1 Part A adds none either; \
+         MO1 A4a adds UpsertEffectKeyframe and RemoveEffectKeyframe"
     );
     for name in [
         "set_track_mix",
@@ -10379,9 +10383,9 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 
 /// IN1 §6.6 and §9 clause 13, `IN1b` §6.4 rules 7–8 and §9 clause 17, and IN2
 /// §6.4 rules 12–13 and §9 clause 19: **three** registry-only capabilities, no
-/// served tool, for the **nineteenth** consecutive measurement.
+/// served tool, for the **twentieth** consecutive measurement.
 ///
-/// The registry sextuple is `141 / 54 / 87 / 1 552 503 / 1 407 480 / 121 892`,
+/// The registry sextuple is `143 / 56 / 87 / 1 716 334 / 1 568 912 / 123 949`,
 /// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
 /// this test pins the three counts and the served quad over the live endpoint.
@@ -10397,7 +10401,7 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 /// to IN2 §9.1 item 33's name; every IN1 and `IN1b` assertion in it is
 /// unchanged except the two registry counts and the ceiling.
 #[tokio::test(flavor = "multi_thread")]
-async fn in2_the_served_quad_does_not_move_for_the_nineteenth_measurement() {
+async fn mo1_the_served_quad_does_not_move_for_the_twentieth_measurement() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
@@ -10428,10 +10432,10 @@ async fn in2_the_served_quad_does_not_move_for_the_nineteenth_measurement() {
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        141,
-        "IN1 adds two capabilities and IN2 Part A adds propose_fix"
+        143,
+        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a adds two mutators"
     );
-    assert_eq!(operations.len(), 54, "IN2 adds no Operation variant");
+    assert_eq!(operations.len(), 56, "MO1 A4a adds two Operation variants");
     assert_eq!(registry.len() - operations.len(), 87);
     let state = registry
         .iter()
@@ -10461,7 +10465,7 @@ async fn in2_the_served_quad_does_not_move_for_the_nineteenth_measurement() {
             metrics.description_bytes
         ),
         (7, 5_660, 3_510, 998),
-        "the served quad does not move for the nineteenth consecutive measurement: {metrics:?}"
+        "the served quad does not move for the twentieth consecutive measurement: {metrics:?}"
     );
 
     // IN1 §6.2 rule 9, `IN1b` §3.11 rule 43 and IN2 §4.2 rule 11: the two

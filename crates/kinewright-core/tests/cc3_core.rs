@@ -1237,3 +1237,80 @@ fn a_keyframed_bypass_is_part_of_the_qa_truncation_scan() {
         "a node that is bypassed at every frame is the exact identity",
     );
 }
+
+/// MO1 R15: the single-key upsert runs the whole-curve chain — hold-only
+/// legality and the point-count/coordinate policy both fire per key, in both
+/// arrival orders, and every refusal is atomic.
+#[test]
+fn upsert_effect_keyframe_enforces_hold_only_and_point_count_policy() {
+    let mut document = managed_document();
+    add(&mut document, effect(1, "color_curves", &[])).expect("a neutral curves node is legal");
+    let upsert = |document: &mut Document, name: &str, key: Keyframe| {
+        Operation::UpsertEffectKeyframe {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            name: name.to_owned(),
+            key,
+        }
+        .apply(document)
+    };
+    let hold = |at: i64, value: i64| Keyframe {
+        at: TimeCode(at),
+        value,
+        interpolation: KeyframeInterpolation::Hold,
+        tangent_in: 0,
+        tangent_out: 0,
+    };
+    let linear = |at: i64, value: i64| Keyframe {
+        at: TimeCode(at),
+        value,
+        interpolation: KeyframeInterpolation::Linear,
+        tangent_in: 0,
+        tangent_out: 0,
+    };
+
+    let before = document.clone();
+    let error = upsert(&mut document, "red_point_count", linear(0, 2))
+        .expect_err("an interpolated point count must be rejected");
+    assert_eq!(
+        error,
+        OpError::NonHoldKeyframeParameter {
+            effect: "color_curves".to_owned(),
+            name: "red_point_count".to_owned(),
+        }
+    );
+    assert_eq!(document, before, "a rejected upsert must be atomic");
+
+    // Whole-curve steps first: the second point-count key lands, then a
+    // coordinate upsert on the same curve fails the policy.
+    upsert(&mut document, "master_point_count", hold(0, 2)).expect("first step lands");
+    upsert(&mut document, "master_point_count", hold(10, 3)).expect("second step lands");
+    let before = document.clone();
+    let error = upsert(&mut document, "master_x1", linear(0, 4_000))
+        .expect_err("a coordinate may not animate under a stepped point count");
+    assert_eq!(
+        error,
+        OpError::CurvePointCountAnimatedWithPoints {
+            effect: "color_curves".to_owned(),
+            curve: "master".to_owned(),
+        }
+    );
+    assert_eq!(document, before, "a rejected upsert must be atomic");
+
+    // The other order fails too: coordinates animate, then the point count
+    // may not take its second key.
+    upsert(&mut document, "green_y1", linear(0, 4_000)).expect("coordinates animate");
+    upsert(&mut document, "green_point_count", hold(0, 2)).expect("a single key is a constant");
+    let before = document.clone();
+    let error = upsert(&mut document, "green_point_count", hold(10, 3))
+        .expect_err("a point count may not step while coordinates animate");
+    assert_eq!(
+        error,
+        OpError::CurvePointCountAnimatedWithPoints {
+            effect: "color_curves".to_owned(),
+            curve: "green".to_owned(),
+        }
+    );
+    assert_eq!(document, before);
+    document.validate().unwrap();
+}

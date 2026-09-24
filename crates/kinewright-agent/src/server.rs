@@ -28205,6 +28205,20 @@ mod tests {
     ///   1 650 903 + 13 664 = **1 664 567**,
     ///   1 504 115 + 13 664 = **1 517 779**, 123 657 + 0 = **123 657**.
     ///   Served quad and counts unchanged.
+    ///
+    /// - **A4a (R15/R16 single-key mutators): +51 767 / +51 133 / +292.**
+    ///   Two generated mutators plus the two new `oneOf` branches in the one
+    ///   inspector tool that embeds the whole `Operation` schema
+    ///   (`apply_edit_plan`, measured before/after on the stashed tree):
+    ///   `upsert_effect_keyframe` 25 231 / 24 914 / 146,
+    ///   `remove_effect_keyframe` 25 229 / 24 912 / 146, `apply_edit_plan`
+    ///   +1 307 / +1 307 / +0. The arithmetic:
+    ///   1 664 567 + 51 767 = **1 716 334**,
+    ///   1 517 779 + 51 133 = **1 568 912**,
+    ///   123 657 + 292 = **123 949**. Counts `143 / 56 / 87`. Served quad
+    ///   unchanged (`7 / 5 660 / 3 510 / 998`) — the twentieth consecutive
+    ///   measurement, and the first whose counter moves for a registry-only
+    ///   MO1 addition rather than an IN2 one.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28230,15 +28244,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_664_567, 5_660),
+            (1_716_334, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_517_779,
+            registry_metrics.input_schema_bytes, 1_568_912,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 123_657,
+            registry_metrics.description_bytes, 123_949,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -33945,12 +33959,25 @@ mod tests {
     /// `served_surface_is_small_and_keeps_the_internal_registry_discoverable`
     /// with their decomposition, because they are a function of description
     /// text this contract deliberately does not fix.
+    ///
+    /// MO1 A4a (R15/R16) grows the generated mutators by two
+    /// (`upsert_effect_keyframe`, `remove_effect_keyframe`): counts `143 /
+    /// 56 / 87`. Both are registry-only — served tools come from the compact
+    /// authority, which MO1 does not touch.
     #[test]
     fn in2_the_registry_grows_by_one_capability() {
         let registry = KinewrightMcp::capability_tools().unwrap();
-        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 141);
+        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 143);
         assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
-        assert_eq!(operation_tools().unwrap().len(), 54);
+        assert_eq!(operation_tools().unwrap().len(), 56);
+        let generated = operation_tools().unwrap();
+        for name in ["upsert_effect_keyframe", "remove_effect_keyframe"] {
+            assert!(
+                generated.iter().any(|tool| tool.tool.name == name),
+                "{name} is a generated mutator"
+            );
+            assert!(!crate::runtime::COMPACT_TOOL_NAMES.contains(&name));
+        }
 
         let names = crate::schema::INSPECTOR_TOOL_NAMES;
         let resolve = names

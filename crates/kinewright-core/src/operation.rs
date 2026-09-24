@@ -295,6 +295,26 @@ pub enum Operation {
         effect: EffectId,
         name: String,
     },
+    /// MO1 R15: insert one key into an effect parameter's clip-local automation
+    /// curve, or replace the key already at `key.at`, keeping curve order.
+    /// `name` routes to the registered parameter or, for `"enabled"`, to the
+    /// effect's `enabled_curve` sibling. Naturally idempotent.
+    UpsertEffectKeyframe {
+        clip: ClipId,
+        effect: EffectId,
+        name: String,
+        key: Keyframe,
+    },
+    /// MO1 R16: remove the key at `at` from an effect parameter's clip-local
+    /// automation curve (`"enabled"` routes to the sibling, as R15). A missing
+    /// key is success with no change; removing the last key writes its value
+    /// into the static parameter, then clears the curve.
+    RemoveEffectKeyframe {
+        clip: ClipId,
+        effect: EffectId,
+        name: String,
+        at: TimeCode,
+    },
     /// Replace one legacy `look_lut` / `cube_lut` at its exact vector position
     /// with an equivalent managed `creative_look` node (CC4 §9).
     ///
@@ -1269,6 +1289,18 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         Operation::ClearEffectKeyframes { clip, effect, name } => {
             clear_effect_keyframes(doc, *clip, *effect, name)
         }
+        Operation::UpsertEffectKeyframe {
+            clip,
+            effect,
+            name,
+            key,
+        } => upsert_effect_keyframe(doc, *clip, *effect, name, *key),
+        Operation::RemoveEffectKeyframe {
+            clip,
+            effect,
+            name,
+            at,
+        } => remove_effect_keyframe(doc, *clip, *effect, name, *at),
         Operation::SetTitleParam { clip, name, value } => {
             set_title_param(doc, *clip, name, value.clone())
         }
@@ -3625,6 +3657,159 @@ fn clear_effect_keyframes(
     Ok(())
 }
 
+/// The R4 sibling's routing name shared by the single-key operations.
+const ENABLED_CURVE_NAME: &str = "enabled";
+
+/// Insert `key` into a sorted key vector, replacing the key at the same frame.
+fn insert_key_sorted(keys: &mut Vec<Keyframe>, key: Keyframe) {
+    match keys.binary_search_by_key(&key.at.0, |existing| existing.at.0) {
+        Ok(index) => keys[index] = key,
+        Err(index) => keys.insert(index, key),
+    }
+}
+
+/// MO1 R15: upsert one key through the whole-curve validation chain.
+///
+/// The prospective curve (existing keys plus `key`) runs `validate_curve` —
+/// descriptor range, hold-only legality, the owner-class structural check,
+/// the R13 outside rule — plus the keyframe policy for curves nodes, exactly
+/// as `SetEffectKeyframes`. `"enabled"` routes to the R4 sibling through
+/// `validate_enabled_curve` instead.
+fn upsert_effect_keyframe(
+    doc: &mut Document,
+    clip_id: ClipId,
+    effect_id: EffectId,
+    name: &str,
+    key: Keyframe,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let clip_duration = doc.clip_duration(&doc.tracks[track_index].clips[clip_index])?;
+    let effect = doc.tracks[track_index].clips[clip_index]
+        .effects
+        .iter_mut()
+        .find(|effect| effect.id == effect_id)
+        .ok_or(OpError::MissingEffect {
+            clip: clip_id,
+            effect: effect_id,
+        })?;
+    if name == ENABLED_CURVE_NAME {
+        let mut prospective = effect.enabled_curve.clone().unwrap_or(AutomationCurve {
+            keyframes: Vec::new(),
+        });
+        insert_key_sorted(&mut prospective.keyframes, key);
+        validate_enabled_curve(&effect.name, &prospective)?;
+        effect.enabled_curve = Some(prospective);
+        return Ok(());
+    }
+    let descriptor = crate::effect_descriptor(&effect.name)
+        .and_then(|descriptor| descriptor.parameter(name))
+        .ok_or_else(|| OpError::UnknownEffectParam {
+            effect: effect.name.clone(),
+            name: name.to_owned(),
+        })?;
+    let mut prospective = effect
+        .keyframes
+        .get(name)
+        .cloned()
+        .unwrap_or(AutomationCurve {
+            keyframes: Vec::new(),
+        });
+    insert_key_sorted(&mut prospective.keyframes, key);
+    validate_curve(
+        clip_id,
+        clip_duration,
+        effect_id,
+        &effect.name,
+        descriptor,
+        name,
+        &prospective,
+    )?;
+    if crate::classify_color_node(effect) == Some(crate::ColorNodeKind::Curves) {
+        let mut keyframes = effect.keyframes.clone();
+        keyframes.insert(name.to_owned(), prospective.clone());
+        validate_curve_keyframe_policy(&effect.name, &keyframes)?;
+    }
+    effect.keyframes.insert(name.to_owned(), prospective);
+    Ok(())
+}
+
+/// MO1 R16: remove one key; a missing key is success with no change.
+///
+/// Removing the last key writes its value into the static parameter (S8 —
+/// the `enabled` sibling writes the static flag through the ≥ 1 test), then
+/// clears the curve. The static write validates before anything mutates, so a
+/// parameter that cannot hold the value fails atomically with the curve intact.
+fn remove_effect_keyframe(
+    doc: &mut Document,
+    clip_id: ClipId,
+    effect_id: EffectId,
+    name: &str,
+    at: TimeCode,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let effect = doc.tracks[track_index].clips[clip_index]
+        .effects
+        .iter_mut()
+        .find(|effect| effect.id == effect_id)
+        .ok_or(OpError::MissingEffect {
+            clip: clip_id,
+            effect: effect_id,
+        })?;
+    if name == ENABLED_CURVE_NAME {
+        let Some(sibling) = effect.enabled_curve.clone() else {
+            return Ok(());
+        };
+        let Some(position) = sibling.keyframes.iter().position(|key| key.at == at) else {
+            return Ok(());
+        };
+        let mut keys = sibling.keyframes;
+        let removed = keys.remove(position);
+        if keys.is_empty() {
+            effect.enabled = removed.value >= 1;
+            effect.enabled_curve = None;
+        } else {
+            effect.enabled_curve = Some(AutomationCurve { keyframes: keys });
+        }
+        return Ok(());
+    }
+    if crate::effect_descriptor(&effect.name)
+        .and_then(|descriptor| descriptor.parameter(name))
+        .is_none()
+    {
+        return Err(OpError::UnknownEffectParam {
+            effect: effect.name.clone(),
+            name: name.to_owned(),
+        });
+    }
+    let Some(curve) = effect.keyframes.get(name).cloned() else {
+        return Ok(());
+    };
+    let Some(position) = curve.keyframes.iter().position(|key| key.at == at) else {
+        return Ok(());
+    };
+    let mut keys = curve.keyframes;
+    let removed = keys.remove(position);
+    if keys.is_empty() {
+        validate_effect_parameter(&effect.name, name, &ParamValue::Integer(removed.value))?;
+        if crate::classify_color_node(effect) == Some(crate::ColorNodeKind::Curves) {
+            let mut prospective = effect.clone();
+            prospective
+                .parameters
+                .insert(name.to_owned(), ParamValue::Integer(removed.value));
+            validate_color_curve_points(&prospective)?;
+        }
+        effect
+            .parameters
+            .insert(name.to_owned(), ParamValue::Integer(removed.value));
+        effect.keyframes.remove(name);
+    } else {
+        effect
+            .keyframes
+            .insert(name.to_owned(), AutomationCurve { keyframes: keys });
+    }
+    Ok(())
+}
+
 fn set_title_param(
     doc: &mut Document,
     clip_id: ClipId,
@@ -5284,7 +5469,7 @@ impl Operation {
     /// — [`Self::ConvertLegacyLook`] — answers `Clip`, because a legacy-look
     /// conversion is a refusal about the clip it is converting. The rung is
     /// therefore a statement of where a future variant would land rather than a
-    /// tie-break the current 57 exercise.
+    /// tie-break the current 59 exercise.
     ///
     /// `IN1b` §0.3 D3 names **five** variants that address a track and nothing
     /// narrower; applying the precedence, there are **seven** — D3's
@@ -5293,7 +5478,7 @@ impl Operation {
     /// [`Self::RippleInsertGap`], which name a track and no clip or asset
     /// (erratum `IN1b`-A-R11).
     #[must_use]
-    // 57 arms, one per `Operation` variant, grouped by subject kind: the list
+    // 59 arms, one per `Operation` variant, grouped by subject kind: the list
     // is the deliverable and splitting it would hide the precedence it exists
     // to show.
     #[allow(clippy::too_many_lines)]
@@ -5315,6 +5500,8 @@ impl Operation {
             | Self::SetEffectParam { clip, .. }
             | Self::SetEffectKeyframes { clip, .. }
             | Self::ClearEffectKeyframes { clip, .. }
+            | Self::UpsertEffectKeyframe { clip, .. }
+            | Self::RemoveEffectKeyframe { clip, .. }
             | Self::ConvertLegacyLook { clip, .. }
             | Self::SetTitleParam { clip, .. }
             | Self::SetClipAudio { clip, .. }
@@ -5395,7 +5582,7 @@ mod tests {
     ///
     /// Reading the source is how a test asserts an **arm count**: the compiler
     /// already proves the match is exhaustive and wildcard-free over
-    /// `OpError`'s 154 and `Operation`'s 57 variants, but it cannot be asked
+    /// `OpError`'s 154 and `Operation`'s 59 variants, but it cannot be asked
     /// how many names each arm groups, and building 154 payload-carrying
     /// rejections to count them would be a fixture, not a measurement.
     fn single_fn_impl_body(signature: &str) -> String {
@@ -5646,13 +5833,13 @@ mod tests {
         ("AssumedFromNotSuppliable", "ColorPolicy"),
     ];
 
-    /// §3.3 rule 20's precedence applied **per variant**: all 57 `Operation`
+    /// §3.3 rule 20's precedence applied **per variant**: all 59 `Operation`
     /// variant names with the subject kind the rule assigns each one.
     ///
     /// Read off `Operation`'s own declaration — which id fields the variant
     /// carries — rather than off the accessor, so a variant that answers with
     /// the wrong kind fails here (review-2 S4).
-    const OPERATION_SUBJECTS: [(&str, &str); 57] = [
+    const OPERATION_SUBJECTS: [(&str, &str); 59] = [
         ("AddAsset", "Asset"),
         ("RelinkAsset", "Asset"),
         ("SetAssetColorDescription", "Asset"),
@@ -5699,6 +5886,8 @@ mod tests {
         ("SetEffectParam", "Clip"),
         ("SetEffectKeyframes", "Clip"),
         ("ClearEffectKeyframes", "Clip"),
+        ("UpsertEffectKeyframe", "Clip"),
+        ("RemoveEffectKeyframe", "Clip"),
         ("ConvertLegacyLook", "Clip"),
         ("AddLutAsset", "LutAsset"),
         ("RemoveLutAsset", "LutAsset"),
@@ -5942,7 +6131,7 @@ mod tests {
         }
     }
 
-    /// `IN1b` §9 clause 8 through §3.3 rule 20: the accessor covers all **57**
+    /// `IN1b` §9 clause 8 through §3.3 rule 20: the accessor covers all **59**
     /// `Operation` variants with no wildcard and answers by the declared
     /// precedence `Clip` -> `Asset` -> `Track` -> `Chain` -> `Project`.
     #[test]
@@ -5969,8 +6158,8 @@ mod tests {
             .iter()
             .map(|(variant, kind)| ((*variant).to_owned(), (*kind).to_owned()))
             .collect();
-        assert_eq!(declared.len(), 57, "`Operation` has 57 distinct variants");
-        assert_eq!(implemented.len(), 57, "the accessor covers every variant");
+        assert_eq!(declared.len(), 59, "`Operation` has 59 distinct variants");
+        assert_eq!(implemented.len(), 59, "the accessor covers every variant");
         for (variant, kind) in &declared {
             assert_eq!(
                 implemented.get(variant),

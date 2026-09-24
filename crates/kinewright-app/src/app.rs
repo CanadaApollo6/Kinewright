@@ -3366,6 +3366,12 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
         Operation::ClearEffectKeyframes {
             clip, effect, name, ..
         } => format!("Cleared {name} keyframes on effect {effect} for clip {clip}"),
+        Operation::UpsertEffectKeyframe {
+            clip, effect, name, ..
+        } => format!("Set a {name} keyframe on effect {effect} for clip {clip}"),
+        Operation::RemoveEffectKeyframe {
+            clip, effect, name, ..
+        } => format!("Removed a {name} keyframe on effect {effect} for clip {clip}"),
         Operation::SetTitleParam { clip, name, .. } => {
             format!("Set {name} on title clip {clip}")
         }

@@ -646,6 +646,24 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         Operation::RemoveLutAsset {
             lut_asset: LutAssetId(1),
         },
+        Operation::UpsertEffectKeyframe {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            name: "exposure_milli_stops".to_owned(),
+            key: Keyframe {
+                at: TimeCode(10),
+                value: 100,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+        },
+        Operation::RemoveEffectKeyframe {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            name: "exposure_milli_stops".to_owned(),
+            at: TimeCode(10),
+        },
     ];
 
     for operation in operations {
