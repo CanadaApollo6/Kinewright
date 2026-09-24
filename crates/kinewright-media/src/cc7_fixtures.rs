@@ -188,6 +188,8 @@ impl Cc7Scene {
             let frames = i64::from(kind.frames());
             assert_eq!(asset.duration, TimeCode(frames));
             clips.push(Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(index as u64 + 1),
                 asset: id,
                 source_range: TimeCode::ZERO..TimeCode(frames),
@@ -709,6 +711,8 @@ fn cc7_primary_insert(clip: ClipId, parameters: &[(String, i64)]) -> Operation {
         clip,
         index: 0,
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "primary_correction".to_owned(),
             parameters: parameters
@@ -2798,6 +2802,8 @@ fn cc7_canonical_effects(operations: &[Cc7Operation]) -> Vec<Effect> {
         .iter()
         .enumerate()
         .map(|(index, operation)| Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(index as u64 + 1),
             name: operation.effect_name.to_owned(),
             parameters: operation

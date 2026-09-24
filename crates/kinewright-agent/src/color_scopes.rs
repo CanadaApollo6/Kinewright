@@ -2219,6 +2219,8 @@ mod tests {
                 sync_lock: true,
                 clips: vec![
                     Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(1),
                         asset: first.id,
                         source_range: TimeCode::ZERO..TimeCode(30),
@@ -2234,6 +2236,8 @@ mod tests {
                         audio_gain_curve: None,
                     },
                     Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(2),
                         asset: second.id,
                         source_range: TimeCode::ZERO..TimeCode(30),
@@ -2763,6 +2767,8 @@ mod tests {
         document.tracks[0].clips[1]
             .effects
             .push(kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(9),
                 name: "primary_correction".to_owned(),
                 parameters: BTreeMap::from([
@@ -2782,6 +2788,8 @@ mod tests {
                             at: TimeCode::ZERO,
                             value: 500,
                             interpolation: kinewright_core::KeyframeInterpolation::default(),
+                            tangent_in: 0,
+                            tangent_out: 0,
                         }],
                     },
                 )]),
@@ -3304,6 +3312,8 @@ mod tests {
         document.resolution = (4, 2);
         document.duration = TimeCode(30);
         document.tracks[0].clips[0].effects = vec![kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(1),
             name: "color_wheels".to_owned(),
             parameters: BTreeMap::from([

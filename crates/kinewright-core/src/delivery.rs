@@ -735,6 +735,8 @@ pub fn document_for_delivery_variant(
             ParamValue::Integer(i64::from(variant.focus_y_percent)),
         );
         clip.effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(next_effect_id),
             name: "reframe".to_owned(),
             parameters,
@@ -1473,6 +1475,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: crate::ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode(0)..TimeCode(30),
@@ -1520,6 +1524,8 @@ mod tests {
     fn matching_animated_reframe_survives_delivery_materialization() {
         let mut source = fixture();
         let tracked = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(41),
             name: "reframe".to_owned(),
             parameters: BTreeMap::from([
@@ -1538,11 +1544,15 @@ mod tests {
                             at: TimeCode::ZERO,
                             value: 50,
                             interpolation: crate::KeyframeInterpolation::EaseInOut,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                         crate::Keyframe {
                             at: TimeCode(29),
                             value: 35,
                             interpolation: crate::KeyframeInterpolation::EaseInOut,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                     ],
                 },
@@ -1563,6 +1573,8 @@ mod tests {
     fn precise_reframe_automation_survives_delivery_materialization() {
         let mut source = fixture();
         source.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(41),
             name: "reframe".to_owned(),
             parameters: BTreeMap::from([
@@ -1628,6 +1640,8 @@ mod tests {
     fn mismatched_animated_reframe_is_replaced_for_delivery_aspect() {
         let mut source = fixture();
         source.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(41),
             name: "reframe".to_owned(),
             parameters: BTreeMap::from([(
@@ -1641,6 +1655,8 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 10,
                         interpolation: crate::KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             )]),
@@ -1760,12 +1776,16 @@ mod tests {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         document.tracks[0].clips[0].effects.extend([
             Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(90),
                 name: "look_lut".to_owned(),
                 parameters: BTreeMap::new(),
                 keyframes: BTreeMap::new(),
             },
             Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(91),
                 name: "cube_lut".to_owned(),
                 parameters: BTreeMap::from([(
@@ -2034,6 +2054,8 @@ mod tests {
             kind: TrackKind::Audio,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: crate::ClipId(2),
                 asset: AssetId(2),
                 source_range: TimeCode(0)..TimeCode(30),

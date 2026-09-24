@@ -193,6 +193,8 @@ fn single_clip_document(asset: MediaAsset) -> Document {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: asset_id,
                 source_range: TimeCode::ZERO..duration,

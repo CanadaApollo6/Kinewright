@@ -37,7 +37,11 @@ use crate::{
 const COMPOSITOR_SHADER_SOURCE: &str = include_str!("compositor.wgsl");
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-const UNIFORM_FLOATS: usize = 48;
+// MO1 R2: the six transform words ride after the historical 46, so every
+// pre-MO1 word keeps its offset. (The constant used to read 48 with only 46
+// words on either side — two trailing zero words from the CC4 reclaim era;
+// the `as_bytes` length assert below pins the constant to the layout now.)
+const UNIFORM_FLOATS: usize = 52;
 const UNIFORM_SIZE: u64 = UNIFORM_FLOATS as u64 * 4;
 const UNIFORM_BYTES: usize = UNIFORM_FLOATS * 4;
 /// `vec4<u32>` header of the CC3 grade buffer: active node count, curve
@@ -598,7 +602,7 @@ struct CachedCubeLut {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct LayerParams {
+pub(crate) struct LayerParams {
     brightness: f32,
     contrast: f32,
     saturation: f32,
@@ -648,6 +652,21 @@ struct LayerParams {
     /// calling `textureDimensions` on a texture it no longer owns alone.
     external_lut_z_origin: f32,
     external_lut_size: f32,
+    /// MO1 R2: effective per-axis scale (master/100 × axis/100 × fine/10000),
+    /// folded by `params_for`. The vertex stage scales by these; the legacy
+    /// `scale` word above keeps folding the master for compat but the shader
+    /// no longer reads it.
+    pub(crate) scale_x: f32,
+    pub(crate) scale_y: f32,
+    /// MO1 R2: rotation in radians, clockwise positive (Premiere).
+    pub(crate) rotation: f32,
+    /// MO1 R2: output frame aspect (height ÷ width), set per render by
+    /// `composite` — not folded from effects — for the R3 correction.
+    pub(crate) frame_aspect: f32,
+    /// MO1 R2: rotation/scale anchor as fractions, top-left origin
+    /// (Premiere: `(0, 0)` is the layer's top-left, `(0.5, 0.5)` its centre).
+    pub(crate) anchor_x: f32,
+    pub(crate) anchor_y: f32,
 }
 
 impl Default for LayerParams {
@@ -699,6 +718,14 @@ impl Default for LayerParams {
             legacy_stage_active: 0.0,
             external_lut_z_origin: 0.0,
             external_lut_size: 2.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotation: 0.0,
+            // Square until `composite` stamps the render aspect; at 1.0 the
+            // R3 correction cancels exactly.
+            frame_aspect: 1.0,
+            anchor_x: 0.5,
+            anchor_y: 0.5,
         }
     }
 }
@@ -1165,7 +1192,10 @@ impl Compositor {
     /// a resample, and it must keep the bilinear sampler. An epsilon here
     /// would point-sample a layer that is genuinely being resized.
     #[allow(clippy::float_cmp)]
-    fn is_pixel_exact_blit<F: CompositorInput>(
+    /// Whether this layer takes the point sampler: exact only for a
+    /// full-frame quad with the identity vertex map. `pub(crate)` so the
+    /// push-in gate can pin which sampler path a ramp takes.
+    pub(crate) fn is_pixel_exact_blit<F: CompositorInput>(
         layer: &CompositorLayer<'_, F>,
         params: &LayerParams,
         width: u32,
@@ -1177,6 +1207,15 @@ impl Compositor {
             && params.offset_x == 0.0
             && params.offset_y == 0.0
             && params.reframe_aspect <= 0.0
+            // MO1 G1: the vertex map also scales by scale_x/scale_y and
+            // rotates — a fine-only ramp or a squeeze is still a resample,
+            // and the point sampler shimmers it. The folded scales cover
+            // the fine lane (master/axis/fine multiply into them) and the
+            // folded offsets cover basis points, so neutral folds stay
+            // bit-exact on the fast path.
+            && params.scale_x == 1.0
+            && params.scale_y == 1.0
+            && params.rotation == 0.0
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1244,6 +1283,13 @@ impl Compositor {
         } else {
             0.0
         };
+        // MO1 R2/R3: the rotation correction needs the render aspect. All
+        // `render_*` entries funnel through here with the output resolution,
+        // and zero resolutions are refused above, so the quotient is exact.
+        #[allow(clippy::cast_precision_loss)]
+        {
+            params.frame_aspect = height as f32 / width as f32;
+        }
         let grade_bytes =
             grade_buffer_bytes_for(layer.effects, library, (width, height), matte_debug_node)?;
         let grade = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1783,7 +1829,16 @@ impl LayerParams {
             self.legacy_stage_active,
             self.external_lut_z_origin,
             self.external_lut_size,
+            self.scale_x,
+            self.scale_y,
+            self.rotation,
+            self.frame_aspect,
+            self.anchor_x,
+            self.anchor_y,
         ];
+        // Compile-forced: the word list and the uniform size agree, so a
+        // field added to one side cannot silently desync the other.
+        let values: [f32; UNIFORM_FLOATS] = values;
         let mut bytes = [0_u8; UNIFORM_BYTES];
         for (index, value) in values.into_iter().enumerate() {
             let start = index * 4;
@@ -2527,13 +2582,14 @@ fn fritsch_carlson_tangents(xs: &[f32], ys: &[f32]) -> Vec<f32> {
 /// here cannot drift from what QA, delivery conformance, and the inspector
 /// report about the same effect.
 fn legacy_stage_active(effects: &[Effect]) -> bool {
-    effects
-        .iter()
-        .any(|effect| kinewright_core::effect_compatibility_stage(&effect.name).is_some())
+    effects.iter().any(|effect| {
+        // MO1 R4: a disabled effect is absent — it must not light the stage.
+        effect.enabled && kinewright_core::effect_compatibility_stage(&effect.name).is_some()
+    })
 }
 
 #[allow(clippy::too_many_lines)]
-fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerParams {
+pub(crate) fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerParams {
     let mut params = LayerParams {
         opacity: transition.alpha.clamp(0.0, 1.0),
         fade_mix: transition.fade_mix.clamp(0.0, 1.0),
@@ -2541,6 +2597,14 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
         ..Default::default()
     };
     for effect in effects {
+        // MO1 R4: callers pass keyframe-evaluated effects, whose `enabled`
+        // is the resolved flag (`Effect::evaluated_at` snapshots it), so a
+        // static-flag test is the whole skip. `evaluated_effects` filters
+        // first; this arm covers the `LayerParams` half for direct
+        // `Compositor` users (the grade/LUT byte path does not filter).
+        if !effect.enabled {
+            continue;
+        }
         let Some(descriptor) = effect_descriptor(&effect.name) else {
             continue;
         };
@@ -2551,9 +2615,34 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 EffectUniform::Contrast => params.contrast *= 1.0 + value / 100.0,
                 EffectUniform::Saturation => params.saturation *= 1.0 + value / 100.0,
                 EffectUniform::Opacity => params.opacity *= value / 100.0,
-                EffectUniform::Scale => params.scale *= value / 100.0,
+                // MO1 R2: the master multiplies both effective axes (and the
+                // legacy `scale` word, which the shader no longer reads).
+                EffectUniform::Scale => {
+                    params.scale *= value / 100.0;
+                    params.scale_x *= value / 100.0;
+                    params.scale_y *= value / 100.0;
+                }
                 EffectUniform::OffsetX => params.offset_x += value / 50.0,
                 EffectUniform::OffsetY => params.offset_y += value / 50.0,
+                // MO1 R2: per-axis scales multiply their axis; the shared
+                // fine multiplies both; basis-point offsets add at 1/5000
+                // NDC per unit (100 bp = 1% = the coarse 1/50 arm).
+                EffectUniform::ScaleX => params.scale_x *= value / 100.0,
+                EffectUniform::ScaleY => params.scale_y *= value / 100.0,
+                EffectUniform::ScaleFine => {
+                    params.scale_x *= value / 10_000.0;
+                    params.scale_y *= value / 10_000.0;
+                }
+                EffectUniform::OffsetXBasisPoints => params.offset_x += value / 5000.0,
+                EffectUniform::OffsetYBasisPoints => params.offset_y += value / 5000.0,
+                // MO1 R2: centidegrees → radians (36000 = one full turn);
+                // rotations from stacked effects add. Anchors are positions:
+                // last wins, like the other position uniforms.
+                EffectUniform::Rotation => {
+                    params.rotation += value * std::f32::consts::PI / 18_000.0;
+                }
+                EffectUniform::AnchorX => params.anchor_x = value / 10_000.0,
+                EffectUniform::AnchorY => params.anchor_y = value / 10_000.0,
                 EffectUniform::CropLeft => params.crop_left += value / 100.0,
                 EffectUniform::CropRight => params.crop_right += value / 100.0,
                 EffectUniform::CropTop => params.crop_top += value / 100.0,
@@ -3095,6 +3184,8 @@ mod tests {
 
     fn effect(id: u64, name: &str, parameter: &str, value: i64) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters: BTreeMap::from([(parameter.to_owned(), ParamValue::Integer(value))]),
@@ -3104,6 +3195,8 @@ mod tests {
 
     fn effect_with(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters: parameters
@@ -3244,6 +3337,8 @@ mod tests {
             parameters.push((format!("{channel}_y{index}"), *y));
         }
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "color_curves".to_owned(),
             parameters: parameters
@@ -3291,6 +3386,8 @@ mod tests {
 
     fn crop(id: u64, left: i64, right: i64, top: i64, bottom: i64) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "crop".to_owned(),
             parameters: BTreeMap::from([
@@ -3305,6 +3402,8 @@ mod tests {
 
     fn reframe(id: u64, aspect_basis_points: i64, focus_x: i64, focus_y: i64) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "reframe".to_owned(),
             parameters: BTreeMap::from([
@@ -3842,6 +3941,172 @@ mod tests {
         assert!(params.crop_right.abs() < f32::EPSILON);
     }
 
+    /// MO1 R4: `params_for` skips disabled effects — a disabled 200% scale
+    /// folds exactly as no effect at all.
+    #[test]
+    fn params_for_skips_disabled_effects() {
+        let mut scaled = effect(1, "transform", "scale_percent", 200);
+        scaled.enabled = false;
+        let off = params_for(
+            std::slice::from_ref(&scaled),
+            TransitionRenderParams::default(),
+        );
+        let gone = params_for(&[], TransitionRenderParams::default());
+        assert!((off.scale - gone.scale).abs() < f32::EPSILON);
+        assert!((off.scale - 1.0).abs() < f32::EPSILON);
+
+        let on = params_for(
+            std::slice::from_ref(&effect(1, "transform", "scale_percent", 200)),
+            TransitionRenderParams::default(),
+        );
+        assert!((on.scale - 2.0).abs() < f32::EPSILON);
+    }
+
+    /// MO1 R4: a disabled legacy look must not light the legacy stage.
+    #[test]
+    fn legacy_stage_ignores_disabled_effects() {
+        let mut legacy = effect_with(1, "brightness", &[("percent", 10)]);
+        assert!(legacy_stage_active(std::slice::from_ref(&legacy)));
+        legacy.enabled = false;
+        assert!(!legacy_stage_active(std::slice::from_ref(&legacy)));
+    }
+
+    /// MO1 R2: effective axis scale = master/100 × axis/100 × fine/10000,
+    /// with absent params resolving to descriptor neutral.
+    #[test]
+    fn params_for_folds_master_axis_and_fine_into_effective_scale() {
+        // Master 200% × X 50% × fine 10050 (×1.005) = 1.005 on X; Y sees
+        // the master and the shared fine.
+        let transform = effect_with(
+            1,
+            "transform",
+            &[
+                ("scale_percent", 200),
+                ("scale_x_percent", 50),
+                ("scale_fine_hundredths", 10_050),
+            ],
+        );
+        let params = params_for(
+            std::slice::from_ref(&transform),
+            TransitionRenderParams::default(),
+        );
+        assert!((params.scale_x - 1.005).abs() < 1e-6);
+        assert!((params.scale_y - 2.01).abs() < 1e-6);
+        // The legacy word still folds the master alone.
+        assert!((params.scale - 2.0).abs() < 1e-6);
+
+        // Absent params resolve neutral: a bare transform is the identity.
+        let bare = effect_with(1, "transform", &[]);
+        let params = params_for(
+            std::slice::from_ref(&bare),
+            TransitionRenderParams::default(),
+        );
+        assert!((params.scale_x - 1.0).abs() < f32::EPSILON);
+        assert!((params.scale_y - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// MO1 R2: NDC offset = coarse/50 + basis-points/5000; rotation =
+    /// centidegrees × π/18000; anchor = basis-points/10000.
+    #[test]
+    fn params_for_folds_fine_position_rotation_and_anchor() {
+        let transform = effect_with(
+            1,
+            "transform",
+            &[
+                ("x_percent", 10),
+                ("x_basis_points", 500),
+                ("y_basis_points", -250),
+                ("rotation_centidegrees", 9_000),
+                ("anchor_x_basis_points", 0),
+                ("anchor_y_basis_points", 10_000),
+            ],
+        );
+        let params = params_for(
+            std::slice::from_ref(&transform),
+            TransitionRenderParams::default(),
+        );
+        // 10/50 + 500/5000 = 0.3; the coarse arm is preserved exactly.
+        assert!((params.offset_x - 0.3).abs() < 1e-6);
+        assert!((params.offset_y + 0.05).abs() < 1e-6);
+        // 90° clockwise = π/2.
+        assert!((params.rotation - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        assert!((params.anchor_x - 0.0).abs() < f32::EPSILON);
+        assert!((params.anchor_y - 1.0).abs() < f32::EPSILON);
+
+        // Neutrals: zero offset/rotation, centre anchor.
+        let bare = effect_with(1, "transform", &[]);
+        let params = params_for(
+            std::slice::from_ref(&bare),
+            TransitionRenderParams::default(),
+        );
+        assert!(params.offset_x.abs() < f32::EPSILON);
+        assert!(params.offset_y.abs() < f32::EPSILON);
+        assert!(params.rotation.abs() < f32::EPSILON);
+        assert!((params.anchor_x - 0.5).abs() < f32::EPSILON);
+        assert!((params.anchor_y - 0.5).abs() < f32::EPSILON);
+    }
+
+    /// MO1 R2: the six transform words serialize after the historical 46 in
+    /// `as_bytes` order — a swapped uniform would silently misrender.
+    #[test]
+    fn uniform_bytes_carry_the_transform_words_after_the_historical_ones() {
+        let params = LayerParams {
+            scale_x: 46.0,
+            scale_y: 47.0,
+            rotation: 48.0,
+            frame_aspect: 49.0,
+            anchor_x: 50.0,
+            anchor_y: 51.0,
+            ..LayerParams::default()
+        };
+        let bytes = params.as_bytes();
+        assert_eq!(bytes.len(), UNIFORM_BYTES);
+        for (word, expected) in [46.0_f32, 47.0, 48.0, 49.0, 50.0, 51.0]
+            .into_iter()
+            .enumerate()
+        {
+            let offset = (46 + word) * 4;
+            let actual = f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            // Bit-exact on purpose: a rounding-tolerant uniform is a
+            // miscompiled shader waiting to happen.
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "uniform word {} is misplaced",
+                46 + word
+            );
+        }
+    }
+
+    /// MO1 R2/R3: the WGSL `LayerParams` block declares the six transform
+    /// fields after `external_lut_size`, in `as_bytes` order, so the host
+    /// words land on the fields the vertex stage reads.
+    #[test]
+    fn wgsl_layer_params_declare_the_transform_words_in_host_order() {
+        let block = COMPOSITOR_SHADER_SOURCE
+            .split_once("struct LayerParams {")
+            .expect("the shader declares LayerParams")
+            .1
+            .split_once("};")
+            .expect("the LayerParams block ends")
+            .0;
+        let mut cursor = 0;
+        for field in [
+            "external_lut_size: f32,",
+            "scale_x: f32,",
+            "scale_y: f32,",
+            "rotation: f32,",
+            "frame_aspect: f32,",
+            "anchor_x: f32,",
+            "anchor_y: f32,",
+        ] {
+            let at = block[cursor..]
+                .find(field)
+                .unwrap_or_else(|| panic!("{field} must follow in WGSL order"));
+            cursor += at + field.len();
+        }
+    }
+
     #[test]
     fn legacy_color_grade_name_has_no_compositor_branch_of_its_own() {
         let legacy = effect_with(1, "color_grade", &[("exposure_milli_stops", 1_000)]);
@@ -3929,6 +4194,8 @@ mod tests {
         )
         .unwrap();
         let cube_lut = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "cube_lut".to_owned(),
             parameters: BTreeMap::from([
@@ -4752,6 +5019,8 @@ mod tests {
         )
         .expect("the legacy LUT is written");
         let legacy = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "cube_lut".to_owned(),
             parameters: BTreeMap::from([
@@ -6228,7 +6497,9 @@ mod tests {
     /// The quad spans NDC `[-s, s]` on both axes, which is `s * W` by `s * H`
     /// pixels, so the per-pixel step of the height-normalized offset `d` is
     /// `a / (s * W) = 1 / (s * H)` on x and `1 / (s * H)` on y — isotropic in
-    /// pixels for every `s`. A circular window therefore stays circular.
+    /// pixels for every `s`. A circular window therefore stays circular
+    /// under uniform scale (MO1 N4 G8: per-axis scale and fitted stills
+    /// map layer uv non-uniformly, so the window renders elliptical).
     #[test]
     #[allow(clippy::cast_precision_loss, clippy::naive_bytecount)]
     fn layer_quad_pixel_aspect_equals_the_raster_aspect() {

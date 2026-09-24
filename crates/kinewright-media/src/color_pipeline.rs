@@ -2469,6 +2469,8 @@ mod tests {
 
     fn primary_effect(parameters: BTreeMap<String, ParamValue>) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(1),
             name: "primary_correction".to_owned(),
             parameters,
@@ -3100,6 +3102,8 @@ mod tests {
 
     fn color_node_effect(id: u64, name: &str, parameters: Vec<(String, i64)>) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(id),
             name: name.to_owned(),
             parameters: parameters

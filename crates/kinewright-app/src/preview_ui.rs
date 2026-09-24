@@ -1383,6 +1383,7 @@ impl KinewrightApp {
             let route_valid = self.valid_route(asset.kind, video_target, audio_target);
             let can_edit = source_edit_controls_are_enabled(
                 source_state,
+                asset.kind,
                 duration,
                 source_in,
                 source_out,
@@ -1695,6 +1696,8 @@ mod tests {
         };
 
         let mut effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EFFECT,
             name: "color_wheels".to_owned(),
             parameters: BTreeMap::new(),
@@ -1702,6 +1705,8 @@ mod tests {
         }];
         if !transform.is_empty() {
             effects.push(Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(2),
                 name: "transform".to_owned(),
                 parameters: transform
@@ -1726,6 +1731,8 @@ mod tests {
             assumed_from: None,
         }];
         document.tracks[0].clips = vec![kinewright_core::Clip {
+            enabled: true,
+            enabled_curve: None,
             id: CLIP,
             asset: AssetId(1),
             source_range: TimeCode(0)..TimeCode(30),

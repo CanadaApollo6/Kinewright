@@ -146,6 +146,16 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   export audio may differ by one ulp per sample from earlier builds when two or
   more unrouted tracks are audible at once (previously nondeterministic run to
   run).
+- Trimming, splitting, rolling, or sliding a clip no longer drops or clamps its
+  video/colour effect curves or its effect and clip enable curves: out-of-range
+  keys are kept and shift with the edit, so trimming in and back out restores
+  them byte-identically. Audio envelopes and audio-effect curves keep the
+  existing drop-and-seam behaviour.
+- Stills (`Image` assets) can no longer be added as plain media clips
+  (`AddClip` refuses them); they enter as freeze clips over the still frame.
+  Roll and slide now accept Title and Freeze neighbours (previously refused),
+  moving span edges in project frames; slip, speed, audio, replace, and
+  fit-to-fill still require media clips.
 
 ### Added
 - IN2 Part B, incident persistence: reopening a project restores every

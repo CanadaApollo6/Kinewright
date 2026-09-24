@@ -2915,6 +2915,8 @@ mod tests {
 
     fn media_clip(id: u64) -> Clip {
         Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(id),
             source_range: TimeCode::ZERO..TimeCode(30),

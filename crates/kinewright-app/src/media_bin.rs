@@ -1,9 +1,10 @@
-use std::{sync::Arc, thread};
+use std::{collections::BTreeMap, sync::Arc, thread};
 
 use eframe::egui;
 use kinewright_core::{
-    AssetId, ClipId, IncidentId, IncidentOutcome, IncidentState, IncidentSubject, LabelIncident,
-    MediaKind, Operation, RecoveryKind, TimeCode, Track, TrackId, TrackKind,
+    AssetId, ClipId, Effect, EffectId, IncidentId, IncidentOutcome, IncidentState, IncidentSubject,
+    LabelIncident, MediaKind, Operation, ParamValue, RecoveryKind, TimeCode, Track, TrackId,
+    TrackKind,
 };
 
 use crate::{
@@ -27,6 +28,7 @@ impl KinewrightApp {
     pub(crate) fn choose_media(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Video", &["mp4", "mov", "mkv", "webm", "avi"])
+            .add_filter("Stills", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
             .pick_file()
         else {
             return;
@@ -95,6 +97,31 @@ impl KinewrightApp {
             return;
         };
         let clip_start = project.document.duration;
+        if asset.kind == MediaKind::Image {
+            // MO1 R25: a still lands as a 5 s freeze with the R10 fit baked in.
+            match still_placement_operations(&self.projects[project_index].document, &asset) {
+                Ok(operations) => {
+                    if self.projects[project_index]
+                        .core
+                        .send(kinewright_core::Command::DoBatch(operations))
+                        .is_err()
+                    {
+                        self.note_actor_stopped(
+                            IncidentSubject::Asset(asset.id),
+                            "Core actor stopped while adding a still",
+                        );
+                    }
+                }
+                Err(error) => self.note_label(
+                    LabelIncident::Operations,
+                    IncidentSubject::Asset(asset.id),
+                    error,
+                ),
+            }
+            self.projects[project_index].position = clip_start;
+            self.projects[project_index].cue_source_asset(asset_id);
+            return;
+        }
         if asset.kind == MediaKind::AudioVideo {
             if self.add_audio_video_asset_to_timeline(project_index, &asset) {
                 self.projects[project_index].position = clip_start;
@@ -632,6 +659,65 @@ fn audio_video_placement_operations(
     Ok(operations)
 }
 
+/// MO1 R25: the two operations a still import sends — a 5 s freeze at the
+/// timeline end, then a transform with the R10 fit baked in (neutral when the
+/// still has no probed dimensions, never a refusal).
+fn still_placement_operations(
+    document: &kinewright_core::Document,
+    asset: &kinewright_core::MediaAsset,
+) -> Result<Vec<Operation>, &'static str> {
+    let track = document
+        .tracks
+        .iter()
+        .find(|track| track.kind == TrackKind::Video)
+        .map(|track| track.id)
+        .ok_or("No video track exists for the still")?;
+    let clip = next_clip_id(document).ok_or("Clip id space is exhausted")?;
+    let nominal = i64::from(crate::timeline_ui::nominal_fps(document.fps).max(1));
+    let (fit_x, fit_y, fit_fine) = asset.resolution.map_or((100, 100, 10_000), |still| {
+        kinewright_core::scale_to_frame_fit(still, document.resolution)
+    });
+    let descriptor =
+        kinewright_core::effect_descriptor("transform").ok_or("The transform effect is missing")?;
+    let mut parameters: BTreeMap<String, ParamValue> = descriptor
+        .parameters
+        .iter()
+        .map(|parameter| {
+            (
+                parameter.name.to_owned(),
+                ParamValue::Integer(parameter.neutral),
+            )
+        })
+        .collect();
+    for (name, baked) in [
+        ("scale_x_percent", fit_x),
+        ("scale_y_percent", fit_y),
+        ("scale_fine_hundredths", fit_fine),
+    ] {
+        parameters.insert(name.to_owned(), ParamValue::Integer(baked));
+    }
+    Ok(vec![
+        Operation::AddFreezeFrame {
+            track,
+            at: document.duration,
+            duration: TimeCode(5 * nominal),
+            asset: asset.id,
+            source_frame: TimeCode::ZERO,
+        },
+        Operation::AddEffect {
+            clip,
+            effect: Effect {
+                enabled: true,
+                enabled_curve: None,
+                id: EffectId(1),
+                name: "transform".to_owned(),
+                parameters,
+                keyframes: BTreeMap::new(),
+            },
+        },
+    ])
+}
+
 fn next_track_id(document: &kinewright_core::Document) -> Option<TrackId> {
     document
         .tracks
@@ -660,6 +746,7 @@ fn asset_metadata(asset: &kinewright_core::MediaAsset) -> String {
         MediaKind::Video => "VIDEO",
         MediaKind::Audio => "AUDIO",
         MediaKind::AudioVideo => "A/V",
+        MediaKind::Image => "STILL",
     };
     let resolution = asset
         .resolution
@@ -681,6 +768,16 @@ fn source_color_label(ui: &mut egui::Ui, display: SourceColorDisplay) {
         color::TEXT_MUTED
     };
     ui.add(egui::Label::new(egui::RichText::new(display.summary).color(text_color)).wrap());
+}
+
+/// R2's review hook: the still-placement builder for the scenario tests.
+/// Above `mod tests` so no item trails the test module.
+#[cfg(test)]
+pub(crate) fn tests_still_placement(
+    document: &kinewright_core::Document,
+    asset: &kinewright_core::MediaAsset,
+) -> Result<Vec<Operation>, &'static str> {
+    still_placement_operations(document, asset)
 }
 
 #[cfg(test)]
@@ -752,5 +849,193 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn still_document(fps: Rational, frame: (u32, u32)) -> Document {
+        Document {
+            investigator: None,
+            catalog: kinewright_core::MediaCatalog::default(),
+            audio_mix: kinewright_core::AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: Vec::new(),
+            }],
+            media_pool: Vec::new(),
+            markers: Vec::new(),
+            fps,
+            resolution: frame,
+            lut_assets: Vec::new(),
+            duration: TimeCode::ZERO,
+        }
+    }
+
+    fn still_asset(id: u64, still: (u32, u32)) -> MediaAsset {
+        MediaAsset {
+            id: AssetId(id),
+            path: PathBuf::from(format!("still{id}.png")),
+            name: format!("still{id}.png"),
+            duration: TimeCode(1),
+            fps: Rational::default(),
+            kind: MediaKind::Image,
+            resolution: Some(still),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+            color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
+        }
+    }
+
+    /// MO1 R25: a still lands as a 5 s freeze with the R10 fit baked into a
+    /// transform — a square still in a square frame bakes neutral.
+    #[test]
+    fn still_placement_builds_freeze_with_baked_fit() {
+        let fps = Rational::new(30, 1).unwrap();
+        let asset = still_asset(4, (100, 100));
+        let mut document = still_document(fps, (100, 100));
+        document.media_pool.push(asset.clone());
+        let operations = still_placement_operations(&document, &asset).unwrap();
+        assert_eq!(operations.len(), 2);
+        assert_eq!(
+            operations[0],
+            Operation::AddFreezeFrame {
+                track: TrackId(1),
+                at: TimeCode::ZERO,
+                duration: TimeCode(150),
+                asset: AssetId(4),
+                source_frame: TimeCode::ZERO,
+            }
+        );
+        let Operation::AddEffect { clip, effect } = &operations[1] else {
+            panic!("second op adds the baked transform: {:?}", operations[1]);
+        };
+        assert_eq!(*clip, ClipId(1));
+        assert_eq!(effect.name, "transform");
+        for (name, expected) in [
+            ("scale_x_percent", 100),
+            ("scale_y_percent", 100),
+            ("scale_fine_hundredths", 10_000),
+        ] {
+            assert_eq!(
+                effect.parameters.get(name),
+                Some(&kinewright_core::ParamValue::Integer(expected)),
+                "{name} bakes neutral for a matching square"
+            );
+        }
+        // The uniform master stays 100: Ken Burns ramps it (R10).
+        assert_eq!(
+            effect.parameters.get("scale_percent"),
+            Some(&kinewright_core::ParamValue::Integer(100))
+        );
+        // The pair applies as one batch: a held frame carrying the fit.
+        kinewright_core::apply_batch(&mut document, &operations).unwrap();
+        let clip = &document.tracks[0].clips[0];
+        assert!(matches!(
+            clip.content,
+            kinewright_core::ClipContent::Freeze(_)
+        ));
+        assert_eq!(clip.effects.len(), 1);
+    }
+
+    /// MO1 R25: a wide still in a square frame shrinks the non-limiting axis
+    /// — the exact R10 ratio, not a stretch.
+    #[test]
+    fn still_placement_bakes_landscape_ratio() {
+        let fps = Rational::new(24, 1).unwrap();
+        let asset = still_asset(7, (100, 50));
+        let mut document = still_document(fps, (100, 100));
+        document.media_pool.push(asset.clone());
+        let operations = still_placement_operations(&document, &asset).unwrap();
+        assert_eq!(
+            operations[0],
+            Operation::AddFreezeFrame {
+                track: TrackId(1),
+                at: TimeCode::ZERO,
+                duration: TimeCode(120),
+                asset: AssetId(7),
+                source_frame: TimeCode::ZERO,
+            }
+        );
+        let Operation::AddEffect { effect, .. } = &operations[1] else {
+            panic!("second op adds the baked transform: {:?}", operations[1]);
+        };
+        for (name, expected) in [
+            ("scale_x_percent", 100),
+            ("scale_y_percent", 50),
+            ("scale_fine_hundredths", 10_000),
+        ] {
+            assert_eq!(
+                effect.parameters.get(name),
+                Some(&kinewright_core::ParamValue::Integer(expected)),
+                "{name} carries the 2:1 fit"
+            );
+        }
+    }
+
+    /// N5 K2: a 3:2 still's baked fit survives every animated preset — each
+    /// move starts from the bake, never from neutral.
+    #[test]
+    fn animated_presets_start_from_a_3_to_2_bake() {
+        for preset in [
+            kinewright_agent::MotionPreset::PushIn,
+            kinewright_agent::MotionPreset::PullOut,
+            kinewright_agent::MotionPreset::KenBurns,
+        ] {
+            let fps = Rational::new(30, 1).unwrap();
+            let asset = still_asset(4, (150, 100));
+            let mut document = still_document(fps, (100, 100));
+            document.media_pool.push(asset.clone());
+            let placed = still_placement_operations(&document, &asset).unwrap();
+            kinewright_core::apply_batch(&mut document, &placed).unwrap();
+            let baked = match document.tracks[0].clips[0].effects[0]
+                .parameters
+                .get("scale_fine_hundredths")
+            {
+                Some(kinewright_core::ParamValue::Integer(value)) => *value,
+                other => panic!("{other:?}"),
+            };
+            assert_ne!(baked, 10_000, "a 3:2 still bakes a non-neutral fine");
+            let plan = kinewright_agent::plan_motion(
+                &document,
+                kinewright_core::TimelineRevision(0),
+                &kinewright_agent::MotionPlanArgs {
+                    expected_revision: kinewright_core::TimelineRevision(0),
+                    clip_id: document.tracks[0].clips[0].id,
+                    preset,
+                    replace: false,
+                },
+            )
+            .unwrap();
+            kinewright_core::apply_batch(&mut document, &plan.operations).unwrap();
+            let first = document.tracks[0].clips[0].effects[0]
+                .keyframes
+                .get("scale_fine_hundredths")
+                .unwrap()
+                .value_at(TimeCode::ZERO)
+                .unwrap();
+            let last = document.tracks[0].clips[0].effects[0]
+                .keyframes
+                .get("scale_fine_hundredths")
+                .unwrap()
+                .value_at(TimeCode(149))
+                .unwrap();
+            assert_eq!(first, baked, "{preset:?} starts from the bake");
+            if preset == kinewright_agent::MotionPreset::PullOut {
+                assert!(last <= baked, "{preset:?} widens from the bake");
+            } else {
+                assert!(last >= baked, "{preset:?} moves away from the bake");
+            }
+        }
+    }
+
+    /// MO1 R25: with no video track there is nothing to freeze onto.
+    #[test]
+    fn still_placement_refuses_without_video_track() {
+        let fps = Rational::new(30, 1).unwrap();
+        let asset = still_asset(4, (100, 100));
+        let mut document = still_document(fps, (100, 100));
+        document.tracks.clear();
+        assert!(still_placement_operations(&document, &asset).is_err());
     }
 }

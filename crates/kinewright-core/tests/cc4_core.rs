@@ -72,6 +72,8 @@ fn managed_document() -> Document {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: AssetId(1),
                 source_range: TimeCode(0)..TimeCode(30),
@@ -108,6 +110,8 @@ fn document_with_assets() -> Document {
 
 fn effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: parameters
@@ -172,6 +176,8 @@ fn set_keyframes(
                     at: TimeCode(*at),
                     value: *value,
                     interpolation: *interpolation,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 })
                 .collect(),
         },
@@ -1795,4 +1801,66 @@ fn convert_legacy_look_accepts_the_default_preset_token() {
     .apply(&mut document)
     .expect("token 0 is never a special case in core");
     assert_eq!(effect_names(&document), ["creative_look"]);
+}
+
+/// MO1 review F2: conversion carries the legacy node's `enabled` flag and
+/// `enabled_curve` — converting a disabled look must not re-enable it.
+#[test]
+fn convert_legacy_look_carries_enabled_and_curve() {
+    let mut document = document_with_assets();
+    add(
+        &mut document,
+        effect(1, "primary_correction", &[("exposure_milli_stops", 250)]),
+    )
+    .expect("a primary node is legal");
+    let mut legacy = effect(
+        2,
+        "look_lut",
+        &[("preset_token", 1), ("intensity_percent", 65)],
+    );
+    legacy.enabled = false;
+    let curve = AutomationCurve {
+        keyframes: vec![
+            Keyframe {
+                at: TimeCode(0),
+                value: 0,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+            Keyframe {
+                at: TimeCode(30),
+                value: 1,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+        ],
+    };
+    legacy.enabled_curve = Some(curve.clone());
+    add(&mut document, legacy).expect("a disabled legacy look is still loadable");
+
+    Operation::ConvertLegacyLook {
+        clip: ClipId(1),
+        effect: EffectId(2),
+        lut_asset: LutAssetId(1),
+        mix_basis_points: 6_500,
+    }
+    .apply(&mut document)
+    .expect("conversion is legal once the asset is registered");
+
+    let converted = &document.clip(ClipId(1)).unwrap().effects[1];
+    assert_eq!(converted.name, "creative_look");
+    assert!(
+        !converted.enabled,
+        "conversion must not re-enable a disabled look"
+    );
+    assert_eq!(
+        converted.enabled_curve.clone().unwrap(),
+        curve,
+        "the enable curve rides along"
+    );
+    document
+        .validate()
+        .expect("the converted document is valid");
 }

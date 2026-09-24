@@ -67,6 +67,10 @@ pub enum MediaKind {
     Video,
     Audio,
     AudioVideo,
+    /// MO1 R7: probed stills (jpeg/png/webp/bmp/tiff) and any single-frame
+    /// source. Video tracks only; counted toward `reframe` single-frame and
+    /// freeze-frame handling (Part B renders it).
+    Image,
 }
 
 impl MediaKind {
@@ -74,8 +78,10 @@ impl MediaKind {
     pub const fn supports(self, track: TrackKind) -> bool {
         matches!(
             (self, track),
-            (Self::Video | Self::AudioVideo, TrackKind::Video)
-                | (Self::Audio | Self::AudioVideo, TrackKind::Audio)
+            (
+                Self::Video | Self::AudioVideo | Self::Image,
+                TrackKind::Video
+            ) | (Self::Audio | Self::AudioVideo, TrackKind::Audio)
         )
     }
 }
@@ -189,6 +195,20 @@ pub struct Effect {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     #[schemars(default)]
     pub keyframes: BTreeMap<String, AutomationCurve>,
+    /// MO1 R4: static enable flag. Default true, skipped when true, so no
+    /// stored project changes a byte. Bus/master audio effects reject
+    /// `false` (`DisabledEffectOnAudioChain`).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    #[schemars(extend("default" = true))]
+    pub enabled: bool,
+    /// MO1 R4: keyframed enable, deliberately NOT a `keyframes` entry so the
+    /// loops over `effect.keyframes` that assume registered parameter names
+    /// are untouched. Values 0..1 under every interpolation; enabled iff
+    /// value ≥ 1 (non-`Hold` kinds act as a step). Addressed as `"enabled"`
+    /// by the single-key and whole-curve operations; storage stays here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub enabled_curve: Option<AutomationCurve>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +218,10 @@ struct EffectWire {
     parameters: BTreeMap<String, ParamValue>,
     #[serde(default)]
     keyframes: BTreeMap<String, AutomationCurve>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    enabled_curve: Option<AutomationCurve>,
 }
 
 impl<'de> Deserialize<'de> for Effect {
@@ -205,13 +229,16 @@ impl<'de> Deserialize<'de> for Effect {
     where
         D: serde::Deserializer<'de>,
     {
-        let mut wire = EffectWire::deserialize(deserializer)?;
-        canonicalize_legacy_color_grade_name(&mut wire.name);
+        let wire = EffectWire::deserialize(deserializer)?;
+        let mut name = wire.name;
+        canonicalize_legacy_color_grade_name(&mut name);
         Ok(Self {
             id: wire.id,
-            name: wire.name,
+            name,
             parameters: wire.parameters,
             keyframes: wire.keyframes,
+            enabled: wire.enabled,
+            enabled_curve: wire.enabled_curve,
         })
     }
 }
@@ -258,7 +285,24 @@ impl Effect {
             }
         }
         evaluated.keyframes.clear();
+        evaluated.enabled = self.is_enabled_at(at);
+        evaluated.enabled_curve = None;
         evaluated
+    }
+
+    /// MO1 R4: whether this effect applies at one clip-local frame.
+    ///
+    /// Curve `value_at` ≥ 1 enables, else the static flag rules. Non-`Hold`
+    /// kinds act as a step: the ≥ 1 test resolves every frame, mid-ramp
+    /// frames deterministically (the `bypass` precedent from CC3 §6,
+    /// documented — not refused). Every `Effect` reader filters via this.
+    #[must_use]
+    pub fn is_enabled_at(&self, at: TimeCode) -> bool {
+        if let Some(curve) = &self.enabled_curve {
+            curve.value_at(at).is_some_and(|value| value >= 1)
+        } else {
+            self.enabled
+        }
     }
 }
 
@@ -375,10 +419,40 @@ pub struct Clip {
     )]
     #[schemars(default)]
     pub speed_percent: u32,
+    /// MO1 R5: static enable flag. Default true, skipped when true, so no
+    /// stored project changes a byte. Disabled clips are skipped by the
+    /// layer/audio resolution (Part B).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    #[schemars(extend("default" = true))]
+    pub enabled: bool,
+    /// MO1 R5: keyframed enable in clip-local frames; enabled iff value ≥ 1,
+    /// non-`Hold` kinds acting as a step exactly as R4. Values 0..1 (R18 —
+    /// the ≥ 1 test still resolves every value at read time); ordered-only
+    /// with no outside check (R13 keep-outside).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub enabled_curve: Option<crate::AutomationCurve>,
 }
 
 const fn default_clip_speed() -> u32 {
     100
+}
+
+impl Clip {
+    /// MO1 R5: whether this clip contributes at one clip-local frame.
+    ///
+    /// Curve `value_at` ≥ 1 enables, else the static flag rules — non-`Hold`
+    /// kinds act as a step exactly as R4. Callers pass clip-local frames
+    /// (`project_frame − timeline_start`); the layer/audio resolution in
+    /// Part B filters via this.
+    #[must_use]
+    pub fn is_enabled_at(&self, local: TimeCode) -> bool {
+        if let Some(curve) = &self.enabled_curve {
+            curve.value_at(local).is_some_and(|value| value >= 1)
+        } else {
+            self.enabled
+        }
+    }
 }
 
 /// Return the frame rate at which a clip consumes its source, honoring its
@@ -411,6 +485,18 @@ const fn i32_is_zero(value: &i32) -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn bool_is_false(value: &bool) -> bool {
     !*value
+}
+
+/// MO1 R4/R5: the default-true enable flag, shared by `Effect.enabled` and
+/// (in A2d) `Clip.enabled`.
+const fn default_true() -> bool {
+    true
+}
+
+// Serde's `skip_serializing_if` callbacks receive references to the fields.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -576,6 +662,10 @@ pub struct TrackMix {
     pub solo: bool,
 }
 
+/// Lowest accepted clip gain in tenths of a decibel (AU4 §2.1).
+pub const CLIP_GAIN_MIN: i32 = -600;
+/// Highest accepted clip gain in tenths of a decibel (AU4 §2.1).
+pub const CLIP_GAIN_MAX: i32 = 120;
 /// Lowest accepted track mix gain in tenths of a decibel (AU1 §2.1).
 pub const TRACK_MIX_GAIN_MIN: i32 = -600;
 /// Highest accepted track mix gain in tenths of a decibel (AU1 §2.1).
@@ -1547,6 +1637,8 @@ mod tests {
 
     fn effect(name: &str) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: name.to_owned(),
             parameters: BTreeMap::from([
@@ -1564,6 +1656,8 @@ mod tests {
                         at: TimeCode(3),
                         value: 1_250,
                         interpolation: KeyframeInterpolation::EaseIn,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             )]),
@@ -1577,6 +1671,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: AssetId(1),
                 source_range: TimeCode::ZERO..TimeCode(10),
@@ -1762,5 +1858,299 @@ mod tests {
                 "{document}"
             );
         }
+    }
+
+    /// MO1 R4: the sibling `enabled_curve` plus `enabled: false` survive a
+    /// serde round trip exactly.
+    #[test]
+    fn disabled_effect_with_curve_round_trips() {
+        let mut disabled = effect("brightness");
+        disabled.enabled = false;
+        disabled.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(0),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(10),
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        });
+        let json = serde_json::to_string(&disabled).unwrap();
+        assert!(json.contains("\"enabled\":false"), "{json}");
+        assert!(json.contains("\"enabled_curve\""), "{json}");
+        assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), disabled);
+    }
+
+    /// MO1 R4: default-enabled effects serialize byte-identically to pre-MO1
+    /// documents (`enabled` skipped when true, curve skipped when absent),
+    /// and legacy wire payloads without the fields read back enabled.
+    #[test]
+    fn default_enabled_effect_stays_byte_identical() {
+        let plain = effect("brightness");
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("enabled"), "{json}");
+        let legacy = json!({
+            "id": 7,
+            "name": "brightness",
+            "parameters": {"exposure_milli_stops": 750},
+            "keyframes": {}
+        });
+        let read: Effect = serde_json::from_value(legacy).unwrap();
+        assert!(read.enabled);
+        assert_eq!(read.enabled_curve, None);
+    }
+
+    /// MO1 R4: `is_enabled_at` resolves the curve ≥ 1 test, else the static
+    /// flag; non-`Hold` kinds act as a step (mid-ramp frames resolve by the
+    /// same ≥ 1 test, deterministically).
+    #[test]
+    fn is_enabled_at_resolves_curve_then_flag() {
+        let mut effect = effect("brightness");
+        assert!(effect.is_enabled_at(TimeCode(5)));
+        effect.enabled = false;
+        assert!(!effect.is_enabled_at(TimeCode(5)));
+        // A curve overrides the static flag in both directions.
+        effect.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(0),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(10),
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        });
+        assert!(!effect.is_enabled_at(TimeCode(0)));
+        assert!(!effect.is_enabled_at(TimeCode(9)));
+        assert!(effect.is_enabled_at(TimeCode(10)));
+        // A `Linear` 0 → 1 ramp steps at the first frame whose rounded value
+        // reaches 1 (frame 5 of 0..10: 0.5 rounds to 1, away from zero).
+        effect.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(0),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(10),
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        });
+        assert!(!effect.is_enabled_at(TimeCode(4)));
+        assert!(effect.is_enabled_at(TimeCode(5)));
+        assert!(effect.is_enabled_at(TimeCode(10)));
+    }
+
+    /// MO1 R7 kind-parity matrix: `Image` rides video tracks exactly like
+    /// `Video` (frames, no audio) and never audio tracks; the pre-existing
+    /// three rows are unchanged. Probe assignment plus the file-shape matrix
+    /// stay Part B.
+    #[test]
+    fn media_kind_supports_matrix_admits_image_on_video_only() {
+        for (kind, video, audio) in [
+            (MediaKind::Video, true, false),
+            (MediaKind::Audio, false, true),
+            (MediaKind::AudioVideo, true, true),
+            (MediaKind::Image, true, false),
+        ] {
+            assert_eq!(kind.supports(TrackKind::Video), video, "{kind:?} video");
+            assert_eq!(kind.supports(TrackKind::Audio), audio, "{kind:?} audio");
+        }
+        assert_eq!(
+            serde_json::to_value(MediaKind::Image).unwrap(),
+            serde_json::Value::String("Image".to_owned())
+        );
+        assert_eq!(
+            serde_json::from_value::<MediaKind>(serde_json::Value::String("Image".to_owned()))
+                .unwrap(),
+            MediaKind::Image
+        );
+    }
+
+    fn clip() -> Clip {
+        Clip {
+            enabled: true,
+            enabled_curve: None,
+            id: ClipId(1),
+            asset: AssetId(1),
+            source_range: TimeCode::ZERO..TimeCode(10),
+            content: ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            audio_gain_curve: None,
+            speed_percent: 100,
+        }
+    }
+
+    /// MO1 R5: a disabled clip with a sibling curve survives serde exactly.
+    #[test]
+    fn disabled_clip_with_curve_round_trips() {
+        let mut disabled = clip();
+        disabled.enabled = false;
+        disabled.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(0),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(9),
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        });
+        let json = serde_json::to_string(&disabled).unwrap();
+        assert!(json.contains("\"enabled\":false"), "{json}");
+        assert!(json.contains("\"enabled_curve\""), "{json}");
+        assert_eq!(serde_json::from_str::<Clip>(&json).unwrap(), disabled);
+    }
+
+    /// MO1 R5: default-enabled clips serialize byte-identically to pre-MO1
+    /// documents, and legacy payloads without the fields read back enabled.
+    #[test]
+    fn default_enabled_clip_stays_byte_identical() {
+        let plain = clip();
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("enabled"), "{json}");
+        let legacy = json!({
+            "id": 1,
+            "asset": 1,
+            "source_range": {"start": 0, "end": 10},
+            "content": "media",
+            "timeline_start": 0,
+            "effects": [],
+            "transition_in": null,
+            "speed_percent": 100
+        });
+        let read: Clip = serde_json::from_value(legacy).unwrap();
+        assert!(read.enabled);
+        assert_eq!(read.enabled_curve, None);
+    }
+
+    /// MO1 R5: `Clip::is_enabled_at` resolves the curve ≥ 1 test, else the
+    /// static flag; any value is stored (no 0..1 range check — values 5 and
+    /// −3 resolve by the same ≥ 1 test).
+    #[test]
+    fn clip_is_enabled_at_resolves_curve_then_flag() {
+        let mut clip = clip();
+        assert!(clip.is_enabled_at(TimeCode(5)));
+        clip.enabled = false;
+        assert!(!clip.is_enabled_at(TimeCode(5)));
+        clip.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(0),
+                    value: -3,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(9),
+                    value: 5,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        });
+        assert!(!clip.is_enabled_at(TimeCode(0)));
+        assert!(clip.is_enabled_at(TimeCode(9)));
+        // Mid-ramp frame 2: −3 + (8 × 2/9 rounded) = −3 + 2 = −1 → disabled.
+        assert!(!clip.is_enabled_at(TimeCode(2)));
+        // Mid-ramp frame 7: −3 + (8 × 7/9 rounded) = −3 + 6 = 3 → enabled.
+        assert!(clip.is_enabled_at(TimeCode(7)));
+    }
+
+    /// MO1 review F4 (mutation 1): a Hold 1 → 0 → 1 toggle disables exactly
+    /// the 0 frames — pins the `>= 1` threshold (`>= 0` would enable the
+    /// held-zero span).
+    #[test]
+    fn clip_enable_hold_toggle_disables_zero_frames() {
+        let hold = |at: i64, value: i64| Keyframe {
+            at: TimeCode(at),
+            value,
+            interpolation: KeyframeInterpolation::Hold,
+            tangent_in: 0,
+            tangent_out: 0,
+        };
+        let mut clip = clip();
+        clip.enabled = false;
+        clip.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![hold(0, 1), hold(10, 0), hold(20, 1)],
+        });
+        assert!(clip.is_enabled_at(TimeCode(0)));
+        assert!(clip.is_enabled_at(TimeCode(9)));
+        assert!(!clip.is_enabled_at(TimeCode(10)));
+        assert!(!clip.is_enabled_at(TimeCode(19)));
+        assert!(clip.is_enabled_at(TimeCode(20)));
+    }
+
+    /// MO1 R4: `evaluated_at` snapshots the resolved flag and clears the
+    /// sibling curve, keeping the ephemeral effect static.
+    #[test]
+    fn evaluated_at_snapshots_the_resolved_flag() {
+        let mut effect = effect("brightness");
+        effect.enabled = false;
+        effect.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(0),
+                value: 1,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
+        });
+        let on = effect.evaluated_at(TimeCode(7));
+        assert!(on.enabled);
+        assert_eq!(on.enabled_curve, None);
+        assert!(on.keyframes.is_empty());
+        effect.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(0),
+                value: 0,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
+        });
+        let off = effect.evaluated_at(TimeCode(7));
+        assert!(!off.enabled);
+        assert_eq!(off.enabled_curve, None);
     }
 }

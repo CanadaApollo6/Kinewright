@@ -1100,6 +1100,8 @@ mod tests {
             JournalCommand::Do(Operation::AddEffect {
                 clip: ClipId(1),
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "brightness".to_owned(),
                     parameters: std::collections::BTreeMap::default(),

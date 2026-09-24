@@ -10,6 +10,24 @@ pub enum EffectUniform {
     Scale,
     OffsetX,
     OffsetY,
+    /// MO1 R1/R2: per-axis scale (`scale_x_percent`, `scale_y_percent`).
+    /// Part B folds these into `LayerParams::{scale_x, scale_y}`.
+    ScaleX,
+    ScaleY,
+    /// MO1 R1/R2: rotation (`rotation_centidegrees`).
+    /// Part B folds this into `LayerParams::rotation` (radians).
+    Rotation,
+    /// MO1 R1/R2: anchor (`anchor_{x,y}_basis_points`).
+    /// Part B folds these into `LayerParams::{anchor_x, anchor_y}`.
+    AnchorX,
+    AnchorY,
+    /// MO1 R1/R2: fine scale (`scale_fine_hundredths`).
+    /// Part B multiplies this with master and axes.
+    ScaleFine,
+    /// MO1 R1/R2: fine position (`{x,y}_basis_points`).
+    /// Part B adds these to the coarse NDC offset.
+    OffsetXBasisPoints,
+    OffsetYBasisPoints,
     CropLeft,
     CropRight,
     CropTop,
@@ -1592,6 +1610,67 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
                 max: 100,
                 neutral: 0,
                 uniform: EffectUniform::OffsetY,
+            },
+            // MO1 R1: per-axis scale, each multiplying the uniform master.
+            EffectParameterDescriptor {
+                name: "scale_x_percent",
+                min: 1,
+                max: 400,
+                neutral: 100,
+                uniform: EffectUniform::ScaleX,
+            },
+            EffectParameterDescriptor {
+                name: "scale_y_percent",
+                min: 1,
+                max: 400,
+                neutral: 100,
+                uniform: EffectUniform::ScaleY,
+            },
+            // MO1 R1: rotation, one full turn each way (Premiere: clockwise).
+            EffectParameterDescriptor {
+                name: "rotation_centidegrees",
+                min: -36_000,
+                max: 36_000,
+                neutral: 0,
+                uniform: EffectUniform::Rotation,
+            },
+            // MO1 R1: anchor, centre-neutral (off-layer pivots deferred).
+            EffectParameterDescriptor {
+                name: "anchor_x_basis_points",
+                min: 0,
+                max: 10_000,
+                neutral: 5_000,
+                uniform: EffectUniform::AnchorX,
+            },
+            EffectParameterDescriptor {
+                name: "anchor_y_basis_points",
+                min: 0,
+                max: 10_000,
+                neutral: 5_000,
+                uniform: EffectUniform::AnchorY,
+            },
+            // MO1 R1: fine triple — fractions live in fine (canonical-writer
+            // rule); readers sum position / multiply scale (R2, Part B).
+            EffectParameterDescriptor {
+                name: "x_basis_points",
+                min: -10_000,
+                max: 10_000,
+                neutral: 0,
+                uniform: EffectUniform::OffsetXBasisPoints,
+            },
+            EffectParameterDescriptor {
+                name: "y_basis_points",
+                min: -10_000,
+                max: 10_000,
+                neutral: 0,
+                uniform: EffectUniform::OffsetYBasisPoints,
+            },
+            EffectParameterDescriptor {
+                name: "scale_fine_hundredths",
+                min: 100,
+                max: 40_000,
+                neutral: 10_000,
+                uniform: EffectUniform::ScaleFine,
             },
         ],
     },
@@ -3387,4 +3466,438 @@ pub fn effect_descriptor(name: &str) -> Option<EffectDescriptor> {
         .iter()
         .copied()
         .find(|descriptor| descriptor.name == name)
+}
+
+/// MO1 R10: the canonical scale-to-frame bake for still import.
+///
+/// Every layer is a full-frame quad with the source stretched to fill, so a
+/// still fits by shrinking the non-limiting axis. With `r = (img_w × frame_h)
+/// ÷ (img_h × frame_w)` as an exact rational, the fitted totals must stand in
+/// ratio `r` (X limiting) or `1/r` (Y limiting) while neither total exceeds
+/// the whole frame; the uniform master stays 100 for Ken Burns to ramp.
+/// Returns `(scale_x_percent, scale_y_percent, scale_fine_hundredths)`.
+///
+/// Erratum MR20: the design text's "limiting coarse 100 + fine remainder" is
+/// unrepresentable — R2's shared fine multiplies BOTH axes, so limiting-coarse
+/// 100 with fine ≠ 10000 overflows the limiting axis by `fine/10000` (up to
+/// 2×) and skews the displayed aspect by the same factor. The bake instead
+/// reduces the fit ratio to lowest terms `P/Q` and scales it to the smallest
+/// limiting coarse ≥ 100 (`P×t`, `Q×t`, both ≤ 400 by construction), with fine
+/// `floor(1e6 / limiting)`: the displayed aspect is then EXACT (the fine
+/// cancels in the ratio) and the fill is inside by less than a coarse unit.
+/// Reduced ratios with `P > 400` — the common case for near-miss photo
+/// aspects — fall back to the best rational with the limiting coarse in
+/// `100..=400` and the other axis in `1..=400` (N4 G7). The old
+/// limiting-400-plus-rounded-other fallback is gone: its error grew as
+/// `r/800` (0.185% at 3:1), not the ≤ 0.125% claimed here before. The
+/// `floor(400/r)` denominator alone witnesses relative error under
+/// `1/(2×floor(400/r)×r)` — under 0.25% for `r ≤ 400`, under 0.13% for
+/// ordinary `r ≤ 2` — and the search keeps the best of all 400
+/// denominators, so photo ratios land far inside the bound (typically
+/// ~0.001 px); past 400:1 the coarse range itself pins the bake at 400:1.
+///
+/// Integer math throughout (`u128` intermediates — `u32` dimensions cannot
+/// overflow it). Degenerate (zero) dimensions bake neutral rather than
+/// panicking.
+#[must_use]
+pub fn scale_to_frame_fit(image: (u32, u32), frame: (u32, u32)) -> (i64, i64, i64) {
+    const NEUTRAL: (i64, i64, i64) = (100, 100, 10_000);
+    let (img_w, img_h) = image;
+    let (frame_w, frame_h) = frame;
+    if img_w == 0 || img_h == 0 || frame_w == 0 || frame_h == 0 {
+        return NEUTRAL;
+    }
+    // `r = (img_w × frame_h) / (img_h × frame_w)`; the larger cross product
+    // names the limiting axis, and the reduced ratio is the exact fit.
+    let wide = u128::from(img_w) * u128::from(frame_h);
+    let tall = u128::from(img_h) * u128::from(frame_w);
+    if wide == tall {
+        return NEUTRAL;
+    }
+    let x_limiting = wide > tall;
+    let (numerator, denominator) = if x_limiting {
+        (wide, tall)
+    } else {
+        (tall, wide)
+    };
+    let divisor = gcd_u128(numerator, denominator);
+    let (p, q) = (numerator / divisor, denominator / divisor);
+    // Smallest `t` with the limiting coarse ≥ 100, unless the ratio itself
+    // already exceeds the coarse range (past 400:1 — the fallback below).
+    let (limiting, other, fine) = if p <= 400 {
+        let t = ceil_div_u128(100, p);
+        let limiting = p.saturating_mul(t);
+        let other = q.saturating_mul(t);
+        // Floor keeps the fill inside (`limiting × fine ≤ 1e6`); the margin
+        // is under one coarse unit.
+        (limiting, other, 1_000_000 / limiting)
+    } else {
+        // Best rational `h/k ~= P/Q` with `h` in the limiting window and
+        // `k` in the coarse range; the fine floors the fill inside exactly
+        // as on the reduced-ratio path.
+        let (limiting, other) = best_fit_rational(p, q);
+        (limiting, other, 1_000_000 / limiting)
+    };
+    // `limiting ≤ 400`, `other ≤ 400`, `fine ≤ 10000` by construction; the
+    // `as` casts are exact.
+    #[allow(clippy::cast_possible_truncation)]
+    let (limiting, other, fine) = (limiting as i64, other as i64, fine as i64);
+    if x_limiting {
+        (limiting, other, fine)
+    } else {
+        (other, limiting, fine)
+    }
+}
+
+/// Best rational approximation of `P/Q` (which exceeds 1) with the
+/// numerator in the limiting window `100..=400` and the denominator in
+/// `1..=400`, minimizing relative aspect error with exact integer
+/// cross-multiplication. Every denominator contributes its rounded
+/// numerator plus neighbours (ties) and both window edges (rounding
+/// outside the window), so the search sees each denominator's
+/// constrained optimum — the kept minimum is the rectangle's best.
+/// Ties prefer the finer limiting coarse, then the smaller denominator.
+/// Products stay far below `u128` (`P`, `Q` fit `u64`: `u32` cross
+/// products, reduced).
+fn best_fit_rational(p: u128, q: u128) -> (u128, u128) {
+    let mut best = (100_u128, 1_u128);
+    let mut best_error = (best.0.saturating_mul(q)).abs_diff(best.1.saturating_mul(p));
+    for denominator in 1..=400_u128 {
+        // `round(denominator × P / Q)`, half up.
+        let rounded = denominator
+            .saturating_mul(p)
+            .saturating_mul(2)
+            .saturating_add(q)
+            / q.saturating_mul(2).max(1);
+        for numerator in [
+            rounded.saturating_sub(1),
+            rounded,
+            rounded.saturating_add(1),
+            100,
+            400,
+        ] {
+            if !(100..=400).contains(&numerator) {
+                continue;
+            }
+            // Relative error orders as `|hQ - kP| / k` (`P` is fixed):
+            // cross-multiply against the incumbent.
+            let error = numerator
+                .saturating_mul(q)
+                .abs_diff(denominator.saturating_mul(p));
+            let challenger = error.saturating_mul(best.1);
+            let incumbent = best_error.saturating_mul(denominator);
+            let takes_over = challenger < incumbent
+                || (challenger == incumbent
+                    && (numerator > best.0 || (numerator == best.0 && denominator < best.1)));
+            if takes_over {
+                best = (numerator, denominator);
+                best_error = error;
+            }
+        }
+    }
+    best
+}
+
+/// Greatest common divisor, Euclid — the R10 ratio reduction.
+fn gcd_u128(mut left: u128, mut right: u128) -> u128 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left.max(1)
+}
+
+/// Ceiling division for positive operands.
+fn ceil_div_u128(numerator: u128, denominator: u128) -> u128 {
+    numerator.saturating_add(denominator.saturating_sub(1)) / denominator.max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EffectUniform, effect_descriptor};
+
+    /// MO1 R1: the completed `transform` descriptor — three legacy rows plus
+    /// eight new ones, each with its exact range, neutral, and uniform.
+    #[test]
+    fn transform_descriptor_carries_eleven_completed_rows() {
+        let descriptor = effect_descriptor("transform").expect("transform is registered");
+        let rows: Vec<(&str, i64, i64, i64, EffectUniform)> = descriptor
+            .parameters
+            .iter()
+            .map(|row| (row.name, row.min, row.max, row.neutral, row.uniform))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("scale_percent", 1, 400, 100, EffectUniform::Scale),
+                ("x_percent", -100, 100, 0, EffectUniform::OffsetX),
+                ("y_percent", -100, 100, 0, EffectUniform::OffsetY),
+                ("scale_x_percent", 1, 400, 100, EffectUniform::ScaleX),
+                ("scale_y_percent", 1, 400, 100, EffectUniform::ScaleY),
+                (
+                    "rotation_centidegrees",
+                    -36_000,
+                    36_000,
+                    0,
+                    EffectUniform::Rotation,
+                ),
+                (
+                    "anchor_x_basis_points",
+                    0,
+                    10_000,
+                    5_000,
+                    EffectUniform::AnchorX,
+                ),
+                (
+                    "anchor_y_basis_points",
+                    0,
+                    10_000,
+                    5_000,
+                    EffectUniform::AnchorY,
+                ),
+                (
+                    "x_basis_points",
+                    -10_000,
+                    10_000,
+                    0,
+                    EffectUniform::OffsetXBasisPoints,
+                ),
+                (
+                    "y_basis_points",
+                    -10_000,
+                    10_000,
+                    0,
+                    EffectUniform::OffsetYBasisPoints,
+                ),
+                (
+                    "scale_fine_hundredths",
+                    100,
+                    40_000,
+                    10_000,
+                    EffectUniform::ScaleFine,
+                ),
+            ]
+        );
+    }
+
+    /// MO1 R1 canonical-writer rule at the descriptor level: whole-percent
+    /// params step visibly (1% ≈ 19 px at 1080p), so a move holds the coarse
+    /// param constant and ramps the fine one — fractions live in fine. This
+    /// pins the rule's preconditions: fine granularity is exactly 100x the
+    /// coarse step on every axis, neutrals are identity on both lanes, and a
+    /// canonical push-in (master constant, fine ramped) is expressible.
+    #[test]
+    fn transform_canonical_form_holds_coarse_and_ramps_fine() {
+        let descriptor = effect_descriptor("transform").expect("transform is registered");
+        let row = |name: &str| descriptor.parameter(name).expect("row exists");
+        // Fine is 100x the coarse step: 1 coarse percent spans 100 fine units
+        // on position (basis points) and scale (hundredths of a percent).
+        for (coarse, fine) in [
+            ("x_percent", "x_basis_points"),
+            ("y_percent", "y_basis_points"),
+        ] {
+            let coarse_span = row(coarse).max - row(coarse).min;
+            let fine_span = row(fine).max - row(fine).min;
+            assert_eq!(fine_span, coarse_span * 100, "{coarse}/{fine} fineness");
+        }
+        let master_span = row("scale_percent").max - row("scale_percent").min;
+        let fine_span = row("scale_fine_hundredths").max - row("scale_fine_hundredths").min;
+        assert_eq!(fine_span, master_span * 100, "scale fineness");
+        // Neutrals are identity on both lanes: additive lanes neutralise to
+        // 0, multiplicative lanes to their unit (100 / 10000).
+        assert_eq!(
+            (row("x_percent").neutral, row("x_basis_points").neutral),
+            (0, 0)
+        );
+        assert_eq!(
+            (row("y_percent").neutral, row("y_basis_points").neutral),
+            (0, 0)
+        );
+        assert_eq!(
+            (
+                row("scale_percent").neutral,
+                row("scale_x_percent").neutral,
+                row("scale_y_percent").neutral,
+                row("scale_fine_hundredths").neutral,
+            ),
+            (100, 100, 100, 10_000)
+        );
+        // A canonical push-in 100.00% → 100.50% holds the master at 100 and
+        // ramps fine 10000 → 10050: every value inside its descriptor range.
+        for value in [100, 100, 100] {
+            assert!((row("scale_percent").min..=row("scale_percent").max).contains(&value));
+        }
+        for value in [10_000, 10_025, 10_050] {
+            assert!(
+                (row("scale_fine_hundredths").min..=row("scale_fine_hundredths").max)
+                    .contains(&value)
+            );
+        }
+        // A canonical 20% → 20.5% pan holds coarse at 20 and ramps fine 0 → 50.
+        assert!((row("x_percent").min..=row("x_percent").max).contains(&20));
+        for value in [0, 25, 50] {
+            assert!((row("x_basis_points").min..=row("x_basis_points").max).contains(&value));
+        }
+    }
+
+    /// MO1 R10: reduced-ratio bakes — the fitted totals stand in the exact
+    /// fit ratio, the fine cancels out of it, and the fill stays inside.
+    #[test]
+    fn scale_to_frame_fit_bakes_exact_ratios() {
+        use super::scale_to_frame_fit;
+
+        assert_eq!(
+            scale_to_frame_fit((100, 100), (100, 100)),
+            (100, 100, 10_000)
+        );
+        assert_eq!(
+            scale_to_frame_fit((1920, 1080), (1920, 1080)),
+            (100, 100, 10_000)
+        );
+        // Relatively wider image: X limiting, Y halved exactly.
+        assert_eq!(scale_to_frame_fit((100, 50), (100, 100)), (100, 50, 10_000));
+        // Relatively taller image: Y limiting, X halved exactly.
+        assert_eq!(scale_to_frame_fit((50, 100), (100, 100)), (50, 100, 10_000));
+        // 16:9 still in a square frame: 16/9 × 7 = 112/63, fine
+        // floor(1e6/112) = 8928; totals (0.999936, 0.562464), ratio exact.
+        assert_eq!(
+            scale_to_frame_fit((1920, 1080), (100, 100)),
+            (112, 63, 8_928)
+        );
+        // Same ratio, portrait: X takes the fraction.
+        assert_eq!(
+            scale_to_frame_fit((1080, 1920), (100, 100)),
+            (63, 112, 8_928)
+        );
+        // Tiny 4:3 still in an HD frame: relatively taller, so Y limits.
+        assert_eq!(scale_to_frame_fit((4, 3), (1920, 1080)), (75, 100, 10_000));
+        // Degenerate dimensions bake neutral instead of panicking.
+        assert_eq!(scale_to_frame_fit((0, 10), (100, 100)), (100, 100, 10_000));
+        assert_eq!(scale_to_frame_fit((10, 10), (100, 0)), (100, 100, 10_000));
+    }
+
+    /// MO1 R10: displayed aspect equals image aspect (exactly on the reduced-
+    /// ratio path, within 0.5% on the past-400:1 fallback) and the fitted
+    /// quad stays inside the frame — integer cross-multiplication, no float
+    /// anywhere near the assertion.
+    #[test]
+    fn scale_to_frame_fit_preserves_aspect_and_fits_inside() {
+        use super::scale_to_frame_fit;
+
+        for (image, frame) in [
+            ((1920, 1080), (1080, 1920)),
+            ((1080, 1920), (1920, 1080)),
+            ((4000, 3000), (1920, 1080)),
+            ((3000, 4000), (1920, 1080)),
+            ((7, 5), (1920, 1080)),
+            ((5, 7), (320, 180)),
+            ((8192, 4320), (1280, 720)),
+            ((1000, 999), (100, 100)),
+        ] {
+            let (cx, cy, fine) = scale_to_frame_fit(image, frame);
+            // Every baked value inside its descriptor range.
+            assert!((1..=400).contains(&cx), "{image:?} in {frame:?}");
+            assert!((1..=400).contains(&cy), "{image:?} in {frame:?}");
+            assert!((100..=40_000).contains(&fine), "{image:?} in {frame:?}");
+            let (cx, cy, fine) = (
+                u32::try_from(cx).expect("baked coarse is positive"),
+                u32::try_from(cy).expect("baked coarse is positive"),
+                u32::try_from(fine).expect("baked fine is positive"),
+            );
+            // Folded totals as exact rationals over 1e6 (master stays 100).
+            let total_x = u128::from(cx) * u128::from(fine);
+            let total_y = u128::from(cy) * u128::from(fine);
+            // Fit inside: neither total exceeds the whole frame.
+            assert!(total_x <= 1_000_000, "{image:?} in {frame:?}");
+            assert!(total_y <= 1_000_000, "{image:?} in {frame:?}");
+            // Displayed aspect (frame_w × total_x) : (frame_h × total_y)
+            // equals image aspect: exactly on the reduced-ratio path (the
+            // cross products are integers, no rounding involved), within the
+            // 400-coarse rounding on the past-400:1 fallback.
+            let displayed = u128::from(frame.0) * total_x * u128::from(image.1);
+            let expected = u128::from(image.0) * u128::from(frame.1) * total_y;
+            let diff = displayed.abs_diff(expected);
+            assert!(
+                diff * 200 <= expected,
+                "{image:?} in {frame:?}: displayed aspect drifts more than 0.5%"
+            );
+        }
+    }
+
+    /// MO1 R10: ratios past 400:1 fall back to limiting 400 + fine 2500
+    /// (exact fill) with the other axis rounded — the ratio clamps at 400:1
+    /// rather than leaving the descriptor range.
+    #[test]
+    fn scale_to_frame_fit_clamps_unrepresentable_panoramas() {
+        use super::scale_to_frame_fit;
+
+        assert_eq!(scale_to_frame_fit((10_000, 1), (1, 1)), (400, 1, 2_500));
+        assert_eq!(scale_to_frame_fit((20_000, 1), (1, 1)), (400, 1, 2_500));
+        assert_eq!(scale_to_frame_fit((1, 20_000), (1, 1)), (1, 400, 2_500));
+        // Just past the boundary the rounding still tracks the ratio.
+        assert_eq!(scale_to_frame_fit((401, 400), (1, 1)), (400, 399, 2_500));
+    }
+
+    /// MO1 N4 G7: the past-400:1 fallback is the best rational with both
+    /// terms in the coarse range — not limiting-400-plus-rounded-other,
+    /// whose error grows as r/800 (0.185% here, past the documented
+    /// 0.125%). 2096/693 resolves to 369/122 (0.002%). This is also the
+    /// R2 S4 remedy: S4's `→ 132` targeted the pre-G7 fallback this pin
+    /// replaces, and the optimality test kills its extremum mutant.
+    #[test]
+    fn scale_to_frame_fit_falls_back_to_best_rational() {
+        use super::scale_to_frame_fit;
+
+        assert_eq!(scale_to_frame_fit((77, 131), (320, 180)), (122, 369, 2_710));
+    }
+
+    /// MO1 N4 G7: the fallback bake attains the minimum relative aspect
+    /// error over the whole feasible rectangle (independent f64
+    /// brute-force oracle), breaking ties toward the finer limiting
+    /// coarse, and stays inside the documented bound.
+    #[test]
+    fn scale_to_frame_fit_fallback_is_optimal_in_range() {
+        use super::scale_to_frame_fit;
+
+        for (image, frame) in [
+            ((77, 131), (320, 180)),
+            ((6000, 3376), (1920, 1080)),
+            ((10_000, 1), (1, 1)),
+            ((401, 400), (1, 1)),
+            ((1000, 999), (100, 100)),
+        ] {
+            let (cx, cy, fine) = scale_to_frame_fit(image, frame);
+            let ratio = f64::from(image.0 * frame.1) / f64::from(image.1 * frame.0);
+            let (limiting, other) = if cx >= cy { (cx, cy) } else { (cy, cx) };
+            assert!((100..=400).contains(&limiting), "{image:?} in {frame:?}");
+            assert!((1..=400).contains(&other), "{image:?} in {frame:?}");
+            assert_eq!(fine, 1_000_000 / limiting, "{image:?} in {frame:?}");
+            let limiting = i32::try_from(limiting).expect("coarse fits i32");
+            let other = i32::try_from(other).expect("coarse fits i32");
+            let baked = f64::from(limiting) / f64::from(other);
+            // The fit ratio is >= 1 with the limiting axis on top.
+            let target = ratio.max(1.0 / ratio);
+            let error = (baked - target).abs() / target;
+            let mut best = f64::INFINITY;
+            for k in 1..=400_i32 {
+                for h in 100..=400_i32 {
+                    let candidate = (f64::from(h) / f64::from(k) - target).abs() / target;
+                    if candidate < best {
+                        best = candidate;
+                    }
+                }
+            }
+            assert!(
+                error <= best + 1e-12,
+                "{image:?} in {frame:?}: bake error {error} above oracle {best}"
+            );
+            if target <= 400.0 {
+                // Documented bound: the floor(400/r) witness alone gives
+                // 1/(2*floor(400/r)*r); 0.26% covers r <= 400 with margin.
+                assert!(error < 0.002_6, "{image:?} in {frame:?}: {error}");
+            } else {
+                // Past 400:1 the coarse range pins the bake at 400:1.
+                assert_eq!((limiting, other), (400, 1), "{image:?} in {frame:?}");
+            }
+        }
+    }
 }

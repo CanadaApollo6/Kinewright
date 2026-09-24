@@ -295,6 +295,69 @@ pub enum Operation {
         effect: EffectId,
         name: String,
     },
+    /// MO1 R15: insert one key into an effect parameter's clip-local automation
+    /// curve, or replace the key already at `key.at`, keeping curve order.
+    /// `name` routes to the registered parameter or, for `"enabled"`, to the
+    /// effect's `enabled_curve` sibling. Naturally idempotent.
+    UpsertEffectKeyframe {
+        clip: ClipId,
+        effect: EffectId,
+        name: String,
+        key: Keyframe,
+    },
+    /// MO1 R16: remove the key at `at` from an effect parameter's clip-local
+    /// automation curve (`"enabled"` routes to the sibling, as R15). A missing
+    /// key is success with no change; removing the last key writes its value
+    /// into the static parameter, then clears the curve.
+    RemoveEffectKeyframe {
+        clip: ClipId,
+        effect: EffectId,
+        name: String,
+        at: TimeCode,
+    },
+    /// MO1 R17: write one effect's static `enabled` flag. A linked pair is
+    /// enabled/disabled via an atomic batch of two clip toggles — core stays
+    /// per-clip, so this operation never follows links itself.
+    SetEffectEnabled {
+        clip: ClipId,
+        effect: EffectId,
+        enabled: bool,
+    },
+    /// MO1 R17: write one clip's static `enabled` flag, per-clip like its
+    /// effect twin (linked pairs toggle via a two-operation batch).
+    SetClipEnabled {
+        clip: ClipId,
+        enabled: bool,
+    },
+    /// MO1 R18: replace or clear one clip's enable curve, in clip-local
+    /// frames. `null` clears it; the field is required, so an omitted `curve`
+    /// is an error and never a silent clear.
+    SetClipEnabledCurve {
+        clip: ClipId,
+        /// Values 0..1 under any interpolation, ordered-only with negatives
+        /// legal and no outside check (keep-outside, R5/R13). `null` clears
+        /// it. The field is required: an omitted `curve` is an error, never
+        /// a silent clear.
+        #[serde(deserialize_with = "deserialize_required_curve")]
+        #[schemars(required, with = "RequiredNullableCurve")]
+        curve: Option<AutomationCurve>,
+    },
+    /// MO1 R19: copy whole effects from one clip to another. `names: None`
+    /// copies every effect, `Some` copies the named subset, matched by
+    /// (name, occurrence). Each copied effect replaces its target wholesale
+    /// in place keeping the target id; names absent on the target are
+    /// appended in source order with fresh ids. One revision gate, one undo.
+    CopyClipAttributes {
+        from_clip: ClipId,
+        to_clip: ClipId,
+        /// `None` copies every effect; `Some` copies the named subset. A
+        /// name unknown to the registry fails; a name absent on the source
+        /// is skipped.
+        names: Option<Vec<String>>,
+        /// Copy keyframe curves too; otherwise the target keeps its own
+        /// curves and appended effects start static.
+        include_keyframes: bool,
+    },
     /// Replace one legacy `look_lut` / `cube_lut` at its exact vector position
     /// with an equivalent managed `creative_look` node (CC4 §9).
     ///
@@ -599,6 +662,13 @@ pub enum OpError {
     /// AU2 §5.4: only registered `audio_*` effects sit on the master chain.
     #[error("effect {effect:?} is not an audio effect and cannot sit on the audio master chain")]
     VisualEffectOnAudioMaster { effect: String },
+    /// MO1 R4: bus/master audio effects reject `enabled: false` or an
+    /// `enabled_curve` — MO1's simplest honest rule (honouring it in
+    /// `chain_structure_matches` and live retune is future work).
+    #[error(
+        "audio chain {chain:?} effect {effect} cannot be disabled: MO1 keeps bus/master chains always-on"
+    )]
+    DisabledEffectOnAudioChain { chain: AudioChain, effect: EffectId },
     /// AU2 §5.4: the master sums every stem, so it has no sidechain to duck
     /// against.
     #[error("audio_ducking has no sidechain on the master chain and cannot be used there")]
@@ -1262,6 +1332,39 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         Operation::ClearEffectKeyframes { clip, effect, name } => {
             clear_effect_keyframes(doc, *clip, *effect, name)
         }
+        Operation::UpsertEffectKeyframe {
+            clip,
+            effect,
+            name,
+            key,
+        } => upsert_effect_keyframe(doc, *clip, *effect, name, *key),
+        Operation::RemoveEffectKeyframe {
+            clip,
+            effect,
+            name,
+            at,
+        } => remove_effect_keyframe(doc, *clip, *effect, name, *at),
+        Operation::SetEffectEnabled {
+            clip,
+            effect,
+            enabled,
+        } => set_effect_enabled(doc, *clip, *effect, *enabled),
+        Operation::SetClipEnabled { clip, enabled } => set_clip_enabled(doc, *clip, *enabled),
+        Operation::SetClipEnabledCurve { clip, curve } => {
+            set_clip_enabled_curve(doc, *clip, curve.as_ref())
+        }
+        Operation::CopyClipAttributes {
+            from_clip,
+            to_clip,
+            names,
+            include_keyframes,
+        } => copy_clip_attributes(
+            doc,
+            *from_clip,
+            *to_clip,
+            names.as_deref(),
+            *include_keyframes,
+        ),
         Operation::SetTitleParam { clip, name, value } => {
             set_title_param(doc, *clip, name, value.clone())
         }
@@ -1488,8 +1591,10 @@ fn validate_clip_gain_curve(
             clip,
             reason: error.to_string(),
         })?;
+    let floor = i64::from(crate::CLIP_GAIN_MIN);
+    let ceiling = i64::from(crate::CLIP_GAIN_MAX);
     for keyframe in &curve.keyframes {
-        if !(-600..=120).contains(&keyframe.value) {
+        if !(floor..=ceiling).contains(&keyframe.value) {
             return Err(OpError::ClipGainEnvelopeOutOfRange {
                 clip,
                 value: keyframe.value,
@@ -1889,6 +1994,14 @@ fn add_clip(
         return Err(OpError::NegativeTimelinePosition(at));
     }
     let asset = doc.asset(asset_id).ok_or(OpError::MissingAsset(asset_id))?;
+    // MO1 R9: a Media range over a still is invalid — stills enter via
+    // `AddFreezeFrame` as `Freeze { source_frame: 0 }`, never here.
+    if asset.kind == crate::MediaKind::Image {
+        return Err(OpError::InvalidSourceRange {
+            start: source.start.0,
+            end: source.end.0,
+        });
+    }
     validate_source_range(asset, &source)?;
     let track_index = doc
         .tracks
@@ -1898,6 +2011,8 @@ fn add_clip(
     validate_track_compatibility(asset, &doc.tracks[track_index])?;
 
     let clip = Clip {
+        enabled: true,
+        enabled_curve: None,
         id: next_clip_id(doc)?,
         asset: asset_id,
         source_range: source,
@@ -1943,6 +2058,8 @@ fn add_title(
     let clip_id = next_clip_id(doc)?;
     validate_title(clip_id, &title, duration)?;
     doc.tracks[track_index].clips.push(Clip {
+        enabled: true,
+        enabled_curve: None,
         id: clip_id,
         asset: AssetId::default(),
         source_range: TimeCode::ZERO..duration,
@@ -1990,6 +2107,8 @@ fn add_freeze_frame(
     validate_freeze_source_frame(asset, source_frame)?;
     let clip_id = next_clip_id(doc)?;
     doc.tracks[track_index].clips.push(Clip {
+        enabled: true,
+        enabled_curve: None,
         id: clip_id,
         asset: asset_id,
         source_range: TimeCode::ZERO..duration,
@@ -2532,8 +2651,8 @@ fn roll_edit(
     }
     let left = doc.tracks[track_index].clips[left_index].clone();
     let right = doc.tracks[track_index].clips[right_index].clone();
-    require_media(&left)?;
-    require_media(&right)?;
+    // MO1 R9: Media, Title, and Freeze all roll — spans move in project
+    // frames below, so no `require_media` gate remains here.
     let left_end = doc.clip_end(&left)?;
     let right_end = doc.clip_end(&right)?;
     if left_end != right.timeline_start || to <= left.timeline_start || to >= right_end {
@@ -2543,41 +2662,69 @@ fn roll_edit(
         });
     }
 
-    let left_asset = doc
-        .asset(left.asset)
-        .ok_or(OpError::MissingAsset(left.asset))?;
-    let left_fps = crate::clip_effective_fps(left_asset.fps, &left)?;
     let left_duration = to
         .checked_sub(left.timeline_start)
         .ok_or(OpError::TimeOverflow)?;
-    let left_source_out = source_end_for_project_duration(
-        left.source_range.start,
-        left_asset.duration,
-        left_fps,
-        doc.fps,
-        left_duration,
-    )
+    let left_source_out = match left.content {
+        ClipContent::Media => {
+            let left_asset = doc
+                .asset(left.asset)
+                .ok_or(OpError::MissingAsset(left.asset))?;
+            let left_fps = crate::clip_effective_fps(left_asset.fps, &left)?;
+            source_end_for_project_duration(
+                left.source_range.start,
+                left_asset.duration,
+                left_fps,
+                doc.fps,
+                left_duration,
+            )
+        }
+        // MO1 R9: spans carry project frames, so the shared point moves the
+        // span edge with no fps mapping; the held frame is untouched.
+        ClipContent::Title(_) | ClipContent::Freeze(_) => {
+            left.source_range.start.checked_add(left_duration)
+        }
+    }
     .ok_or(OpError::UnrepresentableEditBoundary {
         clip: left_id,
         at: to,
     })?;
 
-    let right_asset = doc
-        .asset(right.asset)
-        .ok_or(OpError::MissingAsset(right.asset))?;
-    let right_fps = crate::clip_effective_fps(right_asset.fps, &right)?;
     let right_duration = right_end.checked_sub(to).ok_or(OpError::TimeOverflow)?;
-    let right_source_in = source_start_for_project_duration(
-        TimeCode::ZERO,
-        right.source_range.end,
-        right_fps,
-        doc.fps,
-        right_duration,
-    )
+    let right_source_in = match right.content {
+        ClipContent::Media => {
+            let right_asset = doc
+                .asset(right.asset)
+                .ok_or(OpError::MissingAsset(right.asset))?;
+            let right_fps = crate::clip_effective_fps(right_asset.fps, &right)?;
+            source_start_for_project_duration(
+                TimeCode::ZERO,
+                right.source_range.end,
+                right_fps,
+                doc.fps,
+                right_duration,
+            )
+        }
+        // MO1 R9: spans have no earlier source and must stay non-negative,
+        // so the origin never moves — the window resizes around it below.
+        ClipContent::Title(_) | ClipContent::Freeze(_) => Some(right.source_range.start),
+    }
     .ok_or(OpError::UnrepresentableEditBoundary {
         clip: right_id,
         at: to,
     })?;
+    if !right.content.is_media() {
+        let span_end = right
+            .source_range
+            .start
+            .checked_add(right_duration)
+            .filter(|end| *end > right.source_range.start)
+            .ok_or(OpError::UnrepresentableEditBoundary {
+                clip: right_id,
+                at: to,
+            })?;
+        doc.tracks[track_index].clips[right_index].source_range.end = span_end;
+    }
 
     doc.tracks[track_index].clips[left_index].source_range.end = left_source_out;
     doc.tracks[track_index].clips[right_index]
@@ -2599,9 +2746,9 @@ fn slide_clip(doc: &mut Document, clip_id: ClipId, to: TimeCode) -> Result<(), O
     let left = doc.tracks[track_index].clips[clip_index - 1].clone();
     let middle = doc.tracks[track_index].clips[clip_index].clone();
     let right = doc.tracks[track_index].clips[clip_index + 1].clone();
-    require_media(&left)?;
-    require_media(&middle)?;
-    require_media(&right)?;
+    // MO1 R9: Media, Title, and Freeze all slide — the neighbours resize in
+    // project frames below and the middle only moves its window, so no
+    // `require_media` gate remains here.
     let left_end = doc.clip_end(&left)?;
     let middle_duration = doc.clip_duration(&middle)?;
     let middle_end = doc.clip_end(&middle)?;
@@ -2617,39 +2764,53 @@ fn slide_clip(doc: &mut Document, clip_id: ClipId, to: TimeCode) -> Result<(), O
         return Err(OpError::SlideRequiresNeighbors { clip: clip_id });
     }
 
-    let left_asset = doc
-        .asset(left.asset)
-        .ok_or(OpError::MissingAsset(left.asset))?;
-    let left_fps = crate::clip_effective_fps(left_asset.fps, &left)?;
     let left_duration = to
         .checked_sub(left.timeline_start)
         .ok_or(OpError::TimeOverflow)?;
-    let left_source_out = source_end_for_project_duration(
-        left.source_range.start,
-        left_asset.duration,
-        left_fps,
-        doc.fps,
-        left_duration,
-    )
+    let left_source_out = match left.content {
+        ClipContent::Media => {
+            let left_asset = doc
+                .asset(left.asset)
+                .ok_or(OpError::MissingAsset(left.asset))?;
+            let left_fps = crate::clip_effective_fps(left_asset.fps, &left)?;
+            source_end_for_project_duration(
+                left.source_range.start,
+                left_asset.duration,
+                left_fps,
+                doc.fps,
+                left_duration,
+            )
+        }
+        ClipContent::Title(_) | ClipContent::Freeze(_) => {
+            left.source_range.start.checked_add(left_duration)
+        }
+    }
     .ok_or(OpError::UnrepresentableEditBoundary {
         clip: left.id,
         at: to,
     })?;
 
-    let right_asset = doc
-        .asset(right.asset)
-        .ok_or(OpError::MissingAsset(right.asset))?;
-    let right_fps = crate::clip_effective_fps(right_asset.fps, &right)?;
     let right_duration = right_end
         .checked_sub(new_end)
         .ok_or(OpError::TimeOverflow)?;
-    let right_source_in = source_start_for_project_duration(
-        TimeCode::ZERO,
-        right.source_range.end,
-        right_fps,
-        doc.fps,
-        right_duration,
-    )
+    let right_source_in = match right.content {
+        ClipContent::Media => {
+            let right_asset = doc
+                .asset(right.asset)
+                .ok_or(OpError::MissingAsset(right.asset))?;
+            let right_fps = crate::clip_effective_fps(right_asset.fps, &right)?;
+            source_start_for_project_duration(
+                TimeCode::ZERO,
+                right.source_range.end,
+                right_fps,
+                doc.fps,
+                right_duration,
+            )
+        }
+        ClipContent::Title(_) | ClipContent::Freeze(_) => {
+            right.source_range.end.checked_sub(right_duration)
+        }
+    }
     .ok_or(OpError::UnrepresentableEditBoundary {
         clip: right.id,
         at: new_end,
@@ -2728,14 +2889,27 @@ fn replace_clip(
 /// `delta_local` is `new_timeline_start - old_timeline_start` in project
 /// frames and is **signed**; `new_duration` is `doc.clip_duration(clip)` after
 /// the operation's own rewrite, never the source-range span.
+/// MO1 R11/R12: keep-outside owners shift (drop nothing, insert no
+/// boundary key); audio owners keep AU4 exactly (drop + seam). Clips reject
+/// audio effects outright, so every effect keyframe map here — and both
+/// `enabled_curve` siblings — are keep-outside; only the gain envelope
+/// takes the AU4 path. Every operation that rewrites clip extents funnels
+/// through here (directly or via `survive_clip_edit`), so R12's per-row
+/// policy holds by construction.
 fn rebase_clip_automation(clip: &mut Clip, delta_local: TimeCode, new_duration: TimeCode) {
     if let Some(curve) = &clip.audio_gain_curve {
         clip.audio_gain_curve = Some(crate::rebase_clip_curve(curve, delta_local, new_duration));
     }
     for effect in &mut clip.effects {
         for curve in effect.keyframes.values_mut() {
-            *curve = crate::rebase_clip_curve(curve, delta_local, new_duration);
+            *curve = crate::rebase_clip_curve_keep_outside(curve, delta_local);
         }
+        if let Some(curve) = &effect.enabled_curve {
+            effect.enabled_curve = Some(crate::rebase_clip_curve_keep_outside(curve, delta_local));
+        }
+    }
+    if let Some(curve) = &clip.enabled_curve {
+        clip.enabled_curve = Some(crate::rebase_clip_curve_keep_outside(curve, delta_local));
     }
 }
 
@@ -2796,6 +2970,8 @@ fn ripple_delete_curve(
                     at,
                     value,
                     interpolation: curve.segment_interpolation_at(at),
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             );
         }
@@ -2820,6 +2996,8 @@ fn ripple_delete_curve(
                 at: start,
                 value,
                 interpolation: curve.segment_interpolation_at(ripple_point),
+                tangent_in: 0,
+                tangent_out: 0,
             },
         );
     }
@@ -2882,6 +3060,9 @@ fn ripple_track_automation(
     }
 }
 
+/// Media-only paths (`ReplaceClip`/`FitToFill`): Title/Freeze clips refuse
+/// with `EditorialRequiresMedia`. Roll/slide relaxed to span-or-media under
+/// MO1 R9 and no longer call this.
 fn require_media(clip: &Clip) -> Result<(), OpError> {
     if clip.content.is_media() {
         Ok(())
@@ -3407,7 +3588,11 @@ fn convert_legacy_look(
             lut_asset,
         });
     }
+    // MO1 review F2: conversion carries the legacy enable state — a
+    // disabled look converts disabled, curve and all.
     let converted = Effect {
+        enabled: legacy.enabled,
+        enabled_curve: legacy.enabled_curve.clone(),
         id: effect_id,
         name: crate::ColorNodeKind::CreativeLook.effect_name().to_owned(),
         parameters: BTreeMap::from([
@@ -3541,6 +3726,11 @@ fn set_effect_keyframes(
             clip: clip_id,
             effect: effect_id,
         })?;
+    if name == ENABLED_CURVE_NAME {
+        validate_enabled_curve(&effect.name, &curve)?;
+        effect.enabled_curve = Some(curve);
+        return Ok(());
+    }
     let descriptor = crate::effect_descriptor(&effect.name)
         .and_then(|descriptor| descriptor.parameter(name))
         .ok_or_else(|| OpError::UnknownEffectParam {
@@ -3580,6 +3770,10 @@ fn clear_effect_keyframes(
             clip: clip_id,
             effect: effect_id,
         })?;
+    if name == ENABLED_CURVE_NAME {
+        effect.enabled_curve = None;
+        return Ok(());
+    }
     if crate::effect_descriptor(&effect.name)
         .and_then(|descriptor| descriptor.parameter(name))
         .is_none()
@@ -3590,6 +3784,287 @@ fn clear_effect_keyframes(
         });
     }
     effect.keyframes.remove(name);
+    Ok(())
+}
+
+/// The R4 sibling's routing name shared by the single-key operations.
+const ENABLED_CURVE_NAME: &str = "enabled";
+
+/// Insert `key` into a sorted key vector, replacing the key at the same frame.
+fn insert_key_sorted(keys: &mut Vec<Keyframe>, key: Keyframe) {
+    match keys.binary_search_by_key(&key.at.0, |existing| existing.at.0) {
+        Ok(index) => keys[index] = key,
+        Err(index) => keys.insert(index, key),
+    }
+}
+
+/// MO1 R15: upsert one key through the whole-curve validation chain.
+///
+/// The prospective curve (existing keys plus `key`) runs `validate_curve` —
+/// descriptor range, hold-only legality, the owner-class structural check,
+/// the R13 outside rule — plus the keyframe policy for curves nodes, exactly
+/// as `SetEffectKeyframes`. `"enabled"` routes to the R4 sibling through
+/// `validate_enabled_curve` instead.
+fn upsert_effect_keyframe(
+    doc: &mut Document,
+    clip_id: ClipId,
+    effect_id: EffectId,
+    name: &str,
+    key: Keyframe,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let clip_duration = doc.clip_duration(&doc.tracks[track_index].clips[clip_index])?;
+    let effect = doc.tracks[track_index].clips[clip_index]
+        .effects
+        .iter_mut()
+        .find(|effect| effect.id == effect_id)
+        .ok_or(OpError::MissingEffect {
+            clip: clip_id,
+            effect: effect_id,
+        })?;
+    if name == ENABLED_CURVE_NAME {
+        let mut prospective = effect.enabled_curve.clone().unwrap_or(AutomationCurve {
+            keyframes: Vec::new(),
+        });
+        insert_key_sorted(&mut prospective.keyframes, key);
+        validate_enabled_curve(&effect.name, &prospective)?;
+        effect.enabled_curve = Some(prospective);
+        return Ok(());
+    }
+    let descriptor = crate::effect_descriptor(&effect.name)
+        .and_then(|descriptor| descriptor.parameter(name))
+        .ok_or_else(|| OpError::UnknownEffectParam {
+            effect: effect.name.clone(),
+            name: name.to_owned(),
+        })?;
+    let mut prospective = effect
+        .keyframes
+        .get(name)
+        .cloned()
+        .unwrap_or(AutomationCurve {
+            keyframes: Vec::new(),
+        });
+    insert_key_sorted(&mut prospective.keyframes, key);
+    validate_curve(
+        clip_id,
+        clip_duration,
+        effect_id,
+        &effect.name,
+        descriptor,
+        name,
+        &prospective,
+    )?;
+    if crate::classify_color_node(effect) == Some(crate::ColorNodeKind::Curves) {
+        let mut keyframes = effect.keyframes.clone();
+        keyframes.insert(name.to_owned(), prospective.clone());
+        validate_curve_keyframe_policy(&effect.name, &keyframes)?;
+    }
+    effect.keyframes.insert(name.to_owned(), prospective);
+    Ok(())
+}
+
+/// MO1 R16: remove one key; a missing key is success with no change.
+///
+/// Removing the last key writes its value into the static parameter (S8 —
+/// the `enabled` sibling writes the static flag through the ≥ 1 test), then
+/// clears the curve. The static write validates before anything mutates, so a
+/// parameter that cannot hold the value fails atomically with the curve intact.
+fn remove_effect_keyframe(
+    doc: &mut Document,
+    clip_id: ClipId,
+    effect_id: EffectId,
+    name: &str,
+    at: TimeCode,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let effect = doc.tracks[track_index].clips[clip_index]
+        .effects
+        .iter_mut()
+        .find(|effect| effect.id == effect_id)
+        .ok_or(OpError::MissingEffect {
+            clip: clip_id,
+            effect: effect_id,
+        })?;
+    if name == ENABLED_CURVE_NAME {
+        let Some(sibling) = effect.enabled_curve.clone() else {
+            return Ok(());
+        };
+        let Some(position) = sibling.keyframes.iter().position(|key| key.at == at) else {
+            return Ok(());
+        };
+        let mut keys = sibling.keyframes;
+        let removed = keys.remove(position);
+        if keys.is_empty() {
+            effect.enabled = removed.value >= 1;
+            effect.enabled_curve = None;
+        } else {
+            effect.enabled_curve = Some(AutomationCurve { keyframes: keys });
+        }
+        return Ok(());
+    }
+    if crate::effect_descriptor(&effect.name)
+        .and_then(|descriptor| descriptor.parameter(name))
+        .is_none()
+    {
+        return Err(OpError::UnknownEffectParam {
+            effect: effect.name.clone(),
+            name: name.to_owned(),
+        });
+    }
+    let Some(curve) = effect.keyframes.get(name).cloned() else {
+        return Ok(());
+    };
+    let Some(position) = curve.keyframes.iter().position(|key| key.at == at) else {
+        return Ok(());
+    };
+    let mut keys = curve.keyframes;
+    let removed = keys.remove(position);
+    if keys.is_empty() {
+        validate_effect_parameter(&effect.name, name, &ParamValue::Integer(removed.value))?;
+        if crate::classify_color_node(effect) == Some(crate::ColorNodeKind::Curves) {
+            let mut prospective = effect.clone();
+            prospective
+                .parameters
+                .insert(name.to_owned(), ParamValue::Integer(removed.value));
+            validate_color_curve_points(&prospective)?;
+        }
+        effect
+            .parameters
+            .insert(name.to_owned(), ParamValue::Integer(removed.value));
+        effect.keyframes.remove(name);
+    } else {
+        effect
+            .keyframes
+            .insert(name.to_owned(), AutomationCurve { keyframes: keys });
+    }
+    Ok(())
+}
+
+/// MO1 R17: write the static R4 flag. No descriptor, no curve — the effect
+/// only has to exist.
+fn set_effect_enabled(
+    doc: &mut Document,
+    clip_id: ClipId,
+    effect_id: EffectId,
+    enabled: bool,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    let effect = doc.tracks[track_index].clips[clip_index]
+        .effects
+        .iter_mut()
+        .find(|effect| effect.id == effect_id)
+        .ok_or(OpError::MissingEffect {
+            clip: clip_id,
+            effect: effect_id,
+        })?;
+    effect.enabled = enabled;
+    Ok(())
+}
+
+/// MO1 R17: write the static R5 flag, per-clip — linked pairs toggle via an
+/// atomic batch of two of these, never by link-following here.
+fn set_clip_enabled(doc: &mut Document, clip_id: ClipId, enabled: bool) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    doc.tracks[track_index].clips[clip_index].enabled = enabled;
+    Ok(())
+}
+
+/// MO1 R18: replace or clear the clip enable curve through the AU4
+/// nullable-required shape (`None` clears). Values 0..1, any interpolation,
+/// ordered-only with negatives legal, no outside check.
+fn set_clip_enabled_curve(
+    doc: &mut Document,
+    clip_id: ClipId,
+    curve: Option<&AutomationCurve>,
+) -> Result<(), OpError> {
+    let (track_index, clip_index) = find_clip(doc, clip_id)?;
+    if let Some(curve) = curve {
+        validate_clip_enabled_curve(clip_id, curve)?;
+    }
+    doc.tracks[track_index].clips[clip_index].enabled_curve = curve.cloned();
+    Ok(())
+}
+
+/// MO1 R19: copy whole effects across clips by (name, occurrence).
+///
+/// The k-th same-named in-scope source effect replaces the k-th same-named
+/// target effect wholesale in place — values, `enabled`, `enabled_curve`,
+/// and `keyframes` iff `include_keyframes` — keeping the target `EffectId`
+/// for stable references. Source occurrences past the target's run are
+/// appended after its existing effects in source order with fresh ids
+/// (max-plus-one within the target clip). Requested names unknown to the
+/// registry fail with `UnknownEffect` before anything moves; requested names
+/// absent on the source are skipped. Copying onto a shorter clip is legal:
+/// keep-outside owners carry no outside check (S2).
+fn copy_clip_attributes(
+    doc: &mut Document,
+    from_id: ClipId,
+    to_id: ClipId,
+    names: Option<&[String]>,
+    include_keyframes: bool,
+) -> Result<(), OpError> {
+    let (from_track, from_index) = find_clip(doc, from_id)?;
+    let (to_track, to_index) = find_clip(doc, to_id)?;
+    if let Some(names) = names {
+        for name in names {
+            if crate::effect_descriptor(name).is_none() {
+                return Err(OpError::UnknownEffect(name.clone()));
+            }
+        }
+    }
+    let in_scope =
+        |effect_name: &str| names.is_none_or(|list| list.iter().any(|name| name == effect_name));
+    let source = doc.tracks[from_track].clips[from_index].effects.clone();
+    let mut result = doc.tracks[to_track].clips[to_index].effects.clone();
+    let mut slots: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (index, effect) in result.iter().enumerate() {
+        slots.entry(effect.name.clone()).or_default().push(index);
+    }
+    let mut seen: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut next_id = result.iter().map(|effect| effect.id.0).max().unwrap_or(0);
+    for effect in &source {
+        if !in_scope(&effect.name) {
+            continue;
+        }
+        let occurrence = seen.entry(effect.name.as_str()).or_insert(0);
+        let slot = slots
+            .get(effect.name.as_str())
+            .and_then(|indices| indices.get(*occurrence))
+            .copied();
+        *occurrence += 1;
+        if let Some(index) = slot {
+            let id = result[index].id;
+            let keyframes = if include_keyframes {
+                effect.keyframes.clone()
+            } else {
+                result[index].keyframes.clone()
+            };
+            result[index] = Effect {
+                id,
+                name: effect.name.clone(),
+                parameters: effect.parameters.clone(),
+                keyframes,
+                enabled: effect.enabled,
+                enabled_curve: effect.enabled_curve.clone(),
+            };
+        } else {
+            next_id = next_id.checked_add(1).ok_or(OpError::TimeOverflow)?;
+            result.push(Effect {
+                id: EffectId(next_id),
+                name: effect.name.clone(),
+                parameters: effect.parameters.clone(),
+                keyframes: if include_keyframes {
+                    effect.keyframes.clone()
+                } else {
+                    std::collections::BTreeMap::new()
+                },
+                enabled: effect.enabled,
+                enabled_curve: effect.enabled_curve.clone(),
+            });
+        }
+    }
+    doc.tracks[to_track].clips[to_index].effects = result;
     Ok(())
 }
 
@@ -3923,7 +4398,65 @@ fn validate_effect_automation(
             curve,
         )?;
     }
+    if let Some(curve) = &effect.enabled_curve {
+        validate_enabled_curve(&effect.name, curve)?;
+    }
     validate_curve_keyframe_policy(&effect.name, &effect.keyframes)?;
+    Ok(())
+}
+
+/// MO1 R4/R13: the sibling `enabled_curve` carries values 0..1 under every
+/// interpolation — non-`Hold` kinds act as a step (the ≥ 1 test in
+/// `is_enabled_at`), so no hold-only refusal applies. As a keep-outside
+/// owner it validates ordered-only with no outside check.
+fn validate_enabled_curve(effect_name: &str, curve: &AutomationCurve) -> Result<(), OpError> {
+    curve
+        .validate_ordered()
+        .map_err(|error| OpError::InvalidEffectAutomation {
+            effect: effect_name.to_owned(),
+            name: "enabled".to_owned(),
+            reason: error.to_string(),
+        })?;
+    for keyframe in &curve.keyframes {
+        if !(0..=1).contains(&keyframe.value) {
+            return Err(OpError::EffectParamOutOfRange {
+                effect: effect_name.to_owned(),
+                name: "enabled".to_owned(),
+                min: 0,
+                max: 1,
+                actual: keyframe.value,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// MO1 R5/R13/R18: the clip sibling `enabled_curve` validates ordered-only
+/// with no outside check, and values 0..1 exactly as the R4 sibling — R5's
+/// "(values 0..1...)" and R18's "Values 0..1" both bind; the ≥ 1 test still
+/// resolves every value at read time. Violations reuse the effect-scoped
+/// variants verbatim — R30 admits no fitting clip-scoped variant, and nothing
+/// downstream parses the `effect` field, so the clip identifier rides there
+/// (`"clip 1"`) with the `"enabled"` name.
+fn validate_clip_enabled_curve(clip: ClipId, curve: &AutomationCurve) -> Result<(), OpError> {
+    curve
+        .validate_ordered()
+        .map_err(|error| OpError::InvalidEffectAutomation {
+            effect: format!("clip {}", clip.0),
+            name: "enabled".to_owned(),
+            reason: error.to_string(),
+        })?;
+    for keyframe in &curve.keyframes {
+        if !(0..=1).contains(&keyframe.value) {
+            return Err(OpError::EffectParamOutOfRange {
+                effect: format!("clip {}", clip.0),
+                name: "enabled".to_owned(),
+                min: 0,
+                max: 1,
+                actual: keyframe.value,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -3937,13 +4470,23 @@ fn validate_curve(
     name: &str,
     curve: &AutomationCurve,
 ) -> Result<(), OpError> {
-    curve
-        .validate()
-        .map_err(|error| OpError::InvalidEffectAutomation {
-            effect: effect_name.to_owned(),
-            name: name.to_owned(),
-            reason: error.to_string(),
-        })?;
+    // MO1 R13: keep-outside owners (every clip effect — clips reject audio
+    // effects outright) validate ordered-only with no outside check, so
+    // negative `at` from a trim-in and keys past a trimmed end both pass;
+    // audio owners keep strict `validate` and the outside arm, so
+    // `EffectKeyframeOutsideClip` is raised only for audio-effect owners.
+    // Hold-only and value-range policies apply exactly as today, both sides.
+    let audio_owner = crate::is_audio_effect(effect_name);
+    let structural = if audio_owner {
+        curve.validate()
+    } else {
+        curve.validate_ordered()
+    };
+    structural.map_err(|error| OpError::InvalidEffectAutomation {
+        effect: effect_name.to_owned(),
+        name: name.to_owned(),
+        reason: error.to_string(),
+    })?;
     if is_hold_only_parameter(effect_name, name) {
         for keyframe in &curve.keyframes {
             if keyframe.interpolation != KeyframeInterpolation::Hold {
@@ -3955,7 +4498,7 @@ fn validate_curve(
         }
     }
     for keyframe in &curve.keyframes {
-        if keyframe.at >= clip_duration {
+        if audio_owner && keyframe.at >= clip_duration {
             return Err(OpError::EffectKeyframeOutsideClip {
                 clip,
                 effect: effect_id,
@@ -4172,7 +4715,7 @@ fn validate_clip_audio_values(
     fade_out_frames: TimeCode,
     clip_duration: TimeCode,
 ) -> Result<(), OpError> {
-    if !(-600..=120).contains(&gain_tenth_db) {
+    if !(crate::CLIP_GAIN_MIN..=crate::CLIP_GAIN_MAX).contains(&gain_tenth_db) {
         return Err(OpError::AudioGainOutOfRange {
             clip,
             gain_tenth_db,
@@ -4464,6 +5007,9 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                 validate_transition(doc, clip, transition)?;
             }
             validate_clip_audio(doc, clip)?;
+            if let Some(curve) = &clip.enabled_curve {
+                validate_clip_enabled_curve(clip.id, curve)?;
+            }
             if let Some((previous_clip, previous_end)) = previous {
                 if clip.timeline_start < previous_clip.timeline_start {
                     return Err(OpError::ClipsUnsorted {
@@ -4600,6 +5146,12 @@ fn validate_audio_master(doc: &Document, master: &AudioMaster) -> Result<(), OpE
                 effect: effect.name.clone(),
             });
         }
+        if !effect.enabled || effect.enabled_curve.is_some() {
+            return Err(OpError::DisabledEffectOnAudioChain {
+                chain: AudioChain::Master,
+                effect: effect.id,
+            });
+        }
         validate_effect(effect)?;
         if effect.name == "audio_ducking" {
             return Err(OpError::AudioMasterDuckingUnsupported);
@@ -4688,6 +5240,12 @@ fn validate_audio_bus(doc: &Document, bus: &AudioBus) -> Result<(), OpError> {
             return Err(OpError::VisualEffectOnAudioBus {
                 bus: bus.id,
                 effect: effect.name.clone(),
+            });
+        }
+        if !effect.enabled || effect.enabled_curve.is_some() {
+            return Err(OpError::DisabledEffectOnAudioChain {
+                chain: AudioChain::Bus(bus.id),
+                effect: effect.id,
             });
         }
         validate_effect(effect)?;
@@ -5043,7 +5601,8 @@ impl OpError {
             | Self::InvalidClipGainEnvelope { .. }
             | Self::InvalidTrackAutomation { .. }
             | Self::TooFewLinkedClips { .. }
-            | Self::NonHoldKeyframeParameter { .. } => IncidentFamily::Malformed,
+            | Self::NonHoldKeyframeParameter { .. }
+            | Self::DisabledEffectOnAudioChain { .. } => IncidentFamily::Malformed,
             Self::DuplicateAsset { .. }
             | Self::DuplicateBin { .. }
             | Self::DuplicateBinAsset { .. }
@@ -5181,7 +5740,7 @@ impl Operation {
     /// — [`Self::ConvertLegacyLook`] — answers `Clip`, because a legacy-look
     /// conversion is a refusal about the clip it is converting. The rung is
     /// therefore a statement of where a future variant would land rather than a
-    /// tie-break the current 57 exercise.
+    /// tie-break the current 63 exercise.
     ///
     /// `IN1b` §0.3 D3 names **five** variants that address a track and nothing
     /// narrower; applying the precedence, there are **seven** — D3's
@@ -5190,7 +5749,7 @@ impl Operation {
     /// [`Self::RippleInsertGap`], which name a track and no clip or asset
     /// (erratum `IN1b`-A-R11).
     #[must_use]
-    // 57 arms, one per `Operation` variant, grouped by subject kind: the list
+    // 63 arms, one per `Operation` variant, grouped by subject kind: the list
     // is the deliverable and splitting it would hide the precedence it exists
     // to show.
     #[allow(clippy::too_many_lines)]
@@ -5212,6 +5771,12 @@ impl Operation {
             | Self::SetEffectParam { clip, .. }
             | Self::SetEffectKeyframes { clip, .. }
             | Self::ClearEffectKeyframes { clip, .. }
+            | Self::UpsertEffectKeyframe { clip, .. }
+            | Self::RemoveEffectKeyframe { clip, .. }
+            | Self::SetEffectEnabled { clip, .. }
+            | Self::SetClipEnabled { clip, .. }
+            | Self::SetClipEnabledCurve { clip, .. }
+            | Self::CopyClipAttributes { to_clip: clip, .. }
             | Self::ConvertLegacyLook { clip, .. }
             | Self::SetTitleParam { clip, .. }
             | Self::SetClipAudio { clip, .. }
@@ -5292,7 +5857,7 @@ mod tests {
     ///
     /// Reading the source is how a test asserts an **arm count**: the compiler
     /// already proves the match is exhaustive and wildcard-free over
-    /// `OpError`'s 154 and `Operation`'s 57 variants, but it cannot be asked
+    /// `OpError`'s 154 and `Operation`'s 63 variants, but it cannot be asked
     /// how many names each arm groups, and building 154 payload-carrying
     /// rejections to count them would be a fixture, not a measurement.
     fn single_fn_impl_body(signature: &str) -> String {
@@ -5378,14 +5943,14 @@ mod tests {
         grouped
     }
 
-    /// Appendix A, normative, **per variant**: all 154 `OpError` variant names
+    /// Appendix A, normative, **per variant**: all 155 `OpError` variant names
     /// with the family the contract assigns each one.
     ///
     /// Written out rather than counted, so a variant moved from one family to
     /// another fails here instead of cancelling out against another move
     /// (review-2 S4, review-1 N2). It is transcribed from
     /// `docs/IN1B-ERROR-MIGRATION.md`'s Appendix A, not from the accessor.
-    const APPENDIX_A: [(&str, &str); 154] = [
+    const APPENDIX_A: [(&str, &str); 155] = [
         ("AudioBusLookaheadExceeded", "Bounds"),
         ("AudioBusKeyframeOutsideProject", "Bounds"),
         ("AudioBusGainOutOfRange", "Bounds"),
@@ -5449,6 +6014,7 @@ mod tests {
         ("InvalidTrackAutomation", "Malformed"),
         ("TooFewLinkedClips", "Malformed"),
         ("NonHoldKeyframeParameter", "Malformed"),
+        ("DisabledEffectOnAudioChain", "Malformed"),
         ("DuplicateAsset", "Duplicate"),
         ("DuplicateBin", "Duplicate"),
         ("DuplicateBinAsset", "Duplicate"),
@@ -5542,13 +6108,13 @@ mod tests {
         ("AssumedFromNotSuppliable", "ColorPolicy"),
     ];
 
-    /// §3.3 rule 20's precedence applied **per variant**: all 57 `Operation`
+    /// §3.3 rule 20's precedence applied **per variant**: all 63 `Operation`
     /// variant names with the subject kind the rule assigns each one.
     ///
     /// Read off `Operation`'s own declaration — which id fields the variant
     /// carries — rather than off the accessor, so a variant that answers with
     /// the wrong kind fails here (review-2 S4).
-    const OPERATION_SUBJECTS: [(&str, &str); 57] = [
+    const OPERATION_SUBJECTS: [(&str, &str); 63] = [
         ("AddAsset", "Asset"),
         ("RelinkAsset", "Asset"),
         ("SetAssetColorDescription", "Asset"),
@@ -5595,6 +6161,12 @@ mod tests {
         ("SetEffectParam", "Clip"),
         ("SetEffectKeyframes", "Clip"),
         ("ClearEffectKeyframes", "Clip"),
+        ("UpsertEffectKeyframe", "Clip"),
+        ("RemoveEffectKeyframe", "Clip"),
+        ("SetEffectEnabled", "Clip"),
+        ("SetClipEnabled", "Clip"),
+        ("SetClipEnabledCurve", "Clip"),
+        ("CopyClipAttributes", "Clip"),
         ("ConvertLegacyLook", "Clip"),
         ("AddLutAsset", "LutAsset"),
         ("RemoveLutAsset", "LutAsset"),
@@ -5634,10 +6206,10 @@ mod tests {
             .collect();
         assert_eq!(
             declared.len(),
-            154,
-            "Appendix A names 154 distinct variants"
+            155,
+            "Appendix A names 155 distinct variants"
         );
-        assert_eq!(implemented.len(), 154, "the accessor names 154 variants");
+        assert_eq!(implemented.len(), 155, "the accessor names 155 variants");
         for (variant, family) in &declared {
             assert_eq!(
                 implemented.get(variant),
@@ -5838,7 +6410,7 @@ mod tests {
         }
     }
 
-    /// `IN1b` §9 clause 8 through §3.3 rule 20: the accessor covers all **57**
+    /// `IN1b` §9 clause 8 through §3.3 rule 20: the accessor covers all **63**
     /// `Operation` variants with no wildcard and answers by the declared
     /// precedence `Clip` -> `Asset` -> `Track` -> `Chain` -> `Project`.
     #[test]
@@ -5865,8 +6437,8 @@ mod tests {
             .iter()
             .map(|(variant, kind)| ((*variant).to_owned(), (*kind).to_owned()))
             .collect();
-        assert_eq!(declared.len(), 57, "`Operation` has 57 distinct variants");
-        assert_eq!(implemented.len(), 57, "the accessor covers every variant");
+        assert_eq!(declared.len(), 63, "`Operation` has 63 distinct variants");
+        assert_eq!(implemented.len(), 63, "the accessor covers every variant");
         for (variant, kind) in &declared {
             assert_eq!(
                 implemented.get(variant),

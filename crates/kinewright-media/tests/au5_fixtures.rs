@@ -206,6 +206,8 @@ fn fixture_media(label: &str, stereo: &[f32]) -> GeneratedMedia {
 
 fn effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: parameters
@@ -243,6 +245,8 @@ fn fixture_document(asset: MediaAsset, effects: Vec<Effect>) -> Arc<Document> {
             kind: TrackKind::Audio,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: asset.id,
                 source_range: TimeCode::ZERO..duration,
@@ -280,6 +284,8 @@ fn denoise_with_profile(id: u64, reduction: i64, bands: &[i32; 31]) -> Effect {
         parameters.push(((*name).to_owned(), i64::from(*band)));
     }
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: "audio_denoise".to_owned(),
         parameters: parameters

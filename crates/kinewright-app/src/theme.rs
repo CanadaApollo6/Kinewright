@@ -31,7 +31,7 @@ pub(crate) mod color {
     /// Accent at 14% alpha: persistent selection and demoted accent fills.
     pub const ACCENT_WASH: Color32 = Color32::from_rgba_unmultiplied_const(0x42, 0xC7, 0xC9, 36);
     pub const MEDIA_TINT_78: Color32 = Color32::from_rgba_unmultiplied_const(0xFF, 0xFF, 0xFF, 199);
-    #[allow(dead_code)]
+    /// MO1 R23: the dim wash over a disabled clip.
     pub const MEDIA_VEIL_24: Color32 = Color32::from_rgba_unmultiplied_const(0x0B, 0x0C, 0x0E, 61);
     pub const MEDIA_SCRIM_78: Color32 =
         Color32::from_rgba_unmultiplied_const(0x0B, 0x0C, 0x0E, 199);

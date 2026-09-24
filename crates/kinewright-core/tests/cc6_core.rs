@@ -1521,6 +1521,8 @@ fn managed_document_with_tracks(effects_per_track: &[Vec<Effect>]) -> Document {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(identifier),
                     asset: asset.id,
                     source_range: TimeCode(0)..TimeCode(30),
@@ -1555,6 +1557,8 @@ fn managed_document() -> Document {
 /// always active: the node a bypass-based method could never attribute.
 fn primary_node(id: u64) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: "primary_correction".to_owned(),
         parameters: BTreeMap::new(),
@@ -1566,6 +1570,8 @@ fn primary_node(id: u64) -> Effect {
 /// `color_node_inactive_reason` reports it inactive.
 fn inactive_wheels_node(id: u64) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: "color_wheels".to_owned(),
         parameters: BTreeMap::new(),
@@ -1576,6 +1582,8 @@ fn inactive_wheels_node(id: u64) -> Effect {
 /// A `color_wheels` node with a real gain, so it is active.
 fn active_wheels_node(id: u64) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: "color_wheels".to_owned(),
         parameters: BTreeMap::from([(
@@ -2101,6 +2109,8 @@ fn track_document(clips: &[(u64, TimeCode)]) -> Document {
     let clips = clips
         .iter()
         .map(|(id, start)| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(*id),
             asset: asset.id,
             source_range: TimeCode(0)..TimeCode(15),
@@ -2181,4 +2191,36 @@ fn cc6_per_node_candidates_find_the_on_screen_clip_whatever_the_clip_order() {
         (ClipId(1), EffectId(1)),
         "and it names the clip and the effect it could not remove"
     );
+}
+
+/// MO1 R4: a disabled colour node is absent from QC candidates, exactly as if
+/// removed — while a merely inactive (neutral) node is still listed.
+#[test]
+fn mo1_per_node_candidates_skip_disabled_effects() {
+    let request = range_request(None);
+    let mut off = active_wheels_node(2);
+    off.enabled = false;
+    let document = Arc::new(managed_document_with_tracks(&[vec![
+        active_wheels_node(1),
+        off,
+    ]]));
+    let analysis = GainAnalysis::new(0.9, BTreeMap::from([(EffectId(1), 1.0)]));
+    let contributions =
+        measure_node_contributions(&analysis, Arc::clone(&document), TimeCode::ZERO, &request)
+            .expect("the double renders");
+    assert_eq!(contributions.considered_node_count, 1);
+    assert_eq!(contributions.nodes.len(), 1);
+    assert_eq!(contributions.nodes[0].effect, EffectId(1));
+
+    // Removal-identity: the same document with the node removed measures
+    // identically, including the render count (no wasted scratch render).
+    let removed = Arc::new(managed_document_with_tracks(&[vec![active_wheels_node(1)]]));
+    let analysis = GainAnalysis::new(0.9, BTreeMap::from([(EffectId(1), 1.0)]));
+    let expected = measure_node_contributions(&analysis, removed, TimeCode::ZERO, &request)
+        .expect("the double renders");
+    assert_eq!(
+        contributions.nodes[0].range_basis_points_delta,
+        expected.nodes[0].range_basis_points_delta
+    );
+    assert_eq!(analysis.render_count(), 2, "one baseline plus one scratch");
 }

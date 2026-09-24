@@ -563,6 +563,8 @@ pub(crate) fn cc6_delivery_source(
 /// One `color_wheels` or `primary_correction` node.
 fn effect_with(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: parameters
@@ -1724,6 +1726,8 @@ fn cc6_per_node_contribution_order_matches_production_z_order() {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(track + 1),
                 asset: asset.id,
                 source_range: TimeCode::ZERO..asset.duration,

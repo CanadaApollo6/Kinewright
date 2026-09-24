@@ -325,6 +325,27 @@ does is not a hole. The result is an ordinary clip — it trims, splits and
 deletes like any other, and deleting it brings the gap warning back — and the
 whole fill, capture included, is one undo entry.
 
+A video clip carrying effect keyframes draws one key-lane strip below its
+label, with a diamond per animated frame unioned over every owner. Diamonds
+are `text-primary` at 64%, `accent` on the selected clip. Clicking the strip
+selects the clip; hovering a diamond and pressing Delete or Backspace removes
+that frame's keys (E49 arbitration — a bare press still deletes the clip).
+Lane drag-move, multi-select, and key copy/paste are deferred: the lane
+paints, hovers, and deletes (MO1 R23).
+
+`opacity.percent` gets the envelope treatment: an AU4-style rubber band on video
+clips under the same `Envelopes` toggle, with a parked-value line and
+click-to-insert-first-key when curveless. The vertical axis is linear 0–100 and
+a horizontal drag never lifts a stored 0. No band under 24 points of clip
+width (MO1 R24).
+
+A disabled clip dims under the `media-shadow` veil wash; its lanes and band
+dim with it. Enable is instant and obvious mid-playback (MO1 R22/R23).
+
+Right-clicking a clip body opens the clip menu: `Copy attributes` always, plus
+`Paste attributes (with keys)` and `Paste attributes (values only)` when the
+clipboard holds another clip. Paste is one undo entry (MO1 R25).
+
 ### Media bin
 
 Assets appear as full-width 16:9 cards. A cached thumbnail fills the image area;
@@ -332,6 +353,8 @@ Assets appear as full-width 16:9 cards. A cached thumbnail fills the image area;
 `surface` at 88% with `type-caption` timecode. Name and media metadata occupy
 one compact row below. Selection uses the standard selected tokens. The
 add-to-timeline action is an icon control revealed on hover or selection.
+Stills badge `STILL` with their pixel dimensions, and land on the timeline as
+5-second freeze clips with the scale-to-frame fit already baked (MO1 R25).
 
 ### Agent panel
 
@@ -350,6 +373,17 @@ caps its expanded height at 360 points so it never claims another timeline
 column. Exact frame and second ranges, paths, and raster dimensions use the
 monospace data treatment. Controls stay in compact descriptor-driven rows;
 the empty state is a single `text-muted` sentence with `space-3` breathing room.
+
+The `MOTION` section holds one card per motion effect (`transform`, `crop`,
+`reframe`, `opacity`). Each animated parameter is a row with a value readout,
+prev/next-key navigation, `+ Key at playhead` / `Clear`, and a `KEYFRAMED`
+badge; editing a value at the playhead auto-keys there. A keyed control shows
+the value at the playhead, and keying controls disable with the playhead
+outside the clip — static (curve-free) params stay editable there, since
+they are not keying (Premiere rules, N5 K4, refined N5.1 L1). Per-effect and
+clip-header enable toggles sit on the card and header, with `+ Key at
+playhead` for the enable curve. `Plan move…` opens the plan dialog (MO1 R22).
+Clips on audio tracks show no `MOTION` section (N5.1 L5).
 
 ### Transport
 
@@ -484,6 +518,14 @@ document edit, and its muted line says that monitoring is not delivery. After
 an export the verification block carries an `AUDIO` sub-block whose own status
 line reads `AUDIO VERIFIED`, `AUDIO OFF TARGET`, `AUDIO OVER CEILING`,
 `AUDIO MEASURED`, or `AUDIO NOT VERIFIED`; only the ceiling is danger.
+
+The plan-a-move dialog previews the exact operations a `plan_motion` preset
+would send — one plain-language line each, with the by-hand sender under it
+in muted text — plus a preset picker and a `Replace existing curves`
+checkbox. `Apply` sends them revision-gated as one undo entry, bound to the
+session the dialog opened on (N5 K3); `Cancel` sends nothing. A refusal
+(short clip, existing curves, missing clip) replaces the preview with the
+reason and disables `Apply` (MO1 R25).
 
 ## Performance contract
 

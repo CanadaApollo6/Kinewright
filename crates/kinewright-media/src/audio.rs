@@ -4591,6 +4591,8 @@ mod tests {
 
     fn audio_effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters: parameters
@@ -4639,11 +4641,15 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: -600,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(10),
                         value: 0,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -5042,6 +5048,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: AssetId(1),
                     source_range: TimeCode(0)..TimeCode(2),
@@ -5735,6 +5743,8 @@ mod tests {
                     kind: TrackKind::Audio,
                     sync_lock: true,
                     clips: vec![Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         audio_gain_tenth_db: -60,
                         audio_fade_in_frames: TimeCode(2),
                         audio_fade_out_frames: TimeCode(2),
@@ -6000,6 +6010,8 @@ mod tests {
 
     fn audio_clip(id: u64, asset: u64, source: std::ops::Range<i64>, timeline_start: i64) -> Clip {
         Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(asset),
             source_range: TimeCode(source.start)..TimeCode(source.end),
@@ -6216,11 +6228,15 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 1,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: flip_at,
                         value: 0,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -7070,11 +7086,15 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: -240,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(10),
                         value: 240,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -9506,6 +9526,8 @@ mod tests {
                     at: TimeCode(*at),
                     value: *value,
                     interpolation,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 })
                 .collect(),
         }
@@ -9519,11 +9541,15 @@ mod tests {
                     at: TimeCode(first),
                     value: a,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(second),
                     value: b,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         }
@@ -9908,16 +9934,22 @@ mod tests {
                     at: TimeCode::ZERO,
                     value: 0,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(8),
                     value: -90,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(29),
                     value: 30,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         });
@@ -11110,11 +11142,15 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 0,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(5),
                         value: 400,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -11369,11 +11405,15 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 0,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(10),
                         value: 200,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },

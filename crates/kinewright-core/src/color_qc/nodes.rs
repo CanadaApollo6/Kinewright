@@ -214,6 +214,10 @@ fn candidates_at(document: &Document, at: TimeCode) -> Vec<Candidate> {
                 .checked_sub(clip.timeline_start)
                 .unwrap_or(TimeCode::ZERO);
             for effect in &clip.effects {
+                // MO1 R4: a disabled effect is absent from QC, as from render.
+                if !effect.is_enabled_at(local) {
+                    continue;
+                }
                 let evaluated = effect.evaluated_at(local);
                 let Some(kind) = classify_color_node(&evaluated) else {
                     continue;

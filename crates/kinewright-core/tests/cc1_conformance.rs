@@ -44,6 +44,8 @@ fn managed_document() -> Document {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: AssetId(1),
                 source_range: TimeCode(0)..TimeCode(30),
@@ -71,6 +73,8 @@ fn legacy_brightness_is_reported_by_qa_and_delivery_without_silent_translation()
     Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "brightness".to_owned(),
             parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(35))]),

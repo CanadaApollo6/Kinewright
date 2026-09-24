@@ -974,6 +974,8 @@ fn plan_subject_reframe_scaled(
                 at: sample.at,
                 value,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             })
             .collect(),
     };
@@ -1415,6 +1417,8 @@ mod tests {
 
     fn reframe_document() -> Document {
         let reframe = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "reframe".to_owned(),
             parameters: BTreeMap::from([
@@ -1433,6 +1437,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(2),
                     asset: AssetId(1),
                     source_range: TimeCode::ZERO..TimeCode(100),

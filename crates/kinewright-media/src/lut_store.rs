@@ -2204,6 +2204,8 @@ DOMAIN_MAX 1 1 1
             .enumerate()
             .map(|(index, asset)| {
                 let mut look = Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "creative_look".to_owned(),
                     parameters: BTreeMap::new(),
@@ -2214,6 +2216,8 @@ DOMAIN_MAX 1 1 1
                     ParamValue::Integer(i64::try_from(asset.id.0).unwrap()),
                 );
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(u64::try_from(index).unwrap() + 1),
                     asset: AssetId::default(),
                     source_range: TimeCode(0)..TimeCode(4),

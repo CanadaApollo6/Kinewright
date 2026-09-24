@@ -13,7 +13,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 87] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 88] = [
     "get_timeline_state",
     // IN1 §6.1 rule 1: two internal capabilities, reached only through
     // `invoke_capability` and never added to `COMPACT_TOOL_NAMES`.
@@ -84,6 +84,9 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 87] = [
     "plan_audio_ducking",
     "plan_audio_normalization",
     "plan_clip_fades",
+    // MO1 R20: registered directly after `plan_clip_fades`, matching the
+    // registry position. Registry-only: the served quad does not move.
+    "plan_motion",
     "plan_dialogue_repair",
     "capture_room_tone",
     "plan_room_tone_fill",
@@ -292,6 +295,12 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::SetEffectParam { .. } => "set_effect_param",
         Operation::SetEffectKeyframes { .. } => "set_effect_keyframes",
         Operation::ClearEffectKeyframes { .. } => "clear_effect_keyframes",
+        Operation::UpsertEffectKeyframe { .. } => "upsert_effect_keyframe",
+        Operation::RemoveEffectKeyframe { .. } => "remove_effect_keyframe",
+        Operation::SetEffectEnabled { .. } => "set_effect_enabled",
+        Operation::SetClipEnabled { .. } => "set_clip_enabled",
+        Operation::SetClipEnabledCurve { .. } => "set_clip_enabled_curve",
+        Operation::CopyClipAttributes { .. } => "copy_clip_attributes",
         Operation::ConvertLegacyLook { .. } => "convert_legacy_look",
         Operation::AddLutAsset { .. } => "add_lut_asset",
         Operation::RemoveLutAsset { .. } => "remove_lut_asset",
@@ -399,6 +408,8 @@ fn operation_tool(
             TRACK_AUTOMATION_PARAMETERS[0], TRACK_AUTOMATION_PARAMETERS[1],
         ),
         "SetClipGainEnvelope" => ", where the required curve replaces this clip's whole gain envelope in clip-local frames: null is the only clear, and an omitted curve is an error, never a silent clear".to_owned(),
+        // MO1 review F6: the copy semantics agents must not guess.
+        "CopyClipAttributes" => ", where every copied effect's values, enabled flag, and enable curve are replaced wholesale while its keyframes ride along only when include_keyframes is set; the target clip's own enabled flag and enable curve are never touched".to_owned(),
         _ => String::new(),
     };
     let mut description = format!(
@@ -923,6 +934,12 @@ mod tests {
                 "set_effect_param",
                 "set_effect_keyframes",
                 "clear_effect_keyframes",
+                "upsert_effect_keyframe",
+                "remove_effect_keyframe",
+                "set_effect_enabled",
+                "set_clip_enabled",
+                "set_clip_enabled_curve",
+                "copy_clip_attributes",
                 "remove_lut_asset",
                 "set_title_param",
                 "set_clip_audio",

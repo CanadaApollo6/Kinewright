@@ -2911,6 +2911,8 @@ fn audio_tail_document(
             kind: TrackKind::Audio,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: asset.id,
                 source_range: tail_range,
@@ -9413,6 +9415,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode(0)..TimeCode(60),
@@ -9488,6 +9492,8 @@ mod tests {
         content: ClipContent,
     ) -> Clip {
         Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset,
             source_range: TimeCode(source_start)..TimeCode(source_end),
@@ -10088,6 +10094,8 @@ mod tests {
             duration: TimeCode(6),
         });
         clip.effects.push(kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(4),
             name: "color_grade".to_owned(),
             parameters: BTreeMap::new(),
@@ -10270,6 +10278,8 @@ mod tests {
         source.tracks[0].clips[0]
             .effects
             .push(kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(9),
                 name: "reframe".to_owned(),
                 parameters: BTreeMap::from([(
@@ -10283,6 +10293,8 @@ mod tests {
                             at: TimeCode::ZERO,
                             value: 42,
                             interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         }],
                     },
                 )]),
@@ -10314,6 +10326,8 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn tracked_subject_containment_rejects_static_or_wrong_direction_reframes() {
         let effect = |focus_at_end: i64| kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(7),
             name: "reframe".to_owned(),
             parameters: BTreeMap::from([(
@@ -10329,11 +10343,15 @@ mod tests {
                                 at: TimeCode::ZERO,
                                 value: 5_000,
                                 interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                                tangent_in: 0,
+                                tangent_out: 0,
                             },
                             kinewright_core::Keyframe {
                                 at: TimeCode(36),
                                 value: focus_at_end,
                                 interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                                tangent_in: 0,
+                                tangent_out: 0,
                             },
                         ],
                     },
@@ -10345,6 +10363,8 @@ mod tests {
                             at: TimeCode::ZERO,
                             value: 5_000,
                             interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         }],
                     },
                 ),
@@ -10832,6 +10852,8 @@ mod tests {
         clip.audio_gain_tenth_db = 10;
         clip.audio_fade_in_frames = TimeCode(2);
         clip.effects.push(kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(1),
             name: "compressor".to_owned(),
             parameters: BTreeMap::new(),
@@ -11102,17 +11124,23 @@ mod tests {
                     at: TimeCode::ZERO,
                     value: 50,
                     interpolation,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 kinewright_core::Keyframe {
                     at: TimeCode(12),
                     value: end,
                     interpolation,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         };
         final_document.tracks[0].clips[0]
             .effects
             .push(kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(1),
                 name: "reframe".to_owned(),
                 parameters: BTreeMap::from([(
@@ -11207,6 +11235,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(2),
                 asset: AssetId::default(),
                 source_range: TimeCode::ZERO..TimeCode(30),
@@ -11927,6 +11957,8 @@ mod tests {
     fn cc7_keyframed_document(parameter: &str, frames: &[i64]) -> Document {
         let mut document = document();
         let mut effect = kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(7),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([
@@ -11944,6 +11976,8 @@ mod tests {
                         at: TimeCode(*frame),
                         value: 5_000,
                         interpolation: kinewright_core::KeyframeInterpolation::default(),
+                        tangent_in: 0,
+                        tangent_out: 0,
                     })
                     .collect(),
             },
@@ -12830,6 +12864,8 @@ mod tests {
         document.tracks[0].clips[0]
             .effects
             .push(kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(3),
                 name: "primary_correction".to_owned(),
                 parameters: BTreeMap::from([
@@ -12841,6 +12877,8 @@ mod tests {
         document.tracks[0].clips[0]
             .effects
             .push(kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(4),
                 name: "color_wheels".to_owned(),
                 parameters: BTreeMap::new(),

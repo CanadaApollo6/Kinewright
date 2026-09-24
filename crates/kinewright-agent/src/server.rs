@@ -89,6 +89,7 @@ use crate::{
         ExportJobId, ExportJobRecord, ExportQueue, ExportQueueError, QueueExportRequest,
         media_refusal_code,
     },
+    motion::{MotionPlanArgs, MotionPlanError},
     pacing::{DialoguePacingGap, dialogue_pacing_gaps},
     render::{
         cuttable_timeline_silences, render_asset_scene_changes, render_asset_silences,
@@ -1571,6 +1572,10 @@ impl KinewrightMcp {
             "plan_clip_fades" => {
                 let args: ClipFadesPlanArgs = decode_args("plan_clip_fades", arguments)?;
                 self.plan_clip_fades(&args)
+            }
+            "plan_motion" => {
+                let args: MotionPlanArgs = decode_args("plan_motion", arguments)?;
+                self.motion_plan(&args)
             }
             "plan_room_tone_fill" => {
                 let args: RoomToneFillPlanArgs = decode_args("plan_room_tone_fill", arguments)?;
@@ -3564,6 +3569,12 @@ impl KinewrightMcp {
                                 .map_or(0, |clip| clip.timeline_start.0),
                         )
                         .map_or(TimeCode::ZERO, TimeCode);
+                    // MO1 R4: a disabled node renders no matte to partition.
+                    if !stored.is_enabled_at(clip_local) {
+                        return Ok(color_proof_error_result(
+                            ColorProofError::MatteComparisonNodeDisabled { effect: effect_id },
+                        ));
+                    }
                     if !kinewright_core::MatteParams::from_effect(&stored.evaluated_at(clip_local))
                         .has_matte()
                     {
@@ -5006,6 +5017,8 @@ impl KinewrightMcp {
                     at: observation.local_frame,
                     value: layer[axis],
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 })
                 .collect(),
         };
@@ -5184,6 +5197,23 @@ impl KinewrightMcp {
             .0
             .checked_sub(clip.timeline_start.0)
             .map_or(TimeCode::ZERO, TimeCode);
+        // MO1 R4: a disabled node has no coverage to prove; fail closed here
+        // rather than reporting the stored (unrendered) matte as resolved.
+        if !effect.is_enabled_at(clip_local) {
+            return Ok(matte_error_result(
+                "matte_node_disabled",
+                &format!(
+                    "effect {} is disabled at clip-local frame {clip_local}",
+                    args.effect_id
+                ),
+                &serde_json::json!({
+                    "field": "effect_id",
+                    "observed": {"effect_id": args.effect_id.0, "clip_id": args.clip_id.0, "clip_local_frame": clip_local.0, "enabled": false},
+                    "allowed": "a node enabled at the inspected frame",
+                    "recovery_action": "Re-enable the effect with SetEffectEnabled (or clear its disabling enabled_curve key), then inspect again.",
+                }),
+            ));
+        }
         let evaluated = effect.evaluated_at(clip_local);
         let matte = kinewright_core::MatteParams::from_effect(&evaluated);
         let inactive_reason = kinewright_core::color_node_inactive_reason(&evaluated);
@@ -5428,6 +5458,28 @@ impl KinewrightMcp {
             }
         };
 
+        // MO1 R4: tracking a disabled node's window would match a template
+        // against coverage that renders nothing. Every sample frame is
+        // checked: a node that disables mid-range has no coverage there.
+        if let Some(dark) = sample_frames
+            .iter()
+            .copied()
+            .find(|sample| !effect.is_enabled_at(*sample))
+        {
+            return Ok(matte_error_result(
+                "matte_node_disabled",
+                &format!(
+                    "effect {} is disabled at clip-local frame {dark}",
+                    args.effect_id
+                ),
+                &serde_json::json!({
+                    "field": "effect_id",
+                    "observed": {"effect_id": args.effect_id.0, "clip_id": args.clip_id.0, "first_disabled_frame": dark.0, "enabled": false},
+                    "allowed": "a node enabled across the tracked range",
+                    "recovery_action": "Re-enable the effect with SetEffectEnabled (or clear its disabling enabled_curve keys), then track again.",
+                }),
+            ));
+        }
         let evaluated = effect.evaluated_at(first_local);
         let matte = kinewright_core::MatteParams::from_effect(&evaluated);
         if window_index >= matte.window_count {
@@ -5591,6 +5643,8 @@ impl KinewrightMcp {
                     at: *local_frame,
                     value: smoothed[axis].get(index).copied().unwrap_or_default(),
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 })
                 .collect(),
         };
@@ -6505,6 +6559,8 @@ impl KinewrightMcp {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range,
@@ -7096,6 +7152,8 @@ impl KinewrightMcp {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range,
@@ -9711,6 +9769,45 @@ impl KinewrightMcp {
         ))
     }
 
+    /// MO1 R20: propose one transform move as exact, unapplied operations.
+    ///
+    /// Evidence-only like the colour planners (no prepared plan — the caller
+    /// submits the operations through `prepare_edit_plan` itself), with the
+    /// R20 byte budget enforced on the way out: a proposal past 4 KiB fails
+    /// closed with a summary that names the preset, the clip and the bytes,
+    /// never a silently cut curve.
+    fn motion_plan(&self, args: &MotionPlanArgs) -> Result<CallToolResult, McpError> {
+        let (actual_revision, document) = self.snapshot()?;
+        let plan = match crate::motion::plan_motion(&document, actual_revision, args) {
+            Ok(plan) => plan,
+            Err(MotionPlanError::RevisionConflict { expected, actual }) => {
+                return Ok(revision_conflict_text(expected, actual));
+            }
+            Err(error) => {
+                return Ok(error_structured(
+                    format!("plan_motion rejected: {error}"),
+                    serde_json::json!({
+                        "code": error.code(),
+                        "message": error.to_string(),
+                        "details": error.details(),
+                        "evidence_only": true,
+                        "applied": false,
+                    }),
+                ));
+            }
+        };
+        let operations = serde_json::to_value(&plan.operations)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        match crate::motion::motion_response(&plan, operations) {
+            crate::motion::MotionProposal::Fits { text, body } => {
+                Ok(success_structured(text, body))
+            }
+            crate::motion::MotionProposal::OverBudget { text, body } => {
+                Ok(error_structured(text, body))
+            }
+        }
+    }
+
     /// AU5 §5.5: propose butt-joined room-tone fills for one audio track's
     /// leading and interior gaps.
     ///
@@ -10600,6 +10697,8 @@ fn room_tone_fill_clip(
     source: std::ops::Range<TimeCode>,
 ) -> Clip {
     Clip {
+        enabled: true,
+        enabled_curve: None,
         id: ClipId(0),
         asset: asset.id,
         source_range: source,
@@ -11191,6 +11290,8 @@ fn ducking_curve(
                 at: TimeCode(at.clamp(low, high)),
                 value: i64::from(value),
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             });
         }
     }
@@ -11576,6 +11677,8 @@ fn round_hundredths_to_tenths(value: i32) -> i64 {
 
 fn static_audio_effect(id: EffectId, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id,
         name: name.to_owned(),
         parameters: parameters
@@ -13561,6 +13664,15 @@ fn inspector_tools() -> Vec<Tool> {
             "plan_clip_fades",
             "Propose short audio fade-in and fade-out frame counts on media clips whose head or tail window reads above threshold_dbfs_hundredths, emitting set_clip_audio only - never adding a curve, never overwriting a fade that is already non-zero - and skipping any clip that holds no whole window with a per-clip reason in structured content instead of failing the whole plan. The window is the proposed fade itself, clamped to 1000 ms - the audio the ramp would act on - and the decision reads the track stem's RMS level in dBFS over it, measured in one short-window pass per track rather than one render per clip edge. Each proposal carries that clip's existing gain and its untouched fade through, and clamps the pair so fade_in plus fade_out never exceeds the clip duration. Returns an opaque prepared_edit_plan preview; the timeline is unchanged until commit_edit_plan.",
             schema_object::<ClipFadesPlanArgs>(),
+        )
+        .with_annotations(read_only()),
+        // MO1 R20: registered directly after `plan_clip_fades`, the
+        // placement IN1 §6.1 used for `get_incidents`. Registry-only, so
+        // the served quad does not move; the registry sextuple does.
+        Tool::new(
+            "plan_motion",
+            "Propose one revision-gated transform move on a video-track clip — push_in, pull_out, pan_left, pan_right, ken_burns, or static pip — refused by name when the target params already carry curves unless replace is true, and failing closed past a 4 KiB response budget. Animated presets author whole-curve SetEffectKeyframes on the fine triple (scale_fine_hundredths, x/y_basis_points) with two EaseInOut keys at the clip ends, so coarse values stay put and the move is sub-pixel; ken_burns zooms while drifting and is allowed on video. pip writes a static bottom-right quarter frame, clearing those params' curves first when replace rebuilds them. A missing transform effect is added neutral first. Returns exact operations; evidence-only, applies nothing until prepare_edit_plan and commit_edit_plan.",
+            schema_object::<MotionPlanArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -16437,6 +16549,8 @@ mod tracking_tests {
 
         // A static transform resolves once and is accepted.
         let static_transform = [Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(2),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(50))]),
@@ -16454,6 +16568,8 @@ mod tracking_tests {
                     at: TimeCode(0),
                     value: 50,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -16469,11 +16585,15 @@ mod tracking_tests {
                         at: TimeCode(0),
                         value: 50,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(10),
                         value: 100,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -16495,11 +16615,15 @@ mod tracking_tests {
                         at: TimeCode(0),
                         value: 0,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(10),
                         value: 20,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -16598,6 +16722,8 @@ mod tracking_tests {
     #[test]
     fn resolve_layer_transform_at_follows_a_keyframed_scale() {
         let mut moving = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(2),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
@@ -16611,11 +16737,15 @@ mod tracking_tests {
                         at: TimeCode(0),
                         value: 100,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(40),
                         value: 50,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -16639,6 +16769,8 @@ mod tracking_tests {
         );
 
         let static_chain = [Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(3),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([
@@ -18336,6 +18468,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode::ZERO..TimeCode(60),
@@ -18391,6 +18525,8 @@ mod tests {
             sync_lock: false,
             clips: vec![
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(99),
                     asset: AssetId(1),
                     source_range: TimeCode::ZERO..TimeCode(20),
@@ -18406,6 +18542,8 @@ mod tests {
                     audio_gain_curve: None,
                 },
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(98),
                     asset: AssetId(1),
                     source_range: TimeCode(20)..TimeCode(30),
@@ -18585,6 +18723,8 @@ mod tests {
                     kind: TrackKind::Audio,
                     sync_lock: true,
                     clips: vec![Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(90),
                         asset: music.id,
                         source_range: TimeCode::ZERO..TimeCode(120),
@@ -18641,6 +18781,8 @@ mod tests {
             assumed_from: None,
         };
         let media_clip = |id, asset, track_start| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(asset),
             source_range: TimeCode::ZERO..TimeCode(120),
@@ -20355,6 +20497,8 @@ mod tests {
         overlay_clip.id = ClipId(4);
         overlay_clip.asset = AssetId(2);
         overlay_clip.effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(41),
             name: "look_lut".to_owned(),
             parameters: BTreeMap::new(),
@@ -20720,6 +20864,8 @@ mod tests {
         document.tracks[0].clips[0].effects = extra_effects
             .into_iter()
             .chain(std::iter::once(Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "color_wheels".to_owned(),
                 parameters,
@@ -20758,6 +20904,8 @@ mod tests {
             parameters.insert(name, ParamValue::Integer(value));
         }
         document.tracks[0].clips[0].effects = std::iter::once(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "color_wheels".to_owned(),
             parameters,
@@ -20921,12 +21069,16 @@ mod tests {
             BTreeMap::new(),
             vec![
                 Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(2),
                     name: "mask".to_owned(),
                     parameters: BTreeMap::new(),
                     keyframes: BTreeMap::new(),
                 },
                 Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(3),
                     name: "technical_lut".to_owned(),
                     parameters: BTreeMap::from([(
@@ -20974,6 +21126,51 @@ mod tests {
         );
     }
 
+    /// MO1 R4: a disabled node has no coverage to inspect, even though it
+    /// stores a matte — the refusal names re-enabling, not adding a matte.
+    #[test]
+    fn inspect_grade_matte_refuses_a_disabled_node() {
+        let (service, _core) = matte_service_with(
+            None,
+            BTreeMap::new(),
+            vec![Effect {
+                enabled: false,
+                enabled_curve: None,
+                id: EffectId(4),
+                name: "color_wheels".to_owned(),
+                parameters: BTreeMap::from([
+                    (
+                        "gain_master_thousandths".to_owned(),
+                        ParamValue::Integer(1_500),
+                    ),
+                    ("matte_enabled".to_owned(), ParamValue::Integer(1)),
+                    ("matte_window_count".to_owned(), ParamValue::Integer(1)),
+                ]),
+                keyframes: BTreeMap::new(),
+            }],
+        );
+
+        let result = service
+            .inspect_grade_matte(&InspectGradeMatteArgs {
+                expected_revision: None,
+                clip_id: ClipId(1),
+                effect_id: EffectId(4),
+                timecode: TimeCode(10),
+                include_image: None,
+            })
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "matte_node_disabled");
+        assert_eq!(structured["details"]["observed"]["enabled"], false);
+        assert!(
+            structured["details"]["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("Re-enable")
+        );
+    }
+
     /// CC5 §7: `matte_comparison` is valid only alongside `effect_id`, is
     /// mutually exclusive with `look_comparison`, and needs a node that both
     /// may carry a matte and actually does. Every check runs before any render.
@@ -20982,12 +21179,31 @@ mod tests {
         let (service, _core) = matte_service_with(
             None,
             BTreeMap::new(),
-            vec![Effect {
-                id: EffectId(3),
-                name: "color_curves".to_owned(),
-                parameters: BTreeMap::new(),
-                keyframes: BTreeMap::new(),
-            }],
+            vec![
+                Effect {
+                    enabled: true,
+                    enabled_curve: None,
+                    id: EffectId(3),
+                    name: "color_curves".to_owned(),
+                    parameters: BTreeMap::new(),
+                    keyframes: BTreeMap::new(),
+                },
+                Effect {
+                    enabled: false,
+                    enabled_curve: None,
+                    id: EffectId(4),
+                    name: "color_wheels".to_owned(),
+                    parameters: BTreeMap::from([
+                        (
+                            "gain_master_thousandths".to_owned(),
+                            ParamValue::Integer(1_500),
+                        ),
+                        ("matte_enabled".to_owned(), ParamValue::Integer(1)),
+                        ("matte_window_count".to_owned(), ParamValue::Integer(1)),
+                    ]),
+                    keyframes: BTreeMap::new(),
+                },
+            ],
         );
         let proof = |effect_id: Option<EffectId>,
                      matte: Option<MatteComparison>,
@@ -21040,6 +21256,18 @@ mod tests {
                 .unwrap()
                 .contains("plan_secondary_correction")
         );
+
+        // MO1 R4: a disabled node that stores a matte still has no rendered
+        // matte to partition, and its recovery is re-enabling.
+        let disabled = proof(Some(EffectId(4)), Some(MatteComparison::Coverage), None);
+        assert_eq!(disabled["code"], "matte_comparison_node_disabled");
+        assert_eq!(disabled["details"]["observed"]["enabled"], false);
+        assert!(
+            disabled["details"]["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("Re-enable")
+        );
     }
 
     /// CC5 §7: `matte_invert` is Hold-only but keyframable, so `outside_only`
@@ -21059,6 +21287,8 @@ mod tests {
                         at: TimeCode(0),
                         value: 1,
                         interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             }))
@@ -21349,6 +21579,8 @@ mod tests {
     /// and its inverse is `u_layer = 2·u_composite − 0.9`.
     fn half_scale_transform() -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([
@@ -21363,6 +21595,8 @@ mod tests {
     /// A layer scale that ramps 100 → 50 percent, linearly, over frames 0..=40.
     fn keyframed_scale_transform() -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
@@ -21374,11 +21608,15 @@ mod tests {
                             at: TimeCode(0),
                             value: 100,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                         Keyframe {
                             at: TimeCode(40),
                             value: 50,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                     ],
                 },
@@ -21389,6 +21627,8 @@ mod tests {
     /// A bounded mask at `center` percent with a `size` percent region.
     fn tracking_mask_effect(center: [i64; 2], size: [i64; 2]) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "mask".to_owned(),
             parameters: BTreeMap::from([
@@ -21413,6 +21653,8 @@ mod tests {
     /// window and leaves the vertical axis whole.
     fn tracking_reframe_effect(focus: [i64; 2]) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "reframe".to_owned(),
             parameters: BTreeMap::from([
@@ -21723,6 +21965,8 @@ mod tests {
             .map(|frame| (TimeCode(frame), transform_box_frame([160, 90], 20)))
             .collect::<BTreeMap<_, _>>();
         let doubled = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(200))]),
@@ -21954,6 +22198,8 @@ mod tests {
             .map(|frame| (TimeCode(frame), transform_box_frame([160, 90], 20)))
             .collect::<BTreeMap<_, _>>();
         let doubled = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(200))]),
@@ -21988,6 +22234,8 @@ mod tests {
     /// gate lets through.
     fn growing_scale_transform() -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
@@ -21999,11 +22247,15 @@ mod tests {
                             at: TimeCode(0),
                             value: 100,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                         Keyframe {
                             at: TimeCode(40),
                             value: 200,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                     ],
                 },
@@ -22266,6 +22518,8 @@ mod tests {
             .map(|frame| (TimeCode(frame), transform_box_frame([160, 90], 5)))
             .collect::<BTreeMap<_, _>>();
         let pushed_off = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([
@@ -22317,6 +22571,8 @@ mod tests {
     #[test]
     fn track_matte_window_refuses_a_seed_the_layer_transform_pushes_off_the_composite() {
         let pushed_off = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([
@@ -22733,12 +22989,16 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode::ZERO..TimeCode(TRACKED_SHOT_FRAMES),
                     content: ClipContent::Media,
                     timeline_start: TimeCode::ZERO,
                     effects: vec![Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: EffectId(1),
                         name: "color_wheels".to_owned(),
                         parameters: BTreeMap::from([
@@ -23096,6 +23356,8 @@ mod tests {
     #[test]
     fn track_matte_window_refuses_a_keyframed_layer_transform() {
         let mut transform = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(2),
             name: "transform".to_owned(),
             parameters: BTreeMap::new(),
@@ -23109,11 +23371,15 @@ mod tests {
                         at: TimeCode(0),
                         value: 50,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(40),
                         value: 100,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -23166,6 +23432,101 @@ mod tests {
         );
     }
 
+    /// MO1 R4: tracking refuses a disabled node — statically, and when an
+    /// `enabled_curve` disables it mid-range — naming the first dark sample.
+    #[test]
+    fn track_matte_window_refuses_a_disabled_node() {
+        let matted = || {
+            (
+                "color_wheels".to_owned(),
+                BTreeMap::from([
+                    (
+                        "gain_master_thousandths".to_owned(),
+                        ParamValue::Integer(1_500),
+                    ),
+                    ("matte_enabled".to_owned(), ParamValue::Integer(1)),
+                    ("matte_window_count".to_owned(), ParamValue::Integer(1)),
+                ]),
+            )
+        };
+        let track = |service: &KinewrightMcp, effect: EffectId| {
+            service
+                .track_matte_window(&TrackMatteWindowArgs {
+                    expected_revision: None,
+                    clip_id: ClipId(1),
+                    effect_id: effect,
+                    window_index: 0,
+                    start_local_frame: Some(TimeCode(0)),
+                    end_local_frame: Some(TimeCode(41)),
+                    step_frames: Some(10),
+                    search_radius_percent: None,
+                    max_width: None,
+                    minimum_confidence_basis_points: None,
+                })
+                .unwrap()
+        };
+        let frames = BTreeMap::from([(TimeCode(0), matte_box_frame([160, 90]))]);
+
+        let (name, parameters) = matted();
+        let (service, _core) = matte_track_service(
+            frames.clone(),
+            BTreeMap::new(),
+            vec![Effect {
+                enabled: false,
+                enabled_curve: None,
+                id: EffectId(2),
+                name,
+                parameters,
+                keyframes: BTreeMap::new(),
+            }],
+        );
+        let result = track(&service, EffectId(2));
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "matte_node_disabled");
+        assert_eq!(structured["details"]["observed"]["first_disabled_frame"], 0);
+
+        // Mid-range disable via a Hold curve: samples 0/10 pass, 20 is dark.
+        let (name, parameters) = matted();
+        let (service, _core) = matte_track_service(
+            frames,
+            BTreeMap::new(),
+            vec![Effect {
+                enabled: true,
+                enabled_curve: Some(AutomationCurve {
+                    keyframes: vec![
+                        Keyframe {
+                            at: TimeCode(0),
+                            value: 1,
+                            interpolation: KeyframeInterpolation::Hold,
+                            tangent_in: 0,
+                            tangent_out: 0,
+                        },
+                        Keyframe {
+                            at: TimeCode(20),
+                            value: 0,
+                            interpolation: KeyframeInterpolation::Hold,
+                            tangent_in: 0,
+                            tangent_out: 0,
+                        },
+                    ],
+                }),
+                id: EffectId(2),
+                name,
+                parameters,
+                keyframes: BTreeMap::new(),
+            }],
+        );
+        let result = track(&service, EffectId(2));
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "matte_node_disabled");
+        assert_eq!(
+            structured["details"]["observed"]["first_disabled_frame"],
+            20
+        );
+    }
+
     /// CC5 §2.2: a window at index >= `matte_window_count` is stored but never
     /// rendered, so tracking it would animate geometry that affects no pixel.
     #[test]
@@ -23211,12 +23572,16 @@ mod tests {
         ]);
         let masks = vec![
             Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(7),
                 name: "mask".to_owned(),
                 parameters: BTreeMap::new(),
                 keyframes: BTreeMap::new(),
             },
             Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(8),
                 name: "mask".to_owned(),
                 parameters: BTreeMap::new(),
@@ -23339,7 +23704,7 @@ mod tests {
         }
         // IN1 §6.6: get_incidents and resolve_incident join the registry;
         // IN2 §4.1 rule 2 adds propose_fix beside them.
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
 
         for name in [
             "plan_primary_correction",
@@ -23362,6 +23727,8 @@ mod tests {
             "plan_dialogue_repair",
             "capture_room_tone",
             "plan_room_tone_fill",
+            // MO1 R20: the motion planner joins the same budget.
+            "plan_motion",
         ] {
             let tool = tools.iter().find(|tool| tool.name == name).unwrap();
             let description = tool.description.as_deref().unwrap_or_default();
@@ -23724,6 +24091,8 @@ mod tests {
             assumed_from: None,
         };
         let clip = |id: u64, at: i64| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(1),
             source_range: TimeCode::ZERO..TimeCode(30),
@@ -24184,6 +24553,8 @@ mod tests {
         let mut document = au5b_fill_document();
         document.media_pool.retain(|asset| asset.id == AssetId(1));
         document.tracks[0].clips = vec![Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(1),
             asset: AssetId(1),
             source_range: TimeCode::ZERO..TimeCode(300),
@@ -25571,6 +25942,8 @@ mod tests {
             provenance: ColorProvenance::StreamMetadata,
         };
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(6),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([(
@@ -25585,23 +25958,31 @@ mod tests {
                             at: TimeCode::ZERO,
                             value: 100,
                             interpolation: KeyframeInterpolation::Hold,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                         Keyframe {
                             at: TimeCode(12),
                             value: 750,
                             interpolation: KeyframeInterpolation::Hold,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                     ],
                 },
             )]),
         });
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "look_lut".to_owned(),
             parameters: BTreeMap::new(),
             keyframes: BTreeMap::new(),
         });
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(8),
             name: "cube_lut".to_owned(),
             parameters: BTreeMap::from([(
@@ -25615,6 +25996,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(2),
                 asset: AssetId::default(),
                 source_range: TimeCode::ZERO..TimeCode(60),
@@ -26128,6 +26511,8 @@ mod tests {
         };
         let effects = &mut document.tracks[0].clips[0].effects;
         effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(6),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([(
@@ -26137,6 +26522,8 @@ mod tests {
             keyframes: BTreeMap::new(),
         });
         effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "color_wheels".to_owned(),
             parameters: BTreeMap::from([
@@ -26149,6 +26536,8 @@ mod tests {
             keyframes: BTreeMap::new(),
         });
         effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(8),
             name: "color_curves".to_owned(),
             parameters: BTreeMap::from([
@@ -27171,7 +27560,7 @@ mod tests {
             }
         }
 
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
         // IN1 §6.1 rule 3: nothing the dispatcher accepted before is now
         // refused, and no generated operation tool became invocable.
         let stranded = crate::schema::INSPECTOR_TOOL_NAMES
@@ -27212,6 +27601,59 @@ mod tests {
         assert_eq!(annotations.destructive_hint, Some(false));
         assert_eq!(annotations.idempotent_hint, Some(false));
         assert_eq!(annotations.open_world_hint, Some(false));
+    }
+
+    /// MO1 R21: `plan_motion` is registry-only and costs its measured row —
+    /// `2 297 / 1 337 / 802` — the whole of Part C's sextuple move.
+    ///
+    /// Registered directly after `plan_clip_fades`, invocable through the
+    /// dispatcher, never served. Read-only: a proposal applies nothing.
+    #[test]
+    fn mo1_plan_motion_costs_its_measured_row() {
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        let tool = registry
+            .iter()
+            .find(|tool| tool.name == "plan_motion")
+            .expect("plan_motion must be registered");
+        let metrics = ToolSurfaceMetrics::measure(std::slice::from_ref(tool));
+        assert_eq!(
+            (
+                metrics.serialized_bytes,
+                metrics.input_schema_bytes,
+                metrics.description_bytes
+            ),
+            (2_297, 1_337, 802),
+            "{metrics:?}"
+        );
+
+        let names = crate::schema::INSPECTOR_TOOL_NAMES;
+        let fades = names
+            .iter()
+            .position(|name| *name == "plan_clip_fades")
+            .unwrap();
+        assert_eq!(
+            names.get(fades + 1),
+            Some(&"plan_motion"),
+            "plan_motion is registered directly after plan_clip_fades"
+        );
+
+        // Registry-only: invocable through the dispatcher, never served.
+        assert!(is_invocable_capability("plan_motion"));
+        assert!(!crate::runtime::COMPACT_TOOL_NAMES.contains(&"plan_motion"));
+        let annotations = tool.annotations.as_ref().unwrap();
+        assert_eq!(annotations.read_only_hint, Some(true));
+        assert_eq!(annotations.destructive_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(true));
+        assert_eq!(annotations.open_world_hint, Some(false));
+        assert_eq!(
+            capabilities(&registry)
+                .iter()
+                .find(|capability| capability.name == "plan_motion")
+                .unwrap()
+                .kind,
+            CapabilityKind::Planner,
+            "no CAPABILITY_KIND_OVERRIDES entry is needed"
+        );
     }
 
     /// IN1 §6.2 rule 9, `IN1b` §3.11 rule 43 and IN2 §4.2 rule 11: the two
@@ -28039,6 +28481,129 @@ mod tests {
     /// the refactor is byte-for-byte — and
     /// `served_tools_equal_serialized_filtered_registry` pins the equality
     /// explicitly.
+    ///
+    /// **MO1 Part A re-pins the three byte figures for the model-field
+    /// growth** (MO1 R21 — tangent, `enabled`, `enabled_curve` and `Image`
+    /// fields grow shared `$defs`; transform descriptor rows cost description
+    /// bytes only). Per-commit deltas, each measured as the whole move with
+    /// nothing else in the commit:
+    ///
+    /// - **A2a (R6 tangents): +26 895 / +26 895 / +0.** The two reserved
+    ///   `Keyframe` fields (`tangent_in`, `tangent_out`, each an integer with
+    ///   its doc comment in the shared `$defs`) land in every tool whose
+    ///   input schema embeds a curve. The arithmetic: 1 552 503 + 26 895 =
+    ///   **1 579 398**, 1 407 480 + 26 895 = **1 434 375**, 121 892 + 0 =
+    ///   **121 892** (field docs live in input schemas, not tool
+    ///   descriptions). Served quad unchanged (`7 / 5 660 / 3 510 / 998` —
+    ///   served tools embed no `Keyframe`). Counts stay `141 / 54 / 87`: no
+    ///   new capability, no new tool. The full per-embedding-tool derivation
+    ///   and M36 rows land in A4 with the R21 sextuple re-pin.
+    ///
+    /// - **A2b (R1 transform rows): +1 765 / +0 / +1 765.** The eight new
+    ///   `transform` descriptor rows cost description bytes only:
+    ///   `Effect.parameters` is an untyped map (the AU2 Part A precedent),
+    ///   so no input schema moves — only the effect documentation text
+    ///   grows, which serialized bytes include. The arithmetic:
+    ///   1 579 398 + 1 765 = **1 581 163**, 1 434 375 + 0 = **1 434 375**,
+    ///   121 892 + 1 765 = **123 657**. Served quad and counts unchanged.
+    ///
+    /// - **A2c (R4 per-effect enable): +37 125 / +37 125 / +0.** The two new
+    ///   `Effect` fields (`enabled`, `enabled_curve`) land in the shared
+    ///   `$defs` of every tool embedding an effect. The arithmetic:
+    ///   1 581 163 + 37 125 = **1 618 288**,
+    ///   1 434 375 + 37 125 = **1 471 500**, 123 657 + 0 = **123 657**.
+    ///   Served quad and counts unchanged.
+    ///
+    /// - **A2d (R5 clip enable): +32 615 / +32 615 / +0.** The two new `Clip`
+    ///   fields (`enabled`, `enabled_curve`) land in the shared `$defs` of
+    ///   every tool embedding a clip. The arithmetic:
+    ///   1 618 288 + 32 615 = **1 650 903**,
+    ///   1 471 500 + 32 615 = **1 504 115**, 123 657 + 0 = **123 657**.
+    ///   Served quad and counts unchanged.
+    ///
+    /// - **A2e (R7 stills kind): +13 664 / +13 664 / +0.** The fourth
+    ///   `MediaKind` variant (`Image`) lands in the enum `$defs` of every
+    ///   tool embedding an asset kind. The arithmetic:
+    ///   1 650 903 + 13 664 = **1 664 567**,
+    ///   1 504 115 + 13 664 = **1 517 779**, 123 657 + 0 = **123 657**.
+    ///   Served quad and counts unchanged.
+    ///
+    /// - **A4a (R15/R16 single-key mutators): +51 767 / +51 133 / +292.**
+    ///   Two generated mutators plus the two new `oneOf` branches in the one
+    ///   inspector tool that embeds the whole `Operation` schema
+    ///   (`apply_edit_plan`, measured before/after on the stashed tree):
+    ///   `upsert_effect_keyframe` 25 231 / 24 914 / 146,
+    ///   `remove_effect_keyframe` 25 229 / 24 912 / 146, `apply_edit_plan`
+    ///   +1 307 / +1 307 / +0. The arithmetic:
+    ///   1 664 567 + 51 767 = **1 716 334**,
+    ///   1 517 779 + 51 133 = **1 568 912**,
+    ///   123 657 + 292 = **123 949**. Counts `143 / 56 / 87`. Served quad
+    ///   unchanged (`7 / 5 660 / 3 510 / 998`) — the twentieth consecutive
+    ///   measurement, and the first whose counter moves for a registry-only
+    ///   MO1 addition rather than an IN2 one.
+    ///
+    /// - **A4b (R17/R18 toggles): +77 382 / +76 452 / +427.** Three
+    ///   generated mutators plus the three new `oneOf` branches in
+    ///   `apply_edit_plan` (51 016 → 52 689 serialized, 50 628 → 52 301
+    ///   input, measured against the A4a tree):
+    ///   `set_effect_enabled` 25 190 / 24 881 / 142, `set_clip_enabled`
+    ///   25 119 / 24 814 / 140, `set_clip_enabled_curve` 25 400 / 25 084 /
+    ///   145, `apply_edit_plan` +1 673 / +1 673 / +0. The arithmetic:
+    ///   1 716 334 + 77 382 = **1 793 716**,
+    ///   1 568 912 + 76 452 = **1 645 364**,
+    ///   123 949 + 427 = **124 376**. Counts `146 / 59 / 87`. Served quad
+    ///   unchanged — still the twentieth measurement (one Part-A series).
+    ///
+    /// - **A4c (R19 copy): +26 616 / +26 303 / +144.** One generated
+    ///   mutator plus its `oneOf` branch in `apply_edit_plan` (52 689 →
+    ///   53 743 serialized, 52 301 → 53 355 input, measured against the A4b
+    ///   tree): `copy_clip_attributes` 25 562 / 25 249 / 144,
+    ///   `apply_edit_plan` +1 054 / +1 054 / +0. The arithmetic:
+    ///   1 793 716 + 26 616 = **1 820 332**,
+    ///   1 645 364 + 26 303 = **1 671 667**,
+    ///   124 376 + 144 = **124 520**. Counts `147 / 60 / 87`. Served quad
+    ///   unchanged — still the twentieth measurement.
+    ///
+    /// - **A4d (R21 derivation).** The A2 model-field growth, measured per
+    ///   embedding tool exactly as AU4 E20 did — per-tool bytes diffed
+    ///   between the A1 tree and this tree over the 141 common tools: 85
+    ///   tools embed none of the grown types (+0); 55 embed the full grown
+    ///   set at +2,001 B serialized and input each, split tangents +489 ×
+    ///   55 = 26,895, Effect enable +675 × 55 = 37,125, Clip enable +593 ×
+    ///   55 = 32,615, Image +244 × 55; `search_media` embeds only
+    ///   `MediaKind` (+244 — its args carry `kind: Option<MediaKind>` and
+    ///   nothing grown), closing Image at +244 × 56 = 13,664; and the five
+    ///   effect-vocabulary tools (`add_effect`, `set_effect_param`,
+    ///   `set_effect_keyframes`, `clear_effect_keyframes`, `insert_effect`)
+    ///   carry the transform rows at +353 B of description each (5 × 353 =
+    ///   1,765 — the whole A2b move). Every quotient divides exactly and
+    ///   the parts sum to the pinned per-commit totals; `apply_edit_plan`'s
+    ///   extra +4,034/+4,034/+0 over the same span is the six A4 `oneOf`
+    ///   branches, derived per-commit above.
+    ///
+    /// - **Review round (F6 doc text): −626 / −854 / +228.** The
+    ///   `CopyClipAttributes` opening clause (+228 B description) and the
+    ///   shorter `Clip.enabled_curve` doc (−854 B of embedded `$defs`
+    ///   description across the tools embedding `Clip`, isolated by
+    ///   re-measuring with the old doc restored). The arithmetic:
+    ///   1 820 332 − 626 = **1 819 706**,
+    ///   1 671 667 − 854 = **1 670 813**,
+    ///   124 520 + 228 = **124 748**. Counts `147 / 60 / 87`. Served quad
+    ///   unchanged — still the twentieth measurement.
+    ///
+    /// - **MO1 Part C (R20 `plan_motion`): +2 297 / +1 337 / +802.** One
+    ///   registry-only planner, pinned one by one in
+    ///   `mo1_plan_motion_costs_its_measured_row`: +1 337 B of generated
+    ///   `MotionPlanArgs` input schema (revision, clip, six-way preset enum,
+    ///   replace), +802 B of description text, +158 B of fixed row cost —
+    ///   the M36 envelope rule, 147 B plus the 11 bytes of `plan_motion`.
+    ///   The arithmetic: 1 337 + 802 + 158 = 2 297, and
+    ///   1 819 706 + 2 297 = **1 822 003**,
+    ///   1 670 813 + 1 337 = **1 672 150**,
+    ///   124 748 + 802 = **125 550**. Counts `148 / 60 / 88`. Served quad
+    ///   unchanged (`7 / 5 660 / 3 510 / 998`) — the twenty-first
+    ///   consecutive measurement, and the first whose counter moves for a
+    ///   Part C addition.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28064,15 +28629,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_552_503, 5_660),
+            (1_822_003, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_407_480,
+            registry_metrics.input_schema_bytes, 1_672_150,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 121_892,
+            registry_metrics.description_bytes, 125_550,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -29965,6 +30530,8 @@ mod tests {
 
     fn cc4_look_lut(id: u64, preset_token: i64, intensity_percent: i64) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "look_lut".to_owned(),
             parameters: BTreeMap::from([
@@ -30110,6 +30677,8 @@ mod tests {
         let broker = ConfirmationBroker::with_timeout(Duration::from_secs(2));
         let service = cc4_legacy_service(
             vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(5),
                 name: "cube_lut".to_owned(),
                 parameters: BTreeMap::from([(
@@ -30162,6 +30731,8 @@ mod tests {
         let broker = ConfirmationBroker::with_timeout(Duration::from_secs(2));
         let service = cc4_legacy_service(
             vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(5),
                 name: "cube_lut".to_owned(),
                 parameters: BTreeMap::from([
@@ -30216,6 +30787,8 @@ mod tests {
     fn cc4_unconvertible_legacy_look_reports_field_observed_and_allowed() {
         let service = cc4_legacy_service(
             vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(6),
                 name: "primary_correction".to_owned(),
                 parameters: BTreeMap::from([(
@@ -30423,6 +30996,8 @@ mod tests {
         document.lut_assets =
             vec![kinewright_media::BuiltinLook::Warm.to_lut_asset(kinewright_core::LutAssetId(1))];
         document.tracks[0].clips[0].effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::from([("lut_asset_id".to_owned(), ParamValue::Integer(1))]),
@@ -30481,6 +31056,8 @@ mod tests {
         clean.lut_assets =
             vec![kinewright_media::BuiltinLook::Warm.to_lut_asset(kinewright_core::LutAssetId(1))];
         clean.tracks[0].clips[0].effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::from([("lut_asset_id".to_owned(), ParamValue::Integer(1))]),
@@ -31066,6 +31643,8 @@ mod tests {
         let (_, seeded) = service.snapshot().unwrap();
         let mut with_primary = (*seeded).clone();
         with_primary.tracks[0].clips[0].effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(4),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([(
@@ -31107,6 +31686,8 @@ mod tests {
         with_look.lut_assets =
             vec![kinewright_media::BuiltinLook::Warm.to_lut_asset(kinewright_core::LutAssetId(1))];
         with_look.tracks[0].clips[0].effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::from([("lut_asset_id".to_owned(), ParamValue::Integer(1))]),
@@ -31159,6 +31740,8 @@ mod tests {
                 kind: TrackKind::Audio,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(100 + u64::try_from(index).unwrap()),
                     asset: AssetId(1),
                     source_range: TimeCode::ZERO..TimeCode(60),
@@ -31685,6 +32268,8 @@ mod tests {
             assumed_from: None,
         };
         let clip = |id: u64| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(1),
             source_range: TimeCode::ZERO..TimeCode(360),
@@ -32046,6 +32631,8 @@ mod tests {
                     at: TimeCode::ZERO,
                     value: -50,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             }),
             ..TrackMix::neutral(TrackId(1))
@@ -32088,6 +32675,8 @@ mod tests {
                             at: TimeCode::ZERO,
                             value: 0,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         }],
                     }),
                 }],
@@ -32521,6 +33110,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: false,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(3),
                 asset: AssetId(2),
                 source_range: TimeCode::ZERO..TimeCode(360),
@@ -32632,6 +33223,8 @@ mod tests {
         document.tracks[1].clips[0].source_range = TimeCode::ZERO..TimeCode(60);
         document.tracks[1].clips[0].audio_fade_in_frames = TimeCode(4);
         let short = |id: u64, start: i64, frames: i64| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(1),
             source_range: TimeCode::ZERO..TimeCode(frames),
@@ -32793,6 +33386,8 @@ mod tests {
         let mut document = au4_ducking_document();
         document.tracks[1].clips[0].source_range = TimeCode::ZERO..TimeCode(60);
         document.tracks[1].clips.push(Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(3),
             asset: AssetId(1),
             source_range: TimeCode::ZERO..TimeCode(4),
@@ -32948,6 +33543,206 @@ mod tests {
              longer than the window can still hold none of them: {fades}"
         );
         assert!(fades.contains("per-clip reason"), "{fades}");
+    }
+
+    /// MO1 R20: one video-track document holding a single `duration`-frame
+    /// freeze clip carrying `effects`, with the asset `apply_batch`'s
+    /// document validation requires.
+    fn mo1_motion_document(duration: i64, effects: Vec<Effect>) -> Document {
+        Document {
+            investigator: None,
+            catalog: kinewright_core::MediaCatalog::default(),
+            audio_mix: kinewright_core::AudioMix::default(),
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
+                    id: ClipId(1),
+                    asset: AssetId(1),
+                    source_range: TimeCode::ZERO..TimeCode(duration),
+                    content: ClipContent::Freeze(kinewright_core::FreezeFrame {
+                        source_frame: TimeCode::ZERO,
+                    }),
+                    timeline_start: TimeCode::ZERO,
+                    effects,
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                    audio_gain_curve: None,
+                }],
+            }],
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: "fixture.mp4".into(),
+                name: "fixture".into(),
+                duration: TimeCode(duration),
+                fps: Rational::new(30, 1).unwrap(),
+                kind: MediaKind::Video,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            }],
+            markers: Vec::new(),
+            fps: Rational::new(30, 1).unwrap(),
+            resolution: (1920, 1080),
+            duration: TimeCode(duration),
+            color_context: kinewright_core::ColorContext::default(),
+            lut_assets: Vec::new(),
+        }
+    }
+
+    fn mo1_motion_request(preset: &str, replace: bool) -> CallToolRequestParams {
+        CallToolRequestParams::new("plan_motion").with_arguments(
+            json!({
+                "expected_revision": 0,
+                "clip_id": 1,
+                "preset": preset,
+                "replace": replace,
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+    }
+
+    /// MO1 R20: the `plan_motion` description stays under the 1 KB M36
+    /// budget and carries its load-bearing clauses in the FIRST sentence —
+    /// the refusal rule and the budget — because the compact surfaces
+    /// publish only the summary.
+    #[test]
+    fn mo1_plan_motion_summary_carries_the_load_bearing_clauses() {
+        let tools = KinewrightMcp::tools().unwrap();
+        let description = tools
+            .iter()
+            .find(|tool| tool.name == "plan_motion")
+            .unwrap()
+            .description
+            .clone()
+            .unwrap()
+            .to_string();
+        assert!(
+            description.len() < 1_024,
+            "plan_motion description is {} bytes",
+            description.len()
+        );
+        let summary = crate::runtime::capabilities(&tools)
+            .into_iter()
+            .find(|capability| capability.name == "plan_motion")
+            .unwrap_or_else(|| panic!("plan_motion is a capability"))
+            .summary;
+        assert!(
+            summary.len() < description.len(),
+            "plan_motion must carry more than its first sentence"
+        );
+        assert!(summary.contains("refused by name"), "{summary}");
+        assert!(summary.contains("replace is true"), "{summary}");
+        assert!(summary.contains("4 KiB"), "{summary}");
+    }
+
+    /// MO1 R20: the push-in golden through the real registry dispatch — exact
+    /// operations, evidence-only markers, inside the byte budget, and the
+    /// document untouched.
+    #[test]
+    fn mo1_plan_motion_push_in_golden_through_the_registry() {
+        let service = au4_service(mo1_motion_document(60, Vec::new()), NoopMedia::default());
+        let planned = service
+            .call_blocking(mo1_motion_request("push_in", false))
+            .unwrap();
+        assert_eq!(planned.is_error, Some(false), "{planned:?}");
+        let body = planned.structured_content.as_ref().unwrap();
+        assert_eq!(body["applied"], json!(false));
+        assert_eq!(body["evidence_only"], json!(true));
+        assert_eq!(body["preset"], json!("push_in"));
+        assert_eq!(body["target_effect_id"], json!(1));
+        assert_eq!(body["created_new_effect"], json!(true));
+        assert_eq!(body["key_counts"], json!({"scale_fine_hundredths": 2}));
+        let operations = body["operations"].as_array().unwrap();
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0]["AddEffect"]["clip"], json!(1));
+        assert_eq!(
+            operations[0]["AddEffect"]["effect"]["parameters"]
+                .as_object()
+                .unwrap()
+                .len(),
+            11
+        );
+        let curve = &operations[1]["SetEffectKeyframes"];
+        assert_eq!(curve["name"], json!("scale_fine_hundredths"));
+        assert_eq!(
+            curve["curve"]["keyframes"],
+            json!([
+                {"at": 0, "value": 10000, "interpolation": "ease_in_out"},
+                {"at": 59, "value": 12000, "interpolation": "ease_in_out"},
+            ]),
+            "{curve}"
+        );
+        let text = planned.content[0].as_text().unwrap().text.clone();
+        let bytes = text.len() + body.to_string().len();
+        assert!(
+            bytes < crate::motion::MOTION_RESPONSE_BUDGET_BYTES,
+            "the served push_in renders {bytes} B against a 4 KiB budget"
+        );
+        let (revision, document) = service.snapshot().unwrap();
+        assert_eq!(revision, TimelineRevision(0), "evidence-only plans nothing");
+        assert!(document.tracks[0].clips[0].effects.is_empty());
+    }
+
+    /// MO1 R20: refusals surface typed through the registry — the curves
+    /// refusal names its params and code, a stale revision conflicts.
+    #[test]
+    fn mo1_plan_motion_refusals_surface_typed_through_the_registry() {
+        let mut effect = Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(2),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
+            keyframes: BTreeMap::new(),
+        };
+        effect.keyframes.insert(
+            "scale_fine_hundredths".to_owned(),
+            AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 11_000,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                }],
+            },
+        );
+        let service = au4_service(mo1_motion_document(60, vec![effect]), NoopMedia::default());
+        let refused = service
+            .call_blocking(mo1_motion_request("push_in", false))
+            .unwrap();
+        assert_eq!(refused.is_error, Some(true), "{refused:?}");
+        let body = refused.structured_content.as_ref().unwrap();
+        assert_eq!(body["code"], json!("motion_curves_exist"));
+        assert_eq!(body["applied"], json!(false));
+        let rebuilt = service
+            .call_blocking(mo1_motion_request("push_in", true))
+            .unwrap();
+        assert_eq!(rebuilt.is_error, Some(false), "{rebuilt:?}");
+
+        let stale = CallToolRequestParams::new("plan_motion").with_arguments(
+            json!({
+                "expected_revision": 3,
+                "clip_id": 1,
+                "preset": "push_in",
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let conflicted = service.call_blocking(stale).unwrap();
+        assert_eq!(conflicted.is_error, Some(true), "{conflicted:?}");
     }
 
     // ---- IN2 §9.1 items 24-31 and 34: the investigator server ----
@@ -33749,12 +34544,37 @@ mod tests {
     /// `served_surface_is_small_and_keeps_the_internal_registry_discoverable`
     /// with their decomposition, because they are a function of description
     /// text this contract deliberately does not fix.
+    ///
+    /// MO1 A4a (R15/R16) grows the generated mutators by two
+    /// (`upsert_effect_keyframe`, `remove_effect_keyframe`): counts `143 /
+    /// 56 / 87`. A4b (R17/R18) adds three more (`set_effect_enabled`,
+    /// `set_clip_enabled`, `set_clip_enabled_curve`): counts `146 / 59 /
+    /// 87`. A4c (R19) adds the last one (`copy_clip_attributes`): counts
+    /// `147 / 60 / 87`. Part C (R20) adds one inspector planner
+    /// (`plan_motion`): counts `148 / 60 / 88`. All are registry-only —
+    /// served tools come from the compact authority, which MO1 does not
+    /// touch.
     #[test]
     fn in2_the_registry_grows_by_one_capability() {
         let registry = KinewrightMcp::capability_tools().unwrap();
-        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 141);
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
-        assert_eq!(operation_tools().unwrap().len(), 54);
+        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 148);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
+        assert_eq!(operation_tools().unwrap().len(), 60);
+        let generated = operation_tools().unwrap();
+        for name in [
+            "upsert_effect_keyframe",
+            "remove_effect_keyframe",
+            "set_effect_enabled",
+            "set_clip_enabled",
+            "set_clip_enabled_curve",
+            "copy_clip_attributes",
+        ] {
+            assert!(
+                generated.iter().any(|tool| tool.tool.name == name),
+                "{name} is a generated mutator"
+            );
+            assert!(!crate::runtime::COMPACT_TOOL_NAMES.contains(&name));
+        }
 
         let names = crate::schema::INSPECTOR_TOOL_NAMES;
         let resolve = names

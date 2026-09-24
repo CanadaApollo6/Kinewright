@@ -268,6 +268,17 @@ impl FrameRenderer {
             .sum()
     }
 
+    /// Total decoder seeks across video sources — the test-only churn
+    /// signal. A pinned still decodes once (one seek) no matter how many
+    /// frames render from it; production decode policy is unchanged.
+    #[cfg(test)]
+    pub(crate) fn video_seek_count(&self) -> u64 {
+        self.video_sources
+            .values()
+            .map(|source| source.decoder.seek_count())
+            .sum()
+    }
+
     /// Composite one project frame for the document's monitoring target.
     ///
     /// CC1 2.2.6 requires the monitor transform to be selected from the
@@ -845,6 +856,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: AssetId::default(),
                     source_range: TimeCode(0)..TimeCode(4),
@@ -873,6 +886,8 @@ mod tests {
             return;
         };
         let mut look = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::new(),
@@ -999,6 +1014,8 @@ mod tests {
         assert_eq!(published.len(), 2);
 
         let mut look = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::new(),

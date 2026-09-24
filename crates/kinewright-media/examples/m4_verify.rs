@@ -54,6 +54,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: red.id,
                     source_range: TimeCode(0)..TimeCode(60),
@@ -74,6 +76,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(2),
                     asset: blue.id,
                     source_range: TimeCode(0)..TimeCode(60),
@@ -99,6 +103,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     kinewright_core::Operation::AddEffect {
         clip: ClipId(2),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "opacity".to_owned(),
             parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(65))]),

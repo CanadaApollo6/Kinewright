@@ -1019,6 +1019,15 @@ impl Analysis for FfmpegMediaEngine {
         let (timeline_start, target) = locate_color_node(&document, clip, effect)?;
         let node_kind = target.name.clone();
         let local_at = at.checked_sub(timeline_start).unwrap_or(TimeCode::ZERO);
+        // MO1 R4: a disabled node renders nothing, so it has no coverage to
+        // prove — `NodeInactive`, not `EffectNotFound`, because the recovery
+        // (re-enable) differs from a wrong node id (CC5 §4.1).
+        if !target.is_enabled_at(local_at) {
+            return Err(MatteProofError::NodeInactive {
+                reason: "disabled".to_owned(),
+            }
+            .into());
+        }
         let matte = MatteParams::from_effect(&target.evaluated_at(local_at));
 
         let scratch = matte_proof_scratch_document(&document, clip, effect)?;
@@ -2322,6 +2331,8 @@ mod tests {
     /// `asset`, plus that asset in the project table.
     fn look_document(asset: LutAsset) -> Document {
         let mut look = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "creative_look".to_owned(),
             parameters: std::collections::BTreeMap::new(),
@@ -2339,6 +2350,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: AssetId::default(),
                     source_range: TimeCode(0)..TimeCode(4),
@@ -2613,6 +2626,8 @@ mod tests {
         let mut stored = vec![("gain_master_thousandths", 1_500_i64)];
         stored.extend_from_slice(parameters);
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "color_wheels".to_owned(),
             parameters: stored
@@ -2795,6 +2810,51 @@ mod tests {
             .expect("the matte-carrying node on the same clip still proves");
     }
 
+    /// MO1 R4: a disabled node has no coverage to prove. The refusal is
+    /// `NodeInactive` with the `disabled` reason — not `EffectNotFound`,
+    /// because the recovery is "re-enable", not "fix the effect id" — and
+    /// the enabled sibling on the same clip still proves.
+    #[test]
+    fn mo1_matte_proof_refuses_a_disabled_node_as_inactive() {
+        initialize_ffmpeg().expect("FFmpeg should initialize for the matte proof fixture");
+        let gpu = fallback_gpu().context();
+        let media = matte_source("matte-proof-disabled-node");
+        let mut off = wheels_node(7, CENTERED_RECT);
+        off.enabled = false;
+        let document = matte_document(&media, vec![off, wheels_node(9, CENTERED_RECT)]);
+        let engine = FfmpegMediaEngine::new_with_gpu(gpu)
+            .expect("media engine should start for the matte proof fixture");
+
+        let error = engine
+            .matte_proof_for_document(
+                Arc::clone(&document),
+                TimeCode::ZERO,
+                ClipId(1),
+                EffectId(7),
+            )
+            .expect_err("a disabled node must not render a coverage frame");
+        let MediaError::MatteProof(error) = error else {
+            panic!("a matte proof refusal is a typed matte-proof error");
+        };
+        let message = error.to_string();
+        assert!(
+            message.starts_with("matte_proof_node_inactive:"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            message.contains("disabled"),
+            "the reason token must be reported: {message}"
+        );
+        engine
+            .matte_proof_for_document(
+                Arc::clone(&document),
+                TimeCode::ZERO,
+                ClipId(1),
+                EffectId(9),
+            )
+            .expect("the enabled sibling on the same clip still proves");
+    }
+
     /// CC5 4.1: a clip that exists but is not an active visual layer at the
     /// proved frame is its **own** refusal.
     ///
@@ -2956,11 +3016,15 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 2_500,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(20),
                         value: 7_500,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -3031,6 +3095,8 @@ mod tests {
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_compressor".to_owned(),
                 parameters: std::collections::BTreeMap::new(),
@@ -3057,6 +3123,8 @@ mod tests {
 
         // A master node adds a gain-reduction key, so the table must change.
         document.audio_mix.master.effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "audio_true_peak_limiter".to_owned(),
             parameters: std::collections::BTreeMap::from([(
@@ -3080,6 +3148,8 @@ mod tests {
         use kinewright_core::{AudioBus, AudioBusId, ParamValue};
 
         let lookahead_node = |id: u64, name: &str, milliseconds: i64| Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters: std::collections::BTreeMap::from([(
@@ -3164,6 +3234,8 @@ mod tests {
         );
 
         let limiter = |milliseconds: i64| Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "audio_true_peak_limiter".to_owned(),
             parameters: std::collections::BTreeMap::from([(
@@ -3341,6 +3413,8 @@ mod tests {
         );
 
         let limiter = |milliseconds: i64| Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "audio_true_peak_limiter".to_owned(),
             parameters: std::collections::BTreeMap::from([(

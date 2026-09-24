@@ -5,11 +5,13 @@ use std::collections::BTreeMap;
 
 use kinewright_core::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AudioBus,
-    AudioBusId, AudioMaster, AudioMix, AutomationCurve, CHAIN_LOOKAHEAD_MILLISECONDS,
+    AudioBusId, AudioChain, AudioMaster, AudioMix, AutomationCurve, CHAIN_LOOKAHEAD_MILLISECONDS,
     ChainLookahead, ColorContext, Command, Core, Document, Effect, EffectId, EffectUniform, Event,
-    Keyframe, KeyframeInterpolation, MediaAsset, MediaCatalog, MediaKind, MediaSourceFingerprint,
-    OpError, Operation, ParamValue, Rational, TimeCode, Track, TrackId, TrackKind,
-    chain_lookahead_milliseconds, effect_descriptor, is_audio_effect, is_static_audio_parameter,
+    IncidentCode, IncidentFamily, IncidentLog, IncidentObservation, IncidentSubject, Keyframe,
+    KeyframeInterpolation, MediaAsset, MediaCatalog, MediaKind, MediaSourceFingerprint, Observed,
+    OpError, Operation, ParamValue, Rational, TimeCode, TimelineRevision, Track, TrackId,
+    TrackKind, chain_lookahead_milliseconds, effect_descriptor, is_audio_effect,
+    is_static_audio_parameter,
 };
 
 /// The eight bus-only audio node names, in `EFFECT_DESCRIPTORS` order (AU2 §2.1).
@@ -383,6 +385,8 @@ fn document_with_one_clip() -> Document {
 /// One audio node carrying static integer parameters.
 fn audio_effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: parameters
@@ -402,6 +406,8 @@ fn keyed_effect(
     interpolation: KeyframeInterpolation,
 ) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: BTreeMap::new(),
@@ -412,6 +418,8 @@ fn keyed_effect(
                     at: TimeCode(10),
                     value,
                     interpolation,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         )]),
@@ -1067,6 +1075,8 @@ fn the_master_chain_carries_the_bus_rules_with_master_flavoured_errors() {
             master_with(
                 0,
                 vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "brightness".to_owned(),
                     parameters: BTreeMap::new(),
@@ -1097,6 +1107,8 @@ fn the_master_chain_carries_the_bus_rules_with_master_flavoured_errors() {
             master_with(
                 0,
                 vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "audio_gain".to_owned(),
                     parameters: BTreeMap::new(),
@@ -1107,6 +1119,8 @@ fn the_master_chain_carries_the_bus_rules_with_master_flavoured_errors() {
                                 at: TimeCode(60),
                                 value: -60,
                                 interpolation: KeyframeInterpolation::Linear,
+                                tangent_in: 0,
+                                tangent_out: 0,
                             }],
                         },
                     )]),
@@ -1408,4 +1422,180 @@ fn a_coalesced_bus_fader_drag_is_one_undo_entry() {
         panic!("the gesture should be redoable");
     };
     assert_eq!(&*doc, &*tenth);
+}
+
+/// MO1 R4: bus effects reject `enabled: false` and any `enabled_curve` —
+/// MO1 keeps bus/master chains always-on. Both the operation path and the
+/// document invariant refuse, atomically.
+#[test]
+fn bus_effects_reject_disabled_or_keyframed_enable() {
+    let base = document_with_one_clip();
+    let curve = AutomationCurve {
+        keyframes: vec![Keyframe {
+            at: TimeCode(0),
+            value: 1,
+            interpolation: KeyframeInterpolation::Hold,
+            tangent_in: 0,
+            tangent_out: 0,
+        }],
+    };
+    for (enabled, with_curve) in [(false, false), (true, true)] {
+        let mut effect = audio_effect(1, "audio_gain", &[]);
+        effect.enabled = enabled;
+        if with_curve {
+            effect.enabled_curve = Some(curve.clone());
+        }
+        let effects = vec![effect];
+        let mut doc = base.clone();
+        let error = Operation::UpsertAudioBus {
+            bus: bus_with(effects.clone()),
+        }
+        .apply(&mut doc)
+        .unwrap_err();
+        assert_eq!(
+            error,
+            OpError::DisabledEffectOnAudioChain {
+                chain: AudioChain::Bus(AudioBusId(1)),
+                effect: EffectId(1),
+            }
+        );
+        assert_eq!(doc, base);
+        assert_eq!(hand_edited(effects).validate().unwrap_err(), error);
+    }
+    // An enabled bus effect with no curve stays legal.
+    let mut doc = base.clone();
+    Operation::UpsertAudioBus {
+        bus: bus_with(vec![audio_effect(1, "audio_gain", &[])]),
+    }
+    .apply(&mut doc)
+    .unwrap();
+}
+
+/// MO1 R13: audio owners keep strict `validate` — a negative keyframe
+/// position on a bus effect curve is refused with `NegativePosition` →
+/// `InvalidEffectAutomation`, exactly as before MO1.
+#[test]
+fn bus_effect_curves_still_reject_negative_positions() {
+    let base = document_with_one_clip();
+    let effects = vec![Effect {
+        enabled: true,
+        enabled_curve: None,
+        id: EffectId(1),
+        name: "audio_gain".to_owned(),
+        parameters: BTreeMap::new(),
+        keyframes: BTreeMap::from([(
+            "gain_tenth_db".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode(-10),
+                        value: 0,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                    Keyframe {
+                        at: TimeCode(10),
+                        value: 0,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                ],
+            },
+        )]),
+    }];
+    let mut doc = base.clone();
+    let error = Operation::UpsertAudioBus {
+        bus: bus_with(effects.clone()),
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::InvalidEffectAutomation {
+            effect: "audio_gain".to_owned(),
+            name: "gain_tenth_db".to_owned(),
+            reason: "automation keyframe positions must be non-negative".to_owned(),
+        }
+    );
+    assert_eq!(doc, base);
+    assert_eq!(hand_edited(effects).validate().unwrap_err(), error);
+}
+
+/// MO1 R4: master effects reject `enabled: false` and any `enabled_curve`.
+#[test]
+fn master_effects_reject_disabled_or_keyframed_enable() {
+    let base = document_with_one_clip();
+    let curve = AutomationCurve {
+        keyframes: vec![Keyframe {
+            at: TimeCode(0),
+            value: 0,
+            interpolation: KeyframeInterpolation::Hold,
+            tangent_in: 0,
+            tangent_out: 0,
+        }],
+    };
+    for (enabled, with_curve) in [(false, false), (true, true)] {
+        let mut effect = audio_effect(1, "audio_gain", &[]);
+        effect.enabled = enabled;
+        if with_curve {
+            effect.enabled_curve = Some(curve.clone());
+        }
+        let effects = vec![effect];
+        let mut doc = base.clone();
+        let error = Operation::SetAudioMaster {
+            master: master_with(0, effects.clone()),
+        }
+        .apply(&mut doc)
+        .unwrap_err();
+        assert_eq!(
+            error,
+            OpError::DisabledEffectOnAudioChain {
+                chain: AudioChain::Master,
+                effect: EffectId(1),
+            }
+        );
+        assert_eq!(doc, base);
+        assert_eq!(
+            hand_edited_master(master_with(0, effects))
+                .validate()
+                .unwrap_err(),
+            error
+        );
+    }
+}
+
+/// MO1 R30: the one new `OpError` variant renders as a `Malformed` incident
+/// under the existing `Operation` code — MO1 mints zero `IncidentCode`s.
+#[test]
+fn disabled_effect_on_audio_chain_renders_a_malformed_incident() {
+    let error = OpError::DisabledEffectOnAudioChain {
+        chain: AudioChain::Bus(AudioBusId(1)),
+        effect: EffectId(1),
+    };
+    assert_eq!(error.incident_family(), IncidentFamily::Malformed);
+    assert_eq!(
+        error.incident_code(),
+        IncidentCode::Operation(IncidentFamily::Malformed)
+    );
+    let observation = IncidentObservation::from_op_error(
+        &error,
+        IncidentSubject::Chain(AudioChain::Bus(AudioBusId(1))),
+        TimelineRevision(3),
+    );
+    let mut log = IncidentLog::default();
+    let Observed::Opened(_) = log.observe(observation) else {
+        panic!("the first observation opens an incident");
+    };
+    let rendered = serde_json::to_value(log.open().next().unwrap()).unwrap();
+    assert_eq!(rendered["code"], serde_json::json!("operation_malformed"));
+    assert_eq!(
+        rendered["subject"],
+        serde_json::json!({"chain": {"bus": 1}})
+    );
+    assert!(
+        rendered["observed"].as_str().unwrap().contains("disabled"),
+        "the card names the refusal: {rendered}"
+    );
 }

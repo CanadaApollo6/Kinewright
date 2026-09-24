@@ -24,6 +24,7 @@ pub mod export_queue;
 pub mod fixture_pack;
 mod harness;
 mod models;
+mod motion;
 mod muse;
 mod pacing;
 mod protocol;
@@ -53,6 +54,9 @@ pub use harness::{HARNESS_KEYS, harness_driver};
 pub use models::{
     CLAUDE_ULTRACODE, ModelChoice, ServiceTier, claude_models, codex_default_model, codex_models,
     common_efforts, common_tiers,
+};
+pub use motion::{
+    MOTION_PRESETS, MotionPlan, MotionPlanArgs, MotionPlanError, MotionPreset, plan_motion,
 };
 pub use muse::{MUSE_SANDBOX_NOTICE, MuseDriver, muse_models};
 pub use render::{

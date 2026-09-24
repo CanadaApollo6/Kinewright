@@ -96,6 +96,14 @@ mod in1_fixtures;
 #[cfg(test)]
 mod gpu_test_support;
 
+/// MO1 Part B's render gates (R26–R29 + the §10 B-gates). In `src/` for the
+/// reason every `ccN_fixtures.rs` is: the goldens drive `params_for`,
+/// `FrameRenderer`, and the `pub(crate)` decode/probe seams, and MO1 widens
+/// no public surface to reach them.
+#[cfg(test)]
+mod mo1_fixtures;
+mod still_orientation;
+
 use ffmpeg_next as ffmpeg;
 use kinewright_core::MediaError;
 

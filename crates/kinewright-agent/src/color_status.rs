@@ -495,6 +495,13 @@ pub(crate) enum ColorProofError {
     },
     #[error("matte_comparison needs a node that carries a matte, and node {effect} carries none")]
     MatteComparisonNoMatte { effect: EffectId },
+    // MO1 R4: a disabled node renders no matte, but the recovery (re-enable)
+    // differs from a matte-less node (add one), so it keeps its own variant
+    // (CC5 §4.1). Not an `IncidentCode`: R30 stays at zero new codes.
+    #[error(
+        "matte_comparison needs an enabled node, and node {effect} is disabled at the proved frame"
+    )]
+    MatteComparisonNodeDisabled { effect: EffectId },
     #[error("could not render the CC5 matte proof for node {effect}: {message}")]
     MatteProofUnavailable { effect: EffectId, message: String },
     #[error(transparent)]
@@ -526,6 +533,7 @@ impl ColorProofError {
             }
             Self::MatteComparisonUnsupportedKind { .. } => "matte_unsupported_node_kind",
             Self::MatteComparisonNoMatte { .. } => "matte_proof_no_matte",
+            Self::MatteComparisonNodeDisabled { .. } => "matte_comparison_node_disabled",
             Self::MatteProofUnavailable { .. } => MATTE_PROOF_UNAVAILABLE,
             Self::UnsupportedActiveLayerSource { .. } => "active_layer_needs_color_override",
             Self::LookProofParametersConflict { .. } => "look_proof_parameters_conflict",
@@ -652,6 +660,13 @@ impl ColorProofError {
                 "allowed": "a node whose resolved matte is active (CC5 §2.6)",
                 // CC5 §4.1: a matte proof never returns a blank frame.
                 "recovery_action": "Add a matte with plan_secondary_correction first; a node with no matte has no coverage to partition, and this proof never returns a blank frame.",
+                "effect_id": effect.0,
+            }),
+            Self::MatteComparisonNodeDisabled { effect } => json!({
+                "field": "matte_comparison",
+                "observed": {"effect_id": effect.0, "enabled": false},
+                "allowed": "a node enabled at the proved frame (CC5 §2.6)",
+                "recovery_action": "Re-enable the node with SetEffectEnabled (or clear its disabling enabled_curve key) and re-proof; a disabled node renders no matte to partition, and this proof never returns a blank frame.",
                 "effect_id": effect.0,
             }),
             Self::MatteProofUnavailable { effect, message } => json!({
@@ -1205,7 +1220,14 @@ fn referenced_visual_assets(document: &Document) -> BTreeSet<AssetId> {
         .flat_map(|track| track.clips.iter())
         .filter(|clip| matches!(clip.content, ClipContent::Media | ClipContent::Freeze(_)))
         .filter_map(|clip| document.asset(clip.asset))
-        .filter(|asset| matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo))
+        // MO1 N3: stills reach the source-colour incident path as video
+        // does — an untagged PNG is unknown until assumed, like footage.
+        .filter(|asset| {
+            matches!(
+                asset.kind,
+                MediaKind::Video | MediaKind::AudioVideo | MediaKind::Image
+            )
+        })
         .map(|asset| asset.id)
         .collect()
 }
@@ -1548,6 +1570,8 @@ pub(crate) fn plan_primary_correction(
             operations.push(Operation::AddEffect {
                 clip: args.clip_id,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: effect_id,
                     name: PRIMARY_CORRECTION_EFFECT_NAME.to_owned(),
                     parameters: neutral_parameters,
@@ -1664,7 +1688,13 @@ fn managed_color_clip(
             asset: clip.asset,
         });
     };
-    if !matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo) {
+    // MO1 N3: stills reach the managed-clip gate as video does, so an
+    // untagged still flows into the source-colour incident path instead of
+    // bouncing off the kind filter.
+    if !matches!(
+        asset.kind,
+        MediaKind::Video | MediaKind::AudioVideo | MediaKind::Image
+    ) {
         return Err(ColorClipRejection::WrongAssetKind {
             clip: clip.id,
             asset: asset.id,
@@ -2622,6 +2652,8 @@ pub(crate) fn plan_color_wheels(
             vec![Operation::AddEffect {
                 clip: args.clip_id,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: effect_id,
                     name: effect_name.to_owned(),
                     parameters,
@@ -2987,6 +3019,8 @@ pub(crate) fn plan_color_curves(
             vec![Operation::AddEffect {
                 clip: args.clip_id,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: effect_id,
                     name: effect_name.to_owned(),
                     parameters,
@@ -4093,6 +4127,8 @@ fn plan_lut_node(
             clip: args.clip_id,
             index: insert_index,
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: effect_id,
                 name: effect_name.to_owned(),
                 parameters,
@@ -4639,6 +4675,8 @@ pub(crate) fn plan_secondary_correction(
                 clip: args.clip_id,
                 index,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: effect_id,
                     name: effect_name.to_owned(),
                     parameters,
@@ -5421,6 +5459,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: AssetId(1),
                     source_range: kinewright_core::TimeCode(0)..kinewright_core::TimeCode(100),
@@ -5466,6 +5506,42 @@ mod tests {
             0
         );
         assert_eq!(value["ordered_stage_names"].as_array().unwrap().len(), 8);
+    }
+
+    /// MO1 N3: stills reach the source-colour incident path — the managed
+    /// gate resolves an Image clip (tagged → profile, untagged →
+    /// `UnsupportedSource`, never `WrongAssetKind`), the status lists the
+    /// still as referenced, and non-visual kinds still bounce.
+    #[test]
+    fn stills_reach_the_source_colour_path() {
+        let mut document = document();
+        document.media_pool[0].kind = MediaKind::Image;
+
+        let (clip, profile, assumption) = managed_color_clip(&document, ClipId(1), None)
+            .expect("a tagged still must resolve like video");
+        assert_eq!(clip.id, ClipId(1));
+        assert_eq!(profile, ColorSourceProfile::Rec709Video);
+        assert_eq!(assumption, None);
+
+        document.media_pool[0].color_description = ColorDescription::unknown();
+        let Err(ColorClipRejection::UnsupportedSource { clip, .. }) =
+            managed_color_clip(&document, ClipId(1), None)
+        else {
+            panic!("an untagged still must reach the source-colour incident path");
+        };
+        assert_eq!(clip, ClipId(1));
+
+        let value = color_context_value(TimelineRevision(0), &document);
+        assert_eq!(value["assets"][0]["managed_blocking"], true);
+        assert_eq!(value["managed_blocking_asset_ids"], json!([1]));
+
+        document.media_pool[0].kind = MediaKind::Audio;
+        let Err(ColorClipRejection::WrongAssetKind { kind, .. }) =
+            managed_color_clip(&document, ClipId(1), None)
+        else {
+            panic!("audio must still bounce off the managed-clip gate");
+        };
+        assert_eq!(kind, MediaKind::Audio);
     }
 
     #[test]
@@ -5691,6 +5767,8 @@ mod tests {
             legacy_warning(
                 0,
                 &Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: name.to_owned(),
                     parameters: BTreeMap::new(),
@@ -5715,12 +5793,16 @@ mod tests {
     fn status_reports_video_only_layers_with_z_order_and_the_full_chain() {
         let mut document = document();
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::new(),
             keyframes: BTreeMap::new(),
         });
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(2),
             name: "look_lut".to_owned(),
             parameters: BTreeMap::new(),
@@ -5731,12 +5813,16 @@ mod tests {
             kind: TrackKind::Audio,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(2),
                 asset: AssetId(1),
                 source_range: kinewright_core::TimeCode(0)..kinewright_core::TimeCode(100),
                 content: ClipContent::Media,
                 timeline_start: kinewright_core::TimeCode(0),
                 effects: vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(3),
                     name: "look_lut".to_owned(),
                     parameters: BTreeMap::new(),
@@ -5800,6 +5886,8 @@ mod tests {
     fn an_existing_primary_node_is_corrected_in_place() {
         let mut document = document();
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(5),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([(
@@ -5853,6 +5941,8 @@ mod tests {
 
         // Two primaries: target the last one and warn.
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(6),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::new(),
@@ -5911,6 +6001,8 @@ mod tests {
     fn a_keyframed_target_parameter_is_reported_as_a_warning() {
         let mut document = document();
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(5),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([(
@@ -5924,6 +6016,8 @@ mod tests {
                         at: kinewright_core::TimeCode::ZERO,
                         value: 250,
                         interpolation: kinewright_core::KeyframeInterpolation::default(),
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             )]),
@@ -6020,6 +6114,8 @@ mod tests {
 
     fn wheels_node(id: u64, parameters: BTreeMap<String, ParamValue>) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "color_wheels".to_owned(),
             parameters,
@@ -6029,6 +6125,8 @@ mod tests {
 
     fn curves_node(id: u64, parameters: BTreeMap<String, ParamValue>) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "color_curves".to_owned(),
             parameters,
@@ -6088,6 +6186,8 @@ mod tests {
             vec![Operation::AddEffect {
                 clip: ClipId(1),
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "color_wheels".to_owned(),
                     parameters: integers([
@@ -6279,6 +6379,8 @@ mod tests {
                     at: kinewright_core::TimeCode::ZERO,
                     value: 1_200,
                     interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -6565,6 +6667,8 @@ mod tests {
                     at: kinewright_core::TimeCode::ZERO,
                     value: 4_000,
                     interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -6593,6 +6697,8 @@ mod tests {
         let mut document = document();
         document.tracks[0].clips[0].effects = vec![
             Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "primary_correction".to_owned(),
                 parameters: integers([("exposure_milli_stops", 250)]),
@@ -6606,6 +6712,8 @@ mod tests {
             // A neutral node is inactive for a different, reported reason.
             wheels_node(4, BTreeMap::new()),
             Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(5),
                 name: "look_lut".to_owned(),
                 parameters: BTreeMap::new(),
@@ -6765,6 +6873,8 @@ mod tests {
 
     fn cc4_effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters: parameters
@@ -6820,6 +6930,8 @@ mod tests {
                 clip: ClipId(1),
                 index: 0,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(3),
                     name: "technical_lut".to_owned(),
                     parameters: BTreeMap::from([(
@@ -6841,6 +6953,8 @@ mod tests {
                 clip: ClipId(1),
                 index: 2,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(3),
                     name: "creative_look".to_owned(),
                     parameters: BTreeMap::from([(
@@ -7262,6 +7376,8 @@ mod tests {
                     &[("preset_token", 1), ("intensity_percent", 60)],
                 ),
                 Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(2),
                     name: "cube_lut".to_owned(),
                     parameters: BTreeMap::from([(
@@ -7340,6 +7456,8 @@ mod tests {
                     &[("preset_token", 1), ("intensity_percent", 60)],
                 ),
                 Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(2),
                     name: "cube_lut".to_owned(),
                     parameters: BTreeMap::from([(
@@ -7350,6 +7468,8 @@ mod tests {
                 },
                 cc4_effect(3, "look_lut", &[("preset_token", 9)]),
                 Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(4),
                     name: "cube_lut".to_owned(),
                     parameters: BTreeMap::new(),
@@ -7787,6 +7907,8 @@ mod tests {
             },
         });
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "creative_look".to_owned(),
             parameters: integers([("lut_asset_id", 1)]),
@@ -7814,6 +7936,8 @@ mod tests {
                 clip: ClipId(1),
                 index: 0,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(10),
                     name: "color_wheels".to_owned(),
                     parameters: integers([
@@ -7856,6 +7980,8 @@ mod tests {
     fn secondary_plan_rejects_a_technical_lut_target() {
         let mut document = document();
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(4),
             name: "technical_lut".to_owned(),
             parameters: BTreeMap::new(),
@@ -7987,6 +8113,8 @@ mod tests {
                     at: TimeCode(0),
                     value: 1,
                     interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -8035,6 +8163,8 @@ mod tests {
                     at: TimeCode(0),
                     value: 5_000,
                     interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -8604,6 +8734,8 @@ mod tests {
     fn primary_node_manifests_never_enumerate_the_matte() {
         let mut document = document();
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: PRIMARY_CORRECTION_EFFECT_NAME.to_owned(),
             parameters: integers([("exposure_milli_stops", 250)]),
@@ -8725,6 +8857,8 @@ mod tests {
                 at: TimeCode(0),
                 value,
                 interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
             }],
         };
         let mut document = document();

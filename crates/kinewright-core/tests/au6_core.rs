@@ -106,7 +106,9 @@ fn asset(id: AssetId, kind: MediaKind, rate: u32, frames: i64) -> MediaAsset {
         fps: fps(rate),
         kind,
         resolution: match kind {
-            MediaKind::Video | MediaKind::AudioVideo => Some((AU6_SOURCE_WIDTH, AU6_SOURCE_HEIGHT)),
+            MediaKind::Video | MediaKind::AudioVideo | MediaKind::Image => {
+                Some((AU6_SOURCE_WIDTH, AU6_SOURCE_HEIGHT))
+            }
             MediaKind::Audio => None,
         },
         source_fingerprint: MediaSourceFingerprint::default(),
@@ -128,6 +130,8 @@ fn room_tone_asset(id: AssetId) -> MediaAsset {
 
 fn media_clip(id: ClipId, asset: AssetId, range: Range<TimeCode>) -> Clip {
     Clip {
+        enabled: true,
+        enabled_curve: None,
         id,
         asset,
         source_range: range.clone(),

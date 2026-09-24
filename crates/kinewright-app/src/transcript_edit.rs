@@ -436,6 +436,8 @@ mod tests {
 
     fn clip(id: u64, asset: AssetId, link: Option<LinkId>) -> Clip {
         Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset,
             source_range: TimeCode(0)..TimeCode(120),

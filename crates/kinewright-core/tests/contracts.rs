@@ -202,6 +202,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         master: AudioMaster {
             gain_tenth_db: 20,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_gain".to_owned(),
                 parameters: BTreeMap::from([(
@@ -306,6 +308,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                 gain_tenth_db: -30,
                 effects: vec![
                     Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: EffectId(1),
                         name: "audio_gain".to_owned(),
                         parameters: BTreeMap::from([(
@@ -315,6 +319,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                         keyframes: BTreeMap::new(),
                     },
                     Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: EffectId(2),
                         name: "audio_parametric_eq".to_owned(),
                         parameters: BTreeMap::from([
@@ -324,6 +330,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                         keyframes: BTreeMap::new(),
                     },
                     Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: EffectId(3),
                         name: "audio_gate".to_owned(),
                         parameters: BTreeMap::from([
@@ -333,6 +341,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                         keyframes: BTreeMap::new(),
                     },
                     Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: EffectId(4),
                         name: "audio_true_peak_limiter".to_owned(),
                         parameters: BTreeMap::from([
@@ -352,6 +362,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             master: AudioMaster {
                 gain_tenth_db: -15,
                 effects: vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "audio_true_peak_limiter".to_owned(),
                     parameters: BTreeMap::from([
@@ -401,11 +413,15 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                         at: TimeCode::ZERO,
                         value: -40,
                         interpolation: KeyframeInterpolation::EaseInOut,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(30),
                         value: 40,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             }),
@@ -508,6 +524,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "brightness".to_owned(),
                 parameters: BTreeMap::new(),
@@ -533,6 +551,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                     at: TimeCode::ZERO,
                     value: 25,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         },
@@ -565,11 +585,15 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                         at: TimeCode::ZERO,
                         value: 0,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(15),
                         value: -240,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             }),
@@ -602,6 +626,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             clip: ClipId(1),
             index: 0,
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(2),
                 name: "technical_lut".to_owned(),
                 parameters: BTreeMap::from([("lut_asset_id".to_owned(), ParamValue::Integer(1))]),
@@ -619,6 +645,51 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         },
         Operation::RemoveLutAsset {
             lut_asset: LutAssetId(1),
+        },
+        Operation::UpsertEffectKeyframe {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            name: "exposure_milli_stops".to_owned(),
+            key: Keyframe {
+                at: TimeCode(10),
+                value: 100,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+        },
+        Operation::RemoveEffectKeyframe {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            name: "exposure_milli_stops".to_owned(),
+            at: TimeCode(10),
+        },
+        Operation::SetEffectEnabled {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            enabled: false,
+        },
+        Operation::SetClipEnabled {
+            clip: ClipId(1),
+            enabled: false,
+        },
+        Operation::SetClipEnabledCurve {
+            clip: ClipId(1),
+            curve: Some(AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                }],
+            }),
+        },
+        Operation::CopyClipAttributes {
+            from_clip: ClipId(1),
+            to_clip: ClipId(2),
+            names: None,
+            include_keyframes: true,
         },
     ];
 
@@ -2414,6 +2485,8 @@ fn marker_operations_validate_sort_move_remove_and_atomic_rejection() {
 fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
     let mut doc = document_with_one_clip();
     let effect = Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(7),
         name: "brightness".to_owned(),
         parameters: BTreeMap::new(),
@@ -2432,6 +2505,8 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
         Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(7),
                 name: "opacity".to_owned(),
                 parameters: BTreeMap::new(),
@@ -2491,6 +2566,8 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
         Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(8),
                 name: "blur".to_owned(),
                 parameters: BTreeMap::new(),
@@ -2664,6 +2741,8 @@ fn legacy_color_grade_add_is_canonical_before_history_journal_and_save() {
     let submitted = Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "color_grade".to_owned(),
             parameters: BTreeMap::from([
@@ -2748,6 +2827,8 @@ fn legacy_color_grade_in_batch_is_canonical_before_plan_history() {
         Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(7),
                 name: "color_grade".to_owned(),
                 parameters: BTreeMap::new(),
@@ -2797,6 +2878,8 @@ fn legacy_serialized_color_grade_journal_replays_to_canonical_state() {
     let legacy = JournalCommand::Do(Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "color_grade".to_owned(),
             parameters: BTreeMap::new(),
@@ -2833,6 +2916,8 @@ fn document_with_neutral_primary_correction() -> Document {
     Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "primary_correction".to_owned(),
             parameters: descriptor
@@ -2907,11 +2992,15 @@ fn primary_correction_operations_validate_bounds_and_keyframes() {
                 at: TimeCode::ZERO,
                 value: -100,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(20),
                 value: 100,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             },
         ],
     };
@@ -2941,6 +3030,8 @@ fn primary_correction_operations_validate_bounds_and_keyframes() {
                     at: TimeCode::ZERO,
                     value: 10_001,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         }
@@ -2957,6 +3048,8 @@ fn primary_correction_batch_is_undoable_and_redoable() {
     let add = Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::new(),
@@ -3009,6 +3102,8 @@ fn effect_keyframes_are_exact_validated_and_atomically_clearable() {
     Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "brightness".to_owned(),
             parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(25))]),
@@ -3023,11 +3118,15 @@ fn effect_keyframes_are_exact_validated_and_atomically_clearable() {
                 at: TimeCode::ZERO,
                 value: -100,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(10),
                 value: 100,
                 interpolation: KeyframeInterpolation::EaseInOut,
+                tangent_in: 0,
+                tangent_out: 0,
             },
         ],
     };
@@ -3043,19 +3142,35 @@ fn effect_keyframes_are_exact_validated_and_atomically_clearable() {
     assert_eq!(effect.integer_parameter_at("percent", TimeCode(5)), Some(0));
     assert_eq!(effect.keyframes.get("percent"), Some(&curve));
 
+    // MO1 R13: negative and past-the-end keys now pass ordered-only
+    // validation (see the au4 keep-outside matrix); unordered, out-of-range,
+    // and empty curves are still refused.
     for invalid in [
         AutomationCurve {
-            keyframes: vec![Keyframe {
-                at: TimeCode(30),
-                value: 0,
-                interpolation: KeyframeInterpolation::Linear,
-            }],
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(5),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(5),
+                    value: 50,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
         },
         AutomationCurve {
             keyframes: vec![Keyframe {
                 at: TimeCode(5),
                 value: 101,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             }],
         },
         AutomationCurve { keyframes: vec![] },
@@ -3097,6 +3212,8 @@ fn cube_lut_requires_a_non_empty_text_path_and_preserves_it() {
         Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(8),
                 name: "cube_lut".to_owned(),
                 parameters: BTreeMap::from([(
@@ -3114,6 +3231,8 @@ fn cube_lut_requires_a_non_empty_text_path_and_preserves_it() {
     Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(8),
             name: "cube_lut".to_owned(),
             parameters: BTreeMap::from([
@@ -3139,6 +3258,8 @@ fn cube_lut_requires_a_non_empty_text_path_and_preserves_it() {
 /// One AU2 §2.1 audio node declaring a static `lookahead_milliseconds`.
 fn lookahead_effect(id: u64, name: &str, milliseconds: i64) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: BTreeMap::from([(
@@ -3154,6 +3275,8 @@ fn lookahead_effect(id: u64, name: &str, milliseconds: i64) -> Effect {
 fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically() {
     let mut doc = document_with_one_clip();
     let gain = Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(1),
         name: "audio_gain".to_owned(),
         parameters: BTreeMap::from([("gain_tenth_db".to_owned(), ParamValue::Integer(-30))]),
@@ -3164,6 +3287,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
                     at: TimeCode(20),
                     value: -60,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         )]),
@@ -3200,6 +3325,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "brightness".to_owned(),
                 parameters: BTreeMap::new(),
@@ -3214,6 +3341,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_gain".to_owned(),
                 parameters: BTreeMap::new(),
@@ -3224,6 +3353,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
                             at: doc.duration,
                             value: 0,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         }],
                     },
                 )]),
@@ -3262,6 +3393,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_gain".to_owned(),
                 parameters: BTreeMap::new(),
@@ -3272,6 +3405,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
                             at: TimeCode(20),
                             value: 1,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         }],
                     },
                 )]),
@@ -3285,6 +3420,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_compressor".to_owned(),
                 parameters: BTreeMap::new(),
@@ -3295,6 +3432,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
                             at: TimeCode(20),
                             value: 40,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         }],
                     },
                 )]),
@@ -3308,6 +3447,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_true_peak_limiter".to_owned(),
                 parameters: BTreeMap::new(),
@@ -3318,6 +3459,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
                             at: TimeCode(20),
                             value: 3,
                             interpolation: KeyframeInterpolation::Hold,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         }],
                     },
                 )]),
@@ -3340,12 +3483,15 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
 /// AU2 §5.4: the master chain carries the bus rules with master-flavoured
 /// errors, and every rejection is atomic.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain() {
     let mut doc = document_with_one_clip();
     Operation::SetAudioMaster {
         master: AudioMaster {
             gain_tenth_db: -20,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_true_peak_limiter".to_owned(),
                 parameters: BTreeMap::from([(
@@ -3402,6 +3548,8 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
             AudioMaster {
                 gain_tenth_db: 0,
                 effects: vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "audio_ducking".to_owned(),
                     parameters: BTreeMap::new(),
@@ -3415,6 +3563,8 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
             AudioMaster {
                 gain_tenth_db: 0,
                 effects: vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "brightness".to_owned(),
                     parameters: BTreeMap::new(),
@@ -3456,6 +3606,8 @@ fn a_pre_au2_document_survives_a_load_and_save_byte_identically() {
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_gain".to_owned(),
                 parameters: BTreeMap::from([(
@@ -3689,6 +3841,8 @@ fn clip_gain_envelope_validates_bounds_titles_and_freezes_atomically() {
                 at: TimeCode(*at),
                 value: *value,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             })
             .collect(),
     };
@@ -3869,6 +4023,8 @@ fn track_automation_validates_its_vocabulary_ranges_and_project_bound_atomically
                 at: TimeCode(*at),
                 value: *value,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             })
             .collect(),
     };
@@ -4171,6 +4327,8 @@ fn add_and_remove_track_are_validated_and_atomic() {
         kind: TrackKind::Video,
         sync_lock: true,
         clips: vec![Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(99),
             asset: AssetId(99),
             source_range: TimeCode(0)..TimeCode(1),
@@ -4442,6 +4600,8 @@ fn unsorted_input_document_is_rejected() {
     let fps = Rational::new(30, 1).unwrap();
     let media = asset(1, fps, 300);
     let later = Clip {
+        enabled: true,
+        enabled_curve: None,
         id: ClipId(1),
         asset: AssetId(1),
         source_range: TimeCode(0)..TimeCode(10),
@@ -4457,6 +4617,8 @@ fn unsorted_input_document_is_rejected() {
         audio_gain_curve: None,
     };
     let earlier = Clip {
+        enabled: true,
+        enabled_curve: None,
         id: ClipId(2),
         timeline_start: TimeCode(0),
         ..later.clone()
@@ -6515,5 +6677,236 @@ fn in1_a_hand_edited_assumed_from_is_rejected_on_load() {
             .to_string()
             .contains("colour confidence must be in 0..=10000 basis points"),
         "unexpected error: {error}"
+    );
+}
+
+// ============================================================================
+// MO1 Part A3b — R11/R12: the `ThreePointEdit` composition row plus the R11
+// kernel property tests (shift identity, key-count preservation).
+// ============================================================================
+
+fn linear_curve(points: &[(i64, i64)]) -> AutomationCurve {
+    AutomationCurve {
+        keyframes: points
+            .iter()
+            .map(|(at, value)| Keyframe {
+                at: TimeCode(*at),
+                value: *value,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            })
+            .collect(),
+    }
+}
+
+fn hold_curve(points: &[(i64, i64)]) -> AutomationCurve {
+    AutomationCurve {
+        keyframes: points
+            .iter()
+            .map(|(at, value)| Keyframe {
+                at: TimeCode(*at),
+                value: *value,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            })
+            .collect(),
+    }
+}
+
+/// R12 `ThreePointEdit` row, covered by composition: the insert splits the
+/// straddled clip at the record point, so both halves route through R11 like
+/// `SplitClip` — and the post-split ripple moves them without a rebase.
+#[test]
+fn three_point_insert_routes_split_halves_through_keep_outside() {
+    let mut doc = document_with_butt_joined_clips();
+    // Clip 1: source 50..100, 50 frames at 0..50.
+    let colour = linear_curve(&[(0, 0), (49, 4_720)]);
+    let toggle = hold_curve(&[(0, 1), (24, 1), (25, 0), (49, 0)]);
+    let ramp = linear_curve(&[(0, 0), (49, -490)]);
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: Some(toggle.clone()),
+            id: EffectId(1),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                ParamValue::Integer(0),
+            )]),
+            keyframes: BTreeMap::from([("exposure_milli_stops".to_owned(), colour.clone())]),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    doc.tracks[0].clips[0].enabled_curve = Some(toggle.clone());
+    Operation::SetClipGainEnvelope {
+        clip: ClipId(1),
+        curve: Some(ramp.clone()),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    Operation::ThreePointEdit {
+        track: TrackId(1),
+        asset: AssetId(1),
+        source_in: Some(TimeCode(300)),
+        source_out: Some(TimeCode(310)),
+        timeline_in: Some(TimeCode(25)),
+        timeline_out: None,
+        mode: ThreePointMode::Insert,
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    let half = |doc: &Document, source_start: i64| {
+        doc.tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .find(|clip| clip.source_range.start == TimeCode(source_start))
+            .unwrap()
+            .clone()
+    };
+    // Left half: split with `delta_local` zero, never rippled — identity.
+    let left = half(&doc, 50);
+    assert_eq!(left.timeline_start, TimeCode(0));
+    assert_eq!(left.effects[0].keyframes["exposure_milli_stops"], colour);
+    assert_eq!(left.effects[0].enabled_curve.clone().unwrap(), toggle);
+    assert_eq!(left.enabled_curve.clone().unwrap(), toggle);
+    // Right half: split with offset 25, then rippled 25 → 35 with no rebase.
+    let right = half(&doc, 75);
+    assert_eq!(right.timeline_start, TimeCode(35));
+    assert_eq!(
+        right.effects[0].keyframes["exposure_milli_stops"]
+            .keyframes
+            .iter()
+            .map(|key| (key.at.0, key.value))
+            .collect::<Vec<_>>(),
+        vec![(-25, 0), (24, 4_720)]
+    );
+    for local in 0..25 {
+        let before = TimeCode(local + 25);
+        let at = TimeCode(local);
+        assert_eq!(
+            right.effects[0].keyframes["exposure_milli_stops"].value_at(at),
+            colour.value_at(before),
+            "colour at right-local {local}"
+        );
+        assert_eq!(
+            right.audio_gain_curve.as_ref().unwrap().value_at(at),
+            ramp.value_at(before),
+            "envelope at right-local {local}"
+        );
+        assert_eq!(
+            right.enabled_curve.as_ref().unwrap().value_at(at),
+            toggle.value_at(before),
+            "clip toggle at right-local {local}"
+        );
+    }
+    doc.validate().unwrap();
+}
+
+proptest! {
+    /// MO1 R11: shifting by zero is the identity — keys, values, shape.
+    #[test]
+    fn keep_outside_shift_by_zero_is_identity(
+        pairs in prop::collection::vec((-500_i64..500, -1_000_000_i64..1_000_000), 1..8),
+    ) {
+        let curve = unique_curve(&pairs);
+        prop_assert_eq!(
+            kinewright_core::rebase_clip_curve_keep_outside(&curve, TimeCode::ZERO),
+            curve
+        );
+    }
+
+    /// MO1 R11: a shift preserves the key count and every payload byte,
+    /// moving positions by `-delta_local` (signed, saturating).
+    #[test]
+    fn keep_outside_shift_preserves_count_and_payload(
+        pairs in prop::collection::vec((-500_i64..500, -1_000_000_i64..1_000_000), 1..8),
+        delta in -500_i64..500,
+    ) {
+        let curve = unique_curve(&pairs);
+        let shifted =
+            kinewright_core::rebase_clip_curve_keep_outside(&curve, TimeCode(delta));
+        prop_assert_eq!(shifted.keyframes.len(), curve.keyframes.len());
+        for (got, want) in shifted.keyframes.iter().zip(curve.keyframes.iter()) {
+            prop_assert_eq!(got.at.0, want.at.0.saturating_sub(delta));
+            prop_assert_eq!(got.value, want.value);
+            prop_assert_eq!(got.interpolation, want.interpolation);
+            prop_assert_eq!(got.tangent_in, want.tangent_in);
+            prop_assert_eq!(got.tangent_out, want.tangent_out);
+        }
+    }
+}
+
+fn unique_curve(pairs: &[(i64, i64)]) -> AutomationCurve {
+    let mut deduped = BTreeMap::new();
+    for (at, value) in pairs {
+        deduped.insert(*at, *value);
+    }
+    AutomationCurve {
+        keyframes: deduped
+            .into_iter()
+            .enumerate()
+            .map(|(index, (at, value))| Keyframe {
+                at: TimeCode(at),
+                value,
+                interpolation: if index % 2 == 0 {
+                    KeyframeInterpolation::Linear
+                } else {
+                    KeyframeInterpolation::Hold
+                },
+                tangent_in: value % 7,
+                tangent_out: value % 13,
+            })
+            .collect(),
+    }
+}
+
+/// MO1 R18: `SetClipEnabledCurve` follows the AU4 nullable-required wire
+/// pattern exactly — omission fails, `null` clears, the schema requires it.
+#[test]
+fn clip_enabled_curve_follows_the_nullable_required_wire_pattern() {
+    let omitted = serde_json::json!({ "SetClipEnabledCurve": { "clip": 1 } });
+    let error = serde_json::from_value::<Operation>(omitted).unwrap_err();
+    assert!(
+        error.to_string().contains("missing field `curve`"),
+        "an omitted curve must be an error, got {error}"
+    );
+    assert_eq!(
+        serde_json::from_value::<Operation>(serde_json::json!({
+            "SetClipEnabledCurve": { "clip": 1, "curve": null }
+        }))
+        .unwrap(),
+        Operation::SetClipEnabledCurve {
+            clip: ClipId(1),
+            curve: None,
+        }
+    );
+
+    let schema = serde_json::to_value(schemars::schema_for!(Operation)).unwrap();
+    let variants = schema["oneOf"].as_array().expect("a oneOf of variants");
+    let payload = variants
+        .iter()
+        .find(|variant| variant["properties"].get("SetClipEnabledCurve").is_some())
+        .unwrap_or_else(|| panic!("SetClipEnabledCurve is a variant"))
+        .get("properties")
+        .and_then(|properties| properties.get("SetClipEnabledCurve"))
+        .expect("the variant's payload");
+    let required = payload["required"]
+        .as_array()
+        .expect("a published required list");
+    assert!(
+        required.iter().any(|entry| entry == "curve"),
+        "SetClipEnabledCurve must publish curve as required, got {required:?}"
+    );
+    // The null branch survives `RequiredNullableCurve` (AU4 §2.5 rule 28).
+    let curve_schema = &payload["properties"]["curve"];
+    assert!(
+        curve_schema.to_string().contains("null"),
+        "the curve schema must keep its null branch, got {curve_schema}"
     );
 }

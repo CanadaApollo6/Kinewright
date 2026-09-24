@@ -18,8 +18,9 @@ use kinewright_core::{
     AssetId, ClipContent, ClipId, ColorStage, Command, Document, EffectId, IncidentCode,
     IncidentEvidence, IncidentObservation, IncidentSubject, LabelIncident, LutAsset, LutAssetId,
     MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult,
-    MediaCacheFamily, MediaCacheFamilyStatus, MediaError, MediaSourceFingerprint, Operation,
-    RejectionIncident, RelinkCandidate, ThreePointMode, TimeCode, TimelineRevision, TrackId,
+    MediaCacheFamily, MediaCacheFamilyStatus, MediaError, MediaKind, MediaSourceFingerprint,
+    Operation, RejectionIncident, RelinkCandidate, ThreePointMode, TimeCode, TimelineRevision,
+    TrackId,
 };
 use kinewright_media::{LutAssetImport, LutStore};
 
@@ -601,13 +602,17 @@ pub(crate) const fn source_edit_is_eligible(
 #[must_use]
 pub(crate) const fn source_edit_controls_are_enabled(
     state: SourceDisplayState,
+    kind: MediaKind,
     duration: i64,
     source_in: i64,
     source_out: i64,
     route_valid: bool,
     revalidation_pending: bool,
 ) -> bool {
-    !revalidation_pending
+    // N5 K5: stills are placed from the bin — Core's R9 refuses three-point
+    // edits on them, so Source Insert/Overwrite never arms for `Image`.
+    !matches!(kind, MediaKind::Image)
+        && !revalidation_pending
         && source_edit_is_eligible(state, duration, source_in, source_out, route_valid)
 }
 
@@ -960,6 +965,7 @@ impl KinewrightApp {
                 "Media",
                 &[
                     "mp4", "mov", "mkv", "webm", "avi", "wav", "mp3", "flac", "ogg", "m4a", "aac",
+                    "png", "jpg", "jpeg", "webp", "bmp", "tiff",
                 ],
             )
             .pick_file()
@@ -2463,11 +2469,37 @@ mod tests {
         ));
         assert!(!source_edit_controls_are_enabled(
             SourceDisplayState::OnlineVerified,
+            MediaKind::Video,
             120,
             0,
             24,
             true,
             true,
+        ));
+    }
+
+    /// N5 K5: stills are never offered Source Insert/Overwrite — Core's R9
+    /// refuses three-point edits on them, so the buttons stay off and the
+    /// bin's add-to-timeline is the only placement.
+    #[test]
+    fn stills_are_never_offered_source_insert_or_overwrite() {
+        assert!(!source_edit_controls_are_enabled(
+            SourceDisplayState::OnlineVerified,
+            MediaKind::Image,
+            1,
+            0,
+            0,
+            true,
+            false,
+        ));
+        assert!(source_edit_controls_are_enabled(
+            SourceDisplayState::OnlineVerified,
+            MediaKind::Video,
+            120,
+            0,
+            24,
+            true,
+            false,
         ));
     }
 
@@ -2890,6 +2922,8 @@ mod tests {
                 kind: kinewright_core::TrackKind::Video,
                 sync_lock: true,
                 clips: vec![kinewright_core::Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: kinewright_core::ClipId(10),
                     asset: AssetId(1),
                     timeline_start: TimeCode::ZERO,
@@ -2926,6 +2960,8 @@ mod tests {
 
     fn effect(id: u64, name: &str) -> kinewright_core::Effect {
         kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters: std::collections::BTreeMap::new(),

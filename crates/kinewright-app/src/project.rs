@@ -652,6 +652,11 @@ pub(crate) struct ProjectSession {
     /// how Delete/Backspace tells "remove this key" from "delete this clip" —
     /// the matte overlay's `report_expanded` pattern, one frame old.
     pub(crate) envelope_hover: Option<crate::timeline_ui::EnvelopeHover>,
+    /// MO1 R23: the key-lane diamond the timeline saw under the pointer at
+    /// the end of the last frame. The E49 pattern for effect keys — session
+    /// state, rewritten every frame the timeline draws, taken one-shot by
+    /// `keyboard_shortcuts`.
+    pub(crate) key_lane_hover: Option<crate::timeline_ui::KeyLaneHover>,
     /// The IN2 investigator state for this project: session queue, running
     /// session, and per-project mutes. Always present after `create`, with
     /// the mutes starting from the opened document's; session state lives
@@ -1030,6 +1035,7 @@ impl ProjectSession {
             timeline_scroll_target: 0.0,
             show_envelopes: true,
             envelope_hover: None,
+            key_lane_hover: None,
             investigator: Some(InvestigatorSession::with_muted_codes(
                 document
                     .investigator
@@ -1816,6 +1822,8 @@ mod tests {
     /// bound to it.
     fn look_document(asset: LutAsset) -> Document {
         let effect = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::from([(
@@ -1851,6 +1859,8 @@ mod tests {
             ..Document::default()
         };
         document.tracks[0].clips.push(Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(1),
             asset: AssetId(1),
             timeline_start: TimeCode::ZERO,
@@ -2392,6 +2402,8 @@ mod tests {
         let mut clips = Vec::with_capacity(clip_count);
         for index in 0..clip_count {
             clips.push(Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(index as u64 + 1),
                 asset: AssetId(1),
                 source_range: TimeCode::ZERO..TimeCode(30),

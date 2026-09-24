@@ -441,6 +441,8 @@ fn apply_in_order(document: &mut Document, operations: &[Operation]) {
 
 fn media_clip(spec: &kinewright_core::Au6ClipSpec) -> Clip {
     Clip {
+        enabled: true,
+        enabled_curve: None,
         id: spec.clip,
         asset: spec.asset,
         source_range: spec.range(),

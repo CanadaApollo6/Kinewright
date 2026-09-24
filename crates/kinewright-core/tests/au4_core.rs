@@ -7,13 +7,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crossbeam_channel::Receiver;
 use kinewright_core::{
-    AssetId, AudioBus, AudioBusId, AudioMaster, AudioMix, AutomationCurve, Clip, ClipId,
-    ColorContext, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect, EffectId, FrameTexture,
-    Keyframe, KeyframeInterpolation, MediaAsset, MediaCatalog, MediaEvent, MediaKind,
-    MediaSourceFingerprint, OpError, Operation, ParamValue, Playback, Rational, RelinkCandidate,
-    TRACK_AUTOMATION_PARAMETERS, TimeCode, Track, TrackId, TrackKind, TrackMix,
-    clamp_project_curve, envelope_coalesce_key, is_hold_only_parameter, qa_document,
-    rebase_clip_curve, track_automation_coalesce_key,
+    AssetId, AudioBus, AudioBusId, AudioMaster, AudioMix, AutomationCurve, BatchError, Clip,
+    ClipId, ColorContext, Command, Core, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect, EffectId,
+    Event, FrameTexture, Keyframe, KeyframeInterpolation, MediaAsset, MediaCatalog, MediaEvent,
+    MediaKind, MediaSourceFingerprint, OpError, Operation, ParamValue, Playback, Query,
+    QueryResult, Rational, RelinkCandidate, TRACK_AUTOMATION_PARAMETERS, TimeCode,
+    TimelineRevision, Track, TrackId, TrackKind, TrackMix, apply_batch, clamp_project_curve,
+    envelope_coalesce_key, is_hold_only_parameter, qa_document, rebase_clip_curve,
+    track_automation_coalesce_key,
 };
 
 fn fps() -> Rational {
@@ -101,6 +102,8 @@ fn linear(points: &[(i64, i64)]) -> AutomationCurve {
                 at: TimeCode(*at),
                 value: *value,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             })
             .collect(),
     }
@@ -114,6 +117,8 @@ fn shaped(points: &[(i64, i64, KeyframeInterpolation)]) -> AutomationCurve {
                 at: TimeCode(*at),
                 value: *value,
                 interpolation: *interpolation,
+                tangent_in: 0,
+                tangent_out: 0,
             })
             .collect(),
     }
@@ -171,6 +176,8 @@ fn track_entry(doc: &Document, track: TrackId) -> Option<&TrackMix> {
 
 fn keyed_effect(id: u64, name: &str, curve: &AutomationCurve) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: "audio_eq".to_owned(),
         parameters: BTreeMap::new(),
@@ -970,6 +977,8 @@ fn clip_with_envelope_and_colour_curve() -> Document {
     Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([(
@@ -1124,22 +1133,20 @@ fn both_trim_edges_preserve_the_boundary_value_and_no_longer_fail() {
         envelope_at(&base, ClipId(1), 59)
     );
 
-    // A **written** over-running curve still fails: the invariant survives.
+    // MO1 R13 supersedes the AU4 invariant for keep-outside owners: a
+    // **written** over-running curve on a video/colour-node effect now passes
+    // (ordered-only, no outside check), so GUI read-modify-write via
+    // `SetEffectKeyframes` on trimmed clips works. Audio owners still refuse
+    // (`bus_effect_curves_still_reject_negative_positions` in `au2_core`).
     let mut doc = base.clone();
-    assert!(matches!(
-        Operation::SetEffectKeyframes {
-            clip: ClipId(1),
-            effect: EffectId(1),
-            name: "exposure_milli_stops".to_owned(),
-            curve: linear(&[(0, 0), (60, 4_720)]),
-        }
-        .apply(&mut doc),
-        Err(OpError::EffectKeyframeOutsideClip {
-            at: TimeCode(60),
-            duration: TimeCode(60),
-            ..
-        })
-    ));
+    Operation::SetEffectKeyframes {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: "exposure_milli_stops".to_owned(),
+        curve: linear(&[(0, 0), (60, 4_720)]),
+    }
+    .apply(&mut doc)
+    .unwrap();
 }
 
 /// AU4 §7 item A8: a left slide and a left roll reach rule 13's negative
@@ -1752,3 +1759,1741 @@ fn each_new_field_sits_at_its_declared_wire_position() {
     assert_wire_order(&doc.audio_mix.buses[0], &["gain_tenth_db", "gain_curve"]);
     assert_wire_order(&doc.audio_mix.master, &["gain_tenth_db", "gain_curve"]);
 }
+
+/// MO1 R4: clip effects accept `enabled: false` statically and an
+/// `enabled_curve` carrying 0..1 under every interpolation — non-`Hold`
+/// kinds act as a step, so no hold-only refusal applies (unlike bus/master,
+/// which always reject — see `au2_core`).
+#[test]
+fn clip_effects_accept_static_and_keyframed_enable() {
+    let mut doc = document_with_one_clip();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: false,
+            enabled_curve: None,
+            id: EffectId(1),
+            name: "brightness".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+            keyframes: BTreeMap::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(!clip(&doc, ClipId(1)).effects[0].enabled);
+    // A `Linear` 0 → 1 ramp is accepted (step semantics, not refused).
+    let mut doc = document_with_one_clip();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: Some(linear(&[(0, 0), (30, 1)])),
+            id: EffectId(1),
+            name: "brightness".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+            keyframes: BTreeMap::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(clip(&doc, ClipId(1)).effects[0].enabled_curve.is_some());
+}
+
+/// MO1 R4: `enabled_curve` values outside 0..1 are refused with the reused
+/// `EffectParamOutOfRange` (no new variant — R30).
+#[test]
+fn enabled_curve_values_outside_zero_to_one_are_refused() {
+    let mut doc = document_with_one_clip();
+    let error = Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: Some(linear(&[(0, 0), (30, 2)])),
+            id: EffectId(1),
+            name: "brightness".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+            keyframes: BTreeMap::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::EffectParamOutOfRange {
+            effect: "brightness".to_owned(),
+            name: "enabled".to_owned(),
+            min: 0,
+            max: 1,
+            actual: 2,
+        }
+    );
+}
+
+/// MO1 R13: the `Effect.enabled_curve` sibling validates ordered-only —
+/// negative positions (from a trim-in) and keys past the trimmed end pass,
+/// while empty and unordered curves are still refused.
+#[test]
+fn enabled_curve_accepts_negative_and_outside_but_not_unordered() {
+    for curve in [
+        AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(-5),
+                value: 1,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
+        },
+        linear(&[(0, 0), (60, 1)]),
+        linear(&[(-30, 0), (90, 1)]),
+    ] {
+        let mut doc = document_with_one_clip();
+        Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                enabled: true,
+                enabled_curve: Some(curve),
+                id: EffectId(1),
+                name: "brightness".to_owned(),
+                parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+                keyframes: BTreeMap::new(),
+            },
+        }
+        .apply(&mut doc)
+        .unwrap();
+    }
+    for curve in [
+        AutomationCurve { keyframes: vec![] },
+        linear(&[(30, 0), (30, 1)]),
+        linear(&[(20, 0), (10, 1)]),
+    ] {
+        let mut doc = document_with_one_clip();
+        let error = Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                enabled: true,
+                enabled_curve: Some(curve),
+                id: EffectId(1),
+                name: "brightness".to_owned(),
+                parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+                keyframes: BTreeMap::new(),
+            },
+        }
+        .apply(&mut doc)
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                OpError::InvalidEffectAutomation { ref name, .. } if name == "enabled"
+            ),
+            "unexpected {error:?}"
+        );
+    }
+}
+
+/// MO1 R13: keep-outside effect curves (video/colour-node) validate
+/// ordered-only — negative and past-the-end keys pass (trim survival),
+/// while empty and unordered curves are still refused with the reused
+/// `InvalidEffectAutomation`. Hold-only and value-range policies apply
+/// exactly as today (pinned by the existing CC3/AU2 suites).
+#[test]
+fn keep_outside_effect_curves_accept_negative_and_outside_keys() {
+    for keyframes in [
+        BTreeMap::from([("percent".to_owned(), linear(&[(-20, -50), (10, 50)]))]),
+        BTreeMap::from([("percent".to_owned(), linear(&[(0, 0), (60, 100)]))]),
+        BTreeMap::from([("percent".to_owned(), linear(&[(-30, 0), (90, 100)]))]),
+    ] {
+        let mut doc = document_with_one_clip();
+        Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                enabled: true,
+                enabled_curve: None,
+                id: EffectId(1),
+                name: "brightness".to_owned(),
+                parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+                keyframes,
+            },
+        }
+        .apply(&mut doc)
+        .unwrap();
+    }
+    for keyframes in [
+        BTreeMap::from([("percent".to_owned(), AutomationCurve { keyframes: vec![] })]),
+        BTreeMap::from([("percent".to_owned(), linear(&[(10, 0), (10, 50)]))]),
+    ] {
+        let mut doc = document_with_one_clip();
+        let error = Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                enabled: true,
+                enabled_curve: None,
+                id: EffectId(1),
+                name: "brightness".to_owned(),
+                parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+                keyframes,
+            },
+        }
+        .apply(&mut doc)
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                OpError::InvalidEffectAutomation { ref name, .. } if name == "percent"
+            ),
+            "unexpected {error:?}"
+        );
+    }
+}
+
+/// MO1 R5/R13/R18: the `Clip.enabled_curve` sibling validates ordered-only
+/// with no outside check — negative and past-the-end keys pass — and values
+/// 0..1 exactly as the R4 sibling. (A4b correction: the A3a any-value reading
+/// contradicted R5's "(values 0..1...)" and R18's "Values 0..1", which both
+/// bind; the ≥ 1 test still resolves every value at read time.) Empty and
+/// unordered curves reuse `InvalidEffectAutomation` verbatim per R30, with the
+/// clip identifier in the `effect` field; range violations reuse
+/// `EffectParamOutOfRange` the same way.
+#[test]
+fn clip_enabled_curve_accepts_any_position_and_zero_to_one_values() {
+    for curve in [
+        linear(&[(-30, 0), (90, 1)]),
+        linear(&[(0, 1), (9, 0)]),
+        AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(-5),
+                value: 1,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
+        },
+    ] {
+        let mut doc = document_with_one_clip();
+        doc.tracks[0].clips[0].enabled_curve = Some(curve);
+        doc.validate().unwrap();
+    }
+    for (curve, reason) in [
+        (
+            AutomationCurve { keyframes: vec![] },
+            "automation curve must contain at least one keyframe",
+        ),
+        (
+            linear(&[(10, 0), (10, 1)]),
+            "automation keyframes must be strictly ordered by frame",
+        ),
+    ] {
+        let mut doc = document_with_one_clip();
+        doc.tracks[0].clips[0].enabled_curve = Some(curve);
+        assert_eq!(
+            doc.validate().unwrap_err(),
+            OpError::InvalidEffectAutomation {
+                effect: "clip 1".to_owned(),
+                name: "enabled".to_owned(),
+                reason: reason.to_owned(),
+            }
+        );
+    }
+    for value in [-3, 2, 7] {
+        let mut doc = document_with_one_clip();
+        doc.tracks[0].clips[0].enabled_curve = Some(linear(&[(0, value)]));
+        assert_eq!(
+            doc.validate().unwrap_err(),
+            OpError::EffectParamOutOfRange {
+                effect: "clip 1".to_owned(),
+                name: "enabled".to_owned(),
+                min: 0,
+                max: 1,
+                actual: value,
+            }
+        );
+    }
+}
+
+// ============================================================================
+// MO1 Part A3b — R11/R12 owner-split survival. Keep-outside owners (video and
+// colour-node effect curves, `Effect.enabled_curve`, `Clip.enabled_curve`)
+// shift by `-delta_local`, drop nothing, insert nothing; audio owners keep
+// AU4 §2.4 verbatim. One contract test per R12 row: keep-outside byte-exact,
+// audio AU4-verbatim.
+// ============================================================================
+
+fn clip_mut(doc: &mut Document, id: ClipId) -> &mut Clip {
+    doc.tracks
+        .iter_mut()
+        .flat_map(|track| &mut track.clips)
+        .find(|clip| clip.id == id)
+        .expect("clip")
+}
+
+fn key_positions(curve: &AutomationCurve) -> Vec<(i64, i64)> {
+    curve
+        .keyframes
+        .iter()
+        .map(|key| (key.at.0, key.value))
+        .collect()
+}
+
+/// A hold toggle over the 60-frame fixture clip: on for 0..=30, off after.
+fn hold_toggle() -> AutomationCurve {
+    shaped(&[
+        (0, 1, KeyframeInterpolation::Hold),
+        (30, 1, KeyframeInterpolation::Hold),
+        (31, 0, KeyframeInterpolation::Hold),
+        (59, 0, KeyframeInterpolation::Hold),
+    ])
+}
+
+fn effect_toggle(doc: &Document, id: ClipId) -> AutomationCurve {
+    clip(doc, id).effects[0]
+        .enabled_curve
+        .clone()
+        .expect("effect toggle")
+}
+
+fn clip_toggle(doc: &Document, id: ClipId) -> AutomationCurve {
+    clip(doc, id).enabled_curve.clone().expect("clip toggle")
+}
+
+/// The A1 fixture plus both R11 sibling curves (hand-edit paths — no op
+/// writes them until A4's R16/R18 — validated ordered-only per R13).
+fn siblinged() -> Document {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    clip_mut(&mut doc, ClipId(1)).effects[0].enabled_curve = Some(hold_toggle());
+    clip_mut(&mut doc, ClipId(1)).enabled_curve = Some(hold_toggle());
+    doc.validate().unwrap();
+    doc
+}
+
+/// R12 `TrimClip` row: shift-only; trimming in then out restores every
+/// keep-outside curve byte-identically (the slice's headline gate).
+#[test]
+fn trim_shifts_keep_outside_keys_and_round_trips_byte_identical() {
+    let base = siblinged();
+
+    let mut doc = base.clone();
+    Operation::TrimClip {
+        clip: ClipId(1),
+        new_source: TimeCode(25)..TimeCode(60),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(clip(&doc, ClipId(1)).timeline_start, TimeCode(25));
+    // `delta_local` +25: every keep-outside key moves −25, values and shape
+    // untouched — including the negative head key R13 legalises.
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(-25, 0), (34, 4_720)]
+    );
+    assert_eq!(
+        key_positions(&effect_toggle(&doc, ClipId(1))),
+        vec![(-25, 1), (5, 1), (6, 0), (34, 0)]
+    );
+    assert_eq!(
+        key_positions(&clip_toggle(&doc, ClipId(1))),
+        vec![(-25, 1), (5, 1), (6, 0), (34, 0)]
+    );
+    // Audio half: AU4 drop+seam preserves the project-frame value.
+    for project_frame in 25..60 {
+        assert_eq!(
+            envelope_at(&doc, ClipId(1), project_frame),
+            envelope_at(&base, ClipId(1), project_frame),
+            "envelope at project frame {project_frame}"
+        );
+    }
+    doc.validate().unwrap();
+
+    // Trim back out: `delta_local` −25 restores the bytes exactly.
+    Operation::TrimClip {
+        clip: ClipId(1),
+        new_source: TimeCode(0)..TimeCode(60),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+    doc.validate().unwrap();
+}
+
+/// R12 `SplitClip` row: both halves receive the full curve shifted to their
+/// local origin — left `delta_local` zero, right the split offset.
+#[test]
+fn split_gives_both_halves_the_full_shifted_curve() {
+    let base = siblinged();
+    let mut doc = base.clone();
+    Operation::SplitClip {
+        clip: ClipId(1),
+        at: TimeCode(20),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let right = ClipId(2);
+
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+    assert_eq!(
+        key_positions(&colour_curve(&doc, right)),
+        vec![(-20, 0), (39, 4_720)]
+    );
+    assert_eq!(
+        key_positions(&effect_toggle(&doc, right)),
+        vec![(-20, 1), (10, 1), (11, 0), (39, 0)]
+    );
+    assert_eq!(
+        key_positions(&clip_toggle(&doc, right)),
+        vec![(-20, 1), (10, 1), (11, 0), (39, 0)]
+    );
+    // Audio half: the AU4 seam preserves the project-frame value on both.
+    for project_frame in 0..60 {
+        let id = if project_frame < 20 { ClipId(1) } else { right };
+        assert_eq!(
+            envelope_at(&doc, id, project_frame),
+            envelope_at(&base, ClipId(1), project_frame),
+            "envelope at project frame {project_frame}"
+        );
+    }
+    doc.validate().unwrap();
+}
+
+/// R12 `RollEdit` / `SlideClip` rows: shift-only on both touched clips with
+/// their signed AU4 R34 deltas; the slid middle clip is never rebased.
+#[test]
+fn slide_and_roll_shift_only_the_right_neighbour() {
+    let mut base = document_with_three_clips();
+    for (index, id) in [ClipId(1), ClipId(2), ClipId(3)].iter().enumerate() {
+        Operation::AddEffect {
+            clip: *id,
+            effect: Effect {
+                enabled: true,
+                enabled_curve: Some(hold_toggle()),
+                id: EffectId(index as u64 + 1),
+                name: "primary_correction".to_owned(),
+                parameters: BTreeMap::from([(
+                    "exposure_milli_stops".to_owned(),
+                    ParamValue::Integer(0),
+                )]),
+                keyframes: BTreeMap::from([(
+                    "exposure_milli_stops".to_owned(),
+                    linear(&[(0, 0), (59, 4_720)]),
+                )]),
+            },
+        }
+        .apply(&mut base)
+        .unwrap();
+        clip_mut(&mut base, *id).enabled_curve = Some(hold_toggle());
+    }
+    base.validate().unwrap();
+
+    // Slide the middle clip 60 → 45: left and middle keep-outside curves are
+    // byte-identical, the right shifts by −(−15) = +15.
+    let mut doc = base.clone();
+    Operation::SlideClip {
+        clip: ClipId(2),
+        to: TimeCode(45),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    for id in [ClipId(1), ClipId(2)] {
+        assert_eq!(colour_curve(&doc, id), colour_curve(&base, id));
+        assert_eq!(effect_toggle(&doc, id), effect_toggle(&base, id));
+        assert_eq!(clip_toggle(&doc, id), clip_toggle(&base, id));
+    }
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(3))),
+        vec![(15, 0), (74, 4_720)]
+    );
+    assert_eq!(
+        key_positions(&effect_toggle(&doc, ClipId(3))),
+        vec![(15, 1), (45, 1), (46, 0), (74, 0)]
+    );
+    doc.validate().unwrap();
+
+    // A left roll to 40: the left clip is untouched, the right shifts +20.
+    let mut doc = base.clone();
+    Operation::RollEdit {
+        left_clip: ClipId(1),
+        right_clip: ClipId(2),
+        to: TimeCode(40),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(2))),
+        vec![(20, 0), (79, 4_720)]
+    );
+    assert_eq!(
+        key_positions(&clip_toggle(&doc, ClipId(2))),
+        vec![(20, 1), (50, 1), (51, 0), (79, 0)]
+    );
+    doc.validate().unwrap();
+
+    // A right roll to 75: the right clip shifts −15, keys past the old head
+    // included — nothing is dropped.
+    let mut doc = base.clone();
+    Operation::RollEdit {
+        left_clip: ClipId(1),
+        right_clip: ClipId(2),
+        to: TimeCode(75),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(2))),
+        vec![(-15, 0), (44, 4_720)]
+    );
+    assert_eq!(
+        key_positions(&effect_toggle(&doc, ClipId(2))),
+        vec![(-15, 1), (15, 1), (16, 0), (44, 0)]
+    );
+    doc.validate().unwrap();
+}
+
+/// R12 `SetClipSpeed` row: keep-outside curves are untouched (`delta_local`
+/// zero plus no drop equals identity); the audio envelope keeps its AU4
+/// destructive-on-increase behaviour.
+#[test]
+fn speed_change_leaves_keep_outside_curves_untouched() {
+    let base = siblinged();
+
+    let mut doc = base.clone();
+    Operation::SetClipSpeed {
+        clip: ClipId(1),
+        speed_percent: 200,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(doc.duration, TimeCode(30));
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+    // Audio half: AU4 R42 — inside keys plus the new-duration seam.
+    assert_eq!(
+        key_positions(&envelope(&doc, ClipId(1))),
+        vec![(0, 0), (29, -290)]
+    );
+    doc.validate().unwrap();
+
+    // Slowing down lengthens: keep-outside identity, audio inserts nothing.
+    let mut doc = base.clone();
+    Operation::SetClipSpeed {
+        clip: ClipId(1),
+        speed_percent: 50,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(doc.duration, TimeCode(120));
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(envelope(&doc, ClipId(1)), envelope(&base, ClipId(1)));
+    doc.validate().unwrap();
+}
+
+/// R12 `RelinkAsset` row: shift-only with `delta_local` zero — identity for
+/// every clip curve, keep-outside and audio alike.
+#[test]
+fn relink_keeps_every_clip_curve_byte_identical() {
+    let mut doc = siblinged();
+    let before = doc.clone();
+    let current = doc.asset(AssetId(1)).unwrap().clone();
+    Operation::RelinkAsset {
+        asset: AssetId(1),
+        candidate: RelinkCandidate {
+            path: std::path::PathBuf::from("relinked.mp4"),
+            kind: current.kind,
+            fps: current.fps,
+            duration: current.duration,
+            resolution: current.resolution,
+            fingerprint: MediaSourceFingerprint {
+                content_sha256: Some("a".repeat(64)),
+                byte_len: Some(4_096),
+            },
+        },
+        allow_unverified_source: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&before, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&before, ClipId(1))
+    );
+    assert_eq!(
+        clip_toggle(&doc, ClipId(1)),
+        clip_toggle(&before, ClipId(1))
+    );
+    assert_eq!(envelope(&doc, ClipId(1)), envelope(&before, ClipId(1)));
+    doc.validate().unwrap();
+}
+
+/// R12 `ReplaceClip` / `FitToFill` rows: every clip curve kept verbatim, no
+/// rebase — new footage under the old move.
+#[test]
+fn replace_and_fit_to_fill_keep_every_curve_verbatim() {
+    let base = siblinged();
+
+    let mut doc = base.clone();
+    Operation::AddAsset {
+        asset: asset(2, "asset-2", 300, fps()),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::ReplaceClip {
+        clip: ClipId(1),
+        asset: AssetId(2),
+        source: TimeCode(100)..TimeCode(160),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+    assert_eq!(envelope(&doc, ClipId(1)), envelope(&base, ClipId(1)));
+    doc.validate().unwrap();
+
+    let mut doc = base.clone();
+    Operation::AddAsset {
+        asset: asset(2, "asset-2", 300, fps()),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::FitToFill {
+        clip: ClipId(1),
+        asset: AssetId(2),
+        source: TimeCode(100)..TimeCode(160),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+    assert_eq!(envelope(&doc, ClipId(1)), envelope(&base, ClipId(1)));
+    doc.validate().unwrap();
+}
+
+/// R12 `SlipClip` / `MoveClip` / `DeleteClip` rows: no curve rewrite — the
+/// local origin is unchanged, or the clip (and its curves) is gone.
+#[test]
+fn move_slip_and_delete_leave_sibling_curves_alone() {
+    let base = siblinged();
+
+    let mut doc = base.clone();
+    Operation::MoveClip {
+        clip: ClipId(1),
+        to_track: TrackId(1),
+        to: TimeCode(90),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+    assert_eq!(envelope(&doc, ClipId(1)), envelope(&base, ClipId(1)));
+
+    let mut doc = base.clone();
+    Operation::SlipClip {
+        clip: ClipId(1),
+        new_source_in: TimeCode(30),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+
+    let mut doc = base.clone();
+    Operation::DeleteClip { clip: ClipId(1) }
+        .apply(&mut doc)
+        .unwrap();
+    assert!(doc.tracks.iter().all(|track| track.clips.is_empty()));
+    doc.validate().unwrap();
+}
+
+/// R12 ripple rows: clip-local curves are untouched (local origins move with
+/// their clips); project-frame track curves keep the AU4 ripple helpers.
+#[test]
+fn ripples_move_track_curves_and_never_clip_curves() {
+    let mut base = document_with_three_clips();
+    let ride = linear(&[(0, 0), (60, -100), (70, -200), (120, -300), (179, -400)]);
+    set_track_curve(&mut base, TrackId(1), "gain_tenth_db", &ride);
+    Operation::AddEffect {
+        clip: ClipId(2),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: Some(hold_toggle()),
+            id: EffectId(1),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                ParamValue::Integer(0),
+            )]),
+            keyframes: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                linear(&[(0, 0), (59, 4_720)]),
+            )]),
+        },
+    }
+    .apply(&mut base)
+    .unwrap();
+    clip_mut(&mut base, ClipId(2)).enabled_curve = Some(hold_toggle());
+    set_envelope(&mut base, ClipId(2), &linear(&[(0, 0), (59, -590)]));
+    base.validate().unwrap();
+
+    // Ripple delete clip 1: the survivor slides 60 → 0 with byte-identical
+    // local curves; the track ride shifts per AU4 rule 22.
+    let mut doc = base.clone();
+    Operation::RippleDeleteClip { clip: ClipId(1) }
+        .apply(&mut doc)
+        .unwrap();
+    assert_eq!(clip(&doc, ClipId(2)).timeline_start, TimeCode(0));
+    assert_eq!(
+        colour_curve(&doc, ClipId(2)),
+        colour_curve(&base, ClipId(2))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(2)),
+        effect_toggle(&base, ClipId(2))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(2)), clip_toggle(&base, ClipId(2)));
+    assert_eq!(envelope(&doc, ClipId(2)), envelope(&base, ClipId(2)));
+    assert_eq!(
+        key_positions(
+            &track_entry(&doc, TrackId(1))
+                .unwrap()
+                .gain_curve
+                .clone()
+                .unwrap()
+        ),
+        vec![(0, -100), (10, -200), (60, -300), (119, -400)]
+    );
+    doc.validate().unwrap();
+
+    // Ripple insert at 60: clips at/after the point shift right, curves ride.
+    let mut doc = base.clone();
+    Operation::RippleInsertGap {
+        track: TrackId(1),
+        at: TimeCode(60),
+        duration: TimeCode(15),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(clip(&doc, ClipId(2)).timeline_start, TimeCode(75));
+    assert_eq!(
+        colour_curve(&doc, ClipId(2)),
+        colour_curve(&base, ClipId(2))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(2)),
+        effect_toggle(&base, ClipId(2))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(2)), clip_toggle(&base, ClipId(2)));
+    assert_eq!(envelope(&doc, ClipId(2)), envelope(&base, ClipId(2)));
+    assert_eq!(
+        key_positions(
+            &track_entry(&doc, TrackId(1))
+                .unwrap()
+                .gain_curve
+                .clone()
+                .unwrap()
+        ),
+        vec![(0, 0), (75, -100), (85, -200), (135, -300), (194, -400)]
+    );
+    doc.validate().unwrap();
+}
+
+/// §10 gate 1 (contract half): an eased scale push-in trimmed +20 at the head
+/// and back resolves byte-identically on keep-outside owners. (The lavapipe
+/// frame pins belong to the render part, not the core model.)
+#[test]
+fn push_in_survives_trim_in_then_out() {
+    let mut doc = document_with_one_clip();
+    let push_in = AutomationCurve {
+        keyframes: vec![
+            Keyframe {
+                at: TimeCode(10),
+                value: 100,
+                interpolation: KeyframeInterpolation::EaseInOut,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+            Keyframe {
+                at: TimeCode(50),
+                value: 120,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+        ],
+    };
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(2),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
+            keyframes: BTreeMap::from([("scale_percent".to_owned(), push_in.clone())]),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let scale = |doc: &Document| clip(doc, ClipId(1)).effects[0].keyframes["scale_percent"].clone();
+
+    Operation::TrimClip {
+        clip: ClipId(1),
+        new_source: TimeCode(20)..TimeCode(60),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        key_positions(&scale(&doc)),
+        vec![(-10, 100), (30, 120)],
+        "the eased segment shifts, it is never reshaped"
+    );
+    Operation::TrimClip {
+        clip: ClipId(1),
+        new_source: TimeCode(0)..TimeCode(60),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(scale(&doc), push_in);
+    for local in 0..60 {
+        assert_eq!(
+            scale(&doc).value_at(TimeCode(local)),
+            push_in.value_at(TimeCode(local)),
+            "resolved scale at local {local}"
+        );
+    }
+    doc.validate().unwrap();
+}
+
+/// §10 gate 2 (contract half): an eased move split mid-flight plays across
+/// the cut — both halves hold the full shifted key count.
+#[test]
+fn split_copies_keys_to_both_halves() {
+    let mut doc = document_with_one_clip();
+    let flight = AutomationCurve {
+        keyframes: vec![
+            Keyframe {
+                at: TimeCode(10),
+                value: 100,
+                interpolation: KeyframeInterpolation::EaseInOut,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+            Keyframe {
+                at: TimeCode(50),
+                value: 120,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+        ],
+    };
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(2),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
+            keyframes: BTreeMap::from([("scale_percent".to_owned(), flight.clone())]),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    Operation::SplitClip {
+        clip: ClipId(1),
+        at: TimeCode(30),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let left = clip(&doc, ClipId(1)).effects[0].keyframes["scale_percent"].clone();
+    let right = clip(&doc, ClipId(2)).effects[0].keyframes["scale_percent"].clone();
+    assert_eq!(left.keyframes.len(), 2);
+    assert_eq!(right.keyframes.len(), 2);
+    assert_eq!(left, flight);
+    assert_eq!(key_positions(&right), vec![(-20, 100), (20, 120)]);
+    for local in 0..30 {
+        assert_eq!(
+            left.value_at(TimeCode(local)),
+            flight.value_at(TimeCode(local)),
+            "left plays its own span at {local}"
+        );
+        assert_eq!(
+            right.value_at(TimeCode(local)),
+            flight.value_at(TimeCode(local + 30)),
+            "right continues the flight at {local}"
+        );
+    }
+    doc.validate().unwrap();
+}
+
+// ============================================================================
+// MO1 Part A4a — R15/R16 single-key operations on effect curves.
+// ============================================================================
+
+fn key(at: i64, value: i64) -> Keyframe {
+    Keyframe {
+        at: TimeCode(at),
+        value,
+        interpolation: KeyframeInterpolation::Linear,
+        tangent_in: 0,
+        tangent_out: 0,
+    }
+}
+
+fn upsert(doc: &mut Document, name: &str, keyframe: Keyframe) -> Result<(), OpError> {
+    Operation::UpsertEffectKeyframe {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: name.to_owned(),
+        key: keyframe,
+    }
+    .apply(doc)
+}
+
+fn remove_key(doc: &mut Document, name: &str, at: i64) -> Result<(), OpError> {
+    Operation::RemoveEffectKeyframe {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: name.to_owned(),
+        at: TimeCode(at),
+    }
+    .apply(doc)
+}
+
+/// R15: insert keeps order, re-upsert at the same frame replaces, and the
+/// operation is naturally idempotent.
+#[test]
+fn upsert_inserts_replaces_and_keeps_order() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    upsert(&mut doc, "exposure_milli_stops", key(30, 2_000)).unwrap();
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(0, 0), (30, 2_000), (59, 4_720)]
+    );
+    upsert(&mut doc, "exposure_milli_stops", key(30, 2_500)).unwrap();
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(0, 0), (30, 2_500), (59, 4_720)]
+    );
+    let once = doc.clone();
+    upsert(&mut doc, "exposure_milli_stops", key(30, 2_500)).unwrap();
+    assert_eq!(doc, once, "re-applying the same key changes nothing");
+    doc.validate().unwrap();
+}
+
+/// R15: the whole-curve chain runs per key — descriptor range, owner-class
+/// structural check (negative `at` legal on keep-outside), and names.
+#[test]
+fn upsert_validates_range_owner_class_and_names() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    let before = doc.clone();
+    let error = upsert(&mut doc, "exposure_milli_stops", key(10, 5_001)).unwrap_err();
+    assert_eq!(
+        error,
+        OpError::EffectParamOutOfRange {
+            effect: "primary_correction".to_owned(),
+            name: "exposure_milli_stops".to_owned(),
+            min: -5_000,
+            max: 5_000,
+            actual: 5_001,
+        }
+    );
+    assert_eq!(doc, before, "a rejected upsert changes nothing");
+
+    // Keep-outside owners validate ordered-only: the trimmed head key passes.
+    upsert(&mut doc, "exposure_milli_stops", key(-20, 100)).unwrap();
+    assert_eq!(key_positions(&colour_curve(&doc, ClipId(1)))[0], (-20, 100));
+    doc.validate().unwrap();
+
+    let error = upsert(&mut doc, "no_such_param", key(0, 0)).unwrap_err();
+    assert_eq!(
+        error,
+        OpError::UnknownEffectParam {
+            effect: "primary_correction".to_owned(),
+            name: "no_such_param".to_owned(),
+        }
+    );
+    let error = Operation::UpsertEffectKeyframe {
+        clip: ClipId(1),
+        effect: EffectId(9),
+        name: "exposure_milli_stops".to_owned(),
+        key: key(0, 0),
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::MissingEffect {
+            clip: ClipId(1),
+            effect: EffectId(9),
+        }
+    );
+    let error = Operation::UpsertEffectKeyframe {
+        clip: ClipId(9),
+        effect: EffectId(1),
+        name: "exposure_milli_stops".to_owned(),
+        key: key(0, 0),
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(error, OpError::MissingClip(ClipId(9)));
+}
+
+/// R15: `"enabled"` routes to the R4 sibling — values 0..1, any
+/// interpolation, created on first upsert.
+#[test]
+fn upsert_routes_enabled_to_the_sibling() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    assert!(clip(&doc, ClipId(1)).effects[0].enabled_curve.is_none());
+    upsert(&mut doc, "enabled", key(10, 1)).unwrap();
+    upsert(
+        &mut doc,
+        "enabled",
+        Keyframe {
+            interpolation: KeyframeInterpolation::Hold,
+            ..key(40, 0)
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        key_positions(&effect_toggle(&doc, ClipId(1))),
+        vec![(10, 1), (40, 0)]
+    );
+    let before = doc.clone();
+    let error = upsert(&mut doc, "enabled", key(20, 2)).unwrap_err();
+    assert_eq!(
+        error,
+        OpError::EffectParamOutOfRange {
+            effect: "primary_correction".to_owned(),
+            name: "enabled".to_owned(),
+            min: 0,
+            max: 1,
+            actual: 2,
+        }
+    );
+    assert_eq!(doc, before);
+    doc.validate().unwrap();
+}
+
+/// R16: remove deletes, and a missing key — or a missing curve — is success
+/// with no change, while unknown names still fail.
+#[test]
+fn remove_deletes_and_missing_is_a_noop() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    upsert(&mut doc, "exposure_milli_stops", key(30, 2_000)).unwrap();
+    remove_key(&mut doc, "exposure_milli_stops", 30).unwrap();
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(0, 0), (59, 4_720)]
+    );
+    let before = doc.clone();
+    remove_key(&mut doc, "exposure_milli_stops", 30).unwrap();
+    assert_eq!(doc, before, "removing a missing key changes nothing");
+    remove_key(&mut doc, "enabled", 0).unwrap();
+    assert_eq!(doc, before, "removing from a missing curve changes nothing");
+    let error = remove_key(&mut doc, "no_such_param", 0).unwrap_err();
+    assert_eq!(
+        error,
+        OpError::UnknownEffectParam {
+            effect: "primary_correction".to_owned(),
+            name: "no_such_param".to_owned(),
+        }
+    );
+    doc.validate().unwrap();
+}
+
+/// R16 + S8: removing the last key writes its value into the static
+/// parameter, then clears the curve; the sibling writes the static flag.
+#[test]
+fn remove_last_key_writes_the_static() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    remove_key(&mut doc, "exposure_milli_stops", 0).unwrap();
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(59, 4_720)]
+    );
+    remove_key(&mut doc, "exposure_milli_stops", 59).unwrap();
+    let effect = &clip(&doc, ClipId(1)).effects[0];
+    assert!(!effect.keyframes.contains_key("exposure_milli_stops"));
+    assert_eq!(
+        effect.parameters["exposure_milli_stops"],
+        ParamValue::Integer(4_720)
+    );
+
+    // The sibling: last key off writes `enabled = false` and clears.
+    upsert(&mut doc, "enabled", key(10, 0)).unwrap();
+    remove_key(&mut doc, "enabled", 10).unwrap();
+    let effect = &clip(&doc, ClipId(1)).effects[0];
+    assert!(!effect.enabled);
+    assert!(effect.enabled_curve.is_none());
+    doc.validate().unwrap();
+}
+
+// ============================================================================
+// MO1 Part A4b — R17/R18 enable toggles and clip enable curve, plus the R4
+// whole-curve "enabled" routing.
+// ============================================================================
+
+/// R17: both toggles write their static flag, and missing owners fail.
+#[test]
+fn effect_and_clip_toggles_write_the_static_flags() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    assert!(clip(&doc, ClipId(1)).effects[0].enabled);
+    assert!(clip(&doc, ClipId(1)).enabled);
+
+    Operation::SetEffectEnabled {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        enabled: false,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(!clip(&doc, ClipId(1)).effects[0].enabled);
+    Operation::SetClipEnabled {
+        clip: ClipId(1),
+        enabled: false,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(!clip(&doc, ClipId(1)).enabled);
+    doc.validate().unwrap();
+
+    let error = Operation::SetEffectEnabled {
+        clip: ClipId(1),
+        effect: EffectId(9),
+        enabled: true,
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::MissingEffect {
+            clip: ClipId(1),
+            effect: EffectId(9),
+        }
+    );
+    let error = Operation::SetClipEnabled {
+        clip: ClipId(9),
+        enabled: true,
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(error, OpError::MissingClip(ClipId(9)));
+}
+
+/// R17 skip half: op-written flags flow into the core reader — a disabled
+/// effect evaluates to `enabled = false`, a disabled clip reads back
+/// disabled at every frame, and re-enabling restores both.
+#[test]
+fn disabled_effects_and_clips_read_back_disabled() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    Operation::SetEffectEnabled {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        enabled: false,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::SetClipEnabled {
+        clip: ClipId(1),
+        enabled: false,
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    let effect = &clip(&doc, ClipId(1)).effects[0];
+    for local in [0, 30, 59] {
+        assert!(!effect.is_enabled_at(TimeCode(local)));
+    }
+    assert!(!effect.evaluated_at(TimeCode(30)).enabled);
+    let clip_ref = clip(&doc, ClipId(1));
+    for local in [0, 30, 59] {
+        assert!(!clip_ref.is_enabled_at(TimeCode(local)));
+    }
+
+    Operation::SetEffectEnabled {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        enabled: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::SetClipEnabled {
+        clip: ClipId(1),
+        enabled: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(clip(&doc, ClipId(1)).effects[0].is_enabled_at(TimeCode(30)));
+    assert!(clip(&doc, ClipId(1)).is_enabled_at(TimeCode(30)));
+    doc.validate().unwrap();
+}
+
+/// R17 linked batch: core stays per-clip, so a linked pair toggles via an
+/// atomic batch of two `SetClipEnabled` — and a failing batch flips neither.
+#[test]
+fn linked_pair_toggles_via_an_atomic_batch() {
+    let mut doc = document_with_three_clips();
+    Operation::LinkClips {
+        clips: vec![ClipId(1), ClipId(2)],
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(clip(&doc, ClipId(1)).link, clip(&doc, ClipId(2)).link);
+
+    apply_batch(
+        &mut doc,
+        &[
+            Operation::SetClipEnabled {
+                clip: ClipId(1),
+                enabled: false,
+            },
+            Operation::SetClipEnabled {
+                clip: ClipId(2),
+                enabled: false,
+            },
+        ],
+    )
+    .unwrap();
+    assert!(!clip(&doc, ClipId(1)).enabled);
+    assert!(!clip(&doc, ClipId(2)).enabled);
+    assert!(clip(&doc, ClipId(3)).enabled);
+
+    // Atomicity: the second toggle names a missing clip, so the first is
+    // rolled back with it.
+    let before = doc.clone();
+    let error = apply_batch(
+        &mut doc,
+        &[
+            Operation::SetClipEnabled {
+                clip: ClipId(3),
+                enabled: false,
+            },
+            Operation::SetClipEnabled {
+                clip: ClipId(9),
+                enabled: false,
+            },
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        BatchError::OperationFailed {
+            op_number: 2,
+            error: OpError::MissingClip(ClipId(9)),
+        }
+    );
+    assert_eq!(doc, before);
+}
+
+/// R4 uniform name: whole-curve operations address the sibling through
+/// `"enabled"` exactly as R15/R16 — storage stays the sibling, never a
+/// `keyframes` entry.
+#[test]
+fn set_and_clear_effect_keyframes_route_enabled_to_the_sibling() {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    Operation::SetEffectKeyframes {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: "enabled".to_owned(),
+        curve: hold_toggle(),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        hold_toggle(),
+        "the whole curve parks on the sibling"
+    );
+    assert!(
+        !clip(&doc, ClipId(1)).effects[0]
+            .keyframes
+            .contains_key("enabled"),
+        "storage stays the sibling"
+    );
+
+    let before = doc.clone();
+    let error = Operation::SetEffectKeyframes {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: "enabled".to_owned(),
+        curve: linear(&[(0, 2)]),
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::EffectParamOutOfRange {
+            effect: "primary_correction".to_owned(),
+            name: "enabled".to_owned(),
+            min: 0,
+            max: 1,
+            actual: 2,
+        }
+    );
+    assert_eq!(doc, before);
+
+    Operation::ClearEffectKeyframes {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: "enabled".to_owned(),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(clip(&doc, ClipId(1)).effects[0].enabled_curve.is_none());
+    doc.validate().unwrap();
+}
+
+/// R18: the op writes the curve (values 0..1, negatives legal), `None`
+/// clears it, and the op-written curve survives a trim like any sibling.
+#[test]
+fn clip_enabled_curve_writes_clears_and_survives() {
+    let mut doc = document_with_one_clip();
+    Operation::SetClipEnabledCurve {
+        clip: ClipId(1),
+        curve: Some(hold_toggle()),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(clip_toggle(&doc, ClipId(1)), hold_toggle());
+
+    let before = doc.clone();
+    let error = Operation::SetClipEnabledCurve {
+        clip: ClipId(1),
+        curve: Some(linear(&[(0, 5)])),
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::EffectParamOutOfRange {
+            effect: "clip 1".to_owned(),
+            name: "enabled".to_owned(),
+            min: 0,
+            max: 1,
+            actual: 5,
+        }
+    );
+    assert_eq!(doc, before);
+
+    // Negatives are legal (ordered-only); the written curve then shifts.
+    Operation::SetClipEnabledCurve {
+        clip: ClipId(1),
+        curve: Some(linear(&[(-10, 1), (30, 0)])),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::TrimClip {
+        clip: ClipId(1),
+        new_source: TimeCode(25)..TimeCode(60),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        key_positions(&clip_toggle(&doc, ClipId(1))),
+        vec![(-35, 1), (5, 0)]
+    );
+
+    Operation::SetClipEnabledCurve {
+        clip: ClipId(1),
+        curve: None,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(clip(&doc, ClipId(1)).enabled_curve.is_none());
+    doc.validate().unwrap();
+}
+
+// ============================================================================
+// MO1 Part A4c — R19 copy/paste attributes (incl. §10 gate 8).
+// ============================================================================
+
+fn primary_effect(id: u64, exposure: AutomationCurve, enabled: bool) -> Effect {
+    Effect {
+        enabled,
+        enabled_curve: Some(hold_toggle()),
+        id: EffectId(id),
+        name: "primary_correction".to_owned(),
+        parameters: BTreeMap::from([("exposure_milli_stops".to_owned(), ParamValue::Integer(0))]),
+        keyframes: BTreeMap::from([("exposure_milli_stops".to_owned(), exposure)]),
+    }
+}
+
+fn transform_effect(id: u64, scale: AutomationCurve) -> Effect {
+    Effect {
+        enabled: true,
+        enabled_curve: None,
+        id: EffectId(id),
+        name: "transform".to_owned(),
+        parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
+        keyframes: BTreeMap::from([("scale_percent".to_owned(), scale)]),
+    }
+}
+
+/// §10 gate 8: cross-clip copy reproduces values, keys, and `enabled` — with
+/// and without keyframes.
+#[test]
+fn copy_attributes_verbatim() {
+    let mut doc = document_with_three_clips();
+    let colour = linear(&[(0, 0), (59, 4_720)]);
+    let scale = linear(&[(10, 100), (50, 120)]);
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: primary_effect(1, colour.clone(), false),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: transform_effect(2, scale.clone()),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    Operation::CopyClipAttributes {
+        from_clip: ClipId(1),
+        to_clip: ClipId(2),
+        names: None,
+        include_keyframes: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let target = &clip(&doc, ClipId(2)).effects;
+    assert_eq!(target.len(), 2);
+    assert_eq!(target[0].name, "primary_correction");
+    assert!(!target[0].enabled);
+    assert_eq!(
+        target[0].keyframes["exposure_milli_stops"], colour,
+        "keys ride along"
+    );
+    assert_eq!(
+        target[0].enabled_curve.clone().unwrap(),
+        hold_toggle(),
+        "the sibling rides along"
+    );
+    assert_eq!(target[1].name, "transform");
+    assert_eq!(target[1].keyframes["scale_percent"], scale);
+    doc.validate().unwrap();
+
+    // Without keyframes: values and `enabled` copy, curves stay the target's.
+    let mut doc = document_with_three_clips();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: primary_effect(1, colour.clone(), false),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::AddEffect {
+        clip: ClipId(2),
+        effect: primary_effect(7, linear(&[(0, 1_000)]), true),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::CopyClipAttributes {
+        from_clip: ClipId(1),
+        to_clip: ClipId(2),
+        names: None,
+        include_keyframes: false,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let target = &clip(&doc, ClipId(2)).effects;
+    assert_eq!(target.len(), 1);
+    assert!(!target[0].enabled, "the flag copies without the keys");
+    assert_eq!(
+        key_positions(&target[0].keyframes["exposure_milli_stops"]),
+        vec![(0, 1_000)],
+        "the target keeps its own curve"
+    );
+    doc.validate().unwrap();
+}
+
+/// R19: a named subset matches by (name, occurrence) — the nth same-named
+/// source effect targets the nth same-named target effect; extras append in
+/// source order with fresh ids while replaced effects keep theirs.
+#[test]
+fn copy_subset_matches_by_name_and_occurrence() {
+    let mut doc = document_with_three_clips();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: primary_effect(1, linear(&[(0, 100)]), true),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: transform_effect(2, linear(&[(0, 110)])),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: primary_effect(3, linear(&[(0, 300)]), false),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::AddEffect {
+        clip: ClipId(2),
+        effect: primary_effect(7, linear(&[(0, 700)]), true),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    Operation::CopyClipAttributes {
+        from_clip: ClipId(1),
+        to_clip: ClipId(2),
+        names: Some(vec!["primary_correction".to_owned()]),
+        include_keyframes: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let target = &clip(&doc, ClipId(2)).effects;
+    assert_eq!(target.len(), 2, "the out-of-scope transform never lands");
+    assert_eq!(target[0].id, EffectId(7), "replacement keeps the target id");
+    assert_eq!(
+        key_positions(&target[0].keyframes["exposure_milli_stops"]),
+        vec![(0, 100)],
+        "first source primary wins the only slot"
+    );
+    assert_eq!(target[1].id, EffectId(8), "appends mint max-plus-one");
+    assert_eq!(target[1].name, "primary_correction");
+    assert!(!target[1].enabled);
+    assert_eq!(
+        key_positions(&target[1].keyframes["exposure_milli_stops"]),
+        vec![(0, 300)],
+        "the second occurrence appends after the existing effects"
+    );
+    doc.validate().unwrap();
+}
+
+/// R19: requested names absent on the source are skipped, while names
+/// unknown to the registry fail before anything moves.
+#[test]
+fn copy_skips_names_absent_on_source_and_rejects_unknown() {
+    let mut doc = document_with_three_clips();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: primary_effect(1, linear(&[(0, 100)]), true),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    Operation::CopyClipAttributes {
+        from_clip: ClipId(1),
+        to_clip: ClipId(2),
+        names: Some(vec![
+            "primary_correction".to_owned(),
+            "transform".to_owned(),
+        ]),
+        include_keyframes: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(clip(&doc, ClipId(2)).effects.len(), 1);
+
+    let before = doc.clone();
+    let error = Operation::CopyClipAttributes {
+        from_clip: ClipId(1),
+        to_clip: ClipId(2),
+        names: Some(vec!["no_such_effect".to_owned()]),
+        include_keyframes: true,
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(error, OpError::UnknownEffect("no_such_effect".to_owned()));
+    assert_eq!(doc, before);
+}
+
+/// R19 + S2: copying onto a shorter clip is legal — keep-outside owners
+/// carry no outside check, so past-the-end keys land verbatim.
+#[test]
+fn copy_onto_shorter_clips_is_legal() {
+    let mut doc = document_with_three_clips();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: primary_effect(1, linear(&[(0, 0), (59, 4_720)]), true),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::TrimClip {
+        clip: ClipId(2),
+        new_source: TimeCode(60)..TimeCode(80),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        doc.clip_duration(clip(&doc, ClipId(2))).unwrap(),
+        TimeCode(20)
+    );
+
+    Operation::CopyClipAttributes {
+        from_clip: ClipId(1),
+        to_clip: ClipId(2),
+        names: None,
+        include_keyframes: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(2))),
+        vec![(0, 0), (59, 4_720)],
+        "the 59-frame key lands past the 20-frame end, verbatim"
+    );
+    doc.validate().unwrap();
+}
+
+// ============================================================================
+// MO1 Part A4d — §10 gates 7 (agent path) and 11 (sub-pixel contract half).
+// ============================================================================
+
+fn live_revision(core: &Core) -> TimelineRevision {
+    let Event::QueryResult(QueryResult::Snapshot { revision, .. }) =
+        core.request(Command::Query(Query::Snapshot)).unwrap()
+    else {
+        panic!("a snapshot query answers with a revisioned snapshot");
+    };
+    revision
+}
+
+fn gated_batch(core: &Core, operations: Vec<Operation>) -> std::sync::Arc<Document> {
+    let Event::DocumentChanged { doc, .. } = core
+        .request(Command::DoBatchIfRevision {
+            expected: live_revision(core),
+            operations,
+        })
+        .unwrap()
+    else {
+        panic!("a fresh-revision batch lands");
+    };
+    doc
+}
+
+/// §10 gate 7: upsert/replace/remove/what-is-read-back through the
+/// revision-gated actor path — including key-move as one atomic batch and
+/// last-key-to-static — with a stale revision refused.
+#[test]
+fn single_key_upsert_remove_round_trip() {
+    let core = Core::spawn(clip_with_envelope_and_colour_curve()).unwrap();
+    let upsert_at = |at: i64, value: i64| Operation::UpsertEffectKeyframe {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: "exposure_milli_stops".to_owned(),
+        key: key(at, value),
+    };
+    let remove_at = |at: i64| Operation::RemoveEffectKeyframe {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: "exposure_milli_stops".to_owned(),
+        at: TimeCode(at),
+    };
+
+    // Upsert, then replace: what is read back is what was sent.
+    let doc = gated_batch(&core, vec![upsert_at(30, 2_000)]);
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(0, 0), (30, 2_000), (59, 4_720)]
+    );
+    let doc = gated_batch(&core, vec![upsert_at(30, 2_500)]);
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(0, 0), (30, 2_500), (59, 4_720)]
+    );
+
+    // Key-move as one atomic batch: remove + insert lands together.
+    let doc = gated_batch(&core, vec![remove_at(30), upsert_at(40, 2_500)]);
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(0, 0), (40, 2_500), (59, 4_720)]
+    );
+
+    // Last-key-to-static through the same path: removing every key writes
+    // the final value into the static parameter and clears the curve.
+    let doc = gated_batch(&core, vec![remove_at(0), remove_at(59), remove_at(40)]);
+    let effect = &clip(&doc, ClipId(1)).effects[0];
+    assert!(!effect.keyframes.contains_key("exposure_milli_stops"));
+    assert_eq!(
+        effect.parameters["exposure_milli_stops"],
+        ParamValue::Integer(2_500)
+    );
+
+    // A stale revision is refused without touching the document.
+    let live = live_revision(&core);
+    let event = core
+        .request(Command::DoBatchIfRevision {
+            expected: TimelineRevision(0),
+            operations: vec![upsert_at(10, 1)],
+        })
+        .unwrap();
+    assert_eq!(
+        event,
+        Event::RevisionConflict {
+            expected: TimelineRevision(0),
+            actual: live,
+            token: None,
+        }
+    );
+    assert_eq!(live_revision(&core), live);
+}
+
+// §10 gate 11 lives in the render part now (N3): the contract half runs
+// through the real `params_for` fold in `kinewright-media`'s
+// `push_in_step_sub_pixel` (this file's hand-rolled fold mirror is deleted),
+// beside the lavapipe pixel-diff half.

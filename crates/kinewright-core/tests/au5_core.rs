@@ -180,6 +180,8 @@ fn document_with_one_clip() -> Document {
 
 fn effect_with(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: parameters
@@ -198,6 +200,8 @@ fn keyed_effect(
     interpolation: KeyframeInterpolation,
 ) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: BTreeMap::new(),
@@ -208,6 +212,8 @@ fn keyed_effect(
                     at: TimeCode(10),
                     value,
                     interpolation,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         )]),
@@ -1273,6 +1279,8 @@ fn gap_corpus_assets() -> Vec<MediaAsset> {
 
 fn gap_corpus_tracks() -> Vec<Track> {
     let media_clip = |id: u64, asset: AssetId, at: i64, source: std::ops::Range<i64>| Clip {
+        enabled: true,
+        enabled_curve: None,
         id: ClipId(id),
         asset,
         source_range: TimeCode(source.start)..TimeCode(source.end),
@@ -1317,6 +1325,8 @@ fn gap_corpus_tracks() -> Vec<Track> {
             clips: vec![
                 media_clip(5, AssetId(2), 0, 0..10),
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(6),
                     asset: AssetId::default(),
                     source_range: TimeCode(0)..TimeCode(10),

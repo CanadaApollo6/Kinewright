@@ -73,7 +73,8 @@ pub use audio_repair::{
 };
 pub use automation::{
     AutomationCurve, AutomationCurveError, HoldStep, Keyframe, KeyframeInterpolation,
-    clamp_project_curve, rebase_clip_curve,
+    MAX_KEY_FRAME_OFFSET, PROVEN_VALUE_BOUND, clamp_project_curve, ease_kernel, rebase_clip_curve,
+    rebase_clip_curve_keep_outside, shift_keys_keep_outside, value_at_keys,
 };
 pub use captions::{
     CaptionCue, CaptionMotion, CaptionPlanError, animated_caption_operations,
@@ -177,7 +178,7 @@ pub use effect::{
     is_managed_color_node, is_matte_capable_color_node, is_matte_parameter,
     is_noise_profile_parameter, is_static_audio_parameter, lut_node_count, lut_node_may_be_active,
     managed_color_node_count, matte_capable, matte_parameter_names, matte_parameters,
-    matte_window_parameter_names, matte_window_parameters,
+    matte_window_parameter_names, matte_window_parameters, scale_to_frame_fit,
 };
 pub use incident::{
     ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, INVESTIGATOR_ALLOWLIST,
@@ -216,16 +217,16 @@ pub use media::{
 pub use model::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AssetId,
     AudioBus, AudioBusId, AudioMaster, AudioMix, BinId, CHAIN_LOOKAHEAD_MILLISECONDS,
-    ChainLookahead, Clip, ClipContent, ClipId, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect,
-    EffectId, FreezeFrame, InvestigatorPreferences, LUT_ASSET_ID_MAX, LUT_SIZE_MAX, LUT_SIZE_MIN,
-    LinkId, LutAsset, LutAssetId, LutAssetKind, LutAssetSource, MARKER_COLOR_TOKEN_COUNT, Marker,
-    MarkerId, MediaAsset, MediaBin, MediaCatalog, MediaKind, MediaSourceFingerprint,
-    PROJECT_FORMAT_VERSION, PanLaw, ParamValue, RelinkCandidate, SourceSelect, StringOut,
-    StringOutId, SyncGroup, SyncGroupId, SyncGroupMember, TRACK_AUTOMATION_PARAMETERS,
-    TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, Track, TrackId,
-    TrackKind, TrackMix, Transition, chain_lookahead_milliseconds, clip_effective_fps,
-    envelope_coalesce_key, project_format_version, track_automation_coalesce_key,
-    validate_lut_asset,
+    CLIP_GAIN_MAX, CLIP_GAIN_MIN, ChainLookahead, Clip, ClipContent, ClipId, Document,
+    ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect, EffectId, FreezeFrame, InvestigatorPreferences,
+    LUT_ASSET_ID_MAX, LUT_SIZE_MAX, LUT_SIZE_MIN, LinkId, LutAsset, LutAssetId, LutAssetKind,
+    LutAssetSource, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaCatalog,
+    MediaKind, MediaSourceFingerprint, PROJECT_FORMAT_VERSION, PanLaw, ParamValue, RelinkCandidate,
+    SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
+    TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX,
+    TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix, Transition,
+    chain_lookahead_milliseconds, clip_effective_fps, envelope_coalesce_key,
+    project_format_version, track_automation_coalesce_key, validate_lut_asset,
 };
 pub use multicam::{
     ReframeFocusBounds, SpeakerAngleAssignment, SpeakerMulticamCut, SpeakerMulticamError,

@@ -1223,13 +1223,13 @@ pub(crate) fn automation_section(
                     Some(curve) => {
                         let row_key = automation_row_key(target);
                         for index in 0..curve.keyframes.len() {
-                            let mut action = keyframe_row(ui, &row_key, curve, index);
+                            let mut action = keyframe_row(ui, &row_key, curve, index, 0, false);
                             gesture_started |= action.gesture_started;
                             if let Some(edited) = action.edited.as_mut() {
                                 edited.at = TimeCode(edited.at.0.clamp(0, last));
                             }
                             if let Some(next) =
-                                apply_keyframe_row_action(curve, index, &action, range.clone())
+                                apply_keyframe_row_action(curve, index, &action, range.clone(), 0)
                             {
                                 live = action.live && !action.removed;
                                 pending = Some(next);
@@ -2074,6 +2074,8 @@ pub(crate) fn insert_audio_effect(effects: &mut Vec<Effect>, name: &str) {
             .saturating_add(1),
     );
     effects.push(Effect {
+        enabled: true,
+        enabled_curve: None,
         id,
         name: name.to_owned(),
         parameters: descriptor
@@ -2424,6 +2426,8 @@ mod tests {
                     at: TimeCode(index * 10),
                     value: -index * 10,
                     interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 })
                 .collect(),
         }
@@ -2558,11 +2562,15 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: -120,
                         interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     kinewright_core::Keyframe {
                         at: TimeCode(30),
                         value: 0,
                         interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -2597,11 +2605,15 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 0,
                         interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     kinewright_core::Keyframe {
                         at: TimeCode(30),
                         value: 120,
                         interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },

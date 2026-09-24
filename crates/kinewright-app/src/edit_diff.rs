@@ -241,6 +241,8 @@ mod tests {
         let clips = [(1, 0, 0..100), (2, 100, 100..200), (3, 200, 200..300)]
             .into_iter()
             .map(|(id, at, source)| Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(id),
                 asset: AssetId(1),
                 source_range: TimeCode(source.start)..TimeCode(source.end),
@@ -314,6 +316,8 @@ mod tests {
         Operation::AddEffect {
             clip: ClipId(2),
             effect: kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(1),
                 name: "brightness".to_owned(),
                 parameters: [(
@@ -360,11 +364,15 @@ mod tests {
                         at: TimeCode(40),
                         value: -120,
                         interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     kinewright_core::Keyframe {
                         at: TimeCode(80),
                         value: 0,
                         interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             }),
@@ -408,11 +416,15 @@ mod tests {
                         at: TimeCode(10),
                         value: -60,
                         interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     kinewright_core::Keyframe {
                         at: TimeCode(90),
                         value: 0,
                         interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             }),

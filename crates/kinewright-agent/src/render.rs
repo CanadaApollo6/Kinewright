@@ -1158,12 +1158,16 @@ mod tests {
                 sync_lock: true,
                 clips: vec![
                     Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(10),
                         asset: AssetId(4),
                         source_range: TimeCode(30)..TimeCode(120),
                         content: ClipContent::Media,
                         timeline_start: TimeCode(0),
                         effects: vec![Effect {
+                            enabled: true,
+                            enabled_curve: None,
                             id: EffectId(3),
                             name: "brightness".to_owned(),
                             parameters: BTreeMap::from([(
@@ -1184,6 +1188,8 @@ mod tests {
                         audio_gain_curve: None,
                     },
                     Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(11),
                         asset: AssetId(4),
                         source_range: TimeCode(150)..TimeCode(210),
@@ -1368,6 +1374,8 @@ assets:
             tracks: vec![TrackId(7)],
             gain_tenth_db: -35,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(21),
                 name: "audio_gain".to_owned(),
                 parameters: [("gain_tenth_db".to_owned(), ParamValue::Integer(-20))]
@@ -1381,6 +1389,8 @@ assets:
         document.audio_mix.master = kinewright_core::AudioMaster {
             gain_tenth_db: 15,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(22),
                 name: "audio_true_peak_limiter".to_owned(),
                 parameters: [("ceiling_tenth_db".to_owned(), ParamValue::Integer(-10))]
@@ -1450,6 +1460,8 @@ assets:
         document.audio_mix.master = kinewright_core::AudioMaster {
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(22),
                 name: "audio_gate".to_owned(),
                 parameters: std::collections::BTreeMap::new(),
@@ -1540,6 +1552,8 @@ assets:
         );
 
         let effect_spelling = render_effects(&[Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(9),
             name: "audio_gain".to_owned(),
             parameters: BTreeMap::new(),
@@ -1645,6 +1659,8 @@ assets:
             tracks: vec![TrackId(7)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(31),
                 name: "audio_denoise".to_owned(),
                 parameters,
@@ -1703,6 +1719,8 @@ assets:
         }
         for parameters in [absent, neutral] {
             let rendered = render_effects(&[Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(31),
                 name: "audio_denoise".to_owned(),
                 parameters,
@@ -1719,6 +1737,8 @@ assets:
             ("audio_denoise", "profile_band99_tenth_db"),
         ] {
             let rendered = render_effects(&[Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(32),
                 name: name.to_owned(),
                 parameters: BTreeMap::from([(parameter.to_owned(), ParamValue::Integer(-720))]),
@@ -1799,6 +1819,8 @@ assets:
                     at: TimeCode(*at),
                     value: *value,
                     interpolation: *interpolation,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 })
                 .collect(),
         }
@@ -1815,6 +1837,8 @@ assets:
             kind: TrackKind::Video,
             sync_lock: false,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(12),
                 asset: AssetId::default(),
                 source_range: TimeCode(0)..TimeCode(60),
@@ -1844,6 +1868,8 @@ assets:
             kind: TrackKind::Video,
             sync_lock: false,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(13),
                 asset: AssetId(4),
                 source_range: TimeCode(0)..TimeCode(60),
@@ -1933,6 +1959,8 @@ assets:
             kind: TrackKind::Video,
             sync_lock: false,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(12),
                 asset: AssetId::default(),
                 source_range: TimeCode(0)..TimeCode(60),
@@ -1978,6 +2006,8 @@ assets:
             kind: TrackKind::Video,
             sync_lock: false,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(12),
                 asset: AssetId(4),
                 source_range: TimeCode(0)..TimeCode(60),
@@ -1986,6 +2016,8 @@ assets:
                 }),
                 timeline_start: TimeCode(30),
                 effects: vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(4),
                     name: "crop".to_owned(),
                     parameters: BTreeMap::from([(

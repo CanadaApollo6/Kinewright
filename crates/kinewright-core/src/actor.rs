@@ -90,6 +90,7 @@ pub enum Query {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum QueryResult {
     Document(Arc<Document>),
     Snapshot {
@@ -1109,6 +1110,8 @@ mod tests {
         core.request(Command::Do(Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "primary_correction".to_owned(),
                 parameters: BTreeMap::new(),
@@ -1277,6 +1280,8 @@ mod tests {
                 timeline_start += i64::from(gaps[index % gaps.len()]);
                 let length = i64::from(*length);
                 let clip = Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(index as u64 + 1),
                     asset: AssetId(1),
                     source_range: TimeCode(0)..TimeCode(length),
@@ -1554,6 +1559,8 @@ mod tests {
                         let operation = Operation::AddEffect {
                             clip: ClipId(1),
                             effect: Effect {
+                                enabled: true,
+                                enabled_curve: None,
                                 id: EffectId(next_effect_id),
                                 name: "brightness".to_owned(),
                                 parameters: BTreeMap::new(),

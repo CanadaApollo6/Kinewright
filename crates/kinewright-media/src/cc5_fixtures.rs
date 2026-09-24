@@ -864,6 +864,8 @@ fn cc5_document() -> Document {
 
 fn color_node_effect(id: u64, name: &str, parameters: Vec<(String, i64)>) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: parameters
@@ -3247,11 +3249,15 @@ fn cc5_keyframed_window_motion_moves_the_covered_set() {
                     at: TimeCode(0),
                     value: 2_500,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(KEYFRAME_LAST_FRAME),
                     value: 7_500,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         },
@@ -3324,11 +3330,15 @@ fn cc5_keyframed_window_motion_moves_the_covered_set() {
                     at: TimeCode(0),
                     value: 1,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(10),
                     value: 2,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         },
@@ -4983,6 +4993,8 @@ pub(crate) fn assert_tracked_window_contains_the_subject(
                         at: TimeCode(*frame),
                         value: centre[axis],
                         interpolation,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     })
                     .collect(),
             },
@@ -5171,6 +5183,8 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
                     at: TimeCode(*frame),
                     value: if axis == 0 { centre.0 } else { centre.1 },
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }
             })
             .collect::<Vec<_>>();

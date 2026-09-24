@@ -659,6 +659,8 @@ impl FixtureLuts {
 
 fn effect_with(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: parameters
@@ -2851,6 +2853,8 @@ fn cc4_legacy_cube_lut_runs_last_beside_a_managed_look() {
     )
     .expect("the legacy .cube is written");
     let legacy = Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(9),
         name: "cube_lut".to_owned(),
         parameters: BTreeMap::from([
@@ -3274,6 +3278,8 @@ fn relocatable_document(assets: &[LutAsset], effects: Vec<Effect>) -> Document {
             kind: kinewright_core::TrackKind::Video,
             sync_lock: true,
             clips: vec![kinewright_core::Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: kinewright_core::AssetId::default(),
                 source_range: TimeCode(0)..TimeCode(4),
@@ -3646,11 +3652,15 @@ fn cc4_recovery_rejections_are_typed_and_leave_the_store_untouched() {
                 at: TimeCode(0),
                 value: 1,
                 interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(2),
                 value: 1,
                 interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
             },
         ],
     };
@@ -3893,11 +3903,15 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
                             at: TimeCode(0),
                             value: 0,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                         Keyframe {
                             at: TimeCode(20),
                             value: 10_000,
                             interpolation: KeyframeInterpolation::EaseIn,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                     ],
                 },
@@ -3911,6 +3925,8 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
                         at: TimeCode(0),
                         value: 1,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             },
@@ -4300,11 +4316,15 @@ fn cc4_illegal_lut_edits_are_rejected_atomically_with_field_observed_and_allowed
                         at: TimeCode(0),
                         value: 1,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(2),
                         value: 1,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },

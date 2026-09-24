@@ -70,6 +70,8 @@ fn managed_document() -> Document {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: AssetId(1),
                 source_range: TimeCode(0)..TimeCode(30),
@@ -135,6 +137,8 @@ fn neutral_node(id: u64, kind: &str) -> Effect {
 
 fn effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: parameters
@@ -186,6 +190,8 @@ fn curve(keyframes: &[(i64, i64, KeyframeInterpolation)]) -> AutomationCurve {
                 at: TimeCode(*at),
                 value: *value,
                 interpolation: *interpolation,
+                tangent_in: 0,
+                tangent_out: 0,
             })
             .collect(),
     }

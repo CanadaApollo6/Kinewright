@@ -1714,6 +1714,8 @@ pub const fn cc7_target_clip(scenario: Cc7Scenario) -> ClipId {
 
 fn effect_for(id: EffectId, node: &Cc7Operation) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id,
         name: node.effect_name.to_owned(),
         parameters: node
@@ -1755,6 +1757,8 @@ pub fn cc7_track_keyframe_operations() -> Vec<Operation> {
                         at: TimeCode(*frame),
                         value,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     })
                     .collect(),
             },

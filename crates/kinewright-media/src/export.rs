@@ -329,6 +329,8 @@ fn delivery_limiter_ceiling_tenth_db(target: LoudnessTarget) -> Result<i64, Medi
 /// [`delivery_limiter_ceiling_tenth_db`] before the master is gained.
 fn limit_to_delivery_ceiling(mix: &[f32], ceiling_tenth_db: i64) -> Result<Vec<f32>, MediaError> {
     let limiter = Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(1),
         name: "audio_true_peak_limiter".to_owned(),
         parameters: BTreeMap::from([

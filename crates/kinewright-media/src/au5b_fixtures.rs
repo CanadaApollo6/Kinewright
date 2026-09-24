@@ -109,6 +109,8 @@ fn seam_document(fps: Rational, assets: &[MediaAsset], pieces: Vec<Piece>) -> Do
         .into_iter()
         .enumerate()
         .map(|(index, piece)| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(index as u64 + 1),
             asset: piece.asset,
             source_range: piece.source,
