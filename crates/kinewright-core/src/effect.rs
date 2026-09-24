@@ -10,6 +10,24 @@ pub enum EffectUniform {
     Scale,
     OffsetX,
     OffsetY,
+    /// MO1 R1/R2: per-axis scale (`scale_x_percent`, `scale_y_percent`).
+    /// Part B folds these into `LayerParams::{scale_x, scale_y}`.
+    ScaleX,
+    ScaleY,
+    /// MO1 R1/R2: rotation (`rotation_centidegrees`).
+    /// Part B folds this into `LayerParams::rotation` (radians).
+    Rotation,
+    /// MO1 R1/R2: anchor (`anchor_{x,y}_basis_points`).
+    /// Part B folds these into `LayerParams::{anchor_x, anchor_y}`.
+    AnchorX,
+    AnchorY,
+    /// MO1 R1/R2: fine scale (`scale_fine_hundredths`).
+    /// Part B multiplies this with master and axes.
+    ScaleFine,
+    /// MO1 R1/R2: fine position (`{x,y}_basis_points`).
+    /// Part B adds these to the coarse NDC offset.
+    OffsetXBasisPoints,
+    OffsetYBasisPoints,
     CropLeft,
     CropRight,
     CropTop,
@@ -1592,6 +1610,67 @@ pub const EFFECT_DESCRIPTORS: &[EffectDescriptor] = &[
                 max: 100,
                 neutral: 0,
                 uniform: EffectUniform::OffsetY,
+            },
+            // MO1 R1: per-axis scale, each multiplying the uniform master.
+            EffectParameterDescriptor {
+                name: "scale_x_percent",
+                min: 1,
+                max: 400,
+                neutral: 100,
+                uniform: EffectUniform::ScaleX,
+            },
+            EffectParameterDescriptor {
+                name: "scale_y_percent",
+                min: 1,
+                max: 400,
+                neutral: 100,
+                uniform: EffectUniform::ScaleY,
+            },
+            // MO1 R1: rotation, one full turn each way (Premiere: clockwise).
+            EffectParameterDescriptor {
+                name: "rotation_centidegrees",
+                min: -36_000,
+                max: 36_000,
+                neutral: 0,
+                uniform: EffectUniform::Rotation,
+            },
+            // MO1 R1: anchor, centre-neutral (off-layer pivots deferred).
+            EffectParameterDescriptor {
+                name: "anchor_x_basis_points",
+                min: 0,
+                max: 10_000,
+                neutral: 5_000,
+                uniform: EffectUniform::AnchorX,
+            },
+            EffectParameterDescriptor {
+                name: "anchor_y_basis_points",
+                min: 0,
+                max: 10_000,
+                neutral: 5_000,
+                uniform: EffectUniform::AnchorY,
+            },
+            // MO1 R1: fine triple — fractions live in fine (canonical-writer
+            // rule); readers sum position / multiply scale (R2, Part B).
+            EffectParameterDescriptor {
+                name: "x_basis_points",
+                min: -10_000,
+                max: 10_000,
+                neutral: 0,
+                uniform: EffectUniform::OffsetXBasisPoints,
+            },
+            EffectParameterDescriptor {
+                name: "y_basis_points",
+                min: -10_000,
+                max: 10_000,
+                neutral: 0,
+                uniform: EffectUniform::OffsetYBasisPoints,
+            },
+            EffectParameterDescriptor {
+                name: "scale_fine_hundredths",
+                min: 100,
+                max: 40_000,
+                neutral: 10_000,
+                uniform: EffectUniform::ScaleFine,
             },
         ],
     },
@@ -3387,4 +3466,133 @@ pub fn effect_descriptor(name: &str) -> Option<EffectDescriptor> {
         .iter()
         .copied()
         .find(|descriptor| descriptor.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EffectUniform, effect_descriptor};
+
+    /// MO1 R1: the completed `transform` descriptor — three legacy rows plus
+    /// eight new ones, each with its exact range, neutral, and uniform.
+    #[test]
+    fn transform_descriptor_carries_eleven_completed_rows() {
+        let descriptor = effect_descriptor("transform").expect("transform is registered");
+        let rows: Vec<(&str, i64, i64, i64, EffectUniform)> = descriptor
+            .parameters
+            .iter()
+            .map(|row| (row.name, row.min, row.max, row.neutral, row.uniform))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("scale_percent", 1, 400, 100, EffectUniform::Scale),
+                ("x_percent", -100, 100, 0, EffectUniform::OffsetX),
+                ("y_percent", -100, 100, 0, EffectUniform::OffsetY),
+                ("scale_x_percent", 1, 400, 100, EffectUniform::ScaleX),
+                ("scale_y_percent", 1, 400, 100, EffectUniform::ScaleY),
+                (
+                    "rotation_centidegrees",
+                    -36_000,
+                    36_000,
+                    0,
+                    EffectUniform::Rotation,
+                ),
+                (
+                    "anchor_x_basis_points",
+                    0,
+                    10_000,
+                    5_000,
+                    EffectUniform::AnchorX,
+                ),
+                (
+                    "anchor_y_basis_points",
+                    0,
+                    10_000,
+                    5_000,
+                    EffectUniform::AnchorY,
+                ),
+                (
+                    "x_basis_points",
+                    -10_000,
+                    10_000,
+                    0,
+                    EffectUniform::OffsetXBasisPoints,
+                ),
+                (
+                    "y_basis_points",
+                    -10_000,
+                    10_000,
+                    0,
+                    EffectUniform::OffsetYBasisPoints,
+                ),
+                (
+                    "scale_fine_hundredths",
+                    100,
+                    40_000,
+                    10_000,
+                    EffectUniform::ScaleFine,
+                ),
+            ]
+        );
+    }
+
+    /// MO1 R1 canonical-writer rule at the descriptor level: whole-percent
+    /// params step visibly (1% ≈ 19 px at 1080p), so a move holds the coarse
+    /// param constant and ramps the fine one — fractions live in fine. This
+    /// pins the rule's preconditions: fine granularity is exactly 100x the
+    /// coarse step on every axis, neutrals are identity on both lanes, and a
+    /// canonical push-in (master constant, fine ramped) is expressible.
+    #[test]
+    fn transform_canonical_form_holds_coarse_and_ramps_fine() {
+        let descriptor = effect_descriptor("transform").expect("transform is registered");
+        let row = |name: &str| descriptor.parameter(name).expect("row exists");
+        // Fine is 100x the coarse step: 1 coarse percent spans 100 fine units
+        // on position (basis points) and scale (hundredths of a percent).
+        for (coarse, fine) in [
+            ("x_percent", "x_basis_points"),
+            ("y_percent", "y_basis_points"),
+        ] {
+            let coarse_span = row(coarse).max - row(coarse).min;
+            let fine_span = row(fine).max - row(fine).min;
+            assert_eq!(fine_span, coarse_span * 100, "{coarse}/{fine} fineness");
+        }
+        let master_span = row("scale_percent").max - row("scale_percent").min;
+        let fine_span = row("scale_fine_hundredths").max - row("scale_fine_hundredths").min;
+        assert_eq!(fine_span, master_span * 100, "scale fineness");
+        // Neutrals are identity on both lanes: additive lanes neutralise to
+        // 0, multiplicative lanes to their unit (100 / 10000).
+        assert_eq!(
+            (row("x_percent").neutral, row("x_basis_points").neutral),
+            (0, 0)
+        );
+        assert_eq!(
+            (row("y_percent").neutral, row("y_basis_points").neutral),
+            (0, 0)
+        );
+        assert_eq!(
+            (
+                row("scale_percent").neutral,
+                row("scale_x_percent").neutral,
+                row("scale_y_percent").neutral,
+                row("scale_fine_hundredths").neutral,
+            ),
+            (100, 100, 100, 10_000)
+        );
+        // A canonical push-in 100.00% → 100.50% holds the master at 100 and
+        // ramps fine 10000 → 10050: every value inside its descriptor range.
+        for value in [100, 100, 100] {
+            assert!((row("scale_percent").min..=row("scale_percent").max).contains(&value));
+        }
+        for value in [10_000, 10_025, 10_050] {
+            assert!(
+                (row("scale_fine_hundredths").min..=row("scale_fine_hundredths").max)
+                    .contains(&value)
+            );
+        }
+        // A canonical 20% → 20.5% pan holds coarse at 20 and ramps fine 0 → 50.
+        assert!((row("x_percent").min..=row("x_percent").max).contains(&20));
+        for value in [0, 25, 50] {
+            assert!((row("x_basis_points").min..=row("x_basis_points").max).contains(&value));
+        }
+    }
 }

@@ -2643,7 +2643,18 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
                 | EffectUniform::DeclickMaxClick
                 | EffectUniform::DeclickThreshold
                 | EffectUniform::DeclickLookahead
-                | EffectUniform::ColorNode => {}
+                | EffectUniform::ColorNode
+                // MO1 Part B (R2) folds these into the six new `LayerParams`
+                // fields; ignored until then. Existing projects carry no
+                // such params, so rendering is unchanged.
+                | EffectUniform::ScaleX
+                | EffectUniform::ScaleY
+                | EffectUniform::Rotation
+                | EffectUniform::AnchorX
+                | EffectUniform::AnchorY
+                | EffectUniform::ScaleFine
+                | EffectUniform::OffsetXBasisPoints
+                | EffectUniform::OffsetYBasisPoints => {}
                 EffectUniform::LutPreset => params.lut_preset = value,
                 EffectUniform::LutIntensity => params.lut_intensity = value / 100.0,
                 EffectUniform::ExternalLutIntensity => {

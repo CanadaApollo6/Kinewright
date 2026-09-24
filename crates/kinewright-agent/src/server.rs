@@ -28094,6 +28094,14 @@ mod tests {
     ///   served tools embed no `Keyframe`). Counts stay `141 / 54 / 87`: no
     ///   new capability, no new tool. The full per-embedding-tool derivation
     ///   and M36 rows land in A4 with the R21 sextuple re-pin.
+    ///
+    /// - **A2b (R1 transform rows): +1 765 / +0 / +1 765.** The eight new
+    ///   `transform` descriptor rows cost description bytes only:
+    ///   `Effect.parameters` is an untyped map (the AU2 Part A precedent),
+    ///   so no input schema moves — only the effect documentation text
+    ///   grows, which serialized bytes include. The arithmetic:
+    ///   1 579 398 + 1 765 = **1 581 163**, 1 434 375 + 0 = **1 434 375**,
+    ///   121 892 + 1 765 = **123 657**. Served quad and counts unchanged.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28119,7 +28127,7 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_579_398, 5_660),
+            (1_581_163, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
@@ -28127,7 +28135,7 @@ mod tests {
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 121_892,
+            registry_metrics.description_bytes, 123_657,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
