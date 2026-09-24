@@ -375,6 +375,8 @@ pub(crate) fn insert_lut_node_operation(
         clip: clip.id,
         index: color_stage_insert_index(&clip.effects, stage),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: next_effect_id(clip),
             name: lut_kind_for_stage(stage).effect_name().to_owned(),
             parameters: BTreeMap::from([(
@@ -455,6 +457,8 @@ pub(crate) fn legacy_conversion_keeps_stage_order(effects: &[Effect], legacy: Ef
 /// mix, and nothing else.
 fn converted_look_effect(legacy: &Effect, asset: LutAssetId) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: legacy.id,
         name: ColorNodeKind::CreativeLook.effect_name().to_owned(),
         parameters: BTreeMap::from([
@@ -4451,6 +4455,8 @@ fn add_effect_operation(clip: &Clip, descriptor: &kinewright_core::EffectDescrip
         })
         .collect::<BTreeMap<_, _>>();
     let effect = Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: descriptor.name.to_owned(),
         parameters,
@@ -4593,6 +4599,8 @@ mod tests {
             content: ClipContent::Media,
             timeline_start: TimeCode::ZERO,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(8),
                 name: "contrast".to_owned(),
                 parameters: BTreeMap::new(),
@@ -4611,6 +4619,8 @@ mod tests {
             Operation::AddEffect {
                 clip: ClipId(1),
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(9),
                     name: "brightness".to_owned(),
                     parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0),)]),
@@ -4662,6 +4672,8 @@ mod tests {
             == &ParamValue::Integer(descriptor.parameter(name).unwrap().neutral)));
 
         let reset_effect = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(8),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::new(),
@@ -4828,6 +4840,8 @@ mod tests {
     #[test]
     fn keyframed_primary_parameters_are_badged_and_clearable() {
         let effect = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(8),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::new(),
@@ -5610,6 +5624,8 @@ mod tests {
     #[test]
     fn a_keyframed_bypass_is_part_of_the_truncation_scan() {
         let mut effect = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(4),
             name: "color_curves".to_owned(),
             parameters: BTreeMap::new(),
@@ -5790,6 +5806,8 @@ mod tests {
     #[test]
     fn automation_that_crosses_points_is_reported_as_truncation() {
         let mut effect = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(4),
             name: "color_curves".to_owned(),
             parameters: BTreeMap::from([
@@ -5862,6 +5880,8 @@ mod tests {
 
     fn keyframed_effect(name: &str, parameter: &str, value: i64) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(8),
             name: name.to_owned(),
             parameters: BTreeMap::new(),
@@ -5884,6 +5904,8 @@ mod tests {
     fn curves_document() -> Document {
         let mut clip = media_clip(ClipId(10), AssetId(1), None);
         clip.effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(4),
             name: "color_curves".to_owned(),
             parameters: BTreeMap::new(),
@@ -5934,6 +5956,8 @@ mod tests {
 
     fn colour_effect(id: u64, name: &str) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters: BTreeMap::new(),
@@ -5950,6 +5974,8 @@ mod tests {
             parameters.insert(LUT_MIX_PARAMETER.to_owned(), ParamValue::Integer(mix));
         }
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters,
@@ -8092,6 +8118,8 @@ mod tests {
                     clip: *clip,
                     index: *index,
                     effect: Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: effect.id,
                         name: effect.name.clone(),
                         parameters: BTreeMap::new(),

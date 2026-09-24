@@ -99,6 +99,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     kinewright_core::Operation::AddEffect {
         clip: ClipId(2),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "opacity".to_owned(),
             parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(65))]),

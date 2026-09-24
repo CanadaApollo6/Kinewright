@@ -202,6 +202,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         master: AudioMaster {
             gain_tenth_db: 20,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_gain".to_owned(),
                 parameters: BTreeMap::from([(
@@ -306,6 +308,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                 gain_tenth_db: -30,
                 effects: vec![
                     Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: EffectId(1),
                         name: "audio_gain".to_owned(),
                         parameters: BTreeMap::from([(
@@ -315,6 +319,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                         keyframes: BTreeMap::new(),
                     },
                     Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: EffectId(2),
                         name: "audio_parametric_eq".to_owned(),
                         parameters: BTreeMap::from([
@@ -324,6 +330,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                         keyframes: BTreeMap::new(),
                     },
                     Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: EffectId(3),
                         name: "audio_gate".to_owned(),
                         parameters: BTreeMap::from([
@@ -333,6 +341,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                         keyframes: BTreeMap::new(),
                     },
                     Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: EffectId(4),
                         name: "audio_true_peak_limiter".to_owned(),
                         parameters: BTreeMap::from([
@@ -352,6 +362,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             master: AudioMaster {
                 gain_tenth_db: -15,
                 effects: vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "audio_true_peak_limiter".to_owned(),
                     parameters: BTreeMap::from([
@@ -512,6 +524,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
         Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "brightness".to_owned(),
                 parameters: BTreeMap::new(),
@@ -612,6 +626,8 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             clip: ClipId(1),
             index: 0,
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(2),
                 name: "technical_lut".to_owned(),
                 parameters: BTreeMap::from([("lut_asset_id".to_owned(), ParamValue::Integer(1))]),
@@ -2424,6 +2440,8 @@ fn marker_operations_validate_sort_move_remove_and_atomic_rejection() {
 fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
     let mut doc = document_with_one_clip();
     let effect = Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(7),
         name: "brightness".to_owned(),
         parameters: BTreeMap::new(),
@@ -2442,6 +2460,8 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
         Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(7),
                 name: "opacity".to_owned(),
                 parameters: BTreeMap::new(),
@@ -2501,6 +2521,8 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
         Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(8),
                 name: "blur".to_owned(),
                 parameters: BTreeMap::new(),
@@ -2674,6 +2696,8 @@ fn legacy_color_grade_add_is_canonical_before_history_journal_and_save() {
     let submitted = Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "color_grade".to_owned(),
             parameters: BTreeMap::from([
@@ -2758,6 +2782,8 @@ fn legacy_color_grade_in_batch_is_canonical_before_plan_history() {
         Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(7),
                 name: "color_grade".to_owned(),
                 parameters: BTreeMap::new(),
@@ -2807,6 +2833,8 @@ fn legacy_serialized_color_grade_journal_replays_to_canonical_state() {
     let legacy = JournalCommand::Do(Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "color_grade".to_owned(),
             parameters: BTreeMap::new(),
@@ -2843,6 +2871,8 @@ fn document_with_neutral_primary_correction() -> Document {
     Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "primary_correction".to_owned(),
             parameters: descriptor
@@ -2973,6 +3003,8 @@ fn primary_correction_batch_is_undoable_and_redoable() {
     let add = Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::new(),
@@ -3025,6 +3057,8 @@ fn effect_keyframes_are_exact_validated_and_atomically_clearable() {
     Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "brightness".to_owned(),
             parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(25))]),
@@ -3121,6 +3155,8 @@ fn cube_lut_requires_a_non_empty_text_path_and_preserves_it() {
         Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(8),
                 name: "cube_lut".to_owned(),
                 parameters: BTreeMap::from([(
@@ -3138,6 +3174,8 @@ fn cube_lut_requires_a_non_empty_text_path_and_preserves_it() {
     Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(8),
             name: "cube_lut".to_owned(),
             parameters: BTreeMap::from([
@@ -3163,6 +3201,8 @@ fn cube_lut_requires_a_non_empty_text_path_and_preserves_it() {
 /// One AU2 §2.1 audio node declaring a static `lookahead_milliseconds`.
 fn lookahead_effect(id: u64, name: &str, milliseconds: i64) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: BTreeMap::from([(
@@ -3178,6 +3218,8 @@ fn lookahead_effect(id: u64, name: &str, milliseconds: i64) -> Effect {
 fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically() {
     let mut doc = document_with_one_clip();
     let gain = Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(1),
         name: "audio_gain".to_owned(),
         parameters: BTreeMap::from([("gain_tenth_db".to_owned(), ParamValue::Integer(-30))]),
@@ -3226,6 +3268,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "brightness".to_owned(),
                 parameters: BTreeMap::new(),
@@ -3240,6 +3284,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_gain".to_owned(),
                 parameters: BTreeMap::new(),
@@ -3290,6 +3336,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_gain".to_owned(),
                 parameters: BTreeMap::new(),
@@ -3315,6 +3363,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_compressor".to_owned(),
                 parameters: BTreeMap::new(),
@@ -3340,6 +3390,8 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_true_peak_limiter".to_owned(),
                 parameters: BTreeMap::new(),
@@ -3374,12 +3426,15 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
 /// AU2 §5.4: the master chain carries the bus rules with master-flavoured
 /// errors, and every rejection is atomic.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain() {
     let mut doc = document_with_one_clip();
     Operation::SetAudioMaster {
         master: AudioMaster {
             gain_tenth_db: -20,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_true_peak_limiter".to_owned(),
                 parameters: BTreeMap::from([(
@@ -3436,6 +3491,8 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
             AudioMaster {
                 gain_tenth_db: 0,
                 effects: vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "audio_ducking".to_owned(),
                     parameters: BTreeMap::new(),
@@ -3449,6 +3506,8 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
             AudioMaster {
                 gain_tenth_db: 0,
                 effects: vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "brightness".to_owned(),
                     parameters: BTreeMap::new(),
@@ -3490,6 +3549,8 @@ fn a_pre_au2_document_survives_a_load_and_save_byte_identically() {
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_gain".to_owned(),
                 parameters: BTreeMap::from([(

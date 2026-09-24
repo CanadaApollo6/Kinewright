@@ -282,6 +282,8 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
     let asset = media.probe(generated.path()).unwrap();
     let mut document = single_clip_document(asset);
     document.tracks[0].clips[0].effects.push(Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(1),
         name: "opacity".to_owned(),
         parameters: std::collections::BTreeMap::from([(
@@ -291,6 +293,8 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
         keyframes: std::collections::BTreeMap::new(),
     });
     document.tracks[0].clips[0].effects.push(Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(2),
         name: "mask".to_owned(),
         parameters: std::collections::BTreeMap::from([
@@ -1010,6 +1014,8 @@ async fn cc4_creative_look_plan_and_commit_create_the_ordered_node() {
     let mut document = single_clip_document(asset);
     document.lut_assets = vec![warm.to_lut_asset(kinewright_core::LutAssetId(1))];
     document.tracks[0].clips[0].effects = vec![Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(1),
         name: "primary_correction".to_owned(),
         parameters: [("exposure_milli_stops".to_owned(), ParamValue::Integer(250))]
@@ -1163,6 +1169,8 @@ async fn cc4_convert_legacy_look_submits_the_batch_the_evidence_publishes() {
     let asset = media.probe(generated.path()).unwrap();
     let mut document = single_clip_document(asset);
     let legacy_look = |id: u64, intensity: i64| Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: "look_lut".to_owned(),
         parameters: [
@@ -1403,6 +1411,8 @@ async fn cc4_render_color_proof_reports_the_unpublished_lut_asset_from_the_real_
     let mut document = single_clip_document(asset);
     document.lut_assets = vec![unpublished];
     document.tracks[0].clips[0].effects = vec![Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(1),
         name: "creative_look".to_owned(),
         parameters: [("lut_asset_id".to_owned(), ParamValue::Integer(1))]

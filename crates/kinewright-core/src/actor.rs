@@ -1109,6 +1109,8 @@ mod tests {
         core.request(Command::Do(Operation::AddEffect {
             clip: ClipId(1),
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "primary_correction".to_owned(),
                 parameters: BTreeMap::new(),
@@ -1554,6 +1556,8 @@ mod tests {
                         let operation = Operation::AddEffect {
                             clip: ClipId(1),
                             effect: Effect {
+                                enabled: true,
+                                enabled_curve: None,
                                 id: EffectId(next_effect_id),
                                 name: "brightness".to_owned(),
                                 parameters: BTreeMap::new(),

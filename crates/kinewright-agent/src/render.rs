@@ -1164,6 +1164,8 @@ mod tests {
                         content: ClipContent::Media,
                         timeline_start: TimeCode(0),
                         effects: vec![Effect {
+                            enabled: true,
+                            enabled_curve: None,
                             id: EffectId(3),
                             name: "brightness".to_owned(),
                             parameters: BTreeMap::from([(
@@ -1368,6 +1370,8 @@ assets:
             tracks: vec![TrackId(7)],
             gain_tenth_db: -35,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(21),
                 name: "audio_gain".to_owned(),
                 parameters: [("gain_tenth_db".to_owned(), ParamValue::Integer(-20))]
@@ -1381,6 +1385,8 @@ assets:
         document.audio_mix.master = kinewright_core::AudioMaster {
             gain_tenth_db: 15,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(22),
                 name: "audio_true_peak_limiter".to_owned(),
                 parameters: [("ceiling_tenth_db".to_owned(), ParamValue::Integer(-10))]
@@ -1450,6 +1456,8 @@ assets:
         document.audio_mix.master = kinewright_core::AudioMaster {
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(22),
                 name: "audio_gate".to_owned(),
                 parameters: std::collections::BTreeMap::new(),
@@ -1540,6 +1548,8 @@ assets:
         );
 
         let effect_spelling = render_effects(&[Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(9),
             name: "audio_gain".to_owned(),
             parameters: BTreeMap::new(),
@@ -1645,6 +1655,8 @@ assets:
             tracks: vec![TrackId(7)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(31),
                 name: "audio_denoise".to_owned(),
                 parameters,
@@ -1703,6 +1715,8 @@ assets:
         }
         for parameters in [absent, neutral] {
             let rendered = render_effects(&[Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(31),
                 name: "audio_denoise".to_owned(),
                 parameters,
@@ -1719,6 +1733,8 @@ assets:
             ("audio_denoise", "profile_band99_tenth_db"),
         ] {
             let rendered = render_effects(&[Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(32),
                 name: name.to_owned(),
                 parameters: BTreeMap::from([(parameter.to_owned(), ParamValue::Integer(-720))]),
@@ -1988,6 +2004,8 @@ assets:
                 }),
                 timeline_start: TimeCode(30),
                 effects: vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(4),
                     name: "crop".to_owned(),
                     parameters: BTreeMap::from([(

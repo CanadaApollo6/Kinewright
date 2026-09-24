@@ -1548,6 +1548,8 @@ pub(crate) fn plan_primary_correction(
             operations.push(Operation::AddEffect {
                 clip: args.clip_id,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: effect_id,
                     name: PRIMARY_CORRECTION_EFFECT_NAME.to_owned(),
                     parameters: neutral_parameters,
@@ -2622,6 +2624,8 @@ pub(crate) fn plan_color_wheels(
             vec![Operation::AddEffect {
                 clip: args.clip_id,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: effect_id,
                     name: effect_name.to_owned(),
                     parameters,
@@ -2987,6 +2991,8 @@ pub(crate) fn plan_color_curves(
             vec![Operation::AddEffect {
                 clip: args.clip_id,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: effect_id,
                     name: effect_name.to_owned(),
                     parameters,
@@ -4093,6 +4099,8 @@ fn plan_lut_node(
             clip: args.clip_id,
             index: insert_index,
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: effect_id,
                 name: effect_name.to_owned(),
                 parameters,
@@ -4639,6 +4647,8 @@ pub(crate) fn plan_secondary_correction(
                 clip: args.clip_id,
                 index,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: effect_id,
                     name: effect_name.to_owned(),
                     parameters,
@@ -5691,6 +5701,8 @@ mod tests {
             legacy_warning(
                 0,
                 &Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: name.to_owned(),
                     parameters: BTreeMap::new(),
@@ -5715,12 +5727,16 @@ mod tests {
     fn status_reports_video_only_layers_with_z_order_and_the_full_chain() {
         let mut document = document();
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::new(),
             keyframes: BTreeMap::new(),
         });
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(2),
             name: "look_lut".to_owned(),
             parameters: BTreeMap::new(),
@@ -5737,6 +5753,8 @@ mod tests {
                 content: ClipContent::Media,
                 timeline_start: kinewright_core::TimeCode(0),
                 effects: vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(3),
                     name: "look_lut".to_owned(),
                     parameters: BTreeMap::new(),
@@ -5800,6 +5818,8 @@ mod tests {
     fn an_existing_primary_node_is_corrected_in_place() {
         let mut document = document();
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(5),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([(
@@ -5853,6 +5873,8 @@ mod tests {
 
         // Two primaries: target the last one and warn.
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(6),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::new(),
@@ -5911,6 +5933,8 @@ mod tests {
     fn a_keyframed_target_parameter_is_reported_as_a_warning() {
         let mut document = document();
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(5),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([(
@@ -6022,6 +6046,8 @@ mod tests {
 
     fn wheels_node(id: u64, parameters: BTreeMap<String, ParamValue>) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "color_wheels".to_owned(),
             parameters,
@@ -6031,6 +6057,8 @@ mod tests {
 
     fn curves_node(id: u64, parameters: BTreeMap<String, ParamValue>) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "color_curves".to_owned(),
             parameters,
@@ -6090,6 +6118,8 @@ mod tests {
             vec![Operation::AddEffect {
                 clip: ClipId(1),
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "color_wheels".to_owned(),
                     parameters: integers([
@@ -6599,6 +6629,8 @@ mod tests {
         let mut document = document();
         document.tracks[0].clips[0].effects = vec![
             Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "primary_correction".to_owned(),
                 parameters: integers([("exposure_milli_stops", 250)]),
@@ -6612,6 +6644,8 @@ mod tests {
             // A neutral node is inactive for a different, reported reason.
             wheels_node(4, BTreeMap::new()),
             Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(5),
                 name: "look_lut".to_owned(),
                 parameters: BTreeMap::new(),
@@ -6771,6 +6805,8 @@ mod tests {
 
     fn cc4_effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters: parameters
@@ -6826,6 +6862,8 @@ mod tests {
                 clip: ClipId(1),
                 index: 0,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(3),
                     name: "technical_lut".to_owned(),
                     parameters: BTreeMap::from([(
@@ -6847,6 +6885,8 @@ mod tests {
                 clip: ClipId(1),
                 index: 2,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(3),
                     name: "creative_look".to_owned(),
                     parameters: BTreeMap::from([(
@@ -7268,6 +7308,8 @@ mod tests {
                     &[("preset_token", 1), ("intensity_percent", 60)],
                 ),
                 Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(2),
                     name: "cube_lut".to_owned(),
                     parameters: BTreeMap::from([(
@@ -7346,6 +7388,8 @@ mod tests {
                     &[("preset_token", 1), ("intensity_percent", 60)],
                 ),
                 Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(2),
                     name: "cube_lut".to_owned(),
                     parameters: BTreeMap::from([(
@@ -7356,6 +7400,8 @@ mod tests {
                 },
                 cc4_effect(3, "look_lut", &[("preset_token", 9)]),
                 Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(4),
                     name: "cube_lut".to_owned(),
                     parameters: BTreeMap::new(),
@@ -7793,6 +7839,8 @@ mod tests {
             },
         });
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "creative_look".to_owned(),
             parameters: integers([("lut_asset_id", 1)]),
@@ -7820,6 +7868,8 @@ mod tests {
                 clip: ClipId(1),
                 index: 0,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(10),
                     name: "color_wheels".to_owned(),
                     parameters: integers([
@@ -7862,6 +7912,8 @@ mod tests {
     fn secondary_plan_rejects_a_technical_lut_target() {
         let mut document = document();
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(4),
             name: "technical_lut".to_owned(),
             parameters: BTreeMap::new(),
@@ -8614,6 +8666,8 @@ mod tests {
     fn primary_node_manifests_never_enumerate_the_matte() {
         let mut document = document();
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: PRIMARY_CORRECTION_EFFECT_NAME.to_owned(),
             parameters: integers([("exposure_milli_stops", 250)]),

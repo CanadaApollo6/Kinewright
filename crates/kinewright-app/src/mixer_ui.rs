@@ -1705,6 +1705,8 @@ mod tests {
                     tracks: vec![TrackId(2)],
                     gain_tenth_db: 0,
                     effects: vec![Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: kinewright_core::EffectId(1),
                         name: "audio_gain".to_owned(),
                         parameters: std::collections::BTreeMap::new(),

@@ -4274,6 +4274,8 @@ mod tests {
         with_lookahead.audio_mix.master = kinewright_core::AudioMaster {
             gain_tenth_db: 0,
             effects: vec![kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(1),
                 name: "audio_true_peak_limiter".to_owned(),
                 parameters: std::collections::BTreeMap::from([(
@@ -4613,6 +4615,8 @@ mod tests {
                 master: kinewright_core::AudioMaster {
                     gain_tenth_db: -35,
                     effects: vec![kinewright_core::Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: kinewright_core::EffectId(1),
                         name: "audio_gain".to_owned(),
                         parameters: std::collections::BTreeMap::new(),
@@ -4806,6 +4810,8 @@ mod tests {
             NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, ParamValue,
         };
         let mut denoise = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "audio_denoise".to_owned(),
             parameters: std::collections::BTreeMap::new(),

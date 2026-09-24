@@ -536,6 +536,8 @@ mod tests {
     fn visual_layers_resolve_effect_automation_at_clip_local_frames() {
         let mut document = fixture();
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "brightness".to_owned(),
             parameters: std::collections::BTreeMap::from([(
@@ -772,6 +774,8 @@ mod tests {
                 }),
                 timeline_start: TimeCode::ZERO,
                 effects: vec![Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "brightness".to_owned(),
                     parameters: std::collections::BTreeMap::from([(

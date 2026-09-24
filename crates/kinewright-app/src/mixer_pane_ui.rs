@@ -2074,6 +2074,8 @@ pub(crate) fn insert_audio_effect(effects: &mut Vec<Effect>, name: &str) {
             .saturating_add(1),
     );
     effects.push(Effect {
+        enabled: true,
+        enabled_curve: None,
         id,
         name: name.to_owned(),
         parameters: descriptor

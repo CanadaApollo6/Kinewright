@@ -2204,6 +2204,8 @@ DOMAIN_MAX 1 1 1
             .enumerate()
             .map(|(index, asset)| {
                 let mut look = Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(1),
                     name: "creative_look".to_owned(),
                     parameters: BTreeMap::new(),

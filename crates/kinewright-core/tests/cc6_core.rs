@@ -1555,6 +1555,8 @@ fn managed_document() -> Document {
 /// always active: the node a bypass-based method could never attribute.
 fn primary_node(id: u64) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: "primary_correction".to_owned(),
         parameters: BTreeMap::new(),
@@ -1566,6 +1568,8 @@ fn primary_node(id: u64) -> Effect {
 /// `color_node_inactive_reason` reports it inactive.
 fn inactive_wheels_node(id: u64) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: "color_wheels".to_owned(),
         parameters: BTreeMap::new(),
@@ -1576,6 +1580,8 @@ fn inactive_wheels_node(id: u64) -> Effect {
 /// A `color_wheels` node with a real gain, so it is active.
 fn active_wheels_node(id: u64) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: "color_wheels".to_owned(),
         parameters: BTreeMap::from([(

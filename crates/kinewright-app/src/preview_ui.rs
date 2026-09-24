@@ -1695,6 +1695,8 @@ mod tests {
         };
 
         let mut effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EFFECT,
             name: "color_wheels".to_owned(),
             parameters: BTreeMap::new(),
@@ -1702,6 +1704,8 @@ mod tests {
         }];
         if !transform.is_empty() {
             effects.push(Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(2),
                 name: "transform".to_owned(),
                 parameters: transform

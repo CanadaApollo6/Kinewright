@@ -2763,6 +2763,8 @@ mod tests {
         document.tracks[0].clips[1]
             .effects
             .push(kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(9),
                 name: "primary_correction".to_owned(),
                 parameters: BTreeMap::from([
@@ -3306,6 +3308,8 @@ mod tests {
         document.resolution = (4, 2);
         document.duration = TimeCode(30);
         document.tracks[0].clips[0].effects = vec![kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(1),
             name: "color_wheels".to_owned(),
             parameters: BTreeMap::from([

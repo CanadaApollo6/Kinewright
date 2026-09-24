@@ -864,6 +864,8 @@ fn cc5_document() -> Document {
 
 fn color_node_effect(id: u64, name: &str, parameters: Vec<(String, i64)>) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: parameters

@@ -222,6 +222,8 @@ fn raster_channel_values() -> Vec<f32> {
 
 fn color_node_effect(id: u64, name: &str, parameters: BTreeMap<String, ParamValue>) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters,

@@ -3106,6 +3106,8 @@ mod tests {
 
     fn effect(id: u64, name: &str, parameter: &str, value: i64) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters: BTreeMap::from([(parameter.to_owned(), ParamValue::Integer(value))]),
@@ -3115,6 +3117,8 @@ mod tests {
 
     fn effect_with(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters: parameters
@@ -3255,6 +3259,8 @@ mod tests {
             parameters.push((format!("{channel}_y{index}"), *y));
         }
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "color_curves".to_owned(),
             parameters: parameters
@@ -3302,6 +3308,8 @@ mod tests {
 
     fn crop(id: u64, left: i64, right: i64, top: i64, bottom: i64) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "crop".to_owned(),
             parameters: BTreeMap::from([
@@ -3316,6 +3324,8 @@ mod tests {
 
     fn reframe(id: u64, aspect_basis_points: i64, focus_x: i64, focus_y: i64) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "reframe".to_owned(),
             parameters: BTreeMap::from([
@@ -3940,6 +3950,8 @@ mod tests {
         )
         .unwrap();
         let cube_lut = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "cube_lut".to_owned(),
             parameters: BTreeMap::from([
@@ -4763,6 +4775,8 @@ mod tests {
         )
         .expect("the legacy LUT is written");
         let legacy = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "cube_lut".to_owned(),
             parameters: BTreeMap::from([

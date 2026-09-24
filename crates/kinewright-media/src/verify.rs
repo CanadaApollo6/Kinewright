@@ -1766,6 +1766,8 @@ mod tests {
             ..PrimaryCorrection::default()
         };
         document.tracks[0].clips[0].effects = vec![kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(90),
             name: "primary_correction".to_owned(),
             parameters: PrimaryParameter::ALL

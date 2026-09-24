@@ -180,6 +180,8 @@ fn document_with_one_clip() -> Document {
 
 fn effect_with(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: parameters
@@ -198,6 +200,8 @@ fn keyed_effect(
     interpolation: KeyframeInterpolation,
 ) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: BTreeMap::new(),

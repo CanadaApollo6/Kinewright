@@ -3454,6 +3454,8 @@ mod tests {
             },
         }];
         document.tracks[0].clips[0].effects = vec![kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(1),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::from([(

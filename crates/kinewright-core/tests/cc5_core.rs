@@ -135,6 +135,8 @@ fn neutral_node(id: u64, kind: &str) -> Effect {
 
 fn effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: parameters

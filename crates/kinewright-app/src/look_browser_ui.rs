@@ -395,6 +395,8 @@ mod tests {
 
     fn look_effect(id: u64, asset: u64) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::from([(
@@ -556,6 +558,8 @@ mod tests {
                 clip: ClipId(10),
                 index: 1,
                 effect: Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(3),
                     name: "creative_look".to_owned(),
                     parameters: BTreeMap::from([(

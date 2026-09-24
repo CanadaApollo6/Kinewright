@@ -2204,6 +2204,8 @@ mod tests {
         document.tracks[0].clips[0]
             .effects
             .push(kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(1),
                 name: "brightness".to_owned(),
                 parameters: std::collections::BTreeMap::new(),
@@ -2401,6 +2403,8 @@ mod tests {
                     source_range: TimeCode::ZERO..TimeCode(24),
                     content: ClipContent::Media,
                     effects: vec![Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: EffectId(1),
                         name: "creative_look".to_owned(),
                         parameters: BTreeMap::from([(

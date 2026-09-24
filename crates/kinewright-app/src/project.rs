@@ -1816,6 +1816,8 @@ mod tests {
     /// bound to it.
     fn look_document(asset: LutAsset) -> Document {
         let effect = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::from([(

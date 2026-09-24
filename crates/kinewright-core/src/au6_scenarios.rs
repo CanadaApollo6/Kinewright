@@ -1518,6 +1518,8 @@ const fn track_mix(track: TrackId, gain_tenth_db: i32) -> Operation {
 /// (`static_audio_effect`, `crates/kinewright-agent/src/server.rs:11194`).
 fn sparse_effect(id: EffectId, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id,
         name: name.to_owned(),
         parameters: parameters
@@ -1560,6 +1562,8 @@ fn descriptor_effect(id: EffectId, name: &str, overrides: &[(&str, i64)]) -> Eff
         parameters.insert((*parameter).to_owned(), ParamValue::Integer(*value));
     }
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id,
         name: name.to_owned(),
         parameters,

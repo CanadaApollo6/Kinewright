@@ -10088,6 +10088,8 @@ mod tests {
             duration: TimeCode(6),
         });
         clip.effects.push(kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(4),
             name: "color_grade".to_owned(),
             parameters: BTreeMap::new(),
@@ -10270,6 +10272,8 @@ mod tests {
         source.tracks[0].clips[0]
             .effects
             .push(kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(9),
                 name: "reframe".to_owned(),
                 parameters: BTreeMap::from([(
@@ -10316,6 +10320,8 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn tracked_subject_containment_rejects_static_or_wrong_direction_reframes() {
         let effect = |focus_at_end: i64| kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(7),
             name: "reframe".to_owned(),
             parameters: BTreeMap::from([(
@@ -10840,6 +10846,8 @@ mod tests {
         clip.audio_gain_tenth_db = 10;
         clip.audio_fade_in_frames = TimeCode(2);
         clip.effects.push(kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(1),
             name: "compressor".to_owned(),
             parameters: BTreeMap::new(),
@@ -11125,6 +11133,8 @@ mod tests {
         final_document.tracks[0].clips[0]
             .effects
             .push(kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(1),
                 name: "reframe".to_owned(),
                 parameters: BTreeMap::from([(
@@ -11939,6 +11949,8 @@ mod tests {
     fn cc7_keyframed_document(parameter: &str, frames: &[i64]) -> Document {
         let mut document = document();
         let mut effect = kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: kinewright_core::EffectId(7),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([
@@ -12844,6 +12856,8 @@ mod tests {
         document.tracks[0].clips[0]
             .effects
             .push(kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(3),
                 name: "primary_correction".to_owned(),
                 parameters: BTreeMap::from([
@@ -12855,6 +12869,8 @@ mod tests {
         document.tracks[0].clips[0]
             .effects
             .push(kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(4),
                 name: "color_wheels".to_owned(),
                 parameters: BTreeMap::new(),

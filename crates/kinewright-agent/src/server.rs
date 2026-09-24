@@ -11582,6 +11582,8 @@ fn round_hundredths_to_tenths(value: i32) -> i64 {
 
 fn static_audio_effect(id: EffectId, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id,
         name: name.to_owned(),
         parameters: parameters
@@ -16443,6 +16445,8 @@ mod tracking_tests {
 
         // A static transform resolves once and is accepted.
         let static_transform = [Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(2),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(50))]),
@@ -16614,6 +16618,8 @@ mod tracking_tests {
     #[test]
     fn resolve_layer_transform_at_follows_a_keyframed_scale() {
         let mut moving = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(2),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
@@ -16659,6 +16665,8 @@ mod tracking_tests {
         );
 
         let static_chain = [Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(3),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([
@@ -20375,6 +20383,8 @@ mod tests {
         overlay_clip.id = ClipId(4);
         overlay_clip.asset = AssetId(2);
         overlay_clip.effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(41),
             name: "look_lut".to_owned(),
             parameters: BTreeMap::new(),
@@ -20740,6 +20750,8 @@ mod tests {
         document.tracks[0].clips[0].effects = extra_effects
             .into_iter()
             .chain(std::iter::once(Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "color_wheels".to_owned(),
                 parameters,
@@ -20778,6 +20790,8 @@ mod tests {
             parameters.insert(name, ParamValue::Integer(value));
         }
         document.tracks[0].clips[0].effects = std::iter::once(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "color_wheels".to_owned(),
             parameters,
@@ -20941,12 +20955,16 @@ mod tests {
             BTreeMap::new(),
             vec![
                 Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(2),
                     name: "mask".to_owned(),
                     parameters: BTreeMap::new(),
                     keyframes: BTreeMap::new(),
                 },
                 Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(3),
                     name: "technical_lut".to_owned(),
                     parameters: BTreeMap::from([(
@@ -21003,6 +21021,8 @@ mod tests {
             None,
             BTreeMap::new(),
             vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(3),
                 name: "color_curves".to_owned(),
                 parameters: BTreeMap::new(),
@@ -21371,6 +21391,8 @@ mod tests {
     /// and its inverse is `u_layer = 2·u_composite − 0.9`.
     fn half_scale_transform() -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([
@@ -21385,6 +21407,8 @@ mod tests {
     /// A layer scale that ramps 100 → 50 percent, linearly, over frames 0..=40.
     fn keyframed_scale_transform() -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
@@ -21415,6 +21439,8 @@ mod tests {
     /// A bounded mask at `center` percent with a `size` percent region.
     fn tracking_mask_effect(center: [i64; 2], size: [i64; 2]) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "mask".to_owned(),
             parameters: BTreeMap::from([
@@ -21439,6 +21465,8 @@ mod tests {
     /// window and leaves the vertical axis whole.
     fn tracking_reframe_effect(focus: [i64; 2]) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "reframe".to_owned(),
             parameters: BTreeMap::from([
@@ -21749,6 +21777,8 @@ mod tests {
             .map(|frame| (TimeCode(frame), transform_box_frame([160, 90], 20)))
             .collect::<BTreeMap<_, _>>();
         let doubled = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(200))]),
@@ -21980,6 +22010,8 @@ mod tests {
             .map(|frame| (TimeCode(frame), transform_box_frame([160, 90], 20)))
             .collect::<BTreeMap<_, _>>();
         let doubled = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(200))]),
@@ -22014,6 +22046,8 @@ mod tests {
     /// gate lets through.
     fn growing_scale_transform() -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
@@ -22296,6 +22330,8 @@ mod tests {
             .map(|frame| (TimeCode(frame), transform_box_frame([160, 90], 5)))
             .collect::<BTreeMap<_, _>>();
         let pushed_off = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([
@@ -22347,6 +22383,8 @@ mod tests {
     #[test]
     fn track_matte_window_refuses_a_seed_the_layer_transform_pushes_off_the_composite() {
         let pushed_off = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "transform".to_owned(),
             parameters: BTreeMap::from([
@@ -22769,6 +22807,8 @@ mod tests {
                     content: ClipContent::Media,
                     timeline_start: TimeCode::ZERO,
                     effects: vec![Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: EffectId(1),
                         name: "color_wheels".to_owned(),
                         parameters: BTreeMap::from([
@@ -23126,6 +23166,8 @@ mod tests {
     #[test]
     fn track_matte_window_refuses_a_keyframed_layer_transform() {
         let mut transform = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(2),
             name: "transform".to_owned(),
             parameters: BTreeMap::new(),
@@ -23245,12 +23287,16 @@ mod tests {
         ]);
         let masks = vec![
             Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(7),
                 name: "mask".to_owned(),
                 parameters: BTreeMap::new(),
                 keyframes: BTreeMap::new(),
             },
             Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(8),
                 name: "mask".to_owned(),
                 parameters: BTreeMap::new(),
@@ -25605,6 +25651,8 @@ mod tests {
             provenance: ColorProvenance::StreamMetadata,
         };
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(6),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([(
@@ -25634,12 +25682,16 @@ mod tests {
             )]),
         });
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "look_lut".to_owned(),
             parameters: BTreeMap::new(),
             keyframes: BTreeMap::new(),
         });
         document.tracks[0].clips[0].effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(8),
             name: "cube_lut".to_owned(),
             parameters: BTreeMap::from([(
@@ -26166,6 +26218,8 @@ mod tests {
         };
         let effects = &mut document.tracks[0].clips[0].effects;
         effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(6),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([(
@@ -26175,6 +26229,8 @@ mod tests {
             keyframes: BTreeMap::new(),
         });
         effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "color_wheels".to_owned(),
             parameters: BTreeMap::from([
@@ -26187,6 +26243,8 @@ mod tests {
             keyframes: BTreeMap::new(),
         });
         effects.push(Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(8),
             name: "color_curves".to_owned(),
             parameters: BTreeMap::from([
@@ -28102,6 +28160,13 @@ mod tests {
     ///   grows, which serialized bytes include. The arithmetic:
     ///   1 579 398 + 1 765 = **1 581 163**, 1 434 375 + 0 = **1 434 375**,
     ///   121 892 + 1 765 = **123 657**. Served quad and counts unchanged.
+    ///
+    /// - **A2c (R4 per-effect enable): +37 125 / +37 125 / +0.** The two new
+    ///   `Effect` fields (`enabled`, `enabled_curve`) land in the shared
+    ///   `$defs` of every tool embedding an effect. The arithmetic:
+    ///   1 581 163 + 37 125 = **1 618 288**,
+    ///   1 434 375 + 37 125 = **1 471 500**, 123 657 + 0 = **123 657**.
+    ///   Served quad and counts unchanged.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28127,11 +28192,11 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_581_163, 5_660),
+            (1_618_288, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_434_375,
+            registry_metrics.input_schema_bytes, 1_471_500,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -30028,6 +30093,8 @@ mod tests {
 
     fn cc4_look_lut(id: u64, preset_token: i64, intensity_percent: i64) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "look_lut".to_owned(),
             parameters: BTreeMap::from([
@@ -30173,6 +30240,8 @@ mod tests {
         let broker = ConfirmationBroker::with_timeout(Duration::from_secs(2));
         let service = cc4_legacy_service(
             vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(5),
                 name: "cube_lut".to_owned(),
                 parameters: BTreeMap::from([(
@@ -30225,6 +30294,8 @@ mod tests {
         let broker = ConfirmationBroker::with_timeout(Duration::from_secs(2));
         let service = cc4_legacy_service(
             vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(5),
                 name: "cube_lut".to_owned(),
                 parameters: BTreeMap::from([
@@ -30279,6 +30350,8 @@ mod tests {
     fn cc4_unconvertible_legacy_look_reports_field_observed_and_allowed() {
         let service = cc4_legacy_service(
             vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(6),
                 name: "primary_correction".to_owned(),
                 parameters: BTreeMap::from([(
@@ -30486,6 +30559,8 @@ mod tests {
         document.lut_assets =
             vec![kinewright_media::BuiltinLook::Warm.to_lut_asset(kinewright_core::LutAssetId(1))];
         document.tracks[0].clips[0].effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::from([("lut_asset_id".to_owned(), ParamValue::Integer(1))]),
@@ -30544,6 +30619,8 @@ mod tests {
         clean.lut_assets =
             vec![kinewright_media::BuiltinLook::Warm.to_lut_asset(kinewright_core::LutAssetId(1))];
         clean.tracks[0].clips[0].effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::from([("lut_asset_id".to_owned(), ParamValue::Integer(1))]),
@@ -31129,6 +31206,8 @@ mod tests {
         let (_, seeded) = service.snapshot().unwrap();
         let mut with_primary = (*seeded).clone();
         with_primary.tracks[0].clips[0].effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(4),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([(
@@ -31170,6 +31249,8 @@ mod tests {
         with_look.lut_assets =
             vec![kinewright_media::BuiltinLook::Warm.to_lut_asset(kinewright_core::LutAssetId(1))];
         with_look.tracks[0].clips[0].effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::from([("lut_asset_id".to_owned(), ParamValue::Integer(1))]),

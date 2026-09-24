@@ -918,6 +918,8 @@ fn effect_with_parameters(
     parameters: impl IntoIterator<Item = (&'static str, i64)>,
 ) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: "primary_correction".to_owned(),
         parameters: parameters
@@ -1709,6 +1711,8 @@ fn cc1_manifest_declares_every_required_evidence_fixture() {
 #[test]
 fn cc1_core_migration_fixture_preserves_effect_order_and_parameters() {
     let legacy = Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(7),
         name: "color_grade".to_owned(),
         parameters: BTreeMap::from([
@@ -1733,6 +1737,8 @@ fn cc1_core_migration_fixture_preserves_effect_order_and_parameters() {
             timeline_start: TimeCode::ZERO,
             effects: vec![
                 Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(6),
                     name: "brightness".to_owned(),
                     parameters: BTreeMap::new(),
@@ -1740,6 +1746,8 @@ fn cc1_core_migration_fixture_preserves_effect_order_and_parameters() {
                 },
                 legacy.clone(),
                 Effect {
+                    enabled: true,
+                    enabled_curve: None,
                     id: EffectId(8),
                     name: "saturation".to_owned(),
                     parameters: BTreeMap::new(),

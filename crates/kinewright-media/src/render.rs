@@ -873,6 +873,8 @@ mod tests {
             return;
         };
         let mut look = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::new(),
@@ -999,6 +1001,8 @@ mod tests {
         assert_eq!(published.len(), 2);
 
         let mut look = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "creative_look".to_owned(),
             parameters: BTreeMap::new(),

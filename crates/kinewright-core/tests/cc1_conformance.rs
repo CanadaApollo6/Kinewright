@@ -71,6 +71,8 @@ fn legacy_brightness_is_reported_by_qa_and_delivery_without_silent_translation()
     Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: "brightness".to_owned(),
             parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(35))]),

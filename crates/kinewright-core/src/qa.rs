@@ -985,12 +985,16 @@ mod tests {
                     timeline_start: TimeCode::ZERO,
                     effects: vec![
                         Effect {
+                            enabled: true,
+                            enabled_curve: None,
                             id: crate::EffectId(1),
                             name: "look_lut".to_owned(),
                             parameters: std::collections::BTreeMap::new(),
                             keyframes: std::collections::BTreeMap::new(),
                         },
                         Effect {
+                            enabled: true,
+                            enabled_curve: None,
                             id: crate::EffectId(2),
                             name: "cube_lut".to_owned(),
                             parameters: std::collections::BTreeMap::new(),

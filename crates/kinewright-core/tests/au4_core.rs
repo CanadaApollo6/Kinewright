@@ -175,6 +175,8 @@ fn track_entry(doc: &Document, track: TrackId) -> Option<&TrackMix> {
 
 fn keyed_effect(id: u64, name: &str, curve: &AutomationCurve) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: "audio_eq".to_owned(),
         parameters: BTreeMap::new(),
@@ -974,6 +976,8 @@ fn clip_with_envelope_and_colour_curve() -> Document {
     Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "primary_correction".to_owned(),
             parameters: BTreeMap::from([(
@@ -1755,4 +1759,133 @@ fn each_new_field_sits_at_its_declared_wire_position() {
     );
     assert_wire_order(&doc.audio_mix.buses[0], &["gain_tenth_db", "gain_curve"]);
     assert_wire_order(&doc.audio_mix.master, &["gain_tenth_db", "gain_curve"]);
+}
+
+/// MO1 R4: clip effects accept `enabled: false` statically and an
+/// `enabled_curve` carrying 0..1 under every interpolation — non-`Hold`
+/// kinds act as a step, so no hold-only refusal applies (unlike bus/master,
+/// which always reject — see `au2_core`).
+#[test]
+fn clip_effects_accept_static_and_keyframed_enable() {
+    let mut doc = document_with_one_clip();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: false,
+            enabled_curve: None,
+            id: EffectId(1),
+            name: "brightness".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+            keyframes: BTreeMap::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(!clip(&doc, ClipId(1)).effects[0].enabled);
+    // A `Linear` 0 → 1 ramp is accepted (step semantics, not refused).
+    let mut doc = document_with_one_clip();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: Some(linear(&[(0, 0), (30, 1)])),
+            id: EffectId(1),
+            name: "brightness".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+            keyframes: BTreeMap::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(clip(&doc, ClipId(1)).effects[0].enabled_curve.is_some());
+}
+
+/// MO1 R4: `enabled_curve` values outside 0..1 are refused with the reused
+/// `EffectParamOutOfRange` (no new variant — R30).
+#[test]
+fn enabled_curve_values_outside_zero_to_one_are_refused() {
+    let mut doc = document_with_one_clip();
+    let error = Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: Some(linear(&[(0, 0), (30, 2)])),
+            id: EffectId(1),
+            name: "brightness".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+            keyframes: BTreeMap::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::EffectParamOutOfRange {
+            effect: "brightness".to_owned(),
+            name: "enabled".to_owned(),
+            min: 0,
+            max: 1,
+            actual: 2,
+        }
+    );
+}
+
+/// MO1 R4 (strict until A3): `enabled_curve` takes the same structural and
+/// in-clip checks as every other curve today; A3 (R13) relaxes keep-outside
+/// owners — including this sibling — to `validate_ordered` with no outside
+/// check, and these two arms move with it.
+#[test]
+fn enabled_curve_takes_strict_checks_until_a3() {
+    // Negative positions are refused until the R13 relaxation.
+    let mut doc = document_with_one_clip();
+    let error = Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: Some(AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode(-5),
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                }],
+            }),
+            id: EffectId(1),
+            name: "brightness".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+            keyframes: BTreeMap::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        OpError::InvalidEffectAutomation { ref name, .. } if name == "enabled"
+    ));
+    // Keys at or past the 60-frame clip end are refused until R13.
+    let mut doc = document_with_one_clip();
+    let error = Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: Some(linear(&[(0, 0), (60, 1)])),
+            id: EffectId(1),
+            name: "brightness".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+            keyframes: BTreeMap::new(),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::EffectKeyframeOutsideClip {
+            clip: ClipId(1),
+            effect: EffectId(1),
+            name: "enabled".to_owned(),
+            at: TimeCode(60),
+            duration: TimeCode(60),
+        }
+    );
 }

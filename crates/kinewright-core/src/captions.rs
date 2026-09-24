@@ -207,6 +207,8 @@ fn caption_motion_effects(
     let mut operations = vec![Operation::AddEffect {
         clip,
         effect: Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "opacity".to_owned(),
             parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(100))]),
@@ -248,6 +250,8 @@ fn caption_motion_effects(
         operations.push(Operation::AddEffect {
             clip,
             effect: Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(2),
                 name: "transform".to_owned(),
                 parameters,

@@ -314,6 +314,8 @@ mod tests {
         Operation::AddEffect {
             clip: ClipId(2),
             effect: kinewright_core::Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: kinewright_core::EffectId(1),
                 name: "brightness".to_owned(),
                 parameters: [(

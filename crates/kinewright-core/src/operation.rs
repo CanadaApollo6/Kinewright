@@ -599,6 +599,13 @@ pub enum OpError {
     /// AU2 §5.4: only registered `audio_*` effects sit on the master chain.
     #[error("effect {effect:?} is not an audio effect and cannot sit on the audio master chain")]
     VisualEffectOnAudioMaster { effect: String },
+    /// MO1 R4: bus/master audio effects reject `enabled: false` or an
+    /// `enabled_curve` — MO1's simplest honest rule (honouring it in
+    /// `chain_structure_matches` and live retune is future work).
+    #[error(
+        "audio chain {chain:?} effect {effect} cannot be disabled: MO1 keeps bus/master chains always-on"
+    )]
+    DisabledEffectOnAudioChain { chain: AudioChain, effect: EffectId },
     /// AU2 §5.4: the master sums every stem, so it has no sidechain to duck
     /// against.
     #[error("audio_ducking has no sidechain on the master chain and cannot be used there")]
@@ -3412,6 +3419,8 @@ fn convert_legacy_look(
         });
     }
     let converted = Effect {
+        enabled: true,
+        enabled_curve: None,
         id: effect_id,
         name: crate::ColorNodeKind::CreativeLook.effect_name().to_owned(),
         parameters: BTreeMap::from([
@@ -3927,7 +3936,52 @@ fn validate_effect_automation(
             curve,
         )?;
     }
+    if let Some(curve) = &effect.enabled_curve {
+        validate_enabled_curve(clip, clip_duration, effect.id, &effect.name, curve)?;
+    }
     validate_curve_keyframe_policy(&effect.name, &effect.keyframes)?;
+    Ok(())
+}
+
+/// MO1 R4: the sibling `enabled_curve` carries values 0..1 under every
+/// interpolation — non-`Hold` kinds act as a step (the ≥ 1 test in
+/// `is_enabled_at`), so no hold-only refusal applies. Structural and
+/// in-clip checks match every other curve today; A3 (R13) relaxes
+/// keep-outside owners to `validate_ordered` with no outside check.
+fn validate_enabled_curve(
+    clip: ClipId,
+    clip_duration: TimeCode,
+    effect_id: EffectId,
+    effect_name: &str,
+    curve: &AutomationCurve,
+) -> Result<(), OpError> {
+    curve
+        .validate()
+        .map_err(|error| OpError::InvalidEffectAutomation {
+            effect: effect_name.to_owned(),
+            name: "enabled".to_owned(),
+            reason: error.to_string(),
+        })?;
+    for keyframe in &curve.keyframes {
+        if keyframe.at >= clip_duration {
+            return Err(OpError::EffectKeyframeOutsideClip {
+                clip,
+                effect: effect_id,
+                name: "enabled".to_owned(),
+                at: keyframe.at,
+                duration: clip_duration,
+            });
+        }
+        if !(0..=1).contains(&keyframe.value) {
+            return Err(OpError::EffectParamOutOfRange {
+                effect: effect_name.to_owned(),
+                name: "enabled".to_owned(),
+                min: 0,
+                max: 1,
+                actual: keyframe.value,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -4604,6 +4658,12 @@ fn validate_audio_master(doc: &Document, master: &AudioMaster) -> Result<(), OpE
                 effect: effect.name.clone(),
             });
         }
+        if !effect.enabled || effect.enabled_curve.is_some() {
+            return Err(OpError::DisabledEffectOnAudioChain {
+                chain: AudioChain::Master,
+                effect: effect.id,
+            });
+        }
         validate_effect(effect)?;
         if effect.name == "audio_ducking" {
             return Err(OpError::AudioMasterDuckingUnsupported);
@@ -4692,6 +4752,12 @@ fn validate_audio_bus(doc: &Document, bus: &AudioBus) -> Result<(), OpError> {
             return Err(OpError::VisualEffectOnAudioBus {
                 bus: bus.id,
                 effect: effect.name.clone(),
+            });
+        }
+        if !effect.enabled || effect.enabled_curve.is_some() {
+            return Err(OpError::DisabledEffectOnAudioChain {
+                chain: AudioChain::Bus(bus.id),
+                effect: effect.id,
             });
         }
         validate_effect(effect)?;
@@ -5047,7 +5113,8 @@ impl OpError {
             | Self::InvalidClipGainEnvelope { .. }
             | Self::InvalidTrackAutomation { .. }
             | Self::TooFewLinkedClips { .. }
-            | Self::NonHoldKeyframeParameter { .. } => IncidentFamily::Malformed,
+            | Self::NonHoldKeyframeParameter { .. }
+            | Self::DisabledEffectOnAudioChain { .. } => IncidentFamily::Malformed,
             Self::DuplicateAsset { .. }
             | Self::DuplicateBin { .. }
             | Self::DuplicateBinAsset { .. }
@@ -5382,14 +5449,14 @@ mod tests {
         grouped
     }
 
-    /// Appendix A, normative, **per variant**: all 154 `OpError` variant names
+    /// Appendix A, normative, **per variant**: all 155 `OpError` variant names
     /// with the family the contract assigns each one.
     ///
     /// Written out rather than counted, so a variant moved from one family to
     /// another fails here instead of cancelling out against another move
     /// (review-2 S4, review-1 N2). It is transcribed from
     /// `docs/IN1B-ERROR-MIGRATION.md`'s Appendix A, not from the accessor.
-    const APPENDIX_A: [(&str, &str); 154] = [
+    const APPENDIX_A: [(&str, &str); 155] = [
         ("AudioBusLookaheadExceeded", "Bounds"),
         ("AudioBusKeyframeOutsideProject", "Bounds"),
         ("AudioBusGainOutOfRange", "Bounds"),
@@ -5453,6 +5520,7 @@ mod tests {
         ("InvalidTrackAutomation", "Malformed"),
         ("TooFewLinkedClips", "Malformed"),
         ("NonHoldKeyframeParameter", "Malformed"),
+        ("DisabledEffectOnAudioChain", "Malformed"),
         ("DuplicateAsset", "Duplicate"),
         ("DuplicateBin", "Duplicate"),
         ("DuplicateBinAsset", "Duplicate"),
@@ -5638,10 +5706,10 @@ mod tests {
             .collect();
         assert_eq!(
             declared.len(),
-            154,
-            "Appendix A names 154 distinct variants"
+            155,
+            "Appendix A names 155 distinct variants"
         );
-        assert_eq!(implemented.len(), 154, "the accessor names 154 variants");
+        assert_eq!(implemented.len(), 155, "the accessor names 155 variants");
         for (variant, family) in &declared {
             assert_eq!(
                 implemented.get(variant),

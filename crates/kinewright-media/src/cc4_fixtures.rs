@@ -659,6 +659,8 @@ impl FixtureLuts {
 
 fn effect_with(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(id),
         name: name.to_owned(),
         parameters: parameters
@@ -2851,6 +2853,8 @@ fn cc4_legacy_cube_lut_runs_last_beside_a_managed_look() {
     )
     .expect("the legacy .cube is written");
     let legacy = Effect {
+        enabled: true,
+        enabled_curve: None,
         id: EffectId(9),
         name: "cube_lut".to_owned(),
         parameters: BTreeMap::from([

@@ -2322,6 +2322,8 @@ mod tests {
     /// `asset`, plus that asset in the project table.
     fn look_document(asset: LutAsset) -> Document {
         let mut look = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "creative_look".to_owned(),
             parameters: std::collections::BTreeMap::new(),
@@ -2613,6 +2615,8 @@ mod tests {
         let mut stored = vec![("gain_master_thousandths", 1_500_i64)];
         stored.extend_from_slice(parameters);
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: "color_wheels".to_owned(),
             parameters: stored
@@ -3035,6 +3039,8 @@ mod tests {
             tracks: vec![TrackId(1)],
             gain_tenth_db: 0,
             effects: vec![Effect {
+                enabled: true,
+                enabled_curve: None,
                 id: EffectId(1),
                 name: "audio_compressor".to_owned(),
                 parameters: std::collections::BTreeMap::new(),
@@ -3061,6 +3067,8 @@ mod tests {
 
         // A master node adds a gain-reduction key, so the table must change.
         document.audio_mix.master.effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "audio_true_peak_limiter".to_owned(),
             parameters: std::collections::BTreeMap::from([(
@@ -3084,6 +3092,8 @@ mod tests {
         use kinewright_core::{AudioBus, AudioBusId, ParamValue};
 
         let lookahead_node = |id: u64, name: &str, milliseconds: i64| Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters: std::collections::BTreeMap::from([(
@@ -3168,6 +3178,8 @@ mod tests {
         );
 
         let limiter = |milliseconds: i64| Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "audio_true_peak_limiter".to_owned(),
             parameters: std::collections::BTreeMap::from([(
@@ -3345,6 +3357,8 @@ mod tests {
         );
 
         let limiter = |milliseconds: i64| Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(1),
             name: "audio_true_peak_limiter".to_owned(),
             parameters: std::collections::BTreeMap::from([(

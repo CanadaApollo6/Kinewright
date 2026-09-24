@@ -445,6 +445,8 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
                     content: kinewright_core::ClipContent::Media,
                     timeline_start: TimeCode::ZERO,
                     effects: vec![Effect {
+                        enabled: true,
+                        enabled_curve: None,
                         id: EffectId(1),
                         name: "opacity".to_owned(),
                         parameters: BTreeMap::from([(

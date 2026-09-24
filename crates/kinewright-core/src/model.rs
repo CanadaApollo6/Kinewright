@@ -189,6 +189,20 @@ pub struct Effect {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     #[schemars(default)]
     pub keyframes: BTreeMap<String, AutomationCurve>,
+    /// MO1 R4: static enable flag. Default true, skipped when true, so no
+    /// stored project changes a byte. Bus/master audio effects reject
+    /// `false` (`DisabledEffectOnAudioChain`).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    #[schemars(extend("default" = true))]
+    pub enabled: bool,
+    /// MO1 R4: keyframed enable, deliberately NOT a `keyframes` entry so the
+    /// loops over `effect.keyframes` that assume registered parameter names
+    /// are untouched. Values 0..1 under every interpolation; enabled iff
+    /// value ≥ 1 (non-`Hold` kinds act as a step). Addressed as `"enabled"`
+    /// by the single-key and whole-curve operations; storage stays here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub enabled_curve: Option<AutomationCurve>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +212,10 @@ struct EffectWire {
     parameters: BTreeMap<String, ParamValue>,
     #[serde(default)]
     keyframes: BTreeMap<String, AutomationCurve>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    enabled_curve: Option<AutomationCurve>,
 }
 
 impl<'de> Deserialize<'de> for Effect {
@@ -205,13 +223,16 @@ impl<'de> Deserialize<'de> for Effect {
     where
         D: serde::Deserializer<'de>,
     {
-        let mut wire = EffectWire::deserialize(deserializer)?;
-        canonicalize_legacy_color_grade_name(&mut wire.name);
+        let wire = EffectWire::deserialize(deserializer)?;
+        let mut name = wire.name;
+        canonicalize_legacy_color_grade_name(&mut name);
         Ok(Self {
             id: wire.id,
-            name: wire.name,
+            name,
             parameters: wire.parameters,
             keyframes: wire.keyframes,
+            enabled: wire.enabled,
+            enabled_curve: wire.enabled_curve,
         })
     }
 }
@@ -258,7 +279,24 @@ impl Effect {
             }
         }
         evaluated.keyframes.clear();
+        evaluated.enabled = self.is_enabled_at(at);
+        evaluated.enabled_curve = None;
         evaluated
+    }
+
+    /// MO1 R4: whether this effect applies at one clip-local frame.
+    ///
+    /// Curve `value_at` ≥ 1 enables, else the static flag rules. Non-`Hold`
+    /// kinds act as a step: the ≥ 1 test resolves every frame, mid-ramp
+    /// frames deterministically (the `bypass` precedent from CC3 §6,
+    /// documented — not refused). Every `Effect` reader filters via this.
+    #[must_use]
+    pub fn is_enabled_at(&self, at: TimeCode) -> bool {
+        if let Some(curve) = &self.enabled_curve {
+            curve.value_at(at).is_some_and(|value| value >= 1)
+        } else {
+            self.enabled
+        }
     }
 }
 
@@ -411,6 +449,18 @@ const fn i32_is_zero(value: &i32) -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn bool_is_false(value: &bool) -> bool {
     !*value
+}
+
+/// MO1 R4/R5: the default-true enable flag, shared by `Effect.enabled` and
+/// (in A2d) `Clip.enabled`.
+const fn default_true() -> bool {
+    true
+}
+
+// Serde's `skip_serializing_if` callbacks receive references to the fields.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -1547,6 +1597,8 @@ mod tests {
 
     fn effect(name: &str) -> Effect {
         Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(7),
             name: name.to_owned(),
             parameters: BTreeMap::from([
@@ -1764,5 +1816,143 @@ mod tests {
                 "{document}"
             );
         }
+    }
+
+    /// MO1 R4: the sibling `enabled_curve` plus `enabled: false` survive a
+    /// serde round trip exactly.
+    #[test]
+    fn disabled_effect_with_curve_round_trips() {
+        let mut disabled = effect("brightness");
+        disabled.enabled = false;
+        disabled.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(0),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(10),
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        });
+        let json = serde_json::to_string(&disabled).unwrap();
+        assert!(json.contains("\"enabled\":false"), "{json}");
+        assert!(json.contains("\"enabled_curve\""), "{json}");
+        assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), disabled);
+    }
+
+    /// MO1 R4: default-enabled effects serialize byte-identically to pre-MO1
+    /// documents (`enabled` skipped when true, curve skipped when absent),
+    /// and legacy wire payloads without the fields read back enabled.
+    #[test]
+    fn default_enabled_effect_stays_byte_identical() {
+        let plain = effect("brightness");
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("enabled"), "{json}");
+        let legacy = json!({
+            "id": 7,
+            "name": "brightness",
+            "parameters": {"exposure_milli_stops": 750},
+            "keyframes": {}
+        });
+        let read: Effect = serde_json::from_value(legacy).unwrap();
+        assert!(read.enabled);
+        assert_eq!(read.enabled_curve, None);
+    }
+
+    /// MO1 R4: `is_enabled_at` resolves the curve ≥ 1 test, else the static
+    /// flag; non-`Hold` kinds act as a step (mid-ramp frames resolve by the
+    /// same ≥ 1 test, deterministically).
+    #[test]
+    fn is_enabled_at_resolves_curve_then_flag() {
+        let mut effect = effect("brightness");
+        assert!(effect.is_enabled_at(TimeCode(5)));
+        effect.enabled = false;
+        assert!(!effect.is_enabled_at(TimeCode(5)));
+        // A curve overrides the static flag in both directions.
+        effect.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(0),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(10),
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        });
+        assert!(!effect.is_enabled_at(TimeCode(0)));
+        assert!(!effect.is_enabled_at(TimeCode(9)));
+        assert!(effect.is_enabled_at(TimeCode(10)));
+        // A `Linear` 0 → 1 ramp steps at the first frame whose rounded value
+        // reaches 1 (frame 5 of 0..10: 0.5 rounds to 1, away from zero).
+        effect.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(0),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(10),
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        });
+        assert!(!effect.is_enabled_at(TimeCode(4)));
+        assert!(effect.is_enabled_at(TimeCode(5)));
+        assert!(effect.is_enabled_at(TimeCode(10)));
+    }
+
+    /// MO1 R4: `evaluated_at` snapshots the resolved flag and clears the
+    /// sibling curve, keeping the ephemeral effect static.
+    #[test]
+    fn evaluated_at_snapshots_the_resolved_flag() {
+        let mut effect = effect("brightness");
+        effect.enabled = false;
+        effect.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(0),
+                value: 1,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
+        });
+        let on = effect.evaluated_at(TimeCode(7));
+        assert!(on.enabled);
+        assert_eq!(on.enabled_curve, None);
+        assert!(on.keyframes.is_empty());
+        effect.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(0),
+                value: 0,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
+        });
+        let off = effect.evaluated_at(TimeCode(7));
+        assert!(!off.enabled);
+        assert_eq!(off.enabled_curve, None);
     }
 }

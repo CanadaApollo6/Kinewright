@@ -2926,6 +2926,8 @@ mod tests {
 
     fn effect(id: u64, name: &str) -> kinewright_core::Effect {
         kinewright_core::Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(id),
             name: name.to_owned(),
             parameters: std::collections::BTreeMap::new(),

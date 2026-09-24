@@ -1417,6 +1417,8 @@ mod tests {
 
     fn reframe_document() -> Document {
         let reframe = Effect {
+            enabled: true,
+            enabled_curve: None,
             id: EffectId(9),
             name: "reframe".to_owned(),
             parameters: BTreeMap::from([

@@ -1714,6 +1714,8 @@ pub const fn cc7_target_clip(scenario: Cc7Scenario) -> ClipId {
 
 fn effect_for(id: EffectId, node: &Cc7Operation) -> Effect {
     Effect {
+        enabled: true,
+        enabled_curve: None,
         id,
         name: node.effect_name.to_owned(),
         parameters: node
