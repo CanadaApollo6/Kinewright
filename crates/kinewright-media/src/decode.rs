@@ -92,6 +92,12 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
             let orientation = crate::still_orientation::still_file_orientation(path);
             let rotation = orientation.map_or(rotation, |found| found.rotation);
             let resolution = rotation.display_dimensions(decoder.width(), decoder.height());
+            if resolution.0 == 0 || resolution.1 == 0 {
+                return Err(MediaError::Backend(format!(
+                    "still image {} has no decodable dimensions; the file may be truncated or corrupt",
+                    path.display()
+                )));
+            }
             if resolution.0 > MAX_STILL_DIMENSION || resolution.1 > MAX_STILL_DIMENSION {
                 return Err(MediaError::Backend(format!(
                     "still image {} is {}x{} but stills are limited to {MAX_STILL_DIMENSION}px on either axis; downscale it and re-import",
@@ -2446,5 +2452,77 @@ mod tests {
             (120..=140).contains(&alpha),
             "half alpha must survive decode, got {alpha}"
         );
+    }
+
+    /// MO1 R30: a still-probe failure is the existing `Backend` incident —
+    /// no new code is minted for stills.
+    #[test]
+    fn still_probe_failure_rides_backend_unclassified() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");
+        let directory = crate::test_support::TempDirectory::new("probe-still-garbage");
+        let path = directory.path("garbage.png");
+        std::fs::write(&path, b"not a still file at all").expect("garbage should write");
+
+        let error = probe_path(&path, AssetId(1)).expect_err("garbage must not probe");
+        assert!(
+            matches!(error, MediaError::Backend(_)),
+            "a still-probe failure must stay Backend, got {error:?}"
+        );
+        let observation = kinewright_core::IncidentObservation::from_media_error(
+            &error,
+            kinewright_core::IncidentSubject::Project,
+            kinewright_core::TimelineRevision(1),
+        );
+        assert_eq!(
+            observation.code,
+            kinewright_core::IncidentCode::Media(
+                kinewright_core::MediaIncident::BackendUnclassified
+            )
+        );
+    }
+
+    /// MO1 R30: a 16-bit still under an 8-bit managed description refuses
+    /// with the existing `UnsupportedDecoderFormat` — no new media incident.
+    #[test]
+    fn still_depth_mismatch_is_unsupported_decoder_format() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");
+        let directory = crate::test_support::TempDirectory::new("decode-still-depth");
+        let path = still_fixture(
+            &directory,
+            "deep.png",
+            "color=c=red:size=64x36:rate=1:duration=1,format=rgb48le",
+            "png",
+        );
+        let asset = probe_path(&path, AssetId(1)).expect("the 16-bit still should probe");
+        assert_eq!(asset.kind, MediaKind::Image);
+
+        // A valid 8-bit stamp passes classification, so the refusal is the
+        // decoder's 16-bit depth, not the tagging.
+        let description = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Srgb,
+            matrix: ColorMatrix::Rgb,
+            range: ColorRange::Full,
+            white_point: ColorWhitePoint::D65,
+            bit_depth: ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::UserOverride,
+        };
+        let Err(error) =
+            VideoDecoder::open_scaled_managed(&path, Rational::default(), None, &description, None)
+        else {
+            panic!("16-bit pixels under an 8-bit stamp must refuse");
+        };
+        assert_eq!(error.recovery_code(), Some("unsupported_decoder_format"));
+        let MediaError::UnsupportedDecoderFormat {
+            declared_bit_depth,
+            decoder_bit_depth,
+            ..
+        } = error
+        else {
+            panic!("the refusal must stay UnsupportedDecoderFormat, got {error:?}");
+        };
+        assert_eq!(declared_bit_depth, Some(8));
+        assert_eq!(decoder_bit_depth, Some(16));
     }
 }

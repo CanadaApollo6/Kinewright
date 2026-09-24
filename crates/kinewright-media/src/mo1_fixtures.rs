@@ -8,21 +8,27 @@
 //! no CPU-reference twin — MO2 builds it (R26 re-gated there).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use kinewright_core::{
     AssetId, AudioMix, AutomationCurve, Clip, ClipContent, ClipId, ColorBitDepth, ColorContext,
     ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer,
-    ColorWhitePoint, Document, Effect, EffectId, FrameTexture, FreezeFrame, Keyframe,
-    KeyframeInterpolation, MediaAsset, MediaCatalog, MediaKind, Operation, ParamValue, Rational,
-    TimeCode, Track, TrackId, TrackKind,
+    ColorWhitePoint, Document, Effect, EffectId, ExportCancellation, ExportSettings, FrameTexture,
+    FreezeFrame, Keyframe, KeyframeInterpolation, MediaAsset, MediaCatalog, MediaKind, Operation,
+    ParamValue, Rational, TimeCode, Track, TrackId, TrackKind,
 };
 
+use crate::cc1_fixtures::{
+    DELIVERY_CODEC_MAX, DELIVERY_CODEC_MEAN, DELIVERY_CODEC_P99, abs_code_diff_rgb,
+    delivery_frame_to_rgba8,
+};
 use crate::compositor::{Compositor, CompositorLayer};
 use crate::decode::probe_path;
+use crate::export::mix_audio;
 use crate::gpu_test_support::fixture_gpu_or_skip;
 use crate::render::{DecodeStrategy, FrameRenderer, RenderScale};
-use crate::test_support::{GeneratedMedia, single_clip_document};
+use crate::test_support::{GeneratedMedia, TempDirectory, single_clip_document};
 use crate::timeline::TransitionRenderParams;
 
 /// Prefer the deterministic software fallback adapter; fail loudly when no
@@ -1204,4 +1210,657 @@ fn still_alpha_composites_over_video() {
         (150..240).contains(&r) && (40..120).contains(&g) && (40..120).contains(&b),
         "the blend must be a real mix, got [{r}, {g}, {b}] over [{gr}, {gg}, {gb}]"
     );
+}
+
+/// A quadrant-motion video source: `frames` frames at 25 fps. Flat grey
+/// would hide transform motion, so the trim/push-in/export gates render
+/// quadrants (any scale/position change permutes them observably).
+fn mo1_quadrant_video(label: &str, frames: i64) -> GeneratedMedia {
+    let seconds = frames / 25 + 1;
+    GeneratedMedia::ffmpeg(
+        label,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!(
+                "color=c=red:size=64x36:rate=25:duration={seconds},drawbox=x=32:y=0:w=32:h=36:c=green:t=fill,drawbox=x=0:y=18:w=32:h=18:c=blue:t=fill,drawbox=x=32:y=18:w=32:h=18:c=white:t=fill"
+            ),
+            "-frames:v",
+            &format!("{frames}"),
+            "-c:v",
+            "ffv1",
+            "-pix_fmt",
+            "yuv444p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+        ],
+        "mkv",
+    )
+}
+
+/// Five luma bars over flat chroma (CC1's proven bar codes): the R29
+/// content. The established codec gate was calibrated on near-flat rasters
+/// — sharp chroma edges ring past it through 4:2:0 — so the round trip
+/// moves bars; a push-in still shifts every bar boundary observably.
+fn mo1_bar_bytes(width: u32, height: u32) -> Vec<u8> {
+    const BARS: [u8; 5] = [16, 64, 128, 192, 235];
+    let pixels = usize::try_from(width * height).expect("bar raster");
+    let mut bytes = Vec::with_capacity(pixels * 3);
+    for _ in 0..height {
+        for x in 0..width {
+            bytes.push(BARS[usize::try_from((x * 5 / width).min(4)).expect("bar")]);
+        }
+    }
+    bytes.extend(std::iter::repeat_n(128_u8, pixels));
+    bytes.extend(std::iter::repeat_n(128_u8, pixels));
+    bytes
+}
+
+/// A bar-motion video source: `frames` frames at 25 fps.
+fn mo1_bar_video(label: &str, frames: i64) -> GeneratedMedia {
+    // The raw demuxer takes no loop flag, so the reel holds every frame.
+    let reel = mo1_bar_bytes(64, 36).repeat(usize::try_from(frames).expect("frames"));
+    let raw = GeneratedMedia::from_bytes(&format!("{label}-bars"), "yuv", &reel);
+    GeneratedMedia::ffmpeg(
+        label,
+        &[
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv444p",
+            "-s",
+            "64x36",
+            "-r",
+            "25",
+            "-i",
+            raw.path().to_str().expect("fixture path"),
+            "-frames:v",
+            &format!("{frames}"),
+            "-c:v",
+            "ffv1",
+            "-pix_fmt",
+            "yuv444p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+        ],
+        "mkv",
+    )
+}
+
+/// A bar still (the Ken Burns half of the R29 timeline).
+fn mo1_bar_still(label: &str, width: u32, height: u32) -> GeneratedMedia {
+    let raw = GeneratedMedia::from_bytes(
+        &format!("{label}-bars"),
+        "yuv",
+        &mo1_bar_bytes(width, height),
+    );
+    GeneratedMedia::ffmpeg(
+        label,
+        &[
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv444p",
+            "-s",
+            &format!("{width}x{height}"),
+            "-r",
+            "1",
+            "-i",
+            raw.path().to_str().expect("fixture path"),
+            "-frames:v",
+            "1",
+            "-c:v",
+            "png",
+        ],
+        "png",
+    )
+}
+
+/// Grey video + 440 Hz sine: the mix-null source (10 frames at 25 fps).
+fn mo1_av_source(label: &str) -> GeneratedMedia {
+    GeneratedMedia::ffmpeg(
+        label,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=gray:size=64x36:rate=25:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=1",
+            "-frames:v",
+            "10",
+            "-c:v",
+            "ffv1",
+            "-pix_fmt",
+            "yuv444p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-c:a",
+            "pcm_s16le",
+            "-shortest",
+        ],
+        "mkv",
+    )
+}
+
+/// The limited-range BT.709 stamp a tagged video source carries into
+/// managed decode (what `mo1_document` stamps, factored for hand-built
+/// multi-asset documents).
+fn limited_bt709_stamp() -> ColorDescription {
+    ColorDescription {
+        primaries: ColorPrimaries::Bt709,
+        transfer: ColorTransfer::Bt709,
+        matrix: ColorMatrix::Bt709,
+        range: ColorRange::Limited,
+        white_point: ColorWhitePoint::D65,
+        bit_depth: ColorBitDepth::Eight,
+        confidence_basis_points: 10_000,
+        provenance: ColorProvenance::UserOverride,
+    }
+}
+
+/// The assumed-sRGB stamp a resolved still carries (what
+/// `mo1_still_document` stamps, factored for hand-built documents).
+fn assumed_still_stamp() -> ColorDescription {
+    ColorDescription {
+        primaries: ColorPrimaries::Bt709,
+        transfer: ColorTransfer::Srgb,
+        matrix: ColorMatrix::Rgb,
+        range: ColorRange::Full,
+        white_point: ColorWhitePoint::D65,
+        bit_depth: ColorBitDepth::Eight,
+        confidence_basis_points: 10_000,
+        provenance: ColorProvenance::UserOverride,
+    }
+}
+
+/// Render every project frame in `frames` through one renderer — strips
+/// share the decoder and cache instead of re-initing the GPU per frame.
+fn render_strip(document: &Document, frames: std::ops::Range<i64>) -> Vec<Vec<u8>> {
+    let gpu = fixture_gpu_or_skip().expect("the render gate needs an adapter");
+    let mut renderer = FrameRenderer::new(gpu);
+    frames
+        .map(|at| {
+            renderer
+                .render(
+                    document,
+                    TimeCode(at),
+                    document.resolution,
+                    RenderScale::FullResolution,
+                    DecodeStrategy::Seek,
+                )
+                .expect("strip frames should render")
+                .rgba
+                .as_ref()
+                .clone()
+        })
+        .collect()
+}
+
+/// The delivery proof strip: `render_delivery` frames as RGBA8, the R29
+/// reference the export decode is compared against.
+fn render_delivery_strip(document: &Document, frames: std::ops::Range<i64>) -> Vec<Vec<u8>> {
+    let gpu = fixture_gpu_or_skip().expect("the render gate needs an adapter");
+    let mut renderer = FrameRenderer::new(gpu);
+    frames
+        .map(|at| {
+            let delivery = renderer
+                .render_delivery(
+                    document,
+                    TimeCode(at),
+                    document.resolution,
+                    RenderScale::FullResolution,
+                    DecodeStrategy::Seek,
+                )
+                .expect("delivery proof frames should render");
+            delivery_frame_to_rgba8(&delivery)
+        })
+        .collect()
+}
+
+/// Decode every frame of an export to RGBA (R29 compares the whole strip;
+/// the CC1 helper pins one frame).
+fn export_decode_rgba_all(path: &Path, width: u32, height: u32, frames: usize) -> Vec<Vec<u8>> {
+    use std::process::Command as ProcessCommand;
+
+    let output = ProcessCommand::new(crate::test_support::ffmpeg_executable())
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(path)
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
+        .output()
+        .expect("the export decode should start");
+    assert!(
+        output.status.success(),
+        "the export decode failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stride = usize::try_from(width * height * 4).expect("frame bytes");
+    assert_eq!(
+        output.stdout.len(),
+        stride * frames,
+        "the export must decode to {frames} frames"
+    );
+    output.stdout.chunks(stride).map(<[u8]>::to_vec).collect()
+}
+
+/// A Hold 1→0 step at frame 5: the R28 enable cut shape.
+fn enable_cut_curve() -> AutomationCurve {
+    hold_step_curve(&[(0, 1), (5, 0)])
+}
+
+/// §10 gate 5, lavapipe half: a disabled 50% transform renders
+/// byte-identically to the effect removed (R28 removal identity).
+#[test]
+fn disabled_effect_matches_removal_on_lavapipe() {
+    crate::initialize_ffmpeg().expect("FFmpeg should initialize");
+    let media = mo1_quadrant_video("mo1-r28-effect", 10);
+    let document = mo1_document(&media, vec![transform_effect(1, &[("scale_percent", 50)])]);
+
+    let mut disabled = document.clone();
+    disabled.tracks[0].clips[0].effects[0].enabled = false;
+    disabled
+        .validate()
+        .expect("the disabled document should validate");
+    let mut removed = document.clone();
+    removed.tracks[0].clips[0].effects.clear();
+    removed
+        .validate()
+        .expect("the removed document should validate");
+
+    assert_eq!(
+        render_strip(&disabled, 0..10),
+        render_strip(&removed, 0..10),
+        "a disabled effect must render as the effect removed"
+    );
+    assert_ne!(
+        render_strip(&document, 0..1),
+        render_strip(&disabled, 0..1),
+        "50% must be visible or the identity is vacuous"
+    );
+}
+
+/// R28 lavapipe: a Hold-enabled 50% transform cuts at the key's first
+/// frame — frames 0..5 equal the static scaled render, 5..10 the plain.
+#[test]
+fn keyframed_enable_cuts_at_key_frame_on_lavapipe() {
+    crate::initialize_ffmpeg().expect("FFmpeg should initialize");
+    let media = mo1_quadrant_video("mo1-r28-keycut", 10);
+    let mut effect = transform_effect(1, &[("scale_percent", 50)]);
+    effect.enabled_curve = Some(enable_cut_curve());
+    let document = mo1_document(&media, vec![effect]);
+    let scaled = mo1_document(&media, vec![transform_effect(1, &[("scale_percent", 50)])]);
+    let plain = mo1_document(&media, Vec::new());
+
+    let cut = render_strip(&document, 0..10);
+    let on = render_strip(&scaled, 0..10);
+    let off = render_strip(&plain, 0..10);
+    assert_ne!(on[0], off[0], "50% must be visible or the cut is vacuous");
+    for at in 0..5 {
+        assert_eq!(cut[at], on[at], "frame {at} must carry the effect");
+    }
+    for at in 5..10 {
+        assert_eq!(cut[at], off[at], "frame {at} must drop the effect");
+    }
+}
+
+/// §10 gate 6, lavapipe half: disabling the covering still renders
+/// byte-identically to removing it (R28).
+#[test]
+fn disabled_clip_matches_removal_on_lavapipe() {
+    crate::initialize_ffmpeg().expect("FFmpeg should initialize");
+    let video = mo1_quadrant_video("mo1-r28-under", 10);
+    let still = mo1_quadrant_still("mo1-r28-over", 64, 36);
+    let (baked_x, baked_y, baked_fine) = kinewright_core::scale_to_frame_fit((64, 36), (64, 36));
+    assert_eq!((baked_x, baked_y, baked_fine), (100, 100, 10_000));
+    let (mut document, _) = mo1_still_document(
+        &still,
+        10,
+        (64, 36),
+        vec![transform_effect(
+            1,
+            &[
+                ("scale_x_percent", baked_x),
+                ("scale_y_percent", baked_y),
+                ("scale_fine_hundredths", baked_fine),
+            ],
+        )],
+    );
+    let mut under = probe_path(video.path(), AssetId(2)).expect("video should probe");
+    under.color_description = limited_bt709_stamp();
+    document.fps = under.fps;
+    document.media_pool.push(under);
+    document.tracks.insert(
+        0,
+        Track {
+            id: TrackId(2),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
+                id: ClipId(2),
+                asset: AssetId(2),
+                source_range: TimeCode::ZERO..TimeCode(10),
+                content: ClipContent::Media,
+                timeline_start: TimeCode::ZERO,
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                speed_percent: 100,
+                audio_gain_curve: None,
+            }],
+        },
+    );
+    document
+        .validate()
+        .expect("the layered document should validate");
+
+    let mut disabled = document.clone();
+    disabled.tracks[1].clips[0].enabled = false;
+    disabled
+        .validate()
+        .expect("the disabled document should validate");
+    let mut removed = document.clone();
+    removed.tracks.remove(1);
+    removed
+        .validate()
+        .expect("the removed document should validate");
+
+    assert_eq!(
+        render_strip(&disabled, 0..10),
+        render_strip(&removed, 0..10),
+        "a disabled clip must render as the clip removed"
+    );
+    assert_ne!(
+        render_strip(&document, 0..1),
+        render_strip(&disabled, 0..1),
+        "the covering still must be visible or the identity is vacuous"
+    );
+}
+
+/// §10 gate 6, mix-null half: a disabled clip is silent in the mix —
+/// sample-identical to the clip removed (R28).
+#[test]
+fn disabled_clip_is_silent_in_the_mix() {
+    crate::initialize_ffmpeg().expect("FFmpeg should initialize");
+    let media = mo1_av_source("mo1-r28-mix");
+    let mut asset = probe_path(media.path(), AssetId(1)).expect("the AV source should probe");
+    assert_eq!(asset.kind, MediaKind::AudioVideo);
+    assert_eq!(asset.duration, TimeCode(10));
+    asset.color_description = limited_bt709_stamp();
+    let clip = |id: u64, start: i64| Clip {
+        enabled: true,
+        enabled_curve: None,
+        id: ClipId(id),
+        asset: asset.id,
+        source_range: TimeCode(start)..TimeCode(start + 5),
+        content: ClipContent::Media,
+        timeline_start: TimeCode(start),
+        effects: Vec::new(),
+        transition_in: None,
+        link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
+        speed_percent: 100,
+        audio_gain_curve: None,
+    };
+    let document = Document {
+        investigator: None,
+        catalog: MediaCatalog::default(),
+        audio_mix: AudioMix::default(),
+        color_context: ColorContext::default(),
+        lut_assets: Vec::new(),
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![clip(1, 0), clip(2, 5)],
+        }],
+        media_pool: vec![asset],
+        markers: Vec::new(),
+        fps: Rational::new(25, 1).unwrap(),
+        resolution: (64, 36),
+        duration: TimeCode(10),
+    };
+    document
+        .validate()
+        .expect("the mix document should validate");
+    let settings = ExportSettings {
+        fps: document.fps,
+        resolution: document.resolution,
+        delivery_color: ColorContext::sdr_rec709().delivery,
+        video_codec: "libx264".to_owned(),
+        audio_codec: "aac".to_owned(),
+        video_bitrate: 1,
+        audio_bitrate: 1,
+        loudness_normalization: None,
+        cancellation: ExportCancellation::default(),
+    };
+
+    let mut disabled = document.clone();
+    disabled.tracks[0].clips[0].enabled = false;
+    disabled
+        .validate()
+        .expect("the disabled document should validate");
+    let mut removed = document.clone();
+    removed.tracks[0].clips.remove(0);
+    removed
+        .validate()
+        .expect("the removed document should validate");
+
+    let off = mix_audio(&disabled, &settings).expect("the disabled mix should run");
+    let gone = mix_audio(&removed, &settings).expect("the removed mix should run");
+    assert_eq!(off, gone, "a disabled clip must mix as the clip removed");
+    let on = mix_audio(&document, &settings).expect("the enabled mix should run");
+    assert_ne!(
+        on, off,
+        "the sine must be audible or the silence is vacuous"
+    );
+}
+
+/// A linear 100→120 master ramp over local frames 0..=4.
+fn scale_ramp_curve() -> AutomationCurve {
+    AutomationCurve {
+        keyframes: vec![
+            Keyframe {
+                at: TimeCode(0),
+                value: 100,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+            Keyframe {
+                at: TimeCode(4),
+                value: 120,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+        ],
+    }
+}
+
+/// A Hold step through `(at, value)` keys.
+fn hold_step_curve(keys: &[(i64, i64)]) -> AutomationCurve {
+    AutomationCurve {
+        keyframes: keys
+            .iter()
+            .map(|(at, value)| Keyframe {
+                at: TimeCode(*at),
+                value: *value,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            })
+            .collect(),
+    }
+}
+
+/// The R29 timeline: a push-in over bars (with an enable cut at frame
+/// 3) followed by a Ken Burns bar still.
+fn mo1_export_document(video: &GeneratedMedia, still: &GeneratedMedia) -> Document {
+    let mut video_asset =
+        probe_path(video.path(), AssetId(1)).expect("the video source should probe");
+    video_asset.color_description = limited_bt709_stamp();
+    let mut still_asset =
+        probe_path(still.path(), AssetId(2)).expect("the still source should probe");
+    assert_eq!(still_asset.kind, MediaKind::Image);
+    still_asset.color_description = assumed_still_stamp();
+    let fps = video_asset.fps;
+
+    let mut push_in = transform_effect(1, &[("scale_percent", 100)]);
+    push_in
+        .keyframes
+        .insert("scale_percent".to_owned(), scale_ramp_curve());
+    push_in.enabled_curve = Some(hold_step_curve(&[(0, 1), (3, 0)]));
+    let (baked_x, baked_y, baked_fine) = kinewright_core::scale_to_frame_fit((32, 36), (64, 36));
+    let mut ken_burns = transform_effect(
+        2,
+        &[
+            ("scale_x_percent", baked_x),
+            ("scale_y_percent", baked_y),
+            ("scale_fine_hundredths", baked_fine),
+        ],
+    );
+    ken_burns
+        .keyframes
+        .insert("scale_percent".to_owned(), scale_ramp_curve());
+    Document {
+        investigator: None,
+        catalog: MediaCatalog::default(),
+        audio_mix: AudioMix::default(),
+        color_context: ColorContext::default(),
+        lut_assets: Vec::new(),
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![
+                Clip {
+                    enabled: true,
+                    enabled_curve: None,
+                    id: ClipId(1),
+                    asset: video_asset.id,
+                    source_range: TimeCode::ZERO..TimeCode(5),
+                    content: ClipContent::Media,
+                    timeline_start: TimeCode::ZERO,
+                    effects: vec![push_in],
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                    audio_gain_curve: None,
+                },
+                Clip {
+                    enabled: true,
+                    enabled_curve: None,
+                    id: ClipId(2),
+                    asset: still_asset.id,
+                    source_range: TimeCode::ZERO..TimeCode(5),
+                    content: ClipContent::Freeze(FreezeFrame {
+                        source_frame: TimeCode::ZERO,
+                    }),
+                    timeline_start: TimeCode(5),
+                    effects: vec![ken_burns],
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                    audio_gain_curve: None,
+                },
+            ],
+        }],
+        media_pool: vec![video_asset, still_asset],
+        markers: Vec::new(),
+        fps,
+        resolution: (64, 36),
+        duration: TimeCode(10),
+    }
+}
+
+/// R29: one motion-heavy timeline (push-in + Ken Burns + an enable cut)
+/// exports through delivery and decodes back within the established H.264
+/// codec gate, frame by frame — proving the shared path carries motion.
+#[test]
+fn export_round_trip_carries_motion() {
+    crate::initialize_ffmpeg().expect("FFmpeg should initialize");
+    let video = mo1_bar_video("mo1-r29-video", 10);
+    let still = mo1_bar_still("mo1-r29-still", 32, 36);
+    let document = mo1_export_document(&video, &still);
+    document
+        .validate()
+        .expect("the export document should validate");
+
+    // The proof strip carries the motion: the ramp moves, the cut lands,
+    // the Ken Burns moves.
+    let reference = render_delivery_strip(&document, 0..10);
+    assert_ne!(reference[0], reference[2], "the push-in must move");
+    assert_eq!(reference[3], reference[4], "the cut must land on plain");
+    assert_ne!(reference[5], reference[9], "the Ken Burns must move");
+
+    let directory = TempDirectory::new("mo1-r29-export");
+    let output = directory.path("mo1-round-trip.mp4");
+    let settings = ExportSettings {
+        fps: document.fps,
+        resolution: document.resolution,
+        delivery_color: ColorContext::sdr_rec709().delivery,
+        video_codec: "libx264".to_owned(),
+        audio_codec: "aac".to_owned(),
+        video_bitrate: 20_000_000,
+        audio_bitrate: 192_000,
+        loudness_normalization: None,
+        cancellation: ExportCancellation::default(),
+    };
+    let (progress_tx, _progress_rx) = crossbeam_channel::unbounded();
+    let gpu = fixture_gpu_or_skip().expect("the export gate needs an adapter");
+    crate::export::export_document(&document, &output, &settings, &progress_tx, gpu)
+        .expect("the motion export should write");
+
+    let decoded = export_decode_rgba_all(&output, 64, 36, 10);
+    assert_ne!(decoded[0], decoded[2], "the codec must carry the push-in");
+    assert_ne!(decoded[5], decoded[9], "the codec must carry the Ken Burns");
+    for (at, (actual, expected)) in decoded.iter().zip(reference.iter()).enumerate() {
+        let metric = abs_code_diff_rgb(actual, expected);
+        assert!(
+            metric.max <= DELIVERY_CODEC_MAX,
+            "frame {at} delivery max metric: {metric:?}"
+        );
+        assert!(
+            metric.p99 <= DELIVERY_CODEC_P99,
+            "frame {at} delivery P99 metric: {metric:?}"
+        );
+        assert!(
+            metric.mean <= DELIVERY_CODEC_MEAN,
+            "frame {at} delivery mean metric: {metric:?}"
+        );
+    }
 }

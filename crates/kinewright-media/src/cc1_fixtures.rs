@@ -66,9 +66,9 @@ pub(crate) const MONITOR_CPU_GPU_MEAN: f64 = 0.50;
 pub(crate) const LINEAR_CPU_GPU_MAX: f32 = 1.5e-3;
 pub(crate) const LINEAR_CPU_GPU_P99: f32 = 7.5e-4;
 pub(crate) const LINEAR_CPU_GPU_MEAN: f32 = 2.5e-4;
-const DELIVERY_CODEC_MAX: u8 = 4;
-const DELIVERY_CODEC_P99: f64 = 2.0;
-const DELIVERY_CODEC_MEAN: f64 = 1.0;
+pub(crate) const DELIVERY_CODEC_MAX: u8 = 4;
+pub(crate) const DELIVERY_CODEC_P99: f64 = 2.0;
+pub(crate) const DELIVERY_CODEC_MEAN: f64 = 1.0;
 
 /// §6.2 splits the linear comparison domain: it is defined on finite samples
 /// with `|linear| <= 2` and calls its numbers "roughly one to two ULPs around
@@ -3766,7 +3766,7 @@ pub(crate) fn generate_delivery_source(
 /// produce; the general form is written out with integer rounding so no float
 /// division can drift, and so a change to the constant is followed here
 /// automatically.
-fn delivery_frame_to_rgba8(frame: &crate::compositor::DeliveryFrame) -> Vec<u8> {
+pub(crate) fn delivery_frame_to_rgba8(frame: &crate::compositor::DeliveryFrame) -> Vec<u8> {
     let white = u32::from(DELIVERY_INTERMEDIATE_WHITE);
     frame
         .rgba64le
