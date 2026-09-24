@@ -495,6 +495,13 @@ pub(crate) enum ColorProofError {
     },
     #[error("matte_comparison needs a node that carries a matte, and node {effect} carries none")]
     MatteComparisonNoMatte { effect: EffectId },
+    // MO1 R4: a disabled node renders no matte, but the recovery (re-enable)
+    // differs from a matte-less node (add one), so it keeps its own variant
+    // (CC5 §4.1). Not an `IncidentCode`: R30 stays at zero new codes.
+    #[error(
+        "matte_comparison needs an enabled node, and node {effect} is disabled at the proved frame"
+    )]
+    MatteComparisonNodeDisabled { effect: EffectId },
     #[error("could not render the CC5 matte proof for node {effect}: {message}")]
     MatteProofUnavailable { effect: EffectId, message: String },
     #[error(transparent)]
@@ -526,6 +533,7 @@ impl ColorProofError {
             }
             Self::MatteComparisonUnsupportedKind { .. } => "matte_unsupported_node_kind",
             Self::MatteComparisonNoMatte { .. } => "matte_proof_no_matte",
+            Self::MatteComparisonNodeDisabled { .. } => "matte_comparison_node_disabled",
             Self::MatteProofUnavailable { .. } => MATTE_PROOF_UNAVAILABLE,
             Self::UnsupportedActiveLayerSource { .. } => "active_layer_needs_color_override",
             Self::LookProofParametersConflict { .. } => "look_proof_parameters_conflict",
@@ -652,6 +660,13 @@ impl ColorProofError {
                 "allowed": "a node whose resolved matte is active (CC5 §2.6)",
                 // CC5 §4.1: a matte proof never returns a blank frame.
                 "recovery_action": "Add a matte with plan_secondary_correction first; a node with no matte has no coverage to partition, and this proof never returns a blank frame.",
+                "effect_id": effect.0,
+            }),
+            Self::MatteComparisonNodeDisabled { effect } => json!({
+                "field": "matte_comparison",
+                "observed": {"effect_id": effect.0, "enabled": false},
+                "allowed": "a node enabled at the proved frame (CC5 §2.6)",
+                "recovery_action": "Re-enable the node with SetEffectEnabled (or clear its disabling enabled_curve key) and re-proof; a disabled node renders no matte to partition, and this proof never returns a blank frame.",
                 "effect_id": effect.0,
             }),
             Self::MatteProofUnavailable { effect, message } => json!({

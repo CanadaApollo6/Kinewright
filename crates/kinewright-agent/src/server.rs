@@ -3564,6 +3564,12 @@ impl KinewrightMcp {
                                 .map_or(0, |clip| clip.timeline_start.0),
                         )
                         .map_or(TimeCode::ZERO, TimeCode);
+                    // MO1 R4: a disabled node renders no matte to partition.
+                    if !stored.is_enabled_at(clip_local) {
+                        return Ok(color_proof_error_result(
+                            ColorProofError::MatteComparisonNodeDisabled { effect: effect_id },
+                        ));
+                    }
                     if !kinewright_core::MatteParams::from_effect(&stored.evaluated_at(clip_local))
                         .has_matte()
                     {
@@ -5186,6 +5192,23 @@ impl KinewrightMcp {
             .0
             .checked_sub(clip.timeline_start.0)
             .map_or(TimeCode::ZERO, TimeCode);
+        // MO1 R4: a disabled node has no coverage to prove; fail closed here
+        // rather than reporting the stored (unrendered) matte as resolved.
+        if !effect.is_enabled_at(clip_local) {
+            return Ok(matte_error_result(
+                "matte_node_disabled",
+                &format!(
+                    "effect {} is disabled at clip-local frame {clip_local}",
+                    args.effect_id
+                ),
+                &serde_json::json!({
+                    "field": "effect_id",
+                    "observed": {"effect_id": args.effect_id.0, "clip_id": args.clip_id.0, "clip_local_frame": clip_local.0, "enabled": false},
+                    "allowed": "a node enabled at the inspected frame",
+                    "recovery_action": "Re-enable the effect with SetEffectEnabled (or clear its disabling enabled_curve key), then inspect again.",
+                }),
+            ));
+        }
         let evaluated = effect.evaluated_at(clip_local);
         let matte = kinewright_core::MatteParams::from_effect(&evaluated);
         let inactive_reason = kinewright_core::color_node_inactive_reason(&evaluated);
@@ -5430,6 +5453,28 @@ impl KinewrightMcp {
             }
         };
 
+        // MO1 R4: tracking a disabled node's window would match a template
+        // against coverage that renders nothing. Every sample frame is
+        // checked: a node that disables mid-range has no coverage there.
+        if let Some(dark) = sample_frames
+            .iter()
+            .copied()
+            .find(|sample| !effect.is_enabled_at(*sample))
+        {
+            return Ok(matte_error_result(
+                "matte_node_disabled",
+                &format!(
+                    "effect {} is disabled at clip-local frame {dark}",
+                    args.effect_id
+                ),
+                &serde_json::json!({
+                    "field": "effect_id",
+                    "observed": {"effect_id": args.effect_id.0, "clip_id": args.clip_id.0, "first_disabled_frame": dark.0, "enabled": false},
+                    "allowed": "a node enabled across the tracked range",
+                    "recovery_action": "Re-enable the effect with SetEffectEnabled (or clear its disabling enabled_curve keys), then track again.",
+                }),
+            ));
+        }
         let evaluated = effect.evaluated_at(first_local);
         let matte = kinewright_core::MatteParams::from_effect(&evaluated);
         if window_index >= matte.window_count {
@@ -21028,6 +21073,51 @@ mod tests {
         );
     }
 
+    /// MO1 R4: a disabled node has no coverage to inspect, even though it
+    /// stores a matte — the refusal names re-enabling, not adding a matte.
+    #[test]
+    fn inspect_grade_matte_refuses_a_disabled_node() {
+        let (service, _core) = matte_service_with(
+            None,
+            BTreeMap::new(),
+            vec![Effect {
+                enabled: false,
+                enabled_curve: None,
+                id: EffectId(4),
+                name: "color_wheels".to_owned(),
+                parameters: BTreeMap::from([
+                    (
+                        "gain_master_thousandths".to_owned(),
+                        ParamValue::Integer(1_500),
+                    ),
+                    ("matte_enabled".to_owned(), ParamValue::Integer(1)),
+                    ("matte_window_count".to_owned(), ParamValue::Integer(1)),
+                ]),
+                keyframes: BTreeMap::new(),
+            }],
+        );
+
+        let result = service
+            .inspect_grade_matte(&InspectGradeMatteArgs {
+                expected_revision: None,
+                clip_id: ClipId(1),
+                effect_id: EffectId(4),
+                timecode: TimeCode(10),
+                include_image: None,
+            })
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "matte_node_disabled");
+        assert_eq!(structured["details"]["observed"]["enabled"], false);
+        assert!(
+            structured["details"]["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("Re-enable")
+        );
+    }
+
     /// CC5 §7: `matte_comparison` is valid only alongside `effect_id`, is
     /// mutually exclusive with `look_comparison`, and needs a node that both
     /// may carry a matte and actually does. Every check runs before any render.
@@ -21036,14 +21126,31 @@ mod tests {
         let (service, _core) = matte_service_with(
             None,
             BTreeMap::new(),
-            vec![Effect {
-                enabled: true,
-                enabled_curve: None,
-                id: EffectId(3),
-                name: "color_curves".to_owned(),
-                parameters: BTreeMap::new(),
-                keyframes: BTreeMap::new(),
-            }],
+            vec![
+                Effect {
+                    enabled: true,
+                    enabled_curve: None,
+                    id: EffectId(3),
+                    name: "color_curves".to_owned(),
+                    parameters: BTreeMap::new(),
+                    keyframes: BTreeMap::new(),
+                },
+                Effect {
+                    enabled: false,
+                    enabled_curve: None,
+                    id: EffectId(4),
+                    name: "color_wheels".to_owned(),
+                    parameters: BTreeMap::from([
+                        (
+                            "gain_master_thousandths".to_owned(),
+                            ParamValue::Integer(1_500),
+                        ),
+                        ("matte_enabled".to_owned(), ParamValue::Integer(1)),
+                        ("matte_window_count".to_owned(), ParamValue::Integer(1)),
+                    ]),
+                    keyframes: BTreeMap::new(),
+                },
+            ],
         );
         let proof = |effect_id: Option<EffectId>,
                      matte: Option<MatteComparison>,
@@ -21095,6 +21202,18 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("plan_secondary_correction")
+        );
+
+        // MO1 R4: a disabled node that stores a matte still has no rendered
+        // matte to partition, and its recovery is re-enabling.
+        let disabled = proof(Some(EffectId(4)), Some(MatteComparison::Coverage), None);
+        assert_eq!(disabled["code"], "matte_comparison_node_disabled");
+        assert_eq!(disabled["details"]["observed"]["enabled"], false);
+        assert!(
+            disabled["details"]["recovery_action"]
+                .as_str()
+                .unwrap()
+                .contains("Re-enable")
         );
     }
 
@@ -23257,6 +23376,101 @@ mod tests {
         assert!(
             !recovery.contains("single affine map"),
             "the false rationale must be gone: {recovery}"
+        );
+    }
+
+    /// MO1 R4: tracking refuses a disabled node — statically, and when an
+    /// `enabled_curve` disables it mid-range — naming the first dark sample.
+    #[test]
+    fn track_matte_window_refuses_a_disabled_node() {
+        let matted = || {
+            (
+                "color_wheels".to_owned(),
+                BTreeMap::from([
+                    (
+                        "gain_master_thousandths".to_owned(),
+                        ParamValue::Integer(1_500),
+                    ),
+                    ("matte_enabled".to_owned(), ParamValue::Integer(1)),
+                    ("matte_window_count".to_owned(), ParamValue::Integer(1)),
+                ]),
+            )
+        };
+        let track = |service: &KinewrightMcp, effect: EffectId| {
+            service
+                .track_matte_window(&TrackMatteWindowArgs {
+                    expected_revision: None,
+                    clip_id: ClipId(1),
+                    effect_id: effect,
+                    window_index: 0,
+                    start_local_frame: Some(TimeCode(0)),
+                    end_local_frame: Some(TimeCode(41)),
+                    step_frames: Some(10),
+                    search_radius_percent: None,
+                    max_width: None,
+                    minimum_confidence_basis_points: None,
+                })
+                .unwrap()
+        };
+        let frames = BTreeMap::from([(TimeCode(0), matte_box_frame([160, 90]))]);
+
+        let (name, parameters) = matted();
+        let (service, _core) = matte_track_service(
+            frames.clone(),
+            BTreeMap::new(),
+            vec![Effect {
+                enabled: false,
+                enabled_curve: None,
+                id: EffectId(2),
+                name,
+                parameters,
+                keyframes: BTreeMap::new(),
+            }],
+        );
+        let result = track(&service, EffectId(2));
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "matte_node_disabled");
+        assert_eq!(structured["details"]["observed"]["first_disabled_frame"], 0);
+
+        // Mid-range disable via a Hold curve: samples 0/10 pass, 20 is dark.
+        let (name, parameters) = matted();
+        let (service, _core) = matte_track_service(
+            frames,
+            BTreeMap::new(),
+            vec![Effect {
+                enabled: true,
+                enabled_curve: Some(AutomationCurve {
+                    keyframes: vec![
+                        Keyframe {
+                            at: TimeCode(0),
+                            value: 1,
+                            interpolation: KeyframeInterpolation::Hold,
+                            tangent_in: 0,
+                            tangent_out: 0,
+                        },
+                        Keyframe {
+                            at: TimeCode(20),
+                            value: 0,
+                            interpolation: KeyframeInterpolation::Hold,
+                            tangent_in: 0,
+                            tangent_out: 0,
+                        },
+                    ],
+                }),
+                id: EffectId(2),
+                name,
+                parameters,
+                keyframes: BTreeMap::new(),
+            }],
+        );
+        let result = track(&service, EffectId(2));
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "matte_node_disabled");
+        assert_eq!(
+            structured["details"]["observed"]["first_disabled_frame"],
+            20
         );
     }
 

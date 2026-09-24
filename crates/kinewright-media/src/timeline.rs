@@ -211,6 +211,8 @@ fn evaluated_effects(clip: &Clip, project_at: TimeCode) -> Vec<Effect> {
         .unwrap_or(TimeCode::ZERO);
     clip.effects
         .iter()
+        // MO1 R4: a disabled effect is absent from the resolved layer.
+        .filter(|effect| effect.is_enabled_at(local_at))
         .map(|effect| effect.evaluated_at(local_at))
         .collect()
 }
@@ -275,37 +277,82 @@ pub fn timeline_audio_segments(
             let end_offset = project_end
                 .checked_sub(clip.timeline_start)
                 .ok_or_else(|| MediaError::Backend("timeline position underflowed".to_owned()))?;
-            let source_start_offset = map_frames_with_rounding(
-                start_offset,
-                document.fps,
-                asset.fps,
-                FrameRounding::Floor,
-            )
-            .map_err(|error| MediaError::Backend(error.to_string()))?;
-            let source_end_offset =
-                map_frames_with_rounding(end_offset, document.fps, asset.fps, FrameRounding::Ceil)
-                    .map_err(|error| MediaError::Backend(error.to_string()))?;
-            let source_start = clip
-                .source_range
-                .start
-                .checked_add(source_start_offset)
-                .ok_or_else(|| MediaError::Backend("source position overflowed".to_owned()))?;
-            let source_end = clip
-                .source_range
-                .start
-                .checked_add(source_end_offset)
-                .ok_or_else(|| MediaError::Backend("source position overflowed".to_owned()))?;
-            segments.push(TimelineAudioSegment {
-                track: track.id,
-                clip: clip.id,
-                asset: clip.asset,
-                project: project_start..project_end,
-                source: TimeCode(source_start.0.min(clip.source_range.end.0))
-                    ..TimeCode(source_end.0.min(clip.source_range.end.0)),
-            });
+            // MO1 R5: a statically disabled clip contributes silence (no
+            // segment); a keyframed `enabled_curve` splits the intersection
+            // into maximal enabled runs, one segment each. Without a curve
+            // the single run below is exactly the pre-MO1 segment.
+            if clip.enabled_curve.is_none() && !clip.enabled {
+                continue;
+            }
+            let runs = match &clip.enabled_curve {
+                None => vec![(start_offset, end_offset)],
+                Some(_) => enabled_clip_runs(clip, start_offset, end_offset),
+            };
+            for (run_start, run_end) in runs {
+                let run_project_start =
+                    clip.timeline_start.checked_add(run_start).ok_or_else(|| {
+                        MediaError::Backend("timeline position overflowed".to_owned())
+                    })?;
+                let run_project_end =
+                    clip.timeline_start.checked_add(run_end).ok_or_else(|| {
+                        MediaError::Backend("timeline position overflowed".to_owned())
+                    })?;
+                let source_start_offset = map_frames_with_rounding(
+                    run_start,
+                    document.fps,
+                    asset.fps,
+                    FrameRounding::Floor,
+                )
+                .map_err(|error| MediaError::Backend(error.to_string()))?;
+                let source_end_offset =
+                    map_frames_with_rounding(run_end, document.fps, asset.fps, FrameRounding::Ceil)
+                        .map_err(|error| MediaError::Backend(error.to_string()))?;
+                let source_start = clip
+                    .source_range
+                    .start
+                    .checked_add(source_start_offset)
+                    .ok_or_else(|| MediaError::Backend("source position overflowed".to_owned()))?;
+                let source_end = clip
+                    .source_range
+                    .start
+                    .checked_add(source_end_offset)
+                    .ok_or_else(|| MediaError::Backend("source position overflowed".to_owned()))?;
+                segments.push(TimelineAudioSegment {
+                    track: track.id,
+                    clip: clip.id,
+                    asset: clip.asset,
+                    project: run_project_start..run_project_end,
+                    source: TimeCode(source_start.0.min(clip.source_range.end.0))
+                        ..TimeCode(source_end.0.min(clip.source_range.end.0)),
+                });
+            }
         }
     }
     Ok(segments)
+}
+
+/// Maximal contiguous clip-local runs of `[start, end)` where
+/// [`Clip::is_enabled_at`] holds (MO1 R5).
+///
+/// Per-frame evaluation is the exact semantics: the ≥ 1 test resolves every
+/// frame, including mid-ramp frames of non-`Hold` enable curves. Only called
+/// when the clip carries an `enabled_curve`; the static case never walks.
+fn enabled_clip_runs(clip: &Clip, start: TimeCode, end: TimeCode) -> Vec<(TimeCode, TimeCode)> {
+    let mut runs = Vec::new();
+    let mut cursor = start.0;
+    while cursor < end.0 {
+        if !clip.is_enabled_at(TimeCode(cursor)) {
+            cursor += 1;
+            continue;
+        }
+        let run_start = cursor;
+        cursor += 1;
+        while cursor < end.0 && clip.is_enabled_at(TimeCode(cursor)) {
+            cursor += 1;
+        }
+        runs.push((TimeCode(run_start), TimeCode(cursor)));
+    }
+    runs
 }
 
 fn source_on_track(
@@ -339,6 +386,16 @@ fn active_clip_on_track<'a>(
             .checked_add(duration)
             .ok_or_else(|| MediaError::Backend("timeline position overflowed".to_owned()))?;
         if project_at < timeline_end {
+            // MO1 R5: a disabled clip is absent from every layer resolution
+            // (`timeline_source_at`, `video_layers_at`, `visual_layers_at` all
+            // route through here). `continue`, not `None`, so an overlapping
+            // later clip could still cover the frame.
+            let local = project_at
+                .checked_sub(clip.timeline_start)
+                .unwrap_or(TimeCode::ZERO);
+            if !clip.is_enabled_at(local) {
+                continue;
+            }
             return Ok(Some(clip));
         }
     }
@@ -1032,5 +1089,248 @@ mod tests {
             segments.iter().any(|segment| segment.clip == ClipId(2)),
             "real-time clip must still contribute audio"
         );
+    }
+
+    fn brightness_effect(id: u64, enabled: bool) -> Effect {
+        Effect {
+            enabled,
+            enabled_curve: None,
+            id: EffectId(id),
+            name: "brightness".to_owned(),
+            parameters: std::collections::BTreeMap::from([(
+                "percent".to_owned(),
+                ParamValue::Integer(25),
+            )]),
+            keyframes: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn hold_curve(keys: &[(i64, i64)]) -> AutomationCurve {
+        AutomationCurve {
+            keyframes: keys
+                .iter()
+                .map(|(at, value)| Keyframe {
+                    at: TimeCode(*at),
+                    value: *value,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                })
+                .collect(),
+        }
+    }
+
+    /// §10 gate 5, GPU-free half: toggling an effect off equals removing it
+    /// in `visual_layers_at` (and `video_layers_at`, same `evaluated_effects`
+    /// filter). The lavapipe half lives with the Part B goldens.
+    #[test]
+    fn disabled_effect_renders_through() {
+        let mut document = fixture();
+        document.tracks[0].clips[0]
+            .effects
+            .push(brightness_effect(1, true));
+        document.validate().unwrap();
+
+        let mut disabled = document.clone();
+        disabled.tracks[0].clips[0].effects[0].enabled = false;
+        let mut removed = document.clone();
+        removed.tracks[0].clips[0].effects.clear();
+
+        for at in [0, 3, 9] {
+            let off = visual_layers_at(&disabled, TimeCode(at)).unwrap();
+            let gone = visual_layers_at(&removed, TimeCode(at)).unwrap();
+            assert_eq!(off, gone, "disabled must equal removed at frame {at}");
+            assert!(
+                off.iter().all(|layer| match layer {
+                    TimelineVisualLayer::Video(layer) => layer.effects.is_empty(),
+                    TimelineVisualLayer::Title(layer) => layer.effects.is_empty(),
+                }),
+                "no resolved layer may carry the disabled effect at frame {at}"
+            );
+            assert_eq!(
+                video_layers_at(&disabled, TimeCode(at)).unwrap(),
+                video_layers_at(&removed, TimeCode(at)).unwrap(),
+                "video_layers_at must agree at frame {at}"
+            );
+        }
+
+        // Sanity: the enabled original still resolves the effect.
+        let on = visual_layers_at(&document, TimeCode(3)).unwrap();
+        let TimelineVisualLayer::Video(layer) = &on[0] else {
+            panic!("media clip must resolve to a video layer");
+        };
+        assert_eq!(layer.effects.len(), 1);
+    }
+
+    /// A keyframed `enabled` cuts at the key's first frame: the effect is
+    /// present on every frame before the disabling key and absent from it on.
+    #[test]
+    fn keyframed_effect_enable_cuts_at_the_key_frame() {
+        let mut document = fixture();
+        let mut effect = brightness_effect(1, true);
+        effect.enabled_curve = Some(hold_curve(&[(0, 1), (5, 0)]));
+        document.tracks[0].clips[0].effects.push(effect);
+        document.validate().unwrap();
+
+        for at in 0..10 {
+            let layers = visual_layers_at(&document, TimeCode(at)).unwrap();
+            let TimelineVisualLayer::Video(layer) = &layers[0] else {
+                panic!("media clip must resolve to a video layer at frame {at}");
+            };
+            assert_eq!(
+                layer.effects.len(),
+                usize::from(at < 5),
+                "the effect must cut exactly at frame 5 (probed {at})"
+            );
+        }
+    }
+
+    /// §10 gate 6, GPU-free half: disabling a clip removes it from every
+    /// layer resolution and silences it in the segments — byte-identical to
+    /// the clip removed. The lavapipe half lives with the Part B goldens.
+    #[test]
+    fn disabled_clip_renders_through() {
+        let mut document = fixture();
+        document.tracks[0].clips[0]
+            .effects
+            .push(brightness_effect(1, true));
+        document.validate().unwrap();
+
+        let mut disabled = document.clone();
+        disabled.tracks[0].clips[0].enabled = false;
+        let mut removed = document.clone();
+        removed.tracks[0].clips.remove(0);
+
+        for at in [0, 3, 9, 15, 20] {
+            assert_eq!(
+                visual_layers_at(&disabled, TimeCode(at)).unwrap(),
+                visual_layers_at(&removed, TimeCode(at)).unwrap(),
+                "visual layers must match removal at frame {at}"
+            );
+            assert_eq!(
+                video_layers_at(&disabled, TimeCode(at)).unwrap(),
+                video_layers_at(&removed, TimeCode(at)).unwrap(),
+                "video layers must match removal at frame {at}"
+            );
+            assert_eq!(
+                timeline_source_at(&disabled, TimeCode(at)).unwrap(),
+                timeline_source_at(&removed, TimeCode(at)).unwrap(),
+                "source lookup must match removal at frame {at}"
+            );
+        }
+        assert!(
+            visual_layers_at(&disabled, TimeCode(3)).unwrap().is_empty(),
+            "the disabled clip must leave a gap, not a layer"
+        );
+        // Clip 2 (frames 15+) still resolves through the disabled neighbour.
+        assert_eq!(visual_layers_at(&disabled, TimeCode(15)).unwrap().len(), 1);
+
+        let off_segments = timeline_audio_segments(&disabled, TimeCode(0)..TimeCode(25)).unwrap();
+        let gone_segments = timeline_audio_segments(&removed, TimeCode(0)..TimeCode(25)).unwrap();
+        assert_eq!(off_segments, gone_segments);
+        assert!(
+            off_segments.iter().all(|segment| segment.clip != ClipId(1)),
+            "the disabled clip must contribute silence"
+        );
+        assert!(
+            off_segments.iter().any(|segment| segment.clip == ClipId(2)),
+            "the enabled clip must still contribute audio"
+        );
+    }
+
+    /// A keyframed clip `enabled_curve` cuts layers at the key's first frame,
+    /// in both directions.
+    #[test]
+    fn keyframed_clip_enable_cuts_layers_at_the_key_frame() {
+        let mut document = fixture();
+        document.tracks[0].clips[0].enabled_curve = Some(hold_curve(&[(0, 1), (5, 0)]));
+        document.validate().unwrap();
+
+        for at in 0..10 {
+            let layers = visual_layers_at(&document, TimeCode(at)).unwrap();
+            assert_eq!(
+                layers.len(),
+                usize::from(at < 5),
+                "the clip must cut exactly at frame 5 (probed {at})"
+            );
+            assert_eq!(
+                timeline_source_at(&document, TimeCode(at))
+                    .unwrap()
+                    .is_some(),
+                at < 5,
+                "source lookup must cut with the clip (probed {at})"
+            );
+        }
+
+        document.tracks[0].clips[0].enabled_curve = Some(hold_curve(&[(0, 0), (5, 1)]));
+        document.validate().unwrap();
+        for at in 0..10 {
+            assert_eq!(
+                visual_layers_at(&document, TimeCode(at)).unwrap().len(),
+                usize::from(at >= 5),
+                "the clip must return exactly at frame 5 (probed {at})"
+            );
+        }
+    }
+
+    /// A keyframed clip `enabled_curve` splits audio into maximal enabled
+    /// runs; every covered project frame is enabled at its clip-local frame
+    /// and every uncovered one is not.
+    #[test]
+    fn keyframed_clip_enable_splits_audio_into_enabled_runs() {
+        let mut document = fixture();
+        document.tracks[0].clips[0].enabled_curve = Some(hold_curve(&[(0, 1), (4, 0), (7, 1)]));
+        document.validate().unwrap();
+
+        let segments = timeline_audio_segments(&document, TimeCode(0)..TimeCode(10)).unwrap();
+        let clip: Vec<_> = segments
+            .iter()
+            .filter(|segment| segment.clip == ClipId(1))
+            .collect();
+        assert_eq!(
+            clip.iter()
+                .map(|segment| (segment.project.start.0, segment.project.end.0))
+                .collect::<Vec<_>>(),
+            vec![(0, 4), (7, 10)],
+            "Hold 1→0→1 must cut exactly at frames 4 and 7"
+        );
+        // Same-rate mapping: source runs track the project runs off source 10.
+        assert_eq!(
+            clip.iter()
+                .map(|segment| (segment.source.start.0, segment.source.end.0))
+                .collect::<Vec<_>>(),
+            vec![(10, 14), (17, 20)]
+        );
+
+        // Frame-by-frame equivalence with `is_enabled_at`, whatever the
+        // interpolation between the keys resolves to.
+        for at in 0..10 {
+            let local = TimeCode(at);
+            let covered = segments.iter().any(|segment| {
+                segment.clip == ClipId(1)
+                    && segment.project.start.0 <= at
+                    && at < segment.project.end.0
+            });
+            assert_eq!(
+                covered,
+                document.tracks[0].clips[0].is_enabled_at(local),
+                "segment coverage must equal is_enabled_at at frame {at}"
+            );
+        }
+    }
+
+    /// An always-enabled curve resolves the identical single segment the
+    /// curve-free path always produced.
+    #[test]
+    fn always_enabled_curve_matches_the_curve_free_segment() {
+        let plain = fixture();
+        let expected = timeline_audio_segments(&plain, TimeCode(0)..TimeCode(25)).unwrap();
+
+        let mut document = fixture();
+        document.tracks[0].clips[0].enabled_curve = Some(hold_curve(&[(0, 1)]));
+        document.tracks[0].clips[1].enabled_curve = Some(hold_curve(&[(0, 1)]));
+        document.validate().unwrap();
+        let actual = timeline_audio_segments(&document, TimeCode(0)..TimeCode(25)).unwrap();
+        assert_eq!(actual, expected);
     }
 }

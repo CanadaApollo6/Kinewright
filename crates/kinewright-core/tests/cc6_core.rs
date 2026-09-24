@@ -2192,3 +2192,35 @@ fn cc6_per_node_candidates_find_the_on_screen_clip_whatever_the_clip_order() {
         "and it names the clip and the effect it could not remove"
     );
 }
+
+/// MO1 R4: a disabled colour node is absent from QC candidates, exactly as if
+/// removed — while a merely inactive (neutral) node is still listed.
+#[test]
+fn mo1_per_node_candidates_skip_disabled_effects() {
+    let request = range_request(None);
+    let mut off = active_wheels_node(2);
+    off.enabled = false;
+    let document = Arc::new(managed_document_with_tracks(&[vec![
+        active_wheels_node(1),
+        off,
+    ]]));
+    let analysis = GainAnalysis::new(0.9, BTreeMap::from([(EffectId(1), 1.0)]));
+    let contributions =
+        measure_node_contributions(&analysis, Arc::clone(&document), TimeCode::ZERO, &request)
+            .expect("the double renders");
+    assert_eq!(contributions.considered_node_count, 1);
+    assert_eq!(contributions.nodes.len(), 1);
+    assert_eq!(contributions.nodes[0].effect, EffectId(1));
+
+    // Removal-identity: the same document with the node removed measures
+    // identically, including the render count (no wasted scratch render).
+    let removed = Arc::new(managed_document_with_tracks(&[vec![active_wheels_node(1)]]));
+    let analysis = GainAnalysis::new(0.9, BTreeMap::from([(EffectId(1), 1.0)]));
+    let expected = measure_node_contributions(&analysis, removed, TimeCode::ZERO, &request)
+        .expect("the double renders");
+    assert_eq!(
+        contributions.nodes[0].range_basis_points_delta,
+        expected.nodes[0].range_basis_points_delta
+    );
+    assert_eq!(analysis.render_count(), 2, "one baseline plus one scratch");
+}

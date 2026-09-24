@@ -2527,9 +2527,10 @@ fn fritsch_carlson_tangents(xs: &[f32], ys: &[f32]) -> Vec<f32> {
 /// here cannot drift from what QA, delivery conformance, and the inspector
 /// report about the same effect.
 fn legacy_stage_active(effects: &[Effect]) -> bool {
-    effects
-        .iter()
-        .any(|effect| kinewright_core::effect_compatibility_stage(&effect.name).is_some())
+    effects.iter().any(|effect| {
+        // MO1 R4: a disabled effect is absent — it must not light the stage.
+        effect.enabled && kinewright_core::effect_compatibility_stage(&effect.name).is_some()
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2541,6 +2542,13 @@ fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerPa
         ..Default::default()
     };
     for effect in effects {
+        // MO1 R4: callers pass keyframe-evaluated effects, whose `enabled`
+        // is the resolved flag (`Effect::evaluated_at` snapshots it), so a
+        // static-flag test is the whole skip. `evaluated_effects` filters
+        // first; this arm covers direct `Compositor` users.
+        if !effect.enabled {
+            continue;
+        }
         let Some(descriptor) = effect_descriptor(&effect.name) else {
             continue;
         };
@@ -3861,6 +3869,36 @@ mod tests {
         let params = params_for(&effects, TransitionRenderParams::default());
         assert!((params.crop_left - 0.45).abs() < f32::EPSILON);
         assert!(params.crop_right.abs() < f32::EPSILON);
+    }
+
+    /// MO1 R4: `params_for` skips disabled effects — a disabled 200% scale
+    /// folds exactly as no effect at all.
+    #[test]
+    fn params_for_skips_disabled_effects() {
+        let mut scaled = effect(1, "transform", "scale_percent", 200);
+        scaled.enabled = false;
+        let off = params_for(
+            std::slice::from_ref(&scaled),
+            TransitionRenderParams::default(),
+        );
+        let gone = params_for(&[], TransitionRenderParams::default());
+        assert!((off.scale - gone.scale).abs() < f32::EPSILON);
+        assert!((off.scale - 1.0).abs() < f32::EPSILON);
+
+        let on = params_for(
+            std::slice::from_ref(&effect(1, "transform", "scale_percent", 200)),
+            TransitionRenderParams::default(),
+        );
+        assert!((on.scale - 2.0).abs() < f32::EPSILON);
+    }
+
+    /// MO1 R4: a disabled legacy look must not light the legacy stage.
+    #[test]
+    fn legacy_stage_ignores_disabled_effects() {
+        let mut legacy = effect_with(1, "brightness", &[("percent", 10)]);
+        assert!(legacy_stage_active(std::slice::from_ref(&legacy)));
+        legacy.enabled = false;
+        assert!(!legacy_stage_active(std::slice::from_ref(&legacy)));
     }
 
     #[test]
