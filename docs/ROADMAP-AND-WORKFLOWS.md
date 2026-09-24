@@ -738,6 +738,149 @@ and records deferrals explicitly, as the colour slices did.
 Analysis tools do not mutate. Plan tools return the exact operations they intend
 to apply and require the project revision they analyzed.
 
+## Motion and compositing programme` for `docs/ROADMAP-AND-WORKFLOWS.md`
+
+Proposed section mirroring the `## Colour correction programme` and
+`## Audio programme` sections. Intended placement: after the audio programme,
+before the investigator programme. Revision 2: renumbered MO1–MO7, scrubbed
+to idea-level inspiration with Premiere/AE grounding, future work listed.
+
+---
+
+## Motion and compositing programme
+
+Programme design: [`MO0-MOTION-PROGRAMME.md`](MO0-MOTION-PROGRAMME.md) (promoted
+2026-09-23; slices MO1–MO7; deferred-but-intended work in its §11).
+
+### Product boundary
+
+The motion programme makes Kinewright able to finish the movement of an
+ordinary edit without leaving the application: animate position, scale,
+rotation, opacity, and crop on any clip by hand or by agent; composite
+ordered tracks with blend modes, adjustment layers, and nested compound
+clips; ramp, reverse, hold, and blend retimed footage; shape editorial
+mattes and keys; and build animated titles from vector-only templates.
+It is Premiere-class editorial compositing for picture editors, not a
+shot-based compositing application. 3D layers, particles and simulation,
+mesh warps, rotoscoping, node-graph compositing, custom shader authoring,
+and parameter expressions are the deliberate later After Effects
+programme. Optical-flow retiming, Bezier handles, motion blur, and
+person/segmentation mattes are honestly Premiere gaps, deferred but
+intended, with owners recorded below — not silent rejections.
+
+### Current foundation and limits
+
+The base is one typed integer-fixed-point curve (`AutomationCurve` with
+five interpolation kinds) already shared by effect keyframes (whole-curve
+`SetEffectKeyframes` plus the CC3 scalar/curve policies) and the five
+AU4 audio owners with their survival rules; six motion effect descriptors
+(`opacity`, uniform-scale `transform`, `crop`, `reframe`, single-shape
+`mask`, `chroma_key`); a GPU compositor with one alpha-over blend over
+document-ordered tracks on a shared preview/export render path;
+constant-rate `Clip.speed_percent` on the effective-fps principle (audio
+muted, ramps deferred); unanimated `Title` clips; three
+transition-in-only transitions; an agent template-match tracker that
+prepares keyframe operations; and three `ClipContent` variants (`Media`,
+`Title`, `Freeze`).
+
+The limits are equally clear. No keyframe editor exists for video
+parameters; `transform` has no rotation, anchor, or per-axis scale; no
+blend mode, adjustment layer, compound clip, time remap, track matte, or
+still-image asset exists; titles cannot animate; video effects have no
+bypass; no presets, nest/unnest, or push/slide/wipe transitions exist.
+The competitive audit scored keyframes/motion at — for exactly these
+reasons — the curve model exists, the motion surface does not.
+
+### Motion architecture principles
+
+- **One curve type for every animatable parameter.** Motion, colour,
+  audio, and retime share `AutomationCurve`, its validation, its
+  survival, and its per-frame resolution. New parameters are new owners,
+  never a new representation.
+- **Video and remap keys survive outside in/out.** Trim shifts, split
+  copies, evaluation clamps; audio curves keep the AU4 rules.
+- **Integer frames, owner-local keys, no sub-frame addressing.**
+  Retiming maps integer project frames to integer milli-frame source
+  positions through one `ClipTimeMap`; no call site scales itself.
+- **Tracks stay the document model.** Compositor layers are per-frame
+  artifacts; adjustment and compound clips are clip kinds with ranges,
+  not a parallel hierarchy.
+- **Adjustment affects below; compound effects see precomposed
+  children.** The Premiere adjustment/nest conventions, on tracks.
+- **Normal blends in the fixed-function pass;** anything else splits
+  into a scene-linear sub-composite re-entering via the managed path,
+  with a CPU-reference twin per feature and a pinned fps/VRAM budget.
+- **Node mattes never touch alpha; layer masks only touch alpha.** CC5
+  secondaries and MO5 mattes share the window vocabulary and the tracker,
+  never an evaluation stage.
+- **Frame blending is mix-only;** optical flow is deferred but intended.
+  Audio under any remap stays muted, as under constant speed.
+- **Templates are nested sequences** with typed editable fields —
+  vector and code-generated only, no raster, no model-generated pixels.
+- **Registry-only agent growth.** New operations and capabilities arrive
+  through `invoke_capability`; the served quad does not move by a byte,
+  and every planner answers inside a pinned byte budget.
+
+### Staged implementation
+
+| Stage | Deliverable | Exit gate |
+| --- | --- | --- |
+| MO1 — Keyframes, transform, stills, enable | Single-key upsert/remove; full `transform`; keep-outside video survival; per-effect `enabled` + clip enable; copy/paste attributes; keyframe editor with lanes and opacity rubber band; scale-to-frame; stills; motion planner; pure kernels with a stage-0 Kani probe | A push-in survives trim-in-then-out; split copies keys; Ken Burns renders (lavapipe); probe verdict recorded; served quad unchanged |
+| MO2 — Blend, adjustment, transitions, solids, solo | Per-clip blend modes through the sub-composite pass; adjustment clips; push/slide/wipe transitions; solids; `preview_solo` as an image-returning registry capability; CPU-reference twins; fps/VRAM budget | Normal bit-identical on both lanes; other modes match CPU twins; adjustment equals the hand-computed stack; transitions resolve midpoints; adjustment solo is a before/after pair; served quad unchanged |
+| MO3 — Compound clips | Call-site probe, then the resolver refactor; `Sequence` table with unique IDs and cycle validation; nested `map_frames`; audio mixdown; nest/unnest with step in/out | Probe sizes the brief; refactor changes no golden byte; a nest renders as its flat equivalent (both lanes); mixdown nulls; served quad unchanged |
+| MO4 — Speed ramps and time remap | `ClipTimeMap`; `Clip.time_remap` with keep-outside survival; Nearest/Blend sampling; rubber-band retime editor; budgeted `plan_speed_ramp` | Ramps hold endpoints across trims; reverse mirrors the source walk; Hold-vs-Hide differ at the boundary; pinned blend-vs-nearest diff; served quad unchanged |
+| MO5 — Mattes and keys | Multi-window `mask`, track-nominated mattes, `chroma_key` polish, tracker-driven mask planner with decimation and refusal | Matte containment on both lanes; track mattes match references; tracked mask holds with pinned occlusion behaviour; served quad unchanged |
+| MO6 — Titles and graphics templates | Typewriter field, entrance/exit presets, templates-as-sequences with field bindings, effect/motion presets, built-in set, specified transparent-export shape | Animated lower third on both lanes; template round-trips bound; presets apply keys verbatim; built-ins match pinned renders; served quad unchanged |
+| MO7 — Workflow evaluation | Scenario authority with synthetic sources, technical gates as ordinary tests on both CI operating systems, scripted agent and person paths, a motion-workflow eval suite with blinded review | All gates green on both OSes with lanes named; every workflow completable by agent and by hand; budgets green; human reviewer left only creative questions |
+
+**Current status (2026-09-23): programme design promoted (revision 2 after an
+Opus `revise` verdict, incorporating the lead's rulings and Riel's answers)**
+(keys kept outside in/out; compound nests with mixdown; scene-linear
+blend; expressions to AE). No slice briefed yet. MO1 is first: its
+stage-0 Kani probe gates every later proof claim.
+
+Each slice writes its design doc (≤ ~600 lines) before implementation
+and records deferrals explicitly, as the colour and audio slices did.
+
+Deferred but intended, each with an owner: optical-flow retiming (a
+future retiming-depth slice); Bezier handles (AE programme; tangent
+fields reserved in MO1); motion blur (AE programme); person/segmentation
+mattes (a future ML-matte slice); typed expressions (AE programme).
+
+### Agent surface direction
+
+- `preview_solo`: one clip, compound, or adjustment rendered over its
+  active window, returned as an image plus sampling-report JSON; an
+  adjustment solo is a before/after pair (shipped in MO2).
+- `plan_motion`, `plan_speed_ramp`, `plan_track_mask`,
+  `plan_title_animation`: revision-gated, evidence-only proposals
+  returning exact operations within a pinned byte budget, never applying
+  them; key emitters decimate within tolerance and summarize curves.
+- Single-key upsert/remove and the retime/matte/template mutators arrive
+  as generated operations through the unchanged compact runtime.
+
+Analysis tools do not mutate. Plan tools return the exact operations they
+intend to apply and require the project revision they analyzed. Proof
+tools identify the render stage and cannot substitute a proxy-only result
+for delivery verification.
+
+### Motion evaluation matrix
+
+| Fixture | Objective checks | Human question, if any |
+| --- | --- | --- |
+| Push-in / pull-out, Ken Burns still | Key survival, curve maths and proofs, lavapipe renders | Does the move feel intentional? |
+| Picture-in-picture, adjustment look, nested edit | Blend/matte/precomp renders on both lanes, cycle rejections, mixdown null | Does the composite sit believably; does the look hold? |
+| Speed ramp into freeze, reverse shot | Remap contracts and proofs, pinned blend diff | Does the ramp land on the moment? |
+| Masked isolation, track matte | Containment renders, tracked sequence with occlusion | Are any matte edges or corrections visible? |
+| Animated lower third from a template | Template round-trips, pinned built-in renders | Does the animation suit the story? |
+| Agent-authored motion end to end | Scripted real-endpoint runs, token/tool-call budgets | Only the creative choices, never the mechanics |
+| Encoded delivery of a motion-heavy timeline | Tags, decoded pixel comparison, platform consistency | Only if a codec limitation creates a visible trade-off |
+
+Before implementation, every motion slice brief pins numeric thresholds
+for its fixtures and names the render lane per gate. Results pass three
+gates in order — structural, technical, creative — and passing the first
+two is never grounds for calling a result excellent.
+
 ## Investigator and harness programme
 
 ### Product boundary
