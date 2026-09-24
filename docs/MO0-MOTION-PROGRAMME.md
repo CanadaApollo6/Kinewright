@@ -567,8 +567,11 @@ unchanged. *Depends:* MO1–MO5. *Size:* medium, two parts.
 **MO7 — Workflow evaluation.** Scenario authority (`mo_scenarios`) with
 synthetic lossless sources; technical gates as ordinary `cargo test` on
 both CI operating systems; scripted agent and person paths; a new
-`motion-workflow` eval suite with blinded review; no new feature, no new
-tool. *Exit gate:* all scenario gates green on both OSes with lanes
+`motion-workflow` eval suite with blinded review; the IN3 post-render
+cut-boundary self-check run over every motion scenario output (flash at a
+cut, overlay hiding a caption, audio pop, level jump); a publishable-output
+critic pass that reviews the render adversarially with timecoded evidence
+and a ranked fix list; no new feature, no new tool. *Exit gate:* all scenario gates green on both OSes with lanes
 named; every workflow completable through the real endpoint and through
 the GUI; token/tool-call budgets green; human reviewer left only
 creative questions. *Depends:* MO1–MO6. *Size:* medium, one part plus
