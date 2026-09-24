@@ -274,11 +274,15 @@ fn ramp_curve(from: i64, to: i64, end: TimeCode) -> AutomationCurve {
 /// shipped presets emit two keys and never reach it, but the cap is enforced
 /// rather than assumed.
 ///
-/// N5 K6 tolerance contract: the endpoints plus every interior bucket's
-/// value extrema survive, so a spike or dip inside any bucket is never
-/// dropped and deviation is exactly 0 at every kept key. No numeric bound
-/// is promised between kept keys — the guarantee is structural (features
-/// survive), pinned by the spike test, not a Lipschitz bound.
+/// N5 K6 tolerance contract, amended N5.1 L6 — the checkable numeric claims,
+/// all asserted by `decimation_contract_is_the_exact_kept_set`: at most 8
+/// keys out; the first and last (frame, value) equal the input's; every
+/// interior bucket contributes its first-minimum and first-maximum key with
+/// exact frames and values, so a spike or dip inside any bucket is never
+/// dropped and deviation is exactly 0 at every kept key. Between kept keys
+/// NO deviation bound is promised — none finite exists (scaling the values
+/// scales any gap), so the guarantee there is structural-only, not a
+/// Lipschitz bound.
 fn decimate_keys(keys: Vec<Keyframe>) -> Vec<Keyframe> {
     if keys.len() <= MOTION_MAX_KEYS_PER_CURVE {
         return keys;
@@ -1103,18 +1107,26 @@ mod tests {
     #[test]
     fn pip_replace_clears_fine_and_basis_curves() {
         let mut effect = keyed_transform(EffectId(2), "scale_percent", 150);
-        effect.keyframes.insert(
-            "scale_fine_hundredths".to_owned(),
-            AutomationCurve {
-                keyframes: vec![Keyframe {
-                    at: TimeCode::ZERO,
-                    value: 12_000,
-                    interpolation: KeyframeInterpolation::Hold,
-                    tangent_in: 0,
-                    tangent_out: 0,
-                }],
-            },
-        );
+        // N5.1: the whole fine/basis triple is curved, so a narrowed clear
+        // (K2_pip's `[..1]`) cannot hide — every triple member must clear.
+        for (name, value) in [
+            ("scale_fine_hundredths", 12_000),
+            ("x_basis_points", 100),
+            ("y_basis_points", -100),
+        ] {
+            effect.keyframes.insert(
+                name.to_owned(),
+                AutomationCurve {
+                    keyframes: vec![Keyframe {
+                        at: TimeCode::ZERO,
+                        value,
+                        interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    }],
+                },
+            );
+        }
         let document = motion_fixture(TrackKind::Video, 60, vec![effect]);
         let refused = plan_motion(
             &document,
@@ -1137,7 +1149,15 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(cleared, vec!["scale_percent", "scale_fine_hundredths"]);
+        assert_eq!(
+            cleared,
+            vec![
+                "scale_percent",
+                "scale_fine_hundredths",
+                "x_basis_points",
+                "y_basis_points",
+            ]
+        );
     }
 
     /// MO1 R20: `ken_burns` is a move preset and is NOT refused on video.
@@ -1252,6 +1272,53 @@ mod tests {
                 "kept keys hold ({at}, {value}): {thinned:?}"
             );
         }
+    }
+
+    /// N5.1 L6: the decimation contract as an exact kept set — 12 keys thin
+    /// to exactly 8: both endpoints plus every interior bucket's first-min
+    /// and first-max at their exact frames and values (ties keep the first
+    /// key, strict-inequality scan).
+    #[test]
+    fn decimation_contract_is_the_exact_kept_set() {
+        let keys: Vec<Keyframe> = [
+            (0, 5),
+            (1, 10),
+            (2, 50),
+            (3, 30),
+            (4, 20),
+            (5, 0),
+            (6, 40),
+            (7, 40),
+            (8, 10),
+            (9, 70),
+            (10, 60),
+            (11, 55),
+        ]
+        .into_iter()
+        .map(|(at, value)| Keyframe {
+            at: TimeCode(at),
+            value,
+            interpolation: KeyframeInterpolation::Linear,
+            tangent_in: 0,
+            tangent_out: 0,
+        })
+        .collect();
+        let thinned = decimate_keys(keys);
+        let kept: Vec<(i64, i64)> = thinned.iter().map(|key| (key.at.0, key.value)).collect();
+        assert_eq!(
+            kept,
+            [
+                (0, 5),
+                (1, 10),
+                (2, 50),
+                (5, 0),
+                (6, 40),
+                (9, 70),
+                (10, 60),
+                (11, 55),
+            ],
+            "endpoints + every bucket's extrema, exactly"
+        );
     }
 
     /// MO1 R20: the budget helper draws the line at exactly 4 KiB.

@@ -13,9 +13,9 @@ use kinewright_core::{
     MARKER_COLOR_TOKEN_COUNT, MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, MAX_KEY_FRAME_OFFSET,
     Marker, MarkerId, MatteParams, MatteQualifierParams, MatteWindowParams, MediaKind, Operation,
     ParamValue, ResolvedCurves, TITLE_COLORS, TITLE_FONT_SIZES, TRANSITION_DESCRIPTORS, TimeCode,
-    Title, TitlePosition, Transition, color_node_inactive_reason, effect_compatibility_stage,
-    envelope_coalesce_key, is_audio_effect, is_legacy_display_effect, is_lut_color_node,
-    is_matte_capable_color_node, is_matte_parameter,
+    Title, TitlePosition, TrackKind, Transition, color_node_inactive_reason,
+    effect_compatibility_stage, envelope_coalesce_key, is_audio_effect, is_legacy_display_effect,
+    is_lut_color_node, is_matte_capable_color_node, is_matte_parameter,
 };
 use kinewright_media::BuiltinLook;
 
@@ -193,6 +193,10 @@ impl InspectorEdits {
     /// The last request in the frame wins; cards never touch app state.
     pub(crate) fn request_playhead(&mut self, at: TimeCode) {
         self.playhead_request = Some(at);
+    }
+
+    pub(crate) fn request_motion_plan(&mut self, clip: ClipId) {
+        self.motion_plan_request = Some(clip);
     }
 
     /// Mirror the A/B hold this frame's card reported.
@@ -4091,6 +4095,7 @@ pub(crate) fn keyframe_row(
                     .range(i64::from(i32::MIN)..=i64::from(i32::MAX))
                     .update_while_editing(false),
             );
+            crate::mixer_ui::record_strip_rect("keyframe_row_value", level.rect);
             egui::ComboBox::from_id_salt("interpolation")
                 .selected_text(interpolation_label(interpolation))
                 .width(76.0)
@@ -4455,6 +4460,14 @@ fn motion_card_frames(effect: &Effect) -> Vec<i64> {
 
 /// MO1 R22: the operations one clip-enable toggle writes — the clip plus its
 /// linked partner, so a linked A/V pair toggles as one (R17). Pure.
+/// N5.1 L2: what an enable toggle displays — the value at the playhead when
+/// the sibling is keyed, else the parked flag. Pure; provable without a window.
+fn enabled_toggle_displayed(enabled: bool, curve: Option<&AutomationCurve>, at: TimeCode) -> bool {
+    curve
+        .and_then(|curve| curve.value_at(at))
+        .map_or(enabled, |value| value != 0)
+}
+
 /// N5 K5: R16 for the enable sibling — a last-key remove (a Clear carrying the
 /// removed value) appends the parked-static write, so the value survives. The
 /// `Clear` button sends no removed value and keeps the parked static (Core
@@ -4624,6 +4637,7 @@ fn motion_param_row(
     parameter: &kinewright_core::EffectParameterDescriptor,
     at: TimeCode,
     clip_duration: TimeCode,
+    keep_fit: bool,
     pending: &mut InspectorEdits,
 ) {
     let name = parameter.name;
@@ -4650,17 +4664,20 @@ fn motion_param_row(
         }
     });
     // N5 K4: auto-key is disabled with the playhead outside the clip.
+    // N5.1 L1: a static (curve-free) param is not keying, so it stays
+    // editable outside the clip — only keyed controls disarm.
     let keyable = motion_playhead_keyable(at, clip_duration);
+    let editable = keyable || curve.is_none();
     let response = if motion_param_is_slider(parameter.min, parameter.max) {
         ui.add_enabled(
-            keyable,
+            editable,
             egui::Slider::new(&mut value, parameter.min..=parameter.max)
                 .text(name)
                 .integer(),
         )
     } else {
         ui.add_enabled(
-            keyable,
+            editable,
             egui::DragValue::new(&mut value)
                 .range(parameter.min..=parameter.max)
                 .prefix(format!("{name}: ")),
@@ -4670,11 +4687,18 @@ fn motion_param_row(
         pending.begin_gesture();
     }
     ui.horizontal(|ui| {
+        // N5.1 L5: a fitted still's fit triple keeps its baked scale — its
+        // per-param Reset disarms instead of neutralizing.
+        let fit_kept = keep_fit && STILL_FIT_PARAMETERS.contains(&parameter.name);
         let reset = ui
-            .small_button("Reset")
-            .on_hover_text("Restore the static to neutral; keys are kept.");
+            .add_enabled(!fit_kept, egui::Button::new("Reset").small())
+            .on_hover_text(if fit_kept {
+                "Kept: the still's baked fit. Reset effect keeps it too."
+            } else {
+                "Restore the static to neutral; keys are kept."
+            });
         crate::mixer_ui::record_strip_rect("motion_reset_param", reset.rect);
-        if reset.clicked() {
+        if !fit_kept && reset.clicked() {
             pending.push(effect_param_operation(
                 clip,
                 effect.id,
@@ -4683,10 +4707,10 @@ fn motion_param_row(
             ));
         }
     });
-    // N5 K4: the `keyable` guard is load-bearing, not belt-and-suspenders —
+    // N5 K4: the `editable` guard is load-bearing, not belt-and-suspenders —
     // a disabled egui 0.35 slider still reports `changed()` under a drag, so
     // `add_enabled` alone greys the control without disarming it.
-    if keyable && response.changed() {
+    if editable && response.changed() {
         // Auto-key writes the dragged value: the control shows the value at
         // the playhead, so the first drag pixel starts where the curve is.
         let operation = motion_static_operation(
@@ -4729,7 +4753,10 @@ fn motion_enabled_row(
     pending: &mut InspectorEdits,
 ) {
     ui.horizontal(|ui| {
-        let mut enabled = effect.enabled;
+        // N5.1 L2: a keyed toggle shows the value at the playhead, not the
+        // parked flag — clicking writes the opposite of what is shown.
+        let mut enabled =
+            enabled_toggle_displayed(effect.enabled, effect.enabled_curve.as_ref(), at);
         ui.monospace(egui::RichText::new("enabled").size(type_size::CAPTION));
         // N5 K4: a keyed toggle auto-keys, so it disables outside the clip;
         // a static toggle is not keying and stays live.
@@ -4824,14 +4851,21 @@ fn clip_playhead_local(clip: &Clip, position: TimeCode) -> i64 {
     position.0 - clip.timeline_start.0
 }
 
-/// N5 K5: MOTION is a picture section — an audio-only clip (Media over an
-/// Audio asset) shows no cards and no `+ Transform` row. A missing asset
-/// keeps the section: the cards render from the clip's own effects.
-/// Pure; provable without a window.
+/// N5.1 L5: MOTION is a picture section — a clip placed on an audio TRACK
+/// shows no cards and no `+ Transform` row. Track kind, not asset kind: an
+/// unplaced clip keeps the section (fail-open). Pure; provable without a
+/// window.
 fn clip_shows_motion(document: &kinewright_core::Document, clip: &Clip) -> bool {
-    !document
-        .asset(clip.asset)
-        .is_some_and(|asset| asset.kind == MediaKind::Audio)
+    !matches!(
+        document.tracks.iter().find_map(|track| {
+            track
+                .clips
+                .iter()
+                .any(|member| member.id == clip.id)
+                .then_some(track.kind)
+        }),
+        Some(TrackKind::Audio)
+    )
 }
 
 /// Whether this clip carries a baked still fit — a Freeze over an Image
@@ -4919,7 +4953,9 @@ fn motion_effect_card(
                 continue;
             }
             ui.separator();
-            motion_param_row(ui, clip.id, effect, parameter, at, clip_duration, pending);
+            motion_param_row(
+                ui, clip.id, effect, parameter, at, clip_duration, keep_fit, pending,
+            );
         }
     });
 }
@@ -4984,7 +5020,7 @@ fn motion_section(
         let plan = ui.small_button("Plan move…");
         crate::mixer_ui::record_strip_rect("motion_plan_move", plan.rect);
         if plan.clicked() {
-            pending.motion_plan_request = Some(clip.id);
+            pending.request_motion_plan(clip.id);
         }
     });
 }
@@ -5001,20 +5037,24 @@ fn clip_enable_header(
     pending: &mut InspectorEdits,
 ) {
     let at = TimeCode(playhead_local.clamp(-MAX_KEY_FRAME_OFFSET, MAX_KEY_FRAME_OFFSET));
+    let clip_duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
     ui.horizontal(|ui| {
-        let mut enabled = clip.enabled;
-        let toggle = ui.checkbox(&mut enabled, "Enabled");
+        // N5.1 L2: shows the value at the playhead when keyed. A keyed toggle
+        // auto-keys, so it obeys the K4 outside-clip disable (no clamping to
+        // the last frame); a static toggle is not keying and stays live.
+        let mut enabled = enabled_toggle_displayed(clip.enabled, clip.enabled_curve.as_ref(), at);
+        let keyable = motion_playhead_keyable(at, clip_duration) || clip.enabled_curve.is_none();
+        let toggle = ui.add_enabled(keyable, egui::Checkbox::new(&mut enabled, "Enabled"));
         crate::mixer_ui::record_strip_rect("clip_enable_toggle", toggle.rect);
         if clip.enabled_curve.is_some() {
             ui.colored_label(color::STATUS_WARNING, "KEYFRAMED");
         }
-        if toggle.changed() {
+        if keyable && toggle.changed() {
             for operation in clip_enable_toggle_operations(document, clip.id, enabled, at) {
                 pending.push(operation);
             }
         }
     });
-    let clip_duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
     let row_key = format!("clip_enable:{}", clip.id.0);
     let mut next: Option<CurveWrite> = None;
     let mut live = false;
@@ -6311,7 +6351,7 @@ mod tests {
     /// subtrahend fails here instead of drifting one surface.
     #[test]
     fn clip_playhead_local_subtracts_the_clip_start() {
-        let mut clip = media_clip(ClipId(10), AssetId(1), None);
+        let mut clip = media_clip(ClipId(10), kinewright_core::AssetId(1), None);
         clip.timeline_start = TimeCode(100);
         assert_eq!(clip_playhead_local(&clip, TimeCode(109)), 9);
         assert_eq!(clip_playhead_local(&clip, TimeCode(95)), -5);
@@ -6319,33 +6359,39 @@ mod tests {
         assert_eq!(clip_playhead_local(&clip, TimeCode(7)), 7);
     }
 
-    /// N5 K5: MOTION is a picture section — an audio-only clip (Media over an
-    /// Audio asset) shows no cards and no `+ Transform` row. Video and
-    /// missing-asset clips keep the section.
+    /// N5.1 L5: MOTION is a picture section — a clip placed on an audio TRACK
+    /// shows no cards and no `+ Transform` row, whatever its asset kind. A
+    /// video-track clip and an unplaced clip keep the section.
     #[test]
-    fn audio_only_clips_show_no_motion_section() {
+    fn audio_track_clips_show_no_motion_section() {
         let document = Document {
-            media_pool: vec![MediaAsset {
-                id: AssetId(1),
-                path: PathBuf::from("sound.wav"),
-                name: "Sound".to_owned(),
-                duration: TimeCode(30),
-                fps: Rational::new(30, 1).expect("valid fps"),
-                kind: MediaKind::Audio,
-                resolution: None,
-                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
-                color_description: kinewright_core::ColorDescription::default(),
-                assumed_from: None,
-            }],
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![media_clip(ClipId(10), AssetId(1), None)],
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![media_clip(ClipId(11), AssetId(1), None)],
+                },
+            ],
             ..Document::default()
         };
         assert!(!clip_shows_motion(
             &document,
-            &media_clip(ClipId(10), AssetId(1), None)
+            &document.tracks[1].clips[0].clone()
+        ));
+        assert!(clip_shows_motion(
+            &document,
+            &document.tracks[0].clips[0].clone()
         ));
         assert!(
-            clip_shows_motion(&document, &media_clip(ClipId(11), AssetId(999), None)),
-            "a missing asset keeps the section (fail-open)"
+            clip_shows_motion(&document, &media_clip(ClipId(99), AssetId(1), None)),
+            "an unplaced clip keeps the section (fail-open)"
         );
     }
 
@@ -6384,7 +6430,10 @@ mod tests {
             "a video hold-frame resets fully"
         );
         assert!(
-            !clip_keeps_still_fit(&document, &media_clip(ClipId(12), AssetId(1), None)),
+            !clip_keeps_still_fit(
+                &document,
+                &media_clip(ClipId(12), kinewright_core::AssetId(1), None)
+            ),
             "a media clip resets fully"
         );
         assert!(
@@ -6397,7 +6446,7 @@ mod tests {
     /// a negative playhead keys frame 0.
     #[test]
     fn keyed_enable_toggle_clamps_a_negative_playhead_to_zero() {
-        let mut keyed = media_clip(ClipId(10), AssetId(1), None);
+        let mut keyed = media_clip(ClipId(10), kinewright_core::AssetId(1), None);
         keyed.enabled_curve = Some(AutomationCurve {
             keyframes: Vec::new(),
         });
@@ -6442,6 +6491,122 @@ mod tests {
         );
     }
 
+    /// N5.1 L5: per-parameter Reset on a still's baked-fit params keeps the
+    /// fit — the fit triple's reset writes nothing; other params still
+    /// neutralize to their descriptor neutral.
+    #[test]
+    fn per_param_reset_on_a_fitted_still_keeps_the_fit() {
+        fn press_param_reset(name: &str) -> Vec<Operation> {
+            let descriptor = EFFECT_DESCRIPTORS
+                .iter()
+                .find(|descriptor| descriptor.name == "transform")
+                .expect("the transform descriptor");
+            let parameter = descriptor
+                .parameters
+                .iter()
+                .find(|parameter| parameter.name == name)
+                .unwrap_or_else(|| panic!("{name} is a transform param"));
+            let effect = Effect {
+                enabled: true,
+                enabled_curve: None,
+                id: EffectId(1),
+                name: "transform".to_owned(),
+                parameters: BTreeMap::from([
+                    ("scale_x_percent".to_owned(), ParamValue::Integer(150)),
+                    ("rotation_centidegrees".to_owned(), ParamValue::Integer(900)),
+                ]),
+                keyframes: BTreeMap::new(),
+            };
+            let clip = media_clip(ClipId(2), AssetId(1), None);
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            press_recorded("motion_reset_param", |events, time| {
+                let mut pending = InspectorEdits::default();
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 400.0),
+                        )),
+                        time: Some(time),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let _ = crate::mixer_ui::take_strip_rects();
+                        motion_param_row(
+                            ui,
+                            clip.id,
+                            &effect,
+                            parameter,
+                            TimeCode(9),
+                            TimeCode(30),
+                            true,
+                            &mut pending,
+                        );
+                    },
+                );
+                (crate::mixer_ui::take_strip_rects(), pending)
+            })
+            .operations()
+            .to_vec()
+        }
+
+        assert!(
+            press_param_reset("scale_x_percent").is_empty(),
+            "the fitted still's fit triple keeps its baked scale"
+        );
+        assert_eq!(
+            press_param_reset("rotation_centidegrees"),
+            [Operation::SetEffectParam {
+                clip: ClipId(2),
+                effect: EffectId(1),
+                name: "rotation_centidegrees".to_owned(),
+                value: ParamValue::Integer(0),
+            }]
+        );
+    }
+
+    /// N5.1 (`K5_reset` survivor): card Reset on a fitted still keeps the fit
+    /// through the real card — pressing Reset effect writes no fit-triple
+    /// op while the rest neutralizes. Kills a `keep_fit` forced false at
+    /// the card call site.
+    #[test]
+    fn card_reset_on_a_fitted_still_keeps_the_fit() {
+        let clip = media_clip(ClipId(2), AssetId(1), None);
+        let effect = Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(1),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([
+                ("scale_x_percent".to_owned(), ParamValue::Integer(150)),
+                ("rotation_centidegrees".to_owned(), ParamValue::Integer(900)),
+            ]),
+            keyframes: BTreeMap::new(),
+        };
+        let pressed =
+            motion_press_keep_fit(&clip, &effect, 9, TimeCode(30), true, "motion_reset_effect");
+        let operations = pressed.operations().to_vec();
+        assert!(
+            operations.iter().all(|operation| !matches!(
+                operation,
+                Operation::SetEffectParam { name, .. }
+                    if STILL_FIT_PARAMETERS.contains(&name.as_str())
+            )),
+            "the fit triple keeps its baked scale: {operations:?}"
+        );
+        assert!(
+            operations.contains(&Operation::SetEffectParam {
+                clip: ClipId(2),
+                effect: EffectId(1),
+                name: "rotation_centidegrees".to_owned(),
+                value: ParamValue::Integer(0),
+            }),
+            "the rest neutralizes: {operations:?}"
+        );
+    }
+
     /// N5 K6 (survivor): `keep_fit` narrows only the transform fit triple — an
     /// opacity card on a still still neutralizes its own static.
     #[test]
@@ -6477,7 +6642,7 @@ mod tests {
             assert!(!is_effect_insertable(name));
         }
 
-        let clip = media_clip(ClipId(10), AssetId(1), None);
+        let clip = media_clip(ClipId(10), kinewright_core::AssetId(1), None);
         for (name, parameter_count) in [
             ("color_wheels", 13 + kinewright_core::MATTE_PARAMETER_COUNT),
             ("color_curves", 133 + kinewright_core::MATTE_PARAMETER_COUNT),
@@ -7257,7 +7422,7 @@ mod tests {
 
     /// A one-clip document carrying an all-neutral `color_curves` node.
     fn curves_document() -> Document {
-        let mut clip = media_clip(ClipId(10), AssetId(1), None);
+        let mut clip = media_clip(ClipId(10), kinewright_core::AssetId(1), None);
         clip.effects = vec![Effect {
             enabled: true,
             enabled_curve: None,
@@ -7291,7 +7456,7 @@ mod tests {
         }
     }
 
-    fn media_clip(id: ClipId, asset: AssetId, link: Option<LinkId>) -> Clip {
+    pub(super) fn media_clip(id: ClipId, asset: AssetId, link: Option<LinkId>) -> Clip {
         Clip {
             enabled: true,
             enabled_curve: None,
@@ -7341,7 +7506,7 @@ mod tests {
     }
 
     fn look_clip(effects: Vec<Effect>) -> Clip {
-        let mut clip = media_clip(ClipId(10), AssetId(1), None);
+        let mut clip = media_clip(ClipId(10), kinewright_core::AssetId(1), None);
         clip.effects = effects;
         clip
     }
@@ -10598,7 +10763,7 @@ mod tests {
 
     /// MO1 R22: one `opacity` effect with a `percent` curve riding keys at
     /// −20 (kept outside a head trim), 0 and 15, plus static 80.
-    fn motion_opacity_effect() -> Effect {
+    pub(super) fn motion_opacity_effect() -> Effect {
         Effect {
             enabled: true,
             enabled_curve: None,
@@ -11013,6 +11178,7 @@ mod tests {
         effect: &Effect,
         playhead_local: i64,
         clip_duration: TimeCode,
+        keep_fit: bool,
         events: Vec<egui::Event>,
         rects: &mut Vec<(String, egui::Rect)>,
         time: f64,
@@ -11042,7 +11208,7 @@ mod tests {
                     playhead_local,
                     TimeCode(30),
                     clip_duration,
-                    false,
+                    keep_fit,
                     &mut pending,
                 );
             },
@@ -11090,11 +11256,23 @@ mod tests {
     }
 
     /// Press one recorded MOTION card control and return the frame's edits.
-    fn motion_press(
+    pub(super) fn motion_press(
         clip: &Clip,
         effect: &Effect,
         playhead_local: i64,
         clip_duration: TimeCode,
+        button: &str,
+    ) -> InspectorEdits {
+        motion_press_keep_fit(clip, effect, playhead_local, clip_duration, false, button)
+    }
+
+    /// Press one recorded MOTION card control on a (possibly fitted) still.
+    fn motion_press_keep_fit(
+        clip: &Clip,
+        effect: &Effect,
+        playhead_local: i64,
+        clip_duration: TimeCode,
+        keep_fit: bool,
         button: &str,
     ) -> InspectorEdits {
         let ctx = egui::Context::default();
@@ -11107,12 +11285,63 @@ mod tests {
                 effect,
                 playhead_local,
                 clip_duration,
+                keep_fit,
                 events,
                 &mut rects,
                 time,
             );
             (rects, pending)
         })
+    }
+
+    /// Press one recorded opacity percent-row control and return its ops.
+    fn press_opacity_row_button(
+        effect: &Effect,
+        button: &str,
+        playhead_local: i64,
+    ) -> Vec<Operation> {
+        let clip = media_clip(ClipId(2), AssetId(1), None);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        press_recorded(button, |events, time| {
+            let mut pending = InspectorEdits::default();
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 400.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let _ = crate::mixer_ui::take_strip_rects();
+                    let descriptor = EFFECT_DESCRIPTORS
+                        .iter()
+                        .find(|descriptor| descriptor.name == "opacity")
+                        .expect("the opacity descriptor");
+                    let parameter = descriptor
+                        .parameters
+                        .iter()
+                        .find(|parameter| parameter.name == "percent")
+                        .expect("the percent row");
+                    motion_param_row(
+                        ui,
+                        clip.id,
+                        effect,
+                        parameter,
+                        TimeCode(playhead_local),
+                        TimeCode(30),
+                        false,
+                        &mut pending,
+                    );
+                },
+            );
+            (crate::mixer_ui::take_strip_rects(), pending)
+        })
+        .operations()
+        .to_vec()
     }
 
     /// N5 K4: a focused keyframe row paints the selection wash behind it;
@@ -11228,7 +11457,7 @@ mod tests {
         }
 
         let effect = motion_opacity_effect();
-        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        let mut clip = media_clip(ClipId(2), kinewright_core::AssetId(1), None);
         clip.effects = vec![effect.clone()];
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
@@ -11256,7 +11485,7 @@ mod tests {
     #[test]
     fn keyed_control_shows_the_value_at_the_playhead() {
         let effect = motion_opacity_effect();
-        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        let mut clip = media_clip(ClipId(2), kinewright_core::AssetId(1), None);
         clip.effects = vec![effect.clone()];
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
@@ -11267,6 +11496,7 @@ mod tests {
             &effect,
             5,
             TimeCode(30),
+            false,
             Vec::new(),
             &mut rects,
             0.02,
@@ -11286,7 +11516,7 @@ mod tests {
     #[test]
     fn plus_key_outside_the_clip_writes_nothing() {
         let effect = motion_opacity_effect();
-        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        let mut clip = media_clip(ClipId(2), kinewright_core::AssetId(1), None);
         clip.effects = vec![effect.clone()];
         let pressed = motion_press(&clip, &effect, 45, TimeCode(30), "motion_add_key");
         assert!(pressed.operations().is_empty());
@@ -11308,7 +11538,7 @@ mod tests {
                 tangent_out: 0,
             }],
         });
-        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        let mut clip = media_clip(ClipId(2), kinewright_core::AssetId(1), None);
         clip.effects = vec![effect.clone()];
         let inside = motion_press(&clip, &effect, 9, TimeCode(30), "motion_toggle");
         assert!(
@@ -11372,7 +11602,7 @@ mod tests {
     #[test]
     fn the_motion_card_paints_its_rows_and_a_paint_frame_writes_nothing() {
         let effect = motion_opacity_effect();
-        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        let mut clip = media_clip(ClipId(2), kinewright_core::AssetId(1), None);
         clip.effects = vec![effect.clone()];
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
@@ -11383,6 +11613,7 @@ mod tests {
             &effect,
             9,
             TimeCode(30),
+            false,
             Vec::new(),
             &mut rects,
             0.02,
@@ -11422,54 +11653,10 @@ mod tests {
     /// `Clear` clears the whole curve.
     #[test]
     fn motion_add_key_upserts_and_clear_clears_the_row() {
-        fn row_press(effect: &Effect, button: &str, playhead_local: i64) -> Vec<Operation> {
-            let clip = media_clip(ClipId(2), AssetId(1), None);
-            let ctx = egui::Context::default();
-            crate::theme::install(&ctx);
-            press_recorded(button, |events, time| {
-                let mut pending = InspectorEdits::default();
-                let _ = ctx.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(400.0, 400.0),
-                        )),
-                        time: Some(time),
-                        events,
-                        ..Default::default()
-                    },
-                    |ui| {
-                        let _ = crate::mixer_ui::take_strip_rects();
-                        let descriptor = EFFECT_DESCRIPTORS
-                            .iter()
-                            .find(|descriptor| descriptor.name == "opacity")
-                            .expect("the opacity descriptor");
-                        let parameter = descriptor
-                            .parameters
-                            .iter()
-                            .find(|parameter| parameter.name == "percent")
-                            .expect("the percent row");
-                        motion_param_row(
-                            ui,
-                            clip.id,
-                            effect,
-                            parameter,
-                            TimeCode(playhead_local),
-                            TimeCode(30),
-                            &mut pending,
-                        );
-                    },
-                );
-                (crate::mixer_ui::take_strip_rects(), pending)
-            })
-            .operations()
-            .to_vec()
-        }
-
         let effect = motion_opacity_effect();
         // Playhead 9 sits between 0 (50) and 15 (100): 50 + 50/15 × 9 = 80.
         assert_eq!(
-            row_press(&effect, "motion_add_key", 9),
+            press_opacity_row_button(&effect, "motion_add_key", 9),
             [Operation::UpsertEffectKeyframe {
                 clip: ClipId(2),
                 effect: EffectId(5),
@@ -11484,7 +11671,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            row_press(&effect, "motion_clear", 9),
+            press_opacity_row_button(&effect, "motion_clear", 9),
             [Operation::ClearEffectKeyframes {
                 clip: ClipId(2),
                 effect: EffectId(5),
@@ -11494,7 +11681,7 @@ mod tests {
         // The row's remove button sends the single-key remove at the key's
         // own frame — the first row rides the kept-outside key at −20.
         assert_eq!(
-            row_press(&effect, "keyframe_row_remove", 9),
+            press_opacity_row_button(&effect, "keyframe_row_remove", 9),
             [Operation::RemoveEffectKeyframe {
                 clip: ClipId(2),
                 effect: EffectId(5),
@@ -11509,7 +11696,7 @@ mod tests {
     #[test]
     fn motion_nav_seeks_and_the_toggle_writes_the_static() {
         let effect = motion_opacity_effect();
-        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        let mut clip = media_clip(ClipId(2), kinewright_core::AssetId(1), None);
         clip.timeline_start = TimeCode(10);
         clip.effects = vec![effect.clone()];
         // Keys at −20/0/15, playhead local 9: prev 0 → project 10, next
@@ -11541,7 +11728,7 @@ mod tests {
     fn motion_reset_restores_neutral_and_remove_removes() {
         let mut effect = motion_opacity_effect();
         effect.enabled = false;
-        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        let mut clip = media_clip(ClipId(2), kinewright_core::AssetId(1), None);
         clip.effects = vec![effect.clone()];
         let reset = motion_press(&clip, &effect, 9, TimeCode(30), "motion_reset_effect");
         assert_eq!(
@@ -11579,7 +11766,7 @@ mod tests {
     /// pressed one neutral.
     #[test]
     fn the_motion_add_row_adds_the_pressed_effect_neutral() {
-        let clip = media_clip(ClipId(2), AssetId(1), None);
+        let clip = media_clip(ClipId(2), kinewright_core::AssetId(1), None);
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         let mut painting = InspectorEdits::default();
@@ -11646,7 +11833,7 @@ mod tests {
     /// for this clip, and sends no operations itself.
     #[test]
     fn the_plan_move_button_requests_the_dialog() {
-        let clip = media_clip(ClipId(2), AssetId(1), None);
+        let clip = media_clip(ClipId(2), kinewright_core::AssetId(1), None);
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         let pressed = press_recorded("motion_plan_move", |events, time| {
@@ -11735,6 +11922,619 @@ mod tests {
         );
         assert_eq!(motion_gui_senders("AddAsset"), None);
         assert_eq!(motion_gui_senders("NoSuchOp"), None);
+    }
+
+    /// Press one recorded clip-enable header control and return the frame.
+    fn press_clip_enable_button(
+        document: &Document,
+        clip: &Clip,
+        playhead_local: i64,
+        button: &str,
+    ) -> InspectorEdits {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        press_recorded(button, |events, time| {
+            let mut pending = InspectorEdits::default();
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 400.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let _ = crate::mixer_ui::take_strip_rects();
+                    clip_enable_header(ui, document, clip, playhead_local, &mut pending);
+                },
+            );
+            (crate::mixer_ui::take_strip_rects(), pending)
+        })
+    }
+
+    /// One clip + video asset document for the header drivers.
+    fn header_document(clip: Clip) -> Document {
+        Document {
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: PathBuf::from("picture.mov"),
+                name: "Picture".to_owned(),
+                duration: TimeCode(30),
+                fps: Rational::new(30, 1).expect("valid fps"),
+                kind: MediaKind::Video,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            }],
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![clip],
+            }],
+            ..Document::default()
+        }
+    }
+
+    /// Drag one keyframe row's value control and return the frame's ops.
+    fn drag_opacity_row_value(effect: &Effect) -> Vec<Operation> {
+        use super::review_c2_inspector::drag_frames;
+        let clip = media_clip(ClipId(2), AssetId(1), None);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let paint = |events: Vec<egui::Event>, time: f64| {
+            let mut pending = InspectorEdits::default();
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 400.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let _ = crate::mixer_ui::take_strip_rects();
+                    let descriptor = EFFECT_DESCRIPTORS
+                        .iter()
+                        .find(|descriptor| descriptor.name == "opacity")
+                        .expect("the opacity descriptor");
+                    let parameter = descriptor
+                        .parameters
+                        .iter()
+                        .find(|parameter| parameter.name == "percent")
+                        .expect("the percent row");
+                    motion_param_row(
+                        ui,
+                        clip.id,
+                        effect,
+                        parameter,
+                        TimeCode(9),
+                        TimeCode(30),
+                        false,
+                        &mut pending,
+                    );
+                },
+            );
+            (crate::mixer_ui::take_strip_rects(), pending)
+        };
+        let (rects, _) = paint(Vec::new(), 0.02);
+        let from = rects
+            .iter()
+            .find(|(name, _)| name == "keyframe_row_value")
+            .unwrap_or_else(|| panic!("the row lays out its value: {rects:?}"))
+            .1
+            .center();
+        let mut operations = Vec::new();
+        for edits in drag_frames(|events, time| paint(events, time).1, from, &[40.0, 80.0]) {
+            operations.extend(edits.operations().iter().cloned());
+        }
+        operations
+    }
+
+    /// Drag one percent slider (keyed or static) and return the frame's ops.
+    fn drag_percent_slider(keyed: bool) -> Vec<Operation> {
+        use super::review_c2_inspector::{drag_frames, param_row_frame, texts};
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let keyframes = if keyed {
+            BTreeMap::from([(
+                "percent".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![
+                        Keyframe {
+                            at: TimeCode(0),
+                            value: 50,
+                            interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
+                        },
+                        Keyframe {
+                            at: TimeCode(15),
+                            value: 100,
+                            interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
+                        },
+                    ],
+                },
+            )])
+        } else {
+            BTreeMap::new()
+        };
+        let effect = Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(5),
+            name: "opacity".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(80))]),
+            keyframes,
+        };
+        // Playhead 9 reads 80 either way (value-at-playhead or parked).
+        let (output, _) = param_row_frame(&ctx, ClipId(2), &effect, "percent", 9, Vec::new(), 0.0);
+        let value_box = texts(&output)
+            .into_iter()
+            .find(|(text, _)| text == "80")
+            .expect("the value box shows 80")
+            .1;
+        let press = egui::pos2(value_box.left() - 60.0, value_box.center().y);
+        let mut operations = Vec::new();
+        for edits in drag_frames(
+            |events, time| param_row_frame(&ctx, ClipId(2), &effect, "percent", 9, events, time).1,
+            press,
+            &[10.0, 20.0, 30.0],
+        ) {
+            operations.extend(edits.operations().iter().cloned());
+        }
+        operations
+    }
+
+    /// Press one recorded MOTION section add-row control.
+    fn press_section_button(clip: &Clip, button: &str) -> InspectorEdits {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        press_recorded(button, |events, time| {
+            let mut pending = InspectorEdits::default();
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 400.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let _ = crate::mixer_ui::take_strip_rects();
+                    motion_section(ui, clip, 9, TimeCode(30), TimeCode(30), false, &mut pending);
+                },
+            );
+            (crate::mixer_ui::take_strip_rects(), pending)
+        })
+    }
+
+    /// One 150-frame video clip document for the plan drivers.
+    fn plan_driver_document(effects: Vec<Effect>) -> Document {
+        Document {
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: "f.mp4".into(),
+                name: "f".into(),
+                duration: TimeCode(100_000),
+                fps: Rational::new(30, 1).expect("valid fps"),
+                kind: MediaKind::Video,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            }],
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
+                    id: ClipId(1),
+                    asset: AssetId(1),
+                    source_range: TimeCode::ZERO..TimeCode(150),
+                    content: ClipContent::Media,
+                    timeline_start: TimeCode::ZERO,
+                    effects,
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                    audio_gain_curve: None,
+                }],
+            }],
+            fps: Rational::new(30, 1).expect("valid fps"),
+            resolution: (1920, 1080),
+            duration: TimeCode(150),
+            ..Document::default()
+        }
+    }
+
+    /// Plan one preset exactly as the dialog does and return the operations.
+    fn drive_plan(
+        preset: kinewright_agent::MotionPreset,
+        replace: bool,
+        effects: Vec<Effect>,
+    ) -> Vec<Operation> {
+        let document = plan_driver_document(effects);
+        let revision = kinewright_core::TimelineRevision::default();
+        kinewright_agent::plan_motion(
+            &document,
+            revision,
+            &kinewright_agent::MotionPlanArgs {
+                expected_revision: revision,
+                clip_id: ClipId(1),
+                preset,
+                replace,
+            },
+        )
+        .expect("the driver clip plans")
+        .operations
+    }
+
+    fn transform_with(keys: Vec<Keyframe>) -> Effect {
+        Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(1),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([
+                ("scale_percent".to_owned(), ParamValue::Integer(100)),
+                (
+                    "scale_fine_hundredths".to_owned(),
+                    ParamValue::Integer(10_000),
+                ),
+            ]),
+            keyframes: BTreeMap::from([(
+                "scale_fine_hundredths".to_owned(),
+                AutomationCurve { keyframes: keys },
+            )]),
+        }
+    }
+
+    /// One linear key for the sender drivers.
+    fn sender_key(at: i64, value: i64) -> Keyframe {
+        Keyframe {
+            at: TimeCode(at),
+            value,
+            interpolation: KeyframeInterpolation::Linear,
+            tangent_in: 0,
+            tangent_out: 0,
+        }
+    }
+
+    /// Map operations to variant names for the sender drivers.
+    fn sender_variants(operations: Vec<Operation>) -> Vec<String> {
+        operations
+            .into_iter()
+            .map(|operation| crate::app::operation_variant_name(&operation))
+            .collect()
+    }
+
+    /// Assert every (variant, sender, produced) triple yields its variant.
+    fn assert_sender_drivers(drivers: &[(&str, &str, Vec<String>)]) {
+        for (variant, sender, produced) in drivers {
+            assert!(
+                produced.iter().any(|name| name == variant),
+                "{sender} yields {variant}: {produced:?}"
+            );
+        }
+    }
+
+    /// N5.1 L4: every §4 sender proven through the GUI side. Each driver
+    /// exercises the real widget — or the exact pure seam the widget calls
+    /// where the full timeline body is out of headless reach — and yields
+    /// its operation. Deleting a button, menu item, or wiring call fails
+    /// these tests (missing strip rect, empty ops, or wrong variant).
+    fn editor_sender_drivers() -> Vec<(&'static str, &'static str, Vec<String>)> {
+        let keyed_opacity = motion_opacity_effect();
+        let static_opacity = Effect {
+            keyframes: BTreeMap::new(),
+            ..keyed_opacity.clone()
+        };
+        vec![
+            (
+                "UpsertEffectKeyframe",
+                "keyframe editor + Key",
+                sender_variants(press_opacity_row_button(
+                    &keyed_opacity,
+                    "motion_add_key",
+                    9,
+                )),
+            ),
+            (
+                "UpsertEffectKeyframe",
+                "keyframe editor auto-key drag",
+                sender_variants(drag_percent_slider(true)),
+            ),
+            (
+                "RemoveEffectKeyframe",
+                "keyframe editor row remove",
+                sender_variants(press_opacity_row_button(
+                    &keyed_opacity,
+                    "keyframe_row_remove",
+                    9,
+                )),
+            ),
+            (
+                "SetEffectEnabled",
+                "effect card toggle",
+                sender_variants({
+                    let clip = media_clip(ClipId(2), AssetId(1), None);
+                    motion_press(&clip, &static_opacity, 9, TimeCode(30), "motion_toggle")
+                        .operations()
+                        .to_vec()
+                }),
+            ),
+            (
+                "SetEffectKeyframes",
+                "keyframe editor row edit",
+                sender_variants(drag_opacity_row_value(&keyed_opacity)),
+            ),
+            (
+                "ClearEffectKeyframes",
+                "keyframe editor Clear",
+                sender_variants(press_opacity_row_button(&keyed_opacity, "motion_clear", 9)),
+            ),
+            (
+                "SetEffectParam",
+                "static edit",
+                sender_variants(drag_percent_slider(false)),
+            ),
+            (
+                "RemoveEffect",
+                "effect card Remove",
+                sender_variants({
+                    let mut clip = media_clip(ClipId(2), AssetId(1), None);
+                    clip.effects = vec![keyed_opacity.clone()];
+                    motion_press(&clip, &keyed_opacity, 9, TimeCode(30), "motion_remove")
+                        .operations()
+                        .to_vec()
+                }),
+            ),
+        ]
+    }
+
+    fn header_sender_drivers() -> Vec<(&'static str, &'static str, Vec<String>)> {
+        let mut keyed_clip = media_clip(ClipId(2), AssetId(1), None);
+        keyed_clip.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![sender_key(0, 1)],
+        });
+        let header_keyed = header_document(keyed_clip.clone());
+        let header_static = header_document(media_clip(ClipId(2), AssetId(1), None));
+        vec![
+            (
+                "SetClipEnabled",
+                "clip header toggle",
+                sender_variants(
+                    press_clip_enable_button(
+                        &header_static,
+                        &header_static.tracks[0].clips[0].clone(),
+                        9,
+                        "clip_enable_toggle",
+                    )
+                    .operations()
+                    .to_vec(),
+                ),
+            ),
+            (
+                "SetClipEnabledCurve",
+                "clip header + Key",
+                sender_variants(
+                    press_clip_enable_button(
+                        &header_keyed,
+                        &header_keyed.tracks[0].clips[0].clone(),
+                        9,
+                        "clip_enable_add_key",
+                    )
+                    .operations()
+                    .to_vec(),
+                ),
+            ),
+            (
+                "SetClipEnabledCurve",
+                "clip header toggle auto-key",
+                sender_variants(
+                    press_clip_enable_button(
+                        &header_keyed,
+                        &header_keyed.tracks[0].clips[0].clone(),
+                        9,
+                        "clip_enable_toggle",
+                    )
+                    .operations()
+                    .to_vec(),
+                ),
+            ),
+        ]
+    }
+
+    fn lane_band_menu_drivers() -> Vec<(&'static str, &'static str, Vec<String>)> {
+        let band = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 40.0));
+        let band_keys = vec![sender_key(0, 0), sender_key(15, 100)];
+        let mut lane_clip = media_clip(ClipId(2), AssetId(1), None);
+        lane_clip.effects = vec![motion_opacity_effect()];
+        lane_clip.effects[0].keyframes = BTreeMap::from([(
+            "x_basis_points".to_owned(),
+            AutomationCurve {
+                keyframes: vec![sender_key(15, 100)],
+            },
+        )]);
+        let lane_document = header_document(lane_clip);
+        vec![
+            (
+                "RemoveEffectKeyframe",
+                "timeline key lane hover+Delete",
+                sender_variants(crate::timeline_ui::key_lane_delete_operations(
+                    &crate::timeline_ui::key_lane_delete_action(
+                        &lane_document,
+                        Some(crate::timeline_ui::KeyLaneHover {
+                            clip: ClipId(2),
+                            frame: TimeCode(15),
+                        }),
+                    ),
+                )),
+            ),
+            (
+                "SetEffectKeyframes",
+                "opacity band drag",
+                sender_variants(vec![crate::timeline_ui::opacity_operation(
+                    ClipId(2),
+                    EffectId(1),
+                    crate::timeline_ui::opacity_drag_keys(
+                        &band_keys,
+                        0,
+                        TimeCode(0),
+                        band,
+                        band.top(),
+                        TimeCode(30),
+                    ),
+                )]),
+            ),
+            (
+                "SetEffectKeyframes",
+                "opacity band insert",
+                sender_variants(vec![crate::timeline_ui::opacity_operation(
+                    ClipId(2),
+                    EffectId(1),
+                    crate::timeline_ui::opacity_insert_keys(None, TimeCode(9), 40),
+                )]),
+            ),
+            (
+                "CopyClipAttributes",
+                "clip context menu paste",
+                sender_variants(crate::timeline_ui::clip_attributes_paste_operations(
+                    Some(ClipId(9)),
+                    ClipId(2),
+                )),
+            ),
+        ]
+    }
+
+    fn plan_sender_drivers() -> Vec<(&'static str, &'static str, Vec<String>)> {
+        use kinewright_agent::MotionPreset;
+        vec![
+            (
+                "SetEffectKeyframes",
+                "plan Apply",
+                sender_variants(drive_plan(MotionPreset::PushIn, false, Vec::new())),
+            ),
+            (
+                "ClearEffectKeyframes",
+                "plan Apply",
+                sender_variants(drive_plan(
+                    MotionPreset::Pip,
+                    true,
+                    vec![transform_with(vec![
+                        sender_key(0, 10_000),
+                        sender_key(29, 12_000),
+                    ])],
+                )),
+            ),
+            (
+                "SetEffectParam",
+                "plan Apply",
+                sender_variants(drive_plan(MotionPreset::Pip, false, Vec::new())),
+            ),
+            (
+                "AddEffect",
+                "plan Apply",
+                sender_variants(drive_plan(MotionPreset::PushIn, false, Vec::new())),
+            ),
+            (
+                "AddEffect",
+                "MOTION + effect button",
+                sender_variants(
+                    press_section_button(
+                        &media_clip(ClipId(2), AssetId(1), None),
+                        "motion_add_effect",
+                    )
+                    .operations()
+                    .to_vec(),
+                ),
+            ),
+        ]
+    }
+
+    #[test]
+    fn editor_senders_are_exercised_through_widgets() {
+        assert_sender_drivers(&editor_sender_drivers());
+    }
+
+    #[test]
+    fn header_senders_are_exercised_through_widgets() {
+        assert_sender_drivers(&header_sender_drivers());
+    }
+
+    #[test]
+    fn lane_band_menu_senders_are_exercised() {
+        assert_sender_drivers(&lane_band_menu_drivers());
+    }
+
+    #[test]
+    fn plan_senders_are_exercised_through_the_planner() {
+        assert_sender_drivers(&plan_sender_drivers());
+        // The plan request itself: the Plan move… button opens the dialog.
+        let plan_clip = media_clip(ClipId(2), AssetId(1), None);
+        let requested = press_section_button(&plan_clip, "motion_plan_move");
+        assert!(
+            requested.motion_plan_request == Some(ClipId(2)),
+            "Plan move… requests the dialog (the plan_motion sender)"
+        );
+        // Coverage: every MOTION_OPERATIONS variant has a driver in one of
+        // the tables above — derived from the tables, not a mirror.
+        let tables = [
+            editor_sender_drivers(),
+            header_sender_drivers(),
+            lane_band_menu_drivers(),
+            plan_sender_drivers(),
+        ];
+        for operation in MOTION_OPERATIONS {
+            assert!(
+                tables
+                    .iter()
+                    .flatten()
+                    .any(|(variant, _, _)| variant == &operation),
+                "{operation} has a GUI-side driver"
+            );
+        }
+    }
+
+    /// N5.1 L4: the wiring the drivers cannot reach headlessly — the paste
+    /// menu's labels and offer call, the band's seam calls, the lane's seam
+    /// call — is referenced by the production code. Deleting the menu item
+    /// or unwiring the call fails here.
+    #[test]
+    fn motion_sender_wiring_is_referenced() {
+        let timeline = include_str!("timeline_ui.rs");
+        let production = timeline
+            .split_once("#[cfg(test)]")
+            .map_or(timeline, |(before, _)| before);
+        for needle in [
+            "\"Paste attributes (with keys)\"",
+            "\"Paste attributes (values only)\"",
+            "\"Copy attributes\"",
+            "clip_attributes_paste_operations(clipboard, clip.id)",
+            "opacity_drag_keys(",
+            "opacity_insert_keys(",
+            "key_lane_delete_operations(",
+        ] {
+            assert!(
+                production.contains(needle),
+                "production references {needle}"
+            );
+        }
     }
 
     /// MO1 R25: submitting a plan request opens the Apply-confirmation
@@ -11903,3 +12703,93 @@ mod tests {
 #[cfg(test)]
 #[path = "review_c2_inspector.rs"]
 mod review_c2_inspector;
+
+#[cfg(test)]
+mod rr_probe {
+    use super::review_c2_inspector::{drag_frames, param_row_frame, texts};
+    use super::*;
+
+    #[test]
+    fn rr_keyed_toggle_writes_opposite_of_value_at_playhead() {
+        let mut effect = super::tests::motion_opacity_effect();
+        effect.enabled = true;
+        effect.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(5),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        });
+        let mut clip = super::tests::media_clip(ClipId(2), kinewright_core::AssetId(1), None);
+        clip.effects = vec![effect.clone()];
+        let pressed = super::tests::motion_press(&clip, &effect, 9, TimeCode(30), "motion_toggle");
+        let values: Vec<i64> = pressed
+            .operations()
+            .iter()
+            .filter_map(|op| match op {
+                Operation::UpsertEffectKeyframe { name, key, .. } if name == "enabled" => {
+                    Some(key.value)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            values,
+            vec![1],
+            "effect is off at 9 (curve=0); clicking should turn it ON"
+        );
+    }
+
+    /// Static (unkeyed) param with the playhead outside the clip: can it be edited?
+    #[test]
+    fn rr_static_param_editable_outside_clip() {
+        let mut effect = Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(5),
+            name: "opacity".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(80))]),
+            keyframes: BTreeMap::new(),
+        };
+        effect.keyframes.clear();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let (output, _) = param_row_frame(&ctx, ClipId(2), &effect, "percent", 9, Vec::new(), 0.0);
+        let value_box = texts(&output)
+            .into_iter()
+            .find(|(t, _)| t == "80")
+            .unwrap()
+            .1;
+        let press = egui::pos2(value_box.left() - 60.0, value_box.center().y);
+        let inside = drag_frames(
+            |events, time| param_row_frame(&ctx, ClipId(2), &effect, "percent", 9, events, time).1,
+            press,
+            &[10.0, 20.0, 30.0],
+        );
+        assert!(
+            inside.iter().any(|e| !e.operations().is_empty()),
+            "inside writes"
+        );
+        let outside = drag_frames(
+            |events, time| param_row_frame(&ctx, ClipId(2), &effect, "percent", 45, events, time).1,
+            press,
+            &[10.0, 20.0, 30.0],
+        );
+        let wrote: Vec<_> = outside.iter().flat_map(|e| e.operations().iter()).collect();
+        assert!(
+            !wrote.is_empty(),
+            "static param outside clip must still be editable: {wrote:?}"
+        );
+    }
+}

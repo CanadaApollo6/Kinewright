@@ -1736,10 +1736,9 @@ impl KinewrightApp {
                     }
                 };
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(plannable, egui::Button::new("Apply"))
-                        .clicked()
-                    {
+                    let apply_button = ui.add_enabled(plannable, egui::Button::new("Apply"));
+                    crate::mixer_ui::record_strip_rect("motion_plan_apply", apply_button.rect);
+                    if apply_button.clicked() {
                         apply = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -3376,7 +3375,7 @@ fn plural_s(count: usize) -> &'static str {
 /// first `Debug` token (`SetEffectKeyframes { … }` → `SetEffectKeyframes`),
 /// which keys the GUI-sender table. Pure; one definition for the dialog
 /// and its tests.
-fn operation_variant_name(operation: &Operation) -> String {
+pub(crate) fn operation_variant_name(operation: &Operation) -> String {
     let rendered = format!("{operation:?}");
     rendered.split([' ', '(']).next().unwrap_or("").to_owned()
 }
@@ -5683,6 +5682,142 @@ pub(crate) mod in1_tests {
                 }
             }
         }
+    }
+
+    /// Run one headless frame of the plan-a-move dialog on a caller-held
+    /// context — press and release must meet on the same `ctx`.
+    fn plan_dialog_frame(
+        ctx: &egui::Context,
+        app: &mut KinewrightApp,
+        events: Vec<egui::Event>,
+        time: f64,
+    ) {
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                app.show_motion_plan_dialog(ui.ctx());
+            },
+        );
+    }
+
+    /// Lay the dialog out, press its recorded Apply button, run the release.
+    /// The target comes from a fresh layout frame after settling — the first
+    /// frame's rect predates the window's settled placement, so taking it
+    /// (first match wins) aims at stale coordinates and the press misses.
+    fn click_plan_dialog_apply(ctx: &egui::Context, app: &mut KinewrightApp) {
+        let _ = crate::mixer_ui::take_strip_rects();
+        plan_dialog_frame(ctx, app, Vec::new(), 0.0);
+        plan_dialog_frame(ctx, app, Vec::new(), 0.01);
+        let _ = crate::mixer_ui::take_strip_rects();
+        plan_dialog_frame(ctx, app, Vec::new(), 0.02);
+        let target = crate::mixer_ui::take_strip_rects()
+            .into_iter()
+            .find(|(name, _)| name == "motion_plan_apply")
+            .unwrap_or_else(|| panic!("Apply laid out"))
+            .1
+            .center();
+        for (events, time) in [
+            (
+                vec![
+                    egui::Event::PointerMoved(target),
+                    egui::Event::PointerButton {
+                        pos: target,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                0.04,
+            ),
+            (
+                vec![egui::Event::PointerButton {
+                    pos: target,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                0.06,
+            ),
+        ] {
+            plan_dialog_frame(ctx, app, events, time);
+        }
+        let _ = crate::mixer_ui::take_strip_rects();
+    }
+
+    /// N5.1 L3: Apply drives the real call site — frame the dialog, click
+    /// Apply, and the revision-gated command lands the planned move.
+    #[test]
+    fn plan_apply_through_the_dialog_lands_the_move() {
+        let (_fixture, mut app) = in1b_app();
+        in1_drain_core(&mut app, 0);
+        let clip = app.projects[0].document.tracks[0].clips[0].id;
+        let mut request = crate::inspector_ui::InspectorEdits::default();
+        request.request_motion_plan(clip);
+        app.submit_inspector_edits(request);
+        let from = app.projects[0].revision;
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        click_plan_dialog_apply(&ctx, &mut app);
+        in1_drain_until_revision(&mut app, 0, from);
+        let landed = app.projects[0].document.tracks[0].clips[0].clone();
+        assert!(
+            landed
+                .effects
+                .iter()
+                .any(|effect| effect.name == "transform"),
+            "the planned transform landed"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// N5.1 L3: a stale Apply refuses through the real call site — the core
+    /// moves behind the dialog's back, Apply carries the old revision, and
+    /// the drain notes the conflict while the clip stays untouched. Kills
+    /// the `app.rs` `K3_callsite` survivor (`DoBatch` would land instead).
+    #[test]
+    fn plan_apply_through_the_dialog_refuses_a_stale_revision() {
+        let (_fixture, mut app) = in1b_app();
+        in1_drain_core(&mut app, 0);
+        let clip = app.projects[0].document.tracks[0].clips[0].id;
+        let mut request = crate::inspector_ui::InspectorEdits::default();
+        request.request_motion_plan(clip);
+        app.submit_inspector_edits(request);
+        // Frame once so the preview plans and caches at R; the Ok assert
+        // keeps the refusal below from passing vacuously.
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        plan_dialog_frame(&ctx, &mut app, Vec::new(), 0.0);
+        let plannable = app.motion_plan_dialog.as_ref().is_some_and(|dialog| {
+            dialog.cached.as_ref().is_some_and(
+                |cached| matches!(&cached.preview, Ok(operations) if !operations.is_empty()),
+            )
+        });
+        assert!(plannable, "the fixture clip plans a non-empty move");
+        // Move the core behind the app's back; the app mirror stays at R.
+        let enabled = app.projects[0].document.tracks[0].clips[0].enabled;
+        app.projects[0]
+            .core
+            .request(Command::Do(Operation::SetClipEnabled { clip, enabled }))
+            .expect("the bump lands");
+        click_plan_dialog_apply(&ctx, &mut app);
+        in1_drain_until_conflict(&mut app, 0);
+        let landed = app.projects[0].document.tracks[0].clips[0].clone();
+        assert!(
+            !landed
+                .effects
+                .iter()
+                .any(|effect| effect.name == "transform"),
+            "the stale move refused; the clip is untouched"
+        );
+        in1_shutdown(&mut app);
     }
 
     /// Drain one session's core events the way `poll_background`'s core drain

@@ -197,6 +197,7 @@ pub(crate) fn param_row_frame(
                 parameter,
                 TimeCode(at),
                 TimeCode(30),
+                false,
                 &mut pending,
             );
         },

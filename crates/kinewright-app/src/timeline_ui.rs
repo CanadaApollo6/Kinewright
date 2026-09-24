@@ -269,7 +269,13 @@ fn opacity_polyline(
         .filter(|(key, _)| key.at.0 >= 0 && key.at.0 < duration.0)
         .collect();
     let mut drawn = vec![egui::pos2(band.left(), edge(0))];
-    let mut previous_hold = false;
+    // N5.1 L6: the segment entering the first inside key is governed by its
+    // predecessor — a Hold before the clip draws the edge flat, then steps.
+    let mut previous_hold = kept.first().is_some_and(|(first, _)| {
+        keys.iter()
+            .rfind(|key| key.at.0 < first.at.0)
+            .is_some_and(|key| key.interpolation == KeyframeInterpolation::Hold)
+    });
     for (key, point) in &kept {
         if previous_hold {
             drawn.push(egui::pos2(
@@ -786,7 +792,7 @@ fn opacity_move_key(
 /// N5 K6 (M6): the key list one band-drag frame writes — the pointer's grab
 /// value at `pointer_y` folded through the neighbour clamps. Pure; the drag
 /// body calls this once instead of inlining the grab.
-fn opacity_drag_keys(
+pub(crate) fn opacity_drag_keys(
     keys: &[Keyframe],
     index: usize,
     at: TimeCode,
@@ -807,7 +813,7 @@ fn opacity_drag_keys(
 /// N5 K6 (M6b): the key list one band click inserts — a curved band inserts
 /// the evaluated value, a curve-free band its first key at the parked value.
 /// Pure; the click body calls this once instead of inlining the match.
-fn opacity_insert_keys(
+pub(crate) fn opacity_insert_keys(
     curve: Option<&AutomationCurve>,
     at: TimeCode,
     parked: i64,
@@ -826,7 +832,7 @@ fn opacity_insert_keys(
 
 /// MO1 R24: the operation one band drag or insert writes — the whole curve,
 /// the envelope's rule.
-fn opacity_operation(clip: ClipId, effect: EffectId, keys: Vec<Keyframe>) -> Operation {
+pub(crate) fn opacity_operation(clip: ClipId, effect: EffectId, keys: Vec<Keyframe>) -> Operation {
     Operation::SetEffectKeyframes {
         clip,
         effect,
@@ -964,6 +970,29 @@ pub(crate) fn key_lane_delete_action(
     }
 }
 
+/// N5.1 L4: the operations one lane Delete writes — one single-key remove
+/// per owner curve holding the frame, one undo entry; nothing for a stale
+/// report. Pure; the key handler calls this instead of inline construction,
+/// and the sender-proof driver calls the same seam.
+pub(crate) fn key_lane_delete_operations(action: &KeyLaneDelete) -> Vec<Operation> {
+    match action {
+        KeyLaneDelete::Clip => Vec::new(),
+        KeyLaneDelete::RemoveKeys {
+            clip,
+            frame,
+            removes,
+        } => removes
+            .iter()
+            .map(|(effect, name)| Operation::RemoveEffectKeyframe {
+                clip: *clip,
+                effect: *effect,
+                name: name.clone(),
+                at: *frame,
+            })
+            .collect(),
+    }
+}
+
 /// AU4 §5.1 rule 101 (AU4 §0 E49): what Delete/Backspace does this frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EnvelopeDelete {
@@ -1044,27 +1073,12 @@ impl KinewrightApp {
     /// performs R16's last-key-to-static in Core.
     pub(crate) fn remove_hovered_lane_key(&mut self, hover: Option<KeyLaneHover>) -> bool {
         let document = Arc::clone(&self.focused().document);
-        match key_lane_delete_action(&document, hover) {
-            KeyLaneDelete::Clip => false,
-            KeyLaneDelete::RemoveKeys {
-                clip,
-                frame,
-                removes,
-            } => {
-                self.send_operations(
-                    removes
-                        .into_iter()
-                        .map(|(effect, name)| Operation::RemoveEffectKeyframe {
-                            clip,
-                            effect,
-                            name,
-                            at: frame,
-                        })
-                        .collect(),
-                );
-                true
-            }
+        let action = key_lane_delete_action(&document, hover);
+        if matches!(action, KeyLaneDelete::Clip) {
+            return false;
         }
+        self.send_operations(key_lane_delete_operations(&action));
+        true
     }
 
     pub(crate) fn add_title_at_playhead(&mut self) {
@@ -3263,7 +3277,10 @@ fn linked_minimum_primary_start(document: &Document, primary: ClipId) -> i64 {
 /// MO1 R25: the paste operations the clip context menu offers — the with-keys
 /// and values-only `CopyClipAttributes`, or nothing when the clipboard is
 /// empty or holds this same clip.
-fn clip_attributes_paste_operations(clipboard: Option<ClipId>, clip: ClipId) -> Vec<Operation> {
+pub(crate) fn clip_attributes_paste_operations(
+    clipboard: Option<ClipId>,
+    clip: ClipId,
+) -> Vec<Operation> {
     let Some(from_clip) = clipboard.filter(|from| *from != clip) else {
         return Vec::new();
     };
@@ -5830,6 +5847,37 @@ mod tests {
         );
         let dots = opacity_dots(band, &points);
         assert_eq!(dots.len(), 2, "outside keys draw no dots");
+    }
+
+    /// N5.1 L6 (cosmetic): a Hold key before the clip draws its edge flat —
+    /// the band holds the edge value until the first inside key, then steps.
+    #[test]
+    fn hold_before_the_clip_draws_its_edge_flat() {
+        let band = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 40.0));
+        let duration = TimeCode(30);
+        let keys = vec![
+            Keyframe {
+                at: TimeCode(-20),
+                value: 0,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+            lane_key(10, 100),
+        ];
+        let points = opacity_points(band, duration, &keys);
+        let drawn = opacity_polyline(band, &points, &keys, duration);
+        assert_eq!(drawn.len(), 4, "edge, flat, step, edge: {drawn:?}");
+        assert!((drawn[0].x - band.left()).abs() < f32::EPSILON);
+        assert!((drawn[1].x - drawn[2].x).abs() < f32::EPSILON);
+        assert!(
+            (drawn[1].y - opacity_value_to_y(band, 0)).abs() < f32::EPSILON,
+            "flat at the held edge value until the first key: {drawn:?}"
+        );
+        assert!(
+            (drawn[2].y - opacity_value_to_y(band, 100)).abs() < f32::EPSILON,
+            "then the Hold step: {drawn:?}"
+        );
     }
 
     /// N5 K6 (M6): one band-drag frame folds the pointer's grab value through

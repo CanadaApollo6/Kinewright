@@ -379,10 +379,11 @@ The `MOTION` section holds one card per motion effect (`transform`, `crop`,
 prev/next-key navigation, `+ Key at playhead` / `Clear`, and a `KEYFRAMED`
 badge; editing a value at the playhead auto-keys there. A keyed control shows
 the value at the playhead, and keying controls disable with the playhead
-outside the clip (Premiere rules, N5 K4). Per-effect and clip-header enable
-toggles sit on the card and header, with `+ Key at playhead` for the enable
-curve. `Plan move…` opens the plan dialog (MO1 R22). Audio-only clips show no
-`MOTION` section (N5 K5).
+outside the clip — static (curve-free) params stay editable there, since
+they are not keying (Premiere rules, N5 K4, refined N5.1 L1). Per-effect and
+clip-header enable toggles sit on the card and header, with `+ Key at
+playhead` for the enable curve. `Plan move…` opens the plan dialog (MO1 R22).
+Clips on audio tracks show no `MOTION` section (N5.1 L5).
 
 ### Transport
 
