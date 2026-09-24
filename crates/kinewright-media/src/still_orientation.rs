@@ -35,9 +35,12 @@ pub(crate) fn still_file_orientation(path: &Path) -> Option<StillOrientation> {
         2 => (VideoRotation::None, true),
         3 => (VideoRotation::HalfTurn, false),
         4 => (VideoRotation::HalfTurn, true),
-        5 => (VideoRotation::Clockwise90, true),
+        // G2: 5 is the transpose (flip + 90 CCW) and 7 the transverse
+        // (flip + 90 CW) -- verified against the EXIF spec display
+        // mapping and ImageMagick -auto-orient.
+        5 => (VideoRotation::Clockwise270, true),
         6 => (VideoRotation::Clockwise90, false),
-        7 => (VideoRotation::Clockwise270, true),
+        7 => (VideoRotation::Clockwise90, true),
         8 => (VideoRotation::Clockwise270, false),
         _ => return None,
     };
@@ -328,9 +331,9 @@ mod tests {
             (VideoRotation::None, true),
             (VideoRotation::HalfTurn, false),
             (VideoRotation::HalfTurn, true),
-            (VideoRotation::Clockwise90, true),
-            (VideoRotation::Clockwise90, false),
             (VideoRotation::Clockwise270, true),
+            (VideoRotation::Clockwise90, false),
+            (VideoRotation::Clockwise90, true),
             (VideoRotation::Clockwise270, false),
         ];
         for (index, (rotation, flip)) in rotations.into_iter().enumerate() {

@@ -2394,35 +2394,103 @@ mod tests {
         let frame = decode_still_legacy(&transposed);
         assert_eq!((frame.width, frame.height), (36, 64));
         assert!(
-            still_pixel(&frame, 0, 0)[0] > 200,
-            "transposed top-left must be white"
+            still_pixel(&frame, 0, 0)[0] < 56,
+            "transposed top-left must be black"
         );
         assert!(
-            still_pixel(&frame, 35, 0)[0] > 200,
-            "transposed top-right must be white"
+            still_pixel(&frame, 35, 0)[0] < 56,
+            "transposed top-right must be black"
         );
         assert!(
-            still_pixel(&frame, 0, 63)[0] < 56,
-            "transposed bottom-left must be black"
+            still_pixel(&frame, 0, 63)[0] > 200,
+            "transposed bottom-left must be white"
         );
         assert!(
-            still_pixel(&frame, 35, 63)[0] < 56,
-            "transposed bottom-right must be black"
+            still_pixel(&frame, 35, 63)[0] > 200,
+            "transposed bottom-right must be white"
         );
+    }
+
+    /// MO1 G2: all eight EXIF orientations on tagged JPEGs with an
+    /// asymmetric quadrant pattern. Expected layouts derive from the EXIF
+    /// spec's display mapping per orientation (cross-checked against
+    /// `ImageMagick` `-auto-orient` on the same fixture): 5 is the transpose
+    /// (flip + 90° CCW), 7 the transverse (flip + 90° CW). Quadrant
+    /// centres classify by dominant channel with JPEG margins.
+    #[test]
+    fn still_decode_matches_exif_spec_for_all_eight_orientations() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");
+        let directory = crate::test_support::TempDirectory::new("decode-exif-all-eight");
+        let base = still_fixture(
+            &directory,
+            "quadrants.jpg",
+            "color=c=red:size=64x36:rate=1:duration=1,drawbox=x=32:y=0:w=32:h=36:c=green:t=fill,drawbox=x=0:y=18:w=32:h=18:c=blue:t=fill,drawbox=x=32:y=18:w=32:h=18:c=white:t=fill",
+            "mjpeg",
+        );
+        // (orientation, display dims, TL, TR, BL, BR) with R/G/B/W quadrants.
+        for (orientation, dims, tl, tr, bl, br) in [
+            (1, (64, 36), "R", "G", "B", "W"),
+            (2, (64, 36), "G", "R", "W", "B"),
+            (3, (64, 36), "W", "B", "G", "R"),
+            (4, (64, 36), "B", "W", "R", "G"),
+            (5, (36, 64), "R", "B", "G", "W"),
+            (6, (36, 64), "B", "R", "W", "G"),
+            (7, (36, 64), "W", "G", "B", "R"),
+            (8, (36, 64), "G", "W", "R", "B"),
+        ] {
+            let path = directory.path(&format!("exif-{orientation}.jpg"));
+            std::fs::copy(&base, &path).expect("fixture should copy");
+            if orientation != 1 {
+                inject_jpeg_orientation(&path, orientation);
+            }
+            let asset = probe_path(&path, AssetId(1)).expect("oriented still should probe");
+            assert_eq!(
+                asset.resolution,
+                Some(dims),
+                "orientation {orientation} must probe its display dimensions"
+            );
+            let frame = decode_still_legacy(&path);
+            assert_eq!(
+                (frame.width, frame.height),
+                dims,
+                "orientation {orientation} must decode at its display dimensions"
+            );
+            let (disp_w, disp_h) = dims;
+            let corners = [
+                (disp_w / 4, disp_h / 4, tl, "TL"),
+                (disp_w * 3 / 4, disp_h / 4, tr, "TR"),
+                (disp_w / 4, disp_h * 3 / 4, bl, "BL"),
+                (disp_w * 3 / 4, disp_h * 3 / 4, br, "BR"),
+            ];
+            for (x, y, expected, name) in corners {
+                let pixel = still_pixel(&frame, x, y);
+                let seen = match pixel {
+                    [red, grn, blu, _] if *red > 150 && *grn < 100 && *blu < 100 => "R",
+                    [red, grn, blu, _] if *grn > 80 && *red < 100 && *blu < 100 => "G",
+                    [red, grn, blu, _] if *blu > 150 && *red < 100 && *grn < 100 => "B",
+                    [red, grn, blu, _] if *red > 180 && *grn > 180 && *blu > 180 => "W",
+                    _ => "?",
+                };
+                assert_eq!(
+                    seen, expected,
+                    "orientation {orientation} {name} ({x}, {y}) must be {expected}, got {pixel:?}"
+                );
+            }
+        }
     }
 
     /// MO1 R7: the mirrored orientations compose flip-before-rotation
     /// exactly, at the byte level.
     #[test]
     fn flip_before_rotation_composes_exactly() {
-        // 2 × 1 stored: [A][B]. EXIF 5 = flip (→ [B][A]) then 90° CW,
-        // which stacks the row into a 1 × 2 column, B over A.
+        // 2 × 1 stored: [A][B]. EXIF 5 = flip (→ [B][A]) then 90° CCW,
+        // which stacks the row into a 1 × 2 column, A over B.
         let flipped = flip_optional(true, 2, 1, 1, vec![10, 20]).expect("flip should apply");
         assert_eq!(flipped, vec![20, 10]);
-        let (width, height, pixels) = rotate_bytes(VideoRotation::Clockwise90, 2, 1, 1, flipped)
+        let (width, height, pixels) = rotate_bytes(VideoRotation::Clockwise270, 2, 1, 1, flipped)
             .expect("rotation should apply");
         assert_eq!((width, height), (1, 2));
-        assert_eq!(pixels, vec![20, 10]);
+        assert_eq!(pixels, vec![10, 20]);
 
         // No flip passes the buffer through untouched (same allocation).
         let pixels = vec![10, 20, 30, 40];
