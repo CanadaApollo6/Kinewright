@@ -1223,13 +1223,13 @@ pub(crate) fn automation_section(
                     Some(curve) => {
                         let row_key = automation_row_key(target);
                         for index in 0..curve.keyframes.len() {
-                            let mut action = keyframe_row(ui, &row_key, curve, index);
+                            let mut action = keyframe_row(ui, &row_key, curve, index, 0);
                             gesture_started |= action.gesture_started;
                             if let Some(edited) = action.edited.as_mut() {
                                 edited.at = TimeCode(edited.at.0.clamp(0, last));
                             }
                             if let Some(next) =
-                                apply_keyframe_row_action(curve, index, &action, range.clone())
+                                apply_keyframe_row_action(curve, index, &action, range.clone(), 0)
                             {
                                 live = action.live && !action.removed;
                                 pending = Some(next);

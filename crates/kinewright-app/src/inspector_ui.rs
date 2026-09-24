@@ -10,10 +10,10 @@ use kinewright_core::{
     KeyframeInterpolation, LUT_ASSET_ID_PARAMETER, LUT_INPUT_ENCODING_PARAMETER,
     LUT_MIX_BASIS_POINTS_MAX, LUT_MIX_PARAMETER, LabelIncident, LutAsset, LutAssetId,
     LutAssetSource, LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams,
-    MARKER_COLOR_TOKEN_COUNT, MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, Marker, MarkerId,
-    MatteParams, MatteQualifierParams, MatteWindowParams, MediaKind, Operation, ParamValue,
-    ResolvedCurves, TITLE_COLORS, TITLE_FONT_SIZES, TRANSITION_DESCRIPTORS, TimeCode, Title,
-    TitlePosition, Transition, color_node_inactive_reason, effect_compatibility_stage,
+    MARKER_COLOR_TOKEN_COUNT, MATTE_MIX_BASIS_POINTS_MAX, MATTE_WINDOW_LIMIT, MAX_KEY_FRAME_OFFSET,
+    Marker, MarkerId, MatteParams, MatteQualifierParams, MatteWindowParams, MediaKind, Operation,
+    ParamValue, ResolvedCurves, TITLE_COLORS, TITLE_FONT_SIZES, TRANSITION_DESCRIPTORS, TimeCode,
+    Title, TitlePosition, Transition, color_node_inactive_reason, effect_compatibility_stage,
     envelope_coalesce_key, is_audio_effect, is_legacy_display_effect, is_lut_color_node,
     is_matte_capable_color_node, is_matte_parameter,
 };
@@ -85,6 +85,8 @@ pub(crate) struct InspectorEdits {
     /// outside the look cards, and a room-tone refusal filed under "Look" is a
     /// message landing under a lie.
     incident_code: Option<IncidentCode>,
+    /// The playhead frame a MOTION nav button requested this frame (MO1 R22).
+    playhead_request: Option<TimeCode>,
     /// Refusals a card produced while building a batch, for the app's error
     /// log.
     ///
@@ -185,6 +187,12 @@ impl InspectorEdits {
         self.look_requests.push(request);
     }
 
+    /// Ask the app to move the playhead (MO1 R22 prev/next-key navigation).
+    /// The last request in the frame wins; cards never touch app state.
+    pub(crate) fn request_playhead(&mut self, at: TimeCode) {
+        self.playhead_request = Some(at);
+    }
+
     /// Mirror the A/B hold this frame's card reported.
     fn record_ab_hold(&mut self, record: AbHoldRecord) {
         self.ab_hold = Some(record);
@@ -217,6 +225,11 @@ impl InspectorEdits {
     #[cfg(test)]
     const fn matte_selected_window(&self) -> Option<(usize, usize)> {
         self.matte_selected_window
+    }
+
+    #[cfg(test)]
+    const fn playhead_request(&self) -> Option<TimeCode> {
+        self.playhead_request
     }
 
     /// Record a refusal the app should surface through the error log.
@@ -813,6 +826,11 @@ impl KinewrightApp {
         if edits.gesture_started {
             self.begin_edit_gesture();
         }
+        // MO1 R22: a MOTION nav button moves the playhead without touching
+        // the document, so it bypasses the operation path entirely.
+        if let Some(at) = edits.playhead_request {
+            self.focused_mut().position = at;
+        }
         if !edits.operations.is_empty() {
             match edits.coalesce_key {
                 Some(key) => {
@@ -1007,6 +1025,9 @@ impl KinewrightApp {
         }
 
         let mut pending = InspectorEdits::default();
+        let header_document = Arc::clone(&self.focused().document);
+        let playhead_local = self.focused().position.0 - clip.timeline_start.0;
+        clip_enable_header(ui, &header_document, clip, playhead_local, &mut pending);
         ui.add_space(space::TWO);
         ui.strong("Speed");
         let mut speed_percent = clip.speed_percent;
@@ -1156,6 +1177,7 @@ impl KinewrightApp {
             qc_clipping: &qc_clipping,
             store_unavailable: self.focused().lut_store_unavailable_reason(),
         };
+        motion_section(ui, clip, playhead_local, document.duration, &mut pending);
         effects_section(ui, clip, &looks, &mut pending);
         transition_section(ui, &document, clip, &mut pending);
         self.submit_inspector_edits(pending);
@@ -1191,6 +1213,8 @@ impl KinewrightApp {
         );
         let mut pending = InspectorEdits::default();
         let document = Arc::clone(&self.focused().document);
+        let playhead_local = self.focused().position.0 - clip.timeline_start.0;
+        clip_enable_header(ui, &document, clip, playhead_local, &mut pending);
         let availability = self.focused().lut_availability.clone();
         let qc_clipping = self.color_qc.node_clipping();
         let looks = LookInspectorContext {
@@ -1199,6 +1223,7 @@ impl KinewrightApp {
             qc_clipping: &qc_clipping,
             store_unavailable: self.focused().lut_store_unavailable_reason(),
         };
+        motion_section(ui, clip, playhead_local, document.duration, &mut pending);
         effects_section(ui, clip, &looks, &mut pending);
         transition_section(ui, &document, clip, &mut pending);
         self.submit_inspector_edits(pending);
@@ -1250,7 +1275,7 @@ impl KinewrightApp {
             || (response.has_focus()
                 && ui
                     .input(|input| input.modifiers.command && input.key_pressed(egui::Key::Enter)));
-        let mut pending = Vec::new();
+        let mut pending = InspectorEdits::default();
         if submit_text && draft.1 != title.text {
             pending.push(title_param_operation(
                 clip.id,
@@ -1258,6 +1283,9 @@ impl KinewrightApp {
                 ParamValue::Text(draft.1.clone()),
             ));
         }
+        let title_document = Arc::clone(&self.focused().document);
+        let playhead_local = self.focused().position.0 - clip.timeline_start.0;
+        clip_enable_header(ui, &title_document, clip, playhead_local, &mut pending);
 
         let mut size_token = title.font_size_token;
         egui::ComboBox::from_id_salt(("title-size", clip.id.0))
@@ -1350,7 +1378,14 @@ impl KinewrightApp {
                 ));
             }
         }
-        self.send_operations(pending);
+        motion_section(
+            ui,
+            clip,
+            playhead_local,
+            title_document.duration,
+            &mut pending,
+        );
+        self.submit_inspector_edits(pending);
     }
 
     fn marker_inspector(&mut self, ui: &mut egui::Ui, marker: &Marker) {
@@ -1490,6 +1525,12 @@ fn effects_section(
         if ColorNodeKind::from_effect_name(&effect.name).is_some() {
             continue;
         }
+        // MO1 R22: motion effects live on MOTION cards, whose sliders
+        // auto-key; the generic static slider would write shadowed statics.
+        if is_motion_effect(&effect.name) {
+            continue;
+        }
+
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.label(&effect.name);
@@ -3874,7 +3915,7 @@ fn envelope_block(
         }
         Some(curve) => {
             for index in 0..curve.keyframes.len() {
-                let mut action = keyframe_row(ui, "envelope", curve, index);
+                let mut action = keyframe_row(ui, "envelope", curve, index, 0);
                 if action.gesture_started {
                     pending.begin_gesture();
                 }
@@ -3882,7 +3923,7 @@ fn envelope_block(
                     edited.at = TimeCode(edited.at.0.clamp(0, last));
                 }
                 if let Some(applied) =
-                    apply_keyframe_row_action(curve, index, &action, range.clone())
+                    apply_keyframe_row_action(curve, index, &action, range.clone(), 0)
                 {
                     live = action.live && !action.removed;
                     next = Some(applied);
@@ -3973,11 +4014,18 @@ pub(crate) const fn interpolation_label(interpolation: KeyframeInterpolation) ->
 /// `key` is the owner's own name, used for the row's widget ids so two lists
 /// on one frame cannot collide. Nothing here pushes an operation: the caller
 /// turns the returned action into its own.
+///
+/// MO1 R22 generalises the row for keep-outside owners: `min_frame` is the
+/// lowest frame the row offers (0 for audio owners, `-MAX_KEY_FRAME_OFFSET`
+/// for motion owners whose trimmed-out keys sit below zero), and the stored
+/// tangents ride the edit untouched — the row offers no tangent control, so
+/// it must not zero them either.
 pub(crate) fn keyframe_row(
     ui: &mut egui::Ui,
     key: &str,
     curve: &AutomationCurve,
     index: usize,
+    min_frame: i64,
 ) -> KeyframeRowAction {
     let mut action = KeyframeRowAction::default();
     let Some(stored) = curve.keyframes.get(index) else {
@@ -3994,7 +4042,7 @@ pub(crate) fn keyframe_row(
             ui.spacing_mut().button_padding = egui::vec2(space::HALF, 0.0);
             let frame = ui.add(
                 egui::DragValue::new(&mut at)
-                    .range(0..=i64::from(u32::MAX))
+                    .range(min_frame..=i64::from(u32::MAX))
                     .suffix(" f")
                     .update_while_editing(false),
             );
@@ -4020,10 +4068,9 @@ pub(crate) fn keyframe_row(
                         }
                     }
                 });
-            action.removed = ui
-                .small_button("×")
-                .on_hover_text("Remove this key.")
-                .clicked();
+            let remove = ui.small_button("×").on_hover_text("Remove this key.");
+            crate::mixer_ui::record_strip_rect("keyframe_row_remove", remove.rect);
+            action.removed = remove.clicked();
             if frame.drag_started() || level.drag_started() {
                 action.gesture_started = true;
             }
@@ -4036,8 +4083,8 @@ pub(crate) fn keyframe_row(
             at: TimeCode(at.max(0)),
             value,
             interpolation,
-            tangent_in: 0,
-            tangent_out: 0,
+            tangent_in: stored.tangent_in,
+            tangent_out: stored.tangent_out,
         };
         if edited != *stored {
             action.edited = Some(edited);
@@ -4071,11 +4118,18 @@ impl CurveWrite {
 /// curve its row belongs to. Pure; provable without a window.
 ///
 /// `None` when the row asks for nothing at all.
+///
+/// MO1 R22 generalises the floor: `min_frame` is 0 for audio owners and
+/// `-MAX_KEY_FRAME_OFFSET` for keep-outside motion owners, so editing a key
+/// on a trimmed clip cannot destroy the kept-outside keys below zero. The
+/// stored tangents ride the edit untouched for the same reason the row keeps
+/// them: no control here edits them.
 pub(crate) fn apply_keyframe_row_action(
     curve: &AutomationCurve,
     index: usize,
     action: &KeyframeRowAction,
     range: std::ops::RangeInclusive<i64>,
+    min_frame: i64,
 ) -> Option<CurveWrite> {
     if action.removed {
         if curve.keyframes.len() <= 1 {
@@ -4095,7 +4149,7 @@ pub(crate) fn apply_keyframe_row_action(
     let low = index
         .checked_sub(1)
         .and_then(|previous| curve.keyframes.get(previous))
-        .map_or(0, |key| key.at.0.saturating_add(1));
+        .map_or(min_frame, |key| key.at.0.saturating_add(1));
     let high = curve
         .keyframes
         .get(index + 1)
@@ -4105,13 +4159,14 @@ pub(crate) fn apply_keyframe_row_action(
     } else {
         edited.at.0.clamp(low, high)
     };
+    let stored = &curve.keyframes[index];
     let mut keyframes = curve.keyframes.clone();
     keyframes[index] = Keyframe {
-        at: TimeCode(at.max(0)),
+        at: TimeCode(at.max(min_frame)),
         value: edited.value.clamp(*range.start(), *range.end()),
         interpolation: edited.interpolation,
-        tangent_in: 0,
-        tangent_out: 0,
+        tangent_in: stored.tangent_in,
+        tangent_out: stored.tangent_out,
     };
     if keyframes[index] == curve.keyframes[index] {
         return None;
@@ -4144,6 +4199,619 @@ pub(crate) fn upsert_keyframe(
         ),
     }
     AutomationCurve { keyframes }
+}
+
+/// MO1 R22: the motion effects, in card order. Timeline key lanes (R23) and
+/// the opacity band (R24) read the same table, so the three surfaces cannot
+/// disagree on what "motion" means.
+pub(crate) const MOTION_EFFECT_NAMES: [&str; 6] = [
+    "transform",
+    "opacity",
+    "crop",
+    "reframe",
+    "mask",
+    "chroma_key",
+];
+
+/// MO1 R22: whether one effect is edited on a MOTION card rather than in the
+/// generic `Effects` section.
+pub(crate) fn is_motion_effect(name: &str) -> bool {
+    MOTION_EFFECT_NAMES.contains(&name)
+}
+
+/// MO1 R22: the `MOTION` section's caps label.
+pub(crate) const MOTION_SECTION_LABEL: &str = "MOTION";
+/// MO1 R22: the button that upserts one key at the playhead on a motion row.
+pub(crate) const MOTION_ADD_KEY: &str = "+ Key at playhead";
+/// MO1 R22: the button that clears one motion row's whole curve.
+pub(crate) const MOTION_CLEAR: &str = "Clear";
+/// MO1 R22: what a card says with no motion effect on the clip yet.
+pub(crate) const MOTION_EMPTY_NOTE: &str = "No motion effects on this clip yet.";
+/// MO1 R22: the parked-value note beside a keyframed motion control, mirroring
+/// the `ENVELOPE` block's.
+pub(crate) const MOTION_KEYFRAMED_NOTE: &str =
+    "the control shows the parked value; the list below owns the move";
+
+/// MO1 R22: stable coalesce key for one live motion drag, so the whole drag
+/// lands in a single undo entry and two controls never merge.
+fn motion_coalesce_key(clip: ClipId, effect: EffectId, name: &str) -> String {
+    format!("motion:{}:{}:{name}", clip.0, effect.0)
+}
+
+/// MO1 R22: whether one motion parameter gets a slider (narrow integer
+/// ranges) or a numeric drag (the wide transform/rotation/anchor/fine rows).
+/// Pure; the span rule keeps the choice off the parameter names.
+fn motion_param_is_slider(min: i64, max: i64) -> bool {
+    max.saturating_sub(min) <= 500
+}
+
+/// MO1 R22: the key `+ Key at playhead` writes — the value the owner has at
+/// the playhead, or `fallback` with none, clamped to the owner's range. An
+/// existing key at the frame keeps its interpolation; a fresh key rides
+/// `Linear`, the `upsert_keyframe` precedent. Pure.
+fn motion_plus_key(
+    curve: Option<&AutomationCurve>,
+    at: TimeCode,
+    fallback: i64,
+    range: std::ops::RangeInclusive<i64>,
+) -> Keyframe {
+    let interpolation = curve
+        .and_then(|curve| curve.keyframes.iter().find(|key| key.at == at))
+        .map_or(KeyframeInterpolation::Linear, |key| key.interpolation);
+    let value = curve
+        .and_then(|curve| curve.value_at(at))
+        .unwrap_or(fallback)
+        .clamp(*range.start(), *range.end());
+    Keyframe {
+        at,
+        value,
+        interpolation,
+        tangent_in: 0,
+        tangent_out: 0,
+    }
+}
+
+/// MO1 R22: what one motion control edit writes. A param carrying a curve
+/// auto-keys — the edit upserts a key at the playhead with the value the
+/// person chose, keeping an existing key's interpolation there — instead of
+/// writing a shadowed static (Premiere behaviour); a curve-free param writes
+/// its static. Pure.
+fn motion_static_operation(
+    clip: ClipId,
+    effect: EffectId,
+    name: &str,
+    value: i64,
+    curve: Option<&AutomationCurve>,
+    at: TimeCode,
+    range: std::ops::RangeInclusive<i64>,
+) -> Operation {
+    match curve {
+        Some(curve) => Operation::UpsertEffectKeyframe {
+            clip,
+            effect,
+            name: name.to_owned(),
+            key: Keyframe {
+                at,
+                value: value.clamp(*range.start(), *range.end()),
+                interpolation: curve
+                    .keyframes
+                    .iter()
+                    .find(|key| key.at == at)
+                    .map_or(KeyframeInterpolation::Linear, |key| key.interpolation),
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+        },
+        None => effect_param_operation(clip, effect, name, value),
+    }
+}
+
+/// MO1 R22: the neighbour key frames around the playhead over one card's
+/// keyed frames. Pure; the nav buttons clamp the winners into the project.
+fn motion_neighbor_frames(frames: &[i64], current: i64) -> (Option<i64>, Option<i64>) {
+    let mut previous = None;
+    let mut next = None;
+    for frame in frames {
+        if *frame < current {
+            previous = Some(previous.map_or(*frame, |best: i64| best.max(*frame)));
+        } else if *frame > current {
+            next = Some(next.map_or(*frame, |best: i64| best.min(*frame)));
+        }
+    }
+    (previous, next)
+}
+
+/// MO1 R22: every distinct key frame on one card — its params' curves plus
+/// the `enabled` sibling — in ascending order. Pure.
+fn motion_card_frames(effect: &Effect) -> Vec<i64> {
+    let mut frames: Vec<i64> = effect
+        .keyframes
+        .values()
+        .flat_map(|curve| curve.keyframes.iter().map(|key| key.at.0))
+        .chain(
+            effect
+                .enabled_curve
+                .iter()
+                .flat_map(|curve| curve.keyframes.iter().map(|key| key.at.0)),
+        )
+        .collect();
+    frames.sort_unstable();
+    frames.dedup();
+    frames
+}
+
+/// MO1 R22: the operations one clip-enable toggle writes — the clip plus its
+/// linked partner, so a linked A/V pair toggles as one (R17). Pure.
+fn clip_enable_operations(
+    document: &kinewright_core::Document,
+    clip: ClipId,
+    enabled: bool,
+) -> Vec<Operation> {
+    linked_members(document, clip)
+        .iter()
+        .map(|(_, member)| Operation::SetClipEnabled {
+            clip: member.id,
+            enabled,
+        })
+        .collect()
+}
+
+/// MO1 R22: one motion parameter's keyframe list with `+ Key at playhead` and
+/// `Clear`. Row edits fold whole-curve through `SetEffectKeyframes`; the
+/// row's remove button sends `RemoveEffectKeyframe` so a last-key delete
+/// performs R16's last-key-to-static instead of a value-losing clear.
+#[allow(clippy::too_many_arguments)]
+fn motion_curve_list(
+    ui: &mut egui::Ui,
+    clip: ClipId,
+    effect: &Effect,
+    name: &str,
+    curve: Option<&AutomationCurve>,
+    range: std::ops::RangeInclusive<i64>,
+    at: TimeCode,
+    fallback: i64,
+    pending: &mut InspectorEdits,
+) {
+    let row_key = format!("motion:{}:{}:{name}", clip.0, effect.id.0);
+    let mut next: Option<CurveWrite> = None;
+    let mut removed_at: Option<TimeCode> = None;
+    let mut live = false;
+    if let Some(curve) = curve {
+        for index in 0..curve.keyframes.len() {
+            let action = keyframe_row(ui, &row_key, curve, index, -MAX_KEY_FRAME_OFFSET);
+            if action.gesture_started {
+                pending.begin_gesture();
+            }
+            if action.removed {
+                removed_at = curve.keyframes.get(index).map(|key| key.at);
+            } else if let Some(applied) = apply_keyframe_row_action(
+                curve,
+                index,
+                &action,
+                range.clone(),
+                -MAX_KEY_FRAME_OFFSET,
+            ) {
+                live = action.live;
+                next = Some(applied);
+            }
+        }
+    }
+    ui.horizontal(|ui| {
+        let add = ui
+            .small_button(MOTION_ADD_KEY)
+            .on_hover_text("Add a key at the playhead, holding the value it has there.");
+        crate::mixer_ui::record_strip_rect("motion_add_key", add.rect);
+        if add.clicked() {
+            pending.push(Operation::UpsertEffectKeyframe {
+                clip,
+                effect: effect.id,
+                name: name.to_owned(),
+                key: motion_plus_key(curve, at, fallback, range.clone()),
+            });
+        }
+        let clear = ui
+            .add_enabled(curve.is_some(), egui::Button::new(MOTION_CLEAR).small())
+            .on_hover_text("Remove this parameter's whole curve.");
+        crate::mixer_ui::record_strip_rect("motion_clear", clear.rect);
+        if clear.clicked() {
+            pending.push(Operation::ClearEffectKeyframes {
+                clip,
+                effect: effect.id,
+                name: name.to_owned(),
+            });
+        }
+    });
+    if let Some(at) = removed_at {
+        pending.push(Operation::RemoveEffectKeyframe {
+            clip,
+            effect: effect.id,
+            name: name.to_owned(),
+            at,
+        });
+    } else if let Some(applied) = next {
+        let operation = Operation::SetEffectKeyframes {
+            clip,
+            effect: effect.id,
+            name: name.to_owned(),
+            curve: applied.into_curve().expect("a row edit is never a clear"),
+        };
+        if live {
+            pending.push_live(operation, motion_coalesce_key(clip, effect.id, name));
+        } else {
+            pending.push(operation);
+        }
+    }
+}
+
+/// MO1 R22: one motion parameter row — the static control with auto-keying,
+/// the `KEYFRAMED` badge, per-parameter Reset, and the keyframe list.
+///
+/// Editing a keyframed param upserts a key at the playhead instead of writing
+/// a shadowed static (Premiere behaviour); static writes happen only when the
+/// param carries no curve.
+#[allow(clippy::too_many_arguments)]
+fn motion_param_row(
+    ui: &mut egui::Ui,
+    clip: ClipId,
+    effect: &Effect,
+    parameter: &kinewright_core::EffectParameterDescriptor,
+    at: TimeCode,
+    pending: &mut InspectorEdits,
+) {
+    let name = parameter.name;
+    let curve = effect.keyframes.get(name);
+    let mut value = effect
+        .parameters
+        .get(name)
+        .and_then(|value| match value {
+            ParamValue::Integer(value) => Some(*value),
+            ParamValue::Boolean(_) | ParamValue::Text(_) => None,
+        })
+        .unwrap_or(parameter.neutral);
+    ui.horizontal(|ui| {
+        ui.monospace(egui::RichText::new(name).size(type_size::CAPTION));
+        if curve.is_some() {
+            ui.colored_label(color::STATUS_WARNING, "KEYFRAMED");
+            ui.colored_label(color::TEXT_MUTED, MOTION_KEYFRAMED_NOTE);
+        }
+    });
+    let response = if motion_param_is_slider(parameter.min, parameter.max) {
+        ui.add(
+            egui::Slider::new(&mut value, parameter.min..=parameter.max)
+                .text(name)
+                .integer(),
+        )
+    } else {
+        ui.add(
+            egui::DragValue::new(&mut value)
+                .range(parameter.min..=parameter.max)
+                .prefix(format!("{name}: ")),
+        )
+    };
+    if response.drag_started() {
+        pending.begin_gesture();
+    }
+    ui.horizontal(|ui| {
+        let reset = ui
+            .small_button("Reset")
+            .on_hover_text("Restore the static to neutral; keys are kept.");
+        crate::mixer_ui::record_strip_rect("motion_reset_param", reset.rect);
+        if reset.clicked() {
+            pending.push(effect_param_operation(
+                clip,
+                effect.id,
+                name,
+                parameter.neutral,
+            ));
+        }
+    });
+    if response.changed() {
+        // Auto-key writes the dragged value, not the evaluated one: the
+        // control shows the parked static (the `ENVELOPE` precedent), and the
+        // key it writes is the value the person chose.
+        let operation = motion_static_operation(
+            clip,
+            effect.id,
+            name,
+            value,
+            curve,
+            at,
+            parameter.min..=parameter.max,
+        );
+        if is_live_drag(&response) {
+            pending.push_live(operation, motion_coalesce_key(clip, effect.id, name));
+        } else {
+            pending.push(operation);
+        }
+    }
+    motion_curve_list(
+        ui,
+        clip,
+        effect,
+        name,
+        curve,
+        parameter.min..=parameter.max,
+        at,
+        value,
+        pending,
+    );
+}
+
+/// MO1 R22: one card's `enabled` row — the toggle with auto-keying plus the
+/// `enabled` sibling's keyframe list.
+fn motion_enabled_row(
+    ui: &mut egui::Ui,
+    clip: ClipId,
+    effect: &Effect,
+    at: TimeCode,
+    pending: &mut InspectorEdits,
+) {
+    ui.horizontal(|ui| {
+        let mut enabled = effect.enabled;
+        ui.monospace(egui::RichText::new("enabled").size(type_size::CAPTION));
+        let toggle = ui.checkbox(&mut enabled, "");
+        crate::mixer_ui::record_strip_rect("motion_toggle", toggle.rect);
+        if effect.enabled_curve.is_some() {
+            ui.colored_label(color::STATUS_WARNING, "KEYFRAMED");
+        }
+        if toggle.changed() {
+            if effect.enabled_curve.is_some() {
+                pending.push(motion_static_operation(
+                    clip,
+                    effect.id,
+                    "enabled",
+                    i64::from(enabled),
+                    effect.enabled_curve.as_ref(),
+                    at,
+                    0..=1,
+                ));
+            } else {
+                pending.push(Operation::SetEffectEnabled {
+                    clip,
+                    effect: effect.id,
+                    enabled,
+                });
+            }
+        }
+    });
+    motion_curve_list(
+        ui,
+        clip,
+        effect,
+        "enabled",
+        effect.enabled_curve.as_ref(),
+        0..=1,
+        at,
+        i64::from(effect.enabled),
+        pending,
+    );
+}
+
+/// MO1 R22: one motion effect card — the `enabled` row, one row per rendered
+/// parameter, prev/next-key navigation across the card's keyed params, Reset
+/// and Remove.
+///
+/// `playhead_local` is the playhead in clip-local frames; `project` is the
+/// project duration the nav winners clamp into.
+fn motion_effect_card(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    effect: &Effect,
+    descriptor: &kinewright_core::EffectDescriptor,
+    playhead_local: i64,
+    project: TimeCode,
+    pending: &mut InspectorEdits,
+) {
+    let at = TimeCode(playhead_local.clamp(-MAX_KEY_FRAME_OFFSET, MAX_KEY_FRAME_OFFSET));
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.label(effect_display_name(&effect.name));
+            let (previous, next) =
+                motion_neighbor_frames(&motion_card_frames(effect), playhead_local);
+            let project_last = project.0.saturating_sub(1).max(0);
+            for (label, winner, rect) in
+                [("|◀", previous, "motion_prev"), ("▶|", next, "motion_next")]
+            {
+                let target = winner.map(|frame| {
+                    TimeCode(
+                        clip.timeline_start
+                            .0
+                            .saturating_add(frame)
+                            .clamp(0, project_last),
+                    )
+                });
+                let button = ui
+                    .add_enabled(target.is_some(), egui::Button::new(label).small())
+                    .on_hover_text("Jump the playhead to the neighbouring key on this card.");
+                crate::mixer_ui::record_strip_rect(rect, button.rect);
+                if button.clicked()
+                    && let Some(target) = target
+                {
+                    pending.request_playhead(target);
+                }
+            }
+            let reset = ui.small_button("Reset effect").on_hover_text(
+                "Restore every static to neutral and enable the effect; keys are kept.",
+            );
+            crate::mixer_ui::record_strip_rect("motion_reset_effect", reset.rect);
+            if reset.clicked() {
+                for parameter in descriptor.parameters {
+                    if !should_render_effect_parameter(descriptor, parameter.name) {
+                        continue;
+                    }
+                    pending.push(effect_param_operation(
+                        clip.id,
+                        effect.id,
+                        parameter.name,
+                        parameter.neutral,
+                    ));
+                }
+                pending.push(Operation::SetEffectEnabled {
+                    clip: clip.id,
+                    effect: effect.id,
+                    enabled: true,
+                });
+            }
+            let remove = ui.small_button("Remove");
+            crate::mixer_ui::record_strip_rect("motion_remove", remove.rect);
+            if remove.clicked() {
+                pending.push(Operation::RemoveEffect {
+                    clip: clip.id,
+                    effect: effect.id,
+                });
+            }
+        });
+        motion_enabled_row(ui, clip.id, effect, at, pending);
+        for parameter in descriptor.parameters {
+            if !should_render_effect_parameter(descriptor, parameter.name) {
+                continue;
+            }
+            ui.separator();
+            motion_param_row(ui, clip.id, effect, parameter, at, pending);
+        }
+    });
+}
+
+/// MO1 R22: the `MOTION` section — one card per motion effect on the clip
+/// plus the add-row for the missing ones.
+fn motion_section(
+    ui: &mut egui::Ui,
+    clip: &Clip,
+    playhead_local: i64,
+    project: TimeCode,
+    pending: &mut InspectorEdits,
+) {
+    ui.add_space(space::TWO);
+    ui.label(theme::caps_label(MOTION_SECTION_LABEL, color::TEXT_MUTED));
+    let mut cards = 0usize;
+    for effect in &clip.effects {
+        if !is_motion_effect(&effect.name) {
+            continue;
+        }
+        let Some(descriptor) = EFFECT_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.name == effect.name)
+        else {
+            continue;
+        };
+        cards += 1;
+        motion_effect_card(
+            ui,
+            clip,
+            effect,
+            descriptor,
+            playhead_local,
+            project,
+            pending,
+        );
+    }
+    if cards == 0 {
+        ui.colored_label(color::TEXT_MUTED, MOTION_EMPTY_NOTE);
+    }
+    ui.horizontal_wrapped(|ui| {
+        for name in MOTION_EFFECT_NAMES {
+            if clip.effects.iter().any(|effect| effect.name == name) {
+                continue;
+            }
+            let Some(descriptor) = EFFECT_DESCRIPTORS
+                .iter()
+                .find(|descriptor| descriptor.name == name)
+            else {
+                continue;
+            };
+            let add = ui.small_button(format!("+ {}", effect_display_name(name)));
+            crate::mixer_ui::record_strip_rect("motion_add_effect", add.rect);
+            if add.clicked() {
+                pending.push(add_effect_operation(clip, descriptor));
+            }
+        }
+    });
+}
+
+/// MO1 R17/R18: the clip header's enable toggle plus the enable curve's
+/// keyframe list. The toggle follows links (a linked pair toggles as one);
+/// `+ Key at playhead` read-modify-writes the whole curve exactly as the AU4
+/// `ENVELOPE` block does.
+fn clip_enable_header(
+    ui: &mut egui::Ui,
+    document: &kinewright_core::Document,
+    clip: &Clip,
+    playhead_local: i64,
+    pending: &mut InspectorEdits,
+) {
+    let at = TimeCode(playhead_local.clamp(-MAX_KEY_FRAME_OFFSET, MAX_KEY_FRAME_OFFSET));
+    ui.horizontal(|ui| {
+        let mut enabled = clip.enabled;
+        let toggle = ui.checkbox(&mut enabled, "Enabled");
+        crate::mixer_ui::record_strip_rect("clip_enable_toggle", toggle.rect);
+        if clip.enabled_curve.is_some() {
+            ui.colored_label(color::STATUS_WARNING, "KEYFRAMED");
+        }
+        if toggle.changed() {
+            for operation in clip_enable_operations(document, clip.id, enabled) {
+                pending.push(operation);
+            }
+        }
+    });
+    let row_key = format!("clip_enable:{}", clip.id.0);
+    let mut next: Option<CurveWrite> = None;
+    let mut live = false;
+    if let Some(curve) = clip.enabled_curve.as_ref() {
+        for index in 0..curve.keyframes.len() {
+            let action = keyframe_row(ui, &row_key, curve, index, -MAX_KEY_FRAME_OFFSET);
+            if action.gesture_started {
+                pending.begin_gesture();
+            }
+            if let Some(applied) =
+                apply_keyframe_row_action(curve, index, &action, 0..=1, -MAX_KEY_FRAME_OFFSET)
+            {
+                live = action.live && !action.removed;
+                next = Some(applied);
+            }
+        }
+    }
+    ui.horizontal(|ui| {
+        let add = ui
+            .small_button(MOTION_ADD_KEY)
+            .on_hover_text("Add an enable key at the playhead, holding the state it has there.");
+        crate::mixer_ui::record_strip_rect("clip_enable_add_key", add.rect);
+        if add.clicked() {
+            let value = clip
+                .enabled_curve
+                .as_ref()
+                .and_then(|curve| curve.value_at(at))
+                .unwrap_or_else(|| i64::from(clip.enabled))
+                .clamp(0, 1);
+            next = Some(CurveWrite::Set(upsert_keyframe(
+                clip.enabled_curve.as_ref(),
+                at,
+                value,
+            )));
+            live = false;
+        }
+        let clear = ui
+            .add_enabled(
+                clip.enabled_curve.is_some(),
+                egui::Button::new(MOTION_CLEAR).small(),
+            )
+            .on_hover_text("Remove this clip's enable curve.");
+        crate::mixer_ui::record_strip_rect("clip_enable_clear", clear.rect);
+        if clear.clicked() {
+            next = Some(CurveWrite::Clear);
+            live = false;
+        }
+    });
+    if let Some(applied) = next {
+        let operation = Operation::SetClipEnabledCurve {
+            clip: clip.id,
+            curve: applied.into_curve(),
+        };
+        if live {
+            pending.push_live(operation, format!("clip_enable:{}", clip.id.0));
+        } else {
+            pending.push(operation);
+        }
+    }
 }
 
 /// One keyframed control's badge and its one-click clear.
@@ -9152,7 +9820,7 @@ mod tests {
             live: true,
             gesture_started: false,
         };
-        let CurveWrite::Set(next) = apply_keyframe_row_action(&curve, 1, &dragged, -600..=120)
+        let CurveWrite::Set(next) = apply_keyframe_row_action(&curve, 1, &dragged, -600..=120, 0)
             .expect("the row asked for a change")
         else {
             panic!("a value drag is not a clear");
@@ -9217,7 +9885,7 @@ mod tests {
             ..KeyframeRowAction::default()
         };
         let CurveWrite::Set(next) =
-            apply_keyframe_row_action(&curve, 1, &past, -600..=120).unwrap()
+            apply_keyframe_row_action(&curve, 1, &past, -600..=120, 0).unwrap()
         else {
             panic!("this row asks for a value, not a clear");
         };
@@ -9234,7 +9902,7 @@ mod tests {
             ..KeyframeRowAction::default()
         };
         let CurveWrite::Set(next) =
-            apply_keyframe_row_action(&curve, 1, &loud, -600..=120).unwrap()
+            apply_keyframe_row_action(&curve, 1, &loud, -600..=120, 0).unwrap()
         else {
             panic!("this row asks for a value, not a clear");
         };
@@ -9244,14 +9912,14 @@ mod tests {
             edited: Some(curve.keyframes[1]),
             ..KeyframeRowAction::default()
         };
-        assert!(apply_keyframe_row_action(&curve, 1, &same, -600..=120).is_none());
+        assert!(apply_keyframe_row_action(&curve, 1, &same, -600..=120, 0).is_none());
         // Removing one of three drops one key.
         let remove = KeyframeRowAction {
             removed: true,
             ..KeyframeRowAction::default()
         };
         let CurveWrite::Set(next) =
-            apply_keyframe_row_action(&curve, 1, &remove, -600..=120).unwrap()
+            apply_keyframe_row_action(&curve, 1, &remove, -600..=120, 0).unwrap()
         else {
             panic!("this row asks for a value, not a clear");
         };
@@ -9261,7 +9929,7 @@ mod tests {
             keyframes: vec![curve.keyframes[0]],
         };
         assert_eq!(
-            apply_keyframe_row_action(&single, 0, &remove, -600..=120),
+            apply_keyframe_row_action(&single, 0, &remove, -600..=120, 0),
             Some(CurveWrite::Clear)
         );
 
@@ -9274,5 +9942,860 @@ mod tests {
         let replaced = upsert_keyframe(Some(&curve), TimeCode(15), 55);
         assert_eq!(replaced.keyframes.len(), 3);
         assert_eq!(replaced.keyframes[1].value, 55);
+    }
+
+    /// MO1 R22: one `opacity` effect with a `percent` curve riding keys at
+    /// −20 (kept outside a head trim), 0 and 15, plus static 80.
+    fn motion_opacity_effect() -> Effect {
+        Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(5),
+            name: "opacity".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(80))]),
+            keyframes: BTreeMap::from([(
+                "percent".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![
+                        Keyframe {
+                            at: TimeCode(-20),
+                            value: 0,
+                            interpolation: KeyframeInterpolation::Hold,
+                            tangent_in: 0,
+                            tangent_out: 0,
+                        },
+                        Keyframe {
+                            at: TimeCode::ZERO,
+                            value: 50,
+                            interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
+                        },
+                        Keyframe {
+                            at: TimeCode(15),
+                            value: 100,
+                            interpolation: KeyframeInterpolation::EaseInOut,
+                            tangent_in: 0,
+                            tangent_out: 0,
+                        },
+                    ],
+                },
+            )]),
+        }
+    }
+
+    /// MO1 R22: the six motion names are cards; colour, audio and unknown
+    /// names stay where they are.
+    #[test]
+    fn motion_effects_table_names_the_six() {
+        for name in MOTION_EFFECT_NAMES {
+            assert!(is_motion_effect(name), "{name}");
+        }
+        for name in [
+            "saturation",
+            "primary_correction",
+            "audio_gain",
+            "no_such_effect",
+        ] {
+            assert!(!is_motion_effect(name), "{name}");
+        }
+    }
+
+    /// MO1 R22: narrow ranges ride sliders, the wide transform rows numeric
+    /// drags, with the cut at a span of 500.
+    #[test]
+    fn motion_slider_rule_splits_on_span() {
+        assert!(motion_param_is_slider(0, 100));
+        assert!(motion_param_is_slider(-100, 100));
+        assert!(motion_param_is_slider(0, 500));
+        assert!(!motion_param_is_slider(0, 501));
+        assert!(!motion_param_is_slider(-36_000, 36_000));
+        assert!(!motion_param_is_slider(0, 10_000));
+        assert!(!motion_param_is_slider(100, 40_000));
+    }
+
+    /// MO1 R22: auto-keying — an edit on a keyframed param upserts the
+    /// dragged value at the playhead (keeping an existing key's
+    /// interpolation there); a curve-free param writes its static.
+    #[test]
+    fn auto_key_upserts_the_dragged_value_and_statics_write_through() {
+        let effect = motion_opacity_effect();
+        let curve = effect.keyframes.get("percent");
+        // A fresh frame rides Linear.
+        let keyed = motion_static_operation(
+            ClipId(2),
+            EffectId(5),
+            "percent",
+            90,
+            curve,
+            TimeCode(9),
+            0..=100,
+        );
+        let Operation::UpsertEffectKeyframe { key, name, .. } = keyed else {
+            panic!("a keyframed edit auto-keys: {keyed:?}");
+        };
+        assert_eq!(name, "percent");
+        assert_eq!((key.at, key.value), (TimeCode(9), 90));
+        assert_eq!(key.interpolation, KeyframeInterpolation::Linear);
+        // An existing key keeps its interpolation but takes the new value.
+        let rekeyed = motion_static_operation(
+            ClipId(2),
+            EffectId(5),
+            "percent",
+            10,
+            curve,
+            TimeCode(15),
+            0..=100,
+        );
+        let Operation::UpsertEffectKeyframe { key, .. } = rekeyed else {
+            panic!("a keyframed edit auto-keys: {rekeyed:?}");
+        };
+        assert_eq!((key.at, key.value), (TimeCode(15), 10));
+        assert_eq!(key.interpolation, KeyframeInterpolation::EaseInOut);
+        // Past-range drags clamp to the descriptor.
+        let clamped = motion_static_operation(
+            ClipId(2),
+            EffectId(5),
+            "percent",
+            9_999,
+            curve,
+            TimeCode(9),
+            0..=100,
+        );
+        let Operation::UpsertEffectKeyframe { key, .. } = clamped else {
+            panic!("a keyframed edit auto-keys: {clamped:?}");
+        };
+        assert_eq!(key.value, 100);
+        // And a curve-free param writes its static, untouched.
+        assert_eq!(
+            motion_static_operation(
+                ClipId(2),
+                EffectId(5),
+                "percent",
+                70,
+                None,
+                TimeCode(9),
+                0..=100
+            ),
+            Operation::SetEffectParam {
+                clip: ClipId(2),
+                effect: EffectId(5),
+                name: "percent".to_owned(),
+                value: ParamValue::Integer(70),
+            }
+        );
+    }
+
+    /// MO1 R22: `+ Key at playhead` holds the playhead value — evaluated
+    /// with a curve, the parked fallback without — clamped to range.
+    #[test]
+    fn plus_key_holds_the_playhead_value_or_the_fallback() {
+        let effect = motion_opacity_effect();
+        let curve = effect.keyframes.get("percent");
+        // Between 0 (50) and 15 (100), linear: 50 + 50/15 × 9 = 80.
+        let held = motion_plus_key(curve, TimeCode(9), 80, 0..=100);
+        assert_eq!((held.at, held.value), (TimeCode(9), 80));
+        assert_eq!(held.interpolation, KeyframeInterpolation::Linear);
+        // On an existing key: its interpolation, the evaluated value.
+        let on_key = motion_plus_key(curve, TimeCode(15), 80, 0..=100);
+        assert_eq!(on_key.interpolation, KeyframeInterpolation::EaseInOut);
+        assert_eq!(on_key.value, 100);
+        // Curve-free: the parked fallback, clamped.
+        let seeded = motion_plus_key(None, TimeCode(9), 9_999, 0..=100);
+        assert_eq!((seeded.at, seeded.value), (TimeCode(9), 100));
+    }
+
+    /// MO1 R22: nav neighbours skip the current frame and vanish at the ends.
+    #[test]
+    fn neighbor_frames_skip_current_and_vanish_at_the_ends() {
+        let frames = [-20, 0, 15, 29];
+        assert_eq!(motion_neighbor_frames(&frames, 9), (Some(0), Some(15)));
+        assert_eq!(motion_neighbor_frames(&frames, 15), (Some(0), Some(29)));
+        assert_eq!(motion_neighbor_frames(&frames, -30), (None, Some(-20)));
+        assert_eq!(motion_neighbor_frames(&frames, 29), (Some(15), None));
+        assert_eq!(motion_neighbor_frames(&[], 9), (None, None));
+    }
+
+    /// MO1 R22: one card's frames union its params with the `enabled`
+    /// sibling, sorted and deduplicated.
+    #[test]
+    fn card_frames_union_params_with_the_enabled_sibling() {
+        let mut effect = motion_opacity_effect();
+        effect.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(15),
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(29),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        });
+        assert_eq!(motion_card_frames(&effect), [-20, 0, 15, 29]);
+    }
+
+    /// MO1 R22/R17: the clip-enable toggle follows links — a solo clip
+    /// writes one toggle, a linked pair an atomic batch of two.
+    #[test]
+    fn clip_enable_toggle_follows_links() {
+        let mut solo = curves_document();
+        solo.tracks[0].clips[0].id = ClipId(2);
+        assert_eq!(
+            clip_enable_operations(&solo, ClipId(2), false),
+            [Operation::SetClipEnabled {
+                clip: ClipId(2),
+                enabled: false,
+            }]
+        );
+        let mut linked = curves_document();
+        linked.tracks[0].clips[0].id = ClipId(2);
+        linked.tracks[0].clips[0].link = Some(LinkId(1));
+        let mut partner = media_clip(ClipId(3), AssetId(1), Some(LinkId(1)));
+        partner.timeline_start = TimeCode::ZERO;
+        linked.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![partner],
+        });
+        assert_eq!(
+            clip_enable_operations(&linked, ClipId(2), false),
+            [
+                Operation::SetClipEnabled {
+                    clip: ClipId(2),
+                    enabled: false,
+                },
+                Operation::SetClipEnabled {
+                    clip: ClipId(3),
+                    enabled: false,
+                },
+            ]
+        );
+    }
+
+    /// MO1 R22: the generalised fold keeps negative frames under the
+    /// keep-outside floor, clamps them under the audio floor, and carries
+    /// the stored tangents through untouched.
+    #[test]
+    fn the_generalised_fold_keeps_negatives_and_tangents() {
+        let curve = AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(-20),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 7,
+                    tangent_out: 9,
+                },
+                Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 50,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        };
+        // A negative key edited under the motion floor stays negative.
+        let nudge = KeyframeRowAction {
+            edited: Some(Keyframe {
+                at: TimeCode(-18),
+                value: 10,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }),
+            ..KeyframeRowAction::default()
+        };
+        let CurveWrite::Set(next) =
+            apply_keyframe_row_action(&curve, 0, &nudge, 0..=100, -MAX_KEY_FRAME_OFFSET).unwrap()
+        else {
+            panic!("a value edit is not a clear");
+        };
+        assert_eq!(next.keyframes[0].at, TimeCode(-18));
+        assert_eq!(next.keyframes[0].value, 10);
+        assert_eq!(
+            (next.keyframes[0].tangent_in, next.keyframes[0].tangent_out),
+            (7, 9),
+            "the stored tangents ride the edit"
+        );
+        // Under the audio floor the same edit clamps to zero.
+        let CurveWrite::Set(clamped) =
+            apply_keyframe_row_action(&curve, 0, &nudge, 0..=100, 0).unwrap()
+        else {
+            panic!("a value edit is not a clear");
+        };
+        assert_eq!(clamped.keyframes[0].at, TimeCode::ZERO);
+        // A frame dragged past its neighbour stops one short, below zero too.
+        let past = KeyframeRowAction {
+            edited: Some(Keyframe {
+                at: TimeCode(99),
+                value: 0,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }),
+            ..KeyframeRowAction::default()
+        };
+        let CurveWrite::Set(next) =
+            apply_keyframe_row_action(&curve, 0, &past, 0..=100, -MAX_KEY_FRAME_OFFSET).unwrap()
+        else {
+            panic!("a value edit is not a clear");
+        };
+        assert_eq!(next.keyframes[0].at, TimeCode(-1));
+    }
+
+    /// MO1 R22: motion drags coalesce per control on their own keys, and a
+    /// Reset-effect batch carries no key — one frame, one undo entry.
+    #[test]
+    fn motion_drags_coalesce_per_control_and_resets_batch_as_one() {
+        let key = motion_coalesce_key(ClipId(2), EffectId(5), "percent");
+        assert_eq!(key, "motion:2:5:percent");
+        assert_ne!(
+            key,
+            motion_coalesce_key(ClipId(2), EffectId(5), "scale_percent"),
+            "two params on one card must not merge into one undo entry"
+        );
+        assert_ne!(
+            key,
+            envelope_coalesce_key(ClipId(2)),
+            "a motion drag must not merge with the envelope band's"
+        );
+        let mut drag = InspectorEdits::default();
+        drag.begin_gesture();
+        for value in [81, 82, 83] {
+            drag.push_live(
+                motion_static_operation(
+                    ClipId(2),
+                    EffectId(5),
+                    "percent",
+                    value,
+                    None,
+                    TimeCode(9),
+                    0..=100,
+                ),
+                key.clone(),
+            );
+        }
+        assert_eq!(drag.operations().len(), 3);
+        assert_eq!(drag.coalesce_key(), Some(key.as_str()));
+        assert!(drag.gesture_started);
+
+        let mut reset = InspectorEdits::default();
+        reset.push(effect_param_operation(
+            ClipId(2),
+            EffectId(5),
+            "percent",
+            100,
+        ));
+        reset.push(Operation::SetEffectEnabled {
+            clip: ClipId(2),
+            effect: EffectId(5),
+            enabled: true,
+        });
+        assert_eq!(reset.operations().len(), 2);
+        assert_eq!(
+            reset.coalesce_key(),
+            None,
+            "a discrete batch is one undo entry without a gesture key"
+        );
+    }
+
+    /// Run one frame of a MOTION card and return what it painted, what it
+    /// wrote, and where it laid its controls out.
+    fn motion_frame(
+        ctx: &egui::Context,
+        clip: &Clip,
+        effect: &Effect,
+        playhead_local: i64,
+        events: Vec<egui::Event>,
+        rects: &mut Vec<(String, egui::Rect)>,
+        time: f64,
+    ) -> (Vec<String>, InspectorEdits) {
+        let mut pending = InspectorEdits::default();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 900.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let _ = crate::mixer_ui::take_strip_rects();
+                let descriptor = EFFECT_DESCRIPTORS
+                    .iter()
+                    .find(|descriptor| descriptor.name == effect.name)
+                    .expect("a registered motion effect");
+                motion_effect_card(
+                    ui,
+                    clip,
+                    effect,
+                    descriptor,
+                    playhead_local,
+                    TimeCode(30),
+                    &mut pending,
+                );
+            },
+        );
+        *rects = crate::mixer_ui::take_strip_rects();
+        (crate::theme::painted_text(&output), pending)
+    }
+
+    /// Paint one MOTION frame's controls through down/up frames on `button`
+    /// and return the release frame's edits. The `paint` closure owns its
+    /// surface; rects travel by return so nothing is borrowed across frames.
+    fn press_recorded(
+        button: &str,
+        mut paint: impl FnMut(Vec<egui::Event>, f64) -> (Vec<(String, egui::Rect)>, InspectorEdits),
+    ) -> InspectorEdits {
+        let (rects, _) = paint(Vec::new(), 0.02);
+        let target = rects
+            .iter()
+            .find(|(name, _)| name == button)
+            .unwrap_or_else(|| panic!("the surface lays out `{button}`: {rects:?}"))
+            .1
+            .center();
+        let _ = paint(
+            vec![
+                egui::Event::PointerMoved(target),
+                egui::Event::PointerButton {
+                    pos: target,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            0.04,
+        );
+        let (_, pending) = paint(
+            vec![egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            0.06,
+        );
+        pending
+    }
+
+    /// Press one recorded MOTION card control and return the frame's edits.
+    fn motion_press(
+        clip: &Clip,
+        effect: &Effect,
+        playhead_local: i64,
+        button: &str,
+    ) -> InspectorEdits {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        press_recorded(button, |events, time| {
+            let mut rects = Vec::new();
+            let (_, pending) =
+                motion_frame(&ctx, clip, effect, playhead_local, events, &mut rects, time);
+            (rects, pending)
+        })
+    }
+
+    /// MO1 R22: the card paints its rows — including the kept-outside key —
+    /// and a frame of painting writes nothing and seeks nowhere.
+    #[test]
+    fn the_motion_card_paints_its_rows_and_a_paint_frame_writes_nothing() {
+        let effect = motion_opacity_effect();
+        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        clip.effects = vec![effect.clone()];
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut rects = Vec::new();
+        let (painted, pending) =
+            motion_frame(&ctx, &clip, &effect, 9, Vec::new(), &mut rects, 0.02);
+        assert!(
+            pending.operations().is_empty(),
+            "painting a MOTION card writes no operation: {:?}",
+            pending.operations()
+        );
+        assert_eq!(pending.playhead_request(), None);
+        for expected in [
+            "opacity",
+            "enabled",
+            "percent",
+            "KEYFRAMED",
+            MOTION_KEYFRAMED_NOTE,
+            "-20",
+            " f",
+            "Hold",
+            "Ease in-out",
+            MOTION_ADD_KEY,
+            MOTION_CLEAR,
+            "|◀",
+            "▶|",
+            "Reset",
+            "Reset effect",
+            "Remove",
+        ] {
+            assert!(
+                painted.iter().any(|text| text == expected),
+                "the card paints {expected:?}; it painted {painted:?}"
+            );
+        }
+    }
+
+    /// MO1 R22: `+ Key at playhead` on a param row upserts the single key;
+    /// `Clear` clears the whole curve.
+    #[test]
+    fn motion_add_key_upserts_and_clear_clears_the_row() {
+        fn row_press(effect: &Effect, button: &str, playhead_local: i64) -> Vec<Operation> {
+            let clip = media_clip(ClipId(2), AssetId(1), None);
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            press_recorded(button, |events, time| {
+                let mut pending = InspectorEdits::default();
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 400.0),
+                        )),
+                        time: Some(time),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let _ = crate::mixer_ui::take_strip_rects();
+                        let descriptor = EFFECT_DESCRIPTORS
+                            .iter()
+                            .find(|descriptor| descriptor.name == "opacity")
+                            .expect("the opacity descriptor");
+                        let parameter = descriptor
+                            .parameters
+                            .iter()
+                            .find(|parameter| parameter.name == "percent")
+                            .expect("the percent row");
+                        motion_param_row(
+                            ui,
+                            clip.id,
+                            effect,
+                            parameter,
+                            TimeCode(playhead_local),
+                            &mut pending,
+                        );
+                    },
+                );
+                (crate::mixer_ui::take_strip_rects(), pending)
+            })
+            .operations()
+            .to_vec()
+        }
+
+        let effect = motion_opacity_effect();
+        // Playhead 9 sits between 0 (50) and 15 (100): 50 + 50/15 × 9 = 80.
+        assert_eq!(
+            row_press(&effect, "motion_add_key", 9),
+            [Operation::UpsertEffectKeyframe {
+                clip: ClipId(2),
+                effect: EffectId(5),
+                name: "percent".to_owned(),
+                key: Keyframe {
+                    at: TimeCode(9),
+                    value: 80,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            }]
+        );
+        assert_eq!(
+            row_press(&effect, "motion_clear", 9),
+            [Operation::ClearEffectKeyframes {
+                clip: ClipId(2),
+                effect: EffectId(5),
+                name: "percent".to_owned(),
+            }]
+        );
+        // The row's remove button sends the single-key remove at the key's
+        // own frame — the first row rides the kept-outside key at −20.
+        assert_eq!(
+            row_press(&effect, "keyframe_row_remove", 9),
+            [Operation::RemoveEffectKeyframe {
+                clip: ClipId(2),
+                effect: EffectId(5),
+                name: "percent".to_owned(),
+                at: TimeCode(-20),
+            }]
+        );
+    }
+
+    /// MO1 R22: prev/next jump the playhead across the card's keyed params,
+    /// and the toggle writes the static flag on a curve-free card.
+    #[test]
+    fn motion_nav_seeks_and_the_toggle_writes_the_static() {
+        let effect = motion_opacity_effect();
+        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        clip.timeline_start = TimeCode(10);
+        clip.effects = vec![effect.clone()];
+        // Keys at −20/0/15, playhead local 9: prev 0 → project 10, next
+        // 15 → project 25.
+        let back = motion_press(&clip, &effect, 9, "motion_prev");
+        assert_eq!(back.playhead_request(), Some(TimeCode(10)));
+        assert!(back.operations().is_empty());
+        let forward = motion_press(&clip, &effect, 9, "motion_next");
+        assert_eq!(forward.playhead_request(), Some(TimeCode(25)));
+        // Past the last key the next button is dead: no request, no write.
+        let past = motion_press(&clip, &effect, 29, "motion_next");
+        assert_eq!(past.playhead_request(), None);
+        assert!(past.operations().is_empty());
+
+        let toggled = motion_press(&clip, &effect, 9, "motion_toggle");
+        assert_eq!(
+            toggled.operations(),
+            [Operation::SetEffectEnabled {
+                clip: ClipId(2),
+                effect: EffectId(5),
+                enabled: false,
+            }]
+        );
+    }
+
+    /// MO1 R22: Reset restores statics to neutral and enables the effect —
+    /// keys kept — as one discrete batch; Remove removes the node.
+    #[test]
+    fn motion_reset_restores_neutral_and_remove_removes() {
+        let mut effect = motion_opacity_effect();
+        effect.enabled = false;
+        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        clip.effects = vec![effect.clone()];
+        let reset = motion_press(&clip, &effect, 9, "motion_reset_effect");
+        assert_eq!(
+            reset.operations(),
+            [
+                Operation::SetEffectParam {
+                    clip: ClipId(2),
+                    effect: EffectId(5),
+                    name: "percent".to_owned(),
+                    value: ParamValue::Integer(100),
+                },
+                Operation::SetEffectEnabled {
+                    clip: ClipId(2),
+                    effect: EffectId(5),
+                    enabled: true,
+                },
+            ]
+        );
+        assert_eq!(
+            reset.coalesce_key(),
+            None,
+            "one discrete batch is one undo entry"
+        );
+        let removed = motion_press(&clip, &effect, 9, "motion_remove");
+        assert_eq!(
+            removed.operations(),
+            [Operation::RemoveEffect {
+                clip: ClipId(2),
+                effect: EffectId(5),
+            }]
+        );
+    }
+
+    /// MO1 R22: the add-row offers the missing motion effects and adds the
+    /// pressed one neutral.
+    #[test]
+    fn the_motion_add_row_adds_the_pressed_effect_neutral() {
+        let clip = media_clip(ClipId(2), AssetId(1), None);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut painting = InspectorEdits::default();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 400.0),
+                )),
+                ..Default::default()
+            },
+            |ui| motion_section(ui, &clip, 9, TimeCode(30), &mut painting),
+        );
+        assert!(painting.operations().is_empty());
+        let added = press_recorded("motion_add_effect", |events, time| {
+            let mut pending = InspectorEdits::default();
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 400.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let _ = crate::mixer_ui::take_strip_rects();
+                    motion_section(ui, &clip, 9, TimeCode(30), &mut pending);
+                },
+            );
+            (crate::mixer_ui::take_strip_rects(), pending)
+        });
+        // The first offered effect is `transform`, added neutral.
+        let Operation::AddEffect { clip, effect } = &added.operations()[0] else {
+            panic!("the add-row adds an effect: {:?}", added.operations());
+        };
+        assert_eq!(*clip, ClipId(2));
+        assert_eq!(effect.name, "transform");
+        assert_eq!(effect.id, EffectId(1));
+        assert!(effect.enabled);
+        assert_eq!(effect.parameters.len(), 11);
+    }
+
+    /// MO1 R17/R18: the clip header's toggle writes the linked batch, and
+    /// its `+ Key`/`Clear` write the whole enable curve.
+    #[test]
+    fn the_clip_enable_header_toggles_links_and_keys_the_curve() {
+        fn header_press(document: &Document, clip: &Clip, button: &str) -> InspectorEdits {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            press_recorded(button, |events, time| {
+                let mut pending = InspectorEdits::default();
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 400.0),
+                        )),
+                        time: Some(time),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let _ = crate::mixer_ui::take_strip_rects();
+                        clip_enable_header(ui, document, clip, 9, &mut pending);
+                    },
+                );
+                (crate::mixer_ui::take_strip_rects(), pending)
+            })
+        }
+
+        let mut document = curves_document();
+        document.tracks[0].clips[0].id = ClipId(2);
+        document.tracks[0].clips[0].link = Some(LinkId(1));
+        let mut partner = media_clip(ClipId(3), AssetId(1), Some(LinkId(1)));
+        partner.timeline_start = TimeCode::ZERO;
+        document.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![partner],
+        });
+        let clip = document.tracks[0].clips[0].clone();
+        let toggled = header_press(&document, &clip, "clip_enable_toggle");
+        assert_eq!(
+            toggled.operations(),
+            [
+                Operation::SetClipEnabled {
+                    clip: ClipId(2),
+                    enabled: false,
+                },
+                Operation::SetClipEnabled {
+                    clip: ClipId(3),
+                    enabled: false,
+                },
+            ]
+        );
+        // `+ Key` seeds the whole curve at the playhead, holding enabled.
+        let keyed = header_press(&document, &clip, "clip_enable_add_key");
+        assert_eq!(
+            keyed.operations(),
+            [Operation::SetClipEnabledCurve {
+                clip: ClipId(2),
+                curve: Some(AutomationCurve {
+                    keyframes: vec![Keyframe {
+                        at: TimeCode(9),
+                        value: 1,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    }],
+                }),
+            }]
+        );
+        // And `Clear` on a curved clip nulls it.
+        let mut curved = clip.clone();
+        curved.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode::ZERO,
+                value: 1,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
+        });
+        let cleared = header_press(&document, &curved, "clip_enable_clear");
+        assert_eq!(
+            cleared.operations(),
+            [Operation::SetClipEnabledCurve {
+                clip: ClipId(2),
+                curve: None,
+            }]
+        );
+    }
+
+    /// MO1 R22: the generic `Effects` section skips motion effects — their
+    /// sliders moved to MOTION cards — and keeps the rest.
+    #[test]
+    fn the_generic_effects_section_skips_motion_effects() {
+        let clip = look_clip(vec![
+            colour_effect(1, "transform"),
+            colour_effect(2, "saturation"),
+        ]);
+        let document = look_document(clip.effects.clone(), Vec::new());
+        let availability = BTreeMap::new();
+        let qc_clipping = crate::color_qc_ui::ColorQcNodeClipping::default();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let looks = LookInspectorContext {
+                    document: &document,
+                    availability: &availability,
+                    qc_clipping: &qc_clipping,
+                    store_unavailable: None,
+                };
+                let mut pending = InspectorEdits::default();
+                effects_section(ui, &clip, &looks, &mut pending);
+                assert!(
+                    pending.operations().is_empty(),
+                    "painting writes nothing: {:?}",
+                    pending.operations()
+                );
+            },
+        );
+        let painted = crate::theme::painted_text(&output);
+        assert!(
+            painted.iter().any(|text| text == "saturation"),
+            "non-motion effects stay generic: {painted:?}"
+        );
+        assert!(
+            painted.iter().all(|text| text != "scale_percent"),
+            "no transform slider survives in the generic section: {painted:?}"
+        );
+        assert!(
+            painted.iter().all(|text| text != "transform"),
+            "no transform card survives in the generic section: {painted:?}"
+        );
     }
 }
