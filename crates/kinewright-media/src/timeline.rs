@@ -1273,6 +1273,88 @@ mod tests {
         }
     }
 
+    /// MO1 N4 G8 (R2 S3): the layer cut above, on a clip starting past
+    /// zero — clip 2 at 15 with local keys [(0,1),(5,0)] cuts at project
+    /// 20, not 5. Evaluating `is_enabled_at` at project time leaves no
+    /// layers at 15..20 and the test reds.
+    #[test]
+    fn keyframed_clip_enable_cuts_offset_layers_at_the_local_key_frame() {
+        let mut document = fixture();
+        document.tracks[0].clips[1].enabled_curve = Some(hold_curve(&[(0, 1), (5, 0)]));
+        document.validate().unwrap();
+
+        for at in 15..25 {
+            let layers = visual_layers_at(&document, TimeCode(at)).unwrap();
+            assert_eq!(
+                layers.len(),
+                usize::from(at < 20),
+                "offset clip must cut at project 20 (probed {at})"
+            );
+            assert_eq!(
+                timeline_source_at(&document, TimeCode(at))
+                    .unwrap()
+                    .is_some(),
+                at < 20,
+                "offset source lookup must cut with the clip (probed {at})"
+            );
+        }
+
+        document.tracks[0].clips[1].enabled_curve = Some(hold_curve(&[(0, 0), (5, 1)]));
+        document.validate().unwrap();
+        for at in 15..25 {
+            assert_eq!(
+                visual_layers_at(&document, TimeCode(at)).unwrap().len(),
+                usize::from(at >= 20),
+                "offset clip must return at project 20 (probed {at})"
+            );
+        }
+    }
+
+    /// MO1 N4 G8 (R2 S2): the audio run-split above, on a clip starting
+    /// past zero — clip 2 at 15 with local keys [(0,1),(4,0),(7,1)]
+    /// splits at project (15,19) and (22,25). Runs evaluated in project
+    /// time never split (or split at the wrong frames) and the test reds.
+    #[test]
+    fn keyframed_clip_enable_splits_offset_audio_into_enabled_runs() {
+        let mut document = fixture();
+        document.tracks[0].clips[1].enabled_curve = Some(hold_curve(&[(0, 1), (4, 0), (7, 1)]));
+        document.validate().unwrap();
+
+        let segments = timeline_audio_segments(&document, TimeCode(15)..TimeCode(25)).unwrap();
+        let clip: Vec<_> = segments
+            .iter()
+            .filter(|segment| segment.clip == ClipId(2))
+            .collect();
+        assert_eq!(
+            clip.iter()
+                .map(|segment| (segment.project.start.0, segment.project.end.0))
+                .collect::<Vec<_>>(),
+            vec![(15, 19), (22, 25)],
+            "local Hold 1->0->1 on a start-15 clip must cut at project 19 and 22"
+        );
+        // Same-rate mapping: source runs track the project runs off source 30.
+        assert_eq!(
+            clip.iter()
+                .map(|segment| (segment.source.start.0, segment.source.end.0))
+                .collect::<Vec<_>>(),
+            vec![(30, 34), (37, 40)]
+        );
+
+        for at in 15..25 {
+            let local = TimeCode(at - 15);
+            let covered = segments.iter().any(|segment| {
+                segment.clip == ClipId(2)
+                    && segment.project.start.0 <= at
+                    && at < segment.project.end.0
+            });
+            assert_eq!(
+                covered,
+                document.tracks[0].clips[1].is_enabled_at(local),
+                "offset segment coverage must equal is_enabled_at(local) at frame {at}"
+            );
+        }
+    }
+
     /// A keyframed clip `enabled_curve` splits audio into maximal enabled
     /// runs; every covered project frame is enabled at its clip-local frame
     /// and every uncovered one is not.

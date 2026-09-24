@@ -3840,7 +3840,9 @@ mod tests {
     /// MO1 N4 G7: the past-400:1 fallback is the best rational with both
     /// terms in the coarse range — not limiting-400-plus-rounded-other,
     /// whose error grows as r/800 (0.185% here, past the documented
-    /// 0.125%). 2096/693 resolves to 369/122 (0.002%).
+    /// 0.125%). 2096/693 resolves to 369/122 (0.002%). This is also the
+    /// R2 S4 remedy: S4's `→ 132` targeted the pre-G7 fallback this pin
+    /// replaces, and the optimality test kills its extremum mutant.
     #[test]
     fn scale_to_frame_fit_falls_back_to_best_rational() {
         use super::scale_to_frame_fit;

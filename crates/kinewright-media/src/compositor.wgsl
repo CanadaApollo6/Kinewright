@@ -519,7 +519,9 @@ fn matte_window_weight(base: u32, index: u32, uv: vec2<f32>, aspect: f32) -> f32
         // `d` is the offset from the centre divided by the raster height, so
         // it is isotropic in pixels; `hw * aspect` and `hh` are both half
         // extents in units of raster height, so `n` is dimensionless with the
-        // boundary at `|n| = 1`.
+        // boundary at `|n| = 1`. MO1 N4 G8: this circularity is in LAYER uv —
+        // under non-uniform layer scale (per-axis squeeze, fitted stills)
+        // the window renders elliptical in output pixels.
         let d = vec2<f32>((uv.x - cx) * aspect, uv.y - cy);
         let q = vec2<f32>(
             d.x * cos_t + d.y * sin_t,

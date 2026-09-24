@@ -131,6 +131,29 @@ fn vertical_edge(width: u32, height: u32) -> FrameTexture {
     }
 }
 
+/// A centred white square on black — the S1 order golden's silhouette
+/// source (a square's silhouette is rotation-invariant, so only the
+/// scale/rotate order moves the box).
+fn centred_square(size: u32, square: u32) -> FrameTexture {
+    let margin = (size - square) / 2;
+    let mut rgba = Vec::with_capacity(usize::try_from(size * size * 4).unwrap());
+    for y in 0..size {
+        for x in 0..size {
+            let lit = x >= margin && x < margin + square && y >= margin && y < margin + square;
+            rgba.extend_from_slice(if lit {
+                &[255, 255, 255, 255]
+            } else {
+                &[0, 0, 0, 255]
+            });
+        }
+    }
+    FrameTexture {
+        width: size,
+        height: size,
+        rgba: Arc::new(rgba),
+    }
+}
+
 fn render_layer(
     compositor: &Compositor,
     resolution: (u32, u32),
@@ -459,6 +482,51 @@ fn mo1_rotation_aspect_correction_golden() {
     dark(55, 10);
     dark(10, 30);
     dark(55, 30);
+}
+
+/// MO1 N4 G8 (R2 S1): scale runs before rotation in the vertex stage —
+/// `scale_x` 50 squeezes the centred 40-px square to 20 wide, then +90°
+/// lays it down as a 40 × 20 bar (x 12..52, y 22..42). Rotating first
+/// would stand it up as 20 × 40 instead, so the order swap reds this.
+#[test]
+fn mo1_scale_before_rotate_order_golden() {
+    let Some(compositor) = fallback() else {
+        return;
+    };
+    let source = centred_square(64, 40);
+    let effects = [transform_effect(
+        1,
+        &[("scale_x_percent", 50), ("rotation_centidegrees", 9_000)],
+    )];
+    let frame = render_layer(&compositor, (64, 64), &source, &effects);
+    let lit = |x: u32, y: u32| {
+        let p = pixel(&frame, x, y);
+        assert!(
+            p[0] > 128 && p[1] > 128 && p[2] > 128,
+            "({x}, {y}) must be lit, got {p:?}"
+        );
+    };
+    let dark = |x: u32, y: u32| {
+        let p = pixel(&frame, x, y);
+        assert!(
+            p[0] < 128 && p[1] < 128 && p[2] < 128,
+            "({x}, {y}) must be dark, got {p:?}"
+        );
+    };
+
+    // The 40 x 20 bar: x 12..52, y 22..42.
+    lit(32, 32);
+    lit(13, 32);
+    lit(51, 32);
+    lit(32, 23);
+    lit(32, 41);
+    dark(11, 32);
+    dark(53, 32);
+    dark(32, 21);
+    dark(32, 43);
+    // The rotate-first 20 x 40 bar would light these instead.
+    dark(32, 13);
+    dark(13, 13);
 }
 
 /// MO1 R26: scaling about the top-left anchor keeps the image in the TL
@@ -1016,46 +1084,55 @@ fn mo1_quadrant_still(label: &str, width: u32, height: u32) -> GeneratedMedia {
 
 /// MO1 R27: a still renders identically across its whole five-second span,
 /// decoding once — the frame cache pins the one still frame (one seek, no
-/// evictions) rather than churning it.
+/// evictions) rather than churning it. MO1 N4 G8: the same parity holds on
+/// the export (`Sequential`) decode path, byte-equal to the `Seek` path.
 #[test]
 fn still_hold_parity_across_five_seconds() {
     crate::initialize_ffmpeg().expect("FFmpeg should initialize");
     let media = mo1_quadrant_still("mo1-hold", 64, 36);
     let (document, _) = mo1_still_document(&media, 150, (64, 36), Vec::new());
     let gpu = fixture_gpu_or_skip().expect("the gate needs an adapter");
-    let mut renderer = FrameRenderer::new(gpu);
-    let render = |renderer: &mut FrameRenderer, at: i64| {
-        renderer
-            .render(
-                &document,
-                TimeCode(at),
-                document.resolution,
-                RenderScale::FullResolution,
-                DecodeStrategy::Seek,
-            )
-            .expect("hold frames should render")
-            .rgba
-            .as_ref()
-            .clone()
-    };
+    let mut first_by_strategy = Vec::new();
+    for strategy in [DecodeStrategy::Seek, DecodeStrategy::Sequential] {
+        let mut renderer = FrameRenderer::new(gpu.clone());
+        let render = |renderer: &mut FrameRenderer, at: i64| {
+            renderer
+                .render(
+                    &document,
+                    TimeCode(at),
+                    document.resolution,
+                    RenderScale::FullResolution,
+                    strategy,
+                )
+                .expect("hold frames should render")
+                .rgba
+                .as_ref()
+                .clone()
+        };
 
-    let first = render(&mut renderer, 0);
-    for at in [1, 2, 3, 37, 74, 75, 112, 148, 149] {
+        let first = render(&mut renderer, 0);
+        for at in [1, 2, 3, 37, 74, 75, 112, 148, 149] {
+            assert_eq!(
+                render(&mut renderer, at),
+                first,
+                "hold frame {at} must equal frame 0 ({strategy:?})"
+            );
+        }
         assert_eq!(
-            render(&mut renderer, at),
-            first,
-            "hold frame {at} must equal frame 0"
+            renderer.video_seek_count(),
+            1,
+            "the still must decode exactly once across its span ({strategy:?})"
         );
+        assert_eq!(
+            renderer.cache_eviction_count(),
+            0,
+            "the pinned still frame must never evict ({strategy:?})"
+        );
+        first_by_strategy.push(first);
     }
     assert_eq!(
-        renderer.video_seek_count(),
-        1,
-        "the still must decode exactly once across its span"
-    );
-    assert_eq!(
-        renderer.cache_eviction_count(),
-        0,
-        "the pinned still frame must never evict"
+        first_by_strategy[0], first_by_strategy[1],
+        "the export decode path must render hold bytes equal to preview"
     );
 }
 
@@ -1409,6 +1486,30 @@ fn still_alpha_composites_over_video() {
     assert!(
         (150..240).contains(&r) && (40..120).contains(&g) && (40..120).contains(&b),
         "the blend must be a real mix, got [{r}, {g}, {b}] over [{gr}, {gg}, {gb}]"
+    );
+    // MO1 N4 G8: pin the LINEAR-light value — the coded bounds above admit
+    // double premultiplication (red 161 lands inside 150..240). The top
+    // green is 0, so the green channel solves for the coverage alpha;
+    // red and blue must then match the honest straight-alpha blend in
+    // linear light (readback is BT.709-coded; the blend runs linear).
+    let linear = |coded: u8| crate::color_pipeline::decode_bt709(f32::from(coded) / 255.0);
+    let (red, green, blue) = (linear(r), linear(g), linear(b));
+    let (grey_red, grey_green, grey_blue) = (linear(gr), linear(gg), linear(gb));
+    let alpha = 1.0 - green / grey_green;
+    assert!(
+        (0.47..=0.53).contains(&alpha),
+        "the fixture alpha must read ~0.5, got {alpha}"
+    );
+    let honest = |top: f32, under: f32| alpha * top + (1.0 - alpha) * under;
+    assert!(
+        (red - honest(1.0, grey_red)).abs() < 0.03,
+        "linear red {red} must match the honest blend {} (alpha {alpha})",
+        honest(1.0, grey_red)
+    );
+    assert!(
+        (blue - honest(0.0, grey_blue)).abs() < 0.03,
+        "linear blue {blue} must match the honest blend {} (alpha {alpha})",
+        honest(0.0, grey_blue)
     );
 }
 

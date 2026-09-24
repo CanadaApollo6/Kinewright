@@ -2600,7 +2600,8 @@ pub(crate) fn params_for(effects: &[Effect], transition: TransitionRenderParams)
         // MO1 R4: callers pass keyframe-evaluated effects, whose `enabled`
         // is the resolved flag (`Effect::evaluated_at` snapshots it), so a
         // static-flag test is the whole skip. `evaluated_effects` filters
-        // first; this arm covers direct `Compositor` users.
+        // first; this arm covers the `LayerParams` half for direct
+        // `Compositor` users (the grade/LUT byte path does not filter).
         if !effect.enabled {
             continue;
         }
@@ -6496,7 +6497,9 @@ mod tests {
     /// The quad spans NDC `[-s, s]` on both axes, which is `s * W` by `s * H`
     /// pixels, so the per-pixel step of the height-normalized offset `d` is
     /// `a / (s * W) = 1 / (s * H)` on x and `1 / (s * H)` on y — isotropic in
-    /// pixels for every `s`. A circular window therefore stays circular.
+    /// pixels for every `s`. A circular window therefore stays circular
+    /// under uniform scale (MO1 N4 G8: per-axis scale and fitted stills
+    /// map layer uv non-uniformly, so the window renders elliptical).
     #[test]
     #[allow(clippy::cast_precision_loss, clippy::naive_bytecount)]
     fn layer_quad_pixel_aspect_equals_the_raster_aspect() {

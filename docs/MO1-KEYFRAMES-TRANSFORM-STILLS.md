@@ -457,8 +457,10 @@ allows, else the target). Reused verbatim: `UnknownEffect`, `UnknownEffectParam`
 `RelinkMetadataMismatch`, `EditorialRequiresMedia`, `FreezeClipHasNoAudio`,
 `SpeedOnNonMediaClip`, `FitToFillUnrepresentable` (unchanged). Still-probe
 failures surface as `MediaError::Backend` → `BackendUnclassified`; an undecodable
-still format as `UnsupportedDecoderFormat` — no new media incident. Pinned by the
-table tests plus one incident-render test for the new variant.
+still format as `UnsupportedDecoderFormat` — no new media incident. The two MO1
+matte tool codes (`matte_node_disabled`, `matte_comparison_node_disabled`) are
+structured agent-tool errors, not `IncidentCode`s, so the zero count holds.
+Pinned by the table tests plus one incident-render test for the new variant.
 
 ## 8. Pure kernels + Kani plan
 
