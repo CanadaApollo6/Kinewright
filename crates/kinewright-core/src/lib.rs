@@ -178,7 +178,7 @@ pub use effect::{
     is_managed_color_node, is_matte_capable_color_node, is_matte_parameter,
     is_noise_profile_parameter, is_static_audio_parameter, lut_node_count, lut_node_may_be_active,
     managed_color_node_count, matte_capable, matte_parameter_names, matte_parameters,
-    matte_window_parameter_names, matte_window_parameters,
+    matte_window_parameter_names, matte_window_parameters, scale_to_frame_fit,
 };
 pub use incident::{
     ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, INVESTIGATOR_ALLOWLIST,

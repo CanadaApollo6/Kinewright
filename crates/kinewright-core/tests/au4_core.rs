@@ -3493,61 +3493,7 @@ fn single_key_upsert_remove_round_trip() {
     assert_eq!(live_revision(&core), live);
 }
 
-/// §10 gate 11 (contract half): a canonical push-in (R1 — master constant,
-/// fine ramped) steps ≤ 1 px frame-to-frame on the evaluated effective
-/// scale, while a whole-percent master step jumps ~19 px. (The lavapipe
-/// pixel-diff half belongs to the render part.)
-#[test]
-fn push_in_step_sub_pixel() {
-    let mut doc = document_with_one_clip();
-    Operation::AddEffect {
-        clip: ClipId(1),
-        effect: Effect {
-            enabled: true,
-            enabled_curve: None,
-            id: EffectId(1),
-            name: "transform".to_owned(),
-            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
-            keyframes: BTreeMap::from([(
-                "scale_fine_hundredths".to_owned(),
-                linear(&[(0, 10_000), (50, 10_050)]),
-            )]),
-        },
-    }
-    .apply(&mut doc)
-    .unwrap();
-
-    // Effective width at 1080p in milli-pixels, integer math throughout:
-    // 1920 px × master/100 × axis/100 × fine/10000, axes neutral-absent.
-    let width_milli_px = |doc: &Document, frame: i64| {
-        let evaluated = clip(doc, ClipId(1)).effects[0].evaluated_at(TimeCode(frame));
-        let lane = |name: &str, neutral: i64| match evaluated.parameters.get(name) {
-            Some(ParamValue::Integer(value)) => *value,
-            _ => neutral,
-        };
-        let (master, axis, fine) = (
-            lane("scale_percent", 100),
-            lane("scale_x_percent", 100),
-            lane("scale_fine_hundredths", 10_000),
-        );
-        1_920_000 * master * axis * fine / 100_000_000
-    };
-    let mut worst = 0;
-    for frame in 0..50 {
-        let step = (width_milli_px(&doc, frame + 1) - width_milli_px(&doc, frame)).abs();
-        worst = worst.max(step);
-    }
-    assert!(
-        worst <= 1_000,
-        "a canonical push-in steps ≤ 1 px frame-to-frame, worst {worst} milli-px"
-    );
-
-    // The fails-rationale, pinned: one whole master percent is ~19 px.
-    let coarse = |master: i64| 1_920_000_i64 * master * 100 * 10_000 / 100_000_000;
-    let coarse_step = coarse(101) - coarse(100);
-    assert_eq!(coarse_step, 19_200);
-    assert!(
-        coarse_step > 1_000,
-        "a 1% master step must stay visibly coarse"
-    );
-}
+// §10 gate 11 lives in the render part now (N3): the contract half runs
+// through the real `params_for` fold in `kinewright-media`'s
+// `push_in_step_sub_pixel` (this file's hand-rolled fold mirror is deleted),
+// beside the lavapipe pixel-diff half.

@@ -44,10 +44,19 @@ struct LayerParams {
     input_linear: f32,
     legacy_stage_active: f32,
     // CC4 4.1: the two words that used to be `_uniform_padding` now address
-    // the legacy `cube_lut`'s slot inside the shared depth-packed atlas, so
-    // `LayerParams` stays exactly 48 floats.
+    // the legacy `cube_lut`'s slot inside the shared depth-packed atlas.
     external_lut_z_origin: f32,
     external_lut_size: f32,
+    // MO1 R2: the completed transform. `scale`/`offset_x`/`offset_y` above
+    // keep their historical words (and the host keeps folding the master
+    // into `scale`), but the vertex stage scales by `scale_x`/`scale_y`
+    // only, so per-axis animation never needs the legacy word.
+    scale_x: f32,
+    scale_y: f32,
+    rotation: f32,
+    frame_aspect: f32,
+    anchor_x: f32,
+    anchor_y: f32,
 };
 
 // CC3 3.2: ONE read-only storage buffer carries the whole ordered managed
@@ -116,8 +125,29 @@ fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         vec2<f32>(1.0, 0.0),
     );
     var output: VertexOutput;
-    let translated = positions[vertex_index] * params.scale
-        + vec2<f32>(params.offset_x, -params.offset_y);
+    // MO1 R3: translate(-anchor), per-axis scale, aspect-corrected rotation
+    // about the anchor, translate(anchor), then the offset. The anchor is
+    // top-left origin (Premiere): NDC y is up on screen, so `anchor_y`
+    // flips. At rotation 0 the correction branch is skipped outright, so a
+    // transform-less layer computes exactly the pre-MO1 expression
+    // (`p * s + o`) with no `y*a/a` rounding to differ by.
+    let anchor = vec2<f32>(params.anchor_x * 2.0 - 1.0, 1.0 - params.anchor_y * 2.0);
+    let centred = (positions[vertex_index] - anchor)
+        * vec2<f32>(params.scale_x, params.scale_y);
+    var rotated = centred;
+    if params.rotation != 0.0 {
+        let aspect = params.frame_aspect;
+        let corrected = vec2<f32>(centred.x, centred.y * aspect);
+        let c = cos(params.rotation);
+        let s = sin(params.rotation);
+        // Clockwise on screen (NDC y-up): the standard math negative angle.
+        rotated = vec2<f32>(
+            corrected.x * c + corrected.y * s,
+            -corrected.x * s + corrected.y * c,
+        );
+        rotated.y = rotated.y / aspect;
+    }
+    let translated = rotated + anchor + vec2<f32>(params.offset_x, -params.offset_y);
     output.position = vec4<f32>(translated, 0.0, 1.0);
     output.uv = uvs[vertex_index];
     return output;

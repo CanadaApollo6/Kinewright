@@ -3468,6 +3468,90 @@ pub fn effect_descriptor(name: &str) -> Option<EffectDescriptor> {
         .find(|descriptor| descriptor.name == name)
 }
 
+/// MO1 R10: the canonical scale-to-frame bake for still import.
+///
+/// Every layer is a full-frame quad with the source stretched to fill, so a
+/// still fits by shrinking the non-limiting axis. With `r = (img_w × frame_h)
+/// ÷ (img_h × frame_w)` as an exact rational, the fitted totals must stand in
+/// ratio `r` (X limiting) or `1/r` (Y limiting) while neither total exceeds
+/// the whole frame; the uniform master stays 100 for Ken Burns to ramp.
+/// Returns `(scale_x_percent, scale_y_percent, scale_fine_hundredths)`.
+///
+/// Erratum MR20: the design text's "limiting coarse 100 + fine remainder" is
+/// unrepresentable — R2's shared fine multiplies BOTH axes, so limiting-coarse
+/// 100 with fine ≠ 10000 overflows the limiting axis by `fine/10000` (up to
+/// 2×) and skews the displayed aspect by the same factor. The bake instead
+/// reduces the fit ratio to lowest terms `P/Q` and scales it to the smallest
+/// limiting coarse ≥ 100 (`P×t`, `Q×t`, both ≤ 400 by construction), with fine
+/// `floor(1e6 / limiting)`: the displayed aspect is then EXACT (the fine
+/// cancels in the ratio) and the fill is inside by less than a coarse unit
+/// (< 0.04%). Ratios with `P > 400` (past 400:1) fall back to limiting 400 +
+/// fine 2500 with the other axis rounded — exact fill, ≤ 0.125% aspect error.
+///
+/// Integer math throughout (`u128` intermediates — `u32` dimensions cannot
+/// overflow it). Degenerate (zero) dimensions bake neutral rather than
+/// panicking.
+#[must_use]
+pub fn scale_to_frame_fit(image: (u32, u32), frame: (u32, u32)) -> (i64, i64, i64) {
+    const NEUTRAL: (i64, i64, i64) = (100, 100, 10_000);
+    let (img_w, img_h) = image;
+    let (frame_w, frame_h) = frame;
+    if img_w == 0 || img_h == 0 || frame_w == 0 || frame_h == 0 {
+        return NEUTRAL;
+    }
+    // `r = (img_w × frame_h) / (img_h × frame_w)`; the larger cross product
+    // names the limiting axis, and the reduced ratio is the exact fit.
+    let wide = u128::from(img_w) * u128::from(frame_h);
+    let tall = u128::from(img_h) * u128::from(frame_w);
+    if wide == tall {
+        return NEUTRAL;
+    }
+    let x_limiting = wide > tall;
+    let (numerator, denominator) = if x_limiting {
+        (wide, tall)
+    } else {
+        (tall, wide)
+    };
+    let divisor = gcd_u128(numerator, denominator);
+    let (p, q) = (numerator / divisor, denominator / divisor);
+    // Smallest `t` with the limiting coarse ≥ 100, unless the ratio itself
+    // already exceeds the coarse range (past 400:1 — the fallback below).
+    let (limiting, other, fine) = if p <= 400 {
+        let t = ceil_div_u128(100, p);
+        let limiting = p.saturating_mul(t);
+        let other = q.saturating_mul(t);
+        // Floor keeps the fill inside (`limiting × fine ≤ 1e6`); the margin
+        // is under one coarse unit.
+        (limiting, other, 1_000_000 / limiting)
+    } else {
+        // `round(400 × Q/P)`, half up: `(800Q + P) div 2P`.
+        let other = q.saturating_mul(800).saturating_add(p) / p.saturating_mul(2).max(1);
+        (400, other.clamp(1, 400), 2_500)
+    };
+    // `limiting ≤ 400`, `other ≤ 400`, `fine ≤ 10000` by construction; the
+    // `as` casts are exact.
+    #[allow(clippy::cast_possible_truncation)]
+    let (limiting, other, fine) = (limiting as i64, other as i64, fine as i64);
+    if x_limiting {
+        (limiting, other, fine)
+    } else {
+        (other, limiting, fine)
+    }
+}
+
+/// Greatest common divisor, Euclid — the R10 ratio reduction.
+fn gcd_u128(mut left: u128, mut right: u128) -> u128 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left.max(1)
+}
+
+/// Ceiling division for positive operands.
+fn ceil_div_u128(numerator: u128, denominator: u128) -> u128 {
+    numerator.saturating_add(denominator.saturating_sub(1)) / denominator.max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{EffectUniform, effect_descriptor};
@@ -3594,5 +3678,103 @@ mod tests {
         for value in [0, 25, 50] {
             assert!((row("x_basis_points").min..=row("x_basis_points").max).contains(&value));
         }
+    }
+
+    /// MO1 R10: reduced-ratio bakes — the fitted totals stand in the exact
+    /// fit ratio, the fine cancels out of it, and the fill stays inside.
+    #[test]
+    fn scale_to_frame_fit_bakes_exact_ratios() {
+        use super::scale_to_frame_fit;
+
+        assert_eq!(
+            scale_to_frame_fit((100, 100), (100, 100)),
+            (100, 100, 10_000)
+        );
+        assert_eq!(
+            scale_to_frame_fit((1920, 1080), (1920, 1080)),
+            (100, 100, 10_000)
+        );
+        // Relatively wider image: X limiting, Y halved exactly.
+        assert_eq!(scale_to_frame_fit((100, 50), (100, 100)), (100, 50, 10_000));
+        // Relatively taller image: Y limiting, X halved exactly.
+        assert_eq!(scale_to_frame_fit((50, 100), (100, 100)), (50, 100, 10_000));
+        // 16:9 still in a square frame: 16/9 × 7 = 112/63, fine
+        // floor(1e6/112) = 8928; totals (0.999936, 0.562464), ratio exact.
+        assert_eq!(
+            scale_to_frame_fit((1920, 1080), (100, 100)),
+            (112, 63, 8_928)
+        );
+        // Same ratio, portrait: X takes the fraction.
+        assert_eq!(
+            scale_to_frame_fit((1080, 1920), (100, 100)),
+            (63, 112, 8_928)
+        );
+        // Tiny 4:3 still in an HD frame: relatively taller, so Y limits.
+        assert_eq!(scale_to_frame_fit((4, 3), (1920, 1080)), (75, 100, 10_000));
+        // Degenerate dimensions bake neutral instead of panicking.
+        assert_eq!(scale_to_frame_fit((0, 10), (100, 100)), (100, 100, 10_000));
+        assert_eq!(scale_to_frame_fit((10, 10), (100, 0)), (100, 100, 10_000));
+    }
+
+    /// MO1 R10: displayed aspect equals image aspect (exactly on the reduced-
+    /// ratio path, within 0.5% on the past-400:1 fallback) and the fitted
+    /// quad stays inside the frame — integer cross-multiplication, no float
+    /// anywhere near the assertion.
+    #[test]
+    fn scale_to_frame_fit_preserves_aspect_and_fits_inside() {
+        use super::scale_to_frame_fit;
+
+        for (image, frame) in [
+            ((1920, 1080), (1080, 1920)),
+            ((1080, 1920), (1920, 1080)),
+            ((4000, 3000), (1920, 1080)),
+            ((3000, 4000), (1920, 1080)),
+            ((7, 5), (1920, 1080)),
+            ((5, 7), (320, 180)),
+            ((8192, 4320), (1280, 720)),
+            ((1000, 999), (100, 100)),
+        ] {
+            let (cx, cy, fine) = scale_to_frame_fit(image, frame);
+            // Every baked value inside its descriptor range.
+            assert!((1..=400).contains(&cx), "{image:?} in {frame:?}");
+            assert!((1..=400).contains(&cy), "{image:?} in {frame:?}");
+            assert!((100..=40_000).contains(&fine), "{image:?} in {frame:?}");
+            let (cx, cy, fine) = (
+                u32::try_from(cx).expect("baked coarse is positive"),
+                u32::try_from(cy).expect("baked coarse is positive"),
+                u32::try_from(fine).expect("baked fine is positive"),
+            );
+            // Folded totals as exact rationals over 1e6 (master stays 100).
+            let total_x = u128::from(cx) * u128::from(fine);
+            let total_y = u128::from(cy) * u128::from(fine);
+            // Fit inside: neither total exceeds the whole frame.
+            assert!(total_x <= 1_000_000, "{image:?} in {frame:?}");
+            assert!(total_y <= 1_000_000, "{image:?} in {frame:?}");
+            // Displayed aspect (frame_w × total_x) : (frame_h × total_y)
+            // equals image aspect: exactly on the reduced-ratio path (the
+            // cross products are integers, no rounding involved), within the
+            // 400-coarse rounding on the past-400:1 fallback.
+            let displayed = u128::from(frame.0) * total_x * u128::from(image.1);
+            let expected = u128::from(image.0) * u128::from(frame.1) * total_y;
+            let diff = displayed.abs_diff(expected);
+            assert!(
+                diff * 200 <= expected,
+                "{image:?} in {frame:?}: displayed aspect drifts more than 0.5%"
+            );
+        }
+    }
+
+    /// MO1 R10: ratios past 400:1 fall back to limiting 400 + fine 2500
+    /// (exact fill) with the other axis rounded — the ratio clamps at 400:1
+    /// rather than leaving the descriptor range.
+    #[test]
+    fn scale_to_frame_fit_clamps_unrepresentable_panoramas() {
+        use super::scale_to_frame_fit;
+
+        assert_eq!(scale_to_frame_fit((10_000, 1), (1, 1)), (400, 1, 2_500));
+        assert_eq!(scale_to_frame_fit((20_000, 1), (1, 1)), (400, 1, 2_500));
+        assert_eq!(scale_to_frame_fit((1, 20_000), (1, 1)), (1, 400, 2_500));
+        // Just past the boundary the rounding still tracks the ratio.
+        assert_eq!(scale_to_frame_fit((401, 400), (1, 1)), (400, 399, 2_500));
     }
 }
