@@ -130,9 +130,25 @@ jobs:
       # Only the named, admitted harnesses (each < 5 min / < 6 GB per the
       # admission rule in incident.rs): never bare `cargo kani`, which would
       # also pick up future proofs that do not meet the rule.
+      # MO1 R32: H1–H4 at N=2/3/4 (twelve); ~9 min wall, tightest margin 2.1x
+      # (H1-N4 143 s). H6 translation-equivariance missed the rule (N=2
+      # timeout 900 s, erratum MR1) and rides proptest + segment-local
+      # reasoning instead — it has no harness here by design (R33).
       - name: Verify admitted proofs
         run: |
           set -euo pipefail
           cargo kani -p kinewright-core --harness kani_restore_id_resume || exit 1
           cargo kani -p kinewright-core --harness kani_compact_json_len_anchor || exit 1
           cargo kani -p kinewright-core --harness kani_compact_json_len_symbolic || exit 1
+          cargo kani -p kinewright-core --harness mo1_h1_n2 || exit 1
+          cargo kani -p kinewright-core --harness mo1_h1_n3 || exit 1
+          cargo kani -p kinewright-core --harness mo1_h1_n4 || exit 1
+          cargo kani -p kinewright-core --harness mo1_h2_n2 || exit 1
+          cargo kani -p kinewright-core --harness mo1_h2_n3 || exit 1
+          cargo kani -p kinewright-core --harness mo1_h2_n4 || exit 1
+          cargo kani -p kinewright-core --harness mo1_h3_n2 || exit 1
+          cargo kani -p kinewright-core --harness mo1_h3_n3 || exit 1
+          cargo kani -p kinewright-core --harness mo1_h3_n4 || exit 1
+          cargo kani -p kinewright-core --harness mo1_h4_n2 || exit 1
+          cargo kani -p kinewright-core --harness mo1_h4_n3 || exit 1
+          cargo kani -p kinewright-core --harness mo1_h4_n4 || exit 1

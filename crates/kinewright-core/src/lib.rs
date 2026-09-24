@@ -73,7 +73,8 @@ pub use audio_repair::{
 };
 pub use automation::{
     AutomationCurve, AutomationCurveError, HoldStep, Keyframe, KeyframeInterpolation,
-    clamp_project_curve, rebase_clip_curve,
+    PROVEN_VALUE_BOUND, clamp_project_curve, ease_kernel, rebase_clip_curve,
+    rebase_clip_curve_keep_outside, shift_keys_keep_outside, value_at_keys,
 };
 pub use captions::{
     CaptionCue, CaptionMotion, CaptionPlanError, animated_caption_operations,
