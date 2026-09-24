@@ -1132,22 +1132,20 @@ fn both_trim_edges_preserve_the_boundary_value_and_no_longer_fail() {
         envelope_at(&base, ClipId(1), 59)
     );
 
-    // A **written** over-running curve still fails: the invariant survives.
+    // MO1 R13 supersedes the AU4 invariant for keep-outside owners: a
+    // **written** over-running curve on a video/colour-node effect now passes
+    // (ordered-only, no outside check), so GUI read-modify-write via
+    // `SetEffectKeyframes` on trimmed clips works. Audio owners still refuse
+    // (`bus_effect_curves_still_reject_negative_positions` in `au2_core`).
     let mut doc = base.clone();
-    assert!(matches!(
-        Operation::SetEffectKeyframes {
-            clip: ClipId(1),
-            effect: EffectId(1),
-            name: "exposure_milli_stops".to_owned(),
-            curve: linear(&[(0, 0), (60, 4_720)]),
-        }
-        .apply(&mut doc),
-        Err(OpError::EffectKeyframeOutsideClip {
-            at: TimeCode(60),
-            duration: TimeCode(60),
-            ..
-        })
-    ));
+    Operation::SetEffectKeyframes {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: "exposure_milli_stops".to_owned(),
+        curve: linear(&[(0, 0), (60, 4_720)]),
+    }
+    .apply(&mut doc)
+    .unwrap();
 }
 
 /// AU4 §7 item A8: a left slide and a left roll reach rule 13's negative
@@ -1830,62 +1828,166 @@ fn enabled_curve_values_outside_zero_to_one_are_refused() {
     );
 }
 
-/// MO1 R4 (strict until A3): `enabled_curve` takes the same structural and
-/// in-clip checks as every other curve today; A3 (R13) relaxes keep-outside
-/// owners — including this sibling — to `validate_ordered` with no outside
-/// check, and these two arms move with it.
+/// MO1 R13: the `Effect.enabled_curve` sibling validates ordered-only —
+/// negative positions (from a trim-in) and keys past the trimmed end pass,
+/// while empty and unordered curves are still refused.
 #[test]
-fn enabled_curve_takes_strict_checks_until_a3() {
-    // Negative positions are refused until the R13 relaxation.
-    let mut doc = document_with_one_clip();
-    let error = Operation::AddEffect {
-        clip: ClipId(1),
-        effect: Effect {
-            enabled: true,
-            enabled_curve: Some(AutomationCurve {
-                keyframes: vec![Keyframe {
-                    at: TimeCode(-5),
-                    value: 1,
-                    interpolation: KeyframeInterpolation::Hold,
-                    tangent_in: 0,
-                    tangent_out: 0,
-                }],
-            }),
-            id: EffectId(1),
-            name: "brightness".to_owned(),
-            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
-            keyframes: BTreeMap::new(),
+fn enabled_curve_accepts_negative_and_outside_but_not_unordered() {
+    for curve in [
+        AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(-5),
+                value: 1,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
         },
-    }
-    .apply(&mut doc)
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        OpError::InvalidEffectAutomation { ref name, .. } if name == "enabled"
-    ));
-    // Keys at or past the 60-frame clip end are refused until R13.
-    let mut doc = document_with_one_clip();
-    let error = Operation::AddEffect {
-        clip: ClipId(1),
-        effect: Effect {
-            enabled: true,
-            enabled_curve: Some(linear(&[(0, 0), (60, 1)])),
-            id: EffectId(1),
-            name: "brightness".to_owned(),
-            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
-            keyframes: BTreeMap::new(),
-        },
-    }
-    .apply(&mut doc)
-    .unwrap_err();
-    assert_eq!(
-        error,
-        OpError::EffectKeyframeOutsideClip {
+        linear(&[(0, 0), (60, 1)]),
+        linear(&[(-30, 0), (90, 1)]),
+    ] {
+        let mut doc = document_with_one_clip();
+        Operation::AddEffect {
             clip: ClipId(1),
-            effect: EffectId(1),
-            name: "enabled".to_owned(),
-            at: TimeCode(60),
-            duration: TimeCode(60),
+            effect: Effect {
+                enabled: true,
+                enabled_curve: Some(curve),
+                id: EffectId(1),
+                name: "brightness".to_owned(),
+                parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+                keyframes: BTreeMap::new(),
+            },
         }
-    );
+        .apply(&mut doc)
+        .unwrap();
+    }
+    for curve in [
+        AutomationCurve { keyframes: vec![] },
+        linear(&[(30, 0), (30, 1)]),
+        linear(&[(20, 0), (10, 1)]),
+    ] {
+        let mut doc = document_with_one_clip();
+        let error = Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                enabled: true,
+                enabled_curve: Some(curve),
+                id: EffectId(1),
+                name: "brightness".to_owned(),
+                parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+                keyframes: BTreeMap::new(),
+            },
+        }
+        .apply(&mut doc)
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                OpError::InvalidEffectAutomation { ref name, .. } if name == "enabled"
+            ),
+            "unexpected {error:?}"
+        );
+    }
+}
+
+/// MO1 R13: keep-outside effect curves (video/colour-node) validate
+/// ordered-only — negative and past-the-end keys pass (trim survival),
+/// while empty and unordered curves are still refused with the reused
+/// `InvalidEffectAutomation`. Hold-only and value-range policies apply
+/// exactly as today (pinned by the existing CC3/AU2 suites).
+#[test]
+fn keep_outside_effect_curves_accept_negative_and_outside_keys() {
+    for keyframes in [
+        BTreeMap::from([("percent".to_owned(), linear(&[(-20, -50), (10, 50)]))]),
+        BTreeMap::from([("percent".to_owned(), linear(&[(0, 0), (60, 100)]))]),
+        BTreeMap::from([("percent".to_owned(), linear(&[(-30, 0), (90, 100)]))]),
+    ] {
+        let mut doc = document_with_one_clip();
+        Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                enabled: true,
+                enabled_curve: None,
+                id: EffectId(1),
+                name: "brightness".to_owned(),
+                parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+                keyframes,
+            },
+        }
+        .apply(&mut doc)
+        .unwrap();
+    }
+    for keyframes in [
+        BTreeMap::from([("percent".to_owned(), AutomationCurve { keyframes: vec![] })]),
+        BTreeMap::from([("percent".to_owned(), linear(&[(10, 0), (10, 50)]))]),
+    ] {
+        let mut doc = document_with_one_clip();
+        let error = Operation::AddEffect {
+            clip: ClipId(1),
+            effect: Effect {
+                enabled: true,
+                enabled_curve: None,
+                id: EffectId(1),
+                name: "brightness".to_owned(),
+                parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(0))]),
+                keyframes,
+            },
+        }
+        .apply(&mut doc)
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                OpError::InvalidEffectAutomation { ref name, .. } if name == "percent"
+            ),
+            "unexpected {error:?}"
+        );
+    }
+}
+
+/// MO1 R13: the `Clip.enabled_curve` sibling validates ordered-only with no
+/// outside check and no value-range check — negative, past-the-end, and
+/// out-of-0..1 keys all pass, while empty and unordered curves are refused
+/// (reusing `InvalidEffectAutomation` verbatim per R30, with the clip
+/// identifier in the `effect` field).
+#[test]
+fn clip_enabled_curve_accepts_any_position_and_value_when_ordered() {
+    for curve in [
+        linear(&[(-30, 0), (90, 1)]),
+        linear(&[(0, -3), (9, 5)]),
+        AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(-5),
+                value: 7,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
+        },
+    ] {
+        let mut doc = document_with_one_clip();
+        doc.tracks[0].clips[0].enabled_curve = Some(curve);
+        doc.validate().unwrap();
+    }
+    for (curve, reason) in [
+        (
+            AutomationCurve { keyframes: vec![] },
+            "automation curve must contain at least one keyframe",
+        ),
+        (
+            linear(&[(10, 0), (10, 1)]),
+            "automation keyframes must be strictly ordered by frame",
+        ),
+    ] {
+        let mut doc = document_with_one_clip();
+        doc.tracks[0].clips[0].enabled_curve = Some(curve);
+        assert_eq!(
+            doc.validate().unwrap_err(),
+            OpError::InvalidEffectAutomation {
+                effect: "clip 1".to_owned(),
+                name: "enabled".to_owned(),
+                reason: reason.to_owned(),
+            }
+        );
+    }
 }

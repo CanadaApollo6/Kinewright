@@ -3943,41 +3943,25 @@ fn validate_effect_automation(
         )?;
     }
     if let Some(curve) = &effect.enabled_curve {
-        validate_enabled_curve(clip, clip_duration, effect.id, &effect.name, curve)?;
+        validate_enabled_curve(&effect.name, curve)?;
     }
     validate_curve_keyframe_policy(&effect.name, &effect.keyframes)?;
     Ok(())
 }
 
-/// MO1 R4: the sibling `enabled_curve` carries values 0..1 under every
+/// MO1 R4/R13: the sibling `enabled_curve` carries values 0..1 under every
 /// interpolation — non-`Hold` kinds act as a step (the ≥ 1 test in
-/// `is_enabled_at`), so no hold-only refusal applies. Structural and
-/// in-clip checks match every other curve today; A3 (R13) relaxes
-/// keep-outside owners to `validate_ordered` with no outside check.
-fn validate_enabled_curve(
-    clip: ClipId,
-    clip_duration: TimeCode,
-    effect_id: EffectId,
-    effect_name: &str,
-    curve: &AutomationCurve,
-) -> Result<(), OpError> {
+/// `is_enabled_at`), so no hold-only refusal applies. As a keep-outside
+/// owner it validates ordered-only with no outside check.
+fn validate_enabled_curve(effect_name: &str, curve: &AutomationCurve) -> Result<(), OpError> {
     curve
-        .validate()
+        .validate_ordered()
         .map_err(|error| OpError::InvalidEffectAutomation {
             effect: effect_name.to_owned(),
             name: "enabled".to_owned(),
             reason: error.to_string(),
         })?;
     for keyframe in &curve.keyframes {
-        if keyframe.at >= clip_duration {
-            return Err(OpError::EffectKeyframeOutsideClip {
-                clip,
-                effect: effect_id,
-                name: "enabled".to_owned(),
-                at: keyframe.at,
-                duration: clip_duration,
-            });
-        }
         if !(0..=1).contains(&keyframe.value) {
             return Err(OpError::EffectParamOutOfRange {
                 effect: effect_name.to_owned(),
@@ -3991,6 +3975,22 @@ fn validate_enabled_curve(
     Ok(())
 }
 
+/// MO1 R5/R13: the clip sibling `enabled_curve` validates ordered-only with
+/// no outside check and no value-range check (any value is stored; the ≥ 1
+/// test resolves every value). Structural violations reuse
+/// `InvalidEffectAutomation` verbatim — R30 admits no fitting clip-scoped
+/// variant, and nothing downstream parses the `effect` field, so the clip
+/// identifier rides there (`"clip 1"`) with the `"enabled"` name.
+fn validate_clip_enabled_curve(clip: ClipId, curve: &AutomationCurve) -> Result<(), OpError> {
+    curve
+        .validate_ordered()
+        .map_err(|error| OpError::InvalidEffectAutomation {
+            effect: format!("clip {}", clip.0),
+            name: "enabled".to_owned(),
+            reason: error.to_string(),
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_curve(
     clip: ClipId,
@@ -4001,13 +4001,23 @@ fn validate_curve(
     name: &str,
     curve: &AutomationCurve,
 ) -> Result<(), OpError> {
-    curve
-        .validate()
-        .map_err(|error| OpError::InvalidEffectAutomation {
-            effect: effect_name.to_owned(),
-            name: name.to_owned(),
-            reason: error.to_string(),
-        })?;
+    // MO1 R13: keep-outside owners (every clip effect — clips reject audio
+    // effects outright) validate ordered-only with no outside check, so
+    // negative `at` from a trim-in and keys past a trimmed end both pass;
+    // audio owners keep strict `validate` and the outside arm, so
+    // `EffectKeyframeOutsideClip` is raised only for audio-effect owners.
+    // Hold-only and value-range policies apply exactly as today, both sides.
+    let audio_owner = crate::is_audio_effect(effect_name);
+    let structural = if audio_owner {
+        curve.validate()
+    } else {
+        curve.validate_ordered()
+    };
+    structural.map_err(|error| OpError::InvalidEffectAutomation {
+        effect: effect_name.to_owned(),
+        name: name.to_owned(),
+        reason: error.to_string(),
+    })?;
     if is_hold_only_parameter(effect_name, name) {
         for keyframe in &curve.keyframes {
             if keyframe.interpolation != KeyframeInterpolation::Hold {
@@ -4019,7 +4029,7 @@ fn validate_curve(
         }
     }
     for keyframe in &curve.keyframes {
-        if keyframe.at >= clip_duration {
+        if audio_owner && keyframe.at >= clip_duration {
             return Err(OpError::EffectKeyframeOutsideClip {
                 clip,
                 effect: effect_id,
@@ -4528,6 +4538,9 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                 validate_transition(doc, clip, transition)?;
             }
             validate_clip_audio(doc, clip)?;
+            if let Some(curve) = &clip.enabled_curve {
+                validate_clip_enabled_curve(clip.id, curve)?;
+            }
             if let Some((previous_clip, previous_end)) = previous {
                 if clip.timeline_start < previous_clip.timeline_start {
                     return Err(OpError::ClipsUnsorted {

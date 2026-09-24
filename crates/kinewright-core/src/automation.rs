@@ -112,6 +112,27 @@ impl AutomationCurve {
         Ok(())
     }
 
+    /// MO1 R13: ordered-only validation for keep-outside owners — non-empty
+    /// and strictly ordered, sign-agnostic (negative `at` is legal after a
+    /// trim-in). Audio owners keep strict [`validate`](Self::validate).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for empty, duplicate, or unsorted keyframes.
+    pub fn validate_ordered(&self) -> Result<(), AutomationCurveError> {
+        if self.keyframes.is_empty() {
+            return Err(AutomationCurveError::Empty);
+        }
+        if self
+            .keyframes
+            .windows(2)
+            .any(|pair| pair[1].at <= pair[0].at)
+        {
+            return Err(AutomationCurveError::Unordered);
+        }
+        Ok(())
+    }
+
     /// Evaluate at a clip-local frame, clamping outside the keyed interval.
     ///
     /// MO1 R31: thin wrapper over the slice-level [`value_at_keys`] kernel —
@@ -576,6 +597,46 @@ mod tests {
                 previous_value: -100,
                 next_key: None,
             })
+        );
+    }
+
+    /// MO1 R13: ordered-only validation accepts negative positions but
+    /// still rejects empty and unordered curves.
+    #[test]
+    fn validate_ordered_is_sign_agnostic_but_still_ordered() {
+        let ordered = |positions: &[i64]| AutomationCurve {
+            keyframes: positions
+                .iter()
+                .map(|at| Keyframe {
+                    at: TimeCode(*at),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                })
+                .collect(),
+        };
+        assert_eq!(ordered(&[-20, -5, 0, 30]).validate_ordered(), Ok(()));
+        assert_eq!(
+            ordered(&[]).validate_ordered(),
+            Err(AutomationCurveError::Empty)
+        );
+        assert_eq!(
+            ordered(&[1, 1]).validate_ordered(),
+            Err(AutomationCurveError::Unordered)
+        );
+        assert_eq!(
+            ordered(&[2, 1]).validate_ordered(),
+            Err(AutomationCurveError::Unordered)
+        );
+        assert_eq!(
+            ordered(&[-5, -20]).validate_ordered(),
+            Err(AutomationCurveError::Unordered)
+        );
+        // Strict `validate` still refuses the negative curve.
+        assert_eq!(
+            ordered(&[-20, -5, 0, 30]).validate(),
+            Err(AutomationCurveError::NegativePosition)
         );
     }
 

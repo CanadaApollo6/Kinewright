@@ -3097,15 +3097,27 @@ fn effect_keyframes_are_exact_validated_and_atomically_clearable() {
     assert_eq!(effect.integer_parameter_at("percent", TimeCode(5)), Some(0));
     assert_eq!(effect.keyframes.get("percent"), Some(&curve));
 
+    // MO1 R13: negative and past-the-end keys now pass ordered-only
+    // validation (see the au4 keep-outside matrix); unordered, out-of-range,
+    // and empty curves are still refused.
     for invalid in [
         AutomationCurve {
-            keyframes: vec![Keyframe {
-                at: TimeCode(30),
-                value: 0,
-                interpolation: KeyframeInterpolation::Linear,
-                tangent_in: 0,
-                tangent_out: 0,
-            }],
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(5),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(5),
+                    value: 50,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
         },
         AutomationCurve {
             keyframes: vec![Keyframe {

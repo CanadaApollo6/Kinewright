@@ -1469,6 +1469,58 @@ fn bus_effects_reject_disabled_or_keyframed_enable() {
     .unwrap();
 }
 
+/// MO1 R13: audio owners keep strict `validate` — a negative keyframe
+/// position on a bus effect curve is refused with `NegativePosition` →
+/// `InvalidEffectAutomation`, exactly as before MO1.
+#[test]
+fn bus_effect_curves_still_reject_negative_positions() {
+    let base = document_with_one_clip();
+    let effects = vec![Effect {
+        enabled: true,
+        enabled_curve: None,
+        id: EffectId(1),
+        name: "audio_gain".to_owned(),
+        parameters: BTreeMap::new(),
+        keyframes: BTreeMap::from([(
+            "gain_tenth_db".to_owned(),
+            AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode(-10),
+                        value: 0,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                    Keyframe {
+                        at: TimeCode(10),
+                        value: 0,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                ],
+            },
+        )]),
+    }];
+    let mut doc = base.clone();
+    let error = Operation::UpsertAudioBus {
+        bus: bus_with(effects.clone()),
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OpError::InvalidEffectAutomation {
+            effect: "audio_gain".to_owned(),
+            name: "gain_tenth_db".to_owned(),
+            reason: "automation keyframe positions must be non-negative".to_owned(),
+        }
+    );
+    assert_eq!(doc, base);
+    assert_eq!(hand_edited(effects).validate().unwrap_err(), error);
+}
+
 /// MO1 R4: master effects reject `enabled: false` and any `enabled_curve`.
 #[test]
 fn master_effects_reject_disabled_or_keyframed_enable() {
