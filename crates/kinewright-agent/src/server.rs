@@ -28231,6 +28231,16 @@ mod tests {
     ///   1 568 912 + 76 452 = **1 645 364**,
     ///   123 949 + 427 = **124 376**. Counts `146 / 59 / 87`. Served quad
     ///   unchanged — still the twentieth measurement (one Part-A series).
+    ///
+    /// - **A4c (R19 copy): +26 616 / +26 303 / +144.** One generated
+    ///   mutator plus its `oneOf` branch in `apply_edit_plan` (52 689 →
+    ///   53 743 serialized, 52 301 → 53 355 input, measured against the A4b
+    ///   tree): `copy_clip_attributes` 25 562 / 25 249 / 144,
+    ///   `apply_edit_plan` +1 054 / +1 054 / +0. The arithmetic:
+    ///   1 793 716 + 26 616 = **1 820 332**,
+    ///   1 645 364 + 26 303 = **1 671 667**,
+    ///   124 376 + 144 = **124 520**. Counts `147 / 60 / 87`. Served quad
+    ///   unchanged — still the twentieth measurement.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28256,15 +28266,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_793_716, 5_660),
+            (1_820_332, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_645_364,
+            registry_metrics.input_schema_bytes, 1_671_667,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 124_376,
+            registry_metrics.description_bytes, 124_520,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -33976,14 +33986,15 @@ mod tests {
     /// (`upsert_effect_keyframe`, `remove_effect_keyframe`): counts `143 /
     /// 56 / 87`. A4b (R17/R18) adds three more (`set_effect_enabled`,
     /// `set_clip_enabled`, `set_clip_enabled_curve`): counts `146 / 59 /
-    /// 87`. All are registry-only — served tools come from the compact
-    /// authority, which MO1 does not touch.
+    /// 87`. A4c (R19) adds the last one (`copy_clip_attributes`): counts
+    /// `147 / 60 / 87`. All are registry-only — served tools come from the
+    /// compact authority, which MO1 does not touch.
     #[test]
     fn in2_the_registry_grows_by_one_capability() {
         let registry = KinewrightMcp::capability_tools().unwrap();
-        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 146);
+        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 147);
         assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 87);
-        assert_eq!(operation_tools().unwrap().len(), 59);
+        assert_eq!(operation_tools().unwrap().len(), 60);
         let generated = operation_tools().unwrap();
         for name in [
             "upsert_effect_keyframe",
@@ -33991,6 +34002,7 @@ mod tests {
             "set_effect_enabled",
             "set_clip_enabled",
             "set_clip_enabled_curve",
+            "copy_clip_attributes",
         ] {
             assert!(
                 generated.iter().any(|tool| tool.tool.name == name),

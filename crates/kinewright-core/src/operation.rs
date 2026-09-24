@@ -342,6 +342,22 @@ pub enum Operation {
         #[schemars(required, with = "RequiredNullableCurve")]
         curve: Option<AutomationCurve>,
     },
+    /// MO1 R19: copy whole effects from one clip to another. `names: None`
+    /// copies every effect, `Some` copies the named subset, matched by
+    /// (name, occurrence). Each copied effect replaces its target wholesale
+    /// in place keeping the target id; names absent on the target are
+    /// appended in source order with fresh ids. One revision gate, one undo.
+    CopyClipAttributes {
+        from_clip: ClipId,
+        to_clip: ClipId,
+        /// `None` copies every effect; `Some` copies the named subset. A
+        /// name unknown to the registry fails; a name absent on the source
+        /// is skipped.
+        names: Option<Vec<String>>,
+        /// Copy keyframe curves too; otherwise the target keeps its own
+        /// curves and appended effects start static.
+        include_keyframes: bool,
+    },
     /// Replace one legacy `look_lut` / `cube_lut` at its exact vector position
     /// with an equivalent managed `creative_look` node (CC4 §9).
     ///
@@ -1337,6 +1353,18 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         Operation::SetClipEnabledCurve { clip, curve } => {
             set_clip_enabled_curve(doc, *clip, curve.as_ref())
         }
+        Operation::CopyClipAttributes {
+            from_clip,
+            to_clip,
+            names,
+            include_keyframes,
+        } => copy_clip_attributes(
+            doc,
+            *from_clip,
+            *to_clip,
+            names.as_deref(),
+            *include_keyframes,
+        ),
         Operation::SetTitleParam { clip, name, value } => {
             set_title_param(doc, *clip, name, value.clone())
         }
@@ -3900,6 +3928,89 @@ fn set_clip_enabled_curve(
     Ok(())
 }
 
+/// MO1 R19: copy whole effects across clips by (name, occurrence).
+///
+/// The k-th same-named in-scope source effect replaces the k-th same-named
+/// target effect wholesale in place — values, `enabled`, `enabled_curve`,
+/// and `keyframes` iff `include_keyframes` — keeping the target `EffectId`
+/// for stable references. Source occurrences past the target's run are
+/// appended after its existing effects in source order with fresh ids
+/// (max-plus-one within the target clip). Requested names unknown to the
+/// registry fail with `UnknownEffect` before anything moves; requested names
+/// absent on the source are skipped. Copying onto a shorter clip is legal:
+/// keep-outside owners carry no outside check (S2).
+fn copy_clip_attributes(
+    doc: &mut Document,
+    from_id: ClipId,
+    to_id: ClipId,
+    names: Option<&[String]>,
+    include_keyframes: bool,
+) -> Result<(), OpError> {
+    let (from_track, from_index) = find_clip(doc, from_id)?;
+    let (to_track, to_index) = find_clip(doc, to_id)?;
+    if let Some(names) = names {
+        for name in names {
+            if crate::effect_descriptor(name).is_none() {
+                return Err(OpError::UnknownEffect(name.clone()));
+            }
+        }
+    }
+    let in_scope =
+        |effect_name: &str| names.is_none_or(|list| list.iter().any(|name| name == effect_name));
+    let source = doc.tracks[from_track].clips[from_index].effects.clone();
+    let mut result = doc.tracks[to_track].clips[to_index].effects.clone();
+    let mut slots: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (index, effect) in result.iter().enumerate() {
+        slots.entry(effect.name.clone()).or_default().push(index);
+    }
+    let mut seen: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut next_id = result.iter().map(|effect| effect.id.0).max().unwrap_or(0);
+    for effect in &source {
+        if !in_scope(&effect.name) {
+            continue;
+        }
+        let occurrence = seen.entry(effect.name.as_str()).or_insert(0);
+        let slot = slots
+            .get(effect.name.as_str())
+            .and_then(|indices| indices.get(*occurrence))
+            .copied();
+        *occurrence += 1;
+        if let Some(index) = slot {
+            let id = result[index].id;
+            let keyframes = if include_keyframes {
+                effect.keyframes.clone()
+            } else {
+                result[index].keyframes.clone()
+            };
+            result[index] = Effect {
+                id,
+                name: effect.name.clone(),
+                parameters: effect.parameters.clone(),
+                keyframes,
+                enabled: effect.enabled,
+                enabled_curve: effect.enabled_curve.clone(),
+            };
+        } else {
+            next_id = next_id.checked_add(1).ok_or(OpError::TimeOverflow)?;
+            result.push(Effect {
+                id: EffectId(next_id),
+                name: effect.name.clone(),
+                parameters: effect.parameters.clone(),
+                keyframes: if include_keyframes {
+                    effect.keyframes.clone()
+                } else {
+                    std::collections::BTreeMap::new()
+                },
+                enabled: effect.enabled,
+                enabled_curve: effect.enabled_curve.clone(),
+            });
+        }
+    }
+    doc.tracks[to_track].clips[to_index].effects = result;
+    Ok(())
+}
+
 fn set_title_param(
     doc: &mut Document,
     clip_id: ClipId,
@@ -5572,7 +5683,7 @@ impl Operation {
     /// — [`Self::ConvertLegacyLook`] — answers `Clip`, because a legacy-look
     /// conversion is a refusal about the clip it is converting. The rung is
     /// therefore a statement of where a future variant would land rather than a
-    /// tie-break the current 62 exercise.
+    /// tie-break the current 63 exercise.
     ///
     /// `IN1b` §0.3 D3 names **five** variants that address a track and nothing
     /// narrower; applying the precedence, there are **seven** — D3's
@@ -5581,7 +5692,7 @@ impl Operation {
     /// [`Self::RippleInsertGap`], which name a track and no clip or asset
     /// (erratum `IN1b`-A-R11).
     #[must_use]
-    // 62 arms, one per `Operation` variant, grouped by subject kind: the list
+    // 63 arms, one per `Operation` variant, grouped by subject kind: the list
     // is the deliverable and splitting it would hide the precedence it exists
     // to show.
     #[allow(clippy::too_many_lines)]
@@ -5608,6 +5719,7 @@ impl Operation {
             | Self::SetEffectEnabled { clip, .. }
             | Self::SetClipEnabled { clip, .. }
             | Self::SetClipEnabledCurve { clip, .. }
+            | Self::CopyClipAttributes { to_clip: clip, .. }
             | Self::ConvertLegacyLook { clip, .. }
             | Self::SetTitleParam { clip, .. }
             | Self::SetClipAudio { clip, .. }
@@ -5688,7 +5800,7 @@ mod tests {
     ///
     /// Reading the source is how a test asserts an **arm count**: the compiler
     /// already proves the match is exhaustive and wildcard-free over
-    /// `OpError`'s 154 and `Operation`'s 62 variants, but it cannot be asked
+    /// `OpError`'s 154 and `Operation`'s 63 variants, but it cannot be asked
     /// how many names each arm groups, and building 154 payload-carrying
     /// rejections to count them would be a fixture, not a measurement.
     fn single_fn_impl_body(signature: &str) -> String {
@@ -5939,13 +6051,13 @@ mod tests {
         ("AssumedFromNotSuppliable", "ColorPolicy"),
     ];
 
-    /// §3.3 rule 20's precedence applied **per variant**: all 62 `Operation`
+    /// §3.3 rule 20's precedence applied **per variant**: all 63 `Operation`
     /// variant names with the subject kind the rule assigns each one.
     ///
     /// Read off `Operation`'s own declaration — which id fields the variant
     /// carries — rather than off the accessor, so a variant that answers with
     /// the wrong kind fails here (review-2 S4).
-    const OPERATION_SUBJECTS: [(&str, &str); 62] = [
+    const OPERATION_SUBJECTS: [(&str, &str); 63] = [
         ("AddAsset", "Asset"),
         ("RelinkAsset", "Asset"),
         ("SetAssetColorDescription", "Asset"),
@@ -5997,6 +6109,7 @@ mod tests {
         ("SetEffectEnabled", "Clip"),
         ("SetClipEnabled", "Clip"),
         ("SetClipEnabledCurve", "Clip"),
+        ("CopyClipAttributes", "Clip"),
         ("ConvertLegacyLook", "Clip"),
         ("AddLutAsset", "LutAsset"),
         ("RemoveLutAsset", "LutAsset"),
@@ -6240,7 +6353,7 @@ mod tests {
         }
     }
 
-    /// `IN1b` §9 clause 8 through §3.3 rule 20: the accessor covers all **62**
+    /// `IN1b` §9 clause 8 through §3.3 rule 20: the accessor covers all **63**
     /// `Operation` variants with no wildcard and answers by the declared
     /// precedence `Clip` -> `Asset` -> `Track` -> `Chain` -> `Project`.
     #[test]
@@ -6267,8 +6380,8 @@ mod tests {
             .iter()
             .map(|(variant, kind)| ((*variant).to_owned(), (*kind).to_owned()))
             .collect();
-        assert_eq!(declared.len(), 62, "`Operation` has 62 distinct variants");
-        assert_eq!(implemented.len(), 62, "the accessor covers every variant");
+        assert_eq!(declared.len(), 63, "`Operation` has 63 distinct variants");
+        assert_eq!(implemented.len(), 63, "the accessor covers every variant");
         for (variant, kind) in &declared {
             assert_eq!(
                 implemented.get(variant),

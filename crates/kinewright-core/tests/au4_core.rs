@@ -3160,3 +3160,241 @@ fn clip_enabled_curve_writes_clears_and_survives() {
     assert!(clip(&doc, ClipId(1)).enabled_curve.is_none());
     doc.validate().unwrap();
 }
+
+// ============================================================================
+// MO1 Part A4c — R19 copy/paste attributes (incl. §10 gate 8).
+// ============================================================================
+
+fn primary_effect(id: u64, exposure: AutomationCurve, enabled: bool) -> Effect {
+    Effect {
+        enabled,
+        enabled_curve: Some(hold_toggle()),
+        id: EffectId(id),
+        name: "primary_correction".to_owned(),
+        parameters: BTreeMap::from([("exposure_milli_stops".to_owned(), ParamValue::Integer(0))]),
+        keyframes: BTreeMap::from([("exposure_milli_stops".to_owned(), exposure)]),
+    }
+}
+
+fn transform_effect(id: u64, scale: AutomationCurve) -> Effect {
+    Effect {
+        enabled: true,
+        enabled_curve: None,
+        id: EffectId(id),
+        name: "transform".to_owned(),
+        parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
+        keyframes: BTreeMap::from([("scale_percent".to_owned(), scale)]),
+    }
+}
+
+/// §10 gate 8: cross-clip copy reproduces values, keys, and `enabled` — with
+/// and without keyframes.
+#[test]
+fn copy_attributes_verbatim() {
+    let mut doc = document_with_three_clips();
+    let colour = linear(&[(0, 0), (59, 4_720)]);
+    let scale = linear(&[(10, 100), (50, 120)]);
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: primary_effect(1, colour.clone(), false),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: transform_effect(2, scale.clone()),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    Operation::CopyClipAttributes {
+        from_clip: ClipId(1),
+        to_clip: ClipId(2),
+        names: None,
+        include_keyframes: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let target = &clip(&doc, ClipId(2)).effects;
+    assert_eq!(target.len(), 2);
+    assert_eq!(target[0].name, "primary_correction");
+    assert!(!target[0].enabled);
+    assert_eq!(
+        target[0].keyframes["exposure_milli_stops"], colour,
+        "keys ride along"
+    );
+    assert_eq!(
+        target[0].enabled_curve.clone().unwrap(),
+        hold_toggle(),
+        "the sibling rides along"
+    );
+    assert_eq!(target[1].name, "transform");
+    assert_eq!(target[1].keyframes["scale_percent"], scale);
+    doc.validate().unwrap();
+
+    // Without keyframes: values and `enabled` copy, curves stay the target's.
+    let mut doc = document_with_three_clips();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: primary_effect(1, colour.clone(), false),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::AddEffect {
+        clip: ClipId(2),
+        effect: primary_effect(7, linear(&[(0, 1_000)]), true),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::CopyClipAttributes {
+        from_clip: ClipId(1),
+        to_clip: ClipId(2),
+        names: None,
+        include_keyframes: false,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let target = &clip(&doc, ClipId(2)).effects;
+    assert_eq!(target.len(), 1);
+    assert!(!target[0].enabled, "the flag copies without the keys");
+    assert_eq!(
+        key_positions(&target[0].keyframes["exposure_milli_stops"]),
+        vec![(0, 1_000)],
+        "the target keeps its own curve"
+    );
+    doc.validate().unwrap();
+}
+
+/// R19: a named subset matches by (name, occurrence) — the nth same-named
+/// source effect targets the nth same-named target effect; extras append in
+/// source order with fresh ids while replaced effects keep theirs.
+#[test]
+fn copy_subset_matches_by_name_and_occurrence() {
+    let mut doc = document_with_three_clips();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: primary_effect(1, linear(&[(0, 100)]), true),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: transform_effect(2, linear(&[(0, 110)])),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: primary_effect(3, linear(&[(0, 300)]), false),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::AddEffect {
+        clip: ClipId(2),
+        effect: primary_effect(7, linear(&[(0, 700)]), true),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    Operation::CopyClipAttributes {
+        from_clip: ClipId(1),
+        to_clip: ClipId(2),
+        names: Some(vec!["primary_correction".to_owned()]),
+        include_keyframes: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let target = &clip(&doc, ClipId(2)).effects;
+    assert_eq!(target.len(), 2, "the out-of-scope transform never lands");
+    assert_eq!(target[0].id, EffectId(7), "replacement keeps the target id");
+    assert_eq!(
+        key_positions(&target[0].keyframes["exposure_milli_stops"]),
+        vec![(0, 100)],
+        "first source primary wins the only slot"
+    );
+    assert_eq!(target[1].id, EffectId(8), "appends mint max-plus-one");
+    assert_eq!(target[1].name, "primary_correction");
+    assert!(!target[1].enabled);
+    assert_eq!(
+        key_positions(&target[1].keyframes["exposure_milli_stops"]),
+        vec![(0, 300)],
+        "the second occurrence appends after the existing effects"
+    );
+    doc.validate().unwrap();
+}
+
+/// R19: requested names absent on the source are skipped, while names
+/// unknown to the registry fail before anything moves.
+#[test]
+fn copy_skips_names_absent_on_source_and_rejects_unknown() {
+    let mut doc = document_with_three_clips();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: primary_effect(1, linear(&[(0, 100)]), true),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    Operation::CopyClipAttributes {
+        from_clip: ClipId(1),
+        to_clip: ClipId(2),
+        names: Some(vec![
+            "primary_correction".to_owned(),
+            "transform".to_owned(),
+        ]),
+        include_keyframes: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(clip(&doc, ClipId(2)).effects.len(), 1);
+
+    let before = doc.clone();
+    let error = Operation::CopyClipAttributes {
+        from_clip: ClipId(1),
+        to_clip: ClipId(2),
+        names: Some(vec!["no_such_effect".to_owned()]),
+        include_keyframes: true,
+    }
+    .apply(&mut doc)
+    .unwrap_err();
+    assert_eq!(error, OpError::UnknownEffect("no_such_effect".to_owned()));
+    assert_eq!(doc, before);
+}
+
+/// R19 + S2: copying onto a shorter clip is legal — keep-outside owners
+/// carry no outside check, so past-the-end keys land verbatim.
+#[test]
+fn copy_onto_shorter_clips_is_legal() {
+    let mut doc = document_with_three_clips();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: primary_effect(1, linear(&[(0, 0), (59, 4_720)]), true),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::TrimClip {
+        clip: ClipId(2),
+        new_source: TimeCode(60)..TimeCode(80),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        doc.clip_duration(clip(&doc, ClipId(2))).unwrap(),
+        TimeCode(20)
+    );
+
+    Operation::CopyClipAttributes {
+        from_clip: ClipId(1),
+        to_clip: ClipId(2),
+        names: None,
+        include_keyframes: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(2))),
+        vec![(0, 0), (59, 4_720)],
+        "the 59-frame key lands past the 20-frame end, verbatim"
+    );
+    doc.validate().unwrap();
+}

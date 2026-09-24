@@ -685,6 +685,12 @@ fn document_and_every_operation_variant_round_trip_through_json() {
                 }],
             }),
         },
+        Operation::CopyClipAttributes {
+            from_clip: ClipId(1),
+            to_clip: ClipId(2),
+            names: None,
+            include_keyframes: true,
+        },
     ];
 
     for operation in operations {

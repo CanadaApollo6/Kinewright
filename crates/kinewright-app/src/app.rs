@@ -3385,6 +3385,9 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
             "{} clip {clip}",
             if *enabled { "Enabled" } else { "Disabled" }
         ),
+        Operation::CopyClipAttributes {
+            from_clip, to_clip, ..
+        } => format!("Copied attributes from clip {from_clip} to clip {to_clip}"),
         Operation::SetClipEnabledCurve { clip, curve } => curve.as_ref().map_or_else(
             || format!("Cleared the enable curve on clip {clip}"),
             |curve| {
