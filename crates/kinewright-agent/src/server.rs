@@ -28198,6 +28198,13 @@ mod tests {
     ///   1 618 288 + 32 615 = **1 650 903**,
     ///   1 471 500 + 32 615 = **1 504 115**, 123 657 + 0 = **123 657**.
     ///   Served quad and counts unchanged.
+    ///
+    /// - **A2e (R7 stills kind): +13 664 / +13 664 / +0.** The fourth
+    ///   `MediaKind` variant (`Image`) lands in the enum `$defs` of every
+    ///   tool embedding an asset kind. The arithmetic:
+    ///   1 650 903 + 13 664 = **1 664 567**,
+    ///   1 504 115 + 13 664 = **1 517 779**, 123 657 + 0 = **123 657**.
+    ///   Served quad and counts unchanged.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28223,11 +28230,11 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_650_903, 5_660),
+            (1_664_567, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_504_115,
+            registry_metrics.input_schema_bytes, 1_517_779,
             "registry={registry_metrics:?}"
         );
         assert_eq!(

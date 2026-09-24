@@ -106,7 +106,9 @@ fn asset(id: AssetId, kind: MediaKind, rate: u32, frames: i64) -> MediaAsset {
         fps: fps(rate),
         kind,
         resolution: match kind {
-            MediaKind::Video | MediaKind::AudioVideo => Some((AU6_SOURCE_WIDTH, AU6_SOURCE_HEIGHT)),
+            MediaKind::Video | MediaKind::AudioVideo | MediaKind::Image => {
+                Some((AU6_SOURCE_WIDTH, AU6_SOURCE_HEIGHT))
+            }
             MediaKind::Audio => None,
         },
         source_fingerprint: MediaSourceFingerprint::default(),

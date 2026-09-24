@@ -660,6 +660,7 @@ fn asset_metadata(asset: &kinewright_core::MediaAsset) -> String {
         MediaKind::Video => "VIDEO",
         MediaKind::Audio => "AUDIO",
         MediaKind::AudioVideo => "A/V",
+        MediaKind::Image => "STILL",
     };
     let resolution = asset
         .resolution

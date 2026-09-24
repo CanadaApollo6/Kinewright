@@ -67,6 +67,10 @@ pub enum MediaKind {
     Video,
     Audio,
     AudioVideo,
+    /// MO1 R7: probed stills (jpeg/png/webp/bmp/tiff) and any single-frame
+    /// source. Video tracks only; counted toward `reframe` single-frame and
+    /// freeze-frame handling (Part B renders it).
+    Image,
 }
 
 impl MediaKind {
@@ -74,8 +78,10 @@ impl MediaKind {
     pub const fn supports(self, track: TrackKind) -> bool {
         matches!(
             (self, track),
-            (Self::Video | Self::AudioVideo, TrackKind::Video)
-                | (Self::Audio | Self::AudioVideo, TrackKind::Audio)
+            (
+                Self::Video | Self::AudioVideo | Self::Image,
+                TrackKind::Video
+            ) | (Self::Audio | Self::AudioVideo, TrackKind::Audio)
         )
     }
 }
@@ -1953,6 +1959,32 @@ mod tests {
         assert!(!effect.is_enabled_at(TimeCode(4)));
         assert!(effect.is_enabled_at(TimeCode(5)));
         assert!(effect.is_enabled_at(TimeCode(10)));
+    }
+
+    /// MO1 R7 kind-parity matrix: `Image` rides video tracks exactly like
+    /// `Video` (frames, no audio) and never audio tracks; the pre-existing
+    /// three rows are unchanged. Probe assignment plus the file-shape matrix
+    /// stay Part B.
+    #[test]
+    fn media_kind_supports_matrix_admits_image_on_video_only() {
+        for (kind, video, audio) in [
+            (MediaKind::Video, true, false),
+            (MediaKind::Audio, false, true),
+            (MediaKind::AudioVideo, true, true),
+            (MediaKind::Image, true, false),
+        ] {
+            assert_eq!(kind.supports(TrackKind::Video), video, "{kind:?} video");
+            assert_eq!(kind.supports(TrackKind::Audio), audio, "{kind:?} audio");
+        }
+        assert_eq!(
+            serde_json::to_value(MediaKind::Image).unwrap(),
+            serde_json::Value::String("Image".to_owned())
+        );
+        assert_eq!(
+            serde_json::from_value::<MediaKind>(serde_json::Value::String("Image".to_owned()))
+                .unwrap(),
+            MediaKind::Image
+        );
     }
 
     fn clip() -> Clip {
