@@ -141,7 +141,12 @@ pub fn qa_document(document: &Document) -> QaReport {
         let mut previous_was_media = false;
         for clip in &track.clips {
             for effect in &clip.effects {
-                if let Some(stage) = effect_compatibility_stage(&effect.name) {
+                // MO1 G6: a never-enabled effect lights no stage in the
+                // compositor, so QA warns nothing — aligned with
+                // `legacy_stage_active`.
+                if effect_ever_enabled(effect)
+                    && let Some(stage) = effect_compatibility_stage(&effect.name)
+                {
                     let message = match stage {
                         EffectCompatibilityStage::LegacyDisplayCoded => format!(
                             "Clip {} uses the legacy display-coded {} effect. It remains loadable through the compatibility path, but is outside the managed SDR primary conformance claim.",
@@ -419,58 +424,336 @@ fn noise_profile_issues(document: &Document) -> Vec<QaIssue> {
 }
 
 #[allow(clippy::similar_names)]
+/// Whether an effect lights any frame: no curve means the static flag;
+/// a curve enables exactly the frames evaluating >= 1, and key values are
+/// exact at their frames while interpolation stays within the key range —
+/// so any key >= 1 enables somewhere, and all keys < 1 enables nowhere.
+fn effect_ever_enabled(effect: &Effect) -> bool {
+    match &effect.enabled_curve {
+        None => effect.enabled,
+        Some(curve) => curve.keyframes.iter().any(|key| key.value >= 1),
+    }
+}
+
+/// The conservative axis-aligned bound of title bounds under every
+/// ever-enabled transform, chained effect by effect (each step contains
+/// the true set, so chaining stays conservative). Rotation-free effects
+/// take an exact integer path; anything with rotation takes an f64 path
+/// with a 0.05 px outward margin covering sampler and float error.
 fn transformed_title_bounds(
     bounds: TitlePixelBounds,
     effects: &[Effect],
     resolution: (u32, u32),
 ) -> TitlePixelBounds {
-    let mut scale_percent = 100_i64;
-    let mut minimum_x_percent = 0_i64;
-    let mut maximum_x_percent = 0_i64;
-    let mut minimum_y_percent = 0_i64;
-    let mut maximum_y_percent = 0_i64;
+    let mut bounds = bounds;
     for effect in effects.iter().filter(|effect| effect.name == "transform") {
-        let (_, maximum_scale) = parameter_range(effect, "scale_percent", 100);
-        scale_percent = ceil_div(scale_percent.saturating_mul(maximum_scale.max(1)), 100);
-        let (minimum_x, maximum_x) = parameter_range(effect, "x_percent", 0);
-        minimum_x_percent = minimum_x_percent.saturating_add(minimum_x);
-        maximum_x_percent = maximum_x_percent.saturating_add(maximum_x);
-        let (minimum_y, maximum_y) = parameter_range(effect, "y_percent", 0);
-        minimum_y_percent = minimum_y_percent.saturating_add(minimum_y);
-        maximum_y_percent = maximum_y_percent.saturating_add(maximum_y);
+        // MO1 G6: a never-enabled transform moves no pixels.
+        if !effect_ever_enabled(effect) {
+            continue;
+        }
+        bounds = transform_bounds_once(bounds, effect, resolution);
     }
-    let center_x = i64::from(resolution.0) / 2;
-    let center_y = i64::from(resolution.1) / 2;
+    bounds
+}
+
+/// Per-axis scale extremes as numerators over 100^3: master/100 ×
+/// axis/100 × fine/10000. Products are multilinear, so the extremes sit
+/// on the range corners — including negative (mirroring) scales.
+fn axis_scale_extremes(master: (i64, i64), axis: (i64, i64), fine: (i64, i64)) -> (i64, i64) {
+    let mut extremes = (i64::MAX, i64::MIN);
+    for value in [master.0, master.1] {
+        for axis in [axis.0, axis.1] {
+            for fine in [fine.0, fine.1] {
+                let product = value.saturating_mul(axis).saturating_mul(fine);
+                extremes = (extremes.0.min(product), extremes.1.max(product));
+            }
+        }
+    }
+    extremes
+}
+
+/// Offset extremes in basis points of the extent: percent × 100 + basis.
+fn offset_basis_extremes(percent: (i64, i64), basis: (i64, i64)) -> (i64, i64) {
+    let mut extremes = (i64::MAX, i64::MIN);
+    for percent in [percent.0, percent.1] {
+        for basis in [basis.0, basis.1] {
+            let total = percent.saturating_mul(100).saturating_add(basis);
+            extremes = (extremes.0.min(total), extremes.1.max(total));
+        }
+    }
+    extremes
+}
+
+fn transform_bounds_once(
+    bounds: TitlePixelBounds,
+    effect: &Effect,
+    resolution: (u32, u32),
+) -> TitlePixelBounds {
+    let rotation = parameter_range(effect, "rotation_centidegrees", 0);
+    if rotation == (0, 0) {
+        return transform_bounds_integer(bounds, effect, resolution);
+    }
+    transform_bounds_rotated(bounds, effect, resolution, rotation)
+}
+
+/// Exact integer path: no rotation, so every lane is multilinear and the
+/// extremes sit on the corners. Matches the pre-MO1 fold on its lanes
+/// (master scale, whole-percent offsets, centred anchor).
+#[allow(clippy::similar_names)]
+fn transform_bounds_integer(
+    bounds: TitlePixelBounds,
+    effect: &Effect,
+    resolution: (u32, u32),
+) -> TitlePixelBounds {
+    let width = i64::from(resolution.0);
+    let height = i64::from(resolution.1);
+    let master = parameter_range(effect, "scale_percent", 100);
+    let fine = parameter_range(effect, "scale_fine_hundredths", 10_000);
+    let (sx_min, sx_max) = axis_scale_extremes(
+        master,
+        parameter_range(effect, "scale_x_percent", 100),
+        fine,
+    );
+    let (sy_min, sy_max) = axis_scale_extremes(
+        master,
+        parameter_range(effect, "scale_y_percent", 100),
+        fine,
+    );
+    let (ox_min_bp, ox_max_bp) = offset_basis_extremes(
+        parameter_range(effect, "x_percent", 0),
+        parameter_range(effect, "x_basis_points", 0),
+    );
+    let (oy_min_bp, oy_max_bp) = offset_basis_extremes(
+        parameter_range(effect, "y_percent", 0),
+        parameter_range(effect, "y_basis_points", 0),
+    );
+    // Pixels move down while offsets point up: negate into plain ranges.
+    let ox_min = width.saturating_mul(ox_min_bp).div_euclid(10_000);
+    let ox_max = ceil_div(width.saturating_mul(ox_max_bp), 10_000);
+    let oy_min = ceil_div(height.saturating_mul(oy_max_bp), 10_000).saturating_neg();
+    let oy_max = height
+        .saturating_mul(oy_min_bp)
+        .div_euclid(10_000)
+        .saturating_neg();
+    let (ax_min_bp, ax_max_bp) = parameter_range(effect, "anchor_x_basis_points", 5000);
+    let (ay_min_bp, ay_max_bp) = parameter_range(effect, "anchor_y_basis_points", 5000);
+    // Anchor pixels round both ways: each variant feeds the corner loop.
+    let ax = [
+        width.saturating_mul(ax_min_bp).div_euclid(10_000),
+        ceil_div(width.saturating_mul(ax_max_bp), 10_000),
+    ];
+    let ay = [
+        height.saturating_mul(ay_min_bp).div_euclid(10_000),
+        ceil_div(height.saturating_mul(ay_max_bp), 10_000),
+    ];
+    let corners = [
+        (i64::from(bounds.left), i64::from(bounds.top)),
+        (i64::from(bounds.right), i64::from(bounds.top)),
+        (i64::from(bounds.left), i64::from(bounds.bottom)),
+        (i64::from(bounds.right), i64::from(bounds.bottom)),
+    ];
+    let mut extremes = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for (x, y) in corners {
+        for sx in [sx_min, sx_max] {
+            for sy in [sy_min, sy_max] {
+                for anchor_x in ax {
+                    for anchor_y in ay {
+                        let down_x = scaled_div(x.saturating_sub(anchor_x), sx, false);
+                        let down_y = scaled_div(y.saturating_sub(anchor_y), sy, false);
+                        extremes.0 = extremes
+                            .0
+                            .min(anchor_x.saturating_add(down_x).saturating_add(ox_min));
+                        extremes.1 = extremes
+                            .1
+                            .min(anchor_y.saturating_add(down_y).saturating_add(oy_min));
+                        let up_x = scaled_div(x.saturating_sub(anchor_x), sx, true);
+                        let up_y = scaled_div(y.saturating_sub(anchor_y), sy, true);
+                        extremes.2 = extremes
+                            .2
+                            .max(anchor_x.saturating_add(up_x).saturating_add(ox_max));
+                        extremes.3 = extremes
+                            .3
+                            .max(anchor_y.saturating_add(up_y).saturating_add(oy_max));
+                    }
+                }
+            }
+        }
+    }
     TitlePixelBounds {
-        left: saturating_i32(transform_floor(
-            i64::from(bounds.left),
-            center_x,
-            scale_percent,
-            minimum_x_percent,
-            i64::from(resolution.0),
-        )),
-        top: saturating_i32(transform_floor(
-            i64::from(bounds.top),
-            center_y,
-            scale_percent,
-            maximum_y_percent.saturating_neg(),
-            i64::from(resolution.1),
-        )),
-        right: saturating_i32(transform_ceil(
-            i64::from(bounds.right),
-            center_x,
-            scale_percent,
-            maximum_x_percent,
-            i64::from(resolution.0),
-        )),
-        bottom: saturating_i32(transform_ceil(
-            i64::from(bounds.bottom),
-            center_y,
-            scale_percent,
-            minimum_y_percent.saturating_neg(),
-            i64::from(resolution.1),
-        )),
+        left: saturating_i32(extremes.0),
+        top: saturating_i32(extremes.1),
+        right: saturating_i32(extremes.2),
+        bottom: saturating_i32(extremes.3),
     }
+}
+
+/// `(delta * numerator) / 100^3`, floored (minimum side) or ceiled
+/// (maximum side). The `+den-1` ceil is only valid for non-negative
+/// products, so negatives ceil via negation.
+fn scaled_div(delta: i64, numerator: i64, ceil: bool) -> i64 {
+    const DENOMINATOR: i64 = 100_000_000;
+    let product = delta.saturating_mul(numerator);
+    if !ceil {
+        return product.div_euclid(DENOMINATOR);
+    }
+    if product >= 0 {
+        product
+            .saturating_add(DENOMINATOR - 1)
+            .div_euclid(DENOMINATOR)
+    } else {
+        product
+            .saturating_neg()
+            .div_euclid(DENOMINATOR)
+            .saturating_neg()
+    }
+}
+
+/// Outward conservatism margin for the rotated path, in pixels: covers
+/// the 1-degree sampler (<= 0.04 px at 1920 wide) and float error.
+const ROTATED_BOUND_MARGIN_PX: f64 = 0.05;
+
+/// Rotation path: the angle range is sampled (endpoints plus every whole
+/// degree; a full turn or more falls back to the circumscribed circle),
+/// and every corner is transformed over the scale/offset/anchor corners
+/// at each sample. Positive angles rotate clockwise on screen, matching
+/// the compositor.
+#[allow(clippy::similar_names, clippy::too_many_lines)]
+#[allow(clippy::cast_precision_loss)] // lanes are basis points / pixels: far below 2^53.
+fn transform_bounds_rotated(
+    bounds: TitlePixelBounds,
+    effect: &Effect,
+    resolution: (u32, u32),
+    rotation: (i64, i64),
+) -> TitlePixelBounds {
+    let width = f64::from(resolution.0);
+    let height = f64::from(resolution.1);
+    let master = parameter_range(effect, "scale_percent", 100);
+    let fine = parameter_range(effect, "scale_fine_hundredths", 10_000);
+    let (sx_min, sx_max) = axis_scale_extremes(
+        master,
+        parameter_range(effect, "scale_x_percent", 100),
+        fine,
+    );
+    let (sy_min, sy_max) = axis_scale_extremes(
+        master,
+        parameter_range(effect, "scale_y_percent", 100),
+        fine,
+    );
+    let (ox_min_bp, ox_max_bp) = offset_basis_extremes(
+        parameter_range(effect, "x_percent", 0),
+        parameter_range(effect, "x_basis_points", 0),
+    );
+    let (oy_min_bp, oy_max_bp) = offset_basis_extremes(
+        parameter_range(effect, "y_percent", 0),
+        parameter_range(effect, "y_basis_points", 0),
+    );
+    let scales_x = [sx_min as f64 / 100_000_000.0, sx_max as f64 / 100_000_000.0];
+    let scales_y = [sy_min as f64 / 100_000_000.0, sy_max as f64 / 100_000_000.0];
+    let offsets_x = [
+        ox_min_bp as f64 * width / 10_000.0,
+        ox_max_bp as f64 * width / 10_000.0,
+    ];
+    let offsets_y = [
+        -(oy_max_bp as f64) * height / 10_000.0,
+        -(oy_min_bp as f64) * height / 10_000.0,
+    ];
+    let (ax_min_bp, ax_max_bp) = parameter_range(effect, "anchor_x_basis_points", 5000);
+    let (ay_min_bp, ay_max_bp) = parameter_range(effect, "anchor_y_basis_points", 5000);
+    let anchors_x = [
+        ax_min_bp as f64 * width / 10_000.0,
+        ax_max_bp as f64 * width / 10_000.0,
+    ];
+    let anchors_y = [
+        ay_min_bp as f64 * height / 10_000.0,
+        ay_max_bp as f64 * height / 10_000.0,
+    ];
+    let corners = [
+        (f64::from(bounds.left), f64::from(bounds.top)),
+        (f64::from(bounds.right), f64::from(bounds.top)),
+        (f64::from(bounds.left), f64::from(bounds.bottom)),
+        (f64::from(bounds.right), f64::from(bounds.bottom)),
+    ];
+    // A range spanning a full turn covers every angle: bind the circle.
+    if rotation.1.saturating_sub(rotation.0) >= 36_000 {
+        let mut radius = 0.0_f64;
+        for (x, y) in corners {
+            for sx in scales_x {
+                for sy in scales_y {
+                    for anchor_x in anchors_x {
+                        for anchor_y in anchors_y {
+                            let dx = (x - anchor_x) * sx;
+                            let dy = (y - anchor_y) * sy;
+                            radius = radius.max(dx.hypot(dy));
+                        }
+                    }
+                }
+            }
+        }
+        let margin = ROTATED_BOUND_MARGIN_PX;
+        return TitlePixelBounds {
+            left: clamp_i32((anchors_x[0] - radius - margin).floor()),
+            top: clamp_i32((anchors_y[0] - radius - margin).floor()),
+            right: clamp_i32((anchors_x[1] + radius + margin).ceil()),
+            bottom: clamp_i32((anchors_y[1] + radius + margin).ceil()),
+        };
+    }
+    let mut angles = vec![rotation.0, rotation.1];
+    let mut stepped = rotation.0.div_euclid(100) * 100;
+    while stepped <= rotation.1 {
+        angles.push(stepped);
+        stepped += 100;
+    }
+    let margin = ROTATED_BOUND_MARGIN_PX;
+    let mut extremes = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for centidegrees in angles {
+        let radians = centidegrees as f64 * std::f64::consts::PI / 18_000.0;
+        let (sin, cos) = radians.sin_cos();
+        for (x, y) in corners {
+            for sx in scales_x {
+                for sy in scales_y {
+                    for anchor_x in anchors_x {
+                        for anchor_y in anchors_y {
+                            for offset_x in offsets_x {
+                                for offset_y in offsets_y {
+                                    let dx = (x - anchor_x) * sx;
+                                    let dy = (y - anchor_y) * sy;
+                                    let rotated_x = anchor_x + dx * cos - dy * sin + offset_x;
+                                    let rotated_y = anchor_y + dx * sin + dy * cos + offset_y;
+                                    extremes.0 = extremes.0.min(rotated_x);
+                                    extremes.1 = extremes.1.min(rotated_y);
+                                    extremes.2 = extremes.2.max(rotated_x);
+                                    extremes.3 = extremes.3.max(rotated_y);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    TitlePixelBounds {
+        left: clamp_i32((extremes.0 - margin).floor()),
+        top: clamp_i32((extremes.1 - margin).floor()),
+        right: clamp_i32((extremes.2 + margin).ceil()),
+        bottom: clamp_i32((extremes.3 + margin).ceil()),
+    }
+}
+
+#[allow(clippy::cast_possible_truncation)] // pre-clamped to i32 range; callers pass floor/ceil.
+fn clamp_i32(value: f64) -> i32 {
+    if !value.is_finite() {
+        return if value.is_sign_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        };
+    }
+    value.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
 }
 
 fn parameter_range(effect: &Effect, name: &str, default: i64) -> (i64, i64) {
@@ -491,38 +774,6 @@ fn parameter_range(effect: &Effect, name: &str, default: i64) -> (i64, i64) {
                 (minimum.min(value), maximum.max(value))
             })
     })
-}
-
-fn transform_floor(
-    value: i64,
-    center: i64,
-    scale_percent: i64,
-    offset_percent: i64,
-    extent: i64,
-) -> i64 {
-    center
-        .saturating_add(
-            value
-                .saturating_sub(center)
-                .saturating_mul(scale_percent)
-                .div_euclid(100),
-        )
-        .saturating_add(extent.saturating_mul(offset_percent).div_euclid(100))
-}
-
-fn transform_ceil(
-    value: i64,
-    center: i64,
-    scale_percent: i64,
-    offset_percent: i64,
-    extent: i64,
-) -> i64 {
-    center
-        .saturating_add(ceil_div(
-            value.saturating_sub(center).saturating_mul(scale_percent),
-            100,
-        ))
-        .saturating_add(ceil_div(extent.saturating_mul(offset_percent), 100))
 }
 
 fn ceil_div(numerator: i64, denominator: i64) -> i64 {
@@ -1118,5 +1369,338 @@ mod tests {
                 .any(|issue| issue.code == "caption_outside_safe_area")
         );
         assert!(!report.export_ready());
+    }
+
+    fn mo1_transform(
+        id: u64,
+        enabled: bool,
+        params: &[(&str, i64)],
+        keyed: &[(&str, &[(i64, i64)])],
+        enabled_curve: Option<crate::AutomationCurve>,
+    ) -> Effect {
+        Effect {
+            enabled,
+            enabled_curve,
+            id: crate::EffectId(id),
+            name: "transform".to_owned(),
+            parameters: params
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), ParamValue::Integer(*value)))
+                .collect(),
+            keyframes: keyed
+                .iter()
+                .map(|(name, keys)| {
+                    (
+                        (*name).to_owned(),
+                        crate::AutomationCurve {
+                            keyframes: keys
+                                .iter()
+                                .map(|(at, value)| crate::Keyframe {
+                                    at: TimeCode(*at),
+                                    value: *value,
+                                    interpolation: crate::KeyframeInterpolation::Linear,
+                                    tangent_in: 0,
+                                    tangent_out: 0,
+                                })
+                                .collect(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn mo1_hold_curve(keys: &[(i64, i64)]) -> crate::AutomationCurve {
+        crate::AutomationCurve {
+            keyframes: keys
+                .iter()
+                .map(|(at, value)| crate::Keyframe {
+                    at: TimeCode(*at),
+                    value: *value,
+                    interpolation: crate::KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                })
+                .collect(),
+        }
+    }
+
+    /// MO1 G6: the title bound folds the full transform — per-axis scale,
+    /// fine scale, and basis-point offsets — about the anchor. Box
+    /// 100,40..140,60 in 320x180: x halves about 160 then shifts +32,
+    /// y doubles about 90 then shifts +9.
+    #[test]
+    fn transformed_title_bounds_fold_per_axis_fine_and_basis_lanes() {
+        let bounds = TitlePixelBounds {
+            left: 100,
+            top: 40,
+            right: 140,
+            bottom: 60,
+        };
+        let effects = [mo1_transform(
+            1,
+            true,
+            &[
+                ("scale_percent", 100),
+                ("scale_x_percent", 50),
+                ("scale_y_percent", 200),
+                ("scale_fine_hundredths", 10_000),
+                ("x_basis_points", 1000),
+                ("y_basis_points", -500),
+            ],
+            &[],
+            None,
+        )];
+        let moved = transformed_title_bounds(bounds, &effects, (320, 180));
+        assert_eq!(
+            (moved.left, moved.top, moved.right, moved.bottom),
+            (162, -1, 182, 39)
+        );
+    }
+
+    /// MO1 G6: rotation expands the bound about the anchor — 90 degrees
+    /// clockwise about the frame centre swaps the box footprint. The
+    /// f64 path keeps a 0.05 px conservatism margin, hence the
+    /// one-outward expectations.
+    #[test]
+    fn transformed_title_bounds_rotate_about_the_anchor() {
+        let bounds = TitlePixelBounds {
+            left: 100,
+            top: 40,
+            right: 140,
+            bottom: 60,
+        };
+        let effects = [mo1_transform(
+            1,
+            true,
+            &[("rotation_centidegrees", 9000)],
+            &[],
+            None,
+        )];
+        let moved = transformed_title_bounds(bounds, &effects, (320, 180));
+        assert_eq!(
+            (moved.left, moved.top, moved.right, moved.bottom),
+            (189, 29, 211, 71)
+        );
+
+        // 180 degrees about the top-left corner negates both axes.
+        let effects = [mo1_transform(
+            1,
+            true,
+            &[
+                ("rotation_centidegrees", 18_000),
+                ("anchor_x_basis_points", 0),
+                ("anchor_y_basis_points", 0),
+            ],
+            &[],
+            None,
+        )];
+        let moved = transformed_title_bounds(bounds, &effects, (320, 180));
+        assert_eq!(
+            (moved.left, moved.top, moved.right, moved.bottom),
+            (-141, -61, -99, -39)
+        );
+    }
+
+    /// MO1 G6: a 45-degree static rotation about the box centre grows
+    /// each half-extent by (w + h) / sqrt(2) / 2 — pinned via the
+    /// closed form, not the implementation's sampler.
+    #[test]
+    #[allow(clippy::cast_possible_truncation)] // closed-form pin: values are small by construction.
+    fn transformed_title_bounds_match_the_45_degree_closed_form() {
+        let bounds = TitlePixelBounds {
+            left: 100,
+            top: 40,
+            right: 140,
+            bottom: 60,
+        };
+        let effects = [mo1_transform(
+            1,
+            true,
+            &[
+                ("rotation_centidegrees", 4500),
+                ("anchor_x_basis_points", 3750),
+                ("anchor_y_basis_points", 2500),
+            ],
+            &[],
+            None,
+        )];
+        let moved = transformed_title_bounds(bounds, &effects, (320, 200));
+        let half = 30.0 / 2.0_f64.sqrt();
+        let expected = (
+            (120.0 - half - 0.05).floor() as i32,
+            (50.0 - half - 0.05).floor() as i32,
+            (120.0 + half + 0.05).ceil() as i32,
+            (50.0 + half + 0.05).ceil() as i32,
+        );
+        assert_eq!(expected, (98, 28, 142, 72));
+        assert_eq!((moved.left, moved.top, moved.right, moved.bottom), expected);
+    }
+
+    /// MO1 G6: keyframed scale ranges take their extremes per corner.
+    /// Corners left of / above the anchor have negative deltas, so their
+    /// maxima sit at the SMALLEST scale (50): right = 160 - 20/2 = 150,
+    /// bottom = 90 - 30/2 = 75. The old maximum-only fold pinned (120, 30)
+    /// here and so under-approximated the range — red against the rewrite.
+    #[test]
+    fn transformed_title_bounds_take_keyframe_extremes() {
+        let bounds = TitlePixelBounds {
+            left: 100,
+            top: 40,
+            right: 140,
+            bottom: 60,
+        };
+        let effects = [mo1_transform(
+            1,
+            true,
+            &[("scale_percent", 100)],
+            &[("scale_percent", &[(0, 50), (10, 200)])],
+            None,
+        )];
+        let moved = transformed_title_bounds(bounds, &effects, (320, 180));
+        assert_eq!(
+            (moved.left, moved.top, moved.right, moved.bottom),
+            (40, -10, 150, 75)
+        );
+    }
+
+    /// MO1 G6: disabled transforms are ignored — statically, or via an
+    /// all-zero enable curve — while an enable curve that reaches 1
+    /// anywhere still applies the transform.
+    #[test]
+    fn transformed_title_bounds_ignore_disabled_transforms() {
+        let bounds = TitlePixelBounds {
+            left: 100,
+            top: 40,
+            right: 140,
+            bottom: 60,
+        };
+        let params: &[(&str, i64)] = &[
+            ("scale_percent", 100),
+            ("scale_x_percent", 50),
+            ("scale_y_percent", 200),
+            ("x_basis_points", 1000),
+            ("y_basis_points", -500),
+        ];
+        let unchanged = (bounds.left, bounds.top, bounds.right, bounds.bottom);
+        let moved_case = (162, -1, 182, 39);
+
+        let off = [mo1_transform(1, false, params, &[], None)];
+        let moved = transformed_title_bounds(bounds, &off, (320, 180));
+        assert_eq!(
+            (moved.left, moved.top, moved.right, moved.bottom),
+            unchanged,
+            "a statically disabled transform must not move the bound"
+        );
+
+        // Master lanes the old fold honors: the skip rule itself must win.
+        let master = [mo1_transform(
+            1,
+            false,
+            &[("scale_percent", 200), ("x_percent", 50)],
+            &[],
+            None,
+        )];
+        let moved = transformed_title_bounds(bounds, &master, (320, 180));
+        assert_eq!(
+            (moved.left, moved.top, moved.right, moved.bottom),
+            unchanged,
+            "a disabled 200% + half-frame shift must not move the bound"
+        );
+
+        let zero_curve = [mo1_transform(
+            1,
+            true,
+            params,
+            &[],
+            Some(mo1_hold_curve(&[(0, 0)])),
+        )];
+        let moved = transformed_title_bounds(bounds, &zero_curve, (320, 180));
+        assert_eq!(
+            (moved.left, moved.top, moved.right, moved.bottom),
+            unchanged,
+            "an all-zero enable curve must not move the bound"
+        );
+
+        let cut_in = [mo1_transform(
+            1,
+            false,
+            params,
+            &[],
+            Some(mo1_hold_curve(&[(0, 0), (5, 1)])),
+        )];
+        let moved = transformed_title_bounds(bounds, &cut_in, (320, 180));
+        assert_eq!(
+            (moved.left, moved.top, moved.right, moved.bottom),
+            moved_case,
+            "an enable curve reaching 1 must still apply the transform"
+        );
+    }
+
+    /// MO1 G6: the legacy-stage warning follows the compositor — a
+    /// statically disabled legacy effect, or one whose enable curve
+    /// never reaches 1, warns nothing; a curve reaching 1 still warns.
+    #[test]
+    fn legacy_stage_warning_skips_disabled_effects() {
+        let document = |effects: Vec<Effect>| Document {
+            tracks: vec![crate::Track {
+                id: crate::TrackId(1),
+                kind: crate::TrackKind::Video,
+                sync_lock: true,
+                clips: vec![crate::Clip {
+                    enabled: true,
+                    enabled_curve: None,
+                    id: crate::ClipId(1),
+                    asset: crate::AssetId::default(),
+                    source_range: TimeCode::ZERO..TimeCode(30),
+                    content: crate::ClipContent::Media,
+                    timeline_start: TimeCode::ZERO,
+                    effects,
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                    audio_gain_curve: None,
+                }],
+            }],
+            duration: TimeCode(30),
+            ..Document::default()
+        };
+        let lut = |enabled: bool, curve: Option<crate::AutomationCurve>| Effect {
+            enabled,
+            enabled_curve: curve,
+            id: crate::EffectId(1),
+            name: "look_lut".to_owned(),
+            parameters: std::collections::BTreeMap::new(),
+            keyframes: std::collections::BTreeMap::new(),
+        };
+        let legacy_warnings = |document: &Document| {
+            qa_document(document)
+                .issues
+                .iter()
+                .filter(|issue| issue.code == "legacy_lut_stage")
+                .count()
+        };
+
+        assert_eq!(
+            legacy_warnings(&document(vec![lut(false, None)])),
+            0,
+            "a disabled legacy effect must not warn"
+        );
+        assert_eq!(
+            legacy_warnings(&document(vec![lut(true, Some(mo1_hold_curve(&[(0, 0)])))])),
+            0,
+            "an all-zero enable curve must not warn"
+        );
+        assert_eq!(
+            legacy_warnings(&document(vec![lut(
+                false,
+                Some(mo1_hold_curve(&[(0, 0), (5, 1)]))
+            )])),
+            1,
+            "an enable curve reaching 1 must still warn"
+        );
     }
 }
