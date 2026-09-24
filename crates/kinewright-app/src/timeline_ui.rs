@@ -3,11 +3,11 @@ use std::sync::Arc;
 use eframe::egui;
 use kinewright_core::{
     Analysis, AutomationCurve, Clip, ClipContent, ClipId, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB,
-    EffectId, FrameRounding, IncidentCode, IncidentSubject, Keyframe, LabelIncident,
-    MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaKind, Operation, Rational,
-    SceneStatus, SilenceStatus, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TimeCode, Title, TrackId,
-    TrackKind, Transition, WaveformData, envelope_coalesce_key, map_frames_with_rounding,
-    map_source_range_to_project,
+    EffectId, FrameRounding, IncidentCode, IncidentSubject, Keyframe, KeyframeInterpolation,
+    LabelIncident, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaKind, Operation,
+    ParamValue, Rational, SceneStatus, SilenceStatus, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
+    TimeCode, Title, TrackId, TrackKind, Transition, WaveformData, envelope_coalesce_key,
+    map_frames_with_rounding, map_source_range_to_project,
 };
 use kinewright_media::{RoomToneStore, timeline_source_at};
 
@@ -82,6 +82,17 @@ struct EnvelopeDrag {
     clip: ClipId,
     index: usize,
 }
+
+/// MO1 R24: the in-flight opacity-band drag — the `EnvelopeDrag` shape.
+/// Frame-local temp storage, never serialised.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct OpacityDrag {
+    clip: ClipId,
+    index: usize,
+}
+
+/// Where the in-flight opacity drag is remembered between frames.
+const OPACITY_DRAG_MEMORY_ID: &str = "timeline-opacity-drag";
 
 /// AU4 §5.1 rule 95a: the envelope's paint, hit and interact rect.
 ///
@@ -601,6 +612,165 @@ fn envelope_snapped_local_frame(
     (TimeCode(at), guide)
 }
 
+/// MO1 R24: one pure rect for the opacity band, shared by paint, hit, and
+/// interact (AU4 R36) so the three cannot drift apart.
+///
+/// The audio band's lower region — the bottom 42% — clamped below the key
+/// lane and refused under 24 px of clip width, where the coarse gesture
+/// cannot land. On A/V clips the two bands share the region with the
+/// opacity paint and interact on top (paint order is z-order).
+fn opacity_band_rect(clip_rect: egui::Rect) -> Option<egui::Rect> {
+    if clip_rect.width() < ENVELOPE_MINIMUM_CLIP_WIDTH {
+        return None;
+    }
+    let top = (clip_rect.bottom() - clip_rect.height() * 0.42).max(clip_rect.top() + 31.0);
+    if top >= clip_rect.bottom() {
+        return None;
+    }
+    Some(
+        egui::Rect::from_min_max(egui::pos2(clip_rect.left(), top), clip_rect.max)
+            .shrink2(egui::vec2(space::HALF, space::ONE)),
+    )
+}
+
+/// MO1 R24: an opacity percent to y, linear over 0 … 100.
+#[allow(clippy::cast_precision_loss)]
+fn opacity_value_to_y(rect: egui::Rect, value: i64) -> f32 {
+    let clamped = value.clamp(0, 100);
+    rect.top() + rect.height() * (100 - clamped) as f32 / 100.0
+}
+
+/// MO1 R24: y back to an opacity percent, linear over 0 … 100.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn opacity_y_to_value(rect: egui::Rect, y: f32) -> i64 {
+    let fraction = (f64::from(y - rect.top()) / f64::from(rect.height().max(1.0))).clamp(0.0, 1.0);
+    (envelope_round_half_away_from_zero((1.0 - fraction) * 100.0) as i64).clamp(0, 100)
+}
+
+/// MO1 R24: the value one band grab writes — the AU4 E58 shape ported to a
+/// display axis that equals the value range.
+///
+/// E58 keeps a below-floor stored value while the pointer stays on the
+/// floor; here every value is representable, so the rule collapses to the
+/// floor identity: a 0 key keeps 0 while the pointer reads the floor, and a
+/// purely horizontal drag at the floor y can never lift it. Pinned so a
+/// future display range reopens the question instead of regressing it.
+fn opacity_grab_value(band: egui::Rect, pointer_y: f32, stored: i64) -> i64 {
+    let pointed = opacity_y_to_value(band, pointer_y);
+    if stored == 0 && pointed == 0 {
+        return 0;
+    }
+    pointed
+}
+
+/// MO1 R24: every key of one opacity curve as a pixel position inside the
+/// band. Index `i` is keyframe `i`, the `envelope_points` contract.
+fn opacity_points(rect: egui::Rect, duration: TimeCode, keys: &[Keyframe]) -> Vec<egui::Pos2> {
+    keys.iter()
+        .map(|key| {
+            egui::pos2(
+                envelope_local_frame_to_x(rect, duration, key.at),
+                opacity_value_to_y(rect, key.value),
+            )
+        })
+        .collect()
+}
+
+/// MO1 R24: the parked line a curve-free opacity effect shows — flat, at
+/// the parked static. The E53 offer: a click on it inserts the first key.
+fn opacity_parked_polyline(band: egui::Rect, parked: i64) -> Vec<egui::Pos2> {
+    let y = opacity_value_to_y(band, parked);
+    vec![egui::pos2(band.left(), y), egui::pos2(band.right(), y)]
+}
+
+/// MO1 R24: move one opacity key, x kept strictly between its neighbours
+/// and inside `0..=duration − 1`, y clamped to `0..=100`. Pure; returns the
+/// whole key list. The `envelope_move_key` shape with the opacity clamps.
+fn opacity_move_key(
+    keys: &[Keyframe],
+    index: usize,
+    at: TimeCode,
+    value: i64,
+    duration: TimeCode,
+) -> Vec<Keyframe> {
+    let last = duration.0.saturating_sub(1).max(0);
+    let low = index
+        .checked_sub(1)
+        .and_then(|previous| keys.get(previous))
+        .map_or(0, |key| key.at.0.saturating_add(1));
+    let high = keys
+        .get(index + 1)
+        .map_or(last, |key| key.at.0.saturating_sub(1));
+    let mut moved = keys.to_vec();
+    let Some(key) = moved.get_mut(index) else {
+        return moved;
+    };
+    let low = low.clamp(0, last);
+    let high = high.clamp(0, last);
+    key.at = TimeCode(if low > high {
+        low
+    } else {
+        at.0.clamp(low, high)
+    });
+    key.value = value.clamp(0, 100);
+    moved
+}
+
+/// MO1 R24: the operation one band drag or insert writes — the whole curve,
+/// the envelope's rule.
+fn opacity_operation(clip: ClipId, effect: EffectId, keys: Vec<Keyframe>) -> Operation {
+    Operation::SetEffectKeyframes {
+        clip,
+        effect,
+        name: "percent".to_owned(),
+        curve: AutomationCurve { keyframes: keys },
+    }
+}
+
+/// MO1 R24: stable coalesce key for one band drag — the
+/// `envelope_coalesce_key` style, so the whole drag lands in a single undo
+/// entry and never merges with a slider's.
+fn opacity_coalesce_key(clip: ClipId) -> String {
+    format!("opacity:{}", clip.0)
+}
+
+/// MO1 R24: the band over one clip's opacity curve. The
+/// `paint_clip_envelope` shape: parked line when curve-free (muted, no
+/// dots — an offer, not a curve), polyline plus dots otherwise, accent on
+/// selection.
+fn paint_opacity_band(
+    painter: &egui::Painter,
+    band: egui::Rect,
+    duration: TimeCode,
+    keys: &[Keyframe],
+    parked: i64,
+    selected: bool,
+) {
+    if keys.is_empty() {
+        painter.add(egui::Shape::line(
+            opacity_parked_polyline(band, parked),
+            egui::Stroke::new(ENVELOPE_STROKE, color::TEXT_MUTED),
+        ));
+        return;
+    }
+    let tint = if selected {
+        color::ACCENT
+    } else {
+        color::TEXT_PRIMARY_64
+    };
+    let points = opacity_points(band, duration, keys);
+    let line = envelope_polyline(band, &points, keys);
+    if line.len() >= 2 {
+        painter.add(egui::Shape::line(
+            line,
+            egui::Stroke::new(ENVELOPE_STROKE, tint),
+        ));
+    }
+    for point in &points {
+        painter.circle_filled(*point, ENVELOPE_POINT_RADIUS, tint);
+    }
+}
+
 /// AU4 §5.1 rule 101 (AU4 §0 E49): the timeline's report that the pointer was
 /// over one envelope key, read one frame later.
 ///
@@ -1045,8 +1215,9 @@ impl KinewrightApp {
                             .min_size(egui::vec2(72.0, 22.0)),
                     )
                     .on_hover_text(
-                        "Show the gain envelope on audio clips. The band is the coarse gesture; \
-                         the inspector's keyframe list is the exact one.",
+                        "Show the gain envelope on audio clips and the opacity band on video \
+                         clips. A band is the coarse gesture; the inspector's keyframe list is \
+                         the exact one.",
                     );
                 if envelopes.clicked() {
                     show_envelopes = !show_envelopes;
@@ -1167,6 +1338,8 @@ impl KinewrightApp {
         let mut envelope_edits = InspectorEdits::default();
         let mut envelope_drag = ui
             .data_mut(|data| data.get_temp::<EnvelopeDrag>(egui::Id::new(ENVELOPE_DRAG_MEMORY_ID)));
+        let mut opacity_drag =
+            ui.data_mut(|data| data.get_temp::<OpacityDrag>(egui::Id::new(OPACITY_DRAG_MEMORY_ID)));
         let mut envelope_hover: Option<EnvelopeHover> = None;
         let mut key_lane_hover: Option<KeyLaneHover> = None;
         let mut seek = None;
@@ -1494,6 +1667,174 @@ impl KinewrightApp {
                                 }
                             }
 
+                            // MO1 R24: the opacity band — video tracks with
+                            // an opacity effect, under the one `Envelopes`
+                            // toggle. Registered after the lane (paint
+                            // order is z-order) and gated on nearness, so
+                            // it steals nothing it is not drawn under.
+                            let opacity_effect = matches!(track.kind, TrackKind::Video)
+                                .then(|| {
+                                    clip.effects.iter().find(|effect| effect.name == "opacity")
+                                })
+                                .flatten();
+                            if let (Some(effect), Some(band)) = (
+                                opacity_effect,
+                                envelope_shown
+                                    .then(|| opacity_band_rect(clip_rect))
+                                    .flatten(),
+                            ) {
+                                let keys: &[Keyframe] = effect
+                                    .keyframes
+                                    .get("percent")
+                                    .map_or(&[], |curve| &curve.keyframes);
+                                let parked = effect
+                                    .parameters
+                                    .get("percent")
+                                    .and_then(|value| match value {
+                                        ParamValue::Integer(value) => Some(*value),
+                                        ParamValue::Boolean(_) | ParamValue::Text(_) => None,
+                                    })
+                                    .unwrap_or(100);
+                                let points = opacity_points(band, duration, keys);
+                                let drawn = if keys.is_empty() {
+                                    opacity_parked_polyline(band, parked)
+                                } else {
+                                    envelope_polyline(band, &points, keys)
+                                };
+                                let dragging =
+                                    opacity_drag.is_some_and(|drag| drag.clip == clip.id);
+                                let near = envelope_pointer.is_some_and(|pointer| {
+                                    envelope_near_curve(&drawn, band, pointer)
+                                });
+                                if dragging || near {
+                                    let sense = if keys.is_empty() {
+                                        egui::Sense::click()
+                                    } else {
+                                        egui::Sense::click_and_drag()
+                                    };
+                                    let opacity = ui.interact(
+                                        envelope_interact_rect(band, body_rect),
+                                        ui.make_persistent_id(("clip-opacity", clip.id.0)),
+                                        sense,
+                                    );
+                                    clip_pointer_interaction |=
+                                        opacity.hovered() || opacity.dragged();
+                                    let interacting = opacity.drag_started()
+                                        || is_live_drag(&opacity)
+                                        || opacity.clicked();
+                                    let candidates = if interacting {
+                                        snap_candidates(
+                                            &clip_bounds,
+                                            &document.markers,
+                                            clip.id,
+                                            playhead_position.0,
+                                        )
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    if opacity.drag_started()
+                                        && let Some(pointer) = opacity.interact_pointer_pos()
+                                    {
+                                        opacity_drag =
+                                            envelope_hit(&points, band, pointer).map(|index| {
+                                                OpacityDrag {
+                                                    clip: clip.id,
+                                                    index,
+                                                }
+                                            });
+                                        if opacity_drag.is_some() {
+                                            envelope_edits.begin_gesture();
+                                        }
+                                    }
+                                    if let Some(drag) =
+                                        opacity_drag.filter(|drag| drag.clip == clip.id)
+                                        && let Some(stored) = keys.get(drag.index)
+                                        && is_live_drag(&opacity)
+                                        && let Some(pointer) = opacity.interact_pointer_pos()
+                                    {
+                                        let (at, guide) = envelope_snapped_local_frame(
+                                            band,
+                                            clip.timeline_start,
+                                            duration,
+                                            pointer.x,
+                                            &candidates,
+                                            minor_tick,
+                                            pixels_per_frame,
+                                            snapping_disabled,
+                                        );
+                                        if opacity.dragged() {
+                                            snap_guide = guide.or(snap_guide);
+                                        }
+                                        let moved = opacity_move_key(
+                                            keys,
+                                            drag.index,
+                                            at,
+                                            opacity_grab_value(band, pointer.y, stored.value),
+                                            duration,
+                                        );
+                                        if moved != keys {
+                                            envelope_edits.extend_live(
+                                                vec![opacity_operation(clip.id, effect.id, moved)],
+                                                opacity_coalesce_key(clip.id),
+                                            );
+                                        }
+                                    }
+                                    if opacity.drag_stopped() {
+                                        opacity_drag = None;
+                                    }
+                                    // E53's cost, honestly named: the band
+                                    // wins the last-registered tie against
+                                    // `body`, so a click within 9 px of the
+                                    // line inserts a key instead of selecting
+                                    // the clip; the `Envelopes` toggle
+                                    // disables it wholesale. The curve-free
+                                    // band is click-only, so a drag starting
+                                    // on the parked line still drags the clip.
+                                    if opacity.clicked()
+                                        && let Some(pointer) = opacity.interact_pointer_pos()
+                                        && envelope_hit(&points, band, pointer).is_none()
+                                    {
+                                        let (at, _) = envelope_snapped_local_frame(
+                                            band,
+                                            clip.timeline_start,
+                                            duration,
+                                            pointer.x,
+                                            &candidates,
+                                            minor_tick,
+                                            pixels_per_frame,
+                                            snapping_disabled,
+                                        );
+                                        let inserted = match effect.keyframes.get("percent") {
+                                            Some(curve) => envelope_insert_key(curve, at),
+                                            None => vec![Keyframe {
+                                                at,
+                                                value: parked,
+                                                interpolation: KeyframeInterpolation::Linear,
+                                                tangent_in: 0,
+                                                tangent_out: 0,
+                                            }],
+                                        };
+                                        if inserted != keys {
+                                            envelope_edits.push(opacity_operation(
+                                                clip.id, effect.id, inserted,
+                                            ));
+                                        }
+                                    }
+                                    if opacity.secondary_clicked()
+                                        && let Some(pointer) = opacity.interact_pointer_pos()
+                                        && let Some(index) = envelope_hit(&points, band, pointer)
+                                        && let Some(key) = keys.get(index)
+                                    {
+                                        envelope_edits.push(Operation::RemoveEffectKeyframe {
+                                            clip: clip.id,
+                                            effect: effect.id,
+                                            name: "percent".to_owned(),
+                                            at: key.at,
+                                        });
+                                    }
+                                }
+                            }
+
                             clip_pointer_interaction |= body.hovered()
                                 || body.dragged()
                                 || left.hovered()
@@ -1731,6 +2072,31 @@ impl KinewrightApp {
                                     );
                                 }
                             }
+                            if matches!(track.kind, TrackKind::Video)
+                                && let Some(effect) =
+                                    clip.effects.iter().find(|effect| effect.name == "opacity")
+                                && envelope_shown
+                                && let Some(band) = opacity_band_rect(draw_rect)
+                            {
+                                paint_opacity_band(
+                                    &painter,
+                                    band,
+                                    duration,
+                                    effect
+                                        .keyframes
+                                        .get("percent")
+                                        .map_or(&[], |curve| &curve.keyframes),
+                                    effect
+                                        .parameters
+                                        .get("percent")
+                                        .and_then(|value| match value {
+                                            ParamValue::Integer(value) => Some(*value),
+                                            ParamValue::Boolean(_) | ParamValue::Text(_) => None,
+                                        })
+                                        .unwrap_or(100),
+                                    selected,
+                                );
+                            }
                             if let Some(wash) = disabled_clip_wash(clip.enabled) {
                                 painter.rect_filled(draw_rect, radius::SM, wash);
                             }
@@ -1907,6 +2273,15 @@ impl KinewrightApp {
                     data.insert_temp(id, drag);
                 }
                 None => data.remove::<EnvelopeDrag>(id),
+            }
+        });
+        ui.data_mut(|data| {
+            let id = egui::Id::new(OPACITY_DRAG_MEMORY_ID);
+            match opacity_drag {
+                Some(drag) => {
+                    data.insert_temp(id, drag);
+                }
+                None => data.remove::<OpacityDrag>(id),
             }
         });
         if let Some(operations) = pending_operations {
@@ -4520,7 +4895,9 @@ mod tests {
     /// into `timeline()` is that a clip move, a trim, a marker drag or a
     /// playhead drag starts filing per-frame batches. `timeline()` therefore
     /// owns exactly one `InspectorEdits`, submits it once, and never reaches
-    /// the live path under any key but the envelope's.
+    /// the live path under any key but the envelope's — plus, since MO1 R24,
+    /// the opacity band's, which files through the same accumulator under its
+    /// own key.
     #[test]
     fn the_timeline_has_exactly_one_coalescing_path_and_the_envelope_owns_it() {
         const FILE: &str = include_str!("timeline_ui.rs");
@@ -4543,8 +4920,9 @@ mod tests {
             for (index, _) in source.match_indices(live) {
                 let window = &source[index..(index + 240).min(source.len())];
                 assert!(
-                    window.contains("envelope_coalesce_key"),
-                    "every live write in the timeline is the envelope's: {live}"
+                    window.contains("envelope_coalesce_key")
+                        || window.contains("opacity_coalesce_key"),
+                    "every live write in the timeline is the envelope's or the band's: {live}"
                 );
             }
         }
@@ -5070,6 +5448,300 @@ mod tests {
             Vec::<i64>::new(),
             "the lane is empty"
         );
+    }
+
+    /// MO1 R24: the one band rect — refused under 24 px, the bottom 42%
+    /// clamped below the key lane, shrunk for paint/hit/interact alike.
+    #[test]
+    fn opacity_band_rect_shares_one_geometry() {
+        let tall =
+            egui::Rect::from_min_size(egui::Pos2::new(100.0, 50.0), egui::vec2(300.0, 100.0));
+        let band = opacity_band_rect(tall).expect("a tall clip is offered a band");
+        // Bottom 42% of 100 px is 42 px, shrunk by (2, 4).
+        assert!((band.left() - 102.0).abs() < f32::EPSILON);
+        assert!((band.right() - 398.0).abs() < f32::EPSILON);
+        assert!((band.top() - 112.0).abs() < f32::EPSILON, "{band:?}");
+        assert!((band.bottom() - 146.0).abs() < f32::EPSILON, "{band:?}");
+
+        let narrow =
+            egui::Rect::from_min_size(egui::Pos2::new(100.0, 50.0), egui::vec2(23.9, 100.0));
+        assert_eq!(
+            opacity_band_rect(narrow),
+            None,
+            "no band under 24 px of clip width"
+        );
+
+        // A short clip clamps the band below the lane instead of overlapping.
+        let short =
+            egui::Rect::from_min_size(egui::Pos2::new(100.0, 50.0), egui::vec2(300.0, 42.0));
+        let band = opacity_band_rect(short).expect("a short clip keeps a thin band");
+        assert!(
+            band.top() >= 81.0,
+            "the band starts below the lane strip: {band:?}"
+        );
+    }
+
+    /// MO1 R24: the vertical mapping is linear 0 … 100, clamped past the
+    /// edges, and a 0 key keeps 0 while the pointer reads the floor — the
+    /// E58 shape, so a horizontal drag never lifts it.
+    #[test]
+    fn opacity_mapping_is_linear_and_the_floor_holds_zero() {
+        let band = egui::Rect::from_min_size(egui::Pos2::new(0.0, 0.0), egui::vec2(300.0, 40.0));
+        assert!((opacity_value_to_y(band, 100) - 0.0).abs() < f32::EPSILON);
+        assert!((opacity_value_to_y(band, 0) - 40.0).abs() < f32::EPSILON);
+        assert!((opacity_value_to_y(band, 50) - 20.0).abs() < f32::EPSILON);
+        assert!((opacity_value_to_y(band, 9_999) - 0.0).abs() < f32::EPSILON);
+        assert!((opacity_value_to_y(band, -9_999) - 40.0).abs() < f32::EPSILON);
+        assert_eq!(opacity_y_to_value(band, 0.0), 100);
+        assert_eq!(opacity_y_to_value(band, 40.0), 0);
+        assert_eq!(opacity_y_to_value(band, 20.0), 50);
+        assert_eq!(opacity_y_to_value(band, -100.0), 100);
+        assert_eq!(opacity_y_to_value(band, 100.0), 0);
+
+        // The floor identity: a horizontal drag at the floor y keeps a 0 key.
+        let floor = opacity_value_to_y(band, 0);
+        assert_eq!(opacity_grab_value(band, floor, 0), 0);
+        assert_eq!(
+            opacity_grab_value(band, floor, 40),
+            0,
+            "the pointer means it"
+        );
+        assert_eq!(
+            opacity_grab_value(band, 20.0, 0),
+            50,
+            "off the floor, the drag means it"
+        );
+    }
+
+    /// MO1 R24: a band move keeps x strictly between the neighbours and
+    /// inside the clip, and clamps y to 0 … 100.
+    #[test]
+    fn opacity_move_key_clamps_like_the_envelope() {
+        let keys = vec![lane_key(0, 50), lane_key(15, 100), lane_key(29, 90)];
+        let duration = TimeCode(30);
+        // Past the next neighbour stops one short.
+        let moved = opacity_move_key(&keys, 1, TimeCode(99), 80, duration);
+        assert_eq!((moved[1].at, moved[1].value), (TimeCode(28), 80));
+        // Before the previous neighbour stops one past it.
+        let moved = opacity_move_key(&keys, 1, TimeCode(0), 80, duration);
+        assert_eq!((moved[1].at, moved[1].value), (TimeCode(1), 80));
+        // Values clamp to the percent range; the interpolation rides along.
+        let moved = opacity_move_key(&keys, 0, TimeCode(0), 9_999, duration);
+        assert_eq!(moved[0].value, 100);
+        assert_eq!(moved[0].interpolation, KeyframeInterpolation::Linear);
+        let moved = opacity_move_key(&keys, 2, TimeCode(29), -9_999, duration);
+        assert_eq!(moved[2].value, 0);
+    }
+
+    /// MO1 §10 gate 10: one opacity clip with a two-key `percent` curve,
+    /// plus the clip id and the stored keys.
+    fn opacity_gate_fixture() -> (Document, ClipId, Vec<Keyframe>) {
+        let mut document = linked_fixture();
+        document.tracks[0].clips[0].effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(1),
+            name: "opacity".to_owned(),
+            parameters: BTreeMap::from([("percent".to_owned(), ParamValue::Integer(80))]),
+            keyframes: BTreeMap::from([(
+                "percent".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![lane_key(0, 50), lane_key(15, 100)],
+                },
+            )]),
+        }];
+        let clip = document.tracks[0].clips[0].id;
+        let stored = document.tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.name == "opacity")
+            .and_then(|effect| effect.keyframes.get("percent"))
+            .unwrap()
+            .keyframes
+            .clone();
+        (document, clip, stored)
+    }
+
+    /// MO1 §10 gate 10: a band drag produces exactly the curve the
+    /// equivalent operations would — the band's whole-curve `Set` against
+    /// the single-key remove+insert path.
+    #[test]
+    fn opacity_band_matches_operation_path() {
+        let (document, clip, stored) = opacity_gate_fixture();
+        let duration = TimeCode(30);
+
+        // The band gesture: key 1 rides to (20, 80) as one whole-curve Set.
+        let moved = opacity_move_key(&stored, 1, TimeCode(20), 80, duration);
+        let mut banded = document.clone();
+        kinewright_core::apply_batch(
+            &mut banded,
+            std::slice::from_ref(&opacity_operation(clip, EffectId(1), moved)),
+        )
+        .expect("the band's Set applies");
+
+        // The equivalent op path: remove the old key, insert the moved one.
+        let mut operated = document.clone();
+        kinewright_core::apply_batch(
+            &mut operated,
+            &[
+                Operation::RemoveEffectKeyframe {
+                    clip,
+                    effect: EffectId(1),
+                    name: "percent".to_owned(),
+                    at: TimeCode(15),
+                },
+                Operation::UpsertEffectKeyframe {
+                    clip,
+                    effect: EffectId(1),
+                    name: "percent".to_owned(),
+                    key: Keyframe {
+                        at: TimeCode(20),
+                        value: 80,
+                        interpolation: stored[1].interpolation,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                },
+            ],
+        )
+        .expect("the op path applies");
+        let banded_curve = banded.tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.name == "opacity")
+            .and_then(|effect| effect.keyframes.get("percent"))
+            .unwrap();
+        let operated_curve = operated.tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.name == "opacity")
+            .and_then(|effect| effect.keyframes.get("percent"))
+            .unwrap();
+        assert_eq!(
+            banded_curve.keyframes, operated_curve.keyframes,
+            "the band drag and the op path land the same curve"
+        );
+    }
+
+    /// MO1 §10 gate 10, second half: the band's whole-curve insert equals
+    /// one upsert holding the evaluated value, and drag frames share the
+    /// band's own coalesce key — one undo entry.
+    #[test]
+    fn opacity_band_insert_matches_upsert_and_drags_coalesce() {
+        let (document, clip, stored) = opacity_gate_fixture();
+        let duration = TimeCode(30);
+        let curve = AutomationCurve {
+            keyframes: stored.clone(),
+        };
+        let inserted = envelope_insert_key(&curve, TimeCode(9));
+        let mut via_band = document.clone();
+        kinewright_core::apply_batch(
+            &mut via_band,
+            std::slice::from_ref(&opacity_operation(clip, EffectId(1), inserted)),
+        )
+        .unwrap();
+        let mut via_op = document.clone();
+        kinewright_core::apply_batch(
+            &mut via_op,
+            std::slice::from_ref(&Operation::UpsertEffectKeyframe {
+                clip,
+                effect: EffectId(1),
+                name: "percent".to_owned(),
+                key: Keyframe {
+                    at: TimeCode(9),
+                    value: curve.value_at(TimeCode(9)).unwrap(),
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            }),
+        )
+        .unwrap();
+        let via_band_curve = via_band.tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.name == "opacity")
+            .and_then(|effect| effect.keyframes.get("percent"))
+            .unwrap();
+        let via_op_curve = via_op.tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.name == "opacity")
+            .and_then(|effect| effect.keyframes.get("percent"))
+            .unwrap();
+        assert_eq!(
+            via_band_curve.keyframes, via_op_curve.keyframes,
+            "the band insert and one upsert land the same curve"
+        );
+
+        // Drag frames share the band's own coalesce key — one undo entry.
+        let key = opacity_coalesce_key(clip);
+        assert_eq!(key, format!("opacity:{clip}"));
+        let mut drag = crate::inspector_ui::InspectorEdits::default();
+        drag.begin_gesture();
+        for at in [16, 17, 18] {
+            drag.push_live(
+                opacity_operation(
+                    clip,
+                    EffectId(1),
+                    opacity_move_key(&stored, 1, TimeCode(at), 80, duration),
+                ),
+                key.clone(),
+            );
+        }
+        assert_eq!(drag.coalesce_key(), Some(key.as_str()));
+        assert!(drag.gesture_started());
+    }
+
+    /// MO1 R24: the band paints its parked offer muted and keyless, and its
+    /// keyed line and dots in the selection tint.
+    #[test]
+    fn the_band_paints_its_offer_and_its_keys() {
+        let band = opacity_band_rect(egui::Rect::from_min_size(
+            egui::Pos2::new(100.0, 50.0),
+            egui::vec2(300.0, 100.0),
+        ))
+        .expect("a tall clip is offered a band");
+        let duration = TimeCode(30);
+        for (keys, parked, selected, dots, line) in [
+            (Vec::new(), 80, false, 0, color::TEXT_MUTED),
+            (
+                vec![lane_key(0, 50), lane_key(15, 100)],
+                80,
+                false,
+                2,
+                color::TEXT_PRIMARY_64,
+            ),
+            (
+                vec![lane_key(0, 50), lane_key(15, 100)],
+                80,
+                true,
+                2,
+                color::ACCENT,
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                paint_opacity_band(ui.painter(), band, duration, &keys, parked, selected);
+            });
+            let mut circles = Vec::new();
+            let mut lines = Vec::new();
+            for clipped in &output.shapes {
+                collect_envelope_shapes(&clipped.shape, &mut circles, &mut lines);
+            }
+            assert_eq!(circles.len(), dots, "one dot per key, none parked");
+            for (radius, fill) in &circles {
+                assert!((radius - ENVELOPE_POINT_RADIUS).abs() < f32::EPSILON);
+                assert_eq!(*fill, line);
+            }
+            assert!(
+                lines.iter().any(|(_, width, tint)| {
+                    (width - ENVELOPE_STROKE).abs() < f32::EPSILON && *tint == line
+                }),
+                "the line paints in {line:?}; it painted {lines:?}"
+            );
+        }
     }
 
     /// MO1 R23: a disabled clip dims under the veil; an enabled one paints
