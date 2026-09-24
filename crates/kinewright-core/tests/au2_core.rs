@@ -7,9 +7,11 @@ use kinewright_core::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AudioBus,
     AudioBusId, AudioChain, AudioMaster, AudioMix, AutomationCurve, CHAIN_LOOKAHEAD_MILLISECONDS,
     ChainLookahead, ColorContext, Command, Core, Document, Effect, EffectId, EffectUniform, Event,
-    Keyframe, KeyframeInterpolation, MediaAsset, MediaCatalog, MediaKind, MediaSourceFingerprint,
-    OpError, Operation, ParamValue, Rational, TimeCode, Track, TrackId, TrackKind,
-    chain_lookahead_milliseconds, effect_descriptor, is_audio_effect, is_static_audio_parameter,
+    IncidentCode, IncidentFamily, IncidentLog, IncidentObservation, IncidentSubject, Keyframe,
+    KeyframeInterpolation, MediaAsset, MediaCatalog, MediaKind, MediaSourceFingerprint, Observed,
+    OpError, Operation, ParamValue, Rational, TimeCode, TimelineRevision, Track, TrackId,
+    TrackKind, chain_lookahead_milliseconds, effect_descriptor, is_audio_effect,
+    is_static_audio_parameter,
 };
 
 /// The eight bus-only audio node names, in `EFFECT_DESCRIPTORS` order (AU2 §2.1).
@@ -1562,4 +1564,38 @@ fn master_effects_reject_disabled_or_keyframed_enable() {
             error
         );
     }
+}
+
+/// MO1 R30: the one new `OpError` variant renders as a `Malformed` incident
+/// under the existing `Operation` code — MO1 mints zero `IncidentCode`s.
+#[test]
+fn disabled_effect_on_audio_chain_renders_a_malformed_incident() {
+    let error = OpError::DisabledEffectOnAudioChain {
+        chain: AudioChain::Bus(AudioBusId(1)),
+        effect: EffectId(1),
+    };
+    assert_eq!(error.incident_family(), IncidentFamily::Malformed);
+    assert_eq!(
+        error.incident_code(),
+        IncidentCode::Operation(IncidentFamily::Malformed)
+    );
+    let observation = IncidentObservation::from_op_error(
+        &error,
+        IncidentSubject::Chain(AudioChain::Bus(AudioBusId(1))),
+        TimelineRevision(3),
+    );
+    let mut log = IncidentLog::default();
+    let Observed::Opened(_) = log.observe(observation) else {
+        panic!("the first observation opens an incident");
+    };
+    let rendered = serde_json::to_value(log.open().next().unwrap()).unwrap();
+    assert_eq!(rendered["code"], serde_json::json!("operation_malformed"));
+    assert_eq!(
+        rendered["subject"],
+        serde_json::json!({"chain": {"bus": 1}})
+    );
+    assert!(
+        rendered["observed"].as_str().unwrap().contains("disabled"),
+        "the card names the refusal: {rendered}"
+    );
 }

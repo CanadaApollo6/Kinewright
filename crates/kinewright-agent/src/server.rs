@@ -28241,6 +28241,23 @@ mod tests {
     ///   1 645 364 + 26 303 = **1 671 667**,
     ///   124 376 + 144 = **124 520**. Counts `147 / 60 / 87`. Served quad
     ///   unchanged — still the twentieth measurement.
+    ///
+    /// - **A4d (R21 derivation).** The A2 model-field growth, measured per
+    ///   embedding tool exactly as AU4 E20 did — per-tool bytes diffed
+    ///   between the A1 tree and this tree over the 141 common tools: 85
+    ///   tools embed none of the grown types (+0); 55 embed the full grown
+    ///   set at +2,001 B serialized and input each, split tangents +489 ×
+    ///   55 = 26,895, Effect enable +675 × 55 = 37,125, Clip enable +593 ×
+    ///   55 = 32,615, Image +244 × 55; `search_media` embeds only
+    ///   `MediaKind` (+244 — its args carry `kind: Option<MediaKind>` and
+    ///   nothing grown), closing Image at +244 × 56 = 13,664; and the five
+    ///   effect-vocabulary tools (`add_effect`, `set_effect_param`,
+    ///   `set_effect_keyframes`, `clear_effect_keyframes`, `insert_effect`)
+    ///   carry the transform rows at +353 B of description each (5 × 353 =
+    ///   1,765 — the whole A2b move). Every quotient divides exactly and
+    ///   the parts sum to the pinned per-commit totals; `apply_edit_plan`'s
+    ///   extra +4,034/+4,034/+0 over the same span is the six A4 `oneOf`
+    ///   branches, derived per-commit above.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();

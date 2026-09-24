@@ -8,12 +8,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_channel::Receiver;
 use kinewright_core::{
     AssetId, AudioBus, AudioBusId, AudioMaster, AudioMix, AutomationCurve, BatchError, Clip,
-    ClipId, ColorContext, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect, EffectId, FrameTexture,
-    Keyframe, KeyframeInterpolation, MediaAsset, MediaCatalog, MediaEvent, MediaKind,
-    MediaSourceFingerprint, OpError, Operation, ParamValue, Playback, Rational, RelinkCandidate,
-    TRACK_AUTOMATION_PARAMETERS, TimeCode, Track, TrackId, TrackKind, TrackMix, apply_batch,
-    clamp_project_curve, envelope_coalesce_key, is_hold_only_parameter, qa_document,
-    rebase_clip_curve, track_automation_coalesce_key,
+    ClipId, ColorContext, Command, Core, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect, EffectId,
+    Event, FrameTexture, Keyframe, KeyframeInterpolation, MediaAsset, MediaCatalog, MediaEvent,
+    MediaKind, MediaSourceFingerprint, OpError, Operation, ParamValue, Playback, Query,
+    QueryResult, Rational, RelinkCandidate, TRACK_AUTOMATION_PARAMETERS, TimeCode,
+    TimelineRevision, Track, TrackId, TrackKind, TrackMix, apply_batch, clamp_project_curve,
+    envelope_coalesce_key, is_hold_only_parameter, qa_document, rebase_clip_curve,
+    track_automation_coalesce_key,
 };
 
 fn fps() -> Rational {
@@ -3397,4 +3398,156 @@ fn copy_onto_shorter_clips_is_legal() {
         "the 59-frame key lands past the 20-frame end, verbatim"
     );
     doc.validate().unwrap();
+}
+
+// ============================================================================
+// MO1 Part A4d — §10 gates 7 (agent path) and 11 (sub-pixel contract half).
+// ============================================================================
+
+fn live_revision(core: &Core) -> TimelineRevision {
+    let Event::QueryResult(QueryResult::Snapshot { revision, .. }) =
+        core.request(Command::Query(Query::Snapshot)).unwrap()
+    else {
+        panic!("a snapshot query answers with a revisioned snapshot");
+    };
+    revision
+}
+
+fn gated_batch(core: &Core, operations: Vec<Operation>) -> std::sync::Arc<Document> {
+    let Event::DocumentChanged { doc, .. } = core
+        .request(Command::DoBatchIfRevision {
+            expected: live_revision(core),
+            operations,
+        })
+        .unwrap()
+    else {
+        panic!("a fresh-revision batch lands");
+    };
+    doc
+}
+
+/// §10 gate 7: upsert/replace/remove/what-is-read-back through the
+/// revision-gated actor path — including key-move as one atomic batch and
+/// last-key-to-static — with a stale revision refused.
+#[test]
+fn single_key_upsert_remove_round_trip() {
+    let core = Core::spawn(clip_with_envelope_and_colour_curve()).unwrap();
+    let upsert_at = |at: i64, value: i64| Operation::UpsertEffectKeyframe {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: "exposure_milli_stops".to_owned(),
+        key: key(at, value),
+    };
+    let remove_at = |at: i64| Operation::RemoveEffectKeyframe {
+        clip: ClipId(1),
+        effect: EffectId(1),
+        name: "exposure_milli_stops".to_owned(),
+        at: TimeCode(at),
+    };
+
+    // Upsert, then replace: what is read back is what was sent.
+    let doc = gated_batch(&core, vec![upsert_at(30, 2_000)]);
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(0, 0), (30, 2_000), (59, 4_720)]
+    );
+    let doc = gated_batch(&core, vec![upsert_at(30, 2_500)]);
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(0, 0), (30, 2_500), (59, 4_720)]
+    );
+
+    // Key-move as one atomic batch: remove + insert lands together.
+    let doc = gated_batch(&core, vec![remove_at(30), upsert_at(40, 2_500)]);
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(0, 0), (40, 2_500), (59, 4_720)]
+    );
+
+    // Last-key-to-static through the same path: removing every key writes
+    // the final value into the static parameter and clears the curve.
+    let doc = gated_batch(&core, vec![remove_at(0), remove_at(59), remove_at(40)]);
+    let effect = &clip(&doc, ClipId(1)).effects[0];
+    assert!(!effect.keyframes.contains_key("exposure_milli_stops"));
+    assert_eq!(
+        effect.parameters["exposure_milli_stops"],
+        ParamValue::Integer(2_500)
+    );
+
+    // A stale revision is refused without touching the document.
+    let live = live_revision(&core);
+    let event = core
+        .request(Command::DoBatchIfRevision {
+            expected: TimelineRevision(0),
+            operations: vec![upsert_at(10, 1)],
+        })
+        .unwrap();
+    assert_eq!(
+        event,
+        Event::RevisionConflict {
+            expected: TimelineRevision(0),
+            actual: live,
+            token: None,
+        }
+    );
+    assert_eq!(live_revision(&core), live);
+}
+
+/// §10 gate 11 (contract half): a canonical push-in (R1 — master constant,
+/// fine ramped) steps ≤ 1 px frame-to-frame on the evaluated effective
+/// scale, while a whole-percent master step jumps ~19 px. (The lavapipe
+/// pixel-diff half belongs to the render part.)
+#[test]
+fn push_in_step_sub_pixel() {
+    let mut doc = document_with_one_clip();
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(1),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
+            keyframes: BTreeMap::from([(
+                "scale_fine_hundredths".to_owned(),
+                linear(&[(0, 10_000), (50, 10_050)]),
+            )]),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    // Effective width at 1080p in milli-pixels, integer math throughout:
+    // 1920 px × master/100 × axis/100 × fine/10000, axes neutral-absent.
+    let width_milli_px = |doc: &Document, frame: i64| {
+        let evaluated = clip(doc, ClipId(1)).effects[0].evaluated_at(TimeCode(frame));
+        let lane = |name: &str, neutral: i64| match evaluated.parameters.get(name) {
+            Some(ParamValue::Integer(value)) => *value,
+            _ => neutral,
+        };
+        let (master, axis, fine) = (
+            lane("scale_percent", 100),
+            lane("scale_x_percent", 100),
+            lane("scale_fine_hundredths", 10_000),
+        );
+        1_920_000 * master * axis * fine / 100_000_000
+    };
+    let mut worst = 0;
+    for frame in 0..50 {
+        let step = (width_milli_px(&doc, frame + 1) - width_milli_px(&doc, frame)).abs();
+        worst = worst.max(step);
+    }
+    assert!(
+        worst <= 1_000,
+        "a canonical push-in steps ≤ 1 px frame-to-frame, worst {worst} milli-px"
+    );
+
+    // The fails-rationale, pinned: one whole master percent is ~19 px.
+    let coarse = |master: i64| 1_920_000_i64 * master * 100 * 10_000 / 100_000_000;
+    let coarse_step = coarse(101) - coarse(100);
+    assert_eq!(coarse_step, 19_200);
+    assert!(
+        coarse_step > 1_000,
+        "a 1% master step must stay visibly coarse"
+    );
 }
