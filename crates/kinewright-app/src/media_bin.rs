@@ -770,6 +770,16 @@ fn source_color_label(ui: &mut egui::Ui, display: SourceColorDisplay) {
     ui.add(egui::Label::new(egui::RichText::new(display.summary).color(text_color)).wrap());
 }
 
+/// R2's review hook: the still-placement builder for the scenario tests.
+/// Above `mod tests` so no item trails the test module.
+#[cfg(test)]
+pub(crate) fn tests_still_placement(
+    document: &kinewright_core::Document,
+    asset: &kinewright_core::MediaAsset,
+) -> Result<Vec<Operation>, &'static str> {
+    still_placement_operations(document, asset)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -960,6 +970,62 @@ mod tests {
                 Some(&kinewright_core::ParamValue::Integer(expected)),
                 "{name} carries the 2:1 fit"
             );
+        }
+    }
+
+    /// N5 K2: a 3:2 still's baked fit survives every animated preset — each
+    /// move starts from the bake, never from neutral.
+    #[test]
+    fn animated_presets_start_from_a_3_to_2_bake() {
+        for preset in [
+            kinewright_agent::MotionPreset::PushIn,
+            kinewright_agent::MotionPreset::PullOut,
+            kinewright_agent::MotionPreset::KenBurns,
+        ] {
+            let fps = Rational::new(30, 1).unwrap();
+            let asset = still_asset(4, (150, 100));
+            let mut document = still_document(fps, (100, 100));
+            document.media_pool.push(asset.clone());
+            let placed = still_placement_operations(&document, &asset).unwrap();
+            kinewright_core::apply_batch(&mut document, &placed).unwrap();
+            let baked = match document.tracks[0].clips[0].effects[0]
+                .parameters
+                .get("scale_fine_hundredths")
+            {
+                Some(kinewright_core::ParamValue::Integer(value)) => *value,
+                other => panic!("{other:?}"),
+            };
+            assert_ne!(baked, 10_000, "a 3:2 still bakes a non-neutral fine");
+            let plan = kinewright_agent::plan_motion(
+                &document,
+                kinewright_core::TimelineRevision(0),
+                &kinewright_agent::MotionPlanArgs {
+                    expected_revision: kinewright_core::TimelineRevision(0),
+                    clip_id: document.tracks[0].clips[0].id,
+                    preset,
+                    replace: false,
+                },
+            )
+            .unwrap();
+            kinewright_core::apply_batch(&mut document, &plan.operations).unwrap();
+            let first = document.tracks[0].clips[0].effects[0]
+                .keyframes
+                .get("scale_fine_hundredths")
+                .unwrap()
+                .value_at(TimeCode::ZERO)
+                .unwrap();
+            let last = document.tracks[0].clips[0].effects[0]
+                .keyframes
+                .get("scale_fine_hundredths")
+                .unwrap()
+                .value_at(TimeCode(149))
+                .unwrap();
+            assert_eq!(first, baked, "{preset:?} starts from the bake");
+            if preset == kinewright_agent::MotionPreset::PullOut {
+                assert!(last <= baked, "{preset:?} widens from the bake");
+            } else {
+                assert!(last >= baked, "{preset:?} moves away from the bake");
+            }
         }
     }
 

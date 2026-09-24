@@ -94,6 +94,10 @@ struct OpacityDrag {
 /// Where the in-flight opacity drag is remembered between frames.
 const OPACITY_DRAG_MEMORY_ID: &str = "timeline-opacity-drag";
 
+/// N5 K4: where a lane diamond click remembers its `(clip, frame)` so the
+/// inspector's keyframe list can scroll to and highlight that row.
+pub(crate) const KEYFRAME_FOCUS_MEMORY_ID: &str = "timeline-keyframe-focus";
+
 /// AU4 §5.1 rule 95a: the envelope's paint, hit and interact rect.
 ///
 /// Pure; no `Ui`, no session state. `band` is built exactly as the waveform's
@@ -238,6 +242,57 @@ fn envelope_points(rect: egui::Rect, duration: TimeCode, keys: &[Keyframe]) -> V
         .collect()
 }
 
+/// N5 K4: the opacity band's drawn polyline, clipped to the clip bounds.
+/// `points` and `keys` stay parallel (the hit contract); interior keys draw
+/// at their mapped points, and the edge segments start/end at the evaluated
+/// value at frames 0 and `duration - 1` — never at an outside key's value.
+/// Pure.
+fn opacity_polyline(
+    band: egui::Rect,
+    points: &[egui::Pos2],
+    keys: &[Keyframe],
+    duration: TimeCode,
+) -> Vec<egui::Pos2> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+    let end = duration.0.saturating_sub(1).max(0);
+    let edge = |frame: i64| {
+        opacity_value_to_y(
+            band,
+            kinewright_core::value_at_keys(keys, frame).unwrap_or(0),
+        )
+    };
+    let kept: Vec<(&Keyframe, &egui::Pos2)> = keys
+        .iter()
+        .zip(points)
+        .filter(|(key, _)| key.at.0 >= 0 && key.at.0 < duration.0)
+        .collect();
+    let mut drawn = vec![egui::pos2(band.left(), edge(0))];
+    let mut previous_hold = false;
+    for (key, point) in &kept {
+        if previous_hold {
+            drawn.push(egui::pos2(
+                point.x,
+                drawn.last().map_or(point.y, |last| last.y),
+            ));
+        }
+        drawn.push(**point);
+        previous_hold = key.interpolation == KeyframeInterpolation::Hold;
+    }
+    drawn.push(egui::pos2(band.right(), edge(end)));
+    drawn
+}
+
+/// N5 K4: the dots the band paints — interior keys only.
+fn opacity_dots(band: egui::Rect, points: &[egui::Pos2]) -> Vec<egui::Pos2> {
+    points
+        .iter()
+        .copied()
+        .filter(|point| point.x >= band.left() && point.x <= band.right())
+        .collect()
+}
+
 /// The drawn line through those keys, with a `Hold` segment drawn as a step.
 ///
 /// A `Hold` segment is flat until the next key's first sample (AU4 §3.1 rule
@@ -356,12 +411,12 @@ fn envelope_hit(points: &[egui::Pos2], rect: egui::Rect, pointer: egui::Pos2) ->
         .map(|(index, _)| index)
 }
 
-/// MO1 R23: the lane's diamonds — the distinct non-negative clip-local
-/// frames carrying any effect key, unioned over owners (param curves and
-/// `enabled` siblings alike) and sorted. Negative kept-outside keys are
-/// clipped here and reappear on trim-out; the clip's own enable curve is
+/// MO1 R23: the lane's diamonds — the distinct clip-local frames carrying
+/// any effect key, unioned over owners (param curves and `enabled` siblings
+/// alike) and sorted. N5 K4: clipped to `0..duration` at both ends —
+/// kept-outside keys reappear on trim-out; the clip's own enable curve is
 /// not an effect key and stays out. Pure.
-fn key_lane_diamonds(clip: &Clip) -> Vec<i64> {
+fn key_lane_diamonds(clip: &Clip, duration: TimeCode) -> Vec<i64> {
     let mut frames: Vec<i64> = clip
         .effects
         .iter()
@@ -372,7 +427,7 @@ fn key_lane_diamonds(clip: &Clip) -> Vec<i64> {
                 .chain(effect.enabled_curve.iter())
                 .flat_map(|curve| curve.keyframes.iter().map(|key| key.at.0))
         })
-        .filter(|frame| *frame >= 0)
+        .filter(|frame| *frame >= 0 && *frame < duration.0)
         .collect();
     frames.sort_unstable();
     frames.dedup();
@@ -433,13 +488,25 @@ fn disabled_clip_wash(enabled: bool) -> Option<egui::Color32> {
 
 /// MO1 R23: paint the lane's diamonds — accent on the selected clip, the
 /// envelope's muted tint otherwise.
-fn paint_key_lane(painter: &egui::Painter, points: &[egui::Pos2], selected: bool) {
+fn paint_key_lane(
+    painter: &egui::Painter,
+    points: &[egui::Pos2],
+    selected: bool,
+    focused: Option<usize>,
+) {
     let tint = if selected {
         color::ACCENT
     } else {
         color::TEXT_PRIMARY_64
     };
-    for point in points {
+    for (index, point) in points.iter().enumerate() {
+        // N5 K4: the clicked diamond keeps a light ring, so the selected key
+        // reads even on a selected (all-accent) clip.
+        let stroke = if focused == Some(index) {
+            egui::Stroke::new(1.5, color::TEXT_PRIMARY)
+        } else {
+            egui::Stroke::NONE
+        };
         painter.add(egui::Shape::convex_polygon(
             vec![
                 egui::pos2(point.x, point.y - ENVELOPE_POINT_RADIUS),
@@ -448,7 +515,7 @@ fn paint_key_lane(painter: &egui::Painter, points: &[egui::Pos2], selected: bool
                 egui::pos2(point.x - ENVELOPE_POINT_RADIUS, point.y),
             ],
             tint,
-            egui::Stroke::NONE,
+            stroke,
         ));
     }
 }
@@ -716,6 +783,47 @@ fn opacity_move_key(
     moved
 }
 
+/// N5 K6 (M6): the key list one band-drag frame writes — the pointer's grab
+/// value at `pointer_y` folded through the neighbour clamps. Pure; the drag
+/// body calls this once instead of inlining the grab.
+fn opacity_drag_keys(
+    keys: &[Keyframe],
+    index: usize,
+    at: TimeCode,
+    band: egui::Rect,
+    pointer_y: f32,
+    duration: TimeCode,
+) -> Vec<Keyframe> {
+    let stored = keys.get(index).map_or(0, |key| key.value);
+    opacity_move_key(
+        keys,
+        index,
+        at,
+        opacity_grab_value(band, pointer_y, stored),
+        duration,
+    )
+}
+
+/// N5 K6 (M6b): the key list one band click inserts — a curved band inserts
+/// the evaluated value, a curve-free band its first key at the parked value.
+/// Pure; the click body calls this once instead of inlining the match.
+fn opacity_insert_keys(
+    curve: Option<&AutomationCurve>,
+    at: TimeCode,
+    parked: i64,
+) -> Vec<Keyframe> {
+    match curve {
+        Some(curve) => envelope_insert_key(curve, at),
+        None => vec![Keyframe {
+            at,
+            value: parked,
+            interpolation: KeyframeInterpolation::Linear,
+            tangent_in: 0,
+            tangent_out: 0,
+        }],
+    }
+}
+
 /// MO1 R24: the operation one band drag or insert writes — the whole curve,
 /// the envelope's rule.
 fn opacity_operation(clip: ClipId, effect: EffectId, keys: Vec<Keyframe>) -> Operation {
@@ -759,15 +867,15 @@ fn paint_opacity_band(
         color::TEXT_PRIMARY_64
     };
     let points = opacity_points(band, duration, keys);
-    let line = envelope_polyline(band, &points, keys);
+    let line = opacity_polyline(band, &points, keys, duration);
     if line.len() >= 2 {
         painter.add(egui::Shape::line(
             line,
             egui::Stroke::new(ENVELOPE_STROKE, tint),
         ));
     }
-    for point in &points {
-        painter.circle_filled(*point, ENVELOPE_POINT_RADIUS, tint);
+    for point in opacity_dots(band, &points) {
+        painter.circle_filled(point, ENVELOPE_POINT_RADIUS, tint);
     }
 }
 
@@ -1627,7 +1735,7 @@ impl KinewrightApp {
                             // selects the clip, which drives the inspector
                             // to its keyframe editor.
                             let lane_diamonds = if matches!(track.kind, TrackKind::Video) {
-                                key_lane_diamonds(clip)
+                                key_lane_diamonds(clip, duration)
                             } else {
                                 Vec::new()
                             };
@@ -1659,6 +1767,19 @@ impl KinewrightApp {
                                     selected_clip = Some(clip.id);
                                     selected_marker = None;
                                     selected_asset = asset.map(|asset| asset.id);
+                                    // N5 K4: a diamond click focuses its key
+                                    // in the keyframe editor.
+                                    if let Some(pointer) = lane.interact_pointer_pos()
+                                        && let Some(index) = key_lane_hit(strip, &points, pointer)
+                                        && let Some(frame) = lane_diamonds.get(index)
+                                    {
+                                        ui.data_mut(|data| {
+                                            data.insert_temp(
+                                                egui::Id::new(KEYFRAME_FOCUS_MEMORY_ID),
+                                                (clip.id, TimeCode(*frame)),
+                                            );
+                                        });
+                                    }
                                 }
                                 if lane.double_clicked()
                                     && matches!(&clip.content, ClipContent::Title(_))
@@ -1699,7 +1820,7 @@ impl KinewrightApp {
                                 let drawn = if keys.is_empty() {
                                     opacity_parked_polyline(band, parked)
                                 } else {
-                                    envelope_polyline(band, &points, keys)
+                                    opacity_polyline(band, &points, keys, duration)
                                 };
                                 let dragging =
                                     opacity_drag.is_some_and(|drag| drag.clip == clip.id);
@@ -1748,7 +1869,7 @@ impl KinewrightApp {
                                     }
                                     if let Some(drag) =
                                         opacity_drag.filter(|drag| drag.clip == clip.id)
-                                        && let Some(stored) = keys.get(drag.index)
+                                        && keys.get(drag.index).is_some()
                                         && is_live_drag(&opacity)
                                         && let Some(pointer) = opacity.interact_pointer_pos()
                                     {
@@ -1765,12 +1886,8 @@ impl KinewrightApp {
                                         if opacity.dragged() {
                                             snap_guide = guide.or(snap_guide);
                                         }
-                                        let moved = opacity_move_key(
-                                            keys,
-                                            drag.index,
-                                            at,
-                                            opacity_grab_value(band, pointer.y, stored.value),
-                                            duration,
+                                        let moved = opacity_drag_keys(
+                                            keys, drag.index, at, band, pointer.y, duration,
                                         );
                                         if moved != keys {
                                             envelope_edits.extend_live(
@@ -1804,16 +1921,11 @@ impl KinewrightApp {
                                             pixels_per_frame,
                                             snapping_disabled,
                                         );
-                                        let inserted = match effect.keyframes.get("percent") {
-                                            Some(curve) => envelope_insert_key(curve, at),
-                                            None => vec![Keyframe {
-                                                at,
-                                                value: parked,
-                                                interpolation: KeyframeInterpolation::Linear,
-                                                tangent_in: 0,
-                                                tangent_out: 0,
-                                            }],
-                                        };
+                                        let inserted = opacity_insert_keys(
+                                            effect.keyframes.get("percent"),
+                                            at,
+                                            parked,
+                                        );
                                         if inserted != keys {
                                             envelope_edits.push(opacity_operation(
                                                 clip.id, effect.id, inserted,
@@ -2080,9 +2192,20 @@ impl KinewrightApp {
                             // drag delta), the dim wash last so a disabled
                             // clip dims its diamonds too.
                             if matches!(track.kind, TrackKind::Video) {
-                                let diamonds = key_lane_diamonds(clip);
+                                let diamonds = key_lane_diamonds(clip, duration);
                                 if !diamonds.is_empty() {
                                     let strip = key_lane_strip(draw_rect);
+                                    // N5 K4: the clicked diamond keeps its ring.
+                                    let focused = ui
+                                        .data(|data| {
+                                            data.get_temp::<(ClipId, TimeCode)>(egui::Id::new(
+                                                KEYFRAME_FOCUS_MEMORY_ID,
+                                            ))
+                                        })
+                                        .filter(|(id, _)| *id == clip.id)
+                                        .and_then(|(_, frame)| {
+                                            diamonds.iter().position(|diamond| *diamond == frame.0)
+                                        });
                                     paint_key_lane(
                                         &painter,
                                         &key_lane_points(
@@ -2092,6 +2215,7 @@ impl KinewrightApp {
                                             pixels_per_frame,
                                         ),
                                         selected,
+                                        focused,
                                     );
                                 }
                             }
@@ -5265,21 +5389,21 @@ mod tests {
         let mut document = linked_fixture();
         document.tracks[0].clips[0].effects = lane_effects_fixture();
         let clip = &document.tracks[0].clips[0];
-        assert_eq!(key_lane_diamonds(clip), [0, 15, 29]);
+        assert_eq!(key_lane_diamonds(clip, TimeCode(30)), [0, 15, 29]);
 
         let mut with_clip_curve = document.clone();
         with_clip_curve.tracks[0].clips[0].enabled_curve = Some(AutomationCurve {
             keyframes: vec![lane_key(7, 1)],
         });
         assert_eq!(
-            key_lane_diamonds(&with_clip_curve.tracks[0].clips[0]),
+            key_lane_diamonds(&with_clip_curve.tracks[0].clips[0], TimeCode(30)),
             [0, 15, 29],
             "the clip's own enable curve is not an effect key"
         );
 
         let mut bare = document.clone();
         bare.tracks[0].clips[0].effects = Vec::new();
-        assert!(key_lane_diamonds(&bare.tracks[0].clips[0]).is_empty());
+        assert!(key_lane_diamonds(&bare.tracks[0].clips[0], TimeCode(30)).is_empty());
     }
 
     /// MO1 R23: the strip sits below the label, points map frames to x, and
@@ -5397,7 +5521,7 @@ mod tests {
             "frame 15 is gone from every owner"
         );
         assert_eq!(
-            key_lane_diamonds(landed),
+            key_lane_diamonds(landed, TimeCode(30)),
             [0, 29],
             "and the lane shows the survivors"
         );
@@ -5444,6 +5568,68 @@ mod tests {
         );
     }
 
+    /// N5 K6 (M9): the lane Delete arbitrates the `enabled` sibling too — a
+    /// hovered diamond over an enabled key removes it alongside the param
+    /// keys, and the ops land through R16.
+    #[test]
+    fn delete_over_a_hovered_diamond_removes_the_enabled_sibling_key() {
+        let mut document = linked_fixture();
+        document.tracks[0].clips[0].effects = vec![Effect {
+            enabled: false,
+            enabled_curve: Some(AutomationCurve {
+                keyframes: vec![lane_key(15, 1)],
+            }),
+            id: EffectId(1),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::from([(
+                "x_basis_points".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![lane_key(15, 100)],
+                },
+            )]),
+        }];
+        let clip = document.tracks[0].clips[0].id;
+        let KeyLaneDelete::RemoveKeys { removes, .. } = key_lane_delete_action(
+            &document,
+            Some(KeyLaneHover {
+                clip,
+                frame: TimeCode(15),
+            }),
+        ) else {
+            panic!("a hovered diamond removes its owners");
+        };
+        assert_eq!(
+            removes,
+            [
+                (EffectId(1), "x_basis_points".to_owned()),
+                (EffectId(1), "enabled".to_owned()),
+            ],
+            "the param key and the enabled sibling, in order"
+        );
+        let mut applied = document.clone();
+        let operations: Vec<Operation> = removes
+            .into_iter()
+            .map(|(effect, name)| Operation::RemoveEffectKeyframe {
+                clip,
+                effect,
+                name,
+                at: TimeCode(15),
+            })
+            .collect();
+        kinewright_core::apply_batch(&mut applied, &operations)
+            .expect("the sibling removal is a valid operation");
+        let landed = applied.clip(clip).unwrap();
+        assert!(
+            landed.effects[0].enabled,
+            "R16 writes the removed enabled value into the static"
+        );
+        assert!(
+            landed.effects[0].enabled_curve.is_none(),
+            "the last sibling key clears the curve"
+        );
+    }
+
     /// MO1 R23: a last-key lane delete still removes — R16 writes the
     /// key's value to the static and the lane empties.
     #[test]
@@ -5485,7 +5671,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            key_lane_diamonds(&applied.tracks[0].clips[0]),
+            key_lane_diamonds(&applied.tracks[0].clips[0], TimeCode(30)),
             Vec::<i64>::new(),
             "the lane is empty"
         );
@@ -5601,6 +5787,89 @@ mod tests {
             .keyframes
             .clone();
         (document, clip, stored)
+    }
+
+    /// N5 K4: the band clips drawing to the clip bounds — an outside key's
+    /// value never paints at the edge; the edge segments hold the value the
+    /// curve evaluates to at frames 0 and duration-1.
+    #[test]
+    fn opacity_band_clips_drawing_to_the_clip_bounds() {
+        let band = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 40.0));
+        let duration = TimeCode(30);
+        let hold = |at: i64, value: i64| Keyframe {
+            at: TimeCode(at),
+            value,
+            interpolation: KeyframeInterpolation::Hold,
+            tangent_in: 0,
+            tangent_out: 0,
+        };
+        let keys = vec![
+            hold(-20, 0),
+            lane_key(0, 50),
+            lane_key(29, 100),
+            hold(60, 0),
+        ];
+        let points = opacity_points(band, duration, &keys);
+        let drawn = opacity_polyline(band, &points, &keys, duration);
+        assert!(drawn.len() >= 2);
+        assert!(
+            drawn
+                .iter()
+                .all(|point| point.x >= band.left() && point.x <= band.right()),
+            "every drawn point sits inside the band: {drawn:?}"
+        );
+        assert!((drawn.first().unwrap().x - band.left()).abs() < f32::EPSILON);
+        assert!(
+            (drawn.first().unwrap().y - opacity_value_to_y(band, 50)).abs() < f32::EPSILON,
+            "the left edge holds value-at-0, not the -20 key's 0"
+        );
+        assert!((drawn.last().unwrap().x - band.right()).abs() < f32::EPSILON);
+        assert!(
+            (drawn.last().unwrap().y - opacity_value_to_y(band, 100)).abs() < f32::EPSILON,
+            "the right edge holds value-at-29, not the frame-60 key"
+        );
+        let dots = opacity_dots(band, &points);
+        assert_eq!(dots.len(), 2, "outside keys draw no dots");
+    }
+
+    /// N5 K6 (M6): one band-drag frame folds the pointer's grab value through
+    /// the neighbour clamps — dragging up off a 0 key lifts it (M6's
+    /// `stored.value` would pin it at 0).
+    #[test]
+    fn opacity_band_drag_frame_folds_the_pointer_value() {
+        let band = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 40.0));
+        let keys = vec![lane_key(0, 0), lane_key(15, 100)];
+        let moved = opacity_drag_keys(&keys, 0, TimeCode(0), band, band.top(), TimeCode(30));
+        assert_eq!(
+            moved[0].value, 100,
+            "the pointer's value wins over the stored 0: {moved:?}"
+        );
+        assert_eq!(moved[1], keys[1], "neighbours are untouched");
+    }
+
+    /// N5 K6 (M6b): a curve-free band click inserts its first key at the
+    /// parked value, not 100; a curved band inserts the evaluated value.
+    #[test]
+    fn opacity_band_insert_uses_the_parked_or_evaluated_value() {
+        let inserted = opacity_insert_keys(None, TimeCode(9), 40);
+        assert_eq!(
+            inserted,
+            vec![Keyframe {
+                at: TimeCode(9),
+                value: 40,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            }]
+        );
+        let curve = AutomationCurve {
+            keyframes: vec![lane_key(0, 0), lane_key(20, 100)],
+        };
+        let inserted = opacity_insert_keys(Some(&curve), TimeCode(10), 40);
+        assert_eq!(
+            inserted.iter().map(|key| key.value).collect::<Vec<_>>(),
+            vec![0, 50, 100]
+        );
     }
 
     /// MO1 §10 gate 10: a band drag produces exactly the curve the
@@ -5827,7 +6096,7 @@ mod tests {
             let ctx = egui::Context::default();
             crate::theme::install(&ctx);
             let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                paint_key_lane(ui.painter(), &points, selected);
+                paint_key_lane(ui.painter(), &points, selected, None);
             });
             let found = diamonds(&output);
             assert_eq!(found.len(), 3, "one diamond per frame");
@@ -5836,6 +6105,51 @@ mod tests {
                 assert_eq!(*fill, expected);
             }
         }
+    }
+
+    /// N5 K4: the clicked diamond keeps a light ring, so the selected key
+    /// reads even on a selected (all-accent) clip.
+    #[test]
+    fn the_lane_rings_the_focused_diamond() {
+        fn strokes(output: &egui::FullOutput) -> Vec<egui::epaint::PathStroke> {
+            fn collect(shape: &egui::epaint::Shape, found: &mut Vec<egui::epaint::PathStroke>) {
+                match shape {
+                    egui::epaint::Shape::Path(path) if path.fill != egui::Color32::TRANSPARENT => {
+                        found.push(path.stroke.clone());
+                    }
+                    egui::epaint::Shape::Vec(shapes) => {
+                        for shape in shapes {
+                            collect(shape, found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            for clipped in &output.shapes {
+                collect(&clipped.shape, &mut found);
+            }
+            found
+        }
+
+        let strip = key_lane_strip(egui::Rect::from_min_size(
+            egui::Pos2::new(100.0, 50.0),
+            egui::vec2(300.0, 60.0),
+        ));
+        let points = key_lane_points(strip, 100.0, &[0, 15, 29], 6.0);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_key_lane(ui.painter(), &points, true, Some(1));
+        });
+        let found = strokes(&output);
+        assert_eq!(found.len(), 3);
+        assert_eq!(
+            found[1],
+            egui::epaint::PathStroke::from(egui::Stroke::new(1.5, color::TEXT_PRIMARY))
+        );
+        assert_eq!(found[0], egui::epaint::PathStroke::NONE);
+        assert_eq!(found[2], egui::epaint::PathStroke::NONE);
     }
 
     /// AU4 §0 E53: a clip with no curve still shows a band — one flat, muted
@@ -6858,3 +7172,12 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+pub(crate) fn tests_paste_operations(clipboard: Option<ClipId>, clip: ClipId) -> Vec<Operation> {
+    clip_attributes_paste_operations(clipboard, clip)
+}
+
+#[cfg(test)]
+#[path = "review_c2_timeline.rs"]
+mod review_c2_timeline;

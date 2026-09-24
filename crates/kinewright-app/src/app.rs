@@ -128,12 +128,88 @@ struct RouterApply {
     origin: RouterSendOrigin,
 }
 
-/// MO1 R25: the plan-a-move dialog's target and picks. The operations are
-/// re-planned every frame, so the preview never goes stale under other edits.
+/// N5 K3: one cached plan preview — the revision and picks it was planned
+/// against, plus the operations (or the refusal text). The dialog re-plans
+/// only when the revision or picks change, never per frame.
+pub(crate) struct CachedMotionPlan {
+    revision: TimelineRevision,
+    preset: kinewright_agent::MotionPreset,
+    replace: bool,
+    preview: Result<Vec<Operation>, String>,
+}
+
+/// N5 K3: the cached preview is valid while the revision and picks match.
+fn motion_plan_cache_valid(
+    cached: &CachedMotionPlan,
+    revision: TimelineRevision,
+    preset: kinewright_agent::MotionPreset,
+    replace: bool,
+) -> bool {
+    cached.revision == revision && cached.preset == preset && cached.replace == replace
+}
+
+/// N5 K3: Apply sends the cached plan gated on its revision, so an agent
+/// commit between plan and Apply refuses instead of landing stale.
+fn motion_plan_apply_command(revision: TimelineRevision, operations: Vec<Operation>) -> Command {
+    Command::DoBatchIfRevision {
+        expected: revision,
+        operations,
+    }
+}
+
+/// N5 K3: re-plan the dialog's cached preview when the revision or picks
+/// changed — the only re-plan site, so the dialog never clones per frame.
+fn motion_plan_refresh_cached(
+    dialog: &mut MotionPlanDialog,
+    document: &Document,
+    revision: TimelineRevision,
+) {
+    let valid = dialog.cached.as_ref().is_some_and(|cached| {
+        motion_plan_cache_valid(cached, revision, dialog.preset, dialog.replace)
+    });
+    if valid {
+        return;
+    }
+    let planned = kinewright_agent::plan_motion(
+        document,
+        revision,
+        &kinewright_agent::MotionPlanArgs {
+            expected_revision: revision,
+            clip_id: dialog.clip,
+            preset: dialog.preset,
+            replace: dialog.replace,
+        },
+    );
+    dialog.cached = Some(CachedMotionPlan {
+        revision,
+        preset: dialog.preset,
+        replace: dialog.replace,
+        preview: planned
+            .map(|plan| plan.operations)
+            .map_err(|error| error.to_string()),
+    });
+}
+
+/// MO1 R25: the plan-a-move dialog's target and picks. N5 K3: bound to the
+/// session it was opened on, with the preview cached per revision+picks.
 pub(crate) struct MotionPlanDialog {
     pub(crate) clip: ClipId,
+    pub(crate) session: u64,
     pub(crate) preset: kinewright_agent::MotionPreset,
     pub(crate) replace: bool,
+    cached: Option<CachedMotionPlan>,
+}
+
+impl MotionPlanDialog {
+    pub(crate) fn open(clip: ClipId, session: u64) -> Self {
+        Self {
+            clip,
+            session,
+            preset: kinewright_agent::MotionPreset::PushIn,
+            replace: false,
+            cached: None,
+        }
+    }
 }
 
 /// Appendix B row 1: the observation a failed startup open carries.
@@ -1610,21 +1686,17 @@ impl KinewrightApp {
         let Some(mut dialog) = self.motion_plan_dialog.take() else {
             return;
         };
-        let project = self.focused_project;
-        let document = std::sync::Arc::clone(&self.projects[project].document);
+        // N5 K3: the dialog plans and applies against its own session, never
+        // whatever is focused; a closed session closes the dialog.
+        let Some(project) = crate::project::session_index_by_id(dialog.session, &self.projects)
+        else {
+            return;
+        };
         let revision = self.projects[project].revision;
+        let document = std::sync::Arc::clone(&self.projects[project].document);
+        motion_plan_refresh_cached(&mut dialog, &document, revision);
         let mut apply = false;
         let mut cancel = false;
-        let planned = kinewright_agent::plan_motion(
-            &document,
-            revision,
-            &kinewright_agent::MotionPlanArgs {
-                expected_revision: revision,
-                clip_id: dialog.clip,
-                preset: dialog.preset,
-                replace: dialog.replace,
-            },
-        );
         egui::Window::new("Plan a move")
             .collapsible(false)
             .resizable(false)
@@ -1639,15 +1711,19 @@ impl KinewrightApp {
                         }
                     });
                 ui.checkbox(&mut dialog.replace, "Replace existing curves");
-                let plannable = match &planned {
-                    Ok(plan) => {
-                        for operation in &plan.operations {
+                let preview = &dialog
+                    .cached
+                    .as_ref()
+                    .expect("planned or reused above")
+                    .preview;
+                let plannable = match preview {
+                    Ok(operations) => {
+                        for operation in operations {
                             ui.label(operation_status(operation));
                             // R25 parity where the person meets the agent:
                             // each planned op names its by-hand sender.
-                            let variant = format!("{operation:?}");
-                            let variant = variant.split([' ', '(']).next().unwrap_or("");
-                            if let Some(senders) = crate::inspector_ui::motion_gui_senders(variant)
+                            let variant = operation_variant_name(operation);
+                            if let Some(senders) = crate::inspector_ui::motion_gui_senders(&variant)
                             {
                                 ui.colored_label(color::TEXT_MUTED, senders.join(" · "));
                             }
@@ -1655,7 +1731,7 @@ impl KinewrightApp {
                         true
                     }
                     Err(error) => {
-                        ui.colored_label(color::STATUS_DANGER, error.to_string());
+                        ui.colored_label(color::STATUS_DANGER, error);
                         false
                     }
                 };
@@ -1672,8 +1748,21 @@ impl KinewrightApp {
                 });
             });
         if apply {
-            if let Ok(plan) = planned {
-                self.send_operations(plan.operations);
+            if let Some(CachedMotionPlan {
+                revision: planned_revision,
+                preview: Ok(operations),
+                ..
+            }) = dialog.cached
+            {
+                let command = motion_plan_apply_command(planned_revision, operations);
+                if self.projects[project].core.send(command).is_err() {
+                    self.note_actor_stopped(
+                        IncidentSubject::Clip(dialog.clip),
+                        "Core actor stopped while applying the planned move",
+                    );
+                } else {
+                    self.status = format!("Applying the planned move to clip {}…", dialog.clip);
+                }
             }
         } else if !cancel {
             self.motion_plan_dialog = Some(dialog);
@@ -3283,6 +3372,15 @@ fn plural_s(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
+/// N5 K6 (M8): the plan dialog's hint reader — the variant name, i.e. the
+/// first `Debug` token (`SetEffectKeyframes { … }` → `SetEffectKeyframes`),
+/// which keys the GUI-sender table. Pure; one definition for the dialog
+/// and its tests.
+fn operation_variant_name(operation: &Operation) -> String {
+    let rendered = format!("{operation:?}");
+    rendered.split([' ', '(']).next().unwrap_or("").to_owned()
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn operation_status(operation: &Operation) -> String {
     match operation {
@@ -4844,6 +4942,111 @@ mod tests {
             }),
             "Set mix on track 1 (gain +0.0 dB, pan 0, mute false, solo false)"
         );
+    }
+
+    /// N5 K6 (M8): the plan dialog's hint reader takes the variant name — the
+    /// first Debug token — so `SetEffectKeyframes { … }` reads its senders
+    /// (M8's `.last()` would read the trailing `}` and show no hint).
+    #[test]
+    fn the_hint_reader_takes_the_variant_name() {
+        assert_eq!(
+            super::operation_variant_name(&super::Operation::SetClipEnabled {
+                clip: super::ClipId(7),
+                enabled: true,
+            }),
+            "SetClipEnabled"
+        );
+        assert_eq!(
+            super::operation_variant_name(&super::Operation::ClearEffectKeyframes {
+                clip: super::ClipId(7),
+                effect: kinewright_core::EffectId(1),
+                name: "percent".to_owned(),
+            }),
+            "ClearEffectKeyframes"
+        );
+    }
+
+    /// N5 K6: the plan dialog's rebuilt parity — every operation every preset
+    /// plans (replace on and off) renders a status line *and* names its
+    /// by-hand sender, so the preview's two lines never go missing. The plans
+    /// come from the real planner, not a mirror of the sender table.
+    #[test]
+    fn every_planned_operation_renders_and_names_its_sender() {
+        use kinewright_core::{Clip, MediaKind, MediaSourceFingerprint, Rational};
+        let document = super::Document {
+            media_pool: vec![super::MediaAsset {
+                id: super::AssetId(1),
+                path: "f.mp4".into(),
+                name: "f".into(),
+                duration: super::TimeCode(100_000),
+                fps: Rational::new(30, 1).unwrap(),
+                kind: MediaKind::Video,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: MediaSourceFingerprint::default(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            }],
+            tracks: vec![super::Track {
+                id: super::TrackId(1),
+                kind: super::TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
+                    id: super::ClipId(1),
+                    asset: super::AssetId(1),
+                    source_range: super::TimeCode::ZERO..super::TimeCode(150),
+                    content: super::ClipContent::Media,
+                    timeline_start: super::TimeCode::ZERO,
+                    effects: Vec::new(),
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: super::TimeCode::ZERO,
+                    audio_fade_out_frames: super::TimeCode::ZERO,
+                    speed_percent: 100,
+                    audio_gain_curve: None,
+                }],
+            }],
+            fps: Rational::new(30, 1).unwrap(),
+            resolution: (1920, 1080),
+            duration: super::TimeCode(150),
+            ..super::Document::default()
+        };
+        let revision = super::TimelineRevision::default();
+        let mut planned = 0usize;
+        for (preset, name) in kinewright_agent::MOTION_PRESETS {
+            for replace in [false, true] {
+                let plan = kinewright_agent::plan_motion(
+                    &document,
+                    revision,
+                    &kinewright_agent::MotionPlanArgs {
+                        expected_revision: revision,
+                        clip_id: super::ClipId(1),
+                        preset,
+                        replace,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{name} replace={replace} plans: {error}"));
+                assert!(
+                    !plan.operations.is_empty(),
+                    "{name} replace={replace} plans no operations"
+                );
+                for operation in &plan.operations {
+                    assert!(
+                        !super::operation_status(operation).is_empty(),
+                        "{name} renders: {operation:?}"
+                    );
+                    let variant = super::operation_variant_name(operation);
+                    assert!(
+                        crate::inspector_ui::motion_gui_senders(&variant).is_some(),
+                        "{name} names its sender: {variant}"
+                    );
+                }
+                planned += 1;
+            }
+        }
+        assert_eq!(planned, 12, "six presets × replace on/off");
     }
 
     /// AU5 §3.7 rule 63: the three frame domains, derived and never written
@@ -13816,5 +14019,70 @@ mod in2b_tests {
         }
         in2b_quiesce_engine(&engine);
         in2b_shutdown(&mut app);
+    }
+
+    /// N5 K3: Apply sends the cached plan gated on its revision — an agent
+    /// commit between plan and Apply refuses instead of landing stale.
+    #[test]
+    fn motion_plan_apply_gates_on_the_plan_revision() {
+        let operations = vec![Operation::DeleteClip { clip: ClipId(3) }];
+        let command = motion_plan_apply_command(TimelineRevision(9), operations.clone());
+        assert_eq!(
+            command,
+            Command::DoBatchIfRevision {
+                expected: TimelineRevision(9),
+                operations,
+            }
+        );
+    }
+
+    /// N5 K3: the cached preview is valid while the revision and picks match
+    /// — any change re-plans, anything else reuses.
+    #[test]
+    fn motion_plan_cache_valid_tracks_revision_and_picks() {
+        use kinewright_agent::MotionPreset;
+
+        let cached = CachedMotionPlan {
+            revision: TimelineRevision(9),
+            preset: MotionPreset::PushIn,
+            replace: false,
+            preview: Ok(Vec::new()),
+        };
+        assert!(motion_plan_cache_valid(
+            &cached,
+            TimelineRevision(9),
+            MotionPreset::PushIn,
+            false
+        ));
+        assert!(!motion_plan_cache_valid(
+            &cached,
+            TimelineRevision(10),
+            MotionPreset::PushIn,
+            false
+        ));
+        assert!(!motion_plan_cache_valid(
+            &cached,
+            TimelineRevision(9),
+            MotionPreset::KenBurns,
+            false
+        ));
+        assert!(!motion_plan_cache_valid(
+            &cached,
+            TimelineRevision(9),
+            MotionPreset::PushIn,
+            true
+        ));
+    }
+
+    /// N5 K3: a dialog whose session is gone closes itself instead of
+    /// planning against whatever is focused.
+    #[test]
+    fn motion_plan_dialog_drops_with_a_closed_session() {
+        let (_fixture, mut app) = crate::app::in1_tests::in1b_app();
+        app.motion_plan_dialog = Some(MotionPlanDialog::open(ClipId(1), u64::MAX));
+        let ctx = egui::Context::default();
+        app.show_motion_plan_dialog(&ctx);
+        assert!(app.motion_plan_dialog.is_none());
+        crate::app::in1_tests::in1_shutdown(&mut app);
     }
 }

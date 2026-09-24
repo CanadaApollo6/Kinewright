@@ -833,13 +833,11 @@ impl KinewrightApp {
         if let Some(at) = edits.playhead_request {
             self.focused_mut().position = at;
         }
-        // MO1 R25: "Plan move…" opens the Apply-confirmation dialog.
+        // MO1 R25: "Plan move…" opens the Apply-confirmation dialog, bound
+        // to this session (N5 K3).
         if let Some(clip) = edits.motion_plan_request {
-            self.motion_plan_dialog = Some(crate::app::MotionPlanDialog {
-                clip,
-                preset: kinewright_agent::MotionPreset::PushIn,
-                replace: false,
-            });
+            let session = self.focused().id;
+            self.motion_plan_dialog = Some(crate::app::MotionPlanDialog::open(clip, session));
         }
         if !edits.operations.is_empty() {
             match edits.coalesce_key {
@@ -1036,7 +1034,7 @@ impl KinewrightApp {
 
         let mut pending = InspectorEdits::default();
         let header_document = Arc::clone(&self.focused().document);
-        let playhead_local = self.focused().position.0 - clip.timeline_start.0;
+        let playhead_local = clip_playhead_local(clip, self.focused().position);
         clip_enable_header(ui, &header_document, clip, playhead_local, &mut pending);
         ui.add_space(space::TWO);
         ui.strong("Speed");
@@ -1172,7 +1170,7 @@ impl KinewrightApp {
                 audio_clip.id,
                 audio_clip.audio_gain_curve.as_ref(),
                 duration,
-                self.focused().position.0 - audio_clip.timeline_start.0,
+                clip_playhead_local(&audio_clip, self.focused().position),
                 audio_clip.audio_gain_tenth_db,
                 &mut pending,
             );
@@ -1187,7 +1185,19 @@ impl KinewrightApp {
             qc_clipping: &qc_clipping,
             store_unavailable: self.focused().lut_store_unavailable_reason(),
         };
-        motion_section(ui, clip, playhead_local, document.duration, &mut pending);
+        let clip_duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
+        // N5 K5: audio-only clips show no MOTION section at all.
+        if clip_shows_motion(&document, clip) {
+            motion_section(
+                ui,
+                clip,
+                playhead_local,
+                document.duration,
+                clip_duration,
+                clip_keeps_still_fit(&document, clip),
+                &mut pending,
+            );
+        }
         effects_section(ui, clip, &looks, &mut pending);
         transition_section(ui, &document, clip, &mut pending);
         self.submit_inspector_edits(pending);
@@ -1223,7 +1233,7 @@ impl KinewrightApp {
         );
         let mut pending = InspectorEdits::default();
         let document = Arc::clone(&self.focused().document);
-        let playhead_local = self.focused().position.0 - clip.timeline_start.0;
+        let playhead_local = clip_playhead_local(clip, self.focused().position);
         clip_enable_header(ui, &document, clip, playhead_local, &mut pending);
         let availability = self.focused().lut_availability.clone();
         let qc_clipping = self.color_qc.node_clipping();
@@ -1233,7 +1243,19 @@ impl KinewrightApp {
             qc_clipping: &qc_clipping,
             store_unavailable: self.focused().lut_store_unavailable_reason(),
         };
-        motion_section(ui, clip, playhead_local, document.duration, &mut pending);
+        let clip_duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
+        // N5 K5: audio-only clips show no MOTION section at all.
+        if clip_shows_motion(&document, clip) {
+            motion_section(
+                ui,
+                clip,
+                playhead_local,
+                document.duration,
+                clip_duration,
+                clip_keeps_still_fit(&document, clip),
+                &mut pending,
+            );
+        }
         effects_section(ui, clip, &looks, &mut pending);
         transition_section(ui, &document, clip, &mut pending);
         self.submit_inspector_edits(pending);
@@ -1294,7 +1316,7 @@ impl KinewrightApp {
             ));
         }
         let title_document = Arc::clone(&self.focused().document);
-        let playhead_local = self.focused().position.0 - clip.timeline_start.0;
+        let playhead_local = clip_playhead_local(clip, self.focused().position);
         clip_enable_header(ui, &title_document, clip, playhead_local, &mut pending);
 
         let mut size_token = title.font_size_token;
@@ -1388,13 +1410,19 @@ impl KinewrightApp {
                 ));
             }
         }
-        motion_section(
-            ui,
-            clip,
-            playhead_local,
-            title_document.duration,
-            &mut pending,
-        );
+        let clip_duration = title_document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
+        // N5 K5: audio-only clips show no MOTION section at all.
+        if clip_shows_motion(&title_document, clip) {
+            motion_section(
+                ui,
+                clip,
+                playhead_local,
+                title_document.duration,
+                clip_duration,
+                clip_keeps_still_fit(&title_document, clip),
+                &mut pending,
+            );
+        }
         self.submit_inspector_edits(pending);
     }
 
@@ -3925,7 +3953,7 @@ fn envelope_block(
         }
         Some(curve) => {
             for index in 0..curve.keyframes.len() {
-                let mut action = keyframe_row(ui, "envelope", curve, index, 0);
+                let mut action = keyframe_row(ui, "envelope", curve, index, 0, false);
                 if action.gesture_started {
                     pending.begin_gesture();
                 }
@@ -4029,13 +4057,15 @@ pub(crate) const fn interpolation_label(interpolation: KeyframeInterpolation) ->
 /// lowest frame the row offers (0 for audio owners, `-MAX_KEY_FRAME_OFFSET`
 /// for motion owners whose trimmed-out keys sit below zero), and the stored
 /// tangents ride the edit untouched — the row offers no tangent control, so
-/// it must not zero them either.
+/// it must not zero them either. N5 K4: `focused` scrolls the row into view
+/// and paints the selection wash behind it.
 pub(crate) fn keyframe_row(
     ui: &mut egui::Ui,
     key: &str,
     curve: &AutomationCurve,
     index: usize,
     min_frame: i64,
+    focused: bool,
 ) -> KeyframeRowAction {
     let mut action = KeyframeRowAction::default();
     let Some(stored) = curve.keyframes.get(index) else {
@@ -4045,7 +4075,7 @@ pub(crate) fn keyframe_row(
     let mut value = stored.value;
     let mut interpolation = stored.interpolation;
     let mut changed = false;
-    ui.push_id((key, index), |ui| {
+    let outer = ui.push_id((key, index), |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().interact_size.y = size::ICON_SM;
             ui.spacing_mut().item_spacing.x = space::HALF;
@@ -4088,9 +4118,19 @@ pub(crate) fn keyframe_row(
             changed |= frame.changed() || level.changed();
         });
     });
+    if focused {
+        ui.scroll_to_rect(outer.response.rect, None);
+        ui.painter().rect_filled(
+            outer.response.rect.expand(2.0),
+            theme::radius::SM,
+            color::ACCENT_WASH,
+        );
+    }
     if changed {
         let edited = Keyframe {
-            at: TimeCode(at.max(0)),
+            // N5 K1: clamp to the row's own floor, not 0 — a value edit on
+            // a kept-outside key must not move it.
+            at: TimeCode(at.max(min_frame)),
             value,
             interpolation,
             tangent_in: stored.tangent_in,
@@ -4232,16 +4272,34 @@ pub(crate) fn is_motion_effect(name: &str) -> bool {
 
 /// MO1 R25: every §4 motion operation names its GUI sender(s) — the
 /// op↔GUI parity checklist.
+/// MO1 R25: the §4 motion operations, defined once — the rebuilt parity test
+/// enumerates this list against the agent's operation registry.
+#[cfg(test)]
+pub(crate) const MOTION_OPERATIONS: [&str; 11] = [
+    "UpsertEffectKeyframe",
+    "RemoveEffectKeyframe",
+    "SetEffectEnabled",
+    "SetClipEnabled",
+    "SetClipEnabledCurve",
+    "CopyClipAttributes",
+    "SetEffectKeyframes",
+    "ClearEffectKeyframes",
+    "SetEffectParam",
+    "AddEffect",
+    "RemoveEffect",
+];
+
 pub(crate) fn motion_gui_senders(operation: &str) -> Option<&'static [&'static str]> {
     match operation {
         "UpsertEffectKeyframe" => Some(&["keyframe editor ('+ Key', auto-key edits)"]),
         "RemoveEffectKeyframe" => Some(&[
             "keyframe editor (per-key delete)",
-            "timeline key lane (diamond click)",
+            "timeline key lane (hover + Delete)",
         ]),
         "SetEffectEnabled" => Some(&["effect card toggle"]),
         "SetClipEnabled" => Some(&["clip header toggle"]),
-        "SetClipEnabledCurve" => Some(&["clip header ('+ Key at playhead')"]),
+        "SetClipEnabledCurve" => Some(&["clip header (toggle auto-key, '+ Key at playhead')"]),
+        "RemoveEffect" => Some(&["effect card 'Remove' button"]),
         "CopyClipAttributes" => Some(&["clip context menu (copy/paste)"]),
         "SetEffectKeyframes" => Some(&[
             "keyframe editor (row edits)",
@@ -4270,7 +4328,7 @@ pub(crate) const MOTION_EMPTY_NOTE: &str = "No motion effects on this clip yet."
 /// MO1 R22: the parked-value note beside a keyframed motion control, mirroring
 /// the `ENVELOPE` block's.
 pub(crate) const MOTION_KEYFRAMED_NOTE: &str =
-    "the control shows the parked value; the list below owns the move";
+    "the control shows the value at the playhead; the list below owns the move";
 
 /// MO1 R22: stable coalesce key for one live motion drag, so the whole drag
 /// lands in a single undo entry and two controls never merge.
@@ -4295,9 +4353,7 @@ fn motion_plus_key(
     fallback: i64,
     range: std::ops::RangeInclusive<i64>,
 ) -> Keyframe {
-    let interpolation = curve
-        .and_then(|curve| curve.keyframes.iter().find(|key| key.at == at))
-        .map_or(KeyframeInterpolation::Linear, |key| key.interpolation);
+    let stored = curve.and_then(|curve| curve.keyframes.iter().find(|key| key.at == at));
     let value = curve
         .and_then(|curve| curve.value_at(at))
         .unwrap_or(fallback)
@@ -4305,9 +4361,10 @@ fn motion_plus_key(
     Keyframe {
         at,
         value,
-        interpolation,
-        tangent_in: 0,
-        tangent_out: 0,
+        interpolation: stored.map_or(KeyframeInterpolation::Linear, |key| key.interpolation),
+        // N5 K4: replacing the key already at the playhead keeps its tangents.
+        tangent_in: stored.map_or(0, |key| key.tangent_in),
+        tangent_out: stored.map_or(0, |key| key.tangent_out),
     }
 }
 
@@ -4326,32 +4383,48 @@ fn motion_static_operation(
     range: std::ops::RangeInclusive<i64>,
 ) -> Operation {
     match curve {
-        Some(curve) => Operation::UpsertEffectKeyframe {
-            clip,
-            effect,
-            name: name.to_owned(),
-            key: Keyframe {
-                at,
-                value: value.clamp(*range.start(), *range.end()),
-                interpolation: curve
-                    .keyframes
-                    .iter()
-                    .find(|key| key.at == at)
-                    .map_or(KeyframeInterpolation::Linear, |key| key.interpolation),
-                tangent_in: 0,
-                tangent_out: 0,
-            },
-        },
+        Some(curve) => {
+            let stored = curve.keyframes.iter().find(|key| key.at == at);
+            Operation::UpsertEffectKeyframe {
+                clip,
+                effect,
+                name: name.to_owned(),
+                key: Keyframe {
+                    at,
+                    value: value.clamp(*range.start(), *range.end()),
+                    interpolation: stored
+                        .map_or(KeyframeInterpolation::Linear, |key| key.interpolation),
+                    // N5 K4: auto-keying onto an existing key keeps its tangents.
+                    tangent_in: stored.map_or(0, |key| key.tangent_in),
+                    tangent_out: stored.map_or(0, |key| key.tangent_out),
+                },
+            }
+        }
         None => effect_param_operation(clip, effect, name, value),
     }
 }
 
+/// N5 K4: keying is allowed only with the playhead over the clip —
+/// auto-key and "+ Key" are disabled outside it (Premiere behaviour). Pure.
+fn motion_playhead_keyable(at: TimeCode, clip_duration: TimeCode) -> bool {
+    at.0 >= 0 && at.0 < clip_duration.0
+}
+
 /// MO1 R22: the neighbour key frames around the playhead over one card's
 /// keyed frames. Pure; the nav buttons clamp the winners into the project.
-fn motion_neighbor_frames(frames: &[i64], current: i64) -> (Option<i64>, Option<i64>) {
+/// N5 K4: winners stay inside the clip (`0..clip_end`) — kept-outside keys
+/// are preserved, not navigated to.
+fn motion_neighbor_frames(
+    frames: &[i64],
+    current: i64,
+    clip_end: i64,
+) -> (Option<i64>, Option<i64>) {
     let mut previous = None;
     let mut next = None;
     for frame in frames {
+        if *frame < 0 || *frame >= clip_end {
+            continue;
+        }
         if *frame < current {
             previous = Some(previous.map_or(*frame, |best: i64| best.max(*frame)));
         } else if *frame > current {
@@ -4382,16 +4455,52 @@ fn motion_card_frames(effect: &Effect) -> Vec<i64> {
 
 /// MO1 R22: the operations one clip-enable toggle writes — the clip plus its
 /// linked partner, so a linked A/V pair toggles as one (R17). Pure.
-fn clip_enable_operations(
+/// N5 K5: R16 for the enable sibling — a last-key remove (a Clear carrying the
+/// removed value) appends the parked-static write, so the value survives. The
+/// `Clear` button sends no removed value and keeps the parked static (Core
+/// `clear_effect_keyframes` parity). One frame, so still one undo entry.
+/// Pure; provable without a window.
+fn clip_enable_removed_static_operations(
+    clip: ClipId,
+    cleared: bool,
+    last_removed_value: Option<i64>,
+) -> Vec<Operation> {
+    if cleared && let Some(value) = last_removed_value {
+        vec![Operation::SetClipEnabled {
+            clip,
+            enabled: value != 0,
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+/// N5 K5: the enable-header toggle. A keyed member auto-keys — a key at the
+/// playhead clamped into that member's span — instead of writing the parked
+/// static the curve shadows; an unkeyed member keeps the linked static write.
+/// Pure; provable without a window.
+fn clip_enable_toggle_operations(
     document: &kinewright_core::Document,
     clip: ClipId,
     enabled: bool,
+    at: TimeCode,
 ) -> Vec<Operation> {
+    let value = i64::from(enabled);
     linked_members(document, clip)
         .iter()
-        .map(|(_, member)| Operation::SetClipEnabled {
-            clip: member.id,
-            enabled,
+        .map(|(_, member)| {
+            let Some(curve) = member.enabled_curve.as_ref() else {
+                return Operation::SetClipEnabled {
+                    clip: member.id,
+                    enabled,
+                };
+            };
+            let duration = document.clip_duration(member).map_or(0, |span| span.0);
+            let clamped = TimeCode(at.0.clamp(0, duration.max(1) - 1));
+            Operation::SetClipEnabledCurve {
+                clip: member.id,
+                curve: Some(upsert_keyframe(Some(curve), clamped, value)),
+            }
         })
         .collect()
 }
@@ -4409,6 +4518,7 @@ fn motion_curve_list(
     curve: Option<&AutomationCurve>,
     range: std::ops::RangeInclusive<i64>,
     at: TimeCode,
+    clip_duration: TimeCode,
     fallback: i64,
     pending: &mut InspectorEdits,
 ) {
@@ -4416,9 +4526,24 @@ fn motion_curve_list(
     let mut next: Option<CurveWrite> = None;
     let mut removed_at: Option<TimeCode> = None;
     let mut live = false;
+    // N5 K4: a lane diamond click focuses its key's row here.
+    let focus = ui
+        .data(|data| {
+            data.get_temp::<(ClipId, TimeCode)>(egui::Id::new(
+                crate::timeline_ui::KEYFRAME_FOCUS_MEMORY_ID,
+            ))
+        })
+        .filter(|(focused_clip, _)| *focused_clip == clip)
+        .map(|(_, frame)| frame);
     if let Some(curve) = curve {
         for index in 0..curve.keyframes.len() {
-            let action = keyframe_row(ui, &row_key, curve, index, -MAX_KEY_FRAME_OFFSET);
+            let focused = focus.is_some_and(|frame| {
+                curve
+                    .keyframes
+                    .get(index)
+                    .is_some_and(|key| key.at == frame)
+            });
+            let action = keyframe_row(ui, &row_key, curve, index, -MAX_KEY_FRAME_OFFSET, focused);
             if action.gesture_started {
                 pending.begin_gesture();
             }
@@ -4437,8 +4562,10 @@ fn motion_curve_list(
         }
     }
     ui.horizontal(|ui| {
+        // N5 K4: "+ Key" is disabled with the playhead outside the clip.
+        let keyable = motion_playhead_keyable(at, clip_duration);
         let add = ui
-            .small_button(MOTION_ADD_KEY)
+            .add_enabled(keyable, egui::Button::new(MOTION_ADD_KEY).small())
             .on_hover_text("Add a key at the playhead, holding the value it has there.");
         crate::mixer_ui::record_strip_rect("motion_add_key", add.rect);
         if add.clicked() {
@@ -4496,11 +4623,12 @@ fn motion_param_row(
     effect: &Effect,
     parameter: &kinewright_core::EffectParameterDescriptor,
     at: TimeCode,
+    clip_duration: TimeCode,
     pending: &mut InspectorEdits,
 ) {
     let name = parameter.name;
     let curve = effect.keyframes.get(name);
-    let mut value = effect
+    let parked = effect
         .parameters
         .get(name)
         .and_then(|value| match value {
@@ -4508,6 +4636,12 @@ fn motion_param_row(
             ParamValue::Boolean(_) | ParamValue::Text(_) => None,
         })
         .unwrap_or(parameter.neutral);
+    // N5 K4: a keyed control shows the value at the playhead, not the parked
+    // static — nudging shows and writes the same number.
+    let mut value = curve
+        .and_then(|curve| curve.value_at(at))
+        .unwrap_or(parked)
+        .clamp(parameter.min, parameter.max);
     ui.horizontal(|ui| {
         ui.monospace(egui::RichText::new(name).size(type_size::CAPTION));
         if curve.is_some() {
@@ -4515,14 +4649,18 @@ fn motion_param_row(
             ui.colored_label(color::TEXT_MUTED, MOTION_KEYFRAMED_NOTE);
         }
     });
+    // N5 K4: auto-key is disabled with the playhead outside the clip.
+    let keyable = motion_playhead_keyable(at, clip_duration);
     let response = if motion_param_is_slider(parameter.min, parameter.max) {
-        ui.add(
+        ui.add_enabled(
+            keyable,
             egui::Slider::new(&mut value, parameter.min..=parameter.max)
                 .text(name)
                 .integer(),
         )
     } else {
-        ui.add(
+        ui.add_enabled(
+            keyable,
             egui::DragValue::new(&mut value)
                 .range(parameter.min..=parameter.max)
                 .prefix(format!("{name}: ")),
@@ -4545,10 +4683,12 @@ fn motion_param_row(
             ));
         }
     });
-    if response.changed() {
-        // Auto-key writes the dragged value, not the evaluated one: the
-        // control shows the parked static (the `ENVELOPE` precedent), and the
-        // key it writes is the value the person chose.
+    // N5 K4: the `keyable` guard is load-bearing, not belt-and-suspenders —
+    // a disabled egui 0.35 slider still reports `changed()` under a drag, so
+    // `add_enabled` alone greys the control without disarming it.
+    if keyable && response.changed() {
+        // Auto-key writes the dragged value: the control shows the value at
+        // the playhead, so the first drag pixel starts where the curve is.
         let operation = motion_static_operation(
             clip,
             effect.id,
@@ -4572,6 +4712,7 @@ fn motion_param_row(
         curve,
         parameter.min..=parameter.max,
         at,
+        clip_duration,
         value,
         pending,
     );
@@ -4584,17 +4725,23 @@ fn motion_enabled_row(
     clip: ClipId,
     effect: &Effect,
     at: TimeCode,
+    clip_duration: TimeCode,
     pending: &mut InspectorEdits,
 ) {
     ui.horizontal(|ui| {
         let mut enabled = effect.enabled;
         ui.monospace(egui::RichText::new("enabled").size(type_size::CAPTION));
-        let toggle = ui.checkbox(&mut enabled, "");
+        // N5 K4: a keyed toggle auto-keys, so it disables outside the clip;
+        // a static toggle is not keying and stays live.
+        let keyable = motion_playhead_keyable(at, clip_duration) || effect.enabled_curve.is_none();
+        let toggle = ui.add_enabled(keyable, egui::Checkbox::new(&mut enabled, ""));
         crate::mixer_ui::record_strip_rect("motion_toggle", toggle.rect);
         if effect.enabled_curve.is_some() {
             ui.colored_label(color::STATUS_WARNING, "KEYFRAMED");
         }
-        if toggle.changed() {
+        // N5 K4: same guard as the value control — a disabled checkbox must
+        // not auto-key even if it reports `changed()`.
+        if keyable && toggle.changed() {
             if effect.enabled_curve.is_some() {
                 pending.push(motion_static_operation(
                     clip,
@@ -4622,9 +4769,78 @@ fn motion_enabled_row(
         effect.enabled_curve.as_ref(),
         0..=1,
         at,
+        clip_duration,
         i64::from(effect.enabled),
         pending,
     );
+}
+
+/// The R10 baked-fit triple `still_placement_operations` writes onto a still's
+/// transform. N5 K5: Reset leaves exactly these statics alone on a fitted
+/// still and neutralizes everything else.
+const STILL_FIT_PARAMETERS: [&str; 3] = [
+    "scale_x_percent",
+    "scale_y_percent",
+    "scale_fine_hundredths",
+];
+
+/// N5 K5: Reset-effect operations. `keep_fit` (a Freeze over an Image asset)
+/// keeps the baked-fit scale triple and neutralizes the rest; everywhere else
+/// every rendered static neutralizes. Keys are always kept. Pure; provable
+/// without a window.
+fn motion_reset_operations(
+    clip: ClipId,
+    effect: EffectId,
+    descriptor: &kinewright_core::EffectDescriptor,
+    keep_fit: bool,
+) -> Vec<Operation> {
+    let mut operations = Vec::new();
+    for parameter in descriptor.parameters {
+        if !should_render_effect_parameter(descriptor, parameter.name) {
+            continue;
+        }
+        if keep_fit && STILL_FIT_PARAMETERS.contains(&parameter.name) {
+            continue;
+        }
+        operations.push(effect_param_operation(
+            clip,
+            effect,
+            parameter.name,
+            parameter.neutral,
+        ));
+    }
+    operations.push(Operation::SetEffectEnabled {
+        clip,
+        effect,
+        enabled: true,
+    });
+    operations
+}
+
+/// N5 K6 (M1): the playhead in clip-local frames — one pure definition for
+/// the media/freeze/title inspectors (and the audio target's), so a dropped
+/// `- timeline_start` fails in the unit test instead of drifting one surface.
+fn clip_playhead_local(clip: &Clip, position: TimeCode) -> i64 {
+    position.0 - clip.timeline_start.0
+}
+
+/// N5 K5: MOTION is a picture section — an audio-only clip (Media over an
+/// Audio asset) shows no cards and no `+ Transform` row. A missing asset
+/// keeps the section: the cards render from the clip's own effects.
+/// Pure; provable without a window.
+fn clip_shows_motion(document: &kinewright_core::Document, clip: &Clip) -> bool {
+    !document
+        .asset(clip.asset)
+        .is_some_and(|asset| asset.kind == MediaKind::Audio)
+}
+
+/// Whether this clip carries a baked still fit — a Freeze over an Image
+/// asset — whose scale triple Reset must not touch (N5 K5).
+fn clip_keeps_still_fit(document: &kinewright_core::Document, clip: &Clip) -> bool {
+    matches!(clip.content, ClipContent::Freeze(_))
+        && document
+            .asset(clip.asset)
+            .is_some_and(|asset| asset.kind == MediaKind::Image)
 }
 
 /// MO1 R22: one motion effect card — the `enabled` row, one row per rendered
@@ -4633,6 +4849,7 @@ fn motion_enabled_row(
 ///
 /// `playhead_local` is the playhead in clip-local frames; `project` is the
 /// project duration the nav winners clamp into.
+#[allow(clippy::too_many_arguments)]
 fn motion_effect_card(
     ui: &mut egui::Ui,
     clip: &Clip,
@@ -4640,14 +4857,19 @@ fn motion_effect_card(
     descriptor: &kinewright_core::EffectDescriptor,
     playhead_local: i64,
     project: TimeCode,
+    clip_duration: TimeCode,
+    keep_fit: bool,
     pending: &mut InspectorEdits,
 ) {
     let at = TimeCode(playhead_local.clamp(-MAX_KEY_FRAME_OFFSET, MAX_KEY_FRAME_OFFSET));
     ui.group(|ui| {
         ui.horizontal(|ui| {
             ui.label(effect_display_name(&effect.name));
-            let (previous, next) =
-                motion_neighbor_frames(&motion_card_frames(effect), playhead_local);
+            let (previous, next) = motion_neighbor_frames(
+                &motion_card_frames(effect),
+                playhead_local,
+                clip_duration.0,
+            );
             let project_last = project.0.saturating_sub(1).max(0);
             for (label, winner, rect) in
                 [("|◀", previous, "motion_prev"), ("▶|", next, "motion_next")]
@@ -4670,27 +4892,17 @@ fn motion_effect_card(
                     pending.request_playhead(target);
                 }
             }
-            let reset = ui.small_button("Reset effect").on_hover_text(
-                "Restore every static to neutral and enable the effect; keys are kept.",
-            );
+            let reset = ui.small_button("Reset effect").on_hover_text(if keep_fit {
+                "Restore every static to neutral except the still's baked fit, and enable the effect; keys are kept."
+            } else {
+                "Restore every static to neutral and enable the effect; keys are kept."
+            });
             crate::mixer_ui::record_strip_rect("motion_reset_effect", reset.rect);
             if reset.clicked() {
-                for parameter in descriptor.parameters {
-                    if !should_render_effect_parameter(descriptor, parameter.name) {
-                        continue;
-                    }
-                    pending.push(effect_param_operation(
-                        clip.id,
-                        effect.id,
-                        parameter.name,
-                        parameter.neutral,
-                    ));
+                for operation in motion_reset_operations(clip.id, effect.id, descriptor, keep_fit)
+                {
+                    pending.push(operation);
                 }
-                pending.push(Operation::SetEffectEnabled {
-                    clip: clip.id,
-                    effect: effect.id,
-                    enabled: true,
-                });
             }
             let remove = ui.small_button("Remove");
             crate::mixer_ui::record_strip_rect("motion_remove", remove.rect);
@@ -4701,13 +4913,13 @@ fn motion_effect_card(
                 });
             }
         });
-        motion_enabled_row(ui, clip.id, effect, at, pending);
+        motion_enabled_row(ui, clip.id, effect, at, clip_duration, pending);
         for parameter in descriptor.parameters {
             if !should_render_effect_parameter(descriptor, parameter.name) {
                 continue;
             }
             ui.separator();
-            motion_param_row(ui, clip.id, effect, parameter, at, pending);
+            motion_param_row(ui, clip.id, effect, parameter, at, clip_duration, pending);
         }
     });
 }
@@ -4719,6 +4931,8 @@ fn motion_section(
     clip: &Clip,
     playhead_local: i64,
     project: TimeCode,
+    clip_duration: TimeCode,
+    keep_fit: bool,
     pending: &mut InspectorEdits,
 ) {
     ui.add_space(space::TWO);
@@ -4742,6 +4956,8 @@ fn motion_section(
             descriptor,
             playhead_local,
             project,
+            clip_duration,
+            keep_fit,
             pending,
         );
     }
@@ -4793,19 +5009,26 @@ fn clip_enable_header(
             ui.colored_label(color::STATUS_WARNING, "KEYFRAMED");
         }
         if toggle.changed() {
-            for operation in clip_enable_operations(document, clip.id, enabled) {
+            for operation in clip_enable_toggle_operations(document, clip.id, enabled, at) {
                 pending.push(operation);
             }
         }
     });
+    let clip_duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
     let row_key = format!("clip_enable:{}", clip.id.0);
     let mut next: Option<CurveWrite> = None;
     let mut live = false;
+    // N5 K5: R16 for the enable sibling — removing its last key writes the
+    // removed value into the parked static instead of losing it.
+    let mut last_removed_value: Option<i64> = None;
     if let Some(curve) = clip.enabled_curve.as_ref() {
         for index in 0..curve.keyframes.len() {
-            let action = keyframe_row(ui, &row_key, curve, index, -MAX_KEY_FRAME_OFFSET);
+            let action = keyframe_row(ui, &row_key, curve, index, -MAX_KEY_FRAME_OFFSET, false);
             if action.gesture_started {
                 pending.begin_gesture();
+            }
+            if action.removed && curve.keyframes.len() == 1 {
+                last_removed_value = curve.keyframes.get(index).map(|key| key.value);
             }
             if let Some(applied) =
                 apply_keyframe_row_action(curve, index, &action, 0..=1, -MAX_KEY_FRAME_OFFSET)
@@ -4816,8 +5039,10 @@ fn clip_enable_header(
         }
     }
     ui.horizontal(|ui| {
+        // N5 K4 parity: `+ Key` is disabled with the playhead outside the clip.
+        let keyable = motion_playhead_keyable(at, clip_duration);
         let add = ui
-            .small_button(MOTION_ADD_KEY)
+            .add_enabled(keyable, egui::Button::new(MOTION_ADD_KEY).small())
             .on_hover_text("Add an enable key at the playhead, holding the state it has there.");
         crate::mixer_ui::record_strip_rect("clip_enable_add_key", add.rect);
         if add.clicked() {
@@ -4847,6 +5072,7 @@ fn clip_enable_header(
         }
     });
     if let Some(applied) = next {
+        let cleared = matches!(applied, CurveWrite::Clear);
         let operation = Operation::SetClipEnabledCurve {
             clip: clip.id,
             curve: applied.into_curve(),
@@ -4854,6 +5080,10 @@ fn clip_enable_header(
         if live {
             pending.push_live(operation, format!("clip_enable:{}", clip.id.0));
         } else {
+            pending.push(operation);
+        }
+        for operation in clip_enable_removed_static_operations(clip.id, cleared, last_removed_value)
+        {
             pending.push(operation);
         }
     }
@@ -5847,6 +6077,383 @@ mod tests {
         assert_eq!(
             audio_target_clip(&document, ClipId(11)).map(|clip| clip.id),
             Some(ClipId(11))
+        );
+    }
+
+    /// N5 K5: the enable-header toggle on a keyed clip auto-keys — a key at
+    /// the playhead clamped into the clip — instead of writing the parked
+    /// static the curve shadows. Unkeyed linked members keep the static write.
+    #[test]
+    fn keyed_enable_header_toggle_auto_keys_at_the_clamped_playhead() {
+        fn asset(id: u64, name: &str, kind: MediaKind) -> MediaAsset {
+            MediaAsset {
+                id: AssetId(id),
+                path: PathBuf::from(name),
+                name: name.to_owned(),
+                duration: TimeCode(30),
+                fps: Rational::new(30, 1).expect("valid fps"),
+                kind,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            }
+        }
+        let link = Some(LinkId(7));
+        let mut keyed = media_clip(ClipId(10), AssetId(1), link);
+        keyed.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(0),
+                value: 1,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
+        });
+        let document = Document {
+            media_pool: vec![
+                asset(1, "picture.mov", MediaKind::Video),
+                asset(2, "sound.wav", MediaKind::Audio),
+            ],
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![keyed],
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![media_clip(ClipId(11), AssetId(2), link)],
+                },
+            ],
+            ..Document::default()
+        };
+        let operations = clip_enable_toggle_operations(&document, ClipId(10), false, TimeCode(9));
+        assert_eq!(operations.len(), 2);
+        assert!(
+            matches!(
+                &operations[0],
+                Operation::SetClipEnabledCurve {
+                    clip,
+                    curve: Some(curve),
+                } if clip == &ClipId(10)
+                    && curve
+                        .keyframes
+                        .iter()
+                        .map(|key| (key.at.0, key.value))
+                        .collect::<Vec<_>>()
+                        == vec![(0, 1), (9, 0)]
+            ),
+            "keyed member auto-keys: {operations:?}"
+        );
+        assert_eq!(
+            operations[1],
+            Operation::SetClipEnabled {
+                clip: ClipId(11),
+                enabled: false,
+            }
+        );
+        // Outside the clip the key clamps to the last frame, not ±MAX.
+        let operations = clip_enable_toggle_operations(&document, ClipId(10), false, TimeCode(999));
+        assert!(
+            matches!(
+                &operations[0],
+                Operation::SetClipEnabledCurve {
+                    curve: Some(curve),
+                    ..
+                } if curve.keyframes.iter().any(|key| key.at.0 == 29)
+            ),
+            "clamped into the clip: {operations:?}"
+        );
+    }
+
+    /// N5 K5: R16 for the enable sibling — a last-key remove appends the
+    /// parked-static write so the removed value survives; a plain Clear or a
+    /// row edit sends no static.
+    #[test]
+    fn enable_header_last_key_remove_writes_the_static() {
+        assert_eq!(
+            clip_enable_removed_static_operations(ClipId(10), true, Some(0)),
+            [Operation::SetClipEnabled {
+                clip: ClipId(10),
+                enabled: false,
+            }]
+        );
+        assert_eq!(
+            clip_enable_removed_static_operations(ClipId(10), true, Some(1)),
+            [Operation::SetClipEnabled {
+                clip: ClipId(10),
+                enabled: true,
+            }]
+        );
+        assert!(
+            clip_enable_removed_static_operations(ClipId(10), true, None).is_empty(),
+            "the Clear button keeps the parked static"
+        );
+        assert!(
+            clip_enable_removed_static_operations(ClipId(10), false, Some(1)).is_empty(),
+            "a row edit is not a remove"
+        );
+    }
+
+    /// N5 K5: stills offer no audio section — a Freeze over an Image asset,
+    /// alone or linked to another still, yields no audio target. A still
+    /// linked to a real audio member still routes to that member.
+    #[test]
+    fn stills_offer_no_audio_target() {
+        fn asset(id: u64, name: &str, kind: MediaKind) -> MediaAsset {
+            MediaAsset {
+                id: AssetId(id),
+                path: PathBuf::from(name),
+                name: name.to_owned(),
+                duration: TimeCode(30),
+                fps: Rational::new(30, 1).expect("valid fps"),
+                kind,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            }
+        }
+        fn freeze(id: u64, link: Option<LinkId>) -> Clip {
+            let mut clip = media_clip(ClipId(id), AssetId(1), link);
+            clip.content = ClipContent::Freeze(kinewright_core::FreezeFrame {
+                source_frame: TimeCode::ZERO,
+            });
+            clip
+        }
+        let link = Some(LinkId(9));
+        let document = Document {
+            media_pool: vec![
+                asset(1, "still.png", MediaKind::Image),
+                asset(2, "sound.wav", MediaKind::Audio),
+            ],
+            tracks: vec![
+                Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![freeze(10, link), freeze(11, link)],
+                },
+                Track {
+                    id: TrackId(2),
+                    kind: TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![media_clip(ClipId(12), AssetId(2), None)],
+                },
+            ],
+            ..Document::default()
+        };
+        assert_eq!(audio_target_clip(&document, ClipId(10)), None);
+        assert_eq!(audio_target_clip(&document, ClipId(11)), None);
+        let mut routed = document.clone();
+        routed.tracks[1].clips[0].link = link;
+        assert_eq!(
+            audio_target_clip(&routed, ClipId(10)).map(|clip| clip.id),
+            Some(ClipId(12)),
+            "a still linked to audio routes to that member"
+        );
+    }
+
+    /// N5 K5: Reset on a fitted still keeps the baked fit — the scale triple
+    /// is untouched — and neutralizes everything else; a media clip resets
+    /// every rendered static.
+    #[test]
+    fn motion_reset_on_a_fitted_still_keeps_the_baked_fit() {
+        const FIT: [&str; 3] = [
+            "scale_x_percent",
+            "scale_y_percent",
+            "scale_fine_hundredths",
+        ];
+        let descriptor =
+            kinewright_core::effect_descriptor("transform").expect("transform descriptor");
+        let fitted = motion_reset_operations(ClipId(10), EffectId(1), &descriptor, true);
+        assert!(
+            fitted.iter().all(|operation| !matches!(
+                operation,
+                Operation::SetEffectParam { name, .. } if FIT.contains(&name.as_str())
+            )),
+            "fit triple untouched: {fitted:?}"
+        );
+        assert!(
+            fitted.contains(&Operation::SetEffectParam {
+                clip: ClipId(10),
+                effect: EffectId(1),
+                name: "rotation_centidegrees".to_owned(),
+                value: ParamValue::Integer(0),
+            }),
+            "the rest neutralizes: {fitted:?}"
+        );
+        assert!(fitted.contains(&Operation::SetEffectEnabled {
+            clip: ClipId(10),
+            effect: EffectId(1),
+            enabled: true,
+        }));
+        let full = motion_reset_operations(ClipId(10), EffectId(1), &descriptor, false);
+        assert!(
+            full.iter().any(|operation| matches!(
+                operation,
+                Operation::SetEffectParam {
+                    name,
+                    value: ParamValue::Integer(100),
+                    ..
+                } if name == "scale_x_percent"
+            )),
+            "a media clip resets fully: {full:?}"
+        );
+    }
+
+    /// N5 K6 (M1): the clip-local playhead subtracts the clip's timeline start —
+    /// one pure definition for the media/freeze/title inspectors, so a dropped
+    /// subtrahend fails here instead of drifting one surface.
+    #[test]
+    fn clip_playhead_local_subtracts_the_clip_start() {
+        let mut clip = media_clip(ClipId(10), AssetId(1), None);
+        clip.timeline_start = TimeCode(100);
+        assert_eq!(clip_playhead_local(&clip, TimeCode(109)), 9);
+        assert_eq!(clip_playhead_local(&clip, TimeCode(95)), -5);
+        clip.timeline_start = TimeCode::ZERO;
+        assert_eq!(clip_playhead_local(&clip, TimeCode(7)), 7);
+    }
+
+    /// N5 K5: MOTION is a picture section — an audio-only clip (Media over an
+    /// Audio asset) shows no cards and no `+ Transform` row. Video and
+    /// missing-asset clips keep the section.
+    #[test]
+    fn audio_only_clips_show_no_motion_section() {
+        let document = Document {
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: PathBuf::from("sound.wav"),
+                name: "Sound".to_owned(),
+                duration: TimeCode(30),
+                fps: Rational::new(30, 1).expect("valid fps"),
+                kind: MediaKind::Audio,
+                resolution: None,
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            }],
+            ..Document::default()
+        };
+        assert!(!clip_shows_motion(
+            &document,
+            &media_clip(ClipId(10), AssetId(1), None)
+        ));
+        assert!(
+            clip_shows_motion(&document, &media_clip(ClipId(11), AssetId(999), None)),
+            "a missing asset keeps the section (fail-open)"
+        );
+    }
+
+    /// N5 K6 (survivor): the still-fit predicate is exactly Freeze-over-Image —
+    /// a video hold-frame, a media clip, and a missing asset keep full Reset.
+    #[test]
+    fn still_fit_predicate_is_freeze_over_image_only() {
+        fn asset(id: u64, kind: MediaKind) -> MediaAsset {
+            MediaAsset {
+                id: AssetId(id),
+                path: PathBuf::from("a"),
+                name: "a".to_owned(),
+                duration: TimeCode(30),
+                fps: Rational::new(30, 1).expect("valid fps"),
+                kind,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            }
+        }
+        fn freeze(id: u64, asset: AssetId) -> Clip {
+            let mut clip = media_clip(ClipId(id), asset, None);
+            clip.content = ClipContent::Freeze(kinewright_core::FreezeFrame {
+                source_frame: TimeCode::ZERO,
+            });
+            clip
+        }
+        let document = Document {
+            media_pool: vec![asset(1, MediaKind::Image), asset(2, MediaKind::Video)],
+            ..Document::default()
+        };
+        assert!(clip_keeps_still_fit(&document, &freeze(10, AssetId(1))));
+        assert!(
+            !clip_keeps_still_fit(&document, &freeze(11, AssetId(2))),
+            "a video hold-frame resets fully"
+        );
+        assert!(
+            !clip_keeps_still_fit(&document, &media_clip(ClipId(12), AssetId(1), None)),
+            "a media clip resets fully"
+        );
+        assert!(
+            !clip_keeps_still_fit(&document, &freeze(13, AssetId(999))),
+            "a missing asset resets fully"
+        );
+    }
+
+    /// N5 K6 (survivor): the auto-key clamp has a floor, not just a ceiling —
+    /// a negative playhead keys frame 0.
+    #[test]
+    fn keyed_enable_toggle_clamps_a_negative_playhead_to_zero() {
+        let mut keyed = media_clip(ClipId(10), AssetId(1), None);
+        keyed.enabled_curve = Some(AutomationCurve {
+            keyframes: Vec::new(),
+        });
+        let document = Document {
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: PathBuf::from("picture.mov"),
+                name: "Picture".to_owned(),
+                duration: TimeCode(30),
+                fps: Rational::new(30, 1).expect("valid fps"),
+                kind: MediaKind::Video,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            }],
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![keyed],
+            }],
+            ..Document::default()
+        };
+        let operations = clip_enable_toggle_operations(&document, ClipId(10), true, TimeCode(-5));
+        assert!(
+            matches!(
+                operations.as_slice(),
+                [Operation::SetClipEnabledCurve {
+                    curve: Some(curve),
+                    ..
+                }] if curve.keyframes.as_slice()
+                    == [Keyframe {
+                        at: TimeCode(0),
+                        value: 1,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    }]
+            ),
+            "keys frame 0: {operations:?}"
+        );
+    }
+
+    /// N5 K6 (survivor): `keep_fit` narrows only the transform fit triple — an
+    /// opacity card on a still still neutralizes its own static.
+    #[test]
+    fn motion_reset_keep_fit_leaves_non_transform_cards_alone() {
+        let descriptor = kinewright_core::effect_descriptor("opacity").expect("opacity descriptor");
+        let operations = motion_reset_operations(ClipId(10), EffectId(2), &descriptor, true);
+        assert!(
+            operations.iter().any(|operation| matches!(
+                operation,
+                Operation::SetEffectParam { name, .. } if name == "percent"
+            )),
+            "opacity still neutralizes: {operations:?}"
         );
     }
 
@@ -10150,15 +10757,58 @@ mod tests {
         assert_eq!((seeded.at, seeded.value), (TimeCode(9), 100));
     }
 
-    /// MO1 R22: nav neighbours skip the current frame and vanish at the ends.
+    /// N5 K4: auto-keying onto an existing key keeps its tangents — the
+    /// replacement key is the same key with a new value.
+    #[test]
+    fn auto_key_onto_an_existing_key_keeps_its_tangents() {
+        let curve = AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(9),
+                value: 50,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: -3,
+                tangent_out: 7,
+            }],
+        };
+        let Operation::UpsertEffectKeyframe { key, .. } = motion_static_operation(
+            ClipId(1),
+            EffectId(1),
+            "percent",
+            60,
+            Some(&curve),
+            TimeCode(9),
+            0..=100,
+        ) else {
+            panic!("a curved param auto-keys");
+        };
+        assert_eq!((key.value, key.tangent_in, key.tangent_out), (60, -3, 7));
+        let plus = motion_plus_key(Some(&curve), TimeCode(9), 80, 0..=100);
+        assert_eq!((plus.tangent_in, plus.tangent_out), (-3, 7));
+    }
+
+    /// N5 K4: keying needs the playhead over the clip — frame 0 counts,
+    /// the frame past the end does not.
+    #[test]
+    fn keying_needs_the_playhead_over_the_clip() {
+        assert!(motion_playhead_keyable(TimeCode(0), TimeCode(30)));
+        assert!(motion_playhead_keyable(TimeCode(29), TimeCode(30)));
+        assert!(!motion_playhead_keyable(TimeCode(-1), TimeCode(30)));
+        assert!(!motion_playhead_keyable(TimeCode(30), TimeCode(30)));
+        assert!(!motion_playhead_keyable(TimeCode(9), TimeCode::ZERO));
+    }
+
+    /// MO1 R22 + N5 K4: nav neighbours skip the current frame, vanish at
+    /// the ends, and never leave the clip — kept-outside keys are skipped.
     #[test]
     fn neighbor_frames_skip_current_and_vanish_at_the_ends() {
-        let frames = [-20, 0, 15, 29];
-        assert_eq!(motion_neighbor_frames(&frames, 9), (Some(0), Some(15)));
-        assert_eq!(motion_neighbor_frames(&frames, 15), (Some(0), Some(29)));
-        assert_eq!(motion_neighbor_frames(&frames, -30), (None, Some(-20)));
-        assert_eq!(motion_neighbor_frames(&frames, 29), (Some(15), None));
-        assert_eq!(motion_neighbor_frames(&[], 9), (None, None));
+        let frames = [-20, 0, 15, 29, 45];
+        assert_eq!(motion_neighbor_frames(&frames, 9, 30), (Some(0), Some(15)));
+        assert_eq!(motion_neighbor_frames(&frames, 15, 30), (Some(0), Some(29)));
+        assert_eq!(motion_neighbor_frames(&frames, 5, 30), (Some(0), Some(15)));
+        assert_eq!(motion_neighbor_frames(&frames, 0, 30), (None, Some(15)));
+        assert_eq!(motion_neighbor_frames(&frames, 29, 30), (Some(15), None));
+        assert_eq!(motion_neighbor_frames(&frames, -30, 30), (None, Some(0)));
+        assert_eq!(motion_neighbor_frames(&[], 9, 30), (None, None));
     }
 
     /// MO1 R22: one card's frames union its params with the `enabled`
@@ -10194,7 +10844,7 @@ mod tests {
         let mut solo = curves_document();
         solo.tracks[0].clips[0].id = ClipId(2);
         assert_eq!(
-            clip_enable_operations(&solo, ClipId(2), false),
+            clip_enable_toggle_operations(&solo, ClipId(2), false, TimeCode(9)),
             [Operation::SetClipEnabled {
                 clip: ClipId(2),
                 enabled: false,
@@ -10212,7 +10862,7 @@ mod tests {
             clips: vec![partner],
         });
         assert_eq!(
-            clip_enable_operations(&linked, ClipId(2), false),
+            clip_enable_toggle_operations(&linked, ClipId(2), false, TimeCode(9)),
             [
                 Operation::SetClipEnabled {
                     clip: ClipId(2),
@@ -10356,11 +11006,13 @@ mod tests {
 
     /// Run one frame of a MOTION card and return what it painted, what it
     /// wrote, and where it laid its controls out.
+    #[allow(clippy::too_many_arguments)]
     fn motion_frame(
         ctx: &egui::Context,
         clip: &Clip,
         effect: &Effect,
         playhead_local: i64,
+        clip_duration: TimeCode,
         events: Vec<egui::Event>,
         rects: &mut Vec<(String, egui::Rect)>,
         time: f64,
@@ -10389,6 +11041,8 @@ mod tests {
                     descriptor,
                     playhead_local,
                     TimeCode(30),
+                    clip_duration,
+                    false,
                     &mut pending,
                 );
             },
@@ -10440,16 +11094,277 @@ mod tests {
         clip: &Clip,
         effect: &Effect,
         playhead_local: i64,
+        clip_duration: TimeCode,
         button: &str,
     ) -> InspectorEdits {
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         press_recorded(button, |events, time| {
             let mut rects = Vec::new();
-            let (_, pending) =
-                motion_frame(&ctx, clip, effect, playhead_local, events, &mut rects, time);
+            let (_, pending) = motion_frame(
+                &ctx,
+                clip,
+                effect,
+                playhead_local,
+                clip_duration,
+                events,
+                &mut rects,
+                time,
+            );
             (rects, pending)
         })
+    }
+
+    /// N5 K4: a focused keyframe row paints the selection wash behind it;
+    /// an unfocused row paints none.
+    #[test]
+    fn focused_keyframe_row_paints_the_selection_wash() {
+        fn washes(output: &egui::FullOutput) -> Vec<egui::Color32> {
+            fn collect(shape: &egui::Shape, found: &mut Vec<egui::Color32>) {
+                match shape {
+                    egui::Shape::Rect(rect) => found.push(rect.fill),
+                    egui::Shape::Vec(shapes) => {
+                        for shape in shapes {
+                            collect(shape, found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            for clipped in &output.shapes {
+                collect(&clipped.shape, &mut found);
+            }
+            found
+        }
+
+        let curve = AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(15),
+                value: 100,
+                interpolation: KeyframeInterpolation::EaseInOut,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
+        };
+        for (focused, expected) in [(false, 0), (true, 1)] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 200.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    keyframe_row(ui, "percent", &curve, 0, -MAX_KEY_FRAME_OFFSET, focused);
+                },
+            );
+            let fills = washes(&output);
+            assert_eq!(
+                fills
+                    .iter()
+                    .filter(|fill| **fill == color::ACCENT_WASH)
+                    .count(),
+                expected,
+                "focused={focused}: {fills:?}"
+            );
+        }
+    }
+
+    /// N5 K4: a lane diamond click's focus washes that key's row in the
+    /// keyframe list — and only that clip's rows.
+    #[test]
+    fn lane_focus_washes_the_focused_key_row() {
+        fn card_washes(ctx: &egui::Context, clip: &Clip, effect: &Effect) -> usize {
+            fn collect(shape: &egui::Shape, found: &mut Vec<egui::Color32>) {
+                match shape {
+                    egui::Shape::Rect(rect) => found.push(rect.fill),
+                    egui::Shape::Vec(shapes) => {
+                        for shape in shapes {
+                            collect(shape, found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let descriptor = EFFECT_DESCRIPTORS
+                        .iter()
+                        .find(|descriptor| descriptor.name == effect.name)
+                        .expect("the opacity descriptor");
+                    let mut pending = InspectorEdits::default();
+                    motion_effect_card(
+                        ui,
+                        clip,
+                        effect,
+                        descriptor,
+                        9,
+                        TimeCode(30),
+                        TimeCode(30),
+                        false,
+                        &mut pending,
+                    );
+                },
+            );
+            let mut found = Vec::new();
+            for clipped in &output.shapes {
+                collect(&clipped.shape, &mut found);
+            }
+            found
+                .iter()
+                .filter(|fill| **fill == color::ACCENT_WASH)
+                .count()
+        }
+
+        let effect = motion_opacity_effect();
+        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        clip.effects = vec![effect.clone()];
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        // Differential pin: the slider's own trailing fill also paints a
+        // wash, so focus must add exactly one more — and only for its clip.
+        let baseline = card_washes(&ctx, &clip, &effect);
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new(crate::timeline_ui::KEYFRAME_FOCUS_MEMORY_ID),
+                (ClipId(2), TimeCode(15)),
+            );
+        });
+        assert_eq!(card_washes(&ctx, &clip, &effect), baseline + 1);
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new(crate::timeline_ui::KEYFRAME_FOCUS_MEMORY_ID),
+                (ClipId(9), TimeCode(15)),
+            );
+        });
+        assert_eq!(card_washes(&ctx, &clip, &effect), baseline);
+    }
+
+    /// N5 K4: a keyed control shows the value at the playhead — at local 5
+    /// the 50→100 ramp reads 67, not the parked 80.
+    #[test]
+    fn keyed_control_shows_the_value_at_the_playhead() {
+        let effect = motion_opacity_effect();
+        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        clip.effects = vec![effect.clone()];
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut rects = Vec::new();
+        let (painted, _) = motion_frame(
+            &ctx,
+            &clip,
+            &effect,
+            5,
+            TimeCode(30),
+            Vec::new(),
+            &mut rects,
+            0.02,
+        );
+        assert!(
+            painted.iter().any(|text| text == "67"),
+            "the control reads the ramp at local 5: {painted:?}"
+        );
+        assert!(
+            painted.iter().all(|text| text != "80"),
+            "the parked static is nowhere on the card: {painted:?}"
+        );
+    }
+
+    /// N5 K4: "+ Key" with the playhead outside the clip writes nothing —
+    /// the button is disabled there.
+    #[test]
+    fn plus_key_outside_the_clip_writes_nothing() {
+        let effect = motion_opacity_effect();
+        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        clip.effects = vec![effect.clone()];
+        let pressed = motion_press(&clip, &effect, 45, TimeCode(30), "motion_add_key");
+        assert!(pressed.operations().is_empty());
+        let pressed = motion_press(&clip, &effect, -5, TimeCode(30), "motion_add_key");
+        assert!(pressed.operations().is_empty());
+    }
+
+    /// N5 K4: a keyed toggle with the playhead outside the clip writes no
+    /// key — but the same press over the clip does.
+    #[test]
+    fn keyed_toggle_outside_the_clip_writes_no_key() {
+        let mut effect = motion_opacity_effect();
+        effect.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode::ZERO,
+                value: 1,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
+        });
+        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        clip.effects = vec![effect.clone()];
+        let inside = motion_press(&clip, &effect, 9, TimeCode(30), "motion_toggle");
+        assert!(
+            inside.operations().iter().any(|operation| {
+                matches!(
+                    operation,
+                    Operation::UpsertEffectKeyframe { name, .. } if name == "enabled"
+                )
+            }),
+            "the press aims at the live toggle"
+        );
+        let outside = motion_press(&clip, &effect, 45, TimeCode(30), "motion_toggle");
+        assert!(outside.operations().is_empty());
+    }
+
+    /// N5 K4: dragging a keyed control with the playhead outside the clip
+    /// writes nothing — auto-key is disabled there.
+    #[test]
+    fn keyed_drag_outside_the_clip_writes_nothing() {
+        use super::review_c2_inspector::{drag_frames, param_row_frame, texts};
+
+        let effect = motion_opacity_effect();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        // Aim at the slider bar, left of its value box (N5 K4: the box shows
+        // the value at the playhead — 80 at local 9 on this ramp).
+        let (output, _) = param_row_frame(&ctx, ClipId(2), &effect, "percent", 9, Vec::new(), 0.0);
+        let value_box = texts(&output)
+            .into_iter()
+            .find(|(text, _)| text == "80")
+            .unwrap_or_else(|| panic!("the slider shows 80 at local 9"))
+            .1;
+        let press = egui::pos2(value_box.left() - 60.0, value_box.center().y);
+        // Positive control: the same drag over the clip writes.
+        let inside = drag_frames(
+            |events, time| param_row_frame(&ctx, ClipId(2), &effect, "percent", 9, events, time).1,
+            press,
+            &[10.0, 20.0, 30.0],
+        );
+        assert!(
+            inside.iter().any(|edits| !edits.operations().is_empty()),
+            "the drag aims at the live control"
+        );
+        let frames = drag_frames(
+            |events, time| param_row_frame(&ctx, ClipId(2), &effect, "percent", 45, events, time).1,
+            press,
+            &[10.0, 20.0, 30.0],
+        );
+        let wrote: Vec<_> = frames
+            .iter()
+            .flat_map(|edits| edits.operations().iter())
+            .collect();
+        assert!(
+            wrote.is_empty(),
+            "no drag frame outside the clip writes: {wrote:?}"
+        );
     }
 
     /// MO1 R22: the card paints its rows — including the kept-outside key —
@@ -10462,8 +11377,16 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         let mut rects = Vec::new();
-        let (painted, pending) =
-            motion_frame(&ctx, &clip, &effect, 9, Vec::new(), &mut rects, 0.02);
+        let (painted, pending) = motion_frame(
+            &ctx,
+            &clip,
+            &effect,
+            9,
+            TimeCode(30),
+            Vec::new(),
+            &mut rects,
+            0.02,
+        );
         assert!(
             pending.operations().is_empty(),
             "painting a MOTION card writes no operation: {:?}",
@@ -10532,6 +11455,7 @@ mod tests {
                             effect,
                             parameter,
                             TimeCode(playhead_local),
+                            TimeCode(30),
                             &mut pending,
                         );
                     },
@@ -10590,17 +11514,17 @@ mod tests {
         clip.effects = vec![effect.clone()];
         // Keys at −20/0/15, playhead local 9: prev 0 → project 10, next
         // 15 → project 25.
-        let back = motion_press(&clip, &effect, 9, "motion_prev");
+        let back = motion_press(&clip, &effect, 9, TimeCode(30), "motion_prev");
         assert_eq!(back.playhead_request(), Some(TimeCode(10)));
         assert!(back.operations().is_empty());
-        let forward = motion_press(&clip, &effect, 9, "motion_next");
+        let forward = motion_press(&clip, &effect, 9, TimeCode(30), "motion_next");
         assert_eq!(forward.playhead_request(), Some(TimeCode(25)));
         // Past the last key the next button is dead: no request, no write.
-        let past = motion_press(&clip, &effect, 29, "motion_next");
+        let past = motion_press(&clip, &effect, 29, TimeCode(30), "motion_next");
         assert_eq!(past.playhead_request(), None);
         assert!(past.operations().is_empty());
 
-        let toggled = motion_press(&clip, &effect, 9, "motion_toggle");
+        let toggled = motion_press(&clip, &effect, 9, TimeCode(30), "motion_toggle");
         assert_eq!(
             toggled.operations(),
             [Operation::SetEffectEnabled {
@@ -10619,7 +11543,7 @@ mod tests {
         effect.enabled = false;
         let mut clip = media_clip(ClipId(2), AssetId(1), None);
         clip.effects = vec![effect.clone()];
-        let reset = motion_press(&clip, &effect, 9, "motion_reset_effect");
+        let reset = motion_press(&clip, &effect, 9, TimeCode(30), "motion_reset_effect");
         assert_eq!(
             reset.operations(),
             [
@@ -10641,7 +11565,7 @@ mod tests {
             None,
             "one discrete batch is one undo entry"
         );
-        let removed = motion_press(&clip, &effect, 9, "motion_remove");
+        let removed = motion_press(&clip, &effect, 9, TimeCode(30), "motion_remove");
         assert_eq!(
             removed.operations(),
             [Operation::RemoveEffect {
@@ -10667,7 +11591,17 @@ mod tests {
                 )),
                 ..Default::default()
             },
-            |ui| motion_section(ui, &clip, 9, TimeCode(30), &mut painting),
+            |ui| {
+                motion_section(
+                    ui,
+                    &clip,
+                    9,
+                    TimeCode(30),
+                    TimeCode(30),
+                    false,
+                    &mut painting,
+                );
+            },
         );
         assert!(painting.operations().is_empty());
         let added = press_recorded("motion_add_effect", |events, time| {
@@ -10684,7 +11618,15 @@ mod tests {
                 },
                 |ui| {
                     let _ = crate::mixer_ui::take_strip_rects();
-                    motion_section(ui, &clip, 9, TimeCode(30), &mut pending);
+                    motion_section(
+                        ui,
+                        &clip,
+                        9,
+                        TimeCode(30),
+                        TimeCode(30),
+                        false,
+                        &mut pending,
+                    );
                 },
             );
             (crate::mixer_ui::take_strip_rects(), pending)
@@ -10721,7 +11663,15 @@ mod tests {
                 },
                 |ui| {
                     let _ = crate::mixer_ui::take_strip_rects();
-                    motion_section(ui, &clip, 9, TimeCode(30), &mut pending);
+                    motion_section(
+                        ui,
+                        &clip,
+                        9,
+                        TimeCode(30),
+                        TimeCode(30),
+                        false,
+                        &mut pending,
+                    );
                 },
             );
             (crate::mixer_ui::take_strip_rects(), pending)
@@ -10730,61 +11680,60 @@ mod tests {
         assert!(pressed.operations().is_empty());
     }
 
-    /// MO1 R25: every §4 motion operation names its GUI sender(s) — the
-    /// op↔GUI parity checklist.
+    /// N5 K6: the rebuilt parity test — MO1's §4 motion operations, enumerated
+    /// from the single [`MOTION_OPERATIONS`] list, each resolve in the agent's
+    /// operation registry (real variants, not a hand list compared with
+    /// itself) and each maps to a non-empty GUI sender list; `plan_motion`
+    /// resolves as a registry capability with its own sender. Gesture names
+    /// are pinned exactly where the reviews corrected them.
     #[test]
     fn motion_parity_checklist_is_complete() {
-        let checklist: &[(&str, &[&str])] = &[
-            (
-                "UpsertEffectKeyframe",
-                &["keyframe editor ('+ Key', auto-key edits)"],
-            ),
-            (
-                "RemoveEffectKeyframe",
-                &[
-                    "keyframe editor (per-key delete)",
-                    "timeline key lane (diamond click)",
-                ],
-            ),
-            ("SetEffectEnabled", &["effect card toggle"]),
-            ("SetClipEnabled", &["clip header toggle"]),
-            (
-                "SetClipEnabledCurve",
-                &["clip header ('+ Key at playhead')"],
-            ),
-            ("CopyClipAttributes", &["clip context menu (copy/paste)"]),
-            (
-                "SetEffectKeyframes",
-                &[
-                    "keyframe editor (row edits)",
-                    "opacity rubber band",
-                    "plan 'Apply' confirmation",
-                ],
-            ),
-            (
-                "ClearEffectKeyframes",
-                &[
-                    "keyframe editor ('Clear' buttons)",
-                    "plan 'Apply' confirmation",
-                ],
-            ),
-            (
-                "SetEffectParam",
-                &["effect editor (static edits)", "plan 'Apply' confirmation"],
-            ),
-            (
-                "AddEffect",
-                &["MOTION '+ effect' buttons", "plan 'Apply' confirmation"],
-            ),
-            ("plan_motion", &["plan 'Apply' confirmation"]),
-        ];
-        for (operation, senders) in checklist {
-            assert_eq!(
-                motion_gui_senders(operation),
-                Some(*senders),
-                "{operation} names its GUI sender"
+        let registry = kinewright_agent::operation_tools().expect("the registry builds");
+        let variants: Vec<&str> = registry
+            .iter()
+            .map(|definition| definition.variant.as_str())
+            .collect();
+        assert_eq!(
+            MOTION_OPERATIONS.len(),
+            11,
+            "the §4 motion set, pinned so a quiet add/remove fails here"
+        );
+        for operation in MOTION_OPERATIONS {
+            assert!(
+                variants.contains(&operation),
+                "{operation} is a real Operation variant in the registry"
+            );
+            let senders = motion_gui_senders(operation);
+            assert!(
+                senders.is_some_and(|senders| !senders.is_empty()),
+                "{operation} maps to a GUI sender"
             );
         }
+        let capabilities =
+            kinewright_agent::capability_tool_names().expect("capabilities enumerate");
+        assert!(
+            capabilities.iter().any(|name| name == "plan_motion"),
+            "plan_motion is a registry capability"
+        );
+        assert_eq!(
+            motion_gui_senders("plan_motion"),
+            Some(&["plan 'Apply' confirmation"][..])
+        );
+        // The corrected gesture names, pinned exactly.
+        assert_eq!(
+            motion_gui_senders("RemoveEffectKeyframe"),
+            Some(
+                &[
+                    "keyframe editor (per-key delete)",
+                    "timeline key lane (hover + Delete)",
+                ][..]
+            )
+        );
+        assert_eq!(
+            motion_gui_senders("SetClipEnabledCurve"),
+            Some(&["clip header (toggle auto-key, '+ Key at playhead')"][..])
+        );
+        assert_eq!(motion_gui_senders("AddAsset"), None);
         assert_eq!(motion_gui_senders("NoSuchOp"), None);
     }
 
@@ -10802,6 +11751,7 @@ mod tests {
         let dialog = app.motion_plan_dialog.as_ref().expect("the dialog opens");
         assert_eq!(dialog.clip, clip);
         assert!(!dialog.replace);
+        assert_eq!(dialog.session, app.focused().id, "bound to this session");
         crate::app::in1_tests::in1_shutdown(&mut app);
     }
 
@@ -10949,3 +11899,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "review_c2_inspector.rs"]
+mod review_c2_inspector;

@@ -118,6 +118,8 @@ pub enum MotionPlanError {
     ClipTooShort { clip: ClipId, duration: i64 },
     #[error("clip {clip} already carries curves on {params}; clear them or pass replace: true")]
     ExistingCurves { clip: ClipId, params: String },
+    #[error("clip {clip}'s transform {effect} is disabled; enable it or animate an enabled one")]
+    DisabledTransform { clip: ClipId, effect: EffectId },
     #[error("the Core transform descriptor is unavailable")]
     MissingDescriptor,
     #[error("could not allocate a fresh transform effect id")]
@@ -136,6 +138,7 @@ impl MotionPlanError {
             Self::UnsupportedTrack { .. } => "unsupported_track_kind",
             Self::ClipTooShort { .. } => "clip_too_short",
             Self::ExistingCurves { .. } => "motion_curves_exist",
+            Self::DisabledTransform { .. } => "motion_transform_disabled",
             Self::MissingDescriptor => "missing_transform_descriptor",
             Self::EffectIdExhausted => "effect_id_exhausted",
             Self::CoreRejected(_) => "motion_plan_core_rejected",
@@ -159,6 +162,9 @@ impl MotionPlanError {
             Self::ExistingCurves { clip, params } => {
                 json!({"clip_id": clip, "params": params})
             }
+            Self::DisabledTransform { clip, effect } => {
+                json!({"clip_id": clip, "effect_id": effect})
+            }
             Self::MissingDescriptor | Self::EffectIdExhausted => json!({}),
             Self::CoreRejected(error) => json!({"error": error}),
         }
@@ -178,24 +184,66 @@ pub struct MotionPlan {
     pub key_counts: Vec<(String, usize)>,
 }
 
-/// MO1 R20: the animated ramps one preset authors — `(param, from, to)` over
-/// the clip ends. `pan_left` slides the picture toward the left edge (`x`
-/// decreases); `pan_right` mirrors it. `ken_burns` zooms 100 → 115% while
-/// drifting from up-right to down-left. All values sit inside the R1
-/// descriptor ranges, so the proposal cannot fail its own validation.
-const fn preset_ramps(preset: MotionPreset) -> &'static [(&'static str, i64, i64)] {
+/// N5 K2: how one preset ramp derives its far end from the clip's existing
+/// static `S` — every move starts where the still is (no frame-0 jump) and
+/// travels the documented distance: additive points for pans and drifts,
+/// exact rational factors for the fine zoom (a ×6/5 looks the same whatever
+/// the base, so a baked still fit survives the move).
+#[derive(Debug, Clone, Copy)]
+enum RampSpec {
+    /// Ends `(S, S + delta)`.
+    Offset(i64),
+    /// Ends `(S, S * num / den)`.
+    Factor(i64, i64),
+}
+
+/// MO1 R20: the animated ramps one preset authors — `(param, spec)` over the
+/// clip ends, resolved against the target's static. `pan_left` slides the
+/// picture 2400 points toward the left edge (`x` decreases); `pan_right`
+/// mirrors it. `ken_burns` zooms ×23/20 while drifting down-left. Ends clamp
+/// to the R1 descriptor ranges, so the proposal cannot fail its own validation.
+const fn preset_ramps(preset: MotionPreset) -> &'static [(&'static str, RampSpec)] {
     match preset {
-        MotionPreset::PushIn => &[("scale_fine_hundredths", 10_000, 12_000)],
-        MotionPreset::PullOut => &[("scale_fine_hundredths", 12_000, 10_000)],
-        MotionPreset::PanLeft => &[("x_basis_points", 1_200, -1_200)],
-        MotionPreset::PanRight => &[("x_basis_points", -1_200, 1_200)],
+        MotionPreset::PushIn => &[("scale_fine_hundredths", RampSpec::Factor(6, 5))],
+        MotionPreset::PullOut => &[("scale_fine_hundredths", RampSpec::Factor(5, 6))],
+        MotionPreset::PanLeft => &[("x_basis_points", RampSpec::Offset(-2_400))],
+        MotionPreset::PanRight => &[("x_basis_points", RampSpec::Offset(2_400))],
         MotionPreset::KenBurns => &[
-            ("scale_fine_hundredths", 10_000, 11_500),
-            ("x_basis_points", 800, -800),
-            ("y_basis_points", -450, 450),
+            ("scale_fine_hundredths", RampSpec::Factor(23, 20)),
+            ("x_basis_points", RampSpec::Offset(-1_600)),
+            ("y_basis_points", RampSpec::Offset(900)),
         ],
         MotionPreset::Pip => &[],
     }
+}
+
+/// N5 K2: resolve one ramp's ends against the target's existing static (or
+/// the descriptor neutral for a fresh transform), clamped to the
+/// parameter's range. Non-integer statics cannot occur on these params;
+/// they fall back to neutral rather than refusing.
+fn ramp_ends(
+    descriptor: kinewright_core::EffectDescriptor,
+    existing: Option<&BTreeMap<String, ParamValue>>,
+    name: &str,
+    spec: RampSpec,
+) -> (i64, i64) {
+    let (neutral, min, max) = descriptor
+        .parameter(name)
+        .map_or((0, i64::MIN, i64::MAX), |param| {
+            (param.neutral, param.min, param.max)
+        });
+    let base = existing
+        .and_then(|params| params.get(name))
+        .and_then(|value| match value {
+            ParamValue::Integer(stored) => Some(*stored),
+            _ => None,
+        })
+        .unwrap_or(neutral);
+    let to = match spec {
+        RampSpec::Offset(delta) => base.saturating_add(delta),
+        RampSpec::Factor(num, den) => base.saturating_mul(num) / den.max(1),
+    };
+    (base.clamp(min, max), to.clamp(min, max))
 }
 
 /// MO1 R20: one two-key eased ramp from `from` at frame 0 to `to` at `end`.
@@ -222,28 +270,46 @@ fn ramp_curve(from: i64, to: i64, end: TimeCode) -> AutomationCurve {
     }
 }
 
-/// MO1 R20: thin `keys` to at most [`MOTION_MAX_KEYS_PER_CURVE`], keeping the
-/// endpoints and spacing the survivors evenly. Pure; the shipped presets emit
-/// two keys and never reach it, but the cap is enforced rather than assumed.
+/// MO1 R20: thin `keys` to at most [`MOTION_MAX_KEYS_PER_CURVE`]. Pure; the
+/// shipped presets emit two keys and never reach it, but the cap is enforced
+/// rather than assumed.
+///
+/// N5 K6 tolerance contract: the endpoints plus every interior bucket's
+/// value extrema survive, so a spike or dip inside any bucket is never
+/// dropped and deviation is exactly 0 at every kept key. No numeric bound
+/// is promised between kept keys — the guarantee is structural (features
+/// survive), pinned by the spike test, not a Lipschitz bound.
 fn decimate_keys(keys: Vec<Keyframe>) -> Vec<Keyframe> {
     if keys.len() <= MOTION_MAX_KEYS_PER_CURVE {
         return keys;
     }
-    let keep = MOTION_MAX_KEYS_PER_CURVE;
-    let last = keys.len() - 1;
-    (0..keep)
-        .map(|slot| {
-            // Non-negative by construction (`slot`, `last` and `keep - 1`
-            // are all ≥ 0), so the float round-trip only spaces the slots.
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_precision_loss,
-                clippy::cast_sign_loss
-            )]
-            let index = (slot as f64 * last as f64 / (keep - 1) as f64).round() as usize;
-            keys[index.min(last)]
-        })
-        .collect()
+    // Endpoints plus per-bucket min/max: at most 2 + 2 buckets, and buckets
+    // is 3 while the cap is 8, so the cap holds by construction.
+    let buckets = (MOTION_MAX_KEYS_PER_CURVE - 2) / 2;
+    let mut picks = Vec::with_capacity(MOTION_MAX_KEYS_PER_CURVE);
+    picks.push(keys[0]);
+    let interior = &keys[1..keys.len() - 1];
+    let chunk = interior.len().div_ceil(buckets);
+    for run in interior.chunks(chunk) {
+        let (mut low, mut high) = (run[0], run[0]);
+        for key in &run[1..] {
+            if key.value < low.value {
+                low = *key;
+            }
+            if key.value > high.value {
+                high = *key;
+            }
+        }
+        picks.push(low);
+        if high.at != low.at {
+            picks.push(high);
+        }
+    }
+    picks.push(keys[keys.len() - 1]);
+    picks.sort_by_key(|key| key.at.0);
+    picks.dedup_by_key(|key| key.at.0);
+    debug_assert!(picks.len() <= MOTION_MAX_KEYS_PER_CURVE);
+    picks
 }
 
 /// MO1 R20: whether the response fits the byte budget — the text plus the
@@ -360,20 +426,38 @@ struct MotionTarget {
     curved: Vec<&'static str>,
 }
 
+/// N5 K2: the fine-triple params `pip` also clears — a static frame with a
+/// live fine/basis curve underneath would drift.
+const PIP_CLEARED_CURVES: [&str; 3] = ["scale_fine_hundredths", "x_basis_points", "y_basis_points"];
+
 /// MO1 R20: resolve the transform one preset moves and refuse the params it
 /// must not overwrite. Several same-named transforms stack legally (R19);
 /// the proposal targets the first in compositor order and names its id, so
-/// the evidence is exact.
+/// the evidence is exact. N5 K2: a disabled first transform yields to the
+/// first enabled one, else refuses typed — the planner never animates an
+/// effect that renders through.
 fn resolve_motion_target(
     document: &Document,
     clip: &Clip,
     preset: MotionPreset,
     replace: bool,
 ) -> Result<MotionTarget, MotionPlanError> {
-    let existing = clip
+    let first = clip
         .effects
         .iter()
         .find(|effect| effect.name == MOTION_EFFECT_NAME);
+    let existing = clip
+        .effects
+        .iter()
+        .find(|effect| effect.name == MOTION_EFFECT_NAME && effect.enabled);
+    if let (Some(disabled), None) = (first, existing)
+        && !disabled.enabled
+    {
+        return Err(MotionPlanError::DisabledTransform {
+            clip: clip.id,
+            effect: disabled.id,
+        });
+    }
     let (effect_id, created) = match existing {
         Some(effect) => (effect.id, false),
         None => (
@@ -382,12 +466,13 @@ fn resolve_motion_target(
         ),
     };
     let target_params: Vec<&str> = if preset == MotionPreset::Pip {
-        PIP_STATICS.iter().map(|(name, _)| *name).collect()
-    } else {
-        preset_ramps(preset)
+        PIP_STATICS
             .iter()
-            .map(|(name, _, _)| *name)
+            .map(|(name, _)| *name)
+            .chain(PIP_CLEARED_CURVES.iter().copied())
             .collect()
+    } else {
+        preset_ramps(preset).iter().map(|(name, _)| *name).collect()
     };
     let curved: Vec<&'static str> = target_params
         .iter()
@@ -412,6 +497,32 @@ fn resolve_motion_target(
         created,
         curved,
     })
+}
+
+/// MO1 R20: the fresh neutral transform a preset creates when the clip has no
+/// usable one — every parameter at its descriptor neutral.
+fn new_motion_effect(
+    descriptor: kinewright_core::EffectDescriptor,
+    target_effect_id: EffectId,
+) -> Effect {
+    let parameters = descriptor
+        .parameters
+        .iter()
+        .map(|parameter| {
+            (
+                parameter.name.to_owned(),
+                ParamValue::Integer(parameter.neutral),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    Effect {
+        enabled: true,
+        enabled_curve: None,
+        id: target_effect_id,
+        name: MOTION_EFFECT_NAME.to_owned(),
+        parameters,
+        keyframes: BTreeMap::new(),
+    }
 }
 
 /// MO1 R20: plan one preset against `document` at `actual_revision`. Pure over
@@ -453,26 +564,9 @@ pub fn plan_motion(
 
     let mut operations = Vec::new();
     if created_new_effect {
-        let parameters = descriptor
-            .parameters
-            .iter()
-            .map(|parameter| {
-                (
-                    parameter.name.to_owned(),
-                    ParamValue::Integer(parameter.neutral),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
         operations.push(Operation::AddEffect {
             clip: args.clip_id,
-            effect: Effect {
-                enabled: true,
-                enabled_curve: None,
-                id: target_effect_id,
-                name: MOTION_EFFECT_NAME.to_owned(),
-                parameters,
-                keyframes: BTreeMap::new(),
-            },
+            effect: new_motion_effect(descriptor, target_effect_id),
         });
     }
     let mut key_counts = Vec::new();
@@ -494,9 +588,17 @@ pub fn plan_motion(
             });
         }
     } else {
-        for (name, from, to) in preset_ramps(args.preset) {
+        // N5 K2: ramps resolve against the target's statics (`None` for a
+        // fresh transform reads neutral), so the move starts where the clip is.
+        let existing_params = clip
+            .effects
+            .iter()
+            .find(|effect| effect.id == target_effect_id)
+            .map(|effect| &effect.parameters);
+        for (name, spec) in preset_ramps(args.preset) {
+            let (from, to) = ramp_ends(descriptor, existing_params, name, *spec);
             let curve = AutomationCurve {
-                keyframes: decimate_keys(ramp_curve(*from, *to, end).keyframes),
+                keyframes: decimate_keys(ramp_curve(from, to, end).keyframes),
             };
             key_counts.push(((*name).to_owned(), curve.keyframes.len()));
             operations.push(Operation::SetEffectKeyframes {
@@ -650,7 +752,7 @@ mod tests {
     }
 
     /// MO1 R20: the push-in golden — a missing transform is added neutral,
-    /// then the fine scale ramps 100 → 120% across the clip ends, eased.
+    /// then the fine scale ramps ×1.2 from neutral across the clip ends, eased.
     #[test]
     fn push_in_adds_a_neutral_transform_then_ramps_fine_scale() {
         let document = motion_fixture(TrackKind::Video, 60, Vec::new());
@@ -702,22 +804,16 @@ mod tests {
         for (preset, expected) in [
             (
                 MotionPreset::PullOut,
-                vec![("scale_fine_hundredths", 12_000, 10_000)],
+                vec![("scale_fine_hundredths", 10_000, 8_333)],
             ),
-            (
-                MotionPreset::PanLeft,
-                vec![("x_basis_points", 1_200, -1_200)],
-            ),
-            (
-                MotionPreset::PanRight,
-                vec![("x_basis_points", -1_200, 1_200)],
-            ),
+            (MotionPreset::PanLeft, vec![("x_basis_points", 0, -2_400)]),
+            (MotionPreset::PanRight, vec![("x_basis_points", 0, 2_400)]),
             (
                 MotionPreset::KenBurns,
                 vec![
                     ("scale_fine_hundredths", 10_000, 11_500),
-                    ("x_basis_points", 800, -800),
-                    ("y_basis_points", -450, 450),
+                    ("x_basis_points", 0, -1_600),
+                    ("y_basis_points", 0, 900),
                 ],
             ),
         ] {
@@ -872,6 +968,178 @@ mod tests {
         );
     }
 
+    /// N5 K2: ramps start where the clip is — a push-in on fine 15000 runs
+    /// 15000 → 18000 (×1.2), not 10000 → 12000.
+    #[test]
+    fn push_in_ramps_relative_to_a_non_neutral_fine_static() {
+        let mut effect = neutral_transform(EffectId(1));
+        effect.parameters.insert(
+            "scale_fine_hundredths".to_owned(),
+            ParamValue::Integer(15_000),
+        );
+        let document = motion_fixture(TrackKind::Video, 60, vec![effect]);
+        let plan = plan_motion(
+            &document,
+            TimelineRevision(7),
+            &motion_args(MotionPreset::PushIn, false),
+        )
+        .expect("a clean clip plans");
+        let Operation::SetEffectKeyframes { curve, .. } = &plan.operations[0] else {
+            panic!("{:?}", plan.operations);
+        };
+        let values: Vec<i64> = curve.keyframes.iter().map(|key| key.value).collect();
+        assert_eq!(values, vec![15_000, 18_000]);
+    }
+
+    /// N5 K2: every move starts where the clip is — a pull-out runs S to
+    /// S/1.2, pans run S to S∓2400 — never from neutral.
+    #[test]
+    fn pull_out_and_pans_are_relative_to_the_static() {
+        let mut effect = neutral_transform(EffectId(1));
+        effect.parameters.insert(
+            "scale_fine_hundredths".to_owned(),
+            ParamValue::Integer(15_000),
+        );
+        effect
+            .parameters
+            .insert("x_basis_points".to_owned(), ParamValue::Integer(500));
+        let document = motion_fixture(TrackKind::Video, 60, vec![effect]);
+        for (preset, param, expected) in [
+            (
+                MotionPreset::PullOut,
+                "scale_fine_hundredths",
+                vec![15_000, 12_500],
+            ),
+            (MotionPreset::PanLeft, "x_basis_points", vec![500, -1_900]),
+            (MotionPreset::PanRight, "x_basis_points", vec![500, 2_900]),
+        ] {
+            let plan = plan_motion(&document, TimelineRevision(7), &motion_args(preset, false))
+                .expect("a clean clip plans");
+            let Operation::SetEffectKeyframes { name, curve, .. } = &plan.operations[0] else {
+                panic!("{preset:?}: {plan:?}");
+            };
+            assert_eq!(name, param);
+            let values: Vec<i64> = curve.keyframes.iter().map(|key| key.value).collect();
+            assert_eq!(values, expected, "{preset:?}");
+        }
+    }
+
+    /// N5 K2: relative ends clamp to the descriptor range instead of failing
+    /// their own validation.
+    #[test]
+    fn relative_ramps_clamp_to_the_descriptor_range() {
+        let mut effect = neutral_transform(EffectId(1));
+        effect.parameters.insert(
+            "scale_fine_hundredths".to_owned(),
+            ParamValue::Integer(40_000),
+        );
+        effect
+            .parameters
+            .insert("x_basis_points".to_owned(), ParamValue::Integer(-9_000));
+        let document = motion_fixture(TrackKind::Video, 60, vec![effect]);
+        let plan = plan_motion(
+            &document,
+            TimelineRevision(7),
+            &motion_args(MotionPreset::PushIn, false),
+        )
+        .expect("clamped plans still plan");
+        let Operation::SetEffectKeyframes { curve, .. } = &plan.operations[0] else {
+            panic!("{plan:?}");
+        };
+        assert_eq!(curve.keyframes[1].value, 40_000, "fine caps at its max");
+        let plan = plan_motion(
+            &document,
+            TimelineRevision(7),
+            &motion_args(MotionPreset::PanLeft, false),
+        )
+        .expect("clamped plans still plan");
+        let Operation::SetEffectKeyframes { curve, .. } = &plan.operations[0] else {
+            panic!("{plan:?}");
+        };
+        let values: Vec<i64> = curve.keyframes.iter().map(|key| key.value).collect();
+        assert_eq!(values, vec![-9_000, -10_000]);
+    }
+
+    /// N5 K2: a disabled first transform refuses typed rather than animating
+    /// an effect that renders through.
+    #[test]
+    fn disabled_first_transform_refuses_typed() {
+        let mut effect = neutral_transform(EffectId(1));
+        effect.enabled = false;
+        let document = motion_fixture(TrackKind::Video, 60, vec![effect]);
+        let refused = plan_motion(
+            &document,
+            TimelineRevision(7),
+            &motion_args(MotionPreset::PushIn, false),
+        )
+        .expect_err("a disabled transform refuses");
+        assert_eq!(refused.code(), "motion_transform_disabled");
+        assert!(matches!(refused, MotionPlanError::DisabledTransform { .. }));
+    }
+
+    /// N5 K2: ...unless a later transform is enabled — then the plan targets
+    /// the enabled one.
+    #[test]
+    fn disabled_first_transform_yields_to_an_enabled_one() {
+        let mut first = neutral_transform(EffectId(1));
+        first.enabled = false;
+        let document = motion_fixture(
+            TrackKind::Video,
+            60,
+            vec![first, neutral_transform(EffectId(2))],
+        );
+        let plan = plan_motion(
+            &document,
+            TimelineRevision(7),
+            &motion_args(MotionPreset::PushIn, false),
+        )
+        .expect("an enabled transform plans");
+        assert_eq!(plan.target_effect_id, EffectId(2));
+        assert!(!plan.created_new_effect);
+    }
+
+    /// N5 K2: `pip` with `replace` also clears fine/basis-point curves, so no
+    /// animation drifts under the static frame.
+    #[test]
+    fn pip_replace_clears_fine_and_basis_curves() {
+        let mut effect = keyed_transform(EffectId(2), "scale_percent", 150);
+        effect.keyframes.insert(
+            "scale_fine_hundredths".to_owned(),
+            AutomationCurve {
+                keyframes: vec![Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 12_000,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                }],
+            },
+        );
+        let document = motion_fixture(TrackKind::Video, 60, vec![effect]);
+        let refused = plan_motion(
+            &document,
+            TimelineRevision(7),
+            &motion_args(MotionPreset::Pip, false),
+        )
+        .expect_err("pip refuses curved fine without replace");
+        assert!(matches!(refused, MotionPlanError::ExistingCurves { .. }));
+        let plan = plan_motion(
+            &document,
+            TimelineRevision(7),
+            &motion_args(MotionPreset::Pip, true),
+        )
+        .expect("pip replace plans");
+        let cleared: Vec<&str> = plan
+            .operations
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::ClearEffectKeyframes { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cleared, vec!["scale_percent", "scale_fine_hundredths"]);
+    }
+
     /// MO1 R20: `ken_burns` is a move preset and is NOT refused on video.
     #[test]
     fn ken_burns_is_allowed_on_video() {
@@ -932,8 +1200,8 @@ mod tests {
         );
     }
 
-    /// MO1 R20: decimation keeps the endpoints, spaces the survivors evenly,
-    /// and leaves short curves alone.
+    /// MO1 R20 + N5 K6: decimation keeps the endpoints and every bucket's
+    /// value extrema, and leaves short curves alone.
     #[test]
     fn decimation_keeps_endpoints_and_leaves_short_curves_alone() {
         let keys: Vec<Keyframe> = (0..20)
@@ -955,6 +1223,35 @@ mod tests {
 
         let short: Vec<Keyframe> = keys[..8].to_vec();
         assert_eq!(decimate_keys(short.clone()), short);
+    }
+
+    /// N5 K6: the tolerance contract structurally — a spike and a dip in the
+    /// interior both survive decimation at their exact frames and values.
+    #[test]
+    fn decimation_keeps_interior_extrema() {
+        let keys: Vec<Keyframe> = (0..20)
+            .map(|at| Keyframe {
+                at: TimeCode(at),
+                value: match at {
+                    5 => 10_000,
+                    13 => -10_000,
+                    _ => 0,
+                },
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            })
+            .collect();
+        let thinned = decimate_keys(keys);
+        assert!(thinned.len() <= MOTION_MAX_KEYS_PER_CURVE);
+        for (at, value) in [(0, 0), (5, 10_000), (13, -10_000), (19, 0)] {
+            assert!(
+                thinned
+                    .iter()
+                    .any(|key| key.at == TimeCode(at) && key.value == value),
+                "kept keys hold ({at}, {value}): {thinned:?}"
+            );
+        }
     }
 
     /// MO1 R20: the budget helper draws the line at exactly 4 KiB.
@@ -1017,3 +1314,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "motion_review_c2.rs"]
+mod review_c2;

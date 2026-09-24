@@ -1383,6 +1383,7 @@ impl KinewrightApp {
             let route_valid = self.valid_route(asset.kind, video_target, audio_target);
             let can_edit = source_edit_controls_are_enabled(
                 source_state,
+                asset.kind,
                 duration,
                 source_in,
                 source_out,

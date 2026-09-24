@@ -377,9 +377,12 @@ the empty state is a single `text-muted` sentence with `space-3` breathing room.
 The `MOTION` section holds one card per motion effect (`transform`, `crop`,
 `reframe`, `opacity`). Each animated parameter is a row with a value readout,
 prev/next-key navigation, `+ Key at playhead` / `Clear`, and a `KEYFRAMED`
-badge; editing a value at the playhead auto-keys there. Per-effect and
-clip-header enable toggles sit on the card and header, with `+ Key at
-playhead` for the enable curve. `Plan move…` opens the plan dialog (MO1 R22).
+badge; editing a value at the playhead auto-keys there. A keyed control shows
+the value at the playhead, and keying controls disable with the playhead
+outside the clip (Premiere rules, N5 K4). Per-effect and clip-header enable
+toggles sit on the card and header, with `+ Key at playhead` for the enable
+curve. `Plan move…` opens the plan dialog (MO1 R22). Audio-only clips show no
+`MOTION` section (N5 K5).
 
 ### Transport
 
@@ -518,9 +521,10 @@ line reads `AUDIO VERIFIED`, `AUDIO OFF TARGET`, `AUDIO OVER CEILING`,
 The plan-a-move dialog previews the exact operations a `plan_motion` preset
 would send — one plain-language line each, with the by-hand sender under it
 in muted text — plus a preset picker and a `Replace existing curves`
-checkbox. `Apply` sends them as one undo entry; `Cancel` sends nothing. A
-refusal (short clip, existing curves, missing clip) replaces the preview
-with the reason and disables `Apply` (MO1 R25).
+checkbox. `Apply` sends them revision-gated as one undo entry, bound to the
+session the dialog opened on (N5 K3); `Cancel` sends nothing. A refusal
+(short clip, existing curves, missing clip) replaces the preview with the
+reason and disables `Apply` (MO1 R25).
 
 ## Performance contract
 
