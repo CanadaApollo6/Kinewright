@@ -1192,7 +1192,10 @@ impl Compositor {
     /// a resample, and it must keep the bilinear sampler. An epsilon here
     /// would point-sample a layer that is genuinely being resized.
     #[allow(clippy::float_cmp)]
-    fn is_pixel_exact_blit<F: CompositorInput>(
+    /// Whether this layer takes the point sampler: exact only for a
+    /// full-frame quad with the identity vertex map. `pub(crate)` so the
+    /// push-in gate can pin which sampler path a ramp takes.
+    pub(crate) fn is_pixel_exact_blit<F: CompositorInput>(
         layer: &CompositorLayer<'_, F>,
         params: &LayerParams,
         width: u32,
@@ -1204,6 +1207,15 @@ impl Compositor {
             && params.offset_x == 0.0
             && params.offset_y == 0.0
             && params.reframe_aspect <= 0.0
+            // MO1 G1: the vertex map also scales by scale_x/scale_y and
+            // rotates — a fine-only ramp or a squeeze is still a resample,
+            // and the point sampler shimmers it. The folded scales cover
+            // the fine lane (master/axis/fine multiply into them) and the
+            // folded offsets cover basis points, so neutral folds stay
+            // bit-exact on the fast path.
+            && params.scale_x == 1.0
+            && params.scale_y == 1.0
+            && params.rotation == 0.0
     }
 
     #[allow(clippy::too_many_lines)]

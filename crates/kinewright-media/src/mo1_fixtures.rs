@@ -276,20 +276,76 @@ fn mo1_still_document(
     (document, asset)
 }
 
-/// MO1 R26: a transform-less render is byte-identical to pre-MO1. The hash
-/// was recorded on the pre-Part-B tree (see the report) and is pinned here;
-/// the rotation-0 path computes exactly the pre-MO1 expression.
+/// A gradient raster sensitive to any transform math (adopted from the
+/// reviewer's identity scenarios): horizontal red, vertical green, and a
+/// high-frequency blue channel.
+fn mo1_gradient(width: u32, height: u32) -> FrameTexture {
+    let mut rgba = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            rgba.extend_from_slice(&[
+                u8::try_from(x * 255 / (width - 1)).unwrap(),
+                u8::try_from(y * 255 / (height - 1)).unwrap(),
+                u8::try_from(((x ^ y) * 7) % 256).unwrap(),
+                255,
+            ]);
+        }
+    }
+    FrameTexture {
+        width,
+        height,
+        rgba: Arc::new(rgba),
+    }
+}
+
+/// MO1 R26/G5: the default transform is the identity — no-effect,
+/// bare-transform, and legacy-neutral renders are byte-equal in the same
+/// run on gradient content at three sizes. Same-run differential, so no
+/// adapter bytes are recorded (a recorded SHA pin broke on WARP/Mesa).
 #[test]
-fn mo1_identity_transformless_render_matches_pre_mo1_bytes() {
+fn mo1_default_transform_identity_probes() {
+    let Some(compositor) = fallback() else {
+        return;
+    };
+    let neutral = [transform_effect(
+        1,
+        &[("scale_percent", 100), ("x_percent", 0), ("y_percent", 0)],
+    )];
+    let bare = [transform_effect(1, &[])];
+    for (resolution, source) in [
+        ((64, 36), mo1_gradient(64, 36)),
+        ((1920, 1080), mo1_gradient(97, 53)),
+        ((1080, 1920), mo1_gradient(640, 360)),
+    ] {
+        let plain = render_layer(&compositor, resolution, &source, &[]);
+        let with_bare = render_layer(&compositor, resolution, &source, &bare);
+        assert_eq!(
+            plain.rgba.as_ref(),
+            with_bare.rgba.as_ref(),
+            "a bare transform must render as no transform at {resolution:?}"
+        );
+        let with_neutral = render_layer(&compositor, resolution, &source, &neutral);
+        assert_eq!(
+            plain.rgba.as_ref(),
+            with_neutral.rgba.as_ref(),
+            "legacy-neutral controls must render as no transform at {resolution:?}"
+        );
+    }
+}
+
+/// MO1 R26/G5: the render-path half of the identity pin — a document
+/// carrying a default transform renders the strip byte-equal to the
+/// transform-less document (same run, no recorded bytes).
+#[test]
+fn mo1_render_path_default_transform_is_identity() {
     crate::initialize_ffmpeg().expect("FFmpeg should initialize");
-    let media = mo1_source("mo1-identity");
-    let document = mo1_document(&media, Vec::new());
-    assert_eq!(document.resolution, (64, 36));
-    let frame = render_frame(&document, TimeCode::ZERO);
-    let hash = crate::sha256::sha256_bytes(&frame.rgba);
+    let media = mo1_quadrant_video("mo1-identity-strip", 10);
+    let plain = mo1_document(&media, Vec::new());
+    let with_bare = mo1_document(&media, vec![transform_effect(1, &[])]);
     assert_eq!(
-        hash, "c0e80450da170963a5fb004d1f4ff0c4bf5ab76f1ad25117efb2a525a176e3e0",
-        "transform-less bytes must equal the pre-MO1 recording"
+        render_strip(&plain, 0..10),
+        render_strip(&with_bare, 0..10),
+        "a default transform must add nothing through the render path"
     );
 }
 
@@ -535,6 +591,11 @@ fn mo1_l_shaped_order_shear_golden_16x9() {
     lit(4, 4);
     dark(10, 4);
     dark(32, 4);
+    // Interior pins: more of the shifted bar, away from every edge.
+    lit(7, 12);
+    lit(7, 26);
+    lit(6, 4);
+    dark(12, 4);
 
     // Rotation about the anchor: 50% about (2500, 2500) then 90° CW about
     // the same point — red lands x 11.5..20.5, y 1..17 (centre (16, 9)),
@@ -562,12 +623,11 @@ fn mo1_l_shaped_order_shear_golden_16x9() {
     assert_pixel_close(pixel(&frame, 16, 35), [0, 0, 0, 255], 4);
     assert_pixel_close(pixel(&frame, 50, 8), [0, 0, 0, 255], 4);
 
-    // The combination hash: any wrong order, sign, or shear flips bytes.
-    let hash = crate::sha256::sha256_bytes(&frame.rgba);
-    assert_eq!(
-        hash, "b06517cc94ac7f150b8ac7b8ed39f7c1e8a542b969337fc476394c07c2d9054a",
-        "the L order golden must stay byte-stable"
-    );
+    // Interior pins: more of each colour block, away from every edge.
+    assert_pixel_close(pixel(&frame, 18, 12), [255, 0, 0, 255], 8);
+    assert_pixel_close(pixel(&frame, 5, 12), [0, 0, 255, 255], 8);
+    assert_pixel_close(pixel(&frame, 18, 28), [0, 255, 0, 255], 8);
+    assert_pixel_close(pixel(&frame, 5, 28), [255, 255, 255, 255], 8);
 }
 
 /// MO1 R26: the L order golden through the shared decode + timeline path —
@@ -627,11 +687,11 @@ fn mo1_l_order_golden_through_the_render_path() {
     lit(4, 4);
     dark(10, 4);
     dark(32, 4);
-    let hash = crate::sha256::sha256_bytes(&frame.rgba);
-    assert_eq!(
-        hash, "16c50a6714c7641ad1e93c4a314d588c87dafe826e1456f718776eee7497a7e0",
-        "the render-path L golden must stay byte-stable"
-    );
+    // Interior pins: more of the shifted bar, away from every edge.
+    lit(7, 10);
+    lit(7, 28);
+    dark(14, 18);
+    dark(2, 18);
 }
 
 /// §10 gate 11, contract half, re-driven through the real `params_for` fold
@@ -757,6 +817,7 @@ fn push_in_step_sub_pixel_on_lavapipe() {
     );
     let document = mo1_document(&media, vec![ramp]);
     assert_eq!(document.resolution, (320, 180));
+    assert_push_in_sampler_path(&document);
     let gpu = fixture_gpu_or_skip().expect("the gate needs an adapter");
     let mut renderer = FrameRenderer::new(gpu);
     let edge = |renderer: &mut FrameRenderer, at: i64| {
@@ -793,6 +854,36 @@ fn push_in_step_sub_pixel_on_lavapipe() {
         previous >= 172,
         "the ramp must travel ~16 px total, ended at {previous}"
     );
+}
+
+/// G1: the folded params of the push-in ramp take the filtering sampler
+/// off-identity — a fine-only scale is still a scale, and the point
+/// sampler would shimmer it. Frame 0 (exact identity) keeps the point
+/// fast path. The dummy frame only carries dimensions; the blit gate reads
+/// nothing else from the layer.
+fn assert_push_in_sampler_path(document: &Document) {
+    use crate::compositor::{Compositor as BlitCompositor, params_for};
+    let effect = &document.tracks[0].clips[0].effects[0];
+    let dummy = FrameTexture {
+        width: 320,
+        height: 180,
+        rgba: Arc::new(vec![0; 320 * 180 * 4]),
+    };
+    for (at, expect_blit) in [(0, true), (30, false), (60, false)] {
+        let evaluated = effect.evaluated_at(TimeCode(at));
+        let params = params_for(&[evaluated], TransitionRenderParams::default());
+        let layer = CompositorLayer {
+            frame: &dummy,
+            effects: &[],
+            transition: TransitionRenderParams::default(),
+        };
+        assert_eq!(
+            BlitCompositor::is_pixel_exact_blit(&layer, &params, 320, 180),
+            expect_blit,
+            "frame {at} must take the {} sampler",
+            if expect_blit { "point" } else { "filtering" }
+        );
+    }
 }
 
 /// §10 gate 1, lavapipe frame pins: an eased scale push-in trimmed +20 at
