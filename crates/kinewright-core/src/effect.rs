@@ -3484,9 +3484,17 @@ pub fn effect_descriptor(name: &str) -> Option<EffectDescriptor> {
 /// reduces the fit ratio to lowest terms `P/Q` and scales it to the smallest
 /// limiting coarse ≥ 100 (`P×t`, `Q×t`, both ≤ 400 by construction), with fine
 /// `floor(1e6 / limiting)`: the displayed aspect is then EXACT (the fine
-/// cancels in the ratio) and the fill is inside by less than a coarse unit
-/// (< 0.04%). Ratios with `P > 400` (past 400:1) fall back to limiting 400 +
-/// fine 2500 with the other axis rounded — exact fill, ≤ 0.125% aspect error.
+/// cancels in the ratio) and the fill is inside by less than a coarse unit.
+/// Reduced ratios with `P > 400` — the common case for near-miss photo
+/// aspects — fall back to the best rational with the limiting coarse in
+/// `100..=400` and the other axis in `1..=400` (N4 G7). The old
+/// limiting-400-plus-rounded-other fallback is gone: its error grew as
+/// `r/800` (0.185% at 3:1), not the ≤ 0.125% claimed here before. The
+/// `floor(400/r)` denominator alone witnesses relative error under
+/// `1/(2×floor(400/r)×r)` — under 0.25% for `r ≤ 400`, under 0.13% for
+/// ordinary `r ≤ 2` — and the search keeps the best of all 400
+/// denominators, so photo ratios land far inside the bound (typically
+/// ~0.001 px); past 400:1 the coarse range itself pins the bake at 400:1.
 ///
 /// Integer math throughout (`u128` intermediates — `u32` dimensions cannot
 /// overflow it). Degenerate (zero) dimensions bake neutral rather than
@@ -3524,9 +3532,11 @@ pub fn scale_to_frame_fit(image: (u32, u32), frame: (u32, u32)) -> (i64, i64, i6
         // is under one coarse unit.
         (limiting, other, 1_000_000 / limiting)
     } else {
-        // `round(400 × Q/P)`, half up: `(800Q + P) div 2P`.
-        let other = q.saturating_mul(800).saturating_add(p) / p.saturating_mul(2).max(1);
-        (400, other.clamp(1, 400), 2_500)
+        // Best rational `h/k ~= P/Q` with `h` in the limiting window and
+        // `k` in the coarse range; the fine floors the fill inside exactly
+        // as on the reduced-ratio path.
+        let (limiting, other) = best_fit_rational(p, q);
+        (limiting, other, 1_000_000 / limiting)
     };
     // `limiting ≤ 400`, `other ≤ 400`, `fine ≤ 10000` by construction; the
     // `as` casts are exact.
@@ -3537,6 +3547,55 @@ pub fn scale_to_frame_fit(image: (u32, u32), frame: (u32, u32)) -> (i64, i64, i6
     } else {
         (other, limiting, fine)
     }
+}
+
+/// Best rational approximation of `P/Q` (which exceeds 1) with the
+/// numerator in the limiting window `100..=400` and the denominator in
+/// `1..=400`, minimizing relative aspect error with exact integer
+/// cross-multiplication. Every denominator contributes its rounded
+/// numerator plus neighbours (ties) and both window edges (rounding
+/// outside the window), so the search sees each denominator's
+/// constrained optimum — the kept minimum is the rectangle's best.
+/// Ties prefer the finer limiting coarse, then the smaller denominator.
+/// Products stay far below `u128` (`P`, `Q` fit `u64`: `u32` cross
+/// products, reduced).
+fn best_fit_rational(p: u128, q: u128) -> (u128, u128) {
+    let mut best = (100_u128, 1_u128);
+    let mut best_error = (best.0.saturating_mul(q)).abs_diff(best.1.saturating_mul(p));
+    for denominator in 1..=400_u128 {
+        // `round(denominator × P / Q)`, half up.
+        let rounded = denominator
+            .saturating_mul(p)
+            .saturating_mul(2)
+            .saturating_add(q)
+            / q.saturating_mul(2).max(1);
+        for numerator in [
+            rounded.saturating_sub(1),
+            rounded,
+            rounded.saturating_add(1),
+            100,
+            400,
+        ] {
+            if !(100..=400).contains(&numerator) {
+                continue;
+            }
+            // Relative error orders as `|hQ - kP| / k` (`P` is fixed):
+            // cross-multiply against the incumbent.
+            let error = numerator
+                .saturating_mul(q)
+                .abs_diff(denominator.saturating_mul(p));
+            let challenger = error.saturating_mul(best.1);
+            let incumbent = best_error.saturating_mul(denominator);
+            let takes_over = challenger < incumbent
+                || (challenger == incumbent
+                    && (numerator > best.0 || (numerator == best.0 && denominator < best.1)));
+            if takes_over {
+                best = (numerator, denominator);
+                best_error = error;
+            }
+        }
+    }
+    best
 }
 
 /// Greatest common divisor, Euclid — the R10 ratio reduction.
@@ -3776,5 +3835,67 @@ mod tests {
         assert_eq!(scale_to_frame_fit((1, 20_000), (1, 1)), (1, 400, 2_500));
         // Just past the boundary the rounding still tracks the ratio.
         assert_eq!(scale_to_frame_fit((401, 400), (1, 1)), (400, 399, 2_500));
+    }
+
+    /// MO1 N4 G7: the past-400:1 fallback is the best rational with both
+    /// terms in the coarse range — not limiting-400-plus-rounded-other,
+    /// whose error grows as r/800 (0.185% here, past the documented
+    /// 0.125%). 2096/693 resolves to 369/122 (0.002%).
+    #[test]
+    fn scale_to_frame_fit_falls_back_to_best_rational() {
+        use super::scale_to_frame_fit;
+
+        assert_eq!(scale_to_frame_fit((77, 131), (320, 180)), (122, 369, 2_710));
+    }
+
+    /// MO1 N4 G7: the fallback bake attains the minimum relative aspect
+    /// error over the whole feasible rectangle (independent f64
+    /// brute-force oracle), breaking ties toward the finer limiting
+    /// coarse, and stays inside the documented bound.
+    #[test]
+    fn scale_to_frame_fit_fallback_is_optimal_in_range() {
+        use super::scale_to_frame_fit;
+
+        for (image, frame) in [
+            ((77, 131), (320, 180)),
+            ((6000, 3376), (1920, 1080)),
+            ((10_000, 1), (1, 1)),
+            ((401, 400), (1, 1)),
+            ((1000, 999), (100, 100)),
+        ] {
+            let (cx, cy, fine) = scale_to_frame_fit(image, frame);
+            let ratio = f64::from(image.0 * frame.1) / f64::from(image.1 * frame.0);
+            let (limiting, other) = if cx >= cy { (cx, cy) } else { (cy, cx) };
+            assert!((100..=400).contains(&limiting), "{image:?} in {frame:?}");
+            assert!((1..=400).contains(&other), "{image:?} in {frame:?}");
+            assert_eq!(fine, 1_000_000 / limiting, "{image:?} in {frame:?}");
+            let limiting = i32::try_from(limiting).expect("coarse fits i32");
+            let other = i32::try_from(other).expect("coarse fits i32");
+            let baked = f64::from(limiting) / f64::from(other);
+            // The fit ratio is >= 1 with the limiting axis on top.
+            let target = ratio.max(1.0 / ratio);
+            let error = (baked - target).abs() / target;
+            let mut best = f64::INFINITY;
+            for k in 1..=400_i32 {
+                for h in 100..=400_i32 {
+                    let candidate = (f64::from(h) / f64::from(k) - target).abs() / target;
+                    if candidate < best {
+                        best = candidate;
+                    }
+                }
+            }
+            assert!(
+                error <= best + 1e-12,
+                "{image:?} in {frame:?}: bake error {error} above oracle {best}"
+            );
+            if target <= 400.0 {
+                // Documented bound: the floor(400/r) witness alone gives
+                // 1/(2*floor(400/r)*r); 0.26% covers r <= 400 with margin.
+                assert!(error < 0.002_6, "{image:?} in {frame:?}: {error}");
+            } else {
+                // Past 400:1 the coarse range pins the bake at 400:1.
+                assert_eq!((limiting, other), (400, 1), "{image:?} in {frame:?}");
+            }
+        }
     }
 }
