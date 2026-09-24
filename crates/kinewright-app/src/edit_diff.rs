@@ -241,6 +241,8 @@ mod tests {
         let clips = [(1, 0, 0..100), (2, 100, 100..200), (3, 200, 200..300)]
             .into_iter()
             .map(|(id, at, source)| Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(id),
                 asset: AssetId(1),
                 source_range: TimeCode(source.start)..TimeCode(source.end),

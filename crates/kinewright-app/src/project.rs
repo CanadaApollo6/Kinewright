@@ -1853,6 +1853,8 @@ mod tests {
             ..Document::default()
         };
         document.tracks[0].clips.push(Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(1),
             asset: AssetId(1),
             timeline_start: TimeCode::ZERO,
@@ -2394,6 +2396,8 @@ mod tests {
         let mut clips = Vec::with_capacity(clip_count);
         for index in 0..clip_count {
             clips.push(Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(index as u64 + 1),
                 asset: AssetId(1),
                 source_range: TimeCode::ZERO..TimeCode(30),

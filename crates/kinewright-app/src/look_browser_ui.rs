@@ -377,6 +377,8 @@ mod tests {
 
     fn clip_with(effects: Vec<Effect>) -> Clip {
         Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(10),
             asset: AssetId(1),
             timeline_start: TimeCode::ZERO,
@@ -622,6 +624,8 @@ mod tests {
         let fps = kinewright_core::Rational::new(CC7_SOURCE_FPS, 1).expect("the CC7 rate is valid");
         let length = TimeCode(i64::from(CC7_SOURCE_FRAMES));
         let clip = Clip {
+            enabled: true,
+            enabled_curve: None,
             id: cc7_target_clip(Cc7Scenario::CreativeLook),
             asset: AssetId(1),
             source_range: TimeCode::ZERO..length,

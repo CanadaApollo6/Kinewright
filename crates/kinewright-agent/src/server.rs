@@ -6509,6 +6509,8 @@ impl KinewrightMcp {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range,
@@ -7100,6 +7102,8 @@ impl KinewrightMcp {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range,
@@ -10604,6 +10608,8 @@ fn room_tone_fill_clip(
     source: std::ops::Range<TimeCode>,
 ) -> Clip {
     Clip {
+        enabled: true,
+        enabled_curve: None,
         id: ClipId(0),
         asset: asset.id,
         source_range: source,
@@ -18364,6 +18370,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode::ZERO..TimeCode(60),
@@ -18419,6 +18427,8 @@ mod tests {
             sync_lock: false,
             clips: vec![
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(99),
                     asset: AssetId(1),
                     source_range: TimeCode::ZERO..TimeCode(20),
@@ -18434,6 +18444,8 @@ mod tests {
                     audio_gain_curve: None,
                 },
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(98),
                     asset: AssetId(1),
                     source_range: TimeCode(20)..TimeCode(30),
@@ -18613,6 +18625,8 @@ mod tests {
                     kind: TrackKind::Audio,
                     sync_lock: true,
                     clips: vec![Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(90),
                         asset: music.id,
                         source_range: TimeCode::ZERO..TimeCode(120),
@@ -18669,6 +18683,8 @@ mod tests {
             assumed_from: None,
         };
         let media_clip = |id, asset, track_start| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(asset),
             source_range: TimeCode::ZERO..TimeCode(120),
@@ -22801,6 +22817,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode::ZERO..TimeCode(TRACKED_SHOT_FRAMES),
@@ -23804,6 +23822,8 @@ mod tests {
             assumed_from: None,
         };
         let clip = |id: u64, at: i64| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(1),
             source_range: TimeCode::ZERO..TimeCode(30),
@@ -24264,6 +24284,8 @@ mod tests {
         let mut document = au5b_fill_document();
         document.media_pool.retain(|asset| asset.id == AssetId(1));
         document.tracks[0].clips = vec![Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(1),
             asset: AssetId(1),
             source_range: TimeCode::ZERO..TimeCode(300),
@@ -25705,6 +25727,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(2),
                 asset: AssetId::default(),
                 source_range: TimeCode::ZERO..TimeCode(60),
@@ -28167,6 +28191,13 @@ mod tests {
     ///   1 581 163 + 37 125 = **1 618 288**,
     ///   1 434 375 + 37 125 = **1 471 500**, 123 657 + 0 = **123 657**.
     ///   Served quad and counts unchanged.
+    ///
+    /// - **A2d (R5 clip enable): +32 615 / +32 615 / +0.** The two new `Clip`
+    ///   fields (`enabled`, `enabled_curve`) land in the shared `$defs` of
+    ///   every tool embedding a clip. The arithmetic:
+    ///   1 618 288 + 32 615 = **1 650 903**,
+    ///   1 471 500 + 32 615 = **1 504 115**, 123 657 + 0 = **123 657**.
+    ///   Served quad and counts unchanged.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28192,11 +28223,11 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_618_288, 5_660),
+            (1_650_903, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_471_500,
+            registry_metrics.input_schema_bytes, 1_504_115,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -31303,6 +31334,8 @@ mod tests {
                 kind: TrackKind::Audio,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(100 + u64::try_from(index).unwrap()),
                     asset: AssetId(1),
                     source_range: TimeCode::ZERO..TimeCode(60),
@@ -31829,6 +31862,8 @@ mod tests {
             assumed_from: None,
         };
         let clip = |id: u64| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(1),
             source_range: TimeCode::ZERO..TimeCode(360),
@@ -32669,6 +32704,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: false,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(3),
                 asset: AssetId(2),
                 source_range: TimeCode::ZERO..TimeCode(360),
@@ -32780,6 +32817,8 @@ mod tests {
         document.tracks[1].clips[0].source_range = TimeCode::ZERO..TimeCode(60);
         document.tracks[1].clips[0].audio_fade_in_frames = TimeCode(4);
         let short = |id: u64, start: i64, frames: i64| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(1),
             source_range: TimeCode::ZERO..TimeCode(frames),
@@ -32941,6 +32980,8 @@ mod tests {
         let mut document = au4_ducking_document();
         document.tracks[1].clips[0].source_range = TimeCode::ZERO..TimeCode(60);
         document.tracks[1].clips.push(Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(3),
             asset: AssetId(1),
             source_range: TimeCode::ZERO..TimeCode(4),

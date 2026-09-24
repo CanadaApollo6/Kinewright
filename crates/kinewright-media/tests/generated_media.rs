@@ -419,6 +419,8 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: red_asset.id,
                     source_range: TimeCode(0)..TimeCode(10),
@@ -439,6 +441,8 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(2),
                     asset: blue_asset.id,
                     source_range: TimeCode(0)..TimeCode(10),
@@ -629,6 +633,8 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: AssetId::default(),
                 source_range: TimeCode(0)..TimeCode(10),
@@ -723,6 +729,8 @@ fn freeze_export_pixels_match_preview_after_h264_redecode() {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: asset.id,
                 source_range: TimeCode(0)..TimeCode(30),
@@ -1068,6 +1076,8 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
             sync_lock: true,
             clips: vec![
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode(5)..TimeCode(15),
@@ -1083,6 +1093,8 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
                     audio_gain_curve: None,
                 },
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(2),
                     asset: asset.id,
                     source_range: TimeCode(30)..TimeCode(40),
@@ -1204,6 +1216,8 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: voice_asset.id,
                     source_range: TimeCode::ZERO..duration,
@@ -1224,6 +1238,8 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
                 kind: TrackKind::Audio,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(2),
                     asset: bed_asset.id,
                     source_range: TimeCode(2)..duration,
@@ -1288,6 +1304,8 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
             sync_lock: true,
             clips: vec![
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode(0)..TimeCode(10),
@@ -1303,6 +1321,8 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
                     audio_gain_curve: None,
                 },
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(2),
                     asset: asset.id,
                     source_range: TimeCode(20)..TimeCode(40),
@@ -1357,6 +1377,8 @@ fn full_timeline(asset: MediaAsset) -> Document {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: asset_id,
                 source_range: TimeCode::ZERO..asset_duration,

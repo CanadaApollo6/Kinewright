@@ -5048,6 +5048,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: AssetId(1),
                     source_range: TimeCode(0)..TimeCode(2),
@@ -5741,6 +5743,8 @@ mod tests {
                     kind: TrackKind::Audio,
                     sync_lock: true,
                     clips: vec![Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         audio_gain_tenth_db: -60,
                         audio_fade_in_frames: TimeCode(2),
                         audio_fade_out_frames: TimeCode(2),
@@ -6006,6 +6010,8 @@ mod tests {
 
     fn audio_clip(id: u64, asset: u64, source: std::ops::Range<i64>, timeline_start: i64) -> Clip {
         Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(asset),
             source_range: TimeCode(source.start)..TimeCode(source.end),

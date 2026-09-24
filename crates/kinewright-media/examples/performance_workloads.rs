@@ -253,6 +253,8 @@ fn build_document(
         let source_start = (index as i64 * 7) % span;
         let start = cursors[track];
         per_track[track].push(Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(clip_id),
             asset: asset.id,
             source_range: TimeCode(source_start)..TimeCode(source_start + clip_len),

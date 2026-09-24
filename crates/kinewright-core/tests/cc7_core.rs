@@ -1472,6 +1472,8 @@ fn cc7_asset() -> MediaAsset {
 
 fn cc7_clip(id: u64, timeline_start: i64, frames: i64) -> Clip {
     Clip {
+        enabled: true,
+        enabled_curve: None,
         id: ClipId(id),
         asset: AssetId(1),
         source_range: TimeCode(0)..TimeCode(frames),

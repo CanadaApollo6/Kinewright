@@ -1437,6 +1437,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(2),
                     asset: AssetId(1),
                     source_range: TimeCode::ZERO..TimeCode(100),

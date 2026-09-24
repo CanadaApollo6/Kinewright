@@ -2911,6 +2911,8 @@ fn audio_tail_document(
             kind: TrackKind::Audio,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: asset.id,
                 source_range: tail_range,
@@ -9413,6 +9415,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode(0)..TimeCode(60),
@@ -9488,6 +9492,8 @@ mod tests {
         content: ClipContent,
     ) -> Clip {
         Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset,
             source_range: TimeCode(source_start)..TimeCode(source_end),
@@ -11229,6 +11235,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(2),
                 asset: AssetId::default(),
                 source_range: TimeCode::ZERO..TimeCode(30),

@@ -2890,6 +2890,8 @@ mod tests {
                 kind: kinewright_core::TrackKind::Video,
                 sync_lock: true,
                 clips: vec![kinewright_core::Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: kinewright_core::ClipId(10),
                     asset: AssetId(1),
                     timeline_start: TimeCode::ZERO,

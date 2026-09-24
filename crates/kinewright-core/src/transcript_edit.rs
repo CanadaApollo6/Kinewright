@@ -205,6 +205,8 @@ mod tests {
                 assumed_from: None,
             };
             clips.push(Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(*id),
                 asset: asset.id,
                 source_range: TimeCode(source.start)..TimeCode(source.end),

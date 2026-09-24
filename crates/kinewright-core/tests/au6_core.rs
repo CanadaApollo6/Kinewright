@@ -128,6 +128,8 @@ fn room_tone_asset(id: AssetId) -> MediaAsset {
 
 fn media_clip(id: ClipId, asset: AssetId, range: Range<TimeCode>) -> Clip {
     Clip {
+        enabled: true,
+        enabled_curve: None,
         id,
         asset,
         source_range: range.clone(),

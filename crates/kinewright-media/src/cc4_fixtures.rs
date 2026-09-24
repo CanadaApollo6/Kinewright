@@ -3278,6 +3278,8 @@ fn relocatable_document(assets: &[LutAsset], effects: Vec<Effect>) -> Document {
             kind: kinewright_core::TrackKind::Video,
             sync_lock: true,
             clips: vec![kinewright_core::Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: kinewright_core::AssetId::default(),
                 source_range: TimeCode(0)..TimeCode(4),

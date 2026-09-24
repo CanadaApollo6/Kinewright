@@ -1521,6 +1521,8 @@ fn managed_document_with_tracks(effects_per_track: &[Vec<Effect>]) -> Document {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(identifier),
                     asset: asset.id,
                     source_range: TimeCode(0)..TimeCode(30),
@@ -2107,6 +2109,8 @@ fn track_document(clips: &[(u64, TimeCode)]) -> Document {
     let clips = clips
         .iter()
         .map(|(id, start)| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(*id),
             asset: asset.id,
             source_range: TimeCode(0)..TimeCode(15),

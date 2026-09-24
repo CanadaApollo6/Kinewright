@@ -188,6 +188,8 @@ impl Cc7Scene {
             let frames = i64::from(kind.frames());
             assert_eq!(asset.duration, TimeCode(frames));
             clips.push(Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(index as u64 + 1),
                 asset: id,
                 source_range: TimeCode::ZERO..TimeCode(frames),

@@ -50,6 +50,8 @@ fn managed_document() -> Document {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: AssetId(1),
                 source_range: TimeCode(0)..TimeCode(30),

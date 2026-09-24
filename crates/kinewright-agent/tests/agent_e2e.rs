@@ -550,6 +550,8 @@ fn fixture_document() -> Document {
             sync_lock: true,
             clips: vec![
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode(0)..TimeCode(90),
@@ -565,6 +567,8 @@ fn fixture_document() -> Document {
                     audio_gain_curve: None,
                 },
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(2),
                     asset: asset.id,
                     source_range: TimeCode(90)..TimeCode(150),

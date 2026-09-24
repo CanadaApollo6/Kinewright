@@ -4270,6 +4270,8 @@ fn add_and_remove_track_are_validated_and_atomic() {
         kind: TrackKind::Video,
         sync_lock: true,
         clips: vec![Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(99),
             asset: AssetId(99),
             source_range: TimeCode(0)..TimeCode(1),
@@ -4541,6 +4543,8 @@ fn unsorted_input_document_is_rejected() {
     let fps = Rational::new(30, 1).unwrap();
     let media = asset(1, fps, 300);
     let later = Clip {
+        enabled: true,
+        enabled_curve: None,
         id: ClipId(1),
         asset: AssetId(1),
         source_range: TimeCode(0)..TimeCode(10),
@@ -4556,6 +4560,8 @@ fn unsorted_input_document_is_rejected() {
         audio_gain_curve: None,
     };
     let earlier = Clip {
+        enabled: true,
+        enabled_curve: None,
         id: ClipId(2),
         timeline_start: TimeCode(0),
         ..later.clone()

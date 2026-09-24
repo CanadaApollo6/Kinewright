@@ -748,6 +748,8 @@ mod tests {
                 sync_lock: true,
                 clips: vec![
                     Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(1),
                         asset: asset.id,
                         source_range: TimeCode(0)..TimeCode(30),
@@ -763,6 +765,8 @@ mod tests {
                         audio_gain_curve: None,
                     },
                     Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(2),
                         asset: crate::AssetId::default(),
                         source_range: TimeCode(0)..TimeCode(4),
@@ -815,6 +819,8 @@ mod tests {
             assumed_from: None,
         };
         let media_clip = |id| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: crate::AssetId(id),
             source_range: TimeCode::ZERO..TimeCode(30),
@@ -978,6 +984,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(34),
                     asset: crate::AssetId::default(),
                     source_range: TimeCode::ZERO..TimeCode(30),

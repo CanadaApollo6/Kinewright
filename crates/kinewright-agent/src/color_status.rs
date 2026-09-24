@@ -5431,6 +5431,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: AssetId(1),
                     source_range: kinewright_core::TimeCode(0)..kinewright_core::TimeCode(100),
@@ -5747,6 +5749,8 @@ mod tests {
             kind: TrackKind::Audio,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(2),
                 asset: AssetId(1),
                 source_range: kinewright_core::TimeCode(0)..kinewright_core::TimeCode(100),

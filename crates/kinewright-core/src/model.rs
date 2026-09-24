@@ -413,10 +413,40 @@ pub struct Clip {
     )]
     #[schemars(default)]
     pub speed_percent: u32,
+    /// MO1 R5: static enable flag. Default true, skipped when true, so no
+    /// stored project changes a byte. Disabled clips are skipped by the
+    /// layer/audio resolution (Part B).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    #[schemars(extend("default" = true))]
+    pub enabled: bool,
+    /// MO1 R5: keyframed enable in clip-local frames; enabled iff value ≥ 1,
+    /// non-`Hold` kinds acting as a step exactly as R4. Any value is stored
+    /// (no 0..1 range check — the ≥ 1 test resolves every value); structural
+    /// checks land in A3 with the R13 keep-outside routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
+    pub enabled_curve: Option<crate::AutomationCurve>,
 }
 
 const fn default_clip_speed() -> u32 {
     100
+}
+
+impl Clip {
+    /// MO1 R5: whether this clip contributes at one clip-local frame.
+    ///
+    /// Curve `value_at` ≥ 1 enables, else the static flag rules — non-`Hold`
+    /// kinds act as a step exactly as R4. Callers pass clip-local frames
+    /// (`project_frame − timeline_start`); the layer/audio resolution in
+    /// Part B filters via this.
+    #[must_use]
+    pub fn is_enabled_at(&self, local: TimeCode) -> bool {
+        if let Some(curve) = &self.enabled_curve {
+            curve.value_at(local).is_some_and(|value| value >= 1)
+        } else {
+            self.enabled
+        }
+    }
 }
 
 /// Return the frame rate at which a clip consumes its source, honoring its
@@ -1631,6 +1661,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: AssetId(1),
                 source_range: TimeCode::ZERO..TimeCode(10),
@@ -1921,6 +1953,112 @@ mod tests {
         assert!(!effect.is_enabled_at(TimeCode(4)));
         assert!(effect.is_enabled_at(TimeCode(5)));
         assert!(effect.is_enabled_at(TimeCode(10)));
+    }
+
+    fn clip() -> Clip {
+        Clip {
+            enabled: true,
+            enabled_curve: None,
+            id: ClipId(1),
+            asset: AssetId(1),
+            source_range: TimeCode::ZERO..TimeCode(10),
+            content: ClipContent::Media,
+            timeline_start: TimeCode::ZERO,
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            audio_gain_curve: None,
+            speed_percent: 100,
+        }
+    }
+
+    /// MO1 R5: a disabled clip with a sibling curve survives serde exactly.
+    #[test]
+    fn disabled_clip_with_curve_round_trips() {
+        let mut disabled = clip();
+        disabled.enabled = false;
+        disabled.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(0),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(9),
+                    value: 1,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        });
+        let json = serde_json::to_string(&disabled).unwrap();
+        assert!(json.contains("\"enabled\":false"), "{json}");
+        assert!(json.contains("\"enabled_curve\""), "{json}");
+        assert_eq!(serde_json::from_str::<Clip>(&json).unwrap(), disabled);
+    }
+
+    /// MO1 R5: default-enabled clips serialize byte-identically to pre-MO1
+    /// documents, and legacy payloads without the fields read back enabled.
+    #[test]
+    fn default_enabled_clip_stays_byte_identical() {
+        let plain = clip();
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("enabled"), "{json}");
+        let legacy = json!({
+            "id": 1,
+            "asset": 1,
+            "source_range": {"start": 0, "end": 10},
+            "content": "media",
+            "timeline_start": 0,
+            "effects": [],
+            "transition_in": null,
+            "speed_percent": 100
+        });
+        let read: Clip = serde_json::from_value(legacy).unwrap();
+        assert!(read.enabled);
+        assert_eq!(read.enabled_curve, None);
+    }
+
+    /// MO1 R5: `Clip::is_enabled_at` resolves the curve ≥ 1 test, else the
+    /// static flag; any value is stored (no 0..1 range check — values 5 and
+    /// −3 resolve by the same ≥ 1 test).
+    #[test]
+    fn clip_is_enabled_at_resolves_curve_then_flag() {
+        let mut clip = clip();
+        assert!(clip.is_enabled_at(TimeCode(5)));
+        clip.enabled = false;
+        assert!(!clip.is_enabled_at(TimeCode(5)));
+        clip.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(0),
+                    value: -3,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(9),
+                    value: 5,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        });
+        assert!(!clip.is_enabled_at(TimeCode(0)));
+        assert!(clip.is_enabled_at(TimeCode(9)));
+        // Mid-ramp frame 2: −3 + (8 × 2/9 rounded) = −3 + 2 = −1 → disabled.
+        assert!(!clip.is_enabled_at(TimeCode(2)));
+        // Mid-ramp frame 7: −3 + (8 × 7/9 rounded) = −3 + 6 = 3 → enabled.
+        assert!(clip.is_enabled_at(TimeCode(7)));
     }
 
     /// MO1 R4: `evaluated_at` snapshots the resolved flag and clears the

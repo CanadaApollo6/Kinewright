@@ -1730,6 +1730,8 @@ mod tests {
             assumed_from: None,
         }];
         document.tracks[0].clips = vec![kinewright_core::Clip {
+            enabled: true,
+            enabled_curve: None,
             id: CLIP,
             asset: AssetId(1),
             source_range: TimeCode(0)..TimeCode(30),

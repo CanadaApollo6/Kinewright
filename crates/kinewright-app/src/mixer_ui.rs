@@ -1676,6 +1676,8 @@ mod tests {
                     kind: TrackKind::Video,
                     sync_lock: true,
                     clips: vec![Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(1),
                         asset: asset.id,
                         source_range: TimeCode(0)..TimeCode(30),
@@ -5441,6 +5443,8 @@ mod tests {
                     .iter()
                     .filter(|clip| clip.track == track.track)
                     .map(|clip| Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: clip.clip,
                         asset: clip.asset,
                         source_range: clip.range(),

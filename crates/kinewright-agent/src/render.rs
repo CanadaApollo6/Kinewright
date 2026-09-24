@@ -1158,6 +1158,8 @@ mod tests {
                 sync_lock: true,
                 clips: vec![
                     Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(10),
                         asset: AssetId(4),
                         source_range: TimeCode(30)..TimeCode(120),
@@ -1186,6 +1188,8 @@ mod tests {
                         audio_gain_curve: None,
                     },
                     Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(11),
                         asset: AssetId(4),
                         source_range: TimeCode(150)..TimeCode(210),
@@ -1833,6 +1837,8 @@ assets:
             kind: TrackKind::Video,
             sync_lock: false,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(12),
                 asset: AssetId::default(),
                 source_range: TimeCode(0)..TimeCode(60),
@@ -1862,6 +1868,8 @@ assets:
             kind: TrackKind::Video,
             sync_lock: false,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(13),
                 asset: AssetId(4),
                 source_range: TimeCode(0)..TimeCode(60),
@@ -1951,6 +1959,8 @@ assets:
             kind: TrackKind::Video,
             sync_lock: false,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(12),
                 asset: AssetId::default(),
                 source_range: TimeCode(0)..TimeCode(60),
@@ -1996,6 +2006,8 @@ assets:
             kind: TrackKind::Video,
             sync_lock: false,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(12),
                 asset: AssetId(4),
                 source_range: TimeCode(0)..TimeCode(60),

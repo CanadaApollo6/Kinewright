@@ -4546,6 +4546,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(3),
                 asset: AssetId(1),
                 source_range: TimeCode(0)..TimeCode(30),
@@ -4593,6 +4595,8 @@ mod tests {
             parameters: PARAMETERS,
         };
         let clip = Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(1),
             asset: AssetId(1),
             source_range: TimeCode(0)..TimeCode(30),
@@ -4637,6 +4641,8 @@ mod tests {
             .find(|descriptor| descriptor.name == "primary_correction")
             .expect("CC1 descriptor");
         let clip = Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(3),
             asset: AssetId(1),
             source_range: TimeCode(0)..TimeCode(30),
@@ -4952,6 +4958,8 @@ mod tests {
         ));
 
         let clip = Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(1),
             asset: AssetId(1),
             source_range: TimeCode(0)..TimeCode(30),
@@ -4980,6 +4988,8 @@ mod tests {
             .find(|descriptor| descriptor.name == "crop")
             .unwrap();
         let media = Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(1),
             asset: AssetId(1),
             source_range: TimeCode(0)..TimeCode(30),
@@ -5938,6 +5948,8 @@ mod tests {
 
     fn media_clip(id: ClipId, asset: AssetId, link: Option<LinkId>) -> Clip {
         Clip {
+            enabled: true,
+            enabled_curve: None,
             id,
             asset,
             source_range: TimeCode(0)..TimeCode(30),
@@ -8043,6 +8055,8 @@ mod tests {
                 assumed_from: None,
             });
             clips.push(Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(clip.clip_id),
                 asset,
                 source_range: TimeCode::ZERO..length,

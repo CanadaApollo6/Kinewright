@@ -2219,6 +2219,8 @@ mod tests {
                 sync_lock: true,
                 clips: vec![
                     Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(1),
                         asset: first.id,
                         source_range: TimeCode::ZERO..TimeCode(30),
@@ -2234,6 +2236,8 @@ mod tests {
                         audio_gain_curve: None,
                     },
                     Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(2),
                         asset: second.id,
                         source_range: TimeCode::ZERO..TimeCode(30),

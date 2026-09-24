@@ -2800,6 +2800,8 @@ mod tests {
 
     fn clip(id: u64, asset: u64, start: i64, source: Range<i64>) -> crate::Clip {
         crate::Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(asset),
             source_range: TimeCode(source.start)..TimeCode(source.end),

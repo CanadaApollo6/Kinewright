@@ -1918,6 +1918,8 @@ fn edit_plan_document() -> Document {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: asset.id,
                 source_range: TimeCode::ZERO..TimeCode(60),
@@ -2713,6 +2715,8 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
         kind: TrackKind::Audio,
         sync_lock: true,
         clips: vec![Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(2),
             asset: asset.id,
             source_range: TimeCode::ZERO..asset.duration,
@@ -7425,6 +7429,8 @@ async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
         kind: TrackKind::Audio,
         sync_lock: false,
         clips: vec![Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(2),
             asset: dialogue.id,
             source_range: TimeCode::ZERO..dialogue.duration,
@@ -7757,6 +7763,8 @@ fn au5_audio_document(asset: MediaAsset) -> Document {
             kind: TrackKind::Audio,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: asset.id,
                 source_range: TimeCode::ZERO..duration,
@@ -8242,6 +8250,8 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let clip = |id: u64, at: i64| Clip {
+        enabled: true,
+        enabled_curve: None,
         id: ClipId(id),
         asset: asset.id,
         source_range: TimeCode::ZERO..TimeCode(30),
@@ -8490,6 +8500,8 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_25_fps() {
     let asset = media.probe(generated.path()).unwrap();
     assert_eq!(asset.fps, Rational::new(30, 1).unwrap());
     let clip = |id: u64, at: i64| Clip {
+        enabled: true,
+        enabled_curve: None,
         id: ClipId(id),
         asset: asset.id,
         source_range: TimeCode::ZERO..TimeCode(30),
@@ -8638,6 +8650,8 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_29_97_fps() {
     );
     let project_fps = Rational::new(30_000, 1_001).unwrap();
     let clip = |id: u64, at: i64| Clip {
+        enabled: true,
+        enabled_curve: None,
         id: ClipId(id),
         asset: asset.id,
         source_range: TimeCode::ZERO..TimeCode(30),
@@ -8773,6 +8787,8 @@ async fn au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps() {
     );
 
     let clip = |id: u64, at: i64| Clip {
+        enabled: true,
+        enabled_curve: None,
         id: ClipId(id),
         asset: asset.id,
         source_range: TimeCode::ZERO..TimeCode(30),
@@ -8889,6 +8905,8 @@ fn au6_agent_scene(engine: &FfmpegMediaEngine, scenario: Au6Scenario) -> Au6Agen
                 .iter()
                 .filter(|clip| clip.track == track.track)
                 .map(|clip| Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: clip.clip,
                     asset: clip.asset,
                     source_range: clip.range(),

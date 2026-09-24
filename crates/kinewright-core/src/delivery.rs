@@ -1475,6 +1475,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: crate::ClipId(1),
                     asset: asset.id,
                     source_range: TimeCode(0)..TimeCode(30),
@@ -2052,6 +2054,8 @@ mod tests {
             kind: TrackKind::Audio,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: crate::ClipId(2),
                 asset: AssetId(2),
                 source_range: TimeCode(0)..TimeCode(30),

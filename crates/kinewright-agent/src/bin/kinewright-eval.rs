@@ -2427,6 +2427,8 @@ fn cc7_timeline_document(assets: Vec<MediaAsset>) -> Result<Document, EvalError>
         let duration = map_source_range_to_project(source_range.clone(), asset.fps, fps)
             .map_err(|error| EvalError::Fixture(error.to_string()))?;
         clips.push(Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(u64::try_from(index + 1).unwrap_or(u64::MAX)),
             asset: asset.id,
             source_range,
@@ -2896,6 +2898,8 @@ fn au6_fixture_from_sources(
                 .iter()
                 .filter(|clip| clip.track == track.track)
                 .map(|clip| Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: clip.clip,
                     asset: clip.asset,
                     source_range: clip.range(),
@@ -3901,6 +3905,8 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: video_asset.id,
                     source_range: TimeCode(truth.source_range.start)
@@ -3922,6 +3928,8 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
                 kind: TrackKind::Audio,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(2),
                     asset: audio_master.id,
                     source_range: TimeCode(truth.audio_source_range.start)
@@ -4888,6 +4896,8 @@ fn timeline_document(
         let duration = map_source_range_to_project(source_range.clone(), asset.fps, fps)
             .map_err(|error| EvalError::Fixture(error.to_string()))?;
         timeline_clips.push(Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(u64::try_from(index + 1).unwrap_or(u64::MAX)),
             asset: asset.id,
             source_range: source_range.clone(),
@@ -8466,6 +8476,8 @@ mod tests {
                     .iter()
                     .filter(|clip| clip.track == track.track)
                     .map(|clip| Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: clip.clip,
                         asset: clip.asset,
                         source_range: clip.range(),

@@ -3504,6 +3504,8 @@ mod tests {
             assumed_from: None,
         };
         let clip = |id, track_start| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: asset.id,
             source_range: TimeCode(0)..TimeCode(30),
@@ -3805,6 +3807,8 @@ mod tests {
             sync_lock: true,
             clips: vec![
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(1),
                     asset: AssetId(1),
                     source_range: TimeCode(0)..TimeCode(30),
@@ -3820,6 +3824,8 @@ mod tests {
                     audio_gain_curve: None,
                 },
                 Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(2),
                     asset: AssetId(1),
                     source_range: TimeCode(60)..TimeCode(90),
@@ -4698,6 +4704,8 @@ mod tests {
             assumed_from: None,
         };
         let clip = |id: u64, at: i64, source_start: i64, source_end: i64| Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(id),
             asset: AssetId(1),
             source_range: TimeCode(source_start)..TimeCode(source_end),
@@ -5012,6 +5020,8 @@ mod tests {
                     kind: TrackKind::Audio,
                     sync_lock: true,
                     clips: vec![Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(1),
                         asset: AssetId(1),
                         source_range: TimeCode(0)..TimeCode(12),

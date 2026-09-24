@@ -1730,6 +1730,8 @@ fn cc1_core_migration_fixture_preserves_effect_order_and_parameters() {
         kind: TrackKind::Video,
         sync_lock: true,
         clips: vec![Clip {
+            enabled: true,
+            enabled_curve: None,
             id: ClipId(1),
             asset: AssetId(1),
             source_range: TimeCode::ZERO..TimeCode(10),
@@ -3463,6 +3465,8 @@ pub(crate) fn simple_document(asset: MediaAsset, resolution: (u32, u32)) -> Docu
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(1),
                 asset: asset.id,
                 source_range: TimeCode::ZERO..duration,

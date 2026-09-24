@@ -1905,6 +1905,8 @@ fn add_clip(
     validate_track_compatibility(asset, &doc.tracks[track_index])?;
 
     let clip = Clip {
+        enabled: true,
+        enabled_curve: None,
         id: next_clip_id(doc)?,
         asset: asset_id,
         source_range: source,
@@ -1950,6 +1952,8 @@ fn add_title(
     let clip_id = next_clip_id(doc)?;
     validate_title(clip_id, &title, duration)?;
     doc.tracks[track_index].clips.push(Clip {
+        enabled: true,
+        enabled_curve: None,
         id: clip_id,
         asset: AssetId::default(),
         source_range: TimeCode::ZERO..duration,
@@ -1997,6 +2001,8 @@ fn add_freeze_frame(
     validate_freeze_source_frame(asset, source_frame)?;
     let clip_id = next_clip_id(doc)?;
     doc.tracks[track_index].clips.push(Clip {
+        enabled: true,
+        enabled_curve: None,
         id: clip_id,
         asset: asset_id,
         source_range: TimeCode::ZERO..duration,

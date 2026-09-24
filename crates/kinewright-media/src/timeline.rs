@@ -468,6 +468,8 @@ mod tests {
                 sync_lock: true,
                 clips: vec![
                     Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(1),
                         asset: AssetId(1),
                         source_range: TimeCode(10)..TimeCode(20),
@@ -483,6 +485,8 @@ mod tests {
                         audio_gain_curve: None,
                     },
                     Clip {
+                        enabled: true,
+                        enabled_curve: None,
                         id: ClipId(2),
                         asset: AssetId(2),
                         source_range: TimeCode(30)..TimeCode(40),
@@ -628,6 +632,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(3),
                 asset: AssetId(2),
                 source_range: TimeCode(0)..TimeCode(10),
@@ -715,6 +721,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(3),
                 asset: AssetId::default(),
                 source_range: TimeCode(0)..TimeCode(10),
@@ -766,6 +774,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(3),
                 asset: AssetId(1),
                 source_range: TimeCode(0)..TimeCode(10),
@@ -826,6 +836,8 @@ mod tests {
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![Clip {
+                enabled: true,
+                enabled_curve: None,
                 id: ClipId(3),
                 asset: AssetId(1),
                 source_range: TimeCode(0)..TimeCode(10),
@@ -887,6 +899,8 @@ mod tests {
                 kind: TrackKind::Audio,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(3),
                     asset: AssetId(3),
                     source_range: TimeCode(4)..TimeCode(14),
@@ -907,6 +921,8 @@ mod tests {
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
                     id: ClipId(4),
                     asset: AssetId(4),
                     source_range: TimeCode(0)..TimeCode(20),
