@@ -106,21 +106,16 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
                     resolution.1,
                 )));
             }
-            let reported = color_description_from_decoder(
+            // G3: untagged stills keep the decoder-known range and matrix
+            // (PNG: full + RGB; JPEG: full + BT.601) — never reset to
+            // fully unknown. The unknown primaries/transfer still route
+            // them into the source-colour incident path, while the kept
+            // fields let the recovery refuse honestly (rule 37) instead
+            // of crushing full-range stills with a limited expansion.
+            let color_description = color_description_from_decoder(
                 &decoder,
                 negotiated_pixel_format(path, stream.index()),
             );
-            // Decoder defaults (PNG's GBR matrix, JPEG's full range) are
-            // pixel-format facts, not file tagging: a still whose primaries
-            // AND transfer are both unknown carries `unknown()` into the
-            // source-colour incident path, like any untagged source.
-            let color_description = if reported.primaries == ColorPrimaries::Unknown
-                && reported.transfer == ColorTransfer::Unknown
-            {
-                ColorDescription::unknown()
-            } else {
-                reported
-            };
             (
                 Rational::default(),
                 Some(resolution),
@@ -1218,11 +1213,14 @@ impl VideoDecoder {
         if let Some(source) = &managed_source {
             validate_managed_decoder_depth(path, &decoder, source)?;
         }
-        // MO1 R7: EXIF orientation overrides the (absent, for stills)
-        // container rotation, and only for still-image codecs — containers
-        // fail the file-signature checks inside `still_file_orientation`
-        // anyway, so an MJPEG video can never take this branch by accident.
-        let flip_horizontal = if is_still_image_codec(decoder.id()) {
+        // MO1 R7/G4: EXIF orientation overrides the (absent, for stills)
+        // container rotation, and only for still-shaped inputs — a still
+        // codec with no audio stream, mirroring the probe's kind gate as
+        // closely as the open path can (it never counts packets). Whatever
+        // reaches `still_file_orientation` costs at most the 8-byte
+        // signature when the container is not a still at all.
+        let no_audio = input.streams().best(ffmpeg::media::Type::Audio).is_none();
+        let flip_horizontal = if is_still_image_codec(decoder.id()) && no_audio {
             if let Some(orientation) = crate::still_orientation::still_file_orientation(path) {
                 rotation = orientation.rotation;
                 orientation.flip_horizontal
@@ -2204,17 +2202,37 @@ mod tests {
             assert_eq!(asset.fps, Rational::default(), "{}", path.display());
             assert_eq!(asset.duration, TimeCode(1), "{}", path.display());
             assert_eq!(asset.resolution, Some((64, 36)), "{}", path.display());
+            // G3: untagged stills keep the decoder-known range and matrix
+            // (never reset to fully unknown) — the unknown primaries still
+            // route them into the incident path, while the kept fields let
+            // the recovery refuse honestly instead of crushing.
+            let description = &asset.color_description;
+            assert_eq!(description.primaries, ColorPrimaries::Unknown);
+            assert_eq!(description.transfer, ColorTransfer::Unknown);
+            assert_eq!(description.range, ColorRange::Full, "{}", path.display());
             assert_eq!(
+                description.bit_depth,
+                ColorBitDepth::Eight,
+                "{}",
+                path.display()
+            );
+            let expected_matrix = if path == &png {
+                ColorMatrix::Rgb
+            } else {
+                ColorMatrix::Other("bt470bg".to_owned())
+            };
+            assert_eq!(description.matrix, expected_matrix, "{}", path.display());
+            assert_ne!(
                 asset.color_description,
                 ColorDescription::unknown(),
-                "untagged {} must enter the incident path as unknown",
+                "untagged {} must keep its decoder-known fields",
                 path.display()
             );
         }
     }
 
     /// MO1 R7: a tagged still keeps the decoder description exactly as
-    /// video does — only untagged stills collapse to `unknown()`.
+    /// video does — and untagged stills keep their decoder-known fields.
     #[test]
     fn probe_takes_decoder_colorimetry_for_tagged_stills() {
         crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");

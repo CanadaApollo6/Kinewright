@@ -14,6 +14,31 @@ use std::path::Path;
 
 use crate::decode::VideoRotation;
 
+// Bytes read from disk by `still_file_orientation` on this thread
+// (tests only): the G4 pin that video opens never pay for a whole-file
+// orientation scan. Thread-local so parallel tests never share counts —
+// the decoder reads it synchronously on the opener.
+#[cfg(test)]
+std::thread_local! {
+    static ORIENTATION_BYTES_READ: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_orientation_bytes_read() {
+    ORIENTATION_BYTES_READ.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn orientation_bytes_read() -> u64 {
+    ORIENTATION_BYTES_READ.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn count_orientation_bytes_read(bytes: u64) {
+    ORIENTATION_BYTES_READ.with(|count| count.set(count.get() + bytes));
+}
+
 /// A still's display transform: flip horizontally in stored-pixel space,
 /// then rotate right-angle. (EXIF 2/4/5/7 are the mirrored set; 5 and 7 are
 /// the transpose pair — flip-then-rotate composes them exactly.)
@@ -22,13 +47,39 @@ pub(crate) struct StillOrientation {
     pub(crate) flip_horizontal: bool,
 }
 
+/// The orientation header window: EXIF lives in the file head, so the
+/// walk never reads past 64 KB (G4 — video opens once paid a whole-file
+/// read here). Orientation past the window is missed, which is safe:
+/// orientation is advisory and the pixels display as-is.
+const ORIENTATION_HEADER_BYTES: u64 = 65_536;
+
 /// Read a still file's EXIF orientation, if it carries a valid one.
 ///
-/// Returns `None` for non-stills (the JPEG SOI / PNG signature checks fail
-/// before any parse), for stills without orientation, and for corrupt
-/// headers — never an error.
+/// Returns `None` for non-stills, for stills without orientation, and for
+/// corrupt headers — never an error. Reads the 8-byte signature first so
+/// containers fail before any window read, then at most
+/// [`ORIENTATION_HEADER_BYTES`] total.
 pub(crate) fn still_file_orientation(path: &Path) -> Option<StillOrientation> {
-    let bytes = std::fs::read(path).ok()?;
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut signature = [0_u8; 8];
+    let signature_len = file.read(&mut signature).ok()? as u64;
+    #[cfg(test)]
+    count_orientation_bytes_read(signature_len);
+    if signature_len < 8 {
+        return None;
+    }
+    let is_jpeg = signature[0] == 0xFF && signature[1] == 0xD8;
+    let is_png = signature == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    if !is_jpeg && !is_png {
+        return None;
+    }
+    let mut bytes = signature.to_vec();
+    file.take(ORIENTATION_HEADER_BYTES - signature_len)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    #[cfg(test)]
+    count_orientation_bytes_read(bytes.len() as u64 - signature_len);
     let value = jpeg_exif_orientation(&bytes).or_else(|| png_exif_orientation(&bytes))?;
     let (rotation, flip_horizontal) = match value {
         1 => (VideoRotation::None, false),
@@ -356,6 +407,133 @@ mod tests {
         assert!(
             still_file_orientation(&missing.path("nope.jpg")).is_none(),
             "an unreadable file carries no orientation"
+        );
+    }
+
+    /// MO1 G4: opening an MJPEG video reads under 64 KB for the
+    /// orientation probe — never the whole file (the 62 MB repro).
+    #[test]
+    fn mjpeg_video_open_reads_less_than_64k_for_orientation() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize");
+        let media = crate::test_support::GeneratedMedia::ffmpeg(
+            "mo1-g4-mjpeg-video",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=25:duration=8",
+                "-c:v",
+                "mjpeg",
+                "-q:v",
+                "2",
+                "-an",
+            ],
+            "avi",
+        );
+        let size = std::fs::metadata(media.path())
+            .expect("video should exist")
+            .len();
+        assert!(
+            size > 65_536,
+            "the repro file must exceed the bound to be meaningful, got {size}"
+        );
+        reset_orientation_bytes_read();
+        let decoder = crate::decode::VideoDecoder::open(
+            media.path(),
+            kinewright_core::Rational::new(25, 1).unwrap(),
+        )
+        .expect("the MJPEG video should open");
+        drop(decoder);
+        let read = orientation_bytes_read();
+        assert!(
+            read < 65_536,
+            "opening a {size}-byte MJPEG video read {read} bytes for orientation"
+        );
+
+        // With an audio stream the open path skips the probe entirely.
+        let sounded = crate::test_support::GeneratedMedia::ffmpeg(
+            "mo1-g4-mjpeg-sounded",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=25:duration=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-c:v",
+                "mjpeg",
+                "-q:v",
+                "2",
+                "-c:a",
+                "pcm_s16le",
+                "-shortest",
+            ],
+            "avi",
+        );
+        reset_orientation_bytes_read();
+        drop(
+            crate::decode::VideoDecoder::open(
+                sounded.path(),
+                kinewright_core::Rational::new(25, 1).unwrap(),
+            )
+            .expect("the sounded MJPEG video should open"),
+        );
+        assert_eq!(
+            orientation_bytes_read(),
+            0,
+            "an audio-carrying MJPEG video must skip the orientation probe"
+        );
+    }
+
+    /// MO1 G4: the orientation walk is header-bounded — EXIF past the
+    /// 64 KB header window is missed (orientation is advisory), while a
+    /// normal still parses within the window.
+    #[test]
+    fn still_orientation_read_is_header_bounded() {
+        let dir = crate::test_support::TempDirectory::new("mo1-g4-header-cap");
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend_from_slice(&tiff(0x0112, 3, 1, [6, 0, 0, 0], false));
+        // SOI + two 40 KB filler segments push the APP1 EXIF past 64 KB.
+        let mut jpeg = vec![0xFF, 0xD8];
+        for _ in 0..2 {
+            let filler = vec![0u8; 40_000];
+            jpeg.extend_from_slice(&[0xFF, 0xE0]);
+            jpeg.extend_from_slice(&(u16::try_from(filler.len()).unwrap() + 2).to_be_bytes());
+            jpeg.extend_from_slice(&filler);
+        }
+        jpeg.extend_from_slice(&[0xFF, 0xE1]);
+        jpeg.extend_from_slice(&(u16::try_from(app1.len()).unwrap() + 2).to_be_bytes());
+        jpeg.extend_from_slice(&app1);
+        let path = dir.path("padded.jpg");
+        std::fs::write(&path, &jpeg).unwrap();
+
+        reset_orientation_bytes_read();
+        assert!(
+            still_file_orientation(&path).is_none(),
+            "EXIF past the header window must be missed, not whole-file scanned"
+        );
+        assert!(
+            orientation_bytes_read() <= 65_536,
+            "the header walk must stay bounded, read {}",
+            orientation_bytes_read()
+        );
+
+        // A normal still still parses, within the window.
+        let plain = dir.path("plain.jpg");
+        let mut normal = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        normal.extend_from_slice(&(u16::try_from(app1.len()).unwrap() + 2).to_be_bytes());
+        normal.extend_from_slice(&app1);
+        std::fs::write(&plain, &normal).unwrap();
+        reset_orientation_bytes_read();
+        assert!(
+            still_file_orientation(&plain).is_some(),
+            "in-window EXIF must parse"
+        );
+        assert!(
+            orientation_bytes_read() <= 65_536,
+            "a normal still must read within the window"
         );
     }
 }

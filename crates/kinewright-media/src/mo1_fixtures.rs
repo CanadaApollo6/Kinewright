@@ -1166,7 +1166,19 @@ fn untagged_still_reaches_the_source_colour_incident() {
     crate::initialize_ffmpeg().expect("FFmpeg should initialize");
     let media = mo1_quadrant_still("mo1-untagged", 64, 36);
     let (mut document, _) = mo1_still_document(&media, 5, (64, 36), Vec::new());
-    document.media_pool[0].color_description = ColorDescription::unknown();
+    // G3: no hand stamp — the incident path runs on the real probed
+    // description (decoder-known range/matrix kept).
+    let probed = probe_path(media.path(), AssetId(1))
+        .expect("the untagged still should probe")
+        .color_description;
+    assert_eq!(probed.primaries, ColorPrimaries::Unknown);
+    assert_eq!(probed.transfer, ColorTransfer::Unknown);
+    assert_eq!(probed.matrix, ColorMatrix::Rgb);
+    assert_eq!(probed.range, ColorRange::Full);
+    document.media_pool[0].color_description = probed.clone();
+    document
+        .validate()
+        .expect("the incident document should validate");
 
     let gpu = fixture_gpu_or_skip().expect("the gate needs an adapter");
     let mut renderer = FrameRenderer::new(gpu);
@@ -1199,10 +1211,17 @@ fn untagged_still_reaches_the_source_colour_incident() {
         refusal.description.primaries
     );
 
-    // The assumed stamp (what `mo1_still_document` carries) renders.
-    let (document, _) = mo1_still_document(&media, 5, (64, 36), Vec::new());
-    let mut renderer = FrameRenderer::new(fixture_gpu_or_skip().expect("adapter"));
-    renderer
+    // The policy refuses the Rec.709 recovery honestly (it would
+    // overwrite the known Rgb matrix), while the real recovery
+    // description — full range kept — still decodes.
+    assert!(
+        !kinewright_core::rec709_compatible(&probed),
+        "the recovery must refuse honestly, not overwrite known fields"
+    );
+    let recovered = kinewright_core::recovery_description(&probed);
+    assert_eq!(recovered.range, ColorRange::Full);
+    document.media_pool[0].color_description = recovered;
+    let frame = renderer
         .render(
             &document,
             TimeCode::ZERO,
@@ -1210,7 +1229,97 @@ fn untagged_still_reaches_the_source_colour_incident() {
             RenderScale::FullResolution,
             DecodeStrategy::Seek,
         )
-        .expect("the assumed still must render");
+        .expect("the recovered still must render");
+    let red = pixel(&frame, 16, 9);
+    assert!(
+        red[0] > 150,
+        "the recovered still must really render, got {red:?}"
+    );
+}
+
+/// MO1 G3: the real incident recovery on an untagged JPEG keeps full
+/// range — shadow steps survive instead of crushing to black (a
+/// limited-range recovery would clip bars 8/16 to 0 and bar 250 to 255).
+#[test]
+fn untagged_jpeg_recovery_preserves_shadow_steps() {
+    crate::initialize_ffmpeg().expect("FFmpeg should initialize");
+    let media = GeneratedMedia::ffmpeg(
+        "mo1-g3-jpegbars",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:size=64x36:rate=1:duration=1,drawbox=x=13:y=0:w=13:h=36:c=0x080808:t=fill,drawbox=x=26:y=0:w=13:h=36:c=0x101010:t=fill,drawbox=x=39:y=0:w=13:h=36:c=0xFAFAFA:t=fill,drawbox=x=52:y=0:w=12:h=36:c=white:t=fill",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "1",
+        ],
+        "jpg",
+    );
+    let probed = probe_path(media.path(), AssetId(1))
+        .expect("the untagged JPEG should probe")
+        .color_description;
+    assert_eq!(probed.primaries, ColorPrimaries::Unknown);
+    assert_eq!(probed.transfer, ColorTransfer::Unknown);
+    assert_eq!(probed.matrix, ColorMatrix::Other("bt470bg".to_owned()));
+    assert_eq!(probed.range, ColorRange::Full);
+    assert!(
+        !kinewright_core::rec709_compatible(&probed),
+        "the recovery must refuse honestly, not overwrite known fields"
+    );
+    let recovered = kinewright_core::recovery_description(&probed);
+    assert_eq!(recovered.range, ColorRange::Full);
+
+    let (mut document, _) = mo1_still_document(&media, 5, (64, 36), Vec::new());
+    document.media_pool[0].color_description = recovered;
+    document
+        .validate()
+        .expect("the recovered document should validate");
+    let gpu = fixture_gpu_or_skip().expect("the gate needs an adapter");
+    let mut renderer = FrameRenderer::new(gpu);
+    let frame = renderer
+        .render(
+            &document,
+            TimeCode::ZERO,
+            document.resolution,
+            RenderScale::FullResolution,
+            DecodeStrategy::Seek,
+        )
+        .expect("the recovered JPEG must render");
+    // Region means over bar centres (JPEG noise averages out).
+    let bar = |x0: u32| {
+        let mut sum = 0u32;
+        let mut count = 0u32;
+        for y in 12..24 {
+            for x in x0 + 4..x0 + 9 {
+                sum += u32::from(pixel(&frame, x, y)[0]);
+                count += 1;
+            }
+        }
+        sum / count
+    };
+    let levels = [bar(0), bar(13), bar(26), bar(39), bar(52)];
+    assert!(levels[0] <= 8, "black must stay black, got {levels:?}");
+    assert!(
+        (1..=12).contains(&levels[1]),
+        "code 8 must survive, not crush to 0, got {levels:?}",
+    );
+    assert!(
+        (3..=20).contains(&levels[2]),
+        "code 16 must survive, not crush to 0, got {levels:?}",
+    );
+    assert!(
+        (240..=253).contains(&levels[3]),
+        "code 250 must survive, not clip to 255, got {levels:?}",
+    );
+    assert!(levels[4] >= 250, "white must stay white, got {levels:?}");
+    assert!(
+        levels.windows(2).all(|pair| pair[0] <= pair[1]),
+        "bar levels must not invert, got {levels:?}"
+    );
 }
 
 /// MO1 R7: PNG alpha survives the hold path into alpha-over — a half-red
