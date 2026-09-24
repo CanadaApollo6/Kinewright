@@ -2460,11 +2460,15 @@ mod tests {
                     at: TimeCode::ZERO,
                     value: -120,
                     interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 kinewright_core::Keyframe {
                     at: TimeCode(29),
                     value: 0,
                     interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         }
@@ -2476,6 +2480,8 @@ mod tests {
                 at: TimeCode::ZERO,
                 value: -40,
                 interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
             }],
         }
     }

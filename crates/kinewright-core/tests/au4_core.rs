@@ -101,6 +101,8 @@ fn linear(points: &[(i64, i64)]) -> AutomationCurve {
                 at: TimeCode(*at),
                 value: *value,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             })
             .collect(),
     }
@@ -114,6 +116,8 @@ fn shaped(points: &[(i64, i64, KeyframeInterpolation)]) -> AutomationCurve {
                 at: TimeCode(*at),
                 value: *value,
                 interpolation: *interpolation,
+                tangent_in: 0,
+                tangent_out: 0,
             })
             .collect(),
     }

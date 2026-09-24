@@ -4032,6 +4032,8 @@ pub(crate) fn keyframe_row(
             at: TimeCode(at.max(0)),
             value,
             interpolation,
+            tangent_in: 0,
+            tangent_out: 0,
         };
         if edited != *stored {
             action.edited = Some(edited);
@@ -4104,6 +4106,8 @@ pub(crate) fn apply_keyframe_row_action(
         at: TimeCode(at.max(0)),
         value: edited.value.clamp(*range.start(), *range.end()),
         interpolation: edited.interpolation,
+        tangent_in: 0,
+        tangent_out: 0,
     };
     if keyframes[index] == curve.keyframes[index] {
         return None;
@@ -4130,6 +4134,8 @@ pub(crate) fn upsert_keyframe(
                 at,
                 value,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             },
         ),
     }
@@ -4666,6 +4672,8 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 40,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             )]),
@@ -4830,6 +4838,8 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 250,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             )]),
@@ -5556,6 +5566,8 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 2,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             );
@@ -5567,6 +5579,8 @@ mod tests {
                     at: TimeCode::ZERO,
                     value: 1,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -5606,6 +5620,8 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 16,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             )]),
@@ -5618,11 +5634,15 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 1,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(10),
                         value: 0,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -5791,11 +5811,15 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 5_000,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(5),
                         value: 11_000,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -5848,6 +5872,8 @@ mod tests {
                         at: TimeCode::ZERO,
                         value,
                         interpolation: KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             )]),
@@ -6149,6 +6175,8 @@ mod tests {
                     at: TimeCode::ZERO,
                     value: 9,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -6159,6 +6187,8 @@ mod tests {
                     at: TimeCode::ZERO,
                     value: 4_000,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -6570,6 +6600,8 @@ mod tests {
                     at: TimeCode::ZERO,
                     value: 1,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -6966,6 +6998,8 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 8_000,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             );
@@ -7096,6 +7130,8 @@ mod tests {
                 at: TimeCode::ZERO,
                 value,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             }],
         };
         apply(
@@ -7164,6 +7200,8 @@ mod tests {
                 at: TimeCode::ZERO,
                 value,
                 interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
             }],
         };
         let curve = |name: &str, value: i64| Operation::SetEffectKeyframes {
@@ -7243,6 +7281,8 @@ mod tests {
                         at: TimeCode::ZERO,
                         value: 4_000,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             }],
@@ -8860,16 +8900,22 @@ mod tests {
                     at: TimeCode::ZERO,
                     value: -120,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(15),
                     value: -60,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(29),
                     value: 0,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         }
@@ -9010,6 +9056,8 @@ mod tests {
                         at: TimeCode(15),
                         value: -30,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 }),
             }],
@@ -9030,6 +9078,8 @@ mod tests {
                 at: TimeCode(15),
                 value: -90,
                 interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
             }),
             removed: false,
             live: true,
@@ -9094,6 +9144,8 @@ mod tests {
                 at: TimeCode(99),
                 value: -60,
                 interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
             }),
             ..KeyframeRowAction::default()
         };
@@ -9109,6 +9161,8 @@ mod tests {
                 at: TimeCode(15),
                 value: 9_999,
                 interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
             }),
             ..KeyframeRowAction::default()
         };

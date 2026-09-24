@@ -208,6 +208,8 @@ fn keyed_effect(
                     at: TimeCode(10),
                     value,
                     interpolation,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         )]),

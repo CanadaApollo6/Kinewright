@@ -36,6 +36,24 @@ pub struct Keyframe {
     #[serde(default)]
     #[schemars(default)]
     pub interpolation: KeyframeInterpolation,
+    /// MO1 R6: reserved Bezier incoming tangent, never evaluated here.
+    /// Serde-defaulted to 0 and skipped when 0, so existing documents are
+    /// byte-identical; validation accepts any value; survival preserves
+    /// verbatim via the existing `..*key` updates and the §8 kernels.
+    #[serde(default, skip_serializing_if = "i64_is_zero")]
+    #[schemars(default)]
+    pub tangent_in: i64,
+    /// MO1 R6: reserved Bezier outgoing tangent, never evaluated here.
+    /// See [`Keyframe::tangent_in`].
+    #[serde(default, skip_serializing_if = "i64_is_zero")]
+    #[schemars(default)]
+    pub tangent_out: i64,
+}
+
+// Serde's `skip_serializing_if` callbacks receive references to the fields.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn i64_is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 /// A reusable fixed-point automation curve.
@@ -290,6 +308,8 @@ fn boundary_key(curve: &AutomationCurve, at: TimeCode, source: TimeCode) -> Keyf
             .value_at(source)
             .unwrap_or_else(|| curve.keyframes.first().map_or(0, |key| key.value)),
         interpolation: curve.segment_interpolation_at(source),
+        tangent_in: 0,
+        tangent_out: 0,
     }
 }
 
@@ -426,11 +446,15 @@ mod tests {
                     at: TimeCode(10),
                     value: -100,
                     interpolation,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(20),
                     value: 100,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         }
@@ -505,21 +529,29 @@ mod tests {
                     at: TimeCode(10),
                     value: -300,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(100),
                     value: 0,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(150),
                     value: -100,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(200),
                     value: 0,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         };
@@ -560,6 +592,8 @@ mod tests {
                     at: TimeCode(*at),
                     value: 0,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 })
                 .collect(),
         };
@@ -633,11 +667,15 @@ mod tests {
                     at: TimeCode(0),
                     value: giant,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(10),
                     value: 0,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         };
@@ -651,11 +689,15 @@ mod tests {
                     at: TimeCode(0),
                     value: i64::MAX,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(10),
                     value: i64::MIN,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         };
@@ -670,11 +712,15 @@ mod tests {
                     at: TimeCode(0),
                     value: -9_000_000_000_000,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(10),
                     value: 9_000_000_000_000,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         };
@@ -694,31 +740,43 @@ mod tests {
                     at: TimeCode(0),
                     value: -500_000,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(10),
                     value: 200_000,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(20),
                     value: -300_000,
                     interpolation: KeyframeInterpolation::EaseIn,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(30),
                     value: 400_000,
                     interpolation: KeyframeInterpolation::EaseOut,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(40),
                     value: -100_000,
                     interpolation: KeyframeInterpolation::EaseInOut,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 Keyframe {
                     at: TimeCode(50),
                     value: 600_000,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         };
@@ -749,11 +807,15 @@ mod tests {
                         at: TimeCode(0),
                         value: start_value,
                         interpolation: kind,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(8),
                         value: end_value,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ];
                 for at in 0..=8 {
@@ -832,6 +894,131 @@ mod tests {
     /// clamping translating uniformly. H4 proves the shift preserves keys and
     /// order; H1–H3 prove the evaluation properties; this proptest covers
     /// their composition over randomized curves, deltas, and frames.
+    /// MO1 R6: nonzero tangents survive serde; zero tangents serialize
+    /// byte-identically to pre-MO1 documents (fields skipped when 0).
+    #[test]
+    fn tangents_round_trip_and_legacy_docs_stay_byte_identical() {
+        let keyed = Keyframe {
+            at: TimeCode(5),
+            value: 100,
+            interpolation: KeyframeInterpolation::Linear,
+            tangent_in: -250,
+            tangent_out: 750,
+        };
+        let json = serde_json::to_string(&keyed).unwrap();
+        assert!(
+            json.contains("tangent_in"),
+            "nonzero tangents persist: {json}"
+        );
+        assert!(
+            json.contains("tangent_out"),
+            "nonzero tangents persist: {json}"
+        );
+        assert_eq!(serde_json::from_str::<Keyframe>(&json).unwrap(), keyed);
+        // Zero tangents omit both fields: byte-identical to pre-MO1.
+        let plain = Keyframe {
+            tangent_in: 0,
+            tangent_out: 0,
+            ..keyed
+        };
+        let plain_json = serde_json::to_string(&plain).unwrap();
+        assert_eq!(
+            plain_json,
+            r#"{"at":5,"value":100,"interpolation":"linear"}"#
+        );
+        // Legacy documents (no tangent fields) read back with zero tangents.
+        assert_eq!(
+            serde_json::from_str::<Keyframe>(&plain_json).unwrap(),
+            plain
+        );
+    }
+
+    /// MO1 R6: evaluation ignores both tangent fields for every
+    /// interpolation kind — no `KeyframeInterpolation` variant was added, so
+    /// every existing match stays exhaustive and behaviour is unchanged.
+    #[test]
+    fn nonzero_tangents_change_no_evaluation() {
+        for kind in [
+            KeyframeInterpolation::Hold,
+            KeyframeInterpolation::Linear,
+            KeyframeInterpolation::EaseIn,
+            KeyframeInterpolation::EaseOut,
+            KeyframeInterpolation::EaseInOut,
+        ] {
+            let plain = AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode(0),
+                        value: -500_000,
+                        interpolation: kind,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                    Keyframe {
+                        at: TimeCode(10),
+                        value: 300_000,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                ],
+            };
+            let keyed = AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        tangent_in: -1_000_000,
+                        tangent_out: 1_000_000,
+                        ..plain.keyframes[0]
+                    },
+                    Keyframe {
+                        tangent_in: 42,
+                        tangent_out: -42,
+                        ..plain.keyframes[1]
+                    },
+                ],
+            };
+            for at in -5..=15 {
+                assert_eq!(
+                    keyed.value_at(TimeCode(at)),
+                    plain.value_at(TimeCode(at)),
+                    "tangents change no value_at for {kind:?} at {at}"
+                );
+            }
+        }
+    }
+
+    /// MO1 R6: survival preserves tangents verbatim — they ride the existing
+    /// `..*key` updates and the §8 shift kernel carries them too.
+    #[test]
+    fn keep_outside_shift_preserves_tangents_verbatim() {
+        let curve = AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(10),
+                    value: -100,
+                    interpolation: KeyframeInterpolation::EaseInOut,
+                    tangent_in: -7,
+                    tangent_out: 9,
+                },
+                Keyframe {
+                    at: TimeCode(20),
+                    value: 100,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 3,
+                    tangent_out: -3,
+                },
+            ],
+        };
+        let shifted = super::rebase_clip_curve_keep_outside(&curve, TimeCode(4));
+        assert_eq!(shifted.keyframes.len(), 2);
+        assert_eq!(shifted.keyframes[0].at, TimeCode(6));
+        assert_eq!(shifted.keyframes[1].at, TimeCode(16));
+        assert_eq!(shifted.keyframes[0].tangent_in, -7);
+        assert_eq!(shifted.keyframes[0].tangent_out, 9);
+        assert_eq!(shifted.keyframes[1].tangent_in, 3);
+        assert_eq!(shifted.keyframes[1].tangent_out, -3);
+    }
+
     #[test]
     fn translation_equivariance_holds_on_reference_curve() {
         let keys = vec![
@@ -839,21 +1026,29 @@ mod tests {
                 at: TimeCode(0),
                 value: -500_000,
                 interpolation: KeyframeInterpolation::EaseInOut,
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(10),
                 value: 200_000,
                 interpolation: KeyframeInterpolation::EaseIn,
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(25),
                 value: 800_000,
                 interpolation: KeyframeInterpolation::EaseOut,
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(40),
                 value: -100_000,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             },
         ];
         let orig = AutomationCurve { keyframes: keys };
@@ -907,6 +1102,8 @@ mod mo1_proptest {
                         3 => KeyframeInterpolation::EaseOut,
                         _ => KeyframeInterpolation::EaseInOut,
                     },
+                    tangent_in: 0,
+                    tangent_out: 0,
                 })
                 .collect();
             let orig = AutomationCurve { keyframes: keys };
@@ -1001,11 +1198,15 @@ mod mo1_proofs {
                 at: TimeCode(ats[0]),
                 value: values[0],
                 interpolation: kind_of(tags[0]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(ats[1]),
                 value: values[1],
                 interpolation: kind_of(tags[1]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
         ]
     }
@@ -1023,16 +1224,22 @@ mod mo1_proofs {
                 at: TimeCode(ats[0]),
                 value: values[0],
                 interpolation: kind_of(tags[0]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(ats[1]),
                 value: values[1],
                 interpolation: kind_of(tags[1]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(ats[2]),
                 value: values[2],
                 interpolation: kind_of(tags[2]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
         ]
     }
@@ -1051,21 +1258,29 @@ mod mo1_proofs {
                 at: TimeCode(ats[0]),
                 value: values[0],
                 interpolation: kind_of(tags[0]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(ats[1]),
                 value: values[1],
                 interpolation: kind_of(tags[1]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(ats[2]),
                 value: values[2],
                 interpolation: kind_of(tags[2]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(ats[3]),
                 value: values[3],
                 interpolation: kind_of(tags[3]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
         ]
     }
@@ -1082,11 +1297,15 @@ mod mo1_proofs {
                 at: TimeCode(ats[0]),
                 value: values[0],
                 interpolation: kind_of(tags[0]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(ats[1]),
                 value: values[1],
                 interpolation: kind_of(tags[1]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
         ]
     }
@@ -1101,16 +1320,22 @@ mod mo1_proofs {
                 at: TimeCode(ats[0]),
                 value: values[0],
                 interpolation: kind_of(tags[0]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(ats[1]),
                 value: values[1],
                 interpolation: kind_of(tags[1]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(ats[2]),
                 value: values[2],
                 interpolation: kind_of(tags[2]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
         ]
     }
@@ -1125,21 +1350,29 @@ mod mo1_proofs {
                 at: TimeCode(ats[0]),
                 value: values[0],
                 interpolation: kind_of(tags[0]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(ats[1]),
                 value: values[1],
                 interpolation: kind_of(tags[1]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(ats[2]),
                 value: values[2],
                 interpolation: kind_of(tags[2]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
             Keyframe {
                 at: TimeCode(ats[3]),
                 value: values[3],
                 interpolation: kind_of(tags[3]),
+                tangent_in: 0,
+                tangent_out: 0,
             },
         ]
     }

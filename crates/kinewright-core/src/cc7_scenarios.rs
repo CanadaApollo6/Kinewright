@@ -1755,6 +1755,8 @@ pub fn cc7_track_keyframe_operations() -> Vec<Operation> {
                         at: TimeCode(*frame),
                         value,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     })
                     .collect(),
             },

@@ -186,6 +186,8 @@ fn curve(keyframes: &[(i64, i64, KeyframeInterpolation)]) -> AutomationCurve {
                 at: TimeCode(*at),
                 value: *value,
                 interpolation: *interpolation,
+                tangent_in: 0,
+                tangent_out: 0,
             })
             .collect(),
     }

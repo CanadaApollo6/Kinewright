@@ -1799,6 +1799,8 @@ assets:
                     at: TimeCode(*at),
                     value: *value,
                     interpolation: *interpolation,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 })
                 .collect(),
         }

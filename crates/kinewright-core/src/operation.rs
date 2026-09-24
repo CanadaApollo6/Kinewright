@@ -2796,6 +2796,8 @@ fn ripple_delete_curve(
                     at,
                     value,
                     interpolation: curve.segment_interpolation_at(at),
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             );
         }
@@ -2820,6 +2822,8 @@ fn ripple_delete_curve(
                 at: start,
                 value,
                 interpolation: curve.segment_interpolation_at(ripple_point),
+                tangent_in: 0,
+                tangent_out: 0,
             },
         );
     }

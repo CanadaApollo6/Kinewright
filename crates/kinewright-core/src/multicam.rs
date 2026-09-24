@@ -974,6 +974,8 @@ fn plan_subject_reframe_scaled(
                 at: sample.at,
                 value,
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             })
             .collect(),
     };

@@ -1564,6 +1564,8 @@ mod tests {
                         at: TimeCode(3),
                         value: 1_250,
                         interpolation: KeyframeInterpolation::EaseIn,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             )]),

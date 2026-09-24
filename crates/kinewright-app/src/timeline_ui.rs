@@ -398,6 +398,8 @@ fn envelope_insert_key(curve: &AutomationCurve, at: TimeCode) -> Vec<Keyframe> {
             at,
             value,
             interpolation,
+            tangent_in: 0,
+            tangent_out: 0,
         },
     );
     keys
@@ -3888,6 +3890,8 @@ mod tests {
                     at: TimeCode(*at),
                     value: *value,
                     interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 })
                 .collect(),
         }

@@ -4077,6 +4077,8 @@ mod tests {
                 at: kinewright_core::TimeCode::ZERO,
                 value: -60,
                 interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             }],
         }
     }
@@ -4088,11 +4090,15 @@ mod tests {
                     at: kinewright_core::TimeCode::ZERO,
                     value: -60,
                     interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
                 kinewright_core::Keyframe {
                     at: kinewright_core::TimeCode(12),
                     value: 0,
                     interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 },
             ],
         }

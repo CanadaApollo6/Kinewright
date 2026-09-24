@@ -5006,6 +5006,8 @@ impl KinewrightMcp {
                     at: observation.local_frame,
                     value: layer[axis],
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 })
                 .collect(),
         };
@@ -5591,6 +5593,8 @@ impl KinewrightMcp {
                     at: *local_frame,
                     value: smoothed[axis].get(index).copied().unwrap_or_default(),
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 })
                 .collect(),
         };
@@ -11191,6 +11195,8 @@ fn ducking_curve(
                 at: TimeCode(at.clamp(low, high)),
                 value: i64::from(value),
                 interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
             });
         }
     }
@@ -16454,6 +16460,8 @@ mod tracking_tests {
                     at: TimeCode(0),
                     value: 50,
                     interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -16469,11 +16477,15 @@ mod tracking_tests {
                         at: TimeCode(0),
                         value: 50,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(10),
                         value: 100,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -16495,11 +16507,15 @@ mod tracking_tests {
                         at: TimeCode(0),
                         value: 0,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(10),
                         value: 20,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -16611,11 +16627,15 @@ mod tracking_tests {
                         at: TimeCode(0),
                         value: 100,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(40),
                         value: 50,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -21059,6 +21079,8 @@ mod tests {
                         at: TimeCode(0),
                         value: 1,
                         interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             }))
@@ -21374,11 +21396,15 @@ mod tests {
                             at: TimeCode(0),
                             value: 100,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                         Keyframe {
                             at: TimeCode(40),
                             value: 50,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                     ],
                 },
@@ -21999,11 +22025,15 @@ mod tests {
                             at: TimeCode(0),
                             value: 100,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                         Keyframe {
                             at: TimeCode(40),
                             value: 200,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                     ],
                 },
@@ -23109,11 +23139,15 @@ mod tests {
                         at: TimeCode(0),
                         value: 50,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                     Keyframe {
                         at: TimeCode(40),
                         value: 100,
                         interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
                     },
                 ],
             },
@@ -25585,11 +25619,15 @@ mod tests {
                             at: TimeCode::ZERO,
                             value: 100,
                             interpolation: KeyframeInterpolation::Hold,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                         Keyframe {
                             at: TimeCode(12),
                             value: 750,
                             interpolation: KeyframeInterpolation::Hold,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         },
                     ],
                 },
@@ -28039,6 +28077,23 @@ mod tests {
     /// the refactor is byte-for-byte — and
     /// `served_tools_equal_serialized_filtered_registry` pins the equality
     /// explicitly.
+    ///
+    /// **MO1 Part A re-pins the three byte figures for the model-field
+    /// growth** (MO1 R21 — tangent, `enabled`, `enabled_curve` and `Image`
+    /// fields grow shared `$defs`; transform descriptor rows cost description
+    /// bytes only). Per-commit deltas, each measured as the whole move with
+    /// nothing else in the commit:
+    ///
+    /// - **A2a (R6 tangents): +26 895 / +26 895 / +0.** The two reserved
+    ///   `Keyframe` fields (`tangent_in`, `tangent_out`, each an integer with
+    ///   its doc comment in the shared `$defs`) land in every tool whose
+    ///   input schema embeds a curve. The arithmetic: 1 552 503 + 26 895 =
+    ///   **1 579 398**, 1 407 480 + 26 895 = **1 434 375**, 121 892 + 0 =
+    ///   **121 892** (field docs live in input schemas, not tool
+    ///   descriptions). Served quad unchanged (`7 / 5 660 / 3 510 / 998` —
+    ///   served tools embed no `Keyframe`). Counts stay `141 / 54 / 87`: no
+    ///   new capability, no new tool. The full per-embedding-tool derivation
+    ///   and M36 rows land in A4 with the R21 sextuple re-pin.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28064,11 +28119,11 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_552_503, 5_660),
+            (1_579_398, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_407_480,
+            registry_metrics.input_schema_bytes, 1_434_375,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -32046,6 +32101,8 @@ mod tests {
                     at: TimeCode::ZERO,
                     value: -50,
                     interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             }),
             ..TrackMix::neutral(TrackId(1))
@@ -32088,6 +32145,8 @@ mod tests {
                             at: TimeCode::ZERO,
                             value: 0,
                             interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
                         }],
                     }),
                 }],

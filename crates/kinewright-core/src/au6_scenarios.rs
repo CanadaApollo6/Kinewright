@@ -293,6 +293,8 @@ const fn duck_key(at: i64, value: i64) -> Keyframe {
         at: TimeCode(at),
         value,
         interpolation: KeyframeInterpolation::Linear,
+        tangent_in: 0,
+        tangent_out: 0,
     }
 }
 

@@ -2782,6 +2782,8 @@ mod tests {
                             at: TimeCode::ZERO,
                             value: 500,
                             interpolation: kinewright_core::KeyframeInterpolation::default(),
+                            tangent_in: 0,
+                            tangent_out: 0,
                         }],
                     },
                 )]),

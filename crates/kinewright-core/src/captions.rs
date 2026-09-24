@@ -263,6 +263,8 @@ const fn keyframe(at: TimeCode, value: i64, interpolation: KeyframeInterpolation
         at,
         value,
         interpolation,
+        tangent_in: 0,
+        tangent_out: 0,
     }
 }
 

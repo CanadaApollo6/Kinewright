@@ -5924,6 +5924,8 @@ mod tests {
                         at: kinewright_core::TimeCode::ZERO,
                         value: 250,
                         interpolation: kinewright_core::KeyframeInterpolation::default(),
+                        tangent_in: 0,
+                        tangent_out: 0,
                     }],
                 },
             )]),
@@ -6279,6 +6281,8 @@ mod tests {
                     at: kinewright_core::TimeCode::ZERO,
                     value: 1_200,
                     interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -6565,6 +6569,8 @@ mod tests {
                     at: kinewright_core::TimeCode::ZERO,
                     value: 4_000,
                     interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -7987,6 +7993,8 @@ mod tests {
                     at: TimeCode(0),
                     value: 1,
                     interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -8035,6 +8043,8 @@ mod tests {
                     at: TimeCode(0),
                     value: 5_000,
                     interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
                 }],
             },
         );
@@ -8725,6 +8735,8 @@ mod tests {
                 at: TimeCode(0),
                 value,
                 interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
             }],
         };
         let mut document = document();
