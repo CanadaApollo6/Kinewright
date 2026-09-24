@@ -470,8 +470,10 @@ path would leave prod/proof drift uncheckable.
 
 **R31 (the i64 kernel).** `AutomationCurve::value_at` and `ease` migrate from
 `i128` to `i64` intermediates, behaviour-preserving for validated documents (they
-differ only if a key-value difference exceeds ~9.2e12 — unreachable, spans bounded
-by document duration; the saturating first multiply is kept). The `Hold` arm
+differ only if a key-value difference exceeds ~9.2e12 — unreachable: keep-outside
+spans are bounded by `2 × MAX_KEY_FRAME_OFFSET` (review F3: `validate_ordered`
+refuses `|at|` past 2^40) and audio spans by document duration; the saturating
+first multiply is kept). The `Hold` arm
 returns before any subtraction, so hold-only giants (`LUT_ASSET_ID_DESCRIPTOR_MAX`
 2^53−1) never reach value arithmetic; outside the proven ±1e6 value range the
 kernel uses checked arithmetic returning `None`, matching today's

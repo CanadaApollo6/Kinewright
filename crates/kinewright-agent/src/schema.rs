@@ -405,6 +405,8 @@ fn operation_tool(
             TRACK_AUTOMATION_PARAMETERS[0], TRACK_AUTOMATION_PARAMETERS[1],
         ),
         "SetClipGainEnvelope" => ", where the required curve replaces this clip's whole gain envelope in clip-local frames: null is the only clear, and an omitted curve is an error, never a silent clear".to_owned(),
+        // MO1 review F6: the copy semantics agents must not guess.
+        "CopyClipAttributes" => ", where every copied effect's values, enabled flag, and enable curve are replaced wholesale while its keyframes ride along only when include_keyframes is set; the target clip's own enabled flag and enable curve are never touched".to_owned(),
         _ => String::new(),
     };
     let mut description = format!(

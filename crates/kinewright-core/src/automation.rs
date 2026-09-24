@@ -14,6 +14,14 @@ const CURVE_SCALE: i64 = 1_000_000;
 /// ranges inside it, so every validated document evaluates inside the proof.
 pub const PROVEN_VALUE_BOUND: i64 = 1_000_000;
 
+/// MO1 review F3: the keep-outside position bound. `validate_ordered`
+/// refuses keys with `|at|` past 2^40 frames (~35 million years at 30 fps —
+/// inexhaustible editorially) so spans stay within 2^41 and
+/// `offset × CURVE_SCALE` tops out near 2.2e18, far inside `i64` with no
+/// saturation, and `shift_keys_keep_outside` can never saturate-collapse
+/// two validated keys onto one frame.
+pub const MAX_KEY_FRAME_OFFSET: i64 = 1 << 40;
+
 /// Interpolation applied from a keyframe to the next keyframe.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +81,8 @@ pub enum AutomationCurveError {
     NegativePosition,
     #[error("automation keyframes must be strictly ordered by frame")]
     Unordered,
+    #[error("automation keyframe positions must be within ±2^40 frames")]
+    PositionOutOfBounds,
 }
 
 /// AU4 §3.1: the value stepped discontinuously at the first sample of `at`.
@@ -114,14 +124,23 @@ impl AutomationCurve {
 
     /// MO1 R13: ordered-only validation for keep-outside owners — non-empty
     /// and strictly ordered, sign-agnostic (negative `at` is legal after a
-    /// trim-in). Audio owners keep strict [`validate`](Self::validate).
+    /// trim-in), with `|at|` bounded by [`MAX_KEY_FRAME_OFFSET`] (review F3).
+    /// Audio owners keep strict [`validate`](Self::validate).
     ///
     /// # Errors
     ///
-    /// Returns an error for empty, duplicate, or unsorted keyframes.
+    /// Returns an error for empty, out-of-bounds, duplicate, or unsorted
+    /// keyframes.
     pub fn validate_ordered(&self) -> Result<(), AutomationCurveError> {
         if self.keyframes.is_empty() {
             return Err(AutomationCurveError::Empty);
+        }
+        if self
+            .keyframes
+            .iter()
+            .any(|keyframe| keyframe.at.0.unsigned_abs() > MAX_KEY_FRAME_OFFSET as u64)
+        {
+            return Err(AutomationCurveError::PositionOutOfBounds);
         }
         if self
             .keyframes
@@ -341,8 +360,9 @@ fn boundary_key(curve: &AutomationCurve, at: TimeCode, source: TimeCode) -> Keyf
 /// interval, linear window scan, `Hold` short-circuit, `offset * SCALE / span`,
 /// eased interpolation with round-half-away-from-zero. Behaviour-preserving
 /// for validated documents: it differs from the old `i128` maths only if a
-/// key-value difference exceeds ~9.2e12, unreachable because spans are bounded
-/// by document duration and every non-hold descriptor range fits
+/// key-value difference exceeds ~9.2e12, unreachable because keep-outside
+/// spans are bounded by `2 × MAX_KEY_FRAME_OFFSET` (`validate_ordered`),
+/// audio spans by document duration, and every non-hold descriptor range fits
 /// `±PROVEN_VALUE_BOUND` (sweep test below).
 ///
 /// The `Hold` arm returns before any subtraction, so hold-only giants
@@ -640,6 +660,39 @@ mod tests {
         );
     }
 
+    /// MO1 review F3: ordered-only validation still bounds `|at|` — keys
+    /// past `±MAX_KEY_FRAME_OFFSET` are refused, so spans stay far inside
+    /// `i64 × CURVE_SCALE` and shifts never saturate-collapse.
+    #[test]
+    fn validate_ordered_bounds_keyframe_positions() {
+        let bound = super::MAX_KEY_FRAME_OFFSET;
+        let ordered = |positions: &[i64]| AutomationCurve {
+            keyframes: positions
+                .iter()
+                .map(|at| Keyframe {
+                    at: TimeCode(*at),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                })
+                .collect(),
+        };
+        assert_eq!(ordered(&[-bound, bound]).validate_ordered(), Ok(()));
+        assert_eq!(
+            ordered(&[bound + 1]).validate_ordered(),
+            Err(AutomationCurveError::PositionOutOfBounds)
+        );
+        assert_eq!(
+            ordered(&[-bound - 1]).validate_ordered(),
+            Err(AutomationCurveError::PositionOutOfBounds)
+        );
+        assert_eq!(
+            ordered(&[i64::MIN]).validate_ordered(),
+            Err(AutomationCurveError::PositionOutOfBounds)
+        );
+    }
+
     #[test]
     fn rejects_empty_negative_duplicate_and_unsorted_curves() {
         assert_eq!(
@@ -695,8 +748,12 @@ mod tests {
                 );
             }
         }
-        // Clip gain envelope: -600..=120 tenth-dB (`validate_clip_gain_curve`).
-        for bound in [-600_i64, 120] {
+        // Clip gain envelope (`CLIP_GAIN_MIN..=CLIP_GAIN_MAX`, shared with
+        // `validate_clip_gain_curve` so the two cannot drift).
+        for bound in [
+            i64::from(crate::CLIP_GAIN_MIN),
+            i64::from(crate::CLIP_GAIN_MAX),
+        ] {
             assert!(bound.abs() <= PROVEN_VALUE_BOUND, "clip gain {bound}");
         }
         // Track gain/pan, bus/master gain: the `model.rs` consts.
@@ -787,6 +844,34 @@ mod tests {
         };
         assert_eq!(wide.value_at(TimeCode(5)), Some(0));
         assert_eq!(wide.value_at(TimeCode(9)), None);
+    }
+
+    /// MO1 review F4 (mutation 2): the `Hold` arm returns before any
+    /// subtraction — a held `i64::MAX` reads back over a segment whose
+    /// value delta (`i64::MIN − i64::MAX`) would overflow, which the
+    /// checked path turns into `None` instead. Removing the arm flips
+    /// this `Some` to `None`.
+    #[test]
+    fn hold_arm_reads_back_before_overflowable_subtraction() {
+        let held = AutomationCurve {
+            keyframes: vec![
+                Keyframe {
+                    at: TimeCode(0),
+                    value: i64::MAX,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+                Keyframe {
+                    at: TimeCode(10),
+                    value: i64::MIN,
+                    interpolation: KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                },
+            ],
+        };
+        assert_eq!(held.value_at(TimeCode(5)), Some(i64::MAX));
     }
 
     /// MO1 R31: the method IS the kernel — `value_at` agrees with
@@ -940,21 +1025,6 @@ mod tests {
         None
     }
 
-    /// MO1 R33 fallback (erratum MR1): H6 translation-equivariance as proptest
-    /// plus segment-local reasoning — H6-N2 as Kani timed out at 900 s.
-    ///
-    /// Segment-local reasoning: [`super::shift_keys_keep_outside`] translates
-    /// every key frame by `-delta` and preserves values, interpolations (and
-    /// tangents via `..*`); [`super::value_at_keys`] depends only on relative
-    /// positions — the window guard (`start.at <= at < end.at`), `span =
-    /// end.at − start.at`, `offset = at − start.at`, and both clamp
-    /// comparisons are invariant under a uniform `(keys, at)` translation by
-    /// `-delta` — while `delta = end.value − start.value`, `linear`, `eased`,
-    /// and the rounding see identical inputs on both sides. Hence
-    /// `value_at(shift(k,d), t−d) == value_at(k,t)` for every `t`, with
-    /// clamping translating uniformly. H4 proves the shift preserves keys and
-    /// order; H1–H3 prove the evaluation properties; this proptest covers
-    /// their composition over randomized curves, deltas, and frames.
     /// MO1 R6: nonzero tangents survive serde; zero tangents serialize
     /// byte-identically to pre-MO1 documents (fields skipped when 0).
     #[test]
@@ -1132,6 +1202,21 @@ mod mo1_proptest {
     use super::{AutomationCurve, Keyframe, KeyframeInterpolation, PROVEN_VALUE_BOUND, TimeCode};
 
     proptest! {
+        /// MO1 R33 fallback (erratum MR1): H6 translation-equivariance as proptest
+        /// plus segment-local reasoning — H6-N2 as Kani timed out at 900 s.
+        ///
+        /// Segment-local reasoning: [`super::shift_keys_keep_outside`] translates
+        /// every key frame by `-delta` and preserves values, interpolations (and
+        /// tangents via `..*`); [`super::value_at_keys`] depends only on relative
+        /// positions — the window guard (`start.at <= at < end.at`), `span =
+        /// end.at − start.at`, `offset = at − start.at`, and both clamp
+        /// comparisons are invariant under a uniform `(keys, at)` translation by
+        /// `-delta` — while `delta = end.value − start.value`, `linear`, `eased`,
+        /// and the rounding see identical inputs on both sides. Hence
+        /// `value_at(shift(k,d), t−d) == value_at(k,t)` for every `t`, with
+        /// clamping translating uniformly. H4 proves the shift preserves keys and
+        /// order; H1–H3 prove the evaluation properties; this proptest covers
+        /// their composition over randomized curves, deltas, and frames.
         /// Randomized H6: shifted keys read the shifted frame identically.
         /// Values `±PROVEN_VALUE_BOUND`, all five kinds, `|delta| <= 32`,
         /// frames covering tails plus the keyed interval.
@@ -1490,7 +1575,9 @@ mod mo1_proofs {
     }
 
     /// H4 check: shift by `delta` then `-delta` is identity on all key
-    /// fields, and both shifted arrays stay strictly sorted.
+    /// fields, both shifted arrays stay strictly sorted, and the first
+    /// shift moves every key by exactly `-delta` (review F4: the round
+    /// trip alone passes with the shift sign flipped).
     fn check_shift_roundtrip<const N: usize>(keys: &[Keyframe; N], delta: i64) -> bool {
         let mut once = *keys;
         super::shift_keys_keep_outside(keys, delta, &mut once);
@@ -1500,6 +1587,7 @@ mod mo1_proofs {
         let mut index = 0;
         while index < N {
             ok &= twice[index] == keys[index];
+            ok &= once[index].at.0 == keys[index].at.0 - delta;
             index += 1;
         }
         ok

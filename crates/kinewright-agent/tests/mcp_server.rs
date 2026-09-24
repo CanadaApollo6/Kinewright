@@ -10391,7 +10391,7 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 /// §6.4 rules 12–13 and §9 clause 19: **three** registry-only capabilities, no
 /// served tool, for the **twentieth** consecutive measurement.
 ///
-/// The registry sextuple is `147 / 60 / 87 / 1 820 332 / 1 671 667 / 124 520`,
+/// The registry sextuple is `147 / 60 / 87 / 1 819 706 / 1 670 813 / 124 748`,
 /// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
 /// this test pins the three counts and the served quad over the live endpoint.

@@ -28258,6 +28258,16 @@ mod tests {
     ///   the parts sum to the pinned per-commit totals; `apply_edit_plan`'s
     ///   extra +4,034/+4,034/+0 over the same span is the six A4 `oneOf`
     ///   branches, derived per-commit above.
+    ///
+    /// - **Review round (F6 doc text): −626 / −854 / +228.** The
+    ///   `CopyClipAttributes` opening clause (+228 B description) and the
+    ///   shorter `Clip.enabled_curve` doc (−854 B of embedded `$defs`
+    ///   description across the tools embedding `Clip`, isolated by
+    ///   re-measuring with the old doc restored). The arithmetic:
+    ///   1 820 332 − 626 = **1 819 706**,
+    ///   1 671 667 − 854 = **1 670 813**,
+    ///   124 520 + 228 = **124 748**. Counts `147 / 60 / 87`. Served quad
+    ///   unchanged — still the twentieth measurement.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28283,15 +28293,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_820_332, 5_660),
+            (1_819_706, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_671_667,
+            registry_metrics.input_schema_bytes, 1_670_813,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 124_520,
+            registry_metrics.description_bytes, 124_748,
             "registry={registry_metrics:?}"
         );
         assert_eq!(

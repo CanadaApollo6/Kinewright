@@ -134,7 +134,7 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-16, after IN2 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-23, after IN2 Part B) | 141 | 1,552,503 B | 1,407,480 B | 121,892 B |
 | Served MCP runtime (2026-09-23, after IN2 Part B) | 7 | 5,660 B | 3,510 B | 998 B |
-| Internal capability registry (2026-09-24, after MO1 Part A) | 147 | 1,820,332 B | 1,671,667 B | 124,520 B |
+| Internal capability registry (2026-09-24, after MO1 Part A) | 147 | 1,819,706 B | 1,670,813 B | 124,748 B |
 | Served MCP runtime (2026-09-24, after MO1 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 
 IN1 Part A adds two capabilities, `get_incidents` and `resolve_incident`,
@@ -182,9 +182,11 @@ input each — tangents +489, per-effect enable +675, clip enable +593,
 effect-vocabulary tools carry the eight transform descriptor rows at +353 B
 of description each. The A4 operations arrive as six generated mutators
 (+151,731 B serialized for the tools' own schemas) plus their six `oneOf`
-branches in `apply_edit_plan` (+4,034 B). The registry moves 1,552,503 →
-1,820,332 B serialized (1,407,480 → 1,671,667 input schema, 121,892 →
-124,520 description) at counts 147 / 60 / 87. The served quad is
+branches in `apply_edit_plan` (+4,034 B). The review round rewords two
+texts: the `CopyClipAttributes` tool description gains its copy-semantics
+clause (+228 B) and the `Clip.enabled_curve` doc shortens (−854 B of
+embedded `$defs`). The registry lands at 1,819,706 B serialized
+(1,670,813 input schema, 124,748 description) at counts 147 / 60 / 87. The served quad is
 byte-identical for the twentieth consecutive measurement at 7 / 5,660 B /
 3,510 B / 998 B (MO1 R21), asserted in three value sites.
 

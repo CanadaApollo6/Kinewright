@@ -426,9 +426,9 @@ pub struct Clip {
     #[schemars(extend("default" = true))]
     pub enabled: bool,
     /// MO1 R5: keyframed enable in clip-local frames; enabled iff value ≥ 1,
-    /// non-`Hold` kinds acting as a step exactly as R4. Any value is stored
-    /// (no 0..1 range check — the ≥ 1 test resolves every value); structural
-    /// checks land in A3 with the R13 keep-outside routing.
+    /// non-`Hold` kinds acting as a step exactly as R4. Values 0..1 (R18 —
+    /// the ≥ 1 test still resolves every value at read time); ordered-only
+    /// with no outside check (R13 keep-outside).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(default)]
     pub enabled_curve: Option<crate::AutomationCurve>,
@@ -662,6 +662,10 @@ pub struct TrackMix {
     pub solo: bool,
 }
 
+/// Lowest accepted clip gain in tenths of a decibel (AU4 §2.1).
+pub const CLIP_GAIN_MIN: i32 = -600;
+/// Highest accepted clip gain in tenths of a decibel (AU4 §2.1).
+pub const CLIP_GAIN_MAX: i32 = 120;
 /// Lowest accepted track mix gain in tenths of a decibel (AU1 §2.1).
 pub const TRACK_MIX_GAIN_MIN: i32 = -600;
 /// Highest accepted track mix gain in tenths of a decibel (AU1 §2.1).
@@ -2091,6 +2095,30 @@ mod tests {
         assert!(!clip.is_enabled_at(TimeCode(2)));
         // Mid-ramp frame 7: −3 + (8 × 7/9 rounded) = −3 + 6 = 3 → enabled.
         assert!(clip.is_enabled_at(TimeCode(7)));
+    }
+
+    /// MO1 review F4 (mutation 1): a Hold 1 → 0 → 1 toggle disables exactly
+    /// the 0 frames — pins the `>= 1` threshold (`>= 0` would enable the
+    /// held-zero span).
+    #[test]
+    fn clip_enable_hold_toggle_disables_zero_frames() {
+        let hold = |at: i64, value: i64| Keyframe {
+            at: TimeCode(at),
+            value,
+            interpolation: KeyframeInterpolation::Hold,
+            tangent_in: 0,
+            tangent_out: 0,
+        };
+        let mut clip = clip();
+        clip.enabled = false;
+        clip.enabled_curve = Some(AutomationCurve {
+            keyframes: vec![hold(0, 1), hold(10, 0), hold(20, 1)],
+        });
+        assert!(clip.is_enabled_at(TimeCode(0)));
+        assert!(clip.is_enabled_at(TimeCode(9)));
+        assert!(!clip.is_enabled_at(TimeCode(10)));
+        assert!(!clip.is_enabled_at(TimeCode(19)));
+        assert!(clip.is_enabled_at(TimeCode(20)));
     }
 
     /// MO1 R4: `evaluated_at` snapshots the resolved flag and clears the

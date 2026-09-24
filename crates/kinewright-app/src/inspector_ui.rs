@@ -457,8 +457,8 @@ pub(crate) fn legacy_conversion_keeps_stage_order(effects: &[Effect], legacy: Ef
 /// mix, and nothing else.
 fn converted_look_effect(legacy: &Effect, asset: LutAssetId) -> Effect {
     Effect {
-        enabled: true,
-        enabled_curve: None,
+        enabled: legacy.enabled,
+        enabled_curve: legacy.enabled_curve.clone(),
         id: legacy.id,
         name: ColorNodeKind::CreativeLook.effect_name().to_owned(),
         parameters: BTreeMap::from([
@@ -4521,6 +4521,31 @@ mod tests {
 
     use super::*;
     use crate::{color_wheel_widget::ColorWheelResponse, curve_editor_widget::CurveEditorResponse};
+
+    #[test]
+    fn converted_look_effect_carries_enabled_and_curve() {
+        let curve = AutomationCurve {
+            keyframes: vec![Keyframe {
+                at: TimeCode(0),
+                value: 0,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            }],
+        };
+        let legacy = Effect {
+            enabled: false,
+            enabled_curve: Some(curve.clone()),
+            id: EffectId(2),
+            name: "look_lut".to_owned(),
+            parameters: BTreeMap::from([("intensity_percent".to_owned(), ParamValue::Integer(65))]),
+            keyframes: BTreeMap::new(),
+        };
+        let converted = converted_look_effect(&legacy, LutAssetId(1));
+        assert!(!converted.enabled);
+        assert_eq!(converted.enabled_curve, Some(curve));
+        assert_eq!(converted.id, EffectId(2));
+    }
 
     #[test]
     fn inspector_control_builders_emit_only_operations() {

@@ -1591,8 +1591,10 @@ fn validate_clip_gain_curve(
             clip,
             reason: error.to_string(),
         })?;
+    let floor = i64::from(crate::CLIP_GAIN_MIN);
+    let ceiling = i64::from(crate::CLIP_GAIN_MAX);
     for keyframe in &curve.keyframes {
-        if !(-600..=120).contains(&keyframe.value) {
+        if !(floor..=ceiling).contains(&keyframe.value) {
             return Err(OpError::ClipGainEnvelopeOutOfRange {
                 clip,
                 value: keyframe.value,
@@ -1992,6 +1994,14 @@ fn add_clip(
         return Err(OpError::NegativeTimelinePosition(at));
     }
     let asset = doc.asset(asset_id).ok_or(OpError::MissingAsset(asset_id))?;
+    // MO1 R9: a Media range over a still is invalid — stills enter via
+    // `AddFreezeFrame` as `Freeze { source_frame: 0 }`, never here.
+    if asset.kind == crate::MediaKind::Image {
+        return Err(OpError::InvalidSourceRange {
+            start: source.start.0,
+            end: source.end.0,
+        });
+    }
     validate_source_range(asset, &source)?;
     let track_index = doc
         .tracks
@@ -2641,8 +2651,8 @@ fn roll_edit(
     }
     let left = doc.tracks[track_index].clips[left_index].clone();
     let right = doc.tracks[track_index].clips[right_index].clone();
-    require_media(&left)?;
-    require_media(&right)?;
+    // MO1 R9: Media, Title, and Freeze all roll — spans move in project
+    // frames below, so no `require_media` gate remains here.
     let left_end = doc.clip_end(&left)?;
     let right_end = doc.clip_end(&right)?;
     if left_end != right.timeline_start || to <= left.timeline_start || to >= right_end {
@@ -2652,41 +2662,69 @@ fn roll_edit(
         });
     }
 
-    let left_asset = doc
-        .asset(left.asset)
-        .ok_or(OpError::MissingAsset(left.asset))?;
-    let left_fps = crate::clip_effective_fps(left_asset.fps, &left)?;
     let left_duration = to
         .checked_sub(left.timeline_start)
         .ok_or(OpError::TimeOverflow)?;
-    let left_source_out = source_end_for_project_duration(
-        left.source_range.start,
-        left_asset.duration,
-        left_fps,
-        doc.fps,
-        left_duration,
-    )
+    let left_source_out = match left.content {
+        ClipContent::Media => {
+            let left_asset = doc
+                .asset(left.asset)
+                .ok_or(OpError::MissingAsset(left.asset))?;
+            let left_fps = crate::clip_effective_fps(left_asset.fps, &left)?;
+            source_end_for_project_duration(
+                left.source_range.start,
+                left_asset.duration,
+                left_fps,
+                doc.fps,
+                left_duration,
+            )
+        }
+        // MO1 R9: spans carry project frames, so the shared point moves the
+        // span edge with no fps mapping; the held frame is untouched.
+        ClipContent::Title(_) | ClipContent::Freeze(_) => {
+            left.source_range.start.checked_add(left_duration)
+        }
+    }
     .ok_or(OpError::UnrepresentableEditBoundary {
         clip: left_id,
         at: to,
     })?;
 
-    let right_asset = doc
-        .asset(right.asset)
-        .ok_or(OpError::MissingAsset(right.asset))?;
-    let right_fps = crate::clip_effective_fps(right_asset.fps, &right)?;
     let right_duration = right_end.checked_sub(to).ok_or(OpError::TimeOverflow)?;
-    let right_source_in = source_start_for_project_duration(
-        TimeCode::ZERO,
-        right.source_range.end,
-        right_fps,
-        doc.fps,
-        right_duration,
-    )
+    let right_source_in = match right.content {
+        ClipContent::Media => {
+            let right_asset = doc
+                .asset(right.asset)
+                .ok_or(OpError::MissingAsset(right.asset))?;
+            let right_fps = crate::clip_effective_fps(right_asset.fps, &right)?;
+            source_start_for_project_duration(
+                TimeCode::ZERO,
+                right.source_range.end,
+                right_fps,
+                doc.fps,
+                right_duration,
+            )
+        }
+        // MO1 R9: spans have no earlier source and must stay non-negative,
+        // so the origin never moves — the window resizes around it below.
+        ClipContent::Title(_) | ClipContent::Freeze(_) => Some(right.source_range.start),
+    }
     .ok_or(OpError::UnrepresentableEditBoundary {
         clip: right_id,
         at: to,
     })?;
+    if !right.content.is_media() {
+        let span_end = right
+            .source_range
+            .start
+            .checked_add(right_duration)
+            .filter(|end| *end > right.source_range.start)
+            .ok_or(OpError::UnrepresentableEditBoundary {
+                clip: right_id,
+                at: to,
+            })?;
+        doc.tracks[track_index].clips[right_index].source_range.end = span_end;
+    }
 
     doc.tracks[track_index].clips[left_index].source_range.end = left_source_out;
     doc.tracks[track_index].clips[right_index]
@@ -2708,9 +2746,9 @@ fn slide_clip(doc: &mut Document, clip_id: ClipId, to: TimeCode) -> Result<(), O
     let left = doc.tracks[track_index].clips[clip_index - 1].clone();
     let middle = doc.tracks[track_index].clips[clip_index].clone();
     let right = doc.tracks[track_index].clips[clip_index + 1].clone();
-    require_media(&left)?;
-    require_media(&middle)?;
-    require_media(&right)?;
+    // MO1 R9: Media, Title, and Freeze all slide — the neighbours resize in
+    // project frames below and the middle only moves its window, so no
+    // `require_media` gate remains here.
     let left_end = doc.clip_end(&left)?;
     let middle_duration = doc.clip_duration(&middle)?;
     let middle_end = doc.clip_end(&middle)?;
@@ -2726,39 +2764,53 @@ fn slide_clip(doc: &mut Document, clip_id: ClipId, to: TimeCode) -> Result<(), O
         return Err(OpError::SlideRequiresNeighbors { clip: clip_id });
     }
 
-    let left_asset = doc
-        .asset(left.asset)
-        .ok_or(OpError::MissingAsset(left.asset))?;
-    let left_fps = crate::clip_effective_fps(left_asset.fps, &left)?;
     let left_duration = to
         .checked_sub(left.timeline_start)
         .ok_or(OpError::TimeOverflow)?;
-    let left_source_out = source_end_for_project_duration(
-        left.source_range.start,
-        left_asset.duration,
-        left_fps,
-        doc.fps,
-        left_duration,
-    )
+    let left_source_out = match left.content {
+        ClipContent::Media => {
+            let left_asset = doc
+                .asset(left.asset)
+                .ok_or(OpError::MissingAsset(left.asset))?;
+            let left_fps = crate::clip_effective_fps(left_asset.fps, &left)?;
+            source_end_for_project_duration(
+                left.source_range.start,
+                left_asset.duration,
+                left_fps,
+                doc.fps,
+                left_duration,
+            )
+        }
+        ClipContent::Title(_) | ClipContent::Freeze(_) => {
+            left.source_range.start.checked_add(left_duration)
+        }
+    }
     .ok_or(OpError::UnrepresentableEditBoundary {
         clip: left.id,
         at: to,
     })?;
 
-    let right_asset = doc
-        .asset(right.asset)
-        .ok_or(OpError::MissingAsset(right.asset))?;
-    let right_fps = crate::clip_effective_fps(right_asset.fps, &right)?;
     let right_duration = right_end
         .checked_sub(new_end)
         .ok_or(OpError::TimeOverflow)?;
-    let right_source_in = source_start_for_project_duration(
-        TimeCode::ZERO,
-        right.source_range.end,
-        right_fps,
-        doc.fps,
-        right_duration,
-    )
+    let right_source_in = match right.content {
+        ClipContent::Media => {
+            let right_asset = doc
+                .asset(right.asset)
+                .ok_or(OpError::MissingAsset(right.asset))?;
+            let right_fps = crate::clip_effective_fps(right_asset.fps, &right)?;
+            source_start_for_project_duration(
+                TimeCode::ZERO,
+                right.source_range.end,
+                right_fps,
+                doc.fps,
+                right_duration,
+            )
+        }
+        ClipContent::Title(_) | ClipContent::Freeze(_) => {
+            right.source_range.end.checked_sub(right_duration)
+        }
+    }
     .ok_or(OpError::UnrepresentableEditBoundary {
         clip: right.id,
         at: new_end,
@@ -3008,6 +3060,9 @@ fn ripple_track_automation(
     }
 }
 
+/// Media-only paths (`ReplaceClip`/`FitToFill`): Title/Freeze clips refuse
+/// with `EditorialRequiresMedia`. Roll/slide relaxed to span-or-media under
+/// MO1 R9 and no longer call this.
 fn require_media(clip: &Clip) -> Result<(), OpError> {
     if clip.content.is_media() {
         Ok(())
@@ -3533,9 +3588,11 @@ fn convert_legacy_look(
             lut_asset,
         });
     }
+    // MO1 review F2: conversion carries the legacy enable state — a
+    // disabled look converts disabled, curve and all.
     let converted = Effect {
-        enabled: true,
-        enabled_curve: None,
+        enabled: legacy.enabled,
+        enabled_curve: legacy.enabled_curve.clone(),
         id: effect_id,
         name: crate::ColorNodeKind::CreativeLook.effect_name().to_owned(),
         parameters: BTreeMap::from([
@@ -4658,7 +4715,7 @@ fn validate_clip_audio_values(
     fade_out_frames: TimeCode,
     clip_duration: TimeCode,
 ) -> Result<(), OpError> {
-    if !(-600..=120).contains(&gain_tenth_db) {
+    if !(crate::CLIP_GAIN_MIN..=crate::CLIP_GAIN_MAX).contains(&gain_tenth_db) {
         return Err(OpError::AudioGainOutOfRange {
             clip,
             gain_tenth_db,
