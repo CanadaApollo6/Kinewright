@@ -3,7 +3,7 @@ use std::sync::Arc;
 use eframe::egui;
 use kinewright_core::{
     Analysis, AutomationCurve, Clip, ClipContent, ClipId, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB,
-    FrameRounding, IncidentCode, IncidentSubject, Keyframe, LabelIncident,
+    EffectId, FrameRounding, IncidentCode, IncidentSubject, Keyframe, LabelIncident,
     MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaKind, Operation, Rational,
     SceneStatus, SilenceStatus, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TimeCode, Title, TrackId,
     TrackKind, Transition, WaveformData, envelope_coalesce_key, map_frames_with_rounding,
@@ -345,6 +345,103 @@ fn envelope_hit(points: &[egui::Pos2], rect: egui::Rect, pointer: egui::Pos2) ->
         .map(|(index, _)| index)
 }
 
+/// MO1 R23: the lane's diamonds — the distinct non-negative clip-local
+/// frames carrying any effect key, unioned over owners (param curves and
+/// `enabled` siblings alike) and sorted. Negative kept-outside keys are
+/// clipped here and reappear on trim-out; the clip's own enable curve is
+/// not an effect key and stays out. Pure.
+fn key_lane_diamonds(clip: &Clip) -> Vec<i64> {
+    let mut frames: Vec<i64> = clip
+        .effects
+        .iter()
+        .flat_map(|effect| {
+            effect
+                .keyframes
+                .values()
+                .chain(effect.enabled_curve.iter())
+                .flat_map(|curve| curve.keyframes.iter().map(|key| key.at.0))
+        })
+        .filter(|frame| *frame >= 0)
+        .collect();
+    frames.sort_unstable();
+    frames.dedup();
+    frames
+}
+
+/// MO1 R23: the lane strip — below the 19 px label strip, clear of the
+/// filmstrip's top row. The interact intersects it with the body so the
+/// trim handles keep their edges (the envelope's rule 95a).
+fn key_lane_strip(clip_rect: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(clip_rect.left(), clip_rect.top() + 19.0),
+        egui::pos2(clip_rect.right(), clip_rect.top() + 29.0),
+    )
+}
+
+/// MO1 R23: one diamond centre per frame. Pure.
+// Clip-local frames are small and intentionally projected into egui's f32
+// coordinate space, the `paint_track_labels` precedent.
+#[allow(clippy::cast_precision_loss)]
+fn key_lane_points(
+    strip: egui::Rect,
+    clip_left: f32,
+    frames: &[i64],
+    pixels_per_frame: f32,
+) -> Vec<egui::Pos2> {
+    frames
+        .iter()
+        .map(|frame| {
+            egui::pos2(
+                clip_left + *frame as f32 * pixels_per_frame,
+                strip.center().y,
+            )
+        })
+        .collect()
+}
+
+/// MO1 R23: the diamond under the pointer, if one is within the AU4 9 px
+/// radius. The `envelope_hit` shape exactly.
+fn key_lane_hit(strip: egui::Rect, points: &[egui::Pos2], pointer: egui::Pos2) -> Option<usize> {
+    if !strip.expand(ENVELOPE_HIT_RADIUS).contains(pointer) {
+        return None;
+    }
+    points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| (index, point.distance(pointer)))
+        .filter(|(_, distance)| *distance <= ENVELOPE_HIT_RADIUS)
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(index, _)| index)
+}
+
+/// MO1 R23: the dim wash for a disabled clip — `None` when enabled. Pure,
+/// so the dim state is pinned without a paint harness.
+fn disabled_clip_wash(enabled: bool) -> Option<egui::Color32> {
+    (!enabled).then_some(color::MEDIA_VEIL_24)
+}
+
+/// MO1 R23: paint the lane's diamonds — accent on the selected clip, the
+/// envelope's muted tint otherwise.
+fn paint_key_lane(painter: &egui::Painter, points: &[egui::Pos2], selected: bool) {
+    let tint = if selected {
+        color::ACCENT
+    } else {
+        color::TEXT_PRIMARY_64
+    };
+    for point in points {
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(point.x, point.y - ENVELOPE_POINT_RADIUS),
+                egui::pos2(point.x + ENVELOPE_POINT_RADIUS, point.y),
+                egui::pos2(point.x, point.y + ENVELOPE_POINT_RADIUS),
+                egui::pos2(point.x - ENVELOPE_POINT_RADIUS, point.y),
+            ],
+            tint,
+            egui::Stroke::NONE,
+        ));
+    }
+}
+
 /// The distance from `pointer` to the segment `start..end`.
 fn distance_to_segment(start: egui::Pos2, end: egui::Pos2, pointer: egui::Pos2) -> f32 {
     let span = end - start;
@@ -519,6 +616,76 @@ pub(crate) struct EnvelopeHover {
     pub(crate) index: usize,
 }
 
+/// MO1 R23: the timeline's report that the pointer was over one key-lane
+/// diamond, read one frame later — the E49 pattern for effect keys.
+///
+/// The diamond's clip-local frame, not an index: the union is recomputed
+/// every frame, so an index would go stale under any edit. Owner identity
+/// is resolved at arbitration time, never stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KeyLaneHover {
+    pub(crate) clip: ClipId,
+    pub(crate) frame: TimeCode,
+}
+
+/// MO1 R23: what Delete/Backspace does this frame when a lane diamond was
+/// hovered. The E49 shape without `RefuseLastKey`: a last-key lane delete
+/// performs R16's last-key-to-static in Core instead of refusing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeyLaneDelete {
+    /// No lane diamond was hovered, or the report went stale: Delete
+    /// deletes the selected clip, exactly as it did before.
+    Clip,
+    /// Every effect curve holding the hovered frame loses that key — one
+    /// `RemoveEffectKeyframe` per owner, one undo entry.
+    RemoveKeys {
+        clip: ClipId,
+        frame: TimeCode,
+        removes: Vec<(EffectId, String)>,
+    },
+}
+
+/// MO1 R23: arbitrate one Delete/Backspace between the hovered lane diamond
+/// and the selected clip. Pure; no window, no session.
+///
+/// The lane shows the union over owners, so the delete removes the hovered
+/// frame's key from *every* owner curve holding it — the diamond is gone
+/// after one Delete, and the inspector's lists stay the per-owner surface.
+pub(crate) fn key_lane_delete_action(
+    document: &Document,
+    hover: Option<KeyLaneHover>,
+) -> KeyLaneDelete {
+    let Some(hover) = hover else {
+        return KeyLaneDelete::Clip;
+    };
+    let Some(clip) = document.clip(hover.clip) else {
+        return KeyLaneDelete::Clip;
+    };
+    let mut removes = Vec::new();
+    for effect in &clip.effects {
+        for (name, curve) in &effect.keyframes {
+            if curve.keyframes.iter().any(|key| key.at == hover.frame) {
+                removes.push((effect.id, name.clone()));
+            }
+        }
+        if effect
+            .enabled_curve
+            .as_ref()
+            .is_some_and(|curve| curve.keyframes.iter().any(|key| key.at == hover.frame))
+        {
+            removes.push((effect.id, "enabled".to_owned()));
+        }
+    }
+    if removes.is_empty() {
+        return KeyLaneDelete::Clip;
+    }
+    KeyLaneDelete::RemoveKeys {
+        clip: hover.clip,
+        frame: hover.frame,
+        removes,
+    }
+}
+
 /// AU4 §5.1 rule 101 (AU4 §0 E49): what Delete/Backspace does this frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EnvelopeDelete {
@@ -586,6 +753,36 @@ impl KinewrightApp {
                     LabelIncident::Operations,
                     IncidentSubject::Project,
                     ENVELOPE_LAST_KEY_NOTE,
+                );
+                true
+            }
+        }
+    }
+
+    /// MO1 R23: Delete/Backspace over a key-lane diamond. The E49 shape:
+    /// returns `false` when nothing was hovered (or the report went stale),
+    /// which is the caller's cue to fall through to `delete_selected`.
+    /// Removals go as one batch — one undo entry — and a last-key delete
+    /// performs R16's last-key-to-static in Core.
+    pub(crate) fn remove_hovered_lane_key(&mut self, hover: Option<KeyLaneHover>) -> bool {
+        let document = Arc::clone(&self.focused().document);
+        match key_lane_delete_action(&document, hover) {
+            KeyLaneDelete::Clip => false,
+            KeyLaneDelete::RemoveKeys {
+                clip,
+                frame,
+                removes,
+            } => {
+                self.send_operations(
+                    removes
+                        .into_iter()
+                        .map(|(effect, name)| Operation::RemoveEffectKeyframe {
+                            clip,
+                            effect,
+                            name,
+                            at: frame,
+                        })
+                        .collect(),
                 );
                 true
             }
@@ -971,6 +1168,7 @@ impl KinewrightApp {
         let mut envelope_drag = ui
             .data_mut(|data| data.get_temp::<EnvelopeDrag>(egui::Id::new(ENVELOPE_DRAG_MEMORY_ID)));
         let mut envelope_hover: Option<EnvelopeHover> = None;
+        let mut key_lane_hover: Option<KeyLaneHover> = None;
         let mut seek = None;
         let mut scrub_started = false;
         let mut scrub_stopped = false;
@@ -1248,6 +1446,54 @@ impl KinewrightApp {
                                 }
                             }
 
+                            // MO1 R23: the key lane — video tracks only, no
+                            // lane without diamonds. Registered after
+                            // `body`/`left`/`right` (last-registered-wins)
+                            // and intersected horizontally so the trim
+                            // handles keep their edges. A diamond click
+                            // selects the clip, which drives the inspector
+                            // to its keyframe editor.
+                            let lane_diamonds = if matches!(track.kind, TrackKind::Video) {
+                                key_lane_diamonds(clip)
+                            } else {
+                                Vec::new()
+                            };
+                            if !lane_diamonds.is_empty() {
+                                let strip = key_lane_strip(clip_rect);
+                                let points = key_lane_points(
+                                    strip,
+                                    clip_rect.left(),
+                                    &lane_diamonds,
+                                    pixels_per_frame,
+                                );
+                                let lane = ui.interact(
+                                    envelope_interact_rect(strip, body_rect),
+                                    ui.make_persistent_id(("clip-key-lane", clip.id.0)),
+                                    egui::Sense::click(),
+                                );
+                                clip_pointer_interaction |= lane.hovered();
+                                if lane.hovered()
+                                    && let Some(pointer) = envelope_pointer
+                                    && let Some(index) = key_lane_hit(strip, &points, pointer)
+                                    && let Some(frame) = lane_diamonds.get(index)
+                                {
+                                    key_lane_hover = Some(KeyLaneHover {
+                                        clip: clip.id,
+                                        frame: TimeCode(*frame),
+                                    });
+                                }
+                                if lane.clicked() {
+                                    selected_clip = Some(clip.id);
+                                    selected_marker = None;
+                                    selected_asset = asset.map(|asset| asset.id);
+                                }
+                                if lane.double_clicked()
+                                    && matches!(&clip.content, ClipContent::Title(_))
+                                {
+                                    title_text_focus = Some(clip.id);
+                                }
+                            }
+
                             clip_pointer_interaction |= body.hovered()
                                 || body.dragged()
                                 || left.hovered()
@@ -1465,6 +1711,28 @@ impl KinewrightApp {
                                     clip.audio_gain_tenth_db,
                                     selected,
                                 );
+                            }
+                            // MO1 R23: the lane paints from `draw_rect` (the
+                            // drag delta), the dim wash last so a disabled
+                            // clip dims its diamonds too.
+                            if matches!(track.kind, TrackKind::Video) {
+                                let diamonds = key_lane_diamonds(clip);
+                                if !diamonds.is_empty() {
+                                    let strip = key_lane_strip(draw_rect);
+                                    paint_key_lane(
+                                        &painter,
+                                        &key_lane_points(
+                                            strip,
+                                            draw_rect.left(),
+                                            &diamonds,
+                                            pixels_per_frame,
+                                        ),
+                                        selected,
+                                    );
+                                }
+                            }
+                            if let Some(wash) = disabled_clip_wash(clip.enabled) {
+                                painter.rect_filled(draw_rect, radius::SM, wash);
                             }
                         }
                     }
@@ -1684,6 +1952,7 @@ impl KinewrightApp {
         session.title_text_focus = title_text_focus;
         session.timeline_scroll_target = scroll_target;
         session.envelope_hover = envelope_hover;
+        session.key_lane_hover = key_lane_hover;
     }
 }
 
@@ -3429,9 +3698,11 @@ pub(crate) fn longest_capture_frames(fps: Rational) -> i64 {
 mod tests {
     use std::path::PathBuf;
 
+    use std::collections::BTreeMap;
+
     use kinewright_core::{
-        AssetId, LinkId, MediaAsset, Track, covering_source_range_for_project_duration,
-        map_project_duration_to_source,
+        AssetId, Effect, KeyframeInterpolation, LinkId, MediaAsset, Track,
+        covering_source_range_for_project_duration, map_project_duration_to_source,
     };
 
     use super::*;
@@ -4511,6 +4782,347 @@ mod tests {
             timeline[sense..sense + 200].contains("egui::Sense::click()"),
             "the curve-free band senses clicks only"
         );
+    }
+
+    /// MO1 R23: one keyframe at `at` holding `value`.
+    fn lane_key(at: i64, value: i64) -> Keyframe {
+        Keyframe {
+            at: TimeCode(at),
+            value,
+            interpolation: KeyframeInterpolation::Linear,
+            tangent_in: 0,
+            tangent_out: 0,
+        }
+    }
+
+    /// MO1 R23: two effects sharing frame 15, a negative kept-outside key,
+    /// and an `enabled` sibling key — the union's awkward cases in one.
+    fn lane_effects_fixture() -> Vec<Effect> {
+        vec![
+            Effect {
+                enabled: true,
+                enabled_curve: None,
+                id: EffectId(1),
+                name: "transform".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::from([
+                    (
+                        "scale_fine_hundredths".to_owned(),
+                        AutomationCurve {
+                            keyframes: vec![lane_key(-20, 10_000), lane_key(0, 10_000)],
+                        },
+                    ),
+                    (
+                        "x_basis_points".to_owned(),
+                        AutomationCurve {
+                            keyframes: vec![lane_key(15, 800)],
+                        },
+                    ),
+                ]),
+            },
+            Effect {
+                enabled: true,
+                enabled_curve: Some(AutomationCurve {
+                    keyframes: vec![lane_key(29, 1)],
+                }),
+                id: EffectId(2),
+                name: "opacity".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::from([(
+                    "percent".to_owned(),
+                    AutomationCurve {
+                        keyframes: vec![lane_key(15, 100), lane_key(29, 90)],
+                    },
+                )]),
+            },
+        ]
+    }
+
+    /// MO1 R23: the lane unions every effect owner — param curves and
+    /// `enabled` siblings — into distinct non-negative frames; negatives
+    /// clip, and the clip's own enable curve stays out.
+    #[test]
+    fn key_lane_diamonds_union_owners_and_clip_negatives() {
+        let mut document = linked_fixture();
+        document.tracks[0].clips[0].effects = lane_effects_fixture();
+        let clip = &document.tracks[0].clips[0];
+        assert_eq!(key_lane_diamonds(clip), [0, 15, 29]);
+
+        let mut with_clip_curve = document.clone();
+        with_clip_curve.tracks[0].clips[0].enabled_curve = Some(AutomationCurve {
+            keyframes: vec![lane_key(7, 1)],
+        });
+        assert_eq!(
+            key_lane_diamonds(&with_clip_curve.tracks[0].clips[0]),
+            [0, 15, 29],
+            "the clip's own enable curve is not an effect key"
+        );
+
+        let mut bare = document.clone();
+        bare.tracks[0].clips[0].effects = Vec::new();
+        assert!(key_lane_diamonds(&bare.tracks[0].clips[0]).is_empty());
+    }
+
+    /// MO1 R23: the strip sits below the label, points map frames to x, and
+    /// the hit keeps the AU4 9 px radius.
+    #[test]
+    fn key_lane_geometry_maps_frames_and_hits_within_nine_pixels() {
+        let clip_rect =
+            egui::Rect::from_min_size(egui::Pos2::new(100.0, 50.0), egui::vec2(300.0, 60.0));
+        let strip = key_lane_strip(clip_rect);
+        for (actual, expected) in [
+            (strip.top(), 69.0),
+            (strip.bottom(), 79.0),
+            (strip.left(), 100.0),
+            (strip.right(), 400.0),
+        ] {
+            assert!(
+                (actual - expected).abs() < f32::EPSILON,
+                "strip edge {actual} against {expected}"
+            );
+        }
+        let points = key_lane_points(strip, clip_rect.left(), &[0, 15, 29], 6.0);
+        assert_eq!(points.len(), 3);
+        for (point, expected) in points
+            .iter()
+            .zip([(100.0, 74.0), (190.0, 74.0), (274.0, 74.0)])
+        {
+            assert!(
+                (point.x - expected.0).abs() < f32::EPSILON
+                    && (point.y - expected.1).abs() < f32::EPSILON,
+                "diamond at {point:?} against {expected:?}"
+            );
+        }
+
+        // On a diamond, and nearest-wins between two.
+        assert_eq!(
+            key_lane_hit(strip, &points, egui::pos2(190.0, 74.0)),
+            Some(1)
+        );
+        assert_eq!(
+            key_lane_hit(strip, &points, egui::pos2(186.0, 74.0)),
+            Some(1)
+        );
+        assert_eq!(
+            key_lane_hit(strip, &points, egui::pos2(100.0, 74.0)),
+            Some(0)
+        );
+        // Past the 9 px radius: nothing.
+        assert_eq!(
+            key_lane_hit(strip, &points, egui::pos2(190.0, 74.0 + 9.1)),
+            None
+        );
+        assert_eq!(key_lane_hit(strip, &points, egui::pos2(145.0, 74.0)), None);
+        // Far below the strip: nothing, however close in x.
+        assert_eq!(key_lane_hit(strip, &points, egui::pos2(190.0, 200.0)), None);
+    }
+
+    /// MO1 R23: Delete over a hovered diamond removes the frame's key from
+    /// every owner curve holding it — one batch, the clip kept — and a
+    /// last-key delete performs R16's last-key-to-static. Stale reports
+    /// fall through to the clip delete.
+    #[test]
+    fn delete_over_a_hovered_lane_diamond_removes_every_owner_key() {
+        let mut document = linked_fixture();
+        document.tracks[0].clips[0].effects = lane_effects_fixture();
+        let clip = document.tracks[0].clips[0].id;
+
+        assert_eq!(
+            key_lane_delete_action(&document, None),
+            KeyLaneDelete::Clip,
+            "with nothing hovered Delete is the clip delete it has always been"
+        );
+        let hovered = key_lane_delete_action(
+            &document,
+            Some(KeyLaneHover {
+                clip,
+                frame: TimeCode(15),
+            }),
+        );
+        let KeyLaneDelete::RemoveKeys {
+            clip: target,
+            frame,
+            removes,
+        } = hovered
+        else {
+            panic!("a hovered diamond is removed, not the clip: {hovered:?}");
+        };
+        assert_eq!((target, frame), (clip, TimeCode(15)));
+        assert_eq!(
+            removes,
+            [
+                (EffectId(1), "x_basis_points".to_owned()),
+                (EffectId(2), "percent".to_owned()),
+            ],
+            "every owner holding frame 15, in compositor order"
+        );
+
+        let mut applied = document.clone();
+        let operations: Vec<Operation> = removes
+            .into_iter()
+            .map(|(effect, name)| Operation::RemoveEffectKeyframe {
+                clip: target,
+                effect,
+                name,
+                at: frame,
+            })
+            .collect();
+        kinewright_core::apply_batch(&mut applied, &operations)
+            .expect("lane removals are valid operations");
+        let landed = applied.clip(clip).unwrap();
+        assert!(
+            landed.effects.iter().all(|effect| effect
+                .keyframes
+                .values()
+                .all(|curve| curve.keyframes.iter().all(|key| key.at.0 != 15))),
+            "frame 15 is gone from every owner"
+        );
+        assert_eq!(
+            key_lane_diamonds(landed),
+            [0, 29],
+            "and the lane shows the survivors"
+        );
+
+        // Stale reports are not vetoes.
+        assert_eq!(
+            key_lane_delete_action(
+                &document,
+                Some(KeyLaneHover {
+                    clip,
+                    frame: TimeCode(99),
+                }),
+            ),
+            KeyLaneDelete::Clip,
+            "a report whose keys are gone is not a veto"
+        );
+        assert_eq!(
+            key_lane_delete_action(
+                &document,
+                Some(KeyLaneHover {
+                    clip: ClipId(999),
+                    frame: TimeCode(15),
+                }),
+            ),
+            KeyLaneDelete::Clip,
+            "a report whose clip is gone is not a veto"
+        );
+
+        // And the report is one-shot, arbitrated before any clip delete.
+        let keys = include_str!("keys.rs");
+        let lane = keys
+            .find("remove_hovered_lane_key")
+            .expect("`keyboard_shortcuts` consults the lane report");
+        let delete = keys
+            .find("self.delete_selected()")
+            .expect("`keyboard_shortcuts` still has its clip-delete path");
+        assert!(
+            lane < delete,
+            "the lane branch is arbitrated before any `delete_selected`"
+        );
+        assert!(
+            keys.contains("key_lane_hover.take()"),
+            "and the report is taken, so a stale hover never swallows a clip delete"
+        );
+    }
+
+    /// MO1 R23: a last-key lane delete still removes — R16 writes the
+    /// key's value to the static and the lane empties.
+    #[test]
+    fn delete_over_a_last_lane_key_performs_last_key_to_static() {
+        let mut document = linked_fixture();
+        document.tracks[0].clips[0].effects = vec![Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(1),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::from([(
+                "scale_fine_hundredths".to_owned(),
+                AutomationCurve {
+                    keyframes: vec![lane_key(0, 11_000)],
+                },
+            )]),
+        }];
+        let clip = document.tracks[0].clips[0].id;
+        let KeyLaneDelete::RemoveKeys { removes, .. } = key_lane_delete_action(
+            &document,
+            Some(KeyLaneHover {
+                clip,
+                frame: TimeCode(0),
+            }),
+        ) else {
+            panic!("a last lane key removes through R16");
+        };
+        assert_eq!(removes.len(), 1);
+        let mut applied = document.clone();
+        kinewright_core::apply_batch(
+            &mut applied,
+            &[Operation::RemoveEffectKeyframe {
+                clip,
+                effect: EffectId(1),
+                name: "scale_fine_hundredths".to_owned(),
+                at: TimeCode(0),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            key_lane_diamonds(&applied.tracks[0].clips[0]),
+            Vec::<i64>::new(),
+            "the lane is empty"
+        );
+    }
+
+    /// MO1 R23: a disabled clip dims under the veil; an enabled one paints
+    /// no wash at all.
+    #[test]
+    fn disabled_clips_dim_and_enabled_ones_do_not() {
+        assert_eq!(disabled_clip_wash(false), Some(color::MEDIA_VEIL_24));
+        assert_eq!(disabled_clip_wash(true), None);
+    }
+
+    /// MO1 R23: the lane paints one diamond per frame — accent on the
+    /// selected clip, the envelope's muted tint otherwise.
+    #[test]
+    fn the_lane_paints_one_diamond_per_frame() {
+        fn diamonds(output: &egui::FullOutput) -> Vec<(usize, egui::Color32)> {
+            fn collect(shape: &egui::epaint::Shape, found: &mut Vec<(usize, egui::Color32)>) {
+                match shape {
+                    egui::epaint::Shape::Path(path) if path.fill != egui::Color32::TRANSPARENT => {
+                        found.push((path.points.len(), path.fill));
+                    }
+                    egui::epaint::Shape::Vec(shapes) => {
+                        for shape in shapes {
+                            collect(shape, found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            for clipped in &output.shapes {
+                collect(&clipped.shape, &mut found);
+            }
+            found
+        }
+
+        let strip = key_lane_strip(egui::Rect::from_min_size(
+            egui::Pos2::new(100.0, 50.0),
+            egui::vec2(300.0, 60.0),
+        ));
+        let points = key_lane_points(strip, 100.0, &[0, 15, 29], 6.0);
+        for (selected, expected) in [(false, color::TEXT_PRIMARY_64), (true, color::ACCENT)] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                paint_key_lane(ui.painter(), &points, selected);
+            });
+            let found = diamonds(&output);
+            assert_eq!(found.len(), 3, "one diamond per frame");
+            for (corners, fill) in &found {
+                assert_eq!(*corners, 4, "diamonds, not dots");
+                assert_eq!(*fill, expected);
+            }
+        }
     }
 
     /// AU4 §0 E53: a clip with no curve still shows a band — one flat, muted

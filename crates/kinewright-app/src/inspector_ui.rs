@@ -4201,9 +4201,10 @@ pub(crate) fn upsert_keyframe(
     AutomationCurve { keyframes }
 }
 
-/// MO1 R22: the motion effects, in card order. Timeline key lanes (R23) and
-/// the opacity band (R24) read the same table, so the three surfaces cannot
-/// disagree on what "motion" means.
+/// MO1 R22: the motion effects, in card order. The opacity band (R24) reads
+/// the same table, so cards and band cannot disagree on what "motion" means.
+/// (The R23 key lane unions *all* effect owners, motion or colour, so it
+/// deliberately does not consult this table.)
 pub(crate) const MOTION_EFFECT_NAMES: [&str; 6] = [
     "transform",
     "opacity",

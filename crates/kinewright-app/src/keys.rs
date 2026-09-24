@@ -245,6 +245,7 @@ pub(crate) const KEYMAP: [KeyBinding; 21] = [
 impl KinewrightApp {
     pub(crate) fn keyboard_shortcuts(&mut self, ctx: &egui::Context) {
         let envelope_hover = self.focused_mut().envelope_hover.take();
+        let key_lane_hover = self.focused_mut().key_lane_hover.take();
         if ctx.egui_wants_keyboard_input() {
             return;
         }
@@ -257,6 +258,21 @@ impl KinewrightApp {
                         || input.key_pressed(egui::Key::Backspace))
             })
             && self.remove_hovered_envelope_key(envelope_hover)
+        {
+            return;
+        }
+        // MO1 R23: the lane arbitrates after the envelope — one pointer can
+        // only hover one of them, so the order is a tie-break that never
+        // fires, kept explicit.
+        if key_lane_hover.is_some()
+            && ctx.input(|input| {
+                !input.modifiers.ctrl
+                    && !input.modifiers.shift
+                    && !input.modifiers.alt
+                    && (input.key_pressed(egui::Key::Delete)
+                        || input.key_pressed(egui::Key::Backspace))
+            })
+            && self.remove_hovered_lane_key(key_lane_hover)
         {
             return;
         }
