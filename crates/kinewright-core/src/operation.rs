@@ -2741,14 +2741,27 @@ fn replace_clip(
 /// `delta_local` is `new_timeline_start - old_timeline_start` in project
 /// frames and is **signed**; `new_duration` is `doc.clip_duration(clip)` after
 /// the operation's own rewrite, never the source-range span.
+/// MO1 R11/R12: keep-outside owners shift (drop nothing, insert no
+/// boundary key); audio owners keep AU4 exactly (drop + seam). Clips reject
+/// audio effects outright, so every effect keyframe map here — and both
+/// `enabled_curve` siblings — are keep-outside; only the gain envelope
+/// takes the AU4 path. Every operation that rewrites clip extents funnels
+/// through here (directly or via `survive_clip_edit`), so R12's per-row
+/// policy holds by construction.
 fn rebase_clip_automation(clip: &mut Clip, delta_local: TimeCode, new_duration: TimeCode) {
     if let Some(curve) = &clip.audio_gain_curve {
         clip.audio_gain_curve = Some(crate::rebase_clip_curve(curve, delta_local, new_duration));
     }
     for effect in &mut clip.effects {
         for curve in effect.keyframes.values_mut() {
-            *curve = crate::rebase_clip_curve(curve, delta_local, new_duration);
+            *curve = crate::rebase_clip_curve_keep_outside(curve, delta_local);
         }
+        if let Some(curve) = &effect.enabled_curve {
+            effect.enabled_curve = Some(crate::rebase_clip_curve_keep_outside(curve, delta_local));
+        }
+    }
+    if let Some(curve) = &clip.enabled_curve {
+        clip.enabled_curve = Some(crate::rebase_clip_curve_keep_outside(curve, delta_local));
     }
 }
 

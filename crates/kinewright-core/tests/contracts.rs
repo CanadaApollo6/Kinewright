@@ -6634,3 +6634,189 @@ fn in1_a_hand_edited_assumed_from_is_rejected_on_load() {
         "unexpected error: {error}"
     );
 }
+
+// ============================================================================
+// MO1 Part A3b — R11/R12: the `ThreePointEdit` composition row plus the R11
+// kernel property tests (shift identity, key-count preservation).
+// ============================================================================
+
+fn linear_curve(points: &[(i64, i64)]) -> AutomationCurve {
+    AutomationCurve {
+        keyframes: points
+            .iter()
+            .map(|(at, value)| Keyframe {
+                at: TimeCode(*at),
+                value: *value,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            })
+            .collect(),
+    }
+}
+
+fn hold_curve(points: &[(i64, i64)]) -> AutomationCurve {
+    AutomationCurve {
+        keyframes: points
+            .iter()
+            .map(|(at, value)| Keyframe {
+                at: TimeCode(*at),
+                value: *value,
+                interpolation: KeyframeInterpolation::Hold,
+                tangent_in: 0,
+                tangent_out: 0,
+            })
+            .collect(),
+    }
+}
+
+/// R12 `ThreePointEdit` row, covered by composition: the insert splits the
+/// straddled clip at the record point, so both halves route through R11 like
+/// `SplitClip` — and the post-split ripple moves them without a rebase.
+#[test]
+fn three_point_insert_routes_split_halves_through_keep_outside() {
+    let mut doc = document_with_butt_joined_clips();
+    // Clip 1: source 50..100, 50 frames at 0..50.
+    let colour = linear_curve(&[(0, 0), (49, 4_720)]);
+    let toggle = hold_curve(&[(0, 1), (24, 1), (25, 0), (49, 0)]);
+    let ramp = linear_curve(&[(0, 0), (49, -490)]);
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: Some(toggle.clone()),
+            id: EffectId(1),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                ParamValue::Integer(0),
+            )]),
+            keyframes: BTreeMap::from([("exposure_milli_stops".to_owned(), colour.clone())]),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    doc.tracks[0].clips[0].enabled_curve = Some(toggle.clone());
+    Operation::SetClipGainEnvelope {
+        clip: ClipId(1),
+        curve: Some(ramp.clone()),
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    Operation::ThreePointEdit {
+        track: TrackId(1),
+        asset: AssetId(1),
+        source_in: Some(TimeCode(300)),
+        source_out: Some(TimeCode(310)),
+        timeline_in: Some(TimeCode(25)),
+        timeline_out: None,
+        mode: ThreePointMode::Insert,
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    let half = |doc: &Document, source_start: i64| {
+        doc.tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .find(|clip| clip.source_range.start == TimeCode(source_start))
+            .unwrap()
+            .clone()
+    };
+    // Left half: split with `delta_local` zero, never rippled — identity.
+    let left = half(&doc, 50);
+    assert_eq!(left.timeline_start, TimeCode(0));
+    assert_eq!(left.effects[0].keyframes["exposure_milli_stops"], colour);
+    assert_eq!(left.effects[0].enabled_curve.clone().unwrap(), toggle);
+    assert_eq!(left.enabled_curve.clone().unwrap(), toggle);
+    // Right half: split with offset 25, then rippled 25 → 35 with no rebase.
+    let right = half(&doc, 75);
+    assert_eq!(right.timeline_start, TimeCode(35));
+    assert_eq!(
+        right.effects[0].keyframes["exposure_milli_stops"]
+            .keyframes
+            .iter()
+            .map(|key| (key.at.0, key.value))
+            .collect::<Vec<_>>(),
+        vec![(-25, 0), (24, 4_720)]
+    );
+    for local in 0..25 {
+        let before = TimeCode(local + 25);
+        let at = TimeCode(local);
+        assert_eq!(
+            right.effects[0].keyframes["exposure_milli_stops"].value_at(at),
+            colour.value_at(before),
+            "colour at right-local {local}"
+        );
+        assert_eq!(
+            right.audio_gain_curve.as_ref().unwrap().value_at(at),
+            ramp.value_at(before),
+            "envelope at right-local {local}"
+        );
+        assert_eq!(
+            right.enabled_curve.as_ref().unwrap().value_at(at),
+            toggle.value_at(before),
+            "clip toggle at right-local {local}"
+        );
+    }
+    doc.validate().unwrap();
+}
+
+proptest! {
+    /// MO1 R11: shifting by zero is the identity — keys, values, shape.
+    #[test]
+    fn keep_outside_shift_by_zero_is_identity(
+        pairs in prop::collection::vec((-500_i64..500, -1_000_000_i64..1_000_000), 1..8),
+    ) {
+        let curve = unique_curve(&pairs);
+        prop_assert_eq!(
+            kinewright_core::rebase_clip_curve_keep_outside(&curve, TimeCode::ZERO),
+            curve
+        );
+    }
+
+    /// MO1 R11: a shift preserves the key count and every payload byte,
+    /// moving positions by `-delta_local` (signed, saturating).
+    #[test]
+    fn keep_outside_shift_preserves_count_and_payload(
+        pairs in prop::collection::vec((-500_i64..500, -1_000_000_i64..1_000_000), 1..8),
+        delta in -500_i64..500,
+    ) {
+        let curve = unique_curve(&pairs);
+        let shifted =
+            kinewright_core::rebase_clip_curve_keep_outside(&curve, TimeCode(delta));
+        prop_assert_eq!(shifted.keyframes.len(), curve.keyframes.len());
+        for (got, want) in shifted.keyframes.iter().zip(curve.keyframes.iter()) {
+            prop_assert_eq!(got.at.0, want.at.0.saturating_sub(delta));
+            prop_assert_eq!(got.value, want.value);
+            prop_assert_eq!(got.interpolation, want.interpolation);
+            prop_assert_eq!(got.tangent_in, want.tangent_in);
+            prop_assert_eq!(got.tangent_out, want.tangent_out);
+        }
+    }
+}
+
+fn unique_curve(pairs: &[(i64, i64)]) -> AutomationCurve {
+    let mut deduped = BTreeMap::new();
+    for (at, value) in pairs {
+        deduped.insert(*at, *value);
+    }
+    AutomationCurve {
+        keyframes: deduped
+            .into_iter()
+            .enumerate()
+            .map(|(index, (at, value))| Keyframe {
+                at: TimeCode(at),
+                value,
+                interpolation: if index % 2 == 0 {
+                    KeyframeInterpolation::Linear
+                } else {
+                    KeyframeInterpolation::Hold
+                },
+                tangent_in: value % 7,
+                tangent_out: value % 13,
+            })
+            .collect(),
+    }
+}

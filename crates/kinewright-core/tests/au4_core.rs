@@ -1991,3 +1991,677 @@ fn clip_enabled_curve_accepts_any_position_and_value_when_ordered() {
         );
     }
 }
+
+// ============================================================================
+// MO1 Part A3b — R11/R12 owner-split survival. Keep-outside owners (video and
+// colour-node effect curves, `Effect.enabled_curve`, `Clip.enabled_curve`)
+// shift by `-delta_local`, drop nothing, insert nothing; audio owners keep
+// AU4 §2.4 verbatim. One contract test per R12 row: keep-outside byte-exact,
+// audio AU4-verbatim.
+// ============================================================================
+
+fn clip_mut(doc: &mut Document, id: ClipId) -> &mut Clip {
+    doc.tracks
+        .iter_mut()
+        .flat_map(|track| &mut track.clips)
+        .find(|clip| clip.id == id)
+        .expect("clip")
+}
+
+fn key_positions(curve: &AutomationCurve) -> Vec<(i64, i64)> {
+    curve
+        .keyframes
+        .iter()
+        .map(|key| (key.at.0, key.value))
+        .collect()
+}
+
+/// A hold toggle over the 60-frame fixture clip: on for 0..=30, off after.
+fn hold_toggle() -> AutomationCurve {
+    shaped(&[
+        (0, 1, KeyframeInterpolation::Hold),
+        (30, 1, KeyframeInterpolation::Hold),
+        (31, 0, KeyframeInterpolation::Hold),
+        (59, 0, KeyframeInterpolation::Hold),
+    ])
+}
+
+fn effect_toggle(doc: &Document, id: ClipId) -> AutomationCurve {
+    clip(doc, id).effects[0]
+        .enabled_curve
+        .clone()
+        .expect("effect toggle")
+}
+
+fn clip_toggle(doc: &Document, id: ClipId) -> AutomationCurve {
+    clip(doc, id).enabled_curve.clone().expect("clip toggle")
+}
+
+/// The A1 fixture plus both R11 sibling curves (hand-edit paths — no op
+/// writes them until A4's R16/R18 — validated ordered-only per R13).
+fn siblinged() -> Document {
+    let mut doc = clip_with_envelope_and_colour_curve();
+    clip_mut(&mut doc, ClipId(1)).effects[0].enabled_curve = Some(hold_toggle());
+    clip_mut(&mut doc, ClipId(1)).enabled_curve = Some(hold_toggle());
+    doc.validate().unwrap();
+    doc
+}
+
+/// R12 `TrimClip` row: shift-only; trimming in then out restores every
+/// keep-outside curve byte-identically (the slice's headline gate).
+#[test]
+fn trim_shifts_keep_outside_keys_and_round_trips_byte_identical() {
+    let base = siblinged();
+
+    let mut doc = base.clone();
+    Operation::TrimClip {
+        clip: ClipId(1),
+        new_source: TimeCode(25)..TimeCode(60),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(clip(&doc, ClipId(1)).timeline_start, TimeCode(25));
+    // `delta_local` +25: every keep-outside key moves −25, values and shape
+    // untouched — including the negative head key R13 legalises.
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(1))),
+        vec![(-25, 0), (34, 4_720)]
+    );
+    assert_eq!(
+        key_positions(&effect_toggle(&doc, ClipId(1))),
+        vec![(-25, 1), (5, 1), (6, 0), (34, 0)]
+    );
+    assert_eq!(
+        key_positions(&clip_toggle(&doc, ClipId(1))),
+        vec![(-25, 1), (5, 1), (6, 0), (34, 0)]
+    );
+    // Audio half: AU4 drop+seam preserves the project-frame value.
+    for project_frame in 25..60 {
+        assert_eq!(
+            envelope_at(&doc, ClipId(1), project_frame),
+            envelope_at(&base, ClipId(1), project_frame),
+            "envelope at project frame {project_frame}"
+        );
+    }
+    doc.validate().unwrap();
+
+    // Trim back out: `delta_local` −25 restores the bytes exactly.
+    Operation::TrimClip {
+        clip: ClipId(1),
+        new_source: TimeCode(0)..TimeCode(60),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+    doc.validate().unwrap();
+}
+
+/// R12 `SplitClip` row: both halves receive the full curve shifted to their
+/// local origin — left `delta_local` zero, right the split offset.
+#[test]
+fn split_gives_both_halves_the_full_shifted_curve() {
+    let base = siblinged();
+    let mut doc = base.clone();
+    Operation::SplitClip {
+        clip: ClipId(1),
+        at: TimeCode(20),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let right = ClipId(2);
+
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+    assert_eq!(
+        key_positions(&colour_curve(&doc, right)),
+        vec![(-20, 0), (39, 4_720)]
+    );
+    assert_eq!(
+        key_positions(&effect_toggle(&doc, right)),
+        vec![(-20, 1), (10, 1), (11, 0), (39, 0)]
+    );
+    assert_eq!(
+        key_positions(&clip_toggle(&doc, right)),
+        vec![(-20, 1), (10, 1), (11, 0), (39, 0)]
+    );
+    // Audio half: the AU4 seam preserves the project-frame value on both.
+    for project_frame in 0..60 {
+        let id = if project_frame < 20 { ClipId(1) } else { right };
+        assert_eq!(
+            envelope_at(&doc, id, project_frame),
+            envelope_at(&base, ClipId(1), project_frame),
+            "envelope at project frame {project_frame}"
+        );
+    }
+    doc.validate().unwrap();
+}
+
+/// R12 `RollEdit` / `SlideClip` rows: shift-only on both touched clips with
+/// their signed AU4 R34 deltas; the slid middle clip is never rebased.
+#[test]
+fn slide_and_roll_shift_only_the_right_neighbour() {
+    let mut base = document_with_three_clips();
+    for (index, id) in [ClipId(1), ClipId(2), ClipId(3)].iter().enumerate() {
+        Operation::AddEffect {
+            clip: *id,
+            effect: Effect {
+                enabled: true,
+                enabled_curve: Some(hold_toggle()),
+                id: EffectId(index as u64 + 1),
+                name: "primary_correction".to_owned(),
+                parameters: BTreeMap::from([(
+                    "exposure_milli_stops".to_owned(),
+                    ParamValue::Integer(0),
+                )]),
+                keyframes: BTreeMap::from([(
+                    "exposure_milli_stops".to_owned(),
+                    linear(&[(0, 0), (59, 4_720)]),
+                )]),
+            },
+        }
+        .apply(&mut base)
+        .unwrap();
+        clip_mut(&mut base, *id).enabled_curve = Some(hold_toggle());
+    }
+    base.validate().unwrap();
+
+    // Slide the middle clip 60 → 45: left and middle keep-outside curves are
+    // byte-identical, the right shifts by −(−15) = +15.
+    let mut doc = base.clone();
+    Operation::SlideClip {
+        clip: ClipId(2),
+        to: TimeCode(45),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    for id in [ClipId(1), ClipId(2)] {
+        assert_eq!(colour_curve(&doc, id), colour_curve(&base, id));
+        assert_eq!(effect_toggle(&doc, id), effect_toggle(&base, id));
+        assert_eq!(clip_toggle(&doc, id), clip_toggle(&base, id));
+    }
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(3))),
+        vec![(15, 0), (74, 4_720)]
+    );
+    assert_eq!(
+        key_positions(&effect_toggle(&doc, ClipId(3))),
+        vec![(15, 1), (45, 1), (46, 0), (74, 0)]
+    );
+    doc.validate().unwrap();
+
+    // A left roll to 40: the left clip is untouched, the right shifts +20.
+    let mut doc = base.clone();
+    Operation::RollEdit {
+        left_clip: ClipId(1),
+        right_clip: ClipId(2),
+        to: TimeCode(40),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(2))),
+        vec![(20, 0), (79, 4_720)]
+    );
+    assert_eq!(
+        key_positions(&clip_toggle(&doc, ClipId(2))),
+        vec![(20, 1), (50, 1), (51, 0), (79, 0)]
+    );
+    doc.validate().unwrap();
+
+    // A right roll to 75: the right clip shifts −15, keys past the old head
+    // included — nothing is dropped.
+    let mut doc = base.clone();
+    Operation::RollEdit {
+        left_clip: ClipId(1),
+        right_clip: ClipId(2),
+        to: TimeCode(75),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        key_positions(&colour_curve(&doc, ClipId(2))),
+        vec![(-15, 0), (44, 4_720)]
+    );
+    assert_eq!(
+        key_positions(&effect_toggle(&doc, ClipId(2))),
+        vec![(-15, 1), (15, 1), (16, 0), (44, 0)]
+    );
+    doc.validate().unwrap();
+}
+
+/// R12 `SetClipSpeed` row: keep-outside curves are untouched (`delta_local`
+/// zero plus no drop equals identity); the audio envelope keeps its AU4
+/// destructive-on-increase behaviour.
+#[test]
+fn speed_change_leaves_keep_outside_curves_untouched() {
+    let base = siblinged();
+
+    let mut doc = base.clone();
+    Operation::SetClipSpeed {
+        clip: ClipId(1),
+        speed_percent: 200,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(doc.duration, TimeCode(30));
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+    // Audio half: AU4 R42 — inside keys plus the new-duration seam.
+    assert_eq!(
+        key_positions(&envelope(&doc, ClipId(1))),
+        vec![(0, 0), (29, -290)]
+    );
+    doc.validate().unwrap();
+
+    // Slowing down lengthens: keep-outside identity, audio inserts nothing.
+    let mut doc = base.clone();
+    Operation::SetClipSpeed {
+        clip: ClipId(1),
+        speed_percent: 50,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(doc.duration, TimeCode(120));
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(envelope(&doc, ClipId(1)), envelope(&base, ClipId(1)));
+    doc.validate().unwrap();
+}
+
+/// R12 `RelinkAsset` row: shift-only with `delta_local` zero — identity for
+/// every clip curve, keep-outside and audio alike.
+#[test]
+fn relink_keeps_every_clip_curve_byte_identical() {
+    let mut doc = siblinged();
+    let before = doc.clone();
+    let current = doc.asset(AssetId(1)).unwrap().clone();
+    Operation::RelinkAsset {
+        asset: AssetId(1),
+        candidate: RelinkCandidate {
+            path: std::path::PathBuf::from("relinked.mp4"),
+            kind: current.kind,
+            fps: current.fps,
+            duration: current.duration,
+            resolution: current.resolution,
+            fingerprint: MediaSourceFingerprint {
+                content_sha256: Some("a".repeat(64)),
+                byte_len: Some(4_096),
+            },
+        },
+        allow_unverified_source: true,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&before, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&before, ClipId(1))
+    );
+    assert_eq!(
+        clip_toggle(&doc, ClipId(1)),
+        clip_toggle(&before, ClipId(1))
+    );
+    assert_eq!(envelope(&doc, ClipId(1)), envelope(&before, ClipId(1)));
+    doc.validate().unwrap();
+}
+
+/// R12 `ReplaceClip` / `FitToFill` rows: every clip curve kept verbatim, no
+/// rebase — new footage under the old move.
+#[test]
+fn replace_and_fit_to_fill_keep_every_curve_verbatim() {
+    let base = siblinged();
+
+    let mut doc = base.clone();
+    Operation::AddAsset {
+        asset: asset(2, "asset-2", 300, fps()),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::ReplaceClip {
+        clip: ClipId(1),
+        asset: AssetId(2),
+        source: TimeCode(100)..TimeCode(160),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+    assert_eq!(envelope(&doc, ClipId(1)), envelope(&base, ClipId(1)));
+    doc.validate().unwrap();
+
+    let mut doc = base.clone();
+    Operation::AddAsset {
+        asset: asset(2, "asset-2", 300, fps()),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    Operation::FitToFill {
+        clip: ClipId(1),
+        asset: AssetId(2),
+        source: TimeCode(100)..TimeCode(160),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+    assert_eq!(envelope(&doc, ClipId(1)), envelope(&base, ClipId(1)));
+    doc.validate().unwrap();
+}
+
+/// R12 `SlipClip` / `MoveClip` / `DeleteClip` rows: no curve rewrite — the
+/// local origin is unchanged, or the clip (and its curves) is gone.
+#[test]
+fn move_slip_and_delete_leave_sibling_curves_alone() {
+    let base = siblinged();
+
+    let mut doc = base.clone();
+    Operation::MoveClip {
+        clip: ClipId(1),
+        to_track: TrackId(1),
+        to: TimeCode(90),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+    assert_eq!(envelope(&doc, ClipId(1)), envelope(&base, ClipId(1)));
+
+    let mut doc = base.clone();
+    Operation::SlipClip {
+        clip: ClipId(1),
+        new_source_in: TimeCode(30),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        colour_curve(&doc, ClipId(1)),
+        colour_curve(&base, ClipId(1))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(1)),
+        effect_toggle(&base, ClipId(1))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(1)), clip_toggle(&base, ClipId(1)));
+
+    let mut doc = base.clone();
+    Operation::DeleteClip { clip: ClipId(1) }
+        .apply(&mut doc)
+        .unwrap();
+    assert!(doc.tracks.iter().all(|track| track.clips.is_empty()));
+    doc.validate().unwrap();
+}
+
+/// R12 ripple rows: clip-local curves are untouched (local origins move with
+/// their clips); project-frame track curves keep the AU4 ripple helpers.
+#[test]
+fn ripples_move_track_curves_and_never_clip_curves() {
+    let mut base = document_with_three_clips();
+    let ride = linear(&[(0, 0), (60, -100), (70, -200), (120, -300), (179, -400)]);
+    set_track_curve(&mut base, TrackId(1), "gain_tenth_db", &ride);
+    Operation::AddEffect {
+        clip: ClipId(2),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: Some(hold_toggle()),
+            id: EffectId(1),
+            name: "primary_correction".to_owned(),
+            parameters: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                ParamValue::Integer(0),
+            )]),
+            keyframes: BTreeMap::from([(
+                "exposure_milli_stops".to_owned(),
+                linear(&[(0, 0), (59, 4_720)]),
+            )]),
+        },
+    }
+    .apply(&mut base)
+    .unwrap();
+    clip_mut(&mut base, ClipId(2)).enabled_curve = Some(hold_toggle());
+    set_envelope(&mut base, ClipId(2), &linear(&[(0, 0), (59, -590)]));
+    base.validate().unwrap();
+
+    // Ripple delete clip 1: the survivor slides 60 → 0 with byte-identical
+    // local curves; the track ride shifts per AU4 rule 22.
+    let mut doc = base.clone();
+    Operation::RippleDeleteClip { clip: ClipId(1) }
+        .apply(&mut doc)
+        .unwrap();
+    assert_eq!(clip(&doc, ClipId(2)).timeline_start, TimeCode(0));
+    assert_eq!(
+        colour_curve(&doc, ClipId(2)),
+        colour_curve(&base, ClipId(2))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(2)),
+        effect_toggle(&base, ClipId(2))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(2)), clip_toggle(&base, ClipId(2)));
+    assert_eq!(envelope(&doc, ClipId(2)), envelope(&base, ClipId(2)));
+    assert_eq!(
+        key_positions(
+            &track_entry(&doc, TrackId(1))
+                .unwrap()
+                .gain_curve
+                .clone()
+                .unwrap()
+        ),
+        vec![(0, -100), (10, -200), (60, -300), (119, -400)]
+    );
+    doc.validate().unwrap();
+
+    // Ripple insert at 60: clips at/after the point shift right, curves ride.
+    let mut doc = base.clone();
+    Operation::RippleInsertGap {
+        track: TrackId(1),
+        at: TimeCode(60),
+        duration: TimeCode(15),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(clip(&doc, ClipId(2)).timeline_start, TimeCode(75));
+    assert_eq!(
+        colour_curve(&doc, ClipId(2)),
+        colour_curve(&base, ClipId(2))
+    );
+    assert_eq!(
+        effect_toggle(&doc, ClipId(2)),
+        effect_toggle(&base, ClipId(2))
+    );
+    assert_eq!(clip_toggle(&doc, ClipId(2)), clip_toggle(&base, ClipId(2)));
+    assert_eq!(envelope(&doc, ClipId(2)), envelope(&base, ClipId(2)));
+    assert_eq!(
+        key_positions(
+            &track_entry(&doc, TrackId(1))
+                .unwrap()
+                .gain_curve
+                .clone()
+                .unwrap()
+        ),
+        vec![(0, 0), (75, -100), (85, -200), (135, -300), (194, -400)]
+    );
+    doc.validate().unwrap();
+}
+
+/// §10 gate 1 (contract half): an eased scale push-in trimmed +20 at the head
+/// and back resolves byte-identically on keep-outside owners. (The lavapipe
+/// frame pins belong to the render part, not the core model.)
+#[test]
+fn push_in_survives_trim_in_then_out() {
+    let mut doc = document_with_one_clip();
+    let push_in = AutomationCurve {
+        keyframes: vec![
+            Keyframe {
+                at: TimeCode(10),
+                value: 100,
+                interpolation: KeyframeInterpolation::EaseInOut,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+            Keyframe {
+                at: TimeCode(50),
+                value: 120,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+        ],
+    };
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(2),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
+            keyframes: BTreeMap::from([("scale_percent".to_owned(), push_in.clone())]),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let scale = |doc: &Document| clip(doc, ClipId(1)).effects[0].keyframes["scale_percent"].clone();
+
+    Operation::TrimClip {
+        clip: ClipId(1),
+        new_source: TimeCode(20)..TimeCode(60),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        key_positions(&scale(&doc)),
+        vec![(-10, 100), (30, 120)],
+        "the eased segment shifts, it is never reshaped"
+    );
+    Operation::TrimClip {
+        clip: ClipId(1),
+        new_source: TimeCode(0)..TimeCode(60),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(scale(&doc), push_in);
+    for local in 0..60 {
+        assert_eq!(
+            scale(&doc).value_at(TimeCode(local)),
+            push_in.value_at(TimeCode(local)),
+            "resolved scale at local {local}"
+        );
+    }
+    doc.validate().unwrap();
+}
+
+/// §10 gate 2 (contract half): an eased move split mid-flight plays across
+/// the cut — both halves hold the full shifted key count.
+#[test]
+fn split_copies_keys_to_both_halves() {
+    let mut doc = document_with_one_clip();
+    let flight = AutomationCurve {
+        keyframes: vec![
+            Keyframe {
+                at: TimeCode(10),
+                value: 100,
+                interpolation: KeyframeInterpolation::EaseInOut,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+            Keyframe {
+                at: TimeCode(50),
+                value: 120,
+                interpolation: KeyframeInterpolation::Linear,
+                tangent_in: 0,
+                tangent_out: 0,
+            },
+        ],
+    };
+    Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(2),
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([("scale_percent".to_owned(), ParamValue::Integer(100))]),
+            keyframes: BTreeMap::from([("scale_percent".to_owned(), flight.clone())]),
+        },
+    }
+    .apply(&mut doc)
+    .unwrap();
+
+    Operation::SplitClip {
+        clip: ClipId(1),
+        at: TimeCode(30),
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let left = clip(&doc, ClipId(1)).effects[0].keyframes["scale_percent"].clone();
+    let right = clip(&doc, ClipId(2)).effects[0].keyframes["scale_percent"].clone();
+    assert_eq!(left.keyframes.len(), 2);
+    assert_eq!(right.keyframes.len(), 2);
+    assert_eq!(left, flight);
+    assert_eq!(key_positions(&right), vec![(-20, 100), (20, 120)]);
+    for local in 0..30 {
+        assert_eq!(
+            left.value_at(TimeCode(local)),
+            flight.value_at(TimeCode(local)),
+            "left plays its own span at {local}"
+        );
+        assert_eq!(
+            right.value_at(TimeCode(local)),
+            flight.value_at(TimeCode(local + 30)),
+            "right continues the flight at {local}"
+        );
+    }
+    doc.validate().unwrap();
+}
