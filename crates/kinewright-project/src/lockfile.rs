@@ -201,6 +201,8 @@ impl LockfileHandle {
     /// Returns the removal IO error, if any.
     pub fn release(self) -> io::Result<()> {
         let removed = fs::remove_file(&self.discovery);
+        #[cfg(any(test, feature = "test-util"))]
+        crate::test_hook("release_after_remove_before_unlock"); // RACE-REVIEW
         drop(self);
         match removed {
             Ok(()) => Ok(()),
@@ -380,6 +382,8 @@ pub fn acquire_project_lock_with_policy(
             std::thread::sleep(retry_delay);
             continue;
         }
+        #[cfg(any(test, feature = "test-util"))]
+        crate::test_hook("after_flock_before_scan"); // RACE-REVIEW
         // Holding the flock: pending recovery (or lookup failure) refuses first.
         match pending_journal_for_project(recovery_dir, project_path) {
             Ok(Some(journal)) => {
@@ -414,6 +418,8 @@ pub fn acquire_project_lock_with_policy(
             unlock_attempt(&file);
             return Err(LockfileError::Io(error.to_string()));
         }
+        #[cfg(any(test, feature = "test-util"))]
+        crate::test_hook("after_publish_before_return"); // RACE-REVIEW
         return Ok(AcquiredLock {
             handle: LockfileHandle::held(lock_path, discovery_path, claim, file),
             reclaimed: previous,
@@ -421,6 +427,11 @@ pub fn acquire_project_lock_with_policy(
     }
     unreachable!("the loop above always returns");
 }
+
+// RACE-REVIEW: adversarial scenario module (Opus race review, 2026-09-25).
+#[cfg(test)]
+#[path = "aw1_race_tests.rs"]
+mod race_tests;
 
 #[cfg(test)]
 mod tests {
