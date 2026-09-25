@@ -842,8 +842,13 @@ reasons — the curve model exists, the motion surface does not.
 **Current status (2026-09-23): programme design promoted (revision 2 after an
 Opus `revise` verdict, incorporating the lead's rulings and Riel's answers)**
 (keys kept outside in/out; compound nests with mixdown; scene-linear
-blend; expressions to AE). No slice briefed yet. MO1 is first: its
-stage-0 Kani probe gates every later proof claim.
+blend; expressions to AE). MO1 merged 2026-09-24
+(`MO1-KEYFRAMES-TRANSFORM-STILLS.md`). **MO2 design accepted 2026-09-25**
+(`MO2-BLEND-ADJUSTMENT-TRANSITIONS-SOLIDS.md`: extended-domain Screen/Overlay
+in scene-linear, an opaque accumulator with snapshot-based specials, a
+fully specified Push backdrop, typed overflow refusal, and a shared format-v2
+owner with CC8); it lands after AW1 S1 and ahead of CC8's format and render
+stages. The inherited key-editor bundle moves to MO6.
 
 Each slice writes its design doc (≤ ~600 lines) before implementation
 and records deferrals explicitly, as the colour and audio slices did.
