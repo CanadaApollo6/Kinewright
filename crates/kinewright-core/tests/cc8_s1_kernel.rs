@@ -6,9 +6,9 @@
 //! most assert far tighter. Grows one section per S1 increment.
 
 use kinewright_core::{
-    Cc8KernelError, DISPLAY_TO_SCENE_VERSION, HLG_GAMMA_RULE_VERSION, display_to_scene, hlg_gamma,
-    hlg_inverse_oetf, hlg_oetf, pq_eotf, pq_oetf, pq_q0, reference, s_white, scene_to_display,
-    scene_to_working, working_to_scene,
+    Cc8KernelError, DISPLAY_TO_SCENE_VERSION, HLG_GAMMA_RULE_VERSION, display_to_scene,
+    eetf_to_target, hlg_gamma, hlg_inverse_oetf, hlg_oetf, pq_eotf, pq_oetf, pq_q0, reference,
+    s_white, scene_to_display, scene_to_working, working_to_scene,
 };
 
 /// Narrow an f64 test vector to f32 input. The rounding is the point of the
@@ -707,4 +707,172 @@ fn rendering_refusals() {
         s_white(3e38, 1e-37, 1.0),
         Err(Cc8KernelError::NonFiniteResult { .. })
     ));
+}
+
+// ---------------------------------------------------------------------------
+// C3: EETF to target (§6, R14).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn eetf_anchors_narrow_span() {
+    // (L, oracle f64, App. N) at Cs=1000, Ct=100.
+    for (l, expected, appn) in [
+        (10.0, 9.999_999_999_999_952, 10.0),
+        (100.0, 69.454_403_035_658_91, 69.454_403),
+        (203.0, 88.243_640_538_647_8, 88.243_641),
+        (1000.0, 100.000_000_000_005_24, 100.0),
+    ] {
+        let out = reference::eetf_to_target(l, 1000.0, 100.0).unwrap();
+        assert!(!out.clipped, "L={l} must not flag");
+        assert_close("eetf narrow", out.value, expected, 1e-9);
+        assert_close("eetf narrow App N", out.value, appn, 1e-6);
+    }
+    // Exact 0→0, bit-identical, both precisions.
+    assert_eq!(
+        reference::eetf_to_target(0.0, 1000.0, 100.0)
+            .unwrap()
+            .value
+            .to_bits(),
+        0.0f64.to_bits()
+    );
+    assert_eq!(
+        eetf_to_target(0.0, 1000.0, 100.0).unwrap().value.to_bits(),
+        0.0f32.to_bits()
+    );
+    // Past Cs: clip to Ct exactly, flag set.
+    let clip = reference::eetf_to_target(4000.0, 1000.0, 100.0).unwrap();
+    assert!(clip.clipped, "L=4000 past Cs=1000 must flag");
+    assert_eq!(clip.value.to_bits(), 100.0f64.to_bits());
+    let clip32 = eetf_to_target(4000.0, 1000.0, 100.0).unwrap();
+    assert!(clip32.clipped);
+    assert_eq!(clip32.value.to_bits(), 100.0f32.to_bits());
+}
+
+#[test]
+fn eetf_anchors_wide_span_and_identity() {
+    for (l, expected, appn) in [
+        (203.0, 63.306_209_002_170_73, 63.306_209),
+        (1000.0, 91.070_396_016_548_29, 91.070_396),
+        (4000.0, 99.437_355_791_646_78, 99.437_356),
+        (10_000.0, 100.000_000_000_005_24, 100.0),
+    ] {
+        let out = reference::eetf_to_target(l, 10_000.0, 100.0).unwrap();
+        assert!(!out.clipped, "L={l} must not flag");
+        assert_close("eetf wide", out.value, expected, 1e-9);
+        assert_close("eetf wide App N", out.value, appn, 1e-6);
+    }
+    // Ct ≥ Cs returns L bit-identically: Ct > Cs and Ct == Cs.
+    let id = reference::eetf_to_target(203.0, 100.0, 1000.0).unwrap();
+    assert!(!id.clipped);
+    assert_eq!(id.value.to_bits(), 203.0f64.to_bits());
+    let id_eq = eetf_to_target(500.0, 1000.0, 1000.0).unwrap();
+    assert!(!id_eq.clipped);
+    assert_eq!(id_eq.value.to_bits(), 500.0f32.to_bits());
+}
+
+#[test]
+fn eetf_domain_edges() {
+    // Negatives pass unchanged in nits, never flagged, both precisions.
+    for l in [-5.0, -0.5, -100.0] {
+        let out = reference::eetf_to_target(l, 1000.0, 100.0).unwrap();
+        assert!(!out.clipped);
+        assert_eq!(out.value.to_bits(), l.to_bits(), "L={l}");
+        let out32 = eetf_to_target(as_f32(l), 1000.0, 100.0).unwrap();
+        assert!(!out32.clipped);
+        assert_eq!(out32.value.to_bits(), as_f32(l).to_bits());
+    }
+    // Clip edge: just past Cs flags, just inside does not.
+    assert!(
+        reference::eetf_to_target(1000.0001, 1000.0, 100.0)
+            .unwrap()
+            .clipped
+    );
+    assert!(
+        !reference::eetf_to_target(999.9999, 1000.0, 100.0)
+            .unwrap()
+            .clipped
+    );
+    // Below-knee near-identity (PQ roundtrip only): oracle 4.9999999999997575.
+    assert_close(
+        "eetf below knee",
+        reference::eetf_to_target(5.0, 1000.0, 100.0).unwrap().value,
+        4.999_999_999_999_757_5,
+        1e-9,
+    );
+    for l in [1.0, 5.0, 10.0] {
+        let v = reference::eetf_to_target(l, 1000.0, 100.0).unwrap().value;
+        assert_close("eetf below-knee identity", v, l, 1e-9);
+    }
+    // Monotone through the knee region.
+    let a = reference::eetf_to_target(100.0, 1000.0, 100.0)
+        .unwrap()
+        .value;
+    let b = reference::eetf_to_target(203.0, 1000.0, 100.0)
+        .unwrap()
+        .value;
+    let c = reference::eetf_to_target(1000.0, 1000.0, 100.0)
+        .unwrap()
+        .value;
+    assert!(a < b && b < c, "EETF must be monotone: {a} < {b} < {c}");
+}
+
+#[test]
+fn eetf_f32_agrees_with_f64() {
+    for (l, cs) in [
+        (0.0, 1000.0),
+        (10.0, 1000.0),
+        (100.0, 1000.0),
+        (203.0, 1000.0),
+        (1000.0, 1000.0),
+        (203.0, 10_000.0),
+        (4000.0, 10_000.0),
+        (10_000.0, 10_000.0),
+        (-5.0, 1000.0),
+    ] {
+        let v32 = eetf_to_target(as_f32(l), as_f32(cs), 100.0).unwrap();
+        let v64 = reference::eetf_to_target(l, cs, 100.0).unwrap();
+        assert_eq!(v32.clipped, v64.clipped, "flag at L={l}");
+        assert_close(
+            "eetf f32~f64",
+            f64::from(v32.value),
+            v64.value,
+            1e-4 * v64.value.abs().max(1.0),
+        );
+    }
+}
+
+#[test]
+fn eetf_refusals() {
+    assert!(matches!(
+        eetf_to_target(100.0, 0.0, 100.0),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        eetf_to_target(100.0, 1000.0, -100.0),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        reference::eetf_to_target(100.0, -1.0, 100.0),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(matches!(
+            eetf_to_target(bad, 1000.0, 100.0),
+            Err(Cc8KernelError::NonFiniteInput { .. })
+        ));
+        assert!(matches!(
+            eetf_to_target(100.0, bad, 100.0),
+            Err(Cc8KernelError::NonFiniteInput { .. })
+        ));
+        assert!(matches!(
+            eetf_to_target(100.0, 1000.0, bad),
+            Err(Cc8KernelError::NonFiniteInput { .. })
+        ));
+    }
+    for bad in [f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            reference::eetf_to_target(bad, 1000.0, 100.0),
+            Err(Cc8KernelError::NonFiniteInput { .. })
+        ));
+    }
 }

@@ -467,6 +467,95 @@ pub fn display_to_scene(
 }
 
 // ---------------------------------------------------------------------------
+// EETF to target (§6): the one tone intent. PQ-normalized Hermite, source
+// span, clip+flag past Cs, identity when Ct ≥ Cs, negatives pass in nits.
+// ---------------------------------------------------------------------------
+
+/// `eetf_to_target` result: mapped nits + whether L exceeded Cs (clip+flag).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EetfOutput<T> {
+    /// Mapped nits (or the input unchanged: negatives, identity, zero).
+    pub value: T,
+    /// True iff L exceeded Cs and the value clipped to Ct.
+    pub clipped: bool,
+}
+
+/// EETF to target peak (§6). Exact 0→0; L > Cs clips to Ct with flag set.
+///
+/// # Errors
+/// Non-finite args → `NonFiniteInput`; Cs/Ct ≤ 0 → `OutOfDomain`.
+// Single-letter bindings below are the §6 symbols (x, m, ks, H, T) verbatim.
+#[allow(clippy::many_single_char_names)]
+pub fn eetf_to_target(
+    nits: f32,
+    source_ceiling_nits: f32,
+    target_peak_nits: f32,
+) -> Result<EetfOutput<f32>, Cc8KernelError> {
+    const FUNCTION: &str = "eetf_to_target";
+    let l = finite_input(FUNCTION, nits)?;
+    let cs = finite_input(FUNCTION, source_ceiling_nits)?;
+    let ct = finite_input(FUNCTION, target_peak_nits)?;
+    if cs <= 0.0 || ct <= 0.0 {
+        return Err(Cc8KernelError::OutOfDomain {
+            function: FUNCTION,
+            reason: "source ceiling/target peak must be > 0",
+        });
+    }
+    if l < 0.0 {
+        return Ok(EetfOutput {
+            value: l,
+            clipped: false,
+        }); // never fed to PQ
+    }
+    if l <= 0.0 {
+        return Ok(EetfOutput {
+            value: 0.0,
+            clipped: false,
+        }); // exact 0→0
+    }
+    if ct >= cs {
+        return Ok(EetfOutput {
+            value: l,
+            clipped: false,
+        }); // identity
+    }
+    let q0 = pq_q0();
+    let span = pq_oetf_unchecked(cs) - q0;
+    let x = (pq_oetf_unchecked(l) - q0) / span;
+    let m = (pq_oetf_unchecked(ct) - q0) / span;
+    if m >= 1.0 {
+        return Ok(EetfOutput {
+            value: l,
+            clipped: false,
+        }); // float-identity
+    }
+    if x > 1.0 {
+        return Ok(EetfOutput {
+            value: ct,
+            clipped: true,
+        }); // past Cs
+    }
+    let knee = 1.5 * m - 0.5;
+    let h = if x < knee {
+        x
+    } else {
+        let t = (x - knee) / (1.0 - knee);
+        let t2 = t * t;
+        let t3 = t2 * t;
+        (2.0 * t3 - 3.0 * t2 + 1.0) * knee
+            + (t3 - 2.0 * t2 + t) * (1.0 - knee)
+            + (-2.0 * t3 + 3.0 * t2) * m
+    };
+    match pq_eotf_unchecked(q0 + span * h) {
+        Some(v) => Ok(EetfOutput {
+            value: finite_result(FUNCTION, v)?,
+            clipped: false,
+        }),
+        None => Err(Cc8KernelError::NonFiniteResult { function: FUNCTION }),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // f64 conformance reference: the App. N path. Tested ±1e-6 against the
 // independent vectors; f32 production agreement with this module is itself
 // a test (R35).
@@ -477,9 +566,10 @@ pub fn display_to_scene(
 pub mod reference {
     use super::{
         BT2020_KB_F64, BT2020_KG_F64, BT2020_KR_F64, Cc8KernelError, DISPLAY_TO_SCENE_VERSION,
-        HLG_A_F64, HLG_B_F64, HLG_C_F64, HLG_GAMMA_RULE_VERSION, HLG_SCENE_BREAKPOINT_F64,
-        HLG_SIGNAL_BREAKPOINT_F64, PQ_C1_F64, PQ_C2_F64, PQ_C3_F64, PQ_M1_F64, PQ_M2_F64,
-        PQ_PEAK_NITS_F64, finite_input, finite_input_3, finite_result, finite_result_3,
+        EetfOutput, HLG_A_F64, HLG_B_F64, HLG_C_F64, HLG_GAMMA_RULE_VERSION,
+        HLG_SCENE_BREAKPOINT_F64, HLG_SIGNAL_BREAKPOINT_F64, PQ_C1_F64, PQ_C2_F64, PQ_C3_F64,
+        PQ_M1_F64, PQ_M2_F64, PQ_PEAK_NITS_F64, finite_input, finite_input_3, finite_result,
+        finite_result_3,
     };
 
     /// f64 [`super::pq_oetf`].
@@ -762,6 +852,82 @@ pub mod reference {
                     display[2].min(0.0) / peak,
                 ],
             )
+        }
+    }
+
+    /// f64 [`super::eetf_to_target`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`super::eetf_to_target`].
+    // Single-letter bindings below are the §6 symbols (x, m, ks, H, T) verbatim.
+    #[allow(clippy::many_single_char_names)]
+    pub fn eetf_to_target(
+        nits: f64,
+        source_ceiling_nits: f64,
+        target_peak_nits: f64,
+    ) -> Result<EetfOutput<f64>, Cc8KernelError> {
+        const FUNCTION: &str = "reference::eetf_to_target";
+        let l = finite_input(FUNCTION, nits)?;
+        let cs = finite_input(FUNCTION, source_ceiling_nits)?;
+        let ct = finite_input(FUNCTION, target_peak_nits)?;
+        if cs <= 0.0 || ct <= 0.0 {
+            return Err(Cc8KernelError::OutOfDomain {
+                function: FUNCTION,
+                reason: "source ceiling/target peak must be > 0",
+            });
+        }
+        if l < 0.0 {
+            return Ok(EetfOutput {
+                value: l,
+                clipped: false,
+            });
+        }
+        if l <= 0.0 {
+            return Ok(EetfOutput {
+                value: 0.0,
+                clipped: false,
+            });
+        }
+        if ct >= cs {
+            return Ok(EetfOutput {
+                value: l,
+                clipped: false,
+            });
+        }
+        let q0 = pq_q0();
+        let span = pq_oetf_unchecked(cs) - q0;
+        let x = (pq_oetf_unchecked(l) - q0) / span;
+        let m = (pq_oetf_unchecked(ct) - q0) / span;
+        if m >= 1.0 {
+            return Ok(EetfOutput {
+                value: l,
+                clipped: false,
+            });
+        }
+        if x > 1.0 {
+            return Ok(EetfOutput {
+                value: ct,
+                clipped: true,
+            });
+        }
+        let knee = 1.5 * m - 0.5;
+        let h = if x < knee {
+            x
+        } else {
+            let t = (x - knee) / (1.0 - knee);
+            let t2 = t * t;
+            let t3 = t2 * t;
+            (2.0 * t3 - 3.0 * t2 + 1.0) * knee
+                + (t3 - 2.0 * t2 + t) * (1.0 - knee)
+                + (-2.0 * t3 + 3.0 * t2) * m
+        };
+        match pq_eotf_unchecked(q0 + span * h) {
+            Some(v) => Ok(EetfOutput {
+                value: finite_result(FUNCTION, v)?,
+                clipped: false,
+            }),
+            None => Err(Cc8KernelError::NonFiniteResult { function: FUNCTION }),
         }
     }
 }
