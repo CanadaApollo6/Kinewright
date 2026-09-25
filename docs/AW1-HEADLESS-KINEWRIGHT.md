@@ -74,7 +74,14 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
   OS error 33). Release removes the discovery while holding the lock,
   then unlocks explicitly — never a last-close race against a forked
   duplicate. Stale discovery with a free lock reclaims with a warning.
-  Backoff kept.
+  Backoff kept. (Fix round 2, G1: the publish uses a dedicated strict
+  writer — temp beside the unresolved path with `create_new`,
+  `write_all`+`sync_all` through one handle, `rename` over the discovery —
+  so a planted link is replaced, never followed; no fallback, failures
+  remove the temp and report `Io`. The holder sweeps its own stale publish
+  temps after the flock. A lock object that is a symlink refuses with typed
+  `Io` (Unix also re-checks the fd against the path after open), and
+  discovery reads only regular files, bounded at 64 KiB.)
 - AF2 → §5, §6: one canonical project identity — full canonical path
   when the target exists, else canonical parent dir plus file name
   (relative resolves at the cwd; raw path when nothing resolves). Lock,

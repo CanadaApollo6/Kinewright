@@ -18,7 +18,10 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Barrier},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -1235,4 +1238,118 @@ fn guard_unknown_host_stale_claim_exactly_one_reclaims() {
         assert_eq!(reclaimed.hostname, "unknown");
         assert_eq!(reclaimed.endpoint, "http://legacy");
     }
+}
+
+// ───────────────────────── G1: strict discovery ─────────────────────────
+
+/// The discovery path is a symlink planted in the project folder (a cloned
+/// repo / unzipped share): the publish must not write THROUGH it. Ruled
+/// (G1): the strict writer renames over the link itself — the victim keeps
+/// its bytes, the discovery becomes a regular file, and the acquire
+/// succeeds (a refusal would `DoS` every acquire until manual cleanup).
+#[cfg(unix)]
+#[test]
+fn defect_discovery_symlink_clobbers_its_target() {
+    let fx = fixture("race-discovery-symlink");
+    let victim = fx.dir.path("victim.txt");
+    fs::write(&victim, b"precious user bytes").unwrap();
+    let discovery = discovery_path_for_project(Some(&fx.project)).unwrap();
+    std::os::unix::fs::symlink(&victim, &discovery).unwrap();
+    let acquired = claim(&fx.project, &fx.recovery, "http://a")
+        .expect("the publish replaces the planted link");
+    assert_eq!(
+        fs::read(&victim).unwrap(),
+        b"precious user bytes",
+        "the victim keeps its bytes"
+    );
+    assert!(
+        fs::symlink_metadata(&discovery)
+            .unwrap()
+            .file_type()
+            .is_file(),
+        "the link itself was replaced by a regular discovery"
+    );
+    acquired.handle.release().unwrap();
+    // A dangling planted link takes the same path: nothing is created at
+    // its target, and the discovery lands as a regular file.
+    let fx = fixture("race-discovery-dangling");
+    let discovery = discovery_path_for_project(Some(&fx.project)).unwrap();
+    let missing = fx.dir.path("never-created.txt");
+    std::os::unix::fs::symlink(&missing, &discovery).unwrap();
+    let acquired = claim(&fx.project, &fx.recovery, "http://a")
+        .expect("the publish replaces a dangling planted link");
+    assert!(!missing.exists(), "nothing is created through the link");
+    assert!(
+        fs::symlink_metadata(&discovery)
+            .unwrap()
+            .file_type()
+            .is_file(),
+        "the dangling link was replaced by a regular discovery"
+    );
+    acquired.handle.release().unwrap();
+}
+
+/// A FIFO squatting on the discovery path: the owner read must not block in
+/// `open` — a contender returns promptly (ownerless contention while held,
+/// a reclaim with a free lock), never hanging with the flock held. (A
+/// regressed reader leaks its worker instead of hanging the suite: the
+/// 5 s bound fails first, on a fixture-local lock no other test meets.)
+#[cfg(unix)]
+#[test]
+fn fifo_discovery_does_not_hang_the_claim() {
+    /// Claim on a worker; returns the verdict, or `None` past the bound.
+    fn prompt_claim(project: PathBuf, recovery: PathBuf, endpoint: &str) -> Option<String> {
+        let done = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let done = done.clone();
+            let endpoint = endpoint.to_owned();
+            std::thread::spawn(move || {
+                let got = claim(&project, &recovery, &endpoint);
+                done.store(true, Ordering::SeqCst);
+                format!("{got:?}")
+            })
+        };
+        let until = Instant::now() + Duration::from_secs(5);
+        while !done.load(Ordering::SeqCst) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if !done.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some(worker.join().unwrap())
+    }
+    let fx = fixture("race-fifo-prompt");
+    let held = claim(&fx.project, &fx.recovery, "http://held").unwrap();
+    let discovery = held.handle.discovery.clone();
+    fs::remove_file(&discovery).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(&discovery)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let verdict = prompt_claim(fx.project.clone(), fx.recovery.clone(), "http://probe")
+        .expect("the held-lock claim returns promptly");
+    assert!(
+        verdict.starts_with("Err(Contention") && verdict.contains("owner: None"),
+        "ownerless contention, got {verdict}"
+    );
+    fs::remove_file(&discovery).unwrap();
+    held.handle.release().unwrap();
+    // Free-lock leg: the claimant reads while holding the flock — it must
+    // still return promptly, reclaiming (the unreadable warning is G7's).
+    assert!(
+        Command::new("mkfifo")
+            .arg(&discovery)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let verdict = prompt_claim(fx.project.clone(), fx.recovery.clone(), "http://free")
+        .expect("the free-lock claim returns promptly");
+    assert!(
+        verdict.starts_with("Ok("),
+        "the free lock reclaims, got {verdict}"
+    );
 }

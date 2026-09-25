@@ -11,6 +11,7 @@ use std::{
     fs::{self, File},
     io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -243,9 +244,27 @@ pub fn reclaim_warning_json(previous: &ReclaimedOwner) -> String {
     .to_string()
 }
 
+/// The most a discovery read takes: claims are small JSON; anything
+/// larger (or a link to `/dev/zero`) reads as unreadable, never unbounded.
+const DISCOVERY_READ_LIMIT: u64 = 64 * 1024;
+
 /// Triple at a discovery path (`None` if missing/torn); legal while held (B4).
+/// Only a regular file reads, bounded (G1): a FIFO, device, directory, or
+/// symlink is unreadable, and the read never blocks on a FIFO's open nor
+/// overruns on a huge file.
 fn read_owner(discovery_path: &Path) -> Option<ReclaimedOwner> {
-    let bytes = fs::read(discovery_path).ok()?;
+    use std::io::Read as _;
+    if !fs::symlink_metadata(discovery_path).is_ok_and(|meta| meta.file_type().is_file()) {
+        return None;
+    }
+    let file = fs::File::open(discovery_path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(DISCOVERY_READ_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > DISCOVERY_READ_LIMIT {
+        return None;
+    }
     let claim: LockfileClaim = serde_json::from_slice(&bytes).ok()?;
     Some(ReclaimedOwner {
         pid: claim.pid,
@@ -261,12 +280,117 @@ fn unlock_attempt(file: &File) {
     let _ = file.unlock();
 }
 
-/// Publish a claim atomically. Call only while holding the lock — the
-/// flock serialises publishers.
+/// The discovery temp nonce: `.<file>.<pid>.<nonce>.tmp` is unique per
+/// process, and `create_new` retries past stale siblings anyway.
+static DISCOVERY_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Publish a claim through the dedicated symlink-safe writer (G1) — never
+/// `write_file_atomic`, which canonicalises (writing through a planted link)
+/// and falls back to symlink-following `fs::write`. Temp beside the
+/// UNRESOLVED path with `create_new` (a planted temp link is never
+/// followed); `write_all` + `sync_all` through the one handle, closed (the
+/// rename cannot replace an open file on Windows); `rename` over the
+/// discovery, replacing a planted link itself, never its target. No fallback
+/// of any kind: any failure removes the temp and reports `Io`. Call only
+/// while holding the lock — the flock serialises publishers.
 fn write_discovery(discovery_path: &Path, claim: &LockfileClaim) -> io::Result<()> {
+    write_discovery_with_rename(discovery_path, claim, None)
+}
+
+/// [`write_discovery`] with the rename injected: `None` renames for real.
+/// The seam exists so the refused-rename pin has a portable test — no
+/// portable fixture fails a real rename.
+fn write_discovery_with_rename(
+    discovery_path: &Path,
+    claim: &LockfileClaim,
+    rename: Option<fn(&Path, &Path) -> io::Result<()>>,
+) -> io::Result<()> {
+    use std::io::Write as _;
     let bytes = serde_json::to_vec_pretty(claim)
         .map_err(|error| io::Error::other(format!("could not serialize the lockfile: {error}")))?;
-    crate::project::write_file_atomic(discovery_path, &bytes)
+    let Some(name) = discovery_path.file_name() else {
+        return Err(io::Error::other(format!(
+            "{} names no file",
+            discovery_path.display()
+        )));
+    };
+    let parent = discovery_path.parent().unwrap_or_else(|| Path::new(""));
+    for _ in 0..100 {
+        let temp = parent.join(format!(
+            ".{}.{}.{}.tmp",
+            name.to_string_lossy(),
+            std::process::id(),
+            DISCOVERY_TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let mut file = file;
+        if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+        drop(file);
+        let renamed = match rename {
+            Some(hook) => hook(&temp, discovery_path),
+            None => fs::rename(&temp, discovery_path),
+        };
+        if let Err(error) = renamed {
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "could not pick a temp beside {}",
+        discovery_path.display()
+    )))
+}
+
+/// Sweep this writer's own stale temps (`write_discovery`'s `.<file>.*.tmp`
+/// siblings, left by a kill between temp-write and rename). Best-effort —
+/// never fails the acquire — and strictly patterned, so nothing else is
+/// touched. Call while holding the flock.
+fn sweep_discovery_temps(discovery_path: &Path) {
+    let Some(name) = discovery_path.file_name() else {
+        return;
+    };
+    let prefix = format!(".{}.", name.to_string_lossy());
+    let parent = discovery_path.parent().unwrap_or_else(|| Path::new("."));
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.starts_with(&prefix) && stem.as_bytes().ends_with(b".tmp"))
+        {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+/// Whether the opened lock fd still names the lock path (Unix): the fd's
+/// `(dev, ino)` must equal the path's, and the path must not have become a
+/// symlink — closing the swap window between open and flock.
+#[cfg(unix)]
+fn fd_matches_path(file: &File, lock_path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let (Ok(opened), Ok(current)) = (file.metadata(), fs::symlink_metadata(lock_path)) else {
+        return false;
+    };
+    !current.file_type().is_symlink()
+        && opened.dev() == current.dev()
+        && opened.ino() == current.ino()
 }
 
 fn build_claim(
@@ -340,6 +464,14 @@ pub fn acquire_project_lock_with_policy(
     let attempts = attempts.max(1);
     for attempt in 1..=attempts {
         let last = attempt == attempts;
+        // G1: never open through a symlink — a dangling lock link must
+        // create nothing, and a planted link must not divert the lock.
+        if fs::symlink_metadata(&lock_path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(LockfileError::Io(format!(
+                "refusing to lock through a symlink: {}",
+                lock_path.display()
+            )));
+        }
         // Open-or-create on a never-unlinked object: create races share
         // one flock (F3/L1). Never truncate: it could fail against a live
         // Windows `LockFileEx` range, turning contention into IO errors.
@@ -369,6 +501,20 @@ pub fn acquire_project_lock_with_policy(
         };
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_lock_open_before_flock");
+        // G1 (Unix): the fd must still name the lock path — a swap between
+        // open and flock retries onto the current object.
+        #[cfg(unix)]
+        if !fd_matches_path(&file, &lock_path) {
+            drop(file);
+            if last {
+                return Err(LockfileError::Io(format!(
+                    "the lock object {} changed under its open",
+                    lock_path.display()
+                )));
+            }
+            std::thread::sleep(retry_delay);
+            continue;
+        }
         if file.try_lock_exclusive().is_err() {
             // Held: contention, never a steal.
             drop(file);
@@ -382,6 +528,8 @@ pub fn acquire_project_lock_with_policy(
             std::thread::sleep(retry_delay);
             continue;
         }
+        // Holding the flock: sweep our own stale publish temps first.
+        sweep_discovery_temps(&discovery_path);
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_flock_before_scan"); // RACE-REVIEW
         // Holding the flock: pending recovery (or lookup failure) refuses first.
@@ -1456,5 +1604,124 @@ mod tests {
             "unknown"
         );
         got.handle.release().expect("the release lands");
+    }
+
+    /// G1: a dangling symlink at the lock object refuses with typed `Io` —
+    /// the open creates nothing through the link, and the link is untouched.
+    #[cfg(unix)]
+    #[test]
+    fn g1_dangling_lock_symlink_creates_nothing() {
+        let dir = TempDirectory::new("aw1-g1-dangling-lock");
+        let project = dir.path("edit.kinewright");
+        fs::write(&project, b"{}").expect("the project writes");
+        let recovery = recovery_dir(&dir);
+        let lock = lockfile_path_for_project(Some(&project)).expect("a lockfile derives");
+        let target = dir.path("nowhere.txt");
+        std::os::unix::fs::symlink(&target, &lock).expect("the dangling link plants");
+        let error = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Headless,
+            "http://127.0.0.1:9/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect_err("a lock symlink refuses");
+        assert!(
+            matches!(error, LockfileError::Io(_)),
+            "typed Io, got {error:?}"
+        );
+        assert!(!target.exists(), "nothing is created through the link");
+        assert!(
+            fs::symlink_metadata(&lock)
+                .expect("the link reads")
+                .file_type()
+                .is_symlink(),
+            "the link itself is untouched"
+        );
+    }
+
+    /// G1/RS1: a refused publish renames nothing and falls back to nothing —
+    /// the prior discovery keeps its bytes and no temp litters the dir. The
+    /// refusal is injected: no portable fixture fails a real rename.
+    #[test]
+    fn g1_refused_publish_preserves_the_prior_discovery() {
+        let dir = TempDirectory::new("aw1-g1-refused-publish");
+        let project = dir.path("edit.kinewright");
+        fs::write(&project, b"{}").expect("the project writes");
+        let (_, discovery, claim) =
+            build_claim(&project, LockMode::Gui, "http://127.0.0.1:9/mcp", None);
+        let prior = b"prior discovery bytes";
+        fs::write(&discovery, prior).expect("the prior discovery writes");
+        let refused = |_: &Path, _: &Path| -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected sharing violation",
+            ))
+        };
+        let error = write_discovery_with_rename(&discovery, &claim, Some(refused))
+            .expect_err("the refused rename reports");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            fs::read(&discovery).expect("the discovery re-reads"),
+            prior,
+            "the prior discovery keeps its bytes"
+        );
+        let torn = |_: &Path, _: &Path| -> io::Result<()> {
+            Err(io::Error::other("injected unsplittable failure"))
+        };
+        assert!(
+            write_discovery_with_rename(&discovery, &claim, Some(torn)).is_err(),
+            "a non-permission refusal still reports"
+        );
+        assert_eq!(
+            fs::read(&discovery).expect("the discovery re-reads"),
+            prior,
+            "and still preserves"
+        );
+        for entry in fs::read_dir(discovery.parent().expect("a parent")).expect("the dir reads") {
+            let entry = entry.expect("a readable entry");
+            assert!(
+                !entry.file_name().to_string_lossy().starts_with(&format!(
+                    ".{}",
+                    discovery.file_name().expect("a name").to_string_lossy()
+                )),
+                "no temp litter: {}",
+                entry.file_name().to_string_lossy()
+            );
+        }
+    }
+
+    /// G1/N7: the acquire sweeps this writer's own stale publish temps —
+    /// and nothing else.
+    #[test]
+    fn g1_acquire_sweeps_only_its_own_stale_temps() {
+        let dir = TempDirectory::new("aw1-g1-sweep");
+        let project = dir.path("edit.kinewright");
+        fs::write(&project, b"{}").expect("the project writes");
+        let recovery = recovery_dir(&dir);
+        let discovery = discovery_path_for_project(Some(&project)).expect("a discovery derives");
+        let parent = discovery.parent().expect("a parent");
+        let name = discovery
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy()
+            .into_owned();
+        let stale = parent.join(format!(".{name}.12345.7.tmp"));
+        fs::write(&stale, b"stale temp").expect("the stale temp plants");
+        let stranger = parent.join(".something-else.tmp");
+        fs::write(&stranger, b"not ours").expect("the stranger plants");
+        let acquired = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Headless,
+            "http://127.0.0.1:9/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect("the acquire lands");
+        assert!(!stale.exists(), "our stale temp is swept");
+        assert!(stranger.exists(), "nothing else is touched");
+        acquired.handle.release().expect("the release lands");
     }
 }
