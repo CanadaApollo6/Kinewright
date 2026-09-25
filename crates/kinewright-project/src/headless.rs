@@ -1,6 +1,8 @@
 //! Headless save orchestration (AW1 §2): serialize → sidecar flush →
-//! project bytes → journal retire. The caller gates newer-format overwrite
-//! first, as the app's save prologue does.
+//! project bytes. No journal step: headless owns no journals, and only a
+//! session that replayed recovery data may retire one (AF3) — an
+//! unreplayed pending journal always survives a headless save. The caller
+//! gates newer-format overwrite first, as the app's save prologue does.
 
 use std::path::Path;
 
@@ -27,8 +29,10 @@ pub struct HeadlessSaveReport {
 
 /// Save a document headless (joining flush on every save, R6). Refuses
 /// fail-closed for an unloaded session. `lock` is the held project lock,
-/// verified before any write (G9); `None` while no lock is held
-/// (transitional until S4 threads the acquire through).
+/// verified before any write (G9) — including a save to a fresh path (a
+/// save-as/first-save transfer): a journal for an identity is created or
+/// renamed only while holding that identity's lock (G10). `None` while no
+/// lock is held (transitional until S4 threads the acquire through).
 /// # Errors
 /// `SessionNotLoaded`, `Serialize`, `Write`, or `LockLost`.
 #[allow(clippy::too_many_arguments)]

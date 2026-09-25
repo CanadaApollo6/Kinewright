@@ -869,11 +869,12 @@ mod tests {
         Rational, Track, apply_batch,
     };
     use kinewright_media::{BuiltinLook, LutAssetImport, test_support::TempDirectory};
+    #[cfg(unix)]
+    use kinewright_project::write_file_atomic;
     use kinewright_project::{
         ProjectFile, build_sidecar_bytes, can_overwrite_save, canonical_session_key,
         derive_lut_store, digest_bytes, load_sidecar, serialize_project_document,
-        sidecar_matches_project, sidecar_path_for_project, write_file_atomic,
-        write_project_document,
+        sidecar_matches_project, sidecar_path_for_project, write_project_document,
     };
 
     /// A media backend that does nothing, so the real `AgentThread` seam can

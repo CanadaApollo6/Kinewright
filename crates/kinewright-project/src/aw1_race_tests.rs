@@ -1718,3 +1718,101 @@ fn own_host_spelling_variants_reclaim() {
         other => panic!("an FQDN still refuses, got {other:?}"),
     }
 }
+
+// ───────────────────────── G10: journal-writer rule ─────────────────────────
+
+/// AF3 nesting rule, release half: `release` removes the discovery while
+/// still holding the flock — a successor may create journals for the
+/// identity only after the unlock. A child paused between the removal and
+/// the unlock still excludes, ownerless (the discovery is already gone);
+/// once it resumes, the release completes and the next claim owns clean.
+#[test]
+fn guard_release_removes_discovery_before_the_unlock() {
+    let fx = fixture("race-release-window");
+    let signals = fx.dir.path("owner");
+    let mut owner = spawn(
+        "hold",
+        &fx.project,
+        &fx.recovery,
+        &signals,
+        Opts {
+            hook: Some("release_after_remove_before_unlock"),
+            ..Opts::default()
+        },
+    );
+    wait_for(&signals.join("owned"));
+    let discovery = discovery_path_for_project(Some(&fx.project)).unwrap();
+    assert!(discovery.exists(), "the owner published");
+    fs::write(signals.join("release"), "").unwrap();
+    wait_for(&signals.join("paused"));
+    assert!(
+        !discovery.exists(),
+        "the discovery is gone while the flock is still held"
+    );
+    let probe = claim(&fx.project, &fx.recovery, "http://probe/mid-release");
+    assert!(
+        matches!(probe, Err(LockfileError::Contention { owner: None, .. })),
+        "mid-release still excludes, ownerless: {probe:?}"
+    );
+    fs::write(signals.join("resume"), "").unwrap();
+    wait_for(&signals.join("exited"));
+    assert!(owner.0.wait().unwrap().success(), "clean release exits 0");
+    let next = claim(&fx.project, &fx.recovery, "http://probe/after")
+        .expect("after the unlock the next claim owns");
+    next.handle.release().unwrap();
+}
+
+/// AF3 nesting rule, transfer half: a first save at a fresh path (a
+/// save-as/second-identity transfer) under a stale handle refuses
+/// `LockLost` like any other save — no project, no sidecar, no journal —
+/// because a journal for an identity is created only under its lock.
+#[cfg(unix)]
+#[test]
+fn guard_save_as_transfer_refuses_on_a_lost_lock() {
+    let fx = fixture("race-lost-transfer");
+    let lock = lockfile_path_for_project(Some(&fx.project)).unwrap();
+    let a = claim(&fx.project, &fx.recovery, "http://a").expect("A claims");
+    fs::remove_file(&lock).unwrap(); // The hand delete.
+    let b = claim(&fx.project, &fx.recovery, "http://b").expect("B claims the re-created object");
+    let log = std::sync::Arc::new(std::sync::RwLock::new(
+        kinewright_core::IncidentLog::with_start(
+            std::time::Instant::now(),
+            Some(std::time::SystemTime::now()),
+        ),
+    ));
+    let mut session = SidecarSession::load(
+        &SidecarMode::Load {
+            project_digest: String::new(),
+        },
+        Some(&fx.project),
+        log,
+        kinewright_core::TimelineRevision::default(),
+        None,
+        None,
+    )
+    .session;
+    let fresh = fx.dir.path("save-as.kinewright");
+    let saved = save_headless(
+        &kinewright_core::Document::default(),
+        &fresh,
+        None,
+        &mut session,
+        "",
+        kinewright_core::TimelineRevision::default(),
+        &fx.recovery,
+        Some(&a.handle),
+    );
+    assert!(
+        matches!(saved, Err(ProjectSaveError::LockLost { .. })),
+        "a save-as transfer under a stale handle refuses LockLost"
+    );
+    assert!(!fresh.exists(), "no project lands at the fresh path");
+    let sidecar = crate::sidecar_path_for_project(Some(&fresh)).unwrap();
+    assert!(!sidecar.exists(), "no sidecar lands at the fresh stem");
+    let recovery_entries: Vec<_> = fs::read_dir(&fx.recovery).unwrap().collect();
+    assert!(
+        recovery_entries.is_empty(),
+        "no journal is created without the lock"
+    );
+    b.handle.release().unwrap();
+}

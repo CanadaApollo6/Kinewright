@@ -61,8 +61,9 @@ and every rule owns at least one test.
 ## 0.1 Implementation errata (S1 fix round)
 
 Review-1 (B1–B7, S1–S2, N1) and review-2 (L1–L4) findings against S1,
-ruled by the lead (F1–F8) and implemented on `aw1/impl`. Items AF1–AF7
-amend the sections cited; S2-D1 is a named deferral, not a change.
+ruled by the lead (F1–F8) and implemented on `aw1/impl`. Items AF1–AF8
+amend the sections cited; S2-D1 and S5-OBL are named deferrals, not
+changes.
 
 - AF1 → §5: the single lockfile is split. `<project>.lock` is a lock
   OBJECT (created if absent, never unlinked, contents unused); liveness
@@ -127,7 +128,9 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
   at 1 MiB of header per alias candidate (over-limit headers are ignored
   as unverifiable); name-matched journals refuse without any header read;
   non-regular entries are skipped; only a read error on a regular file
-  fails closed.)
+  fails closed. G10, journal-writer rule: a journal for an identity is
+  created or renamed only while holding that identity's lock, including
+  Save-As and first-save transitions.)
 - AF4 → §2: headless save shares the app's H12/J2/J3 transaction
   machinery (`SidecarRollback` in `kinewright-project`): snapshot and
   restore the destination sidecar and both generation baselines on
@@ -167,6 +170,23 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
   behaviour, kept deliberately. A changed project save pairs (AF6); a
   first touch of a foreign stem still overwrites it when the log is
   non-empty.
+- AF8 → §2 (fix round 2, G12: byte identity): AW1 sidecars are
+  byte-identical to main's writer except where a ruled behavior differs
+  from what main (or C) wrote. Exact cases from R2's byte table
+  (pre-fix2 snapshot): (1) the C/app buggy second save (stale `e063…`
+  vs main's paired `cbb2…`) — H matches main, not C (F1 repair); (2) an
+  empty first touch of an occupied stem, where pre-G3 H preserved the
+  foreign stem (`e063…`) and main overwrote with a pair (`4b75…`) —
+  post-G3 the stem pairs as main's does, and the foreign history
+  survives in a `.bak` main never wrote; (3) headless re-saving an
+  occupied stem differed from app (`e063…` vs `a5dd…`) — R2 B1, now
+  fixed (headless pairs like the app). Everything else in the table is
+  byte-identical (lengths, R1/M13/digest stability).
+- S5-OBL (gate obligation, not fixed): when S5 wires the GUI lock, port
+  `defect_journal_appearing_after_the_scan_is_missed` to the GUI journal
+  path — a journal appearing after the scan must be impossible once all
+  writers hold the lock. The reproducer stays ignored in the tree until
+  then.
 
 ## 1. Goal and non-goals
 
@@ -365,16 +385,25 @@ see the secret.
 (TCP connect + authed `initialize`) → proxy every MCP call over
 loopback with the bearer token (the already-enabled
 `transport-streamable-http-client-reqwest` feature), forwarding the
-session root set per request (§9). No live owner → own the lock
+session root set per request (§9). A proxy candidate with an absent
+`endpoint` is a lock-check attempt target, not a proxy target: on
+`endpoint: None` the startup sequence attempts the lock itself rather
+than exiting 4. No live owner → own the lock
 (`mode: "headless"`, fresh token), BIND its own authenticated endpoint
 (B4 — Desktop + Code proxy to the headless owner instead of double
-writing), and serve in-process against a local `Core`.
+writing), and serve in-process against a local `Core`. The lock-check
+answers exactly one question — "is this identity live?" — never a
+four-valued shape; a `Proxy` outcome is not a degraded approval.
 
 Reclaim/takeover: only when the lockfile is gone or re-owned
 (different owner identity), with backoff (3 attempts, 250 ms apart);
 a held flock is never stolen. A flock-free lockfile means the owner
 died without cleanup → reclaim with a typed JSON warning on stderr
 (the AW3 decision log consumes this shape) and `reclaimed_from` set.
+(G11, hostname rule: two spellings name the same machine iff they agree
+case-insensitively after ignoring one trailing dot, so `HOST` and
+`host.` match; an unknown or unreadable local hostname is never a
+live-match.)
 Takeover first checks `journal_file_name` for a pending journal →
 refuse `pending_recovery` naming GUI restore (S7); else reload
 last-saved bytes, announce `base_revision_reset`, invalidate prepared

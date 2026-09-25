@@ -26,8 +26,10 @@ pub const LOCKFILE_SUFFIX: &str = "kinewright.lock";
 /// The lockfile format version this build writes.
 pub const LOCKFILE_FORMAT_VERSION: u32 = 1;
 
-/// Acquire attempts before contention (AW1 §5: 3 × 250 ms). Retries cover a
-/// dying flock and the Windows delete-pending window — never a steal.
+/// Acquire attempts before contention (AW1 §5: 3 × 250 ms). Retries only
+/// re-probe after a racing local contender: flock release is immediate,
+/// so a dying owner never needs a wait — spurious contention comes only
+/// from two contenders racing one try (one verdict each). Never a steal.
 pub const LOCK_ACQUIRE_ATTEMPTS: u32 = 3;
 
 /// The delay between acquire attempts (AW1 §5).
@@ -149,6 +151,10 @@ pub enum LockfileError {
     /// The lockfile exists and its flock is held. `owner` is the holding
     /// triple when its claim parses (the full claim overflows
     /// `result_large_err`; the refusal only names the triple).
+    /// Best-effort: an unreadable discovery contends ownerless, and a
+    /// parsed triple is still only an unauthenticated advertisement —
+    /// S3's proxy must keep §5's authenticated `initialize` liveness
+    /// check before trusting an endpoint.
     Contention {
         path: PathBuf,
         owner: Option<ReclaimedOwner>,
@@ -285,7 +291,10 @@ impl LockfileHandle {
     /// The discovery is removed only if it still names this handle (pid,
     /// claim second, endpoint — G9); otherwise it is left alone and the
     /// skip is logged — another owner may have published after an
-    /// external unlink.
+    /// external unlink. G10: release ends this handle's writer right — a
+    /// journal for the identity may be created or renamed only under its
+    /// lock, so the removal lands under the held flock and any later
+    /// journal write must re-acquire first.
     /// # Errors
     /// Returns the removal IO error, if any.
     pub fn release(self) -> io::Result<()> {
