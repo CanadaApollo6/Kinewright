@@ -805,7 +805,10 @@ fn kernel_gamma_domain_refusals() {
 #[test]
 fn rendering_refuses_hidden_intermediate_overflow() {
     // R1 B3 under G1: Y/P and U overflows needed out-of-domain parameters,
-    // so they now refuse by domain (f32 and f64).
+    // so they now refuse by domain (f32 and f64). F2 exception: the
+    // compressor's per-channel ratio may evaluate to +∞ (never NaN); it is
+    // non-binding for t ≤ 1 and skipped, not refused (see the two
+    // `compressor_skips_*`/`f64_true_overflowing_*` tests).
     assert!(matches!(
         display_to_scene([3e38, 3e38, 3e38], 1e-37, 1.2),
         Err(Cc8KernelError::OutOfDomain { .. })
@@ -854,10 +857,12 @@ fn rendering_refuses_hidden_intermediate_overflow() {
 #[test]
 fn inverse_denominator_underflow_refuses_in_domain() {
     // R2 S1/N06 under G1: R2's P=1e30/1e200 + γ=0.5 denom overflows are
-    // out of domain (overflow needs P < 1 or γ < 1 energies — unreachable
-    // with P ≥ 1, γ ≥ 1, so the finite-denom guard was deleted as
-    // provably unreachable). Reachable in-domain is underflow to a zero
-    // denominator, which still refuses NonFiniteResult, both precisions.
+    // out of domain. In domain (finite Y ≥ 0, a = (γ−1)/γ ∈ [0, 2/3]) the
+    // denominator D = P·(Y/P)^a ≤ max(P, (P·Y²)^(1/3)) — the P branch for
+    // Y < P — < 4.9e27 f32 / 1.5e207 f64, so the finite-denom guard was
+    // deleted as provably unreachable. Reachable in-domain is underflow to
+    // a zero denominator, which still refuses NonFiniteResult, both
+    // precisions.
     assert!(matches!(
         display_to_scene([1.0, 1.0, 1.0], 1e30, 0.5),
         Err(Cc8KernelError::OutOfDomain { .. })
@@ -901,6 +906,23 @@ fn compressor_skips_inactive_infinite_ratio() {
     assert!(!got64.y_clamped);
     assert!(!got64.compressed);
     assert_close("ratio-skip red f64", got64.value[0], 1e-38, 1e-50);
+}
+
+#[test]
+fn f64_true_overflowing_ratio_stays_correct() {
+    // Verify nit (shipped from the verifier's probe): the f64 test above
+    // uses 1e-38, whose ratio is FINITE in f64. 1e-310 (subnormal) makes
+    // (100 − Y)/(x − Y) overflow to +∞ in f64, exercising the actual skip
+    // branch: finite-correct, unflagged, never refused.
+    let x = 1e-310f64;
+    let y = 0.2126 * x;
+    assert!(((100.0 - y) / (x - y)).is_infinite());
+    let got =
+        reference::gamut_compress([x, 0.0, 0.0], CompressDest::Sdr { target_peak: 100.0 }).unwrap();
+    assert!(!got.compressed && !got.y_clamped);
+    assert_close("f64 +inf skip red", got.value[0], x, 1e-320);
+    assert_close("f64 +inf skip green", got.value[1], 0.0, 1e-320);
+    assert_close("f64 +inf skip blue", got.value[2], 0.0, 1e-320);
 }
 
 // ---------------------------------------------------------------------------
@@ -1970,7 +1992,7 @@ fn pb2_working_domain_repeated_chain() {
 #[test]
 fn pb3_display_absolute() {
     // Production f32 chain through one f16 working store vs exact display:
-    // white ±10% ≤ 1.0 nit, peak ≤ max(2.0, 0.1% × P) (CE3), sub-1 ≤ 0.05.
+    // white ±10% ≤ 1.0 nit, peak ≤ max(2.0, 0.2% × P) (CE3, CE5), sub-1 ≤ 0.05.
     for white in [100.0, 203.0, 400.0] {
         for peak in [400.0, 1000.0, 2000.0, 4000.0, 10_000.0] {
             let g = hlg_gamma(as_f32(peak)).unwrap();
