@@ -695,13 +695,17 @@ fn eetf_anchors_narrow_span() {
         (10.0, 9.999_999_999_999_952, 10.0),
         (100.0, 69.454_403_035_658_91, 69.454_403),
         (203.0, 88.243_640_538_647_8, 88.243_641),
-        (1000.0, 100.000_000_000_005_24, 100.0),
     ] {
         let out = reference::eetf_to_target(l, 1000.0, 100.0).unwrap();
         assert!(!out.clipped, "L={l} must not flag");
         assert_close("eetf narrow", out.value, expected, 1e-9);
         assert_close("eetf narrow App N", out.value, appn, 1e-6);
     }
+    // L == Cs maps exactly to Ct, unflagged (nit-domain endpoint rule).
+    let end = reference::eetf_to_target(1000.0, 1000.0, 100.0).unwrap();
+    assert!(!end.clipped);
+    assert_eq!(end.value.to_bits(), 100.0f64.to_bits());
+    assert_close("eetf narrow App N endpoint", end.value, 100.0, 1e-6);
     // Exact 0→0, bit-identical, both precisions.
     assert_eq!(
         reference::eetf_to_target(0.0, 1000.0, 100.0)
@@ -729,13 +733,17 @@ fn eetf_anchors_wide_span_and_identity() {
         (203.0, 63.306_209_002_170_73, 63.306_209),
         (1000.0, 91.070_396_016_548_29, 91.070_396),
         (4000.0, 99.437_355_791_646_78, 99.437_356),
-        (10_000.0, 100.000_000_000_005_24, 100.0),
     ] {
         let out = reference::eetf_to_target(l, 10_000.0, 100.0).unwrap();
         assert!(!out.clipped, "L={l} must not flag");
         assert_close("eetf wide", out.value, expected, 1e-9);
         assert_close("eetf wide App N", out.value, appn, 1e-6);
     }
+    // L == Cs maps exactly to Ct, unflagged (nit-domain endpoint rule).
+    let end = reference::eetf_to_target(10_000.0, 10_000.0, 100.0).unwrap();
+    assert!(!end.clipped);
+    assert_eq!(end.value.to_bits(), 100.0f64.to_bits());
+    assert_close("eetf wide App N endpoint", end.value, 100.0, 1e-6);
     // Ct ≥ Cs returns L bit-identically: Ct > Cs and Ct == Cs.
     let id = reference::eetf_to_target(203.0, 100.0, 1000.0).unwrap();
     assert!(!id.clipped);
@@ -850,6 +858,83 @@ fn eetf_refusals() {
             Err(Cc8KernelError::NonFiniteInput { .. })
         ));
     }
+}
+
+#[test]
+fn eetf_nit_domain_clip_regressions() {
+    // R1 B1: f32 PQ(7606) == PQ(7605), but 10000 > 7606 must clip + flag.
+    let out = eetf_to_target(10_000.0, 7606.0, 7605.0).unwrap();
+    assert!(out.clipped, "L=10000 past Cs=7606 must flag");
+    assert_eq!(out.value.to_bits(), 7605.0f32.to_bits());
+    let out64 = reference::eetf_to_target(10_000.0, 7606.0, 7605.0).unwrap();
+    assert!(out64.clipped);
+    assert_eq!(out64.value.to_bits(), 7605.0f64.to_bits());
+    // R1 B1 / R2 B1: next-representable past Cs flags, both precisions.
+    let just_past = 1000f32.next_up();
+    debug_assert!(just_past > 1000.0);
+    let edge = eetf_to_target(just_past, 1000.0, 100.0).unwrap();
+    assert!(edge.clipped, "L=1000.next_up past Cs must flag");
+    assert_eq!(edge.value.to_bits(), 100.0f32.to_bits());
+    let edge64 = reference::eetf_to_target(1000f64.next_up(), 1000.0, 100.0).unwrap();
+    assert!(edge64.clipped);
+    assert_eq!(edge64.value.to_bits(), 100.0f64.to_bits());
+    // R2 B1: 400.0001 > 400 flags with value Ct.
+    let b1 = eetf_to_target(400.0001, 400.0, 100.0).unwrap();
+    assert!(b1.clipped, "L=400.0001 past Cs=400 must flag");
+    assert_eq!(b1.value.to_bits(), 100.0f32.to_bits());
+    let b1_64 = reference::eetf_to_target(400.0001, 400.0, 100.0).unwrap();
+    assert!(b1_64.clipped);
+    assert_eq!(b1_64.value.to_bits(), 100.0f64.to_bits());
+    // R2 B2: distinct near-equal ceilings must not disable clipping.
+    let ct = f32::from_bits(400f32.to_bits() - 4); // 399.9998779296875
+    let b2 = eetf_to_target(10_000.0, 400.0, ct).unwrap();
+    assert!(b2.clipped, "L=10000 past Cs=400 must flag");
+    assert_eq!(b2.value.to_bits(), ct.to_bits());
+    let ct64 = 399.999_877_929_687_5f64;
+    let b2_64 = reference::eetf_to_target(10_000.0, 400.0, ct64).unwrap();
+    assert!(b2_64.clipped);
+    assert_eq!(b2_64.value.to_bits(), ct64.to_bits());
+    // R2 S2, strict: L == Cs with rounded-PQ ceilings maps exactly to Ct.
+    let end = eetf_to_target(400.0, 400.0, ct).unwrap();
+    assert!(!end.clipped);
+    assert_eq!(end.value.to_bits(), ct.to_bits());
+    let end64 = reference::eetf_to_target(400.0, 400.0, ct64).unwrap();
+    assert!(!end64.clipped);
+    assert_eq!(end64.value.to_bits(), ct64.to_bits());
+}
+
+#[test]
+fn eetf_adjacent_integer_ceiling_scan() {
+    // Exhaustive Cs = 401..10000, Ct = Cs−1: L = Cs+1 flags to Ct,
+    // L = Cs maps exactly to Ct unflagged. Both precisions.
+    for cs in 401..=10_000 {
+        let src = f64::from(cs);
+        let tgt = f64::from(cs - 1);
+        let over = eetf_to_target(as_f32(src) + 1.0, as_f32(src), as_f32(tgt)).unwrap();
+        assert!(over.clipped, "Cs={cs}: L=Cs+1 must flag");
+        assert_eq!(over.value.to_bits(), as_f32(tgt).to_bits(), "Cs={cs}");
+        let at = eetf_to_target(as_f32(src), as_f32(src), as_f32(tgt)).unwrap();
+        assert!(!at.clipped, "Cs={cs}: L=Cs must not flag");
+        assert_eq!(at.value.to_bits(), as_f32(tgt).to_bits(), "Cs={cs}");
+        let over64 = reference::eetf_to_target(src + 1.0, src, tgt).unwrap();
+        assert!(over64.clipped, "f64 Cs={cs}: L=Cs+1 must flag");
+        assert_eq!(over64.value.to_bits(), tgt.to_bits(), "f64 Cs={cs}");
+        let at64 = reference::eetf_to_target(src, src, tgt).unwrap();
+        assert!(!at64.clipped, "f64 Cs={cs}: L=Cs must not flag");
+        assert_eq!(at64.value.to_bits(), tgt.to_bits(), "f64 Cs={cs}");
+    }
+}
+
+#[test]
+fn exact_identity_small_positive_ceilings() {
+    // R2 S1/R13: equal smallest-subnormal Cs = Ct takes the exact-identity
+    // rule (value bit-identical, unflagged), both precisions.
+    let out = eetf_to_target(203.0, f32::from_bits(1), f32::from_bits(1)).unwrap();
+    assert!(!out.clipped);
+    assert_eq!(out.value.to_bits(), 203.0f32.to_bits());
+    let out64 = reference::eetf_to_target(203.0, f64::from_bits(1), f64::from_bits(1)).unwrap();
+    assert!(!out64.clipped);
+    assert_eq!(out64.value.to_bits(), 203.0f64.to_bits());
 }
 
 // ---------------------------------------------------------------------------

@@ -367,12 +367,41 @@ pub struct EetfOutput<T> {
     pub clipped: bool,
 }
 
-/// EETF to target peak (§6). Exact 0→0; L > Cs clips to Ct with flag set.
+/// §6 Hermite core in f64, shared by both precisions (the f32 entry widens:
+/// near-equal ceilings round equal in f32 PQ). `None` = degenerate source
+/// span or knee — the caller saturates to Ct and never divides by ≤ 0.
+/// `q0` IS `PQ_OETF(0)` (§6 P2).
+// Single-letter bindings below are the §6 symbols (x, m, H) verbatim.
+#[allow(clippy::many_single_char_names)]
+fn eetf_hermite_64(l: f64, cs: f64, ct: f64) -> Option<f64> {
+    let q0 = reference::pq_oetf_unchecked(0.0);
+    let span = reference::pq_oetf_unchecked(cs) - q0;
+    if !span.is_finite() || span <= 0.0 {
+        return None;
+    }
+    let x = (reference::pq_oetf_unchecked(l) - q0) / span;
+    let m = (reference::pq_oetf_unchecked(ct) - q0) / span;
+    let knee = 1.5 * m - 0.5;
+    let dk = 1.0 - knee;
+    let h = if x < knee {
+        x
+    } else if !dk.is_finite() || dk <= 0.0 {
+        return None; // m ≥ 1 by rounding: at/above knee saturates to Ct
+    } else {
+        let t = (x - knee) / dk;
+        let t2 = t * t;
+        let t3 = t2 * t;
+        (2.0 * t3 - 3.0 * t2 + 1.0) * knee + (t3 - 2.0 * t2 + t) * dk + (-2.0 * t3 + 3.0 * t2) * m
+    };
+    reference::pq_eotf_unchecked(q0 + span * h)
+}
+
+/// EETF to target peak (§6). Identity/clip/endpoint decide in nits before
+/// any PQ arithmetic: exact 0→0; Ct ≥ Cs identity; L > Cs clips with flag;
+/// L == Cs maps exactly to Ct, unflagged.
 ///
 /// # Errors
 /// Non-finite args → `NonFiniteInput`; Cs/Ct ≤ 0 → `OutOfDomain`.
-// Single-letter bindings below are the §6 symbols (x, m, ks, H, T) verbatim.
-#[allow(clippy::many_single_char_names)]
 pub fn eetf_to_target(
     nits: f32,
     source_ceiling_nits: f32,
@@ -400,39 +429,35 @@ pub fn eetf_to_target(
             clipped: false,
         }); // identity
     }
-    let q0 = pq_oetf_unchecked(0.0); // q0 IS PQ_OETF(0) (§6 P2)
-    let span = pq_oetf_unchecked(cs) - q0;
-    let x = (pq_oetf_unchecked(l) - q0) / span;
-    let m = (pq_oetf_unchecked(ct) - q0) / span;
-    if m >= 1.0 {
-        return Ok(EetfOutput {
-            value: l,
-            clipped: false,
-        }); // float-identity
-    }
-    if x > 1.0 {
+    if l > cs {
         return Ok(EetfOutput {
             value: ct,
             clipped: true,
         }); // past Cs
     }
-    let knee = 1.5 * m - 0.5;
-    let h = if x < knee {
-        x
-    } else {
-        let t = (x - knee) / (1.0 - knee);
-        let t2 = t * t;
-        let t3 = t2 * t;
-        (2.0 * t3 - 3.0 * t2 + 1.0) * knee
-            + (t3 - 2.0 * t2 + t) * (1.0 - knee)
-            + (-2.0 * t3 + 3.0 * t2) * m
-    };
-    match pq_eotf_unchecked(q0 + span * h) {
-        Some(v) => Ok(EetfOutput {
-            value: finite_result(FUNCTION, v)?,
+    // Exact endpoint (bit equality is the spec): source maps to target.
+    #[allow(clippy::float_cmp)]
+    if l == cs {
+        return Ok(EetfOutput {
+            value: ct,
+            clipped: false,
+        }); // source→target endpoint
+    }
+    // L < Cs: §6 Hermite via the f64 core (local widen); degenerate spans
+    // saturate to Ct rather than dividing.
+    match eetf_hermite_64(f64::from(l), f64::from(cs), f64::from(ct)) {
+        Some(v) => {
+            #[allow(clippy::cast_possible_truncation)]
+            let narrowed = v as f32;
+            Ok(EetfOutput {
+                value: finite_result(FUNCTION, narrowed)?,
+                clipped: false,
+            })
+        }
+        None => Ok(EetfOutput {
+            value: ct,
             clipped: false,
         }),
-        None => Err(Cc8KernelError::NonFiniteResult { function: FUNCTION }),
     }
 }
 
@@ -659,7 +684,7 @@ pub mod reference {
         finite_result(FUNCTION, pq_oetf_unchecked(nits))
     }
 
-    fn pq_oetf_unchecked(nits: f64) -> f64 {
+    pub(crate) fn pq_oetf_unchecked(nits: f64) -> f64 {
         let y = (nits / PQ_PEAK_NITS_F64).powf(PQ_M1_F64);
         ((PQ_C1_F64 + PQ_C2_F64 * y) / (1.0 + PQ_C3_F64 * y)).powf(PQ_M2_F64)
     }
@@ -683,7 +708,7 @@ pub mod reference {
         }
     }
 
-    fn pq_eotf_unchecked(signal: f64) -> Option<f64> {
+    pub(crate) fn pq_eotf_unchecked(signal: f64) -> Option<f64> {
         let p = signal.powf(1.0 / PQ_M2_F64);
         let denominator = PQ_C2_F64 - PQ_C3_F64 * p;
         if denominator <= 0.0 {
@@ -851,8 +876,6 @@ pub mod reference {
     ///
     /// # Errors
     /// Same as [`super::eetf_to_target`].
-    // Single-letter bindings below are the §6 symbols (x, m, ks, H, T) verbatim.
-    #[allow(clippy::many_single_char_names)]
     pub fn eetf_to_target(
         nits: f64,
         source_ceiling_nits: f64,
@@ -880,39 +903,29 @@ pub mod reference {
                 clipped: false,
             });
         }
-        let q0 = pq_oetf_unchecked(0.0); // q0 IS PQ_OETF(0) (§6 P2)
-        let span = pq_oetf_unchecked(cs) - q0;
-        let x = (pq_oetf_unchecked(l) - q0) / span;
-        let m = (pq_oetf_unchecked(ct) - q0) / span;
-        if m >= 1.0 {
-            return Ok(EetfOutput {
-                value: l,
-                clipped: false,
-            });
-        }
-        if x > 1.0 {
+        if l > cs {
             return Ok(EetfOutput {
                 value: ct,
                 clipped: true,
             });
         }
-        let knee = 1.5 * m - 0.5;
-        let h = if x < knee {
-            x
-        } else {
-            let t = (x - knee) / (1.0 - knee);
-            let t2 = t * t;
-            let t3 = t2 * t;
-            (2.0 * t3 - 3.0 * t2 + 1.0) * knee
-                + (t3 - 2.0 * t2 + t) * (1.0 - knee)
-                + (-2.0 * t3 + 3.0 * t2) * m
-        };
-        match pq_eotf_unchecked(q0 + span * h) {
+        // Exact endpoint (bit equality is the spec): source maps to target.
+        #[allow(clippy::float_cmp)]
+        if l == cs {
+            return Ok(EetfOutput {
+                value: ct,
+                clipped: false,
+            });
+        }
+        match super::eetf_hermite_64(l, cs, ct) {
             Some(v) => Ok(EetfOutput {
                 value: finite_result(FUNCTION, v)?,
                 clipped: false,
             }),
-            None => Err(Cc8KernelError::NonFiniteResult { function: FUNCTION }),
+            None => Ok(EetfOutput {
+                value: ct,
+                clipped: false,
+            }),
         }
     }
 
