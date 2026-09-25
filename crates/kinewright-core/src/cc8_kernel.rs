@@ -186,10 +186,10 @@ fn hlg_inverse_oetf_unchecked(signal: f32) -> f32 {
 /// the boundary at exactly 2000.
 ///
 /// # Errors
-/// Non-finite → `NonFiniteInput`; peak ≤ 0 → `OutOfDomain`.
+/// Non-finite → `NonFiniteInput`; peak outside [1, 100000] → `OutOfDomain`.
 pub fn hlg_gamma(peak_nits: f32) -> Result<f32, Cc8KernelError> {
     const FUNCTION: &str = "hlg_gamma";
-    let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
+    let peak = domain(FUNCTION, "peak out of range", 100_000.0, peak_nits)?;
     finite_result(FUNCTION, hlg_gamma_unchecked(peak))
 }
 
@@ -240,7 +240,7 @@ where
     Ok(value)
 }
 
-/// Require a finite positive scale (white/peak/Ct/γ); else refuse (R35).
+/// Require a finite positive scale (`scene_to_working`'s `s_white`); else refuse.
 fn positive<T>(function: &'static str, reason: &'static str, value: T) -> Result<T, Cc8KernelError>
 where
     T: Copy + Into<f64>,
@@ -255,15 +255,28 @@ where
     Ok(value)
 }
 
+/// Kernel parameter domain (S1): γ ∈ [1, 3], nit params ∈ [1, 100000] (R35).
+fn domain<T>(f: &'static str, why: &'static str, hi: f64, v: T) -> Result<T, Cc8KernelError>
+where
+    T: Copy + Into<f64>,
+{
+    let v = positive(f, why, v)?;
+    let (function, reason) = (f, why);
+    if v.into() < 1.0 || v.into() > hi {
+        return Err(Cc8KernelError::OutOfDomain { function, reason });
+    }
+    Ok(v)
+}
+
 /// Reference-scene white `s_white = (W/P)^(1/γ)` (§2). Working = `scene/s_white`.
 ///
 /// # Errors
-/// Non-finite args → `NonFiniteInput`; W/P/γ ≤ 0 → `OutOfDomain`.
+/// Non-finite args → `NonFiniteInput`; params outside domain → `OutOfDomain`.
 pub fn s_white(white_nits: f32, peak_nits: f32, gamma: f32) -> Result<f32, Cc8KernelError> {
     const FUNCTION: &str = "s_white";
-    let white = positive(FUNCTION, "white must be > 0", white_nits)?;
-    let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
-    let gamma = positive(FUNCTION, "gamma must be > 0", gamma)?;
+    let white = domain(FUNCTION, "white out of range", 100_000.0, white_nits)?;
+    let peak = domain(FUNCTION, "peak out of range", 100_000.0, peak_nits)?;
+    let gamma = domain(FUNCTION, "gamma out of range", 3.0, gamma)?;
     finite_result(FUNCTION, (white / peak).powf(1.0 / gamma))
 }
 
@@ -283,7 +296,7 @@ pub fn scene_to_working(scene: [f32; 3], ref_white: f32) -> Result<[f32; 3], Cc8
 /// `D = F(max(s,0)) + P·min(s,0)`. `Y_s` = 0 → F part exactly 0.
 ///
 /// # Errors
-/// Non-finite args → `NonFiniteInput`; peak/γ ≤ 0 → `OutOfDomain`.
+/// Non-finite args → `NonFiniteInput`; peak/γ outside domain → `OutOfDomain`.
 pub fn scene_to_display(
     scene: [f32; 3],
     peak_nits: f32,
@@ -291,12 +304,11 @@ pub fn scene_to_display(
 ) -> Result<[f32; 3], Cc8KernelError> {
     const FUNCTION: &str = "scene_to_display";
     let scene = finite_input_3(FUNCTION, scene)?;
-    let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
-    let gamma = positive(FUNCTION, "gamma must be > 0", gamma)?;
+    let peak = domain(FUNCTION, "peak out of range", 100_000.0, peak_nits)?;
+    let gamma = domain(FUNCTION, "gamma out of range", 3.0, gamma)?;
     let nonneg = [scene[0].max(0.0), scene[1].max(0.0), scene[2].max(0.0)];
     let luma = BT2020_KR_F32 * nonneg[0] + BT2020_KG_F32 * nonneg[1] + BT2020_KB_F32 * nonneg[2];
-    // Positive luma takes the power path; zero luma is exactly zero (never
-    // feed 0 to a possibly-negative power). Luma of nonnegatives is ≥ 0.
+    // Luma > 0 takes the power path; 0 luma is exactly 0 (never 0^negative).
     finite_result(FUNCTION, luma)?; // Y and the gain checked before use
     let gain = if luma > 0.0 {
         finite_result(FUNCTION, peak * luma.powf(gamma - 1.0))?
@@ -319,7 +331,7 @@ pub fn scene_to_display(
 ///
 /// # Errors
 /// Non-finite args → `NonFiniteInput`;
-/// peak/γ ≤ 0 → `OutOfDomain`.
+/// peak/γ outside domain → `OutOfDomain`.
 pub fn display_to_scene(
     display: [f32; 3],
     peak_nits: f32,
@@ -327,8 +339,8 @@ pub fn display_to_scene(
 ) -> Result<[f32; 3], Cc8KernelError> {
     const FUNCTION: &str = "display_to_scene";
     let display = finite_input_3(FUNCTION, display)?;
-    let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
-    let gamma = positive(FUNCTION, "gamma must be > 0", gamma)?;
+    let peak = domain(FUNCTION, "peak out of range", 100_000.0, peak_nits)?;
+    let gamma = domain(FUNCTION, "gamma out of range", 3.0, gamma)?;
     let nonneg = [
         display[0].max(0.0),
         display[1].max(0.0),
@@ -373,10 +385,8 @@ pub struct EetfOutput<T> {
     pub clipped: bool,
 }
 
-/// §6 Hermite core in f64, shared by both precisions (the f32 entry widens:
-/// near-equal ceilings round equal in f32 PQ). `None` = degenerate source
-/// span or knee — the caller saturates to Ct and never divides by ≤ 0.
-/// `q0` IS `PQ_OETF(0)` (§6 P2).
+/// §6 Hermite core in f64 (f32 widens: near-equal ceilings round equal in
+/// f32 PQ). `None` = degenerate span/knee → caller saturates to Ct.
 // Single-letter bindings below are the §6 symbols (x, m, H) verbatim.
 #[allow(clippy::many_single_char_names)]
 fn eetf_hermite_64(l: f64, cs: f64, ct: f64) -> Option<f64> {
@@ -402,12 +412,10 @@ fn eetf_hermite_64(l: f64, cs: f64, ct: f64) -> Option<f64> {
     reference::pq_eotf_unchecked(q0 + span * h)
 }
 
-/// EETF to target peak (§6). Identity/clip/endpoint decide in nits before
-/// any PQ arithmetic: exact 0→0; Ct ≥ Cs identity; L > Cs clips with flag;
-/// L == Cs maps exactly to Ct, unflagged.
+/// EETF to target peak (§6): 0→0; Ct≥Cs identity; L>Cs clips+flags; L==Cs→Ct.
 ///
 /// # Errors
-/// Non-finite args → `NonFiniteInput`; Cs/Ct ≤ 0 → `OutOfDomain`.
+/// Non-finite args → `NonFiniteInput`; Cs/Ct outside [1, 100000] → `OutOfDomain`.
 pub fn eetf_to_target(
     nits: f32,
     source_ceiling_nits: f32,
@@ -415,8 +423,8 @@ pub fn eetf_to_target(
 ) -> Result<EetfOutput<f32>, Cc8KernelError> {
     const FUNCTION: &str = "eetf_to_target";
     let l = finite_input(FUNCTION, nits)?;
-    let cs = positive(FUNCTION, "source ceiling must be > 0", source_ceiling_nits)?;
-    let ct = positive(FUNCTION, "target peak must be > 0", target_peak_nits)?;
+    let cs = domain(FUNCTION, "Cs out of range", 100_000.0, source_ceiling_nits)?;
+    let ct = domain(FUNCTION, "Ct out of range", 100_000.0, target_peak_nits)?;
     if l < 0.0 {
         return Ok(EetfOutput {
             value: l,
@@ -441,16 +449,14 @@ pub fn eetf_to_target(
             clipped: true,
         }); // past Cs
     }
-    // Exact endpoint (bit equality is the spec): source maps to target.
-    #[allow(clippy::float_cmp)]
+    #[allow(clippy::float_cmp)] // bit equality is the endpoint spec
     if l == cs {
         return Ok(EetfOutput {
             value: ct,
             clipped: false,
         }); // source→target endpoint
     }
-    // L < Cs: §6 Hermite via the f64 core (local widen); degenerate spans
-    // saturate to Ct rather than dividing.
+    // L < Cs: §6 Hermite via the f64 core; degenerate spans saturate to Ct.
     match eetf_hermite_64(f64::from(l), f64::from(cs), f64::from(ct)) {
         Some(v) => {
             #[allow(clippy::cast_possible_truncation)]
@@ -575,7 +581,7 @@ pub struct HlgOutput<T> {
 /// → black, else affine `c′ = Y + t(c−Y)` with destination luma/U.
 ///
 /// # Errors
-/// Non-finite → `NonFiniteInput`; peak/Ct/γ ≤ 0 → `OutOfDomain`.
+/// Non-finite → `NonFiniteInput`; params outside domain → `OutOfDomain`.
 pub fn gamut_compress(
     rgb: [f32; 3],
     dest: CompressDest<f32>,
@@ -584,12 +590,12 @@ pub fn gamut_compress(
     let rgb = finite_input_3(FUNCTION, rgb)?;
     let (kr, kg, kb, ymax, hlg) = match dest {
         CompressDest::Sdr { target_peak } => {
-            let ct = positive(FUNCTION, "target peak must be > 0", target_peak)?;
+            let ct = domain(FUNCTION, "Ct out of range", 100_000.0, target_peak)?;
             (BT709_KR_F32, BT709_KG_F32, BT709_KB_F32, ct, None)
         }
         CompressDest::Hlg { peak, gamma } => {
-            let p = positive(FUNCTION, "peak must be > 0", peak)?;
-            let g = positive(FUNCTION, "gamma must be > 0", gamma)?;
+            let p = domain(FUNCTION, "peak out of range", 100_000.0, peak)?;
+            let g = domain(FUNCTION, "gamma out of range", 3.0, gamma)?;
             (BT2020_KR_F32, BT2020_KG_F32, BT2020_KB_F32, p, Some((p, g)))
         }
     };
@@ -616,9 +622,11 @@ pub fn gamut_compress(
     let mut t = 1.0f32;
     for c in rgb {
         if c < y {
-            t = t.min(y / (y - c));
+            let r = y / (y - c); // +inf constrains nothing: skipped below
+            t = if r.is_finite() { t.min(r) } else { t };
         } else if c > y {
-            t = t.min((upper - y) / (c - y));
+            let r = (upper - y) / (c - y);
+            t = if r.is_finite() { t.min(r) } else { t };
         }
     }
     let value = finite_result_3(
@@ -640,7 +648,7 @@ pub fn gamut_compress(
 /// peak → post-OETF clamp to `[0, 1]` (float residue only).
 ///
 /// # Errors
-/// Non-finite → `NonFiniteInput`; peak/γ ≤ 0 → `OutOfDomain`.
+/// Non-finite → `NonFiniteInput`; peak/γ outside domain → `OutOfDomain`.
 pub fn hlg_output(
     display: [f32; 3],
     target_peak: f32,
@@ -655,7 +663,6 @@ pub fn hlg_output(
         },
     )?;
     let scene = display_to_scene(fit.value, target_peak, gamma)?;
-    // Raw signals checked BEFORE the clamp consumes them (R35).
     let signal = [
         finite_result(FUNCTION, hlg_oetf_unchecked(scene[0]))?.clamp(0.0, 1.0),
         finite_result(FUNCTION, hlg_oetf_unchecked(scene[1]))?.clamp(0.0, 1.0),
@@ -673,7 +680,7 @@ pub mod reference {
         BT709_KB_F64, BT709_KG_F64, BT709_KR_F64, BT2020_KB_F64, BT2020_KG_F64, BT2020_KR_F64,
         Cc8KernelError, CompressDest, EetfOutput, GamutOutput, HLG_A_F64, HLG_B_F64, HLG_C_F64,
         HLG_SCENE_BREAKPOINT_F64, HLG_SIGNAL_BREAKPOINT_F64, HlgOutput, PQ_C1_F64, PQ_C2_F64,
-        PQ_C3_F64, PQ_M1_F64, PQ_M2_F64, PQ_PEAK_NITS_F64, finite_input, finite_input_3,
+        PQ_C3_F64, PQ_M1_F64, PQ_M2_F64, PQ_PEAK_NITS_F64, domain, finite_input, finite_input_3,
         finite_result, finite_result_3, positive,
     };
 
@@ -772,7 +779,7 @@ pub mod reference {
     /// Same as [`super::hlg_gamma`].
     pub fn hlg_gamma(peak_nits: f64) -> Result<f64, Cc8KernelError> {
         const FUNCTION: &str = "reference::hlg_gamma";
-        let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
+        let peak = domain(FUNCTION, "peak out of range", 100_000.0, peak_nits)?;
         finite_result(FUNCTION, hlg_gamma_unchecked(peak))
     }
 
@@ -790,9 +797,9 @@ pub mod reference {
     /// Same as [`super::s_white`].
     pub fn s_white(white_nits: f64, peak_nits: f64, gamma: f64) -> Result<f64, Cc8KernelError> {
         const FUNCTION: &str = "reference::s_white";
-        let white = positive(FUNCTION, "white must be > 0", white_nits)?;
-        let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
-        let gamma = positive(FUNCTION, "gamma must be > 0", gamma)?;
+        let white = domain(FUNCTION, "white out of range", 100_000.0, white_nits)?;
+        let peak = domain(FUNCTION, "peak out of range", 100_000.0, peak_nits)?;
+        let gamma = domain(FUNCTION, "gamma out of range", 3.0, gamma)?;
         finite_result(FUNCTION, (white / peak).powf(1.0 / gamma))
     }
 
@@ -818,8 +825,8 @@ pub mod reference {
     ) -> Result<[f64; 3], Cc8KernelError> {
         const FUNCTION: &str = "reference::scene_to_display";
         let scene = finite_input_3(FUNCTION, scene)?;
-        let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
-        let gamma = positive(FUNCTION, "gamma must be > 0", gamma)?;
+        let peak = domain(FUNCTION, "peak out of range", 100_000.0, peak_nits)?;
+        let gamma = domain(FUNCTION, "gamma out of range", 3.0, gamma)?;
         let nonneg = [scene[0].max(0.0), scene[1].max(0.0), scene[2].max(0.0)];
         let luma =
             BT2020_KR_F64 * nonneg[0] + BT2020_KG_F64 * nonneg[1] + BT2020_KB_F64 * nonneg[2];
@@ -850,8 +857,8 @@ pub mod reference {
     ) -> Result<[f64; 3], Cc8KernelError> {
         const FUNCTION: &str = "reference::display_to_scene";
         let display = finite_input_3(FUNCTION, display)?;
-        let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
-        let gamma = positive(FUNCTION, "gamma must be > 0", gamma)?;
+        let peak = domain(FUNCTION, "peak out of range", 100_000.0, peak_nits)?;
+        let gamma = domain(FUNCTION, "gamma out of range", 3.0, gamma)?;
         let nonneg = [
             display[0].max(0.0),
             display[1].max(0.0),
@@ -898,8 +905,8 @@ pub mod reference {
     ) -> Result<EetfOutput<f64>, Cc8KernelError> {
         const FUNCTION: &str = "reference::eetf_to_target";
         let l = finite_input(FUNCTION, nits)?;
-        let cs = positive(FUNCTION, "source ceiling must be > 0", source_ceiling_nits)?;
-        let ct = positive(FUNCTION, "target peak must be > 0", target_peak_nits)?;
+        let cs = domain(FUNCTION, "Cs out of range", 100_000.0, source_ceiling_nits)?;
+        let ct = domain(FUNCTION, "Ct out of range", 100_000.0, target_peak_nits)?;
         if l < 0.0 {
             return Ok(EetfOutput {
                 value: l,
@@ -924,8 +931,7 @@ pub mod reference {
                 clipped: true,
             });
         }
-        // Exact endpoint (bit equality is the spec): source maps to target.
-        #[allow(clippy::float_cmp)]
+        #[allow(clippy::float_cmp)] // bit equality is the endpoint spec
         if l == cs {
             return Ok(EetfOutput {
                 value: ct,
@@ -955,12 +961,12 @@ pub mod reference {
         let rgb = finite_input_3(FUNCTION, rgb)?;
         let (kr, kg, kb, ymax, hlg) = match dest {
             CompressDest::Sdr { target_peak } => {
-                let ct = positive(FUNCTION, "target peak must be > 0", target_peak)?;
+                let ct = domain(FUNCTION, "Ct out of range", 100_000.0, target_peak)?;
                 (BT709_KR_F64, BT709_KG_F64, BT709_KB_F64, ct, None)
             }
             CompressDest::Hlg { peak, gamma } => {
-                let p = positive(FUNCTION, "peak must be > 0", peak)?;
-                let g = positive(FUNCTION, "gamma must be > 0", gamma)?;
+                let p = domain(FUNCTION, "peak out of range", 100_000.0, peak)?;
+                let g = domain(FUNCTION, "gamma out of range", 3.0, gamma)?;
                 (BT2020_KR_F64, BT2020_KG_F64, BT2020_KB_F64, p, Some((p, g)))
             }
         };
@@ -987,9 +993,11 @@ pub mod reference {
         let mut t = 1.0f64;
         for c in rgb {
             if c < y {
-                t = t.min(y / (y - c));
+                let r = y / (y - c); // +inf constrains nothing: skipped below
+                t = if r.is_finite() { t.min(r) } else { t };
             } else if c > y {
-                t = t.min((upper - y) / (c - y));
+                let r = (upper - y) / (c - y);
+                t = if r.is_finite() { t.min(r) } else { t };
             }
         }
         let value = finite_result_3(
@@ -1024,7 +1032,6 @@ pub mod reference {
             },
         )?;
         let scene = display_to_scene(fit.value, target_peak, gamma)?;
-        // Raw signals checked BEFORE the clamp consumes them (R35).
         let signal = [
             finite_result(FUNCTION, hlg_oetf_unchecked(scene[0]))?.clamp(0.0, 1.0),
             finite_result(FUNCTION, hlg_oetf_unchecked(scene[1]))?.clamp(0.0, 1.0),

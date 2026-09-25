@@ -680,38 +680,155 @@ fn rendering_refusals() {
     ));
     assert!(matches!(
         s_white(3e38, 1e-37, 1.0),
-        Err(Cc8KernelError::NonFiniteResult { .. })
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+}
+
+#[test]
+fn kernel_nits_domain_refusals() {
+    // G1: nit params (P, W, Cs, Ct, SDR peak) ∈ [1, 100000] (R35). Edges
+    // accepted, just-outside refused, both precisions.
+    for peak in [1.0f32, 100_000.0] {
+        assert!(hlg_gamma(peak).is_ok());
+    }
+    for peak in [0.999f32, 100_001.0] {
+        assert!(matches!(
+            hlg_gamma(peak),
+            Err(Cc8KernelError::OutOfDomain { .. })
+        ));
+    }
+    assert!(reference::hlg_gamma(1.0).is_ok());
+    assert!(matches!(
+        reference::hlg_gamma(100_001.0),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    // Peak/white/ceiling edges; sub-domain and over-domain refuse.
+    assert!(s_white(1.0, 100_000.0, 1.0).is_ok());
+    assert!(s_white(100_000.0, 1.0, 3.0).is_ok());
+    assert!(matches!(
+        s_white(0.999, 1000.0, 1.2),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        reference::s_white(100.0, 100_001.0, 1.2),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(eetf_to_target(50.0, 1.0, 1.0).is_ok());
+    assert!(matches!(
+        eetf_to_target(50.0, 0.999, 1.0),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        reference::eetf_to_target(50.0, 1000.0, 100_001.0),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(gamut_compress([50.0; 3], CompressDest::Sdr { target_peak: 1.0 }).is_ok());
+    assert!(matches!(
+        gamut_compress(
+            [50.0; 3],
+            CompressDest::Sdr {
+                target_peak: 200_000.0
+            }
+        ),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        reference::gamut_compress([50.0; 3], CompressDest::Sdr { target_peak: 0.5 }),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    // `scene_to_working`'s scale is scene-linear, not nits: small stays legal.
+    assert!(scene_to_working([1.0, 1.0, 1.0], 0.5).is_ok());
+}
+
+#[test]
+fn kernel_gamma_domain_refusals() {
+    // G1: γ ∈ [1, 3] on every γ consumer (R35). Edges accepted,
+    // just-outside and R1's subnormal-γ exponents refused, both precisions.
+    for g in [1.0f32, 3.0] {
+        assert!(s_white(100.0, 1000.0, g).is_ok());
+        assert!(scene_to_display([0.5, 0.5, 0.5], 1000.0, g).is_ok());
+        assert!(display_to_scene([100.0, 100.0, 100.0], 1000.0, g).is_ok());
+        assert!(hlg_output([100.0, 100.0, 100.0], 1000.0, g).is_ok());
+    }
+    for g in [0.999f32, 3.001] {
+        assert!(matches!(
+            s_white(100.0, 1000.0, g),
+            Err(Cc8KernelError::OutOfDomain { .. })
+        ));
+        assert!(matches!(
+            scene_to_display([0.5, 0.5, 0.5], 1000.0, g),
+            Err(Cc8KernelError::OutOfDomain { .. })
+        ));
+        assert!(matches!(
+            display_to_scene([100.0, 100.0, 100.0], 1000.0, g),
+            Err(Cc8KernelError::OutOfDomain { .. })
+        ));
+        assert!(matches!(
+            hlg_output([100.0, 100.0, 100.0], 1000.0, g),
+            Err(Cc8KernelError::OutOfDomain { .. })
+        ));
+        assert!(matches!(
+            gamut_compress(
+                [100.0, 100.0, 100.0],
+                CompressDest::Hlg {
+                    peak: 1000.0,
+                    gamma: g
+                }
+            ),
+            Err(Cc8KernelError::OutOfDomain { .. })
+        ));
+    }
+    // R1's subnormal-γ exponents refuse (by domain now); the f32 peak sums
+    // to 0.99999994, so an in-domain peak isolates the γ refusal as well.
+    assert!(matches!(
+        display_to_scene(
+            [1.0, 1.0, 1.0],
+            0.2627f32 + 0.6780 + 0.0593,
+            f32::from_bits(1)
+        ),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        display_to_scene([1.0, 1.0, 1.0], 1.0, f32::from_bits(1)),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        reference::display_to_scene([1.0, 1.0, 1.0], 1.0, f64::from_bits(1)),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        reference::scene_to_display([0.5, 0.5, 0.5], 1000.0, 0.5),
+        Err(Cc8KernelError::OutOfDomain { .. })
     ));
 }
 
 #[test]
 fn rendering_refuses_hidden_intermediate_overflow() {
-    // R1 B3: Y/P overflows while the final values would be finite zeros —
-    // the intermediate refuses instead (f32 and f64).
+    // R1 B3 under G1: Y/P and U overflows needed out-of-domain parameters,
+    // so they now refuse by domain (f32 and f64).
     assert!(matches!(
         display_to_scene([3e38, 3e38, 3e38], 1e-37, 1.2),
-        Err(Cc8KernelError::NonFiniteResult { .. })
+        Err(Cc8KernelError::OutOfDomain { .. })
     ));
     assert!(matches!(
         reference::display_to_scene([1e308, 1e308, 1e308], 1e-307, 1.2),
-        Err(Cc8KernelError::NonFiniteResult { .. })
+        Err(Cc8KernelError::OutOfDomain { .. })
     ));
-    // Gain-overflow still refuses (the luma/gain pre-checks preserve the
-    // existing outcome; all-MAX luma stays finite under these coefficients).
+    // In-domain gain overflow still refuses with NonFiniteResult.
     assert!(matches!(
         scene_to_display([3e38, 0.0, 0.0], 1e4, 1.7),
         Err(Cc8KernelError::NonFiniteResult { .. })
     ));
-    // The infinite-U refusal propagates through hlg_output (f32 and f64).
+    // The out-of-domain γ refusal propagates through hlg_output (f32, f64).
     assert!(matches!(
         hlg_output([1.0, 0.0, 0.0], 1000.0, 0.001),
-        Err(Cc8KernelError::NonFiniteResult { .. })
+        Err(Cc8KernelError::OutOfDomain { .. })
     ));
     assert!(matches!(
         reference::hlg_output([1.0, 0.0, 0.0], 1000.0, 0.001),
-        Err(Cc8KernelError::NonFiniteResult { .. })
+        Err(Cc8KernelError::OutOfDomain { .. })
     ));
-    // Infinite U refuses before `min` discards it (f32 and f64).
+    // Infinite U needed γ < 1: refuses by domain before U (f32 and f64).
     assert!(matches!(
         gamut_compress(
             [1.0, 0.0, 0.0],
@@ -720,7 +837,7 @@ fn rendering_refuses_hidden_intermediate_overflow() {
                 gamma: 0.001
             }
         ),
-        Err(Cc8KernelError::NonFiniteResult { .. })
+        Err(Cc8KernelError::OutOfDomain { .. })
     ));
     assert!(matches!(
         reference::gamut_compress(
@@ -730,8 +847,35 @@ fn rendering_refuses_hidden_intermediate_overflow() {
                 gamma: 0.001
             }
         ),
-        Err(Cc8KernelError::NonFiniteResult { .. })
+        Err(Cc8KernelError::OutOfDomain { .. })
     ));
+}
+
+#[test]
+fn compressor_skips_inactive_infinite_ratio() {
+    // R1 S1: SDR P=100, [1e-38,0,0] overflows the upper ratio to +inf, but
+    // t ≤ +inf constrains nothing — skipped, pinned finite-correct, both
+    // precisions (never min-ed, never refused).
+    let x = 1e-38f32;
+    let y = 0.2126f32 * x;
+    assert!(((100.0 - y) / (x - y)).is_infinite());
+    let got = gamut_compress([x, 0.0, 0.0], CompressDest::Sdr { target_peak: 100.0 }).unwrap();
+    assert!(!got.y_clamped);
+    assert!(!got.compressed);
+    assert_close(
+        "ratio-skip red",
+        f64::from(got.value[0]),
+        f64::from(x),
+        1e-44,
+    );
+    assert_close("ratio-skip green", f64::from(got.value[1]), 0.0, 1e-44);
+    assert_close("ratio-skip blue", f64::from(got.value[2]), 0.0, 1e-44);
+    let got64 =
+        reference::gamut_compress([1e-38, 0.0, 0.0], CompressDest::Sdr { target_peak: 100.0 })
+            .unwrap();
+    assert!(!got64.y_clamped);
+    assert!(!got64.compressed);
+    assert_close("ratio-skip red f64", got64.value[0], 1e-38, 1e-50);
 }
 
 // ---------------------------------------------------------------------------
@@ -977,14 +1121,23 @@ fn eetf_adjacent_integer_ceiling_scan() {
 
 #[test]
 fn exact_identity_small_positive_ceilings() {
-    // R2 S1/R13: equal smallest-subnormal Cs = Ct takes the exact-identity
-    // rule (value bit-identical, unflagged), both precisions.
-    let out = eetf_to_target(203.0, f32::from_bits(1), f32::from_bits(1)).unwrap();
+    // R2 S1/R13 under G1: the smallest in-domain ceilings Cs = Ct = 1 take
+    // the exact-identity rule (bit-identical, unflagged; still kills R13),
+    // both precisions; sub-domain ceilings refuse OutOfDomain.
+    let out = eetf_to_target(203.0, 1.0, 1.0).unwrap();
     assert!(!out.clipped);
     assert_eq!(out.value.to_bits(), 203.0f32.to_bits());
-    let out64 = reference::eetf_to_target(203.0, f64::from_bits(1), f64::from_bits(1)).unwrap();
+    let out64 = reference::eetf_to_target(203.0, 1.0, 1.0).unwrap();
     assert!(!out64.clipped);
     assert_eq!(out64.value.to_bits(), 203.0f64.to_bits());
+    assert!(matches!(
+        eetf_to_target(203.0, f32::from_bits(1), f32::from_bits(1)),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        reference::eetf_to_target(203.0, f64::from_bits(1), f64::from_bits(1)),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
 }
 
 // ---------------------------------------------------------------------------
