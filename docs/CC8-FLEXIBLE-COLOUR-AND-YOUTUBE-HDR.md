@@ -738,7 +738,7 @@ codes; W=100 puts the 10 000-nit input at working 46.4159.
 - **PB4 final code**: 10-bit delivery anchors (black/18%/white/peak/saturated)
   ≤ 2 codes max, ≤ 0.5 mean; 8-bit SDR anchors ≤ 1 code. A triplet channel
   outside 2 codes still passes if its display error ≤ 0.2% of the triplet's
-  max-channel display value (errata CE6, CE7).
+  max-channel display value (errata CE6, CE7; SDR leg above 1500 nits: CE8).
 - **S1 precision errata (2026-09-25, lead ruling after the S1 reviews).**
   CE3: the 2.0-nit peak bound was derived at P = 1000; one f16 store of the
   W=100/P=10 000 working peak (≈14.96) alone costs 3.46 nits, so the peak bound
@@ -763,6 +763,17 @@ codes; W=100 puts the 10 000-nit input at working 46.4159.
   passes PB4 by codes (≤ 2) or by display error ≤ 0.2% of the triplet's max
   channel (CE5's composed budget, relative to the channel that sets the
   quantum); the mean stays ≤ 0.5 codes over all channels.
+  CE8 (S1 fix round 3, SDR leg): the 8-bit SDR leg meets CE7 for every source
+  peak P ≤ 1500 nits, which covers HLG sources (nominal 1000). Above it the
+  HDR→SDR EETF shrinks the max channel by up to P/W while a non-max channel keeps
+  the max channel's inherited storage quantum (CE4), so its SDR error can exceed
+  both prongs: a 1,620-channel scan (P 400–10 000, W 100–400, minor 0.1–2 %)
+  found 17 failures, all at P ≥ 2000, never on the max channel, worst 1.60 % of
+  the SDR triplet's max display value (39 codes; [20, 4000, 20], W = 203). For
+  P > 1500 a non-max SDR channel is bounded in display error by 2 % of the SDR
+  triplet max (codes unbounded); the max channel keeps CE7. PQ-class masters are
+  CC9's scope: CC9 must remove or re-derive this bound (e.g. f32 through the
+  EETF) before it claims PQ→SDR delivery.
   Kernel parameter domain (S1): γ ∈ [1, 3]; P, W, Cs, Ct ∈ [1, 100 000] nits;
   outside it the kernel refuses `OutOfDomain`.
 - Non-finite/overflow in working values: typed render refusal with asset/frame
