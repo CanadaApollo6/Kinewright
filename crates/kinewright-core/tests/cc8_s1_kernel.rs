@@ -684,6 +684,56 @@ fn rendering_refusals() {
     ));
 }
 
+#[test]
+fn rendering_refuses_hidden_intermediate_overflow() {
+    // R1 B3: Y/P overflows while the final values would be finite zeros —
+    // the intermediate refuses instead (f32 and f64).
+    assert!(matches!(
+        display_to_scene([3e38, 3e38, 3e38], 1e-37, 1.2),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+    assert!(matches!(
+        reference::display_to_scene([1e308, 1e308, 1e308], 1e-307, 1.2),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+    // Gain-overflow still refuses (the luma/gain pre-checks preserve the
+    // existing outcome; all-MAX luma stays finite under these coefficients).
+    assert!(matches!(
+        scene_to_display([3e38, 0.0, 0.0], 1e4, 1.7),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+    // The infinite-U refusal propagates through hlg_output (f32 and f64).
+    assert!(matches!(
+        hlg_output([1.0, 0.0, 0.0], 1000.0, 0.001),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+    assert!(matches!(
+        reference::hlg_output([1.0, 0.0, 0.0], 1000.0, 0.001),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+    // Infinite U refuses before `min` discards it (f32 and f64).
+    assert!(matches!(
+        gamut_compress(
+            [1.0, 0.0, 0.0],
+            CompressDest::Hlg {
+                peak: 1000.0,
+                gamma: 0.001
+            }
+        ),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+    assert!(matches!(
+        reference::gamut_compress(
+            [1.0, 0.0, 0.0],
+            CompressDest::Hlg {
+                peak: 1000.0,
+                gamma: 0.001
+            }
+        ),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // C3: EETF to target (§6, R14).
 // ---------------------------------------------------------------------------

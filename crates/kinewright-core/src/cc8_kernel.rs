@@ -297,8 +297,9 @@ pub fn scene_to_display(
     let luma = BT2020_KR_F32 * nonneg[0] + BT2020_KG_F32 * nonneg[1] + BT2020_KB_F32 * nonneg[2];
     // Positive luma takes the power path; zero luma is exactly zero (never
     // feed 0 to a possibly-negative power). Luma of nonnegatives is ≥ 0.
+    finite_result(FUNCTION, luma)?; // Y and the gain checked before use
     let gain = if luma > 0.0 {
-        peak * luma.powf(gamma - 1.0)
+        finite_result(FUNCTION, peak * luma.powf(gamma - 1.0))?
     } else {
         0.0
     };
@@ -334,9 +335,14 @@ pub fn display_to_scene(
         display[2].max(0.0),
     ];
     let luma = BT2020_KR_F32 * nonneg[0] + BT2020_KG_F32 * nonneg[1] + BT2020_KB_F32 * nonneg[2];
+    finite_result(FUNCTION, luma)?; // Y checked before Y/P consumes it
     if luma > 0.0 {
-        let scene_luma = (luma / peak).powf(1.0 / gamma);
-        let denom = peak * scene_luma.powf(gamma - 1.0);
+        let ratio = finite_result(FUNCTION, luma / peak)?;
+        let scene_luma = finite_result(FUNCTION, ratio.powf(1.0 / gamma))?;
+        let denom = finite_result(FUNCTION, peak * scene_luma.powf(gamma - 1.0))?;
+        if denom == 0.0 {
+            return Err(Cc8KernelError::NonFiniteResult { function: FUNCTION });
+        }
         finite_result_3(
             FUNCTION,
             [
@@ -588,6 +594,7 @@ pub fn gamut_compress(
         }
     };
     let y = kr * rgb[0] + kg * rgb[1] + kb * rgb[2];
+    finite_result(FUNCTION, y)?; // Y checked before range resolution hides it
     let (y, y_clamped) = if y < 0.0 {
         (0.0, true)
     } else if y > ymax {
@@ -603,7 +610,7 @@ pub fn gamut_compress(
         });
     }
     let upper = match hlg {
-        Some((p, g)) => p * (y / p).powf((g - 1.0) / g),
+        Some((p, g)) => finite_result(FUNCTION, p * (y / p).powf((g - 1.0) / g))?,
         None => ymax,
     };
     let mut t = 1.0f32;
@@ -639,6 +646,7 @@ pub fn hlg_output(
     target_peak: f32,
     gamma: f32,
 ) -> Result<HlgOutput<f32>, Cc8KernelError> {
+    const FUNCTION: &str = "hlg_output";
     let fit = gamut_compress(
         display,
         CompressDest::Hlg {
@@ -647,10 +655,11 @@ pub fn hlg_output(
         },
     )?;
     let scene = display_to_scene(fit.value, target_peak, gamma)?;
+    // Raw signals checked BEFORE the clamp consumes them (R35).
     let signal = [
-        hlg_oetf_unchecked(scene[0]).clamp(0.0, 1.0),
-        hlg_oetf_unchecked(scene[1]).clamp(0.0, 1.0),
-        hlg_oetf_unchecked(scene[2]).clamp(0.0, 1.0),
+        finite_result(FUNCTION, hlg_oetf_unchecked(scene[0]))?.clamp(0.0, 1.0),
+        finite_result(FUNCTION, hlg_oetf_unchecked(scene[1]))?.clamp(0.0, 1.0),
+        finite_result(FUNCTION, hlg_oetf_unchecked(scene[2]))?.clamp(0.0, 1.0),
     ];
     Ok(HlgOutput { signal, fit })
 }
@@ -814,8 +823,9 @@ pub mod reference {
         let nonneg = [scene[0].max(0.0), scene[1].max(0.0), scene[2].max(0.0)];
         let luma =
             BT2020_KR_F64 * nonneg[0] + BT2020_KG_F64 * nonneg[1] + BT2020_KB_F64 * nonneg[2];
+        finite_result(FUNCTION, luma)?; // Y and the gain checked before use
         let gain = if luma > 0.0 {
-            peak * luma.powf(gamma - 1.0)
+            finite_result(FUNCTION, peak * luma.powf(gamma - 1.0))?
         } else {
             0.0
         };
@@ -849,9 +859,14 @@ pub mod reference {
         ];
         let luma =
             BT2020_KR_F64 * nonneg[0] + BT2020_KG_F64 * nonneg[1] + BT2020_KB_F64 * nonneg[2];
+        finite_result(FUNCTION, luma)?; // Y checked before Y/P consumes it
         if luma > 0.0 {
-            let scene_luma = (luma / peak).powf(1.0 / gamma);
-            let denom = peak * scene_luma.powf(gamma - 1.0);
+            let ratio = finite_result(FUNCTION, luma / peak)?;
+            let scene_luma = finite_result(FUNCTION, ratio.powf(1.0 / gamma))?;
+            let denom = finite_result(FUNCTION, peak * scene_luma.powf(gamma - 1.0))?;
+            if denom == 0.0 {
+                return Err(Cc8KernelError::NonFiniteResult { function: FUNCTION });
+            }
             finite_result_3(
                 FUNCTION,
                 [
@@ -950,6 +965,7 @@ pub mod reference {
             }
         };
         let y = kr * rgb[0] + kg * rgb[1] + kb * rgb[2];
+        finite_result(FUNCTION, y)?; // Y checked before range resolution hides it
         let (y, y_clamped) = if y < 0.0 {
             (0.0, true)
         } else if y > ymax {
@@ -965,7 +981,7 @@ pub mod reference {
             });
         }
         let upper = match hlg {
-            Some((p, g)) => p * (y / p).powf((g - 1.0) / g),
+            Some((p, g)) => finite_result(FUNCTION, p * (y / p).powf((g - 1.0) / g))?,
             None => ymax,
         };
         let mut t = 1.0f64;
@@ -999,6 +1015,7 @@ pub mod reference {
         target_peak: f64,
         gamma: f64,
     ) -> Result<HlgOutput<f64>, Cc8KernelError> {
+        const FUNCTION: &str = "reference::hlg_output";
         let fit = gamut_compress(
             display,
             CompressDest::Hlg {
@@ -1007,10 +1024,11 @@ pub mod reference {
             },
         )?;
         let scene = display_to_scene(fit.value, target_peak, gamma)?;
+        // Raw signals checked BEFORE the clamp consumes them (R35).
         let signal = [
-            hlg_oetf_unchecked(scene[0]).clamp(0.0, 1.0),
-            hlg_oetf_unchecked(scene[1]).clamp(0.0, 1.0),
-            hlg_oetf_unchecked(scene[2]).clamp(0.0, 1.0),
+            finite_result(FUNCTION, hlg_oetf_unchecked(scene[0]))?.clamp(0.0, 1.0),
+            finite_result(FUNCTION, hlg_oetf_unchecked(scene[1]))?.clamp(0.0, 1.0),
+            finite_result(FUNCTION, hlg_oetf_unchecked(scene[2]))?.clamp(0.0, 1.0),
         ];
         Ok(HlgOutput { signal, fit })
     }
