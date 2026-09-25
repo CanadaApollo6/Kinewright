@@ -100,26 +100,47 @@ pub fn discovery_path_for_project(project_path: Option<&Path>) -> Option<PathBuf
 /// Absent host info; stale claims carrying it still reclaim (F7).
 const UNKNOWN_HOSTNAME: &str = "unknown";
 
+/// Hostname equality (G11/AF5): case-insensitive after trimming a
+/// trailing dot — `HOST.` and `host` name one machine; anything else
+/// (notably an FQDN) stays distinct and fail-closed.
+fn hostnames_equal(first: &str, second: &str) -> bool {
+    fn normalise(host: &str) -> String {
+        host.trim_end_matches('.').to_ascii_lowercase()
+    }
+    normalise(first) == normalise(second)
+}
+
 /// This machine's hostname: OS name, env, [`UNKNOWN_HOSTNAME`].
 fn current_hostname() -> String {
-    if let Some(name) = gethostname::gethostname()
-        .to_str()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
-        return name.to_owned();
+    let os = gethostname::gethostname();
+    current_hostname_with(
+        Some(os.as_os_str()),
+        std::env::var_os("HOSTNAME").as_deref(),
+        std::env::var_os("COMPUTERNAME").as_deref(),
+    )
+}
+
+/// Hostname resolution with its inputs injected (G11/R2-S1): the OS name,
+/// then `HOSTNAME`, then `COMPUTERNAME`, then [`UNKNOWN_HOSTNAME`]. Blank
+/// and non-UTF-8 inputs fall through. Pure, so the fallback-order test
+/// needs no interposition.
+fn current_hostname_with(
+    os: Option<&std::ffi::OsStr>,
+    hostname: Option<&std::ffi::OsStr>,
+    computername: Option<&std::ffi::OsStr>,
+) -> String {
+    fn clean(value: &std::ffi::OsStr) -> Option<&str> {
+        value
+            .to_str()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
     }
-    for key in ["HOSTNAME", "COMPUTERNAME"] {
-        if let Some(value) = std::env::var_os(key)
-            && let Some(name) = value
-                .to_str()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-        {
-            return name.to_owned();
-        }
-    }
-    UNKNOWN_HOSTNAME.to_owned()
+    [os, hostname, computername]
+        .into_iter()
+        .flatten()
+        .find_map(clean)
+        .unwrap_or(UNKNOWN_HOSTNAME)
+        .to_owned()
 }
 
 /// Why a project lock acquire failed.
@@ -144,6 +165,8 @@ pub enum LockfileError {
     ForeignHost {
         host: String,
         endpoint: String,
+        /// The discovery to delete if this machine was renamed (G11).
+        discovery: PathBuf,
     },
     /// The lock object was deleted under this live handle (G9): the fd
     /// still holds its flock, but the path names another (or no) object —
@@ -179,7 +202,15 @@ impl std::fmt::Display for LockfileError {
                 journal.display()
             ),
             Self::RecoveryLookup { reason } => write!(formatter, "recovery scan failed: {reason}"),
-            Self::ForeignHost { host, endpoint: _ } => write!(formatter, "foreign host {host}"),
+            Self::ForeignHost {
+                host,
+                endpoint: _,
+                discovery,
+            } => write!(
+                formatter,
+                "foreign host {host}; if this is this machine renamed, delete {} and retry",
+                discovery.display()
+            ),
             Self::LockLost { path } => write!(
                 formatter,
                 "the lock {} was deleted under this live owner; not writing",
@@ -389,11 +420,10 @@ fn read_owner(discovery_path: &Path, own_hostname: &str) -> DiscoveryRead {
     }
     // Lenient (G7/AF5): a hostname string that is neither this host nor
     // `unknown` still refuses, however unparseable the rest of the claim.
-    // (Exact spelling until G11 normalises both this and the strict path.)
     if let Some(value) = serde_json::from_slice::<serde_json::Value>(&bytes).ok()
         && let Some(host) = value.get("hostname").and_then(serde_json::Value::as_str)
-        && host != UNKNOWN_HOSTNAME
-        && host != own_hostname
+        && !hostnames_equal(host, UNKNOWN_HOSTNAME)
+        && !hostnames_equal(host, own_hostname)
     {
         let endpoint = value
             .get("endpoint")
@@ -477,17 +507,21 @@ fn decide_free_claim(
     match read_owner(discovery_path, own_hostname) {
         DiscoveryRead::Absent => Ok((None, false)),
         DiscoveryRead::Owner(owner)
-            if owner.hostname != UNKNOWN_HOSTNAME && owner.hostname != own_hostname =>
+            if !hostnames_equal(&owner.hostname, UNKNOWN_HOSTNAME)
+                && !hostnames_equal(&owner.hostname, own_hostname) =>
         {
             Err(LockfileError::ForeignHost {
                 host: owner.hostname,
                 endpoint: owner.endpoint,
+                discovery: discovery_path.to_path_buf(),
             })
         }
         DiscoveryRead::Owner(owner) => Ok((Some(owner), false)),
-        DiscoveryRead::Foreign { host, endpoint } => {
-            Err(LockfileError::ForeignHost { host, endpoint })
-        }
+        DiscoveryRead::Foreign { host, endpoint } => Err(LockfileError::ForeignHost {
+            host,
+            endpoint,
+            discovery: discovery_path.to_path_buf(),
+        }),
         DiscoveryRead::Unreadable => Ok((
             Some(ReclaimedOwner {
                 pid: 0,
@@ -1924,6 +1958,43 @@ mod tests {
         assert!(!stale.exists(), "our stale temp is swept");
         assert!(stranger.exists(), "nothing else is touched");
         acquired.handle.release().expect("the release lands");
+    }
+
+    /// G11/R2-S1: hostname fallback order — OS, then `HOSTNAME`, then
+    /// `COMPUTERNAME`, then `unknown`; blank and non-UTF-8 fall through.
+    /// Kills R2's M18 (the env order swap).
+    #[test]
+    fn g11_hostname_fallback_order() {
+        use std::ffi::OsStr;
+        fn name(value: &str) -> &OsStr {
+            OsStr::new(value)
+        }
+        assert_eq!(
+            current_hostname_with(Some(name("os")), Some(name("h")), Some(name("c"))),
+            "os"
+        );
+        assert_eq!(
+            current_hostname_with(None, Some(name("h")), Some(name("c"))),
+            "h"
+        );
+        assert_eq!(current_hostname_with(None, None, Some(name("c"))), "c");
+        assert_eq!(current_hostname_with(None, None, None), "unknown");
+        assert_eq!(
+            current_hostname_with(Some(name("  ")), Some(name("h")), None),
+            "h"
+        );
+        assert_eq!(
+            current_hostname_with(None, Some(name("")), Some(name("c"))),
+            "c"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            assert_eq!(
+                current_hostname_with(None, Some(OsStr::from_bytes(b"\xff")), Some(name("c"))),
+                "c"
+            );
+        }
     }
 
     /// G9: the fd-vs-path check detects a swapped or vanished object —

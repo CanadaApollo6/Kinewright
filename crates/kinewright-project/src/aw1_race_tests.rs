@@ -1679,3 +1679,42 @@ fn defect_lock_object_deleted_under_a_live_owner() {
     b.handle.release().unwrap();
     assert!(!discovery.exists(), "B's own release still cleans up");
 }
+
+// ───────────────────────── G11: hostname spelling ─────────────────────────
+
+/// G11/N2: own-host spelling variants reclaim — the comparison is
+/// case-insensitive after trimming a trailing dot. Anything else (an FQDN)
+/// still refuses fail-closed, naming the discovery to delete if this
+/// machine was renamed.
+#[test]
+fn own_host_spelling_variants_reclaim() {
+    let own = current_hostname();
+    assert_ne!(own, UNKNOWN_HOSTNAME, "the probe needs a real hostname");
+    for (name, spelling) in [
+        ("upper", own.to_uppercase()),
+        ("trailing-dot", format!("{own}.")),
+        ("both", format!("{}.", own.to_uppercase())),
+    ] {
+        let fx = fixture("race-host-spelling");
+        let discovery = plant_stale(&fx, "http://old");
+        patch_discovery(&discovery, "hostname", serde_json::json!(spelling));
+        let got = claim(&fx.project, &fx.recovery, "http://new");
+        assert!(got.is_ok(), "{name} ({spelling}) reclaims, got {got:?}");
+    }
+    let fx = fixture("race-host-fqdn");
+    let discovery = plant_stale(&fx, "http://old");
+    patch_discovery(
+        &discovery,
+        "hostname",
+        serde_json::json!(format!("{own}.localdomain")),
+    );
+    match claim(&fx.project, &fx.recovery, "http://new") {
+        Err(error @ LockfileError::ForeignHost { .. }) => {
+            assert!(
+                error.to_string().contains(&*discovery.to_string_lossy()),
+                "the refusal names the discovery to delete: {error}"
+            );
+        }
+        other => panic!("an FQDN still refuses, got {other:?}"),
+    }
+}

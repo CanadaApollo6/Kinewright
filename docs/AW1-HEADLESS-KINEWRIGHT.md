@@ -142,9 +142,12 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
   takeover (`ForeignHost` naming the host); `unknown`-host claims
   predate real hostnames and still reclaim. (G7: the foreign check also
   reads leniently — a claim this build cannot parse still refuses when its
-  hostname string names a known foreign host.) Limit: flock liveness is
-  host-local, so on local-lock network filesystems a free lock proves
-  nothing about a foreign owner — AW1 claims no multi-host exclusion.
+  hostname string names a known foreign host. G11: hostnames compare
+  case-insensitively after trimming a trailing dot; an FQDN stays
+  distinct and refuses, and the refusal names the discovery to delete if
+  this machine was renamed.) Limit: flock liveness is host-local, so on
+  local-lock network filesystems a free lock proves nothing about a
+  foreign owner — AW1 claims no multi-host exclusion.
 - AF6 → §2 (S1-delta refinement, GUARD-B): the session tracks an
   established baseline per stem — a load, a successful flush, or
   adopting the saved path establishes that stem. The empty-flush guard
