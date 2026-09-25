@@ -40,11 +40,8 @@ pub fn fnv1a_64(bytes: &[u8]) -> u64 {
 }
 
 /// `MyVideo-1a2b3c4d5e6f7081.journal` - readable stem, collision-proof hash.
-/// Both halves derive from the canonical identity (F4): one file, one name.
-#[must_use]
-pub fn journal_file_name(project_path: &Path) -> String {
-    let identity = crate::project::canonical_project_identity(project_path);
-    let stem: String = identity
+fn journal_name_for(path: &Path) -> String {
+    let stem: String = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default()
@@ -57,8 +54,34 @@ pub fn journal_file_name(project_path: &Path) -> String {
     } else {
         stem
     };
-    let hash = fnv1a_64(identity.to_string_lossy().as_bytes());
+    let hash = fnv1a_64(path.to_string_lossy().as_bytes());
     format!("{stem}-{hash:016x}.journal")
+}
+
+/// `MyVideo-1a2b3c4d5e6f7081.journal` - readable stem, collision-proof hash.
+/// Both halves derive from the canonical identity (F4): one file, one name.
+#[must_use]
+pub fn journal_file_name(project_path: &Path) -> String {
+    journal_name_for(&crate::project::canonical_project_identity(project_path))
+}
+
+/// The pre-F4 journal name (G5): main hashed the RAW path spelling, so a
+/// legacy journal is found by this name when the project is queried with
+/// the spelling that created it.
+fn legacy_journal_file_name(project_path: &Path) -> String {
+    journal_name_for(project_path)
+}
+
+/// The ordinary spelling of a verbatim Windows path, when it has one:
+/// `\\?\C:\…` → `C:\…`, `\\?\UNC\s\s` → `\\s\s`. Pre-F4 journals hashed the
+/// ordinary spelling while `canonicalize` returns the verbatim one (G5).
+/// Pure, so the unit test runs on every OS.
+#[cfg(any(windows, test))]
+fn ordinary_spelling(verbatim: &str) -> Option<String> {
+    if let Some(rest) = verbatim.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{rest}"));
+    }
+    verbatim.strip_prefix(r"\\?\").map(str::to_owned)
 }
 
 /// The journal path for a project, never colliding with a reserved (pending)
@@ -151,8 +174,12 @@ struct JournalIdentityHeader {
     project_path: Option<PathBuf>,
 }
 
-/// Whether a journal's header names the project (F5's alias arm). Torn
-/// headers never match (fail-closed); vanished reads as gone.
+/// Whether a journal's header names the project (F5's alias arm). Only an
+/// absolute header path claims, by canonical identity (G5): a relative
+/// header is ambiguous — never rebound to the current cwd — and torn or
+/// missing headers never match, so a non-name-matched journal with one is
+/// ignored, never blocking an unrelated project. Name-matched journals
+/// refuse without consulting the header at all. Vanished reads as gone.
 fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Error> {
     let bytes = match fs::read(journal) {
         Ok(bytes) => bytes,
@@ -176,11 +203,15 @@ fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Err
     let Some(project) = header.project_path else {
         return Ok(false);
     };
+    if !project.is_absolute() {
+        return Ok(false);
+    }
     Ok(canonical_project_identity(&project) == identity)
 }
 
-/// Pending journal (AW1 §5/S7, F5): base, `-N` suffixes, header-matched
-/// aliases — first in name order. Missing dir means none pending.
+/// Pending journal (AW1 §5/S7, F5/G5): canonical and legacy bases, every
+/// `-N` allocator suffix of each, and header-matched aliases — first in
+/// name order. Missing dir means none pending.
 /// # Errors
 /// Returns the lookup IO error (fail-closed).
 pub fn pending_journal_for_project(
@@ -189,6 +220,14 @@ pub fn pending_journal_for_project(
 ) -> Result<Option<PathBuf>, io::Error> {
     let identity = canonical_project_identity(project_path);
     let base = journal_file_name(project_path);
+    let legacy = legacy_journal_file_name(project_path);
+    // Windows only: the ordinary spelling main hashed, recovered from a
+    // verbatim identity (unit-pinned on every OS via `ordinary_spelling`).
+    #[cfg(windows)]
+    let ordinary_base = ordinary_spelling(&identity.to_string_lossy())
+        .map(|ordinary| legacy_journal_file_name(Path::new(&ordinary)));
+    #[cfg(not(windows))]
+    let ordinary_base: Option<String> = None;
     let entries = match fs::read_dir(recovery_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -206,7 +245,13 @@ pub fn pending_journal_for_project(
         let named = journal
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| journal_name_matches_for(&base, name));
+            .is_some_and(|name| {
+                journal_name_matches_for(&base, name)
+                    || journal_name_matches_for(&legacy, name)
+                    || ordinary_base
+                        .as_deref()
+                        .is_some_and(|third| journal_name_matches_for(third, name))
+            });
         if named || journal_header_names(&journal, &identity)? {
             pending.push(journal);
         }
@@ -232,6 +277,96 @@ mod tests {
     use kinewright_media::test_support::TempDirectory;
 
     use super::*;
+
+    /// G5/RB3: a legacy raw-path-hash journal refuses by NAME even with a
+    /// torn header — and so does its allocator `-N` suffix.
+    #[test]
+    fn g5_legacy_name_torn_header_refuses() {
+        let dir = TempDirectory::new("aw1-g5-legacy-name");
+        let recovery = dir.path("recovery");
+        fs::create_dir(&recovery).expect("the recovery dir creates");
+        // The RB3 repro's spelling: main hashed the raw path, `./` included.
+        let crooked = dir.root().join(".").join("source.kinewright");
+        let legacy = recovery.join(legacy_journal_file_name(&crooked));
+        assert_ne!(
+            legacy.file_name().expect("a file name").to_string_lossy(),
+            journal_file_name(&crooked),
+            "the legacy name differs from the canonical one"
+        );
+        fs::write(&legacy, b"KINEWRIGHT-JOURNAL 1\n{\"project_path\":")
+            .expect("the torn legacy journal writes");
+        assert_eq!(
+            pending_journal_for_project(&recovery, &crooked).expect("the lookup lands"),
+            Some(legacy.clone()),
+            "a legacy-name torn header refuses"
+        );
+        let suffixed = recovery.join(
+            legacy
+                .file_name()
+                .expect("a file name")
+                .to_string_lossy()
+                .trim_end_matches(".journal")
+                .to_owned()
+                + "-2.journal",
+        );
+        fs::write(&suffixed, b"crash").expect("the suffixed legacy journal writes");
+        fs::remove_file(&legacy).expect("only the suffix pends");
+        assert_eq!(
+            pending_journal_for_project(&recovery, &crooked).expect("the lookup lands"),
+            Some(suffixed),
+            "a legacy allocator suffix refuses"
+        );
+    }
+
+    /// G5/RB3: a legacy RELATIVE header is never rebound to the current
+    /// cwd — it claims nothing, so an unrelated same-named project is not
+    /// blocked; the original spelling is still found via the legacy NAME.
+    #[test]
+    fn g5_relative_header_never_claims() {
+        let dir = TempDirectory::new("aw1-g5-relative-header");
+        let recovery = dir.path("recovery");
+        fs::create_dir(&recovery).expect("the recovery dir creates");
+        let journal = recovery.join(legacy_journal_file_name(Path::new("edit.kinewright")));
+        let document = serde_json::to_string(&kinewright_core::Document::default())
+            .expect("the document serialises");
+        let header = format!(
+            "KINEWRIGHT-JOURNAL 1\n{{\"format_version\":1,\"writer_format_version\":1,\
+             \"project_path\":\"edit.kinewright\",\"initial_document\":{document}}}\n"
+        );
+        fs::write(&journal, header).expect("the legacy journal writes");
+        // The same-named path under the CURRENT cwd: resolving the header
+        // against the cwd would falsely block it. (No chdir — the cwd is
+        // process-global — the test constructs the collision instead.)
+        let same_named = std::env::current_dir()
+            .expect("the cwd reads")
+            .join("edit.kinewright");
+        assert_eq!(
+            pending_journal_for_project(&recovery, &same_named).expect("the lookup lands"),
+            None,
+            "a relative header never blocks an unrelated same-named project"
+        );
+        assert_eq!(
+            pending_journal_for_project(&recovery, Path::new("edit.kinewright"))
+                .expect("the lookup lands"),
+            Some(journal),
+            "the original spelling is found via the legacy name"
+        );
+    }
+
+    /// G5: the verbatim→ordinary spelling map is unit-pinned on every OS.
+    #[test]
+    fn g5_ordinary_spelling_maps_verbatim_paths() {
+        assert_eq!(
+            ordinary_spelling(r"\\?\C:\videos\edit.kinewright").as_deref(),
+            Some(r"C:\videos\edit.kinewright")
+        );
+        assert_eq!(
+            ordinary_spelling(r"\\?\UNC\host\share\edit.kinewright").as_deref(),
+            Some(r"\\host\share\edit.kinewright")
+        );
+        assert_eq!(ordinary_spelling(r"C:\videos\edit.kinewright"), None);
+        assert_eq!(ordinary_spelling("/home/u/edit.kinewright"), None);
+    }
 
     #[test]
     fn retire_removes_the_base_journal_and_tolerates_absence() {

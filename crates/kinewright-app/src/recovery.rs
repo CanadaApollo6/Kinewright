@@ -39,7 +39,8 @@ use kinewright_core::{
     LabelIncident, PROJECT_FORMAT_VERSION, TimelineRevision,
 };
 use kinewright_project::{
-    JOURNAL_MAGIC as MAGIC, allocate_journal_path, default_recovery_directory,
+    JOURNAL_MAGIC as MAGIC, allocate_journal_path, canonical_project_identity,
+    default_recovery_directory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -111,9 +112,12 @@ impl JournalWriter {
                     path.display()
                 )
             })?;
+        // G5: new headers persist the absolute canonical identity, so the
+        // takeover scan never has to guess which spelling a relative header
+        // meant — legacy relative headers stay readable but never claim.
         let header = serde_json::to_vec(&JournalHeader {
             format_version: FORMAT_VERSION,
-            project_path: project_path.map(Path::to_path_buf),
+            project_path: project_path.map(canonical_project_identity),
             writer_format_version: PROJECT_FORMAT_VERSION,
             initial_document: initial_document.clone(),
         })
@@ -1583,7 +1587,11 @@ mod tests {
             panic!("expected checkpoint journal");
         };
         assert_eq!(report.recovered_commands, 1);
-        assert_eq!(report.project_path.as_deref(), Some(project.as_path()));
+        // G5: new headers persist the absolute canonical identity.
+        assert_eq!(
+            report.project_path.as_deref(),
+            Some(canonical_project_identity(&project).as_path())
+        );
         assert!(report.document.asset(AssetId(1)).is_some());
         assert!(report.document.asset(AssetId(2)).is_some());
     }

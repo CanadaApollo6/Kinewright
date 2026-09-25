@@ -100,7 +100,15 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
   path. Lookup IO errors fail closed (`RecoveryLookup`). §2's "journal
   retire" pipeline step is a no-op for headless: it owns no journals —
   only a session that replayed recovery data may retire it, so an
-  unreplayed pending journal always survives a headless save.
+  unreplayed pending journal always survives a headless save. (Fix round
+  2, G5: the scan also recognises legacy raw-path-hash names and their
+  `-N` suffixes — including the ordinary spelling behind a Windows
+  verbatim identity — and new journal headers persist the absolute
+  canonical identity. Exact header rule: a non-name-matched journal is
+  claimed by header only when `project_path` is absolute and
+  canonical-identical; a relative, missing, or unparseable header never
+  claims — ambiguous legacy identity is ignored, never rebound to the
+  current cwd, so it cannot block an unrelated project.)
 - AF4 → §2: headless save shares the app's H12/J2/J3 transaction
   machinery (`SidecarRollback` in `kinewright-project`): snapshot and
   restore the destination sidecar and both generation baselines on
