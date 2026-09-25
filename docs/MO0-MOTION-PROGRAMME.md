@@ -627,8 +627,9 @@ Decided since revision 1 (Riel's answers + N1, recorded here so the
 questions are closed, not dropped): keys are kept outside in/out for
 video and remap curves; compound clips are full editable nested sequences
 with audio mixdown; blend is evaluated in scene-linear; expressions are
-deferred to the AE programme; optical flow, Bezier handles, motion blur,
-and person/segmentation mattes are deferred but intended (§11).
+deferred to the AE programme; optical flow, motion blur, and
+person/segmentation mattes are deferred but intended (§11); Bezier handles
+moved into MO6 (Riel 2026-09-25).
 
 Open questions, defaulted by the lead on 2026-09-23 (Riel may override):
 
@@ -642,7 +643,8 @@ Riel wants all of these eventually; each has an owner, not a rejection:
 
 - **Optical-flow retiming.** Owner: a future retiming-depth slice (needs
   a model choice, compute budget, and a cache story).
-- **Bezier keyframe handles.** Owner: the AE programme; tangent fields
+- **Bezier keyframe handles.** Owner: **MO6** (Riel 2026-09-25, pulled
+  forward from the AE programme for the production videos); tangent fields
   reserved on `Keyframe` in MO1 for a clean migration.
 - **Motion blur.** Shutter-accurate blur. Owner: the AE programme; no
   approximation ships in MO.

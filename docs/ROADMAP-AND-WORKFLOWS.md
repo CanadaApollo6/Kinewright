@@ -836,7 +836,7 @@ reasons — the curve model exists, the motion surface does not.
 | MO3 — Compound clips | Call-site probe, then the resolver refactor; `Sequence` table with unique IDs and cycle validation; nested `map_frames`; audio mixdown; nest/unnest with step in/out | Probe sizes the brief; refactor changes no golden byte; a nest renders as its flat equivalent (both lanes); mixdown nulls; served quad unchanged |
 | MO4 — Speed ramps and time remap | `ClipTimeMap`; `Clip.time_remap` with keep-outside survival; Nearest/Blend sampling; rubber-band retime editor; budgeted `plan_speed_ramp` | Ramps hold endpoints across trims; reverse mirrors the source walk; Hold-vs-Hide differ at the boundary; pinned blend-vs-nearest diff; served quad unchanged |
 | MO5 — Mattes and keys | Multi-window `mask`, track-nominated mattes, `chroma_key` polish, tracker-driven mask planner with decimation and refusal | Matte containment on both lanes; track mattes match references; tracked mask holds with pinned occlusion behaviour; served quad unchanged |
-| MO6 — Titles and graphics templates | Typewriter field, entrance/exit presets, templates-as-sequences with field bindings, effect/motion presets, built-in set, specified transparent-export shape | Animated lower third on both lanes; template round-trips bound; presets apply keys verbatim; built-ins match pinned renders; served quad unchanged |
+| MO6 — Titles and graphics templates | Bezier keyframe handles (pulled forward from the AE programme, 2026-09-25); typewriter field, entrance/exit presets, templates-as-sequences with field bindings, effect/motion presets, built-in set, specified transparent-export shape | Animated lower third on both lanes; template round-trips bound; presets apply keys verbatim; built-ins match pinned renders; served quad unchanged |
 | MO7 — Workflow evaluation | Scenario authority with synthetic sources, technical gates as ordinary tests on both CI operating systems, scripted agent and person paths, a motion-workflow eval suite with blinded review, the IN3 post-render cut-boundary self-check over every scenario output, and an adversarial critic pass with timecoded evidence | All gates green on both OSes with lanes named; every workflow completable by agent and by hand; budgets green; human reviewer left only creative questions |
 
 **Current status (2026-09-23): programme design promoted (revision 2 after an
@@ -848,9 +848,22 @@ stage-0 Kani probe gates every later proof claim.
 Each slice writes its design doc (≤ ~600 lines) before implementation
 and records deferrals explicitly, as the colour and audio slices did.
 
+**Production-driven order (Riel 2026-09-25).** The one hands-on session
+is a real production of two videos: a presenter-led explainer on AI
+models in the style of the "Get to know Cloud Firestore" series
+(presenter, animated diagram cutaways, callouts, title cards, music and
+effects; 16:9) and an animated motion-graphics piece for MockingBoard's
+Instagram (9:16 Reel, with a 4:5 feed cut). The near-term order follows
+what those need: AW1 and CC8 in flight; then MO2; then AW2 code clips
+(ahead of AW3); then MO6 with Bezier handles; then MO3 and MO5. A 4:5
+`portrait_feed` delivery profile (1080x1350, alongside M34's
+`vertical_short` and `square_social`) lands before the session. MO4 and
+the evaluation slices follow it. An agent-driven dry run of both videos
+precedes the session.
+
 Deferred but intended, each with an owner: optical-flow retiming (a
-future retiming-depth slice); Bezier handles (AE programme; tangent
-fields reserved in MO1); motion blur (AE programme); person/segmentation
+future retiming-depth slice); Bezier handles (moved into MO6 by Riel
+2026-09-25; tangent fields reserved in MO1); motion blur (AE programme); person/segmentation
 mattes (a future ML-matte slice); typed expressions (AE programme).
 
 ### Agent surface direction
@@ -976,15 +989,17 @@ diff, frame explanation, decision log, comparison sheet, or skill exists.
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |
 | AW1 — Headless Kinewright | `kinewright` CLI (new/open/import/save/inspect/schema/apply plan/proof frame/strip/check/export/branch) plus proxy-first stdio with server auth; lockfile discovery; shared project-IO crate; lifecycle capabilities; destructive-consent plumbing; skill v1 + MCPB package | Headless: stdio client opens, splits, commits, proofs; the GUI opens the same file with the change and one CLI commit in provenance. GUI open: the same session proxies live and one GUI undo removes the edit. Destructive without consent refuses naming the flag; proofs equal on the pinned adapter; headless peak RSS inside budget; served quad unchanged |
-| AW3 — Aggregate diagnostics, state diffs, explain-frame | Aggregate `apply_batch` diagnostics with lenient plan parsing under a byte budget; `get_timeline_diff` over revision-indexed snapshots; two-tier `explain_frame`; per-frame hash; decision-log sidecar; comparison sheet with batch proofs | A 50-op plan with three seeded errors returns all three plus fixes in one call; a diff answers a cut-point question inside budget; tier-1 explanation names every stack contributor; two branches render one sheet with diffs, QA, batch proofs, and costs; diff/explain compute inside budget; served quad unchanged |
 | AW2 — Code-generated clips | `ClipContent::Code` with SVG and Lottie sources, declared descriptors, typed bindings, hash-blob store, keyframable parameters, sandbox bounds, and provenance; Typst/WGSL specified but deferred; render-import adapter specified-only and external if ever built; parity with Remotion/Manim for the common jobs | SVG lower third byte-identical across runs and both CI operating systems; Lottie params survive trim-in-then-out; over-budget renders and unbound ids fail closed; per-frame render cost and cache bounds inside budget; parity table green except named gaps; served quad unchanged |
+| AW3 — Aggregate diagnostics, state diffs, explain-frame | Aggregate `apply_batch` diagnostics with lenient plan parsing under a byte budget; `get_timeline_diff` over revision-indexed snapshots; two-tier `explain_frame`; per-frame hash; decision-log sidecar; comparison sheet with batch proofs | A 50-op plan with three seeded errors returns all three plus fixes in one call; a diff answers a cut-point question inside budget; tier-1 explanation names every stack contributor; two branches render one sheet with diffs, QA, batch proofs, and costs; diff/explain compute inside budget; served quad unchanged |
 | AW4 — Workflow evaluation | Scenario authority with synthetic sources, scripted agent/person paths, the Claude Code `-p` both-arms comparison harness against a full-strength baseline (ffmpeg + Remotion/Manim + official skills) measuring tokens, time, corrections, and peak RSS, blinded review; no feature, no tool | All gates green on both OSes with lanes named; N runs per task per arm with setup time counted; engine wins tokens/time/corrections/RSS; human reviewer left only creative questions |
 
 Each slice writes its design doc (≤ ~600 lines) before implementation
 and records deferrals explicitly, as the colour, audio, and motion
-slices did. Order is AW1 → AW3 → AW2 → AW4: external provability first,
-drivability second, code clips on the settled content model third,
-measurement last. AW1 runs parallel with MO1 except the shared-crate
+slices did. Order is AW1 → AW2 → AW3 → AW4 (Riel 2026-09-25: code clips
+move ahead of AW3 because both production videos need animated text,
+shapes and diagrams; AW3 is agent-runtime-only and may run alongside):
+external provability first, code clips on the settled content model
+second, drivability third, measurement last. AW1 runs parallel with MO1 except the shared-crate
 cutover, which serialises; AW3/MO2 landings at the registry pin sites
 serialise; AW2 starts once MO1's content match arms are stable.
 

@@ -180,6 +180,11 @@ packs when they land but must not block on them (byte budgets instead,
 per the MO0 risk rule). AW4 consumes IN3's self-check and the MO7
 critic-pass shape.
 
+**Ruling 2026-09-25 (Riel): AW2 now precedes AW3** — both production
+videos need code clips (animated text, shapes, diagrams); AW3 is
+agent-runtime-only and may run alongside. The paragraph below records the
+original reasoning.
+
 **Rejected alternative.** AW2 before AW3 (clips you can barely drive)
 and AW3 before AW1 (lethality with no external client to prove it).
 The reorder costs nothing; code-clip gratification arrives one slice
