@@ -276,10 +276,10 @@ impl LockfileHandle {
         }
     }
 
-    /// Non-Unix `verify` always passes: `std` opens with
-    /// `FILE_SHARE_DELETE`, so a delete goes delete-pending and blocks
-    /// re-create while the handle lives — the object cannot be swapped
-    /// under a live owner.
+    /// Non-Unix `verify` always passes: every handle on the object opens
+    /// without `FILE_SHARE_DELETE` (H2), so no process can rename or
+    /// delete it while this handle lives — it cannot be swapped under a
+    /// live owner.
     /// # Errors
     /// Returns nothing: the non-Unix object cannot be swapped.
     #[cfg(not(unix))]
@@ -725,13 +725,14 @@ pub fn acquire_project_lock_with_policy(
         // Open-or-create on a never-unlinked object: create races share
         // one flock (F3/L1). Never truncate: it could fail against a live
         // Windows `LockFileEx` range, turning contention into IO errors.
-        let file = match File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-        {
+        let mut options = File::options();
+        options.read(true).write(true).create(true).truncate(false);
+        // H2 (Windows): share read+write, never DELETE — while any handle
+        // lives nobody can rename or delete the object (contenders stay
+        // share-compatible), which is what makes `verify` sound there.
+        #[cfg(windows)]
+        std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 3);
+        let file = match options.open(&lock_path) {
             Ok(file) => file,
             // A missing parent never resolves by retrying.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -2034,6 +2035,40 @@ mod tests {
         );
         fs::remove_file(&lock).expect("the path vanishes");
         assert!(!fd_matches_path(&file, &lock), "a vanished path mismatches");
+    }
+
+    /// H2 (Windows): a held lock object denies delete sharing — neither a
+    /// rename nor a delete lands while the handle lives, and a second
+    /// claimant's open stays share-compatible, so it contends.
+    #[cfg(windows)]
+    #[test]
+    fn h2_held_object_refuses_rename_and_delete() {
+        let dir = TempDirectory::new("aw1-h2-share");
+        let project = dir.path("edit.kinewright");
+        fs::write(&project, b"{}").expect("the project writes");
+        let recovery = recovery_dir(&dir);
+        let policy = |endpoint: &str| {
+            acquire_project_lock_with_policy(
+                &project,
+                LockMode::Headless,
+                endpoint,
+                &recovery,
+                1,
+                Duration::ZERO,
+            )
+        };
+        let held = policy("http://127.0.0.1:9/mcp").expect("the first acquire lands");
+        let lock = held.handle.path.clone();
+        let stash = dir.path("edit.kinewright.lock.stashed");
+        assert!(fs::rename(&lock, &stash).is_err(), "no rename while held");
+        assert!(fs::remove_file(&lock).is_err(), "no delete while held");
+        assert!(held.handle.verify().is_ok(), "the object stays pinned");
+        match policy("http://127.0.0.1:10/mcp") {
+            Err(LockfileError::Contention { .. }) => {}
+            other => panic!("a second claimant contends, got {other:?}"),
+        }
+        held.handle.release().expect("the release lands");
+        fs::rename(&lock, &stash).expect("a released object renames");
     }
 
     /// G7: an unreadable stale discovery with a free lock reclaims WITH the

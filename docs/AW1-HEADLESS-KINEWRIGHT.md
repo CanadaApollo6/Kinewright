@@ -94,9 +94,11 @@ changes.
   it and logging; `LockfileHandle::verify` detects an object deleted under
   a live owner (Unix fd-vs-path, typed `LockLost`, no write — checked
   before every headless save and every discovery re-publish) and is
-  trivially true elsewhere, where share-delete semantics pin the object;
-  only the `.lock.json` discovery may be hand-deleted, never the `.lock`
-  object.)
+  trivially true on Windows, where the object pins itself (fix round 3,
+  H2: it opens with `share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)`, no
+  DELETE, so no process can rename or delete it while any handle lives;
+  contenders stay share-compatible and contend); only the `.lock.json`
+  discovery may be hand-deleted, never the `.lock` object.)
 - AF2 → §5, §6: one canonical project identity — full canonical path
   when the target exists, else canonical parent dir plus file name
   (relative resolves at the cwd; raw path when nothing resolves). Lock,
