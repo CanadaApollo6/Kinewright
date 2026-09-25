@@ -13832,6 +13832,40 @@ mod in2b_tests {
         );
     }
 
+    /// H6 (R2 S2): an EMPTY failed Save As onto an occupied stem takes
+    /// G3's `.bak` branch; the rollback must move that backup back — the
+    /// exact foreign stem, no leftover `.bak`, no unearned membership.
+    #[test]
+    fn rr2_g4_empty_failure_restores_backup() {
+        let temp = TempDirectory::new("aw1-rr2-empty-rollback");
+        let target = temp.path("target.kinewright");
+        fs::create_dir(&target).expect("a directory fails the project write");
+        let stem = sidecar_path_for_project(Some(&target)).expect("derived");
+        let foreign = b"foreign history preserved exactly";
+        fs::write(&stem, foreign).expect("the foreign stem writes");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        let failed = matches!(app.write_project(&target), Err(ProjectSaveError::Write(_)));
+        // Collected before shutdown; asserted after (see the G4 test).
+        let stem_after = fs::read(&stem).expect("the stem re-reads");
+        let member_after = app.focused().established.contains(&stem);
+        let mut baks_after = 0;
+        for entry in fs::read_dir(temp.root()).expect("the dir reads") {
+            let entry = entry.expect("a readable entry");
+            if entry.file_name().to_string_lossy().contains(".bak") {
+                baks_after += 1;
+            }
+        }
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+        assert!(failed, "the project write fails");
+        assert_eq!(
+            stem_after, foreign,
+            "the backup moves back onto the exact stem"
+        );
+        assert_eq!(baks_after, 0, "no leftover .bak from the failed save");
+        assert!(!member_after, "no unearned stem");
+    }
+
     /// G4/RB2 (app): a failed nonempty Save As onto an occupied stem
     /// restores the foreign bytes, the baselines, AND the establishment it
     /// never earned — and the empty-retry after the fix preserves-and-pairs

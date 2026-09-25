@@ -625,6 +625,48 @@ mod tests {
         );
     }
 
+    /// H6 (R2 S2): an EMPTY failed Save As onto an occupied stem takes
+    /// G3's `.bak` branch; the rollback must move that backup back — the
+    /// exact foreign stem, no leftover `.bak`, no unearned membership.
+    #[test]
+    fn rr2_g4_empty_failure_restores_backup() {
+        let dir = TempDirectory::new("aw1-rr2-empty-rollback");
+        let source = dir.path("source.kinewright");
+        write_project_document(&Document::default(), &source, None).expect("source writes");
+        let mut session = loaded_session(&source);
+        let target = dir.path("target.kinewright");
+        std::fs::create_dir(&target).expect("a directory fails the project write");
+        let stem = sidecar_path_for_project(Some(&target)).expect("derived");
+        let foreign = b"foreign history preserved exactly";
+        std::fs::write(&stem, foreign).expect("the foreign stem writes");
+        let got = save_headless(
+            &Document::default(),
+            &target,
+            None,
+            &mut session,
+            "",
+            TimelineRevision::default(),
+            dir.root(),
+            None,
+        );
+        assert!(
+            matches!(got, Err(ProjectSaveError::Write(_))),
+            "the project write fails"
+        );
+        assert_eq!(
+            std::fs::read(&stem).expect("the stem re-reads"),
+            foreign,
+            "the backup moves back onto the exact stem"
+        );
+        let baks = std::fs::read_dir(dir.root())
+            .expect("the dir reads")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".bak"))
+            .count();
+        assert_eq!(baks, 0, "no leftover .bak from the failed save");
+        assert!(!session.established.contains(&stem), "no unearned stem");
+    }
+
     /// G4/RB2: a failed nonempty Save As onto an occupied stem restores the
     /// foreign bytes AND the establishment it never earned — and the
     /// empty-retry after the fix preserves-and-pairs instead of wiping.
