@@ -1877,8 +1877,66 @@ fn ulp_w1() -> f64 {
     2f64.powi(-10)
 }
 
-// --- §17 wrong-transform controls (R15): test-only substitutes that MUST fail
-// the R14/R28/R30 assertions. Each cites the kernel test it mirrors. ---
+// --- §17 wrong-transform controls (R15): one shared anchor/assertion harness
+// per gate. The production function passes each gate; every substitute runs
+// through the SAME gate and must fail it (gates return Result so rejection
+// is asserted, not panicked through). Each gate cites the kernel test whose
+// anchors it shares. ---
+
+/// Gate assertion: `Ok(())` within tol, else `Err` naming the anchor.
+fn gate_close(label: &str, actual: f64, expected: f64, tol: f64) -> Result<(), String> {
+    let diff = (actual - expected).abs();
+    if diff <= tol {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label}: actual={actual} expected={expected} diff={diff} tol={tol}"
+        ))
+    }
+}
+
+/// EETF anchor gate (mirrors `eetf_anchors_narrow_span`, Cs=1000, Ct=100).
+fn eetf_gate(eval: &dyn Fn(f64, f64, f64) -> f64) -> Result<(), String> {
+    gate_close("eetf black", eval(0.0, 1000.0, 100.0), 0.0, 1e-12)?;
+    gate_close("eetf Cs→Ct", eval(1000.0, 1000.0, 100.0), 100.0, 1e-9)?;
+    gate_close(
+        "eetf L=100",
+        eval(100.0, 1000.0, 100.0),
+        69.454_403_035_658_91,
+        1e-9,
+    )?;
+    gate_close(
+        "eetf L=203",
+        eval(203.0, 1000.0, 100.0),
+        88.243_640_538_647_8,
+        1e-9,
+    )
+}
+
+/// HLG-input anchor gate (mirrors `hlg_inverse_oetf_anchors` +
+/// `hlg_reference_white_lands_on_working_one`).
+fn hlg_input_gate(eval: &dyn Fn([f64; 3]) -> [f64; 3]) -> Result<(), String> {
+    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
+    let scene = eval([0.75, 0.75, 0.75])[0];
+    gate_close("hlg scene at 0.75", scene, 0.264_962_559_786_400_15, 1e-12)?;
+    let w = eval([0.749_877_365, 0.749_877_365, 0.749_877_365])[0] / sw;
+    gate_close("hlg working 1.0", w, 0.999_999_999_477_619_4, 1e-9)
+}
+
+/// HLG-compressor anchor gate (mirrors `hlg_primaries_u_bounds_pre_post_fit`,
+/// P=1000, γ=1.2): fitted max channel lands on U per primary.
+fn hlg_compress_gate(eval: &dyn Fn([f64; 3], f64, f64) -> [f64; 3]) -> Result<(), String> {
+    for (prim, u) in [
+        ([1000.0, 0.0, 0.0], 800.282_546_629_577_4),
+        ([0.0, 1000.0, 0.0], 937.284_889_648_623_7),
+        ([0.0, 0.0, 1000.0], 624.466_457_290_609_7),
+    ] {
+        let fit = eval(prim, 1000.0, 1.2);
+        let max_c = fit[0].max(fit[1]).max(fit[2]);
+        gate_close(&format!("hlg U for {prim:?}"), max_c, u, 1e-9)?;
+    }
+    Ok(())
+}
 
 /// Extended (white-preserving) Reinhard as an EETF substitute: matches 0→0
 /// and Cs→Ct, so it is a worthy adversary — and still wrong in the middle.
@@ -1891,19 +1949,11 @@ fn reinhard_eetf_sub(l: f64, cs: f64, ct: f64) -> f64 {
 
 #[test]
 fn control_reinhard_fails_eetf() {
-    // Mirrors eetf_anchors_narrow_span (Cs=1000, Ct=100).
-    assert!((reinhard_eetf_sub(0.0, 1000.0, 100.0) - 0.0).abs() <= 1e-12);
-    assert!((reinhard_eetf_sub(1000.0, 1000.0, 100.0) - 100.0).abs() <= 1e-9);
-    for (l, expected) in [
-        (100.0, 69.454_403_035_658_91),
-        (203.0, 88.243_640_538_647_8),
-    ] {
-        let got = reinhard_eetf_sub(l, 1000.0, 100.0);
-        assert!(
-            (got - expected).abs() > 1e-6,
-            "Reinhard must FAIL the EETF anchor L={l}: got {got}, want {expected}"
-        );
-    }
+    let prod = |l: f64, cs: f64, ct: f64| reference::eetf_to_target(l, cs, ct).unwrap().value;
+    assert!(eetf_gate(&prod).is_ok());
+    let err = eetf_gate(&reinhard_eetf_sub).unwrap_err();
+    // Black and Cs→Ct pass (worthy adversary); the mid anchor rejects it.
+    assert!(err.contains("eetf L=100"), "unexpected rejection: {err}");
 }
 
 /// §4 sRGB inverse OETF (test-only copy) as an HLG-input substitute.
@@ -1917,18 +1967,10 @@ fn srgb_gamma_decode_sub(v: f64) -> f64 {
 
 #[test]
 fn control_srgb_gamma_fails_hlg_input() {
-    // Mirrors hlg_inverse_oetf_anchors + hlg_reference_white_lands_on_working_one.
-    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
-    let scene = srgb_gamma_decode_sub(0.75);
-    assert!(
-        (scene - 0.264_962_559_786_400_15).abs() > 1e-6,
-        "sRGB decode must FAIL scene-at-0.75: got {scene}"
-    );
-    let w = srgb_gamma_decode_sub(0.749_877_365) / sw;
-    assert!(
-        (w - 1.0).abs() > 1e-6,
-        "sRGB decode must FAIL working-1.0: got {w}"
-    );
+    let prod = |s: [f64; 3]| s.map(|x| reference::hlg_inverse_oetf(x).unwrap());
+    assert!(hlg_input_gate(&prod).is_ok());
+    let sub = |s: [f64; 3]| s.map(srgb_gamma_decode_sub);
+    assert!(hlg_input_gate(&sub).is_err());
 }
 
 /// HLG compressor with 709 luma (test-only copy of the §6 equation).
@@ -1952,19 +1994,13 @@ fn hlg_compress_709_sub(rgb: [f64; 3], peak: f64, gamma: f64) -> [f64; 3] {
 
 #[test]
 fn control_709_luma_fails_hlg_compressor() {
-    // Mirrors hlg_primaries_u_bounds_pre_post_fit (P=1000, γ=1.2).
-    for (prim, u) in [
-        ([1000.0, 0.0, 0.0], 800.282_546_629_577_4),
-        ([0.0, 1000.0, 0.0], 937.284_889_648_623_7),
-        ([0.0, 0.0, 1000.0], 624.466_457_290_609_7),
-    ] {
-        let fit = hlg_compress_709_sub(prim, 1000.0, 1.2);
-        let max_c = fit[0].max(fit[1]).max(fit[2]);
-        assert!(
-            (max_c - u).abs() > 1e-3,
-            "709-luma compressor must FAIL U={u}: got {max_c}"
-        );
-    }
+    let prod = |rgb: [f64; 3], p: f64, g: f64| {
+        reference::gamut_compress(rgb, CompressDest::Hlg { peak: p, gamma: g })
+            .unwrap()
+            .value
+    };
+    assert!(hlg_compress_gate(&prod).is_ok());
+    assert!(hlg_compress_gate(&hlg_compress_709_sub).is_err());
 }
 
 /// HLG input WITH an input-side OOTF (the archived attempt's forbidden light
@@ -1982,16 +2018,8 @@ fn hlg_input_ootf_sub(signal: [f64; 3], peak: f64, gamma: f64) -> [f64; 3] {
 
 #[test]
 fn control_input_ootf_fails_hlg_input() {
-    // Mirrors hlg_inverse_oetf_anchors + hlg_reference_white_lands_on_working_one.
-    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
-    let scene = hlg_input_ootf_sub([0.75, 0.75, 0.75], 1000.0, 1.2)[0];
-    assert!(
-        (scene - 0.264_962_559_786_400_15).abs() > 1e-6,
-        "input OOTF must FAIL scene-at-0.75: got {scene}"
-    );
-    let w = hlg_input_ootf_sub([0.749_877_365, 0.749_877_365, 0.749_877_365], 1000.0, 1.2)[0] / sw;
-    assert!(
-        (w - 1.0).abs() > 1e-6,
-        "input OOTF must FAIL working-1.0: got {w}"
-    );
+    let prod = |s: [f64; 3]| s.map(|x| reference::hlg_inverse_oetf(x).unwrap());
+    assert!(hlg_input_gate(&prod).is_ok());
+    let sub = |s: [f64; 3]| hlg_input_ootf_sub(s, 1000.0, 1.2);
+    assert!(hlg_input_gate(&sub).is_err());
 }
