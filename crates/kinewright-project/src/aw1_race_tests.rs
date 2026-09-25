@@ -13,27 +13,24 @@
 //! Mounted from lockfile.rs as a child module (`#[path]`) so it can reach the
 //! private `file` of `LockfileHandle` for the forked-duplicate scenarios.
 
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{
     fs,
     io::Write as _,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{
-        Arc, Barrier,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
+    sync::{Arc, Barrier},
     time::{Duration, Instant},
 };
 
 use kinewright_media::test_support::TempDirectory;
 
 use super::*;
+use crate::recovery::{JOURNAL_MAGIC, allocate_journal_path, journal_file_name};
+#[cfg(unix)]
 use crate::{
-    project::ProjectSaveError,
-    recovery::{JOURNAL_MAGIC, allocate_journal_path, journal_file_name},
-    save_headless,
-    session::SidecarSession,
-    sidecar::SidecarMode,
+    project::ProjectSaveError, save_headless, session::SidecarSession, sidecar::SidecarMode,
 };
 
 const CHILD_TEST: &str = "lockfile::race_tests::race_child";

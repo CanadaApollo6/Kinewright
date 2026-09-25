@@ -280,6 +280,8 @@ impl LockfileHandle {
     /// `FILE_SHARE_DELETE`, so a delete goes delete-pending and blocks
     /// re-create while the handle lives — the object cannot be swapped
     /// under a live owner.
+    /// # Errors
+    /// Returns nothing: the non-Unix object cannot be swapped.
     #[cfg(not(unix))]
     pub fn verify(&self) -> Result<(), LockfileError> {
         Ok(())
@@ -474,7 +476,9 @@ impl FlockGuard {
         self.file.take().expect("a held flock releases once")
     }
 
-    /// The held file, for pre-publish liveness checks (G9).
+    /// The held file, for pre-publish liveness checks (G9; Unix only —
+    /// the sole caller is the Unix fd-vs-path check).
+    #[cfg(unix)]
     fn file(&self) -> &File {
         self.file.as_ref().expect("a held flock")
     }
