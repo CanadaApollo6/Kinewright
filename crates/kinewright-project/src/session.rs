@@ -6,7 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Instant,
 };
@@ -40,9 +40,10 @@ pub struct SidecarSession {
     pub last_restore_report: Option<RestoreReport>,
     /// Suspended: loads run, every flush reports `Skipped` (rule 10, H3).
     pub sidecar_suspended: bool,
-    /// Whether a load established the baseline; only an unloaded session
-    /// can hit GUARD-B.
-    pub loaded: bool,
+    /// The stems this session established a baseline for — loaded, or
+    /// written by a successful flush, or adopted after a save. GUARD-B
+    /// applies only to stems outside this set (F1).
+    pub established: BTreeSet<PathBuf>,
     pub incidents: IncidentLogHandle,
 }
 
@@ -223,8 +224,12 @@ impl SidecarSession {
         writer: Option<Arc<SidecarWriter>>,
         rename: Option<&RefuseRename>,
     ) -> LoadedSidecarSession {
-        let looked = !matches!(mode, SidecarMode::None)
-            && project_path.is_some_and(|path| sidecar_path_for_project(Some(path)).is_some());
+        let mut established = BTreeSet::new();
+        if !matches!(mode, SidecarMode::None)
+            && let Some(stem) = project_path.and_then(|path| sidecar_path_for_project(Some(path)))
+        {
+            established.insert(stem);
+        }
         let loaded = load_session_sidecar(mode, project_path, &incidents, opening, rename);
         LoadedSidecarSession {
             session: Self {
@@ -236,7 +241,7 @@ impl SidecarSession {
                 confirmed_written_gen: loaded.last_written_gen,
                 last_restore_report: loaded.report,
                 sidecar_suspended: loaded.suspended,
-                loaded: looked,
+                established,
                 incidents,
             },
             loaded_walls: loaded.walls,
@@ -306,10 +311,11 @@ impl SidecarSession {
         let (bytes, report) = self
             .sidecar_bytes_for_save(project_digest, previous_digest, running)
             .map_err(std::io::Error::other)?;
-        // GUARD-B (R6): an unloaded session never wipes an occupied stem
-        // with an empty flush — it established no baseline. Fresh stems
+        // GUARD-B (R6/F1): a stem this session never loaded or wrote
+        // keeps its history against an empty flush — the session
+        // established no baseline there. Fresh stems, established stems,
         // and non-empty flushes are untouched.
-        if !self.loaded
+        if !self.established.contains(&sidecar_path)
             && report.written_open == 0
             && report.written_resolved == 0
             && self.carried_sidecar_records.is_empty()
@@ -317,7 +323,8 @@ impl SidecarSession {
         {
             return Ok(FlushOutcome::Skipped);
         }
-        self.sidecar_writer.submit_and_join(sidecar_path, bytes)?;
+        self.sidecar_writer
+            .submit_and_join(sidecar_path.clone(), bytes)?;
         let generation = self
             .incidents
             .read()
@@ -327,6 +334,8 @@ impl SidecarSession {
         // N6/H6: a joined success confirms; a failure propagates before
         // either baseline moves, so close retries it.
         self.confirmed_written_gen = generation;
+        // F1: the write landed, so the stem is established.
+        self.established.insert(sidecar_path);
         Ok(FlushOutcome::Written(report))
     }
 
@@ -456,7 +465,7 @@ mod tests {
             None,
             None,
         );
-        assert!(!loaded.session.loaded, "no load ran");
+        assert!(loaded.session.established.is_empty(), "no load ran");
         let mut session = loaded.session;
         assert_eq!(
             session
@@ -491,7 +500,7 @@ mod tests {
             None,
             None,
         );
-        assert!(loaded.session.loaded, "the load ran");
+        assert!(!loaded.session.established.is_empty(), "the load ran");
         let mut session = loaded.session;
         let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
         fs::create_dir(&sidecar).expect("the sidecar path is occupied");
@@ -517,7 +526,7 @@ mod tests {
             None,
             None,
         );
-        assert!(!loaded.session.loaded, "no load ran");
+        assert!(loaded.session.established.is_empty(), "no load ran");
         let mut session = loaded.session;
         let outcome = session
             .flush_incidents(Some(&project), &digest, &digest, None)
@@ -531,5 +540,99 @@ mod tests {
             panic!("the first sidecar parses");
         };
         assert!(current.records.is_empty(), "empty, as flushed");
+    }
+
+    /// F1/B1: a stem this session wrote is established — the second save's
+    /// empty flush pairs instead of skipping, so the reopen finds no `.bak`.
+    #[test]
+    fn f1_second_empty_flush_to_a_written_stem_pairs() {
+        let dir = TempDirectory::new("aw1-f1-second-save");
+        let project = dir.path("edit.kinewright");
+        write_project_document(&Document::default(), &project, None).expect("project writes");
+        let first = digest_bytes(&fs::read(&project).expect("the project reads"));
+        let loaded = SidecarSession::load(
+            &SidecarMode::None,
+            Some(&project),
+            empty_log(),
+            TimelineRevision::default(),
+            None,
+            None,
+        );
+        let mut session = loaded.session;
+        assert!(
+            matches!(
+                session
+                    .flush_incidents(Some(&project), &first, &first, None)
+                    .expect("the first flush reports"),
+                FlushOutcome::Written(_)
+            ),
+            "the fresh stem is written"
+        );
+        // The document edit advances the project digest, not the log: the
+        // second flush is still empty.
+        let second = digest_bytes(b"edited project bytes");
+        let outcome = session
+            .flush_incidents(Some(&project), &second, &first, None)
+            .expect("the second flush reports");
+        assert!(
+            matches!(outcome, FlushOutcome::Written(_)),
+            "a written stem pairs, got {outcome:?}"
+        );
+        let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
+        let SidecarLoad::Current(current) = load_sidecar(&sidecar) else {
+            panic!("the paired sidecar parses");
+        };
+        assert_eq!(current.project_digest, second);
+        assert_eq!(current.previous_digest, first);
+    }
+
+    /// F1: legitimate clearing — resolving the last incident empties the
+    /// stem on the next save; establishment is not a refusal to clear.
+    #[test]
+    fn f1_resolving_the_last_incident_empties_the_stem() {
+        let dir = TempDirectory::new("aw1-f1-clearing");
+        let project = dir.path("edit.kinewright");
+        write_project_document(&Document::default(), &project, None).expect("project writes");
+        let digest = digest_bytes(&fs::read(&project).expect("the project reads"));
+        let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
+        let bytes =
+            build_sidecar_bytes(&two_records(), &[], &digest, &digest).expect("the sidecar builds");
+        fs::write(&sidecar, &bytes).expect("the occupied stem writes");
+        let loaded = SidecarSession::load(
+            &SidecarMode::Load {
+                project_digest: digest.clone(),
+            },
+            Some(&project),
+            empty_log(),
+            TimelineRevision::default(),
+            None,
+            None,
+        );
+        let mut session = loaded.session;
+        assert_eq!(
+            session
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .open_count(),
+            2,
+            "both records restore"
+        );
+        session
+            .incidents
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove_open_with_code(IncidentCode::Label(LabelIncident::Project));
+        let outcome = session
+            .flush_incidents(Some(&project), &digest, &digest, None)
+            .expect("the clearing flush reports");
+        assert!(
+            matches!(outcome, FlushOutcome::Written(_)),
+            "clearing writes, got {outcome:?}"
+        );
+        let SidecarLoad::Current(current) = load_sidecar(&sidecar) else {
+            panic!("the cleared sidecar parses");
+        };
+        assert!(current.records.is_empty(), "the stem is emptied");
     }
 }

@@ -1178,6 +1178,12 @@ impl KinewrightApp {
         session.name = name;
         session.project_path = Some(path.to_path_buf());
         new_digest.clone_into(&mut session.saved_digest);
+        // F1: the project bytes landed here, so the stem is established —
+        // a later flush pairs instead of skipping, even when this save's
+        // flush skipped over foreign history.
+        if let Some(stem) = sidecar_path_for_project(Some(path)) {
+            session.established.insert(stem);
+        }
         if save_as {
             session.format_version = PROJECT_FORMAT_VERSION;
         }
@@ -13662,6 +13668,126 @@ mod in2b_tests {
         fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).expect("chmod back");
         in2b_quiesce_engine(&engine);
         in2b_shutdown(&mut app);
+    }
+
+    /// F1/B1: new project → save → edit → save (empty log) → reopen: the
+    /// second save pairs its sidecar, so the reopen finds no `.bak` and
+    /// notes no `sidecar_refused`.
+    #[test]
+    fn f1_second_save_pairs_and_reopen_finds_no_bak() {
+        let temp = TempDirectory::new("aw1-f1-second-save");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        app.write_project(&project_path)
+            .expect("the first save succeeds");
+        std::sync::Arc::make_mut(&mut app.projects[0].document)
+            .markers
+            .push(Marker {
+                id: MarkerId(7),
+                position: kinewright_core::TimeCode(0),
+                label: "f1 edit".to_owned(),
+                color_token: 0,
+            });
+        app.write_project(&project_path)
+            .expect("the second save succeeds");
+        // The reopen runs through the production close/open path (a scratch
+        // session keeps the close legal, as in J1/J2).
+        let scratch_path = temp.path("scratch.kinewright");
+        fs::write(
+            &scratch_path,
+            serde_json::to_string_pretty(&Document::default()).expect("the file serialises"),
+        )
+        .expect("the scratch file writes");
+        app.open_project(&scratch_path);
+        let saved_id = app.projects[0].id;
+        app.close_project(saved_id);
+        app.open_project(&project_path);
+        app.route_incidents();
+        // Collected before shutdown; asserted after — a red assert must
+        // never unwind past the engine quiesce (worker teardown race).
+        let refused = {
+            let log = app
+                .focused()
+                .incidents
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            log.all()
+                .any(|incident| incident.code == IncidentCode::Label(LabelIncident::SidecarRefused))
+        };
+        let mut bak = None;
+        for entry in fs::read_dir(temp.root()).expect("the dir reads") {
+            let entry = entry.expect("a readable entry");
+            if entry.file_name().to_string_lossy().contains(".bak") {
+                bak = Some(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+        assert!(!refused, "no sidecar_refused on reopen");
+        assert!(
+            bak.is_none(),
+            "no .bak beside the reopened project: {}",
+            bak.unwrap_or_default()
+        );
+    }
+
+    /// F1: Save-As to a fresh stem writes; Save-As onto an occupied stem
+    /// preserves the foreign bytes (GUARD-B still applies to a stem this
+    /// session never touched); the adopted stem then pairs on re-save.
+    #[test]
+    fn f1_save_as_fresh_writes_occupied_preserves_then_pairs() {
+        let temp = TempDirectory::new("aw1-f1-save-as");
+        let occupied = temp.path("occupied.kinewright");
+        kinewright_project::write_project_document(&Document::default(), &occupied, None)
+            .expect("the occupied target writes");
+        let foreign_digest = digest_bytes(&fs::read(&occupied).expect("the target reads"));
+        let mut foreign = kinewright_core::IncidentLog::with_start(std::time::Instant::now(), None);
+        let _ = foreign.observe(IncidentObservation::plain(
+            IncidentCode::Label(LabelIncident::Project),
+            IncidentSubject::Project,
+            "foreign history",
+            TimelineRevision::default(),
+        ));
+        let (records, _) = foreign.records(None, &std::collections::BTreeMap::new());
+        let foreign_bytes = kinewright_project::build_sidecar_bytes(
+            &records,
+            &[],
+            &foreign_digest,
+            &foreign_digest,
+        )
+        .expect("the foreign sidecar builds");
+        let occupied_sidecar = sidecar_path_for_project(Some(&occupied)).expect("derived");
+        fs::write(&occupied_sidecar, &foreign_bytes).expect("the foreign stem writes");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        let fresh = temp.path("fresh.kinewright");
+        app.write_project(&fresh).expect("fresh Save-As succeeds");
+        let fresh_sidecar = sidecar_path_for_project(Some(&fresh)).expect("derived");
+        assert!(fresh_sidecar.is_file(), "the fresh stem is written");
+        app.write_project(&occupied)
+            .expect("occupied Save-As succeeds");
+        assert_eq!(
+            fs::read(&occupied_sidecar).expect("the stem re-reads"),
+            foreign_bytes,
+            "GUARD-B preserves the foreign stem"
+        );
+        std::sync::Arc::make_mut(&mut app.projects[0].document)
+            .markers
+            .push(Marker {
+                id: MarkerId(9),
+                position: kinewright_core::TimeCode(0),
+                label: "f1 re-save".to_owned(),
+                color_token: 0,
+            });
+        app.write_project(&occupied).expect("the re-save succeeds");
+        let new_digest = digest_bytes(&fs::read(&occupied).expect("the target re-reads"));
+        let SidecarLoad::Current(current) = load_sidecar(&occupied_sidecar) else {
+            panic!("the re-saved sidecar parses");
+        };
+        // Asserted after shutdown, like the second-save test.
+        let paired = current.project_digest.clone();
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+        assert_eq!(paired, new_digest, "the adopted stem pairs on re-save");
     }
 
     /// N6.1/J4: the H1 disk-digest arm, pinned without a sidecar — with no

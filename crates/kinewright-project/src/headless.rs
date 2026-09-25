@@ -35,7 +35,7 @@ pub fn save_headless(
     revision: TimelineRevision,
     recovery_dir: &Path,
 ) -> Result<HeadlessSaveReport, ProjectSaveError> {
-    if !sidecar.loaded {
+    if sidecar.established.is_empty() {
         return Err(ProjectSaveError::SessionNotLoaded);
     }
     let json = serialize_project_document(document)?;
@@ -98,7 +98,7 @@ mod tests {
             None,
             None,
         );
-        assert!(session.loaded, "the headless open loads");
+        assert!(!session.established.is_empty(), "the headless open loads");
         session
     }
 
@@ -197,7 +197,7 @@ mod tests {
             None,
             None,
         );
-        assert!(!session.loaded, "no load ran");
+        assert!(session.established.is_empty(), "no load ran");
         let mut session = session;
         assert!(
             matches!(
