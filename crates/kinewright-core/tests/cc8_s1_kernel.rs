@@ -2215,6 +2215,19 @@ fn bound_predicates_reject_just_outside() {
     assert!(pb4_8bit_channel_ok(1.0, 1e9, 100.0));
     assert!(pb4_8bit_channel_ok(2.0, 0.199_9, 100.0));
     assert!(!pb4_8bit_channel_ok(2.0, 0.200_1, 100.0));
+    // CE8: non-max channel of a P > 1500 source gets 2% of the SDR max.
+    assert!(ce8_sdr_channel_ok(2000.0, false, 5.0, 1.999, 100.0));
+    assert!(ce8_sdr_channel_ok(2000.0, false, 5.0, 2.0, 100.0)); // inclusive.
+    assert!(!ce8_sdr_channel_ok(2000.0, false, 5.0, 2.001, 100.0));
+    assert!(ce8_sdr_channel_ok(1500.1, false, 5.0, 1.999, 100.0));
+    // P = 1500 is CE7 only: the same error fails; CE7 prongs still pass.
+    assert!(!ce8_sdr_channel_ok(1500.0, false, 5.0, 1.999, 100.0));
+    assert!(ce8_sdr_channel_ok(1500.0, false, 1.0, 1.999, 100.0));
+    assert!(ce8_sdr_channel_ok(1500.0, false, 5.0, 0.199_9, 100.0));
+    // The max channel keeps CE7 at any P: 1% fails at P = 4000.
+    assert!(!ce8_sdr_channel_ok(4000.0, true, 5.0, 1.0, 100.0));
+    assert!(ce8_sdr_channel_ok(4000.0, false, 5.0, 1.0, 100.0));
+    assert!(ce8_sdr_channel_ok(4000.0, true, 5.0, 0.199_9, 100.0));
 }
 
 /// Composed matrix/storage delivery leg (R1's shape, generalized anchor):
@@ -2281,9 +2294,26 @@ fn pb4_8bit_channel_ok(codes: f64, disp_err: f64, max_ch: f64) -> bool {
     codes <= pb4_8bit_tol() || ce7_display_ok(disp_err, max_ch)
 }
 
+/// CE8 SDR 8-bit channel acceptance. Source peak P ≤ 1500 nits, or the
+/// SDR triplet's max channel: exactly CE7. Otherwise (P > 1500, non-max
+/// channel — the EETF shrinks the max by up to P/W while this channel
+/// keeps its inherited storage quantum): CE7, or display error ≤ 2% of
+/// the SDR triplet max (codes unbounded). Shared predicate (G4).
+fn ce8_sdr_channel_ok(
+    p_nits: f64,
+    is_max_channel: bool,
+    code_err: f64,
+    disp_err: f64,
+    sdr_max: f64,
+) -> bool {
+    pb4_8bit_channel_ok(code_err, disp_err, sdr_max)
+        || (p_nits > 1500.0 && !is_max_channel && disp_err <= 0.02 * sdr_max.abs())
+}
+
 /// PB4 code accumulators over every channel (CE7: the mean covers all).
 /// `max10`/`max8` are raw code errors; `by_display10`/`by_display8` count
-/// channels that pass only through the CE7 display prong.
+/// channels past the code bound (display prong or, SDR, CE8); `ce8` lists
+/// (P, `disp_err` / SDR max) of SDR channels that fail CE7 and rely on CE8.
 #[derive(Default)]
 struct Pb4Acc {
     max10: f64,
@@ -2292,6 +2322,7 @@ struct Pb4Acc {
     max8: f64,
     by_display10: u32,
     by_display8: u32,
+    ce8: Vec<(f64, f64)>,
 }
 
 /// PB4 HLG 10-bit leg: chain display vs the direct f64 reference, CE7 per
@@ -2320,9 +2351,18 @@ fn pb4_hlg_gate(acc: &mut Pb4Acc, display: [f32; 3], d: [f64; 3], white: f64, pe
     }
 }
 
-/// PB4 SDR leg per channel: (8-bit code error, SDR nit error, SDR triplet
-/// max) of EETF→100 → 709 → SDR compress, chain display vs f64 reference.
-fn pb4_sdr_leg(display: [f32; 3], d: [f64; 3], peak: f64) -> [(f64, f64, f64); 3] {
+/// One SDR 8-bit channel of the PB4 leg vs the f64 reference.
+#[derive(Clone, Copy)]
+struct SdrCh {
+    codes: f64,
+    disp_err: f64,
+    sdr_max: f64,
+    is_max: bool,
+}
+
+/// PB4 SDR leg per channel of EETF→100 → 709 → SDR compress, chain display
+/// vs f64 reference; `is_max` marks the reference SDR triplet's max channel.
+fn pb4_sdr_leg(display: [f32; 3], d: [f64; 3], peak: f64) -> [SdrCh; 3] {
     let code8 = |x: f64| (219.0 * (x.max(0.0) / 100.0).powf(1.0 / 2.4) + 16.0).round();
     let tone = display.map(|x| eetf_to_target(x, as_f32(peak), 100.0).unwrap().value);
     let rec709 = apply_matrix(BT2020_TO_BT709, tone).unwrap();
@@ -2335,24 +2375,32 @@ fn pb4_sdr_leg(display: [f32; 3], d: [f64; 3], peak: f64) -> [(f64, f64, f64); 3
         .unwrap()
         .value;
     let ms = max_abs_3(sdr64);
-    [0, 1, 2].map(|i| {
-        let delta = (code8(f64::from(sdr[i])) - code8(sdr64[i])).abs();
-        (delta, (f64::from(sdr[i]) - sdr64[i]).abs(), ms)
+    [0, 1, 2].map(|i| SdrCh {
+        codes: (code8(f64::from(sdr[i])) - code8(sdr64[i])).abs(),
+        disp_err: (f64::from(sdr[i]) - sdr64[i]).abs(),
+        sdr_max: ms,
+        is_max: sdr64[i].abs() >= ms, // ties (neutrals) are all max.
     })
 }
 
-/// PB4 SDR 8-bit leg: CE7 per channel, display prong in SDR nits vs the
-/// SDR triplet max.
+/// PB4 SDR 8-bit leg: CE8 per channel (CE7 with the display prong in SDR
+/// nits vs the SDR triplet max; CE8's 2% prong for non-max channels of
+/// P > 1500 sources). CE7 failures that CE8 absorbs are recorded.
 fn pb4_sdr_gate(acc: &mut Pb4Acc, display: [f32; 3], d: [f64; 3], white: f64, peak: f64) {
-    for (i, (delta, derr, ms)) in pb4_sdr_leg(display, d, peak).into_iter().enumerate() {
+    for (i, c) in pb4_sdr_leg(display, d, peak).into_iter().enumerate() {
         assert!(
-            pb4_8bit_channel_ok(delta, derr, ms),
-            "PB4 SDR[{i}] d={d:?} W={white} P={peak}: codes={delta} disp={derr}"
+            ce8_sdr_channel_ok(peak, c.is_max, c.codes, c.disp_err, c.sdr_max),
+            "PB4 SDR[{i}] d={d:?} W={white} P={peak}: codes={} disp={}",
+            c.codes,
+            c.disp_err
         );
-        if delta > pb4_8bit_tol() {
+        if !pb4_8bit_channel_ok(c.codes, c.disp_err, c.sdr_max) {
+            acc.ce8.push((peak, c.disp_err / c.sdr_max));
+        }
+        if c.codes > pb4_8bit_tol() {
             acc.by_display8 += 1;
         }
-        acc.max8 = acc.max8.max(delta);
+        acc.max8 = acc.max8.max(c.codes);
     }
 }
 
@@ -2468,28 +2516,23 @@ fn pb4_composed_coloured_anchor_scan() {
     // cutoff through the composed matrix/storage leg. One channel at P,
     // the other two at f·P; P × W × pairs × f × position = 324 anchors.
     // HLG 10-bit: every channel passes CE7; mean over all channels.
-    // SDR 8-bit: every channel passes CE7 except the green-major 0.5% cell
-    // at P=4000 (OPEN, lead ruling): its red minor's HDR display error
-    // (up to ≈1.8 nits, inside CE7's 8) survives the EETF toe almost
-    // unscaled and is amplified by 709 + SDR compression while the SDR max
-    // drops to 100, so SDR-relative 0.2% (0.2 nits) cannot absorb it (all
-    // 6 W × pairs anchors fail on Linux: 4–39 codes). Witness pinned below.
+    // SDR 8-bit: every channel passes CE8. The green-major 0.5% cell at
+    // P=4000 fails CE7 (its red minor's HDR display error, up to ≈1.8 nits
+    // inside CE7's 8, survives the EETF toe almost unscaled while the SDR
+    // max drops to 100) and passes only through CE8's 2% prong — which the
+    // gate grants for P > 1500 alone; asserted below so a P ≤ 1500 CE7
+    // failure cannot hide in it.
     let mut acc = Pb4Acc::default();
-    let (mut n, mut sdr_open) = (0u32, 0u32);
-    for (pi, peak) in [400.0, 1000.0, 4000.0].into_iter().enumerate() {
+    let mut n = 0u32;
+    for peak in [400.0, 1000.0, 4000.0] {
         for white in [100.0, 203.0, 400.0] {
             for pairs in [1, 3] {
-                for (fi, f) in [0.005, 0.01, 0.02, 0.04, 0.1, 0.25].into_iter().enumerate() {
+                for f in [0.005, 0.01, 0.02, 0.04, 0.1, 0.25] {
                     for i in 0..3 {
                         let mut d = [f * peak; 3];
                         d[i] = peak;
                         let display = matrix_chain_display(d, white, peak, pairs);
-                        pb4_hlg_gate(&mut acc, display, d, white, peak);
-                        if (pi, fi, i) == (2, 0, 1) {
-                            sdr_open += 1;
-                        } else {
-                            pb4_sdr_gate(&mut acc, display, d, white, peak);
-                        }
+                        pb4_gate(&mut acc, display, d, white, peak);
                         n += 1;
                     }
                 }
@@ -2499,25 +2542,76 @@ fn pb4_composed_coloured_anchor_scan() {
     let mean10 = acc.sum10 / f64::from(acc.n10);
     println!(
         "CE7 scan: anchors={n} ch={} max10={} mean10={mean10} by_display10={} \
-         max8={} by_display8={} sdr_open={sdr_open}",
-        acc.n10, acc.max10, acc.by_display10, acc.max8, acc.by_display8
+         max8={} by_display8={} ce8={:?}",
+        acc.n10, acc.max10, acc.by_display10, acc.max8, acc.by_display8, acc.ce8
     );
-    assert_eq!((n, sdr_open), (324, 6));
+    assert_eq!(n, 324);
+    // CE8 visibility: some channels rely on the CE8 prong, all at P > 1500.
+    assert!(!acc.ce8.is_empty(), "scan must exercise CE8");
+    assert!(
+        acc.ce8.iter().all(|&(p, _)| p > 1500.0),
+        "only P > 1500 may rely on CE8: {:?}",
+        acc.ce8
+    );
     assert!(mean10 <= pb4_mean_tol(), "CE7 scan 10-bit mean: {mean10}");
     // Erratum visibility: the scan has 10-bit code misses CE7 must absorb.
     assert!(acc.max10 > pb4_code_tol(), "scan must exercise the prong");
     assert!(acc.by_display10 > 0);
-    // OPEN SDR witness: [20, 4000, 20], W=203, three pairs. HLG passes
-    // CE7; the SDR red channel fails it (Linux: 39 codes, 1.60 nits).
+    // CE8 witness: [20, 4000, 20], W=203, three pairs. HLG passes CE7; the
+    // SDR red (non-max) channel fails CE7 (Linux: 39 codes, 1.60% of the
+    // SDR max) and passes CE8's 2% prong.
     let d = [20.0, 4000.0, 20.0];
     let display = matrix_chain_display(d, 203.0, 4000.0, 3);
     pb4_hlg_gate(&mut acc, display, d, 203.0, 4000.0);
-    let (codes, derr, ms) = pb4_sdr_leg(display, d, 4000.0)[0];
-    println!("SDR witness red: codes={codes} disp={derr} sdr_max={ms}");
-    assert!(
-        !pb4_8bit_channel_ok(codes, derr, ms),
-        "SDR witness must fail CE7: codes={codes} disp={derr}"
+    let c = pb4_sdr_leg(display, d, 4000.0)[0];
+    println!(
+        "SDR witness red: codes={} disp={} sdr_max={}",
+        c.codes, c.disp_err, c.sdr_max
     );
+    assert!(!c.is_max);
+    assert!(
+        !pb4_8bit_channel_ok(c.codes, c.disp_err, c.sdr_max),
+        "SDR witness must fail CE7: codes={} disp={}",
+        c.codes,
+        c.disp_err
+    );
+    assert!(ce8_sdr_channel_ok(
+        4000.0, c.is_max, c.codes, c.disp_err, c.sdr_max
+    ));
+}
+
+#[test]
+fn pb4_sdr_ce8_envelope_scan() {
+    // CE8 envelope (reduced from the 1,620-channel measurement): SDR leg
+    // only, P 1500/2000/4000/10000 × minor 0.1/0.5/1% × W 203/400 × three
+    // pairs × major position = 72 anchors. Every channel passes CE8; P=1500
+    // (the CE8 threshold) has no CE7 failure; the worst P > 1500 CE7 miss
+    // stays under 2% of the SDR max.
+    let mut acc = Pb4Acc::default();
+    let mut n = 0u32;
+    for peak in [1500.0, 2000.0, 4000.0, 10_000.0] {
+        for f in [0.001, 0.005, 0.01] {
+            for white in [203.0, 400.0] {
+                for i in 0..3 {
+                    let mut d = [f * peak; 3];
+                    d[i] = peak;
+                    let display = matrix_chain_display(d, white, peak, 3);
+                    pb4_sdr_gate(&mut acc, display, d, white, peak);
+                    n += 1;
+                }
+            }
+        }
+    }
+    let worst = acc.ce8.iter().map(|&(_, r)| r).fold(0.0, f64::max);
+    println!("CE8 envelope: anchors={n} ce8={:?} worst={worst}", acc.ce8);
+    assert_eq!(n, 72);
+    assert!(!acc.ce8.is_empty(), "envelope must exercise CE8");
+    assert!(
+        acc.ce8.iter().all(|&(p, _)| p > 1500.0),
+        "P=1500 must meet CE7: {:?}",
+        acc.ce8
+    );
+    assert!(worst < 0.02, "worst P > 1500 SDR error: {worst}");
 }
 
 fn ulp_w1() -> f64 {
