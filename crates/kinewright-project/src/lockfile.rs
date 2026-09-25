@@ -130,6 +130,11 @@ pub enum LockfileError {
     PendingRecovery {
         journal: PathBuf,
     },
+    /// Takeover refused: the pending-journal lookup itself failed — take
+    /// no chances with undecided crash data (F5, fail-closed).
+    RecoveryLookup {
+        reason: String,
+    },
     Io(String),
 }
 
@@ -152,6 +157,11 @@ impl std::fmt::Display for LockfileError {
                 "not taking over: a recovery journal is pending ({}) — \
                  restore or discard it in the GUI first",
                 journal.display()
+            ),
+            Self::RecoveryLookup { reason } => write!(
+                formatter,
+                "not taking over: the pending-recovery lookup failed ({reason}) — \
+                 restore or discard recovery journals in the GUI first"
             ),
             Self::Io(reason) => write!(formatter, "{reason}"),
         }
@@ -286,7 +296,7 @@ fn build_claim(
 /// Acquire the project lock with the §5 policy (`recovery_dir` feeds the
 /// pending-journal check).
 /// # Errors
-/// `Contention`, `PendingRecovery`, or `Io`.
+/// `Contention`, `PendingRecovery`, `RecoveryLookup`, or `Io`.
 pub fn acquire_project_lock(
     project_path: &Path,
     mode: LockMode,
@@ -366,10 +376,19 @@ pub fn acquire_project_lock_with_policy(
         }
         // We hold the flock, so any discovery present is stale — a live
         // owner holds the lock. Pending recovery refuses first (S7), on
-        // every ownership path.
-        if let Some(journal) = pending_journal_for_project(recovery_dir, project_path) {
-            drop(file);
-            return Err(LockfileError::PendingRecovery { journal });
+        // every ownership path — and a failed lookup refuses too (F5).
+        match pending_journal_for_project(recovery_dir, project_path) {
+            Ok(Some(journal)) => {
+                drop(file);
+                return Err(LockfileError::PendingRecovery { journal });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                drop(file);
+                return Err(LockfileError::RecoveryLookup {
+                    reason: error.to_string(),
+                });
+            }
         }
         let previous = read_owner(&discovery_path);
         claim.reclaimed_from.clone_from(&previous);
@@ -396,7 +415,7 @@ mod tests {
 
     use kinewright_media::test_support::TempDirectory;
 
-    use crate::recovery::journal_file_name;
+    use crate::recovery::{allocate_journal_path, journal_file_name};
 
     use super::*;
 
@@ -1114,6 +1133,134 @@ mod tests {
                 Err(LockfileError::Contention { .. })
             ),
             "the spellings exclude each other"
+        );
+    }
+
+    /// F5/L3 port: a pending journal refuses even with no lockfile at all —
+    /// the check runs after the lock on every ownership path.
+    #[test]
+    fn f5_pending_recovery_without_lockfile_refuses() {
+        let dir = TempDirectory::new("aw1-f5-l3");
+        let project = dir.path("edit.kinewright");
+        let recovery = recovery_dir(&dir);
+        let journal = recovery.join(journal_file_name(&project));
+        fs::write(&journal, b"pending crash data").expect("the pending journal writes");
+        let error = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Headless,
+            "http://127.0.0.1:40123/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect_err("a pending journal refuses without a lockfile");
+        assert!(
+            matches!(&error, LockfileError::PendingRecovery { journal: found } if found == &journal),
+            "pending_recovery naming the journal, got {error}"
+        );
+    }
+
+    /// F5/L4 port: a suffixed pending journal refuses too — the lookup
+    /// covers every `allocate_journal_path` name for the identity.
+    #[test]
+    fn f5_pending_allocator_suffix_refuses() {
+        let dir = TempDirectory::new("aw1-f5-l4");
+        let project = dir.path("edit.kinewright");
+        let recovery = recovery_dir(&dir);
+        drop(
+            acquire_project_lock_with_policy(
+                &project,
+                LockMode::Gui,
+                "http://127.0.0.1:9/mcp",
+                &recovery,
+                1,
+                Duration::ZERO,
+            )
+            .expect("the first acquire lands"),
+        );
+        let base = recovery.join(journal_file_name(&project));
+        fs::write(&base, b"reserved").expect("the base journal writes");
+        let suffixed = allocate_journal_path(&recovery, Some(&project), Path::new(""), &[&base]);
+        assert_ne!(suffixed, base);
+        fs::write(&suffixed, b"second pending crash").expect("the suffixed journal writes");
+        fs::remove_file(&base).expect("only the suffix pends");
+        let error = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Headless,
+            "http://127.0.0.1:40123/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect_err("a suffixed pending journal refuses");
+        assert!(
+            matches!(&error, LockfileError::PendingRecovery { journal: found } if found == &suffixed),
+            "pending_recovery naming the suffix, got {error}"
+        );
+    }
+
+    /// F5/B6: a journal named by an alias spelling still refuses — the
+    /// lookup reads the owning project from the journal header.
+    #[test]
+    fn f5_alias_named_journal_refuses() {
+        let dir = TempDirectory::new("aw1-f5-alias");
+        let project = dir.path("edit.kinewright");
+        fs::write(&project, b"{}").expect("the project writes");
+        let recovery = recovery_dir(&dir);
+        // Named as a pre-F4 alias spelling would name it: a different stem
+        // and hash, so no filename pattern matches — only the header does.
+        let alias = dir.path("elsewhere.kinewright");
+        let journal = recovery.join(journal_file_name(&alias));
+        assert_ne!(
+            journal_file_name(&alias),
+            journal_file_name(&project),
+            "the alias name matches no pattern for the project"
+        );
+        let header = serde_json::json!({
+            "format_version": 1,
+            "project_path": project,
+            "writer_format_version": 1,
+            "initial_document": kinewright_core::Document::default(),
+        });
+        let mut bytes = crate::recovery::JOURNAL_MAGIC.to_vec();
+        bytes.extend_from_slice(&serde_json::to_vec(&header).expect("the header serialises"));
+        bytes.push(b'\n');
+        fs::write(&journal, &bytes).expect("the alias-named journal writes");
+        let error = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Headless,
+            "http://127.0.0.1:40123/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect_err("an alias-named pending journal refuses");
+        assert!(
+            matches!(&error, LockfileError::PendingRecovery { journal: found } if found == &journal),
+            "pending_recovery naming the journal, got {error}"
+        );
+    }
+
+    /// F5: a failed pending-journal lookup refuses takeover closed — an
+    /// unscannable recovery dir never reads as "nothing pends".
+    #[test]
+    fn f5_lookup_error_refuses_takeover_closed() {
+        let dir = TempDirectory::new("aw1-f5-lookup-error");
+        let project = dir.path("edit.kinewright");
+        let recovery = dir.path("recovery");
+        fs::write(&recovery, b"not a dir").expect("the recovery path is a file");
+        let error = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Headless,
+            "http://127.0.0.1:40123/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect_err("an unscannable recovery dir refuses");
+        assert!(
+            matches!(error, LockfileError::RecoveryLookup { .. }),
+            "a typed fail-closed refusal, got {error}"
         );
     }
 }

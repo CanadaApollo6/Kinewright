@@ -9,7 +9,6 @@ use kinewright_media::LutStore;
 
 use crate::{
     project::{ProjectSaveError, ProjectSaveReport, serialize_project_document},
-    recovery::retire_journal_for_project,
     session::SidecarSession,
     sidecar::{FlushOutcome, digest_bytes, sidecar_write_failed_observation},
 };
@@ -57,7 +56,10 @@ pub fn save_headless(
         };
     let project = crate::project::write_project_bytes(&json, document, path, previous_store)?;
     new_digest.clone_into(&mut sidecar.saved_digest);
-    let _ = retire_journal_for_project(recovery_dir, path);
+    // F5: headless retires nothing — it owns no journals (only a session
+    // that replayed recovery data may retire it). The parameter stays so
+    // the save-pipeline call shape is stable across callers.
+    let _ = recovery_dir;
     Ok(HeadlessSaveReport {
         project,
         sidecar: sidecar_outcome,
@@ -103,10 +105,11 @@ mod tests {
     }
 
     /// R1/R2/R5/R6: a headless save round-trips — the project re-loads
-    /// identical, the sidecar pairs on the new digest, the baseline advances,
-    /// and the stale journal retires.
+    /// identical, the sidecar pairs on the new digest, and the baseline
+    /// advances. F5: an unreplayed pending journal survives the save —
+    /// headless owns no journals, so it retires none.
     #[test]
-    fn headless_save_round_trip_pairs_and_retires() {
+    fn headless_save_preserves_an_unreplayed_journal() {
         let dir = TempDirectory::new("aw1-headless-round-trip");
         let project = dir.path("edit.kinewright");
         let recovery = dir.path("recovery");
@@ -170,9 +173,12 @@ mod tests {
             "a first save has no previous"
         );
         assert!(
-            pending_journal_for_project(&recovery, &project).is_none(),
-            "the stale journal retired"
+            pending_journal_for_project(&recovery, &project)
+                .expect("the lookup lands")
+                .is_some(),
+            "the unreplayed journal survives the save"
         );
+        assert!(stale.exists(), "headless retires nothing it did not replay");
     }
 
     /// R6: a headless save refuses an unloaded session fail-closed instead

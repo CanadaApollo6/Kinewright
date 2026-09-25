@@ -23,7 +23,7 @@ pub use project::{
     write_project_bytes, write_project_document,
 };
 pub use recovery::{
-    allocate_journal_path, default_recovery_directory, fnv1a_64, journal_file_name,
+    JOURNAL_MAGIC, allocate_journal_path, default_recovery_directory, fnv1a_64, journal_file_name,
     pending_journal_for_project, restore_status, retire_journal_for_project,
 };
 pub use session::{IncidentLogHandle, LoadedSidecarSession, SidecarSession};

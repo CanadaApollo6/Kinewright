@@ -38,12 +38,11 @@ use kinewright_core::{
     Core, Document, Event, IncidentCode, IncidentObservation, IncidentSubject, JournalCommand,
     LabelIncident, PROJECT_FORMAT_VERSION, TimelineRevision,
 };
-use kinewright_project::{allocate_journal_path, default_recovery_directory};
+use kinewright_project::{JOURNAL_MAGIC, allocate_journal_path, default_recovery_directory};
 use serde::{Deserialize, Serialize};
 
 use crate::theme::{self, type_size};
 
-const MAGIC: &[u8] = b"KINEWRIGHT-JOURNAL 1\n";
 const FORMAT_VERSION: u32 = 1;
 const CORE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -117,7 +116,7 @@ impl JournalWriter {
             initial_document: initial_document.clone(),
         })
         .map_err(|error| format!("could not serialize recovery snapshot: {error}"))?;
-        file.write_all(MAGIC)
+        file.write_all(JOURNAL_MAGIC)
             .and_then(|()| file.write_all(&header))
             .and_then(|()| file.write_all(b"\n"))
             .and_then(|()| file.flush())
@@ -191,8 +190,8 @@ enum Inspection {
 }
 
 fn parse_journal(bytes: &[u8]) -> Result<ParsedJournal, Damage> {
-    if !bytes.starts_with(MAGIC) {
-        let reason = if MAGIC.starts_with(bytes) {
+    if !bytes.starts_with(JOURNAL_MAGIC) {
+        let reason = if JOURNAL_MAGIC.starts_with(bytes) {
             "the journal preamble was truncated"
         } else {
             "the journal preamble or format version is invalid"
@@ -204,22 +203,22 @@ fn parse_journal(bytes: &[u8]) -> Result<ParsedJournal, Damage> {
         });
     }
 
-    let Some((header_line, header_end)) = complete_line(bytes, MAGIC.len()) else {
+    let Some((header_line, header_end)) = complete_line(bytes, JOURNAL_MAGIC.len()) else {
         return Err(Damage {
-            offset: MAGIC.len(),
-            ignored_bytes: bytes.len().saturating_sub(MAGIC.len()),
+            offset: JOURNAL_MAGIC.len(),
+            ignored_bytes: bytes.len().saturating_sub(JOURNAL_MAGIC.len()),
             reason: "the initial document snapshot was truncated".to_owned(),
         });
     };
     let header: JournalHeader = serde_json::from_slice(header_line).map_err(|error| Damage {
-        offset: MAGIC.len(),
-        ignored_bytes: bytes.len().saturating_sub(MAGIC.len()),
+        offset: JOURNAL_MAGIC.len(),
+        ignored_bytes: bytes.len().saturating_sub(JOURNAL_MAGIC.len()),
         reason: format!("the initial document snapshot is corrupt: {error}"),
     })?;
     if header.format_version != FORMAT_VERSION {
         return Err(Damage {
-            offset: MAGIC.len(),
-            ignored_bytes: bytes.len().saturating_sub(MAGIC.len()),
+            offset: JOURNAL_MAGIC.len(),
+            ignored_bytes: bytes.len().saturating_sub(JOURNAL_MAGIC.len()),
             reason: format!(
                 "journal format {} is not supported by this build",
                 header.format_version
@@ -228,8 +227,8 @@ fn parse_journal(bytes: &[u8]) -> Result<ParsedJournal, Damage> {
     }
     if let Err(error) = header.initial_document.validate() {
         return Err(Damage {
-            offset: MAGIC.len(),
-            ignored_bytes: bytes.len().saturating_sub(MAGIC.len()),
+            offset: JOURNAL_MAGIC.len(),
+            ignored_bytes: bytes.len().saturating_sub(JOURNAL_MAGIC.len()),
             reason: format!("the initial document snapshot is invalid: {error}"),
         });
     }
@@ -313,8 +312,8 @@ fn replay(parsed: ParsedJournal) -> Inspection {
         Ok(core) => core,
         Err(error) => {
             return Inspection::Unusable(Damage {
-                offset: MAGIC.len(),
-                ignored_bytes: parsed.byte_len.saturating_sub(MAGIC.len()),
+                offset: JOURNAL_MAGIC.len(),
+                ignored_bytes: parsed.byte_len.saturating_sub(JOURNAL_MAGIC.len()),
                 reason: format!("the initial recovery snapshot was rejected: {error}"),
             });
         }
@@ -1040,7 +1039,7 @@ mod tests {
         initial: &Document,
         commands: &[JournalCommand],
     ) -> Vec<u8> {
-        let mut bytes = MAGIC.to_vec();
+        let mut bytes = JOURNAL_MAGIC.to_vec();
         bytes.extend(
             serde_json::to_vec(&JournalHeader {
                 format_version: FORMAT_VERSION,
@@ -1692,7 +1691,7 @@ mod tests {
 
     /// Craft header-only journal bytes with a chosen writer version line.
     fn journal_bytes_with_header_line(header_line: &[u8]) -> Vec<u8> {
-        let mut bytes = MAGIC.to_vec();
+        let mut bytes = JOURNAL_MAGIC.to_vec();
         bytes.extend_from_slice(header_line);
         bytes.push(b'\n');
         bytes

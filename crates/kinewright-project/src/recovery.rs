@@ -10,6 +10,14 @@ use std::{
 use kinewright_core::{
     IncidentCode, IncidentObservation, IncidentSubject, LabelIncident, TimelineRevision,
 };
+use serde::Deserialize;
+
+use crate::project::canonical_project_identity;
+
+/// The recovery-journal magic: every journal opens with it, and the lock
+/// takeover check reads the owning project from the header line behind it
+/// (F5). Shared with the app's writer/inspector so the two never drift.
+pub const JOURNAL_MAGIC: &[u8] = b"KINEWRIGHT-JOURNAL 1\n";
 
 pub fn default_recovery_directory() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
@@ -125,14 +133,106 @@ pub fn restore_status(result: Result<(), String>) -> Result<String, Box<Incident
     }
 }
 
-/// The pending journal for a project: the takeover check (AW1 §5/S7).
-#[must_use]
-pub fn pending_journal_for_project(recovery_dir: &Path, project_path: &Path) -> Option<PathBuf> {
-    let candidate = recovery_dir.join(journal_file_name(project_path));
-    candidate.is_file().then_some(candidate)
+/// Whether a journal file name belongs to the identity's base name: the
+/// base itself or any `allocate_journal_path` `-N` suffix for it.
+fn journal_name_matches_for(identity_base: &str, file_name: &str) -> bool {
+    if file_name == identity_base {
+        return true;
+    }
+    let stem = identity_base.trim_end_matches(".journal");
+    file_name
+        .strip_prefix(stem)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .and_then(|rest| rest.strip_suffix(".journal"))
+        .is_some_and(|digits| {
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
-/// Retire a project's journal after a save: the headless checkpoint.
+/// The one header field the takeover check reads: the owning project's
+/// path. Every other header field is the app's business.
+#[derive(Deserialize)]
+struct JournalIdentityHeader {
+    #[serde(default)]
+    project_path: Option<PathBuf>,
+}
+
+/// Whether a journal's header names the identity's project (F5): the
+/// alias arm — a journal named by another spelling still blocks. A
+/// missing or torn header never matches by content (the filename arm
+/// covers our own names whatever their bytes); a vanished file reads as
+/// gone, any other read error propagates (fail-closed).
+fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Error> {
+    let bytes = match fs::read(journal) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !bytes.starts_with(JOURNAL_MAGIC) {
+        return Ok(false);
+    }
+    let Some(relative_end) = bytes[JOURNAL_MAGIC.len()..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+    else {
+        return Ok(false);
+    };
+    let line = &bytes[JOURNAL_MAGIC.len()..JOURNAL_MAGIC.len() + relative_end];
+    let header: JournalIdentityHeader = match serde_json::from_slice(line) {
+        Ok(header) => header,
+        Err(_) => return Ok(false),
+    };
+    let Some(project) = header.project_path else {
+        return Ok(false);
+    };
+    Ok(canonical_project_identity(&project) == identity)
+}
+
+/// The pending journal for a project: the takeover check (AW1 §5/S7, F5).
+///
+/// Covers the identity's base journal, every `allocate_journal_path`
+/// `-N` suffix for it, and any alias-named journal whose header names
+/// the project — the first match in name order wins. A missing recovery
+/// dir holds nothing; any other lookup IO error fails closed.
+/// # Errors
+/// Returns the lookup IO error.
+pub fn pending_journal_for_project(
+    recovery_dir: &Path,
+    project_path: &Path,
+) -> Result<Option<PathBuf>, io::Error> {
+    let identity = canonical_project_identity(project_path);
+    let base = journal_file_name(project_path);
+    let entries = match fs::read_dir(recovery_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut pending = Vec::new();
+    for entry in entries {
+        let journal = entry?.path();
+        if journal
+            .extension()
+            .is_none_or(|extension| extension != "journal")
+        {
+            continue;
+        }
+        let named = journal
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| journal_name_matches_for(&base, name));
+        if named || journal_header_names(&journal, &identity)? {
+            pending.push(journal);
+        }
+    }
+    pending.sort();
+    Ok(pending.into_iter().next())
+}
+
+/// Retire a project's base journal: the checkpoint half of a restore.
+///
+/// The caller must own the journal (F5) — only retire recovery data your
+/// session replayed and superseded. Headless owns none, so it never calls
+/// this; an unreplayed pending journal always survives a headless save.
 /// # Errors
 /// Any removal IO error other than absence.
 pub fn retire_journal_for_project(recovery_dir: &Path, project_path: &Path) -> io::Result<bool> {
@@ -157,7 +257,7 @@ mod tests {
         fs::create_dir(&recovery).expect("the recovery dir creates");
         let project = dir.path("edit.kinewright");
         assert_eq!(
-            pending_journal_for_project(&recovery, &project),
+            pending_journal_for_project(&recovery, &project).expect("the lookup lands"),
             None,
             "no journal pends"
         );
@@ -168,7 +268,7 @@ mod tests {
         let journal = recovery.join(journal_file_name(&project));
         fs::write(&journal, b"stale crash bytes").expect("the stale journal writes");
         assert_eq!(
-            pending_journal_for_project(&recovery, &project),
+            pending_journal_for_project(&recovery, &project).expect("the lookup lands"),
             Some(journal.clone()),
             "the stale journal pends"
         );
@@ -178,7 +278,7 @@ mod tests {
         );
         assert!(!journal.exists(), "the stale journal is gone");
         assert_eq!(
-            pending_journal_for_project(&recovery, &project),
+            pending_journal_for_project(&recovery, &project).expect("the lookup lands"),
             None,
             "nothing pends after the retire"
         );
