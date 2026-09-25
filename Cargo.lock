@@ -2338,6 +2338,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "fs2",
+ "gethostname",
  "kinewright-core",
  "kinewright-media",
  "serde",

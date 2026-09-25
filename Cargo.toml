@@ -28,6 +28,7 @@ egui_extras = { version = "=0.35.0", default-features = false, features = ["svg"
 half = "=2.7.1"
 ffmpeg-next = { version = "=8.0.0", default-features = false, features = ["codec", "filter", "format", "software-resampling", "software-scaling"] }
 fs2 = "=0.4.3"
+gethostname = "=1.1.0"
 getrandom = "=0.3.4"
 image = { version = "=0.25.9", default-features = false, features = ["png"] }
 proptest = "=1.11.0"

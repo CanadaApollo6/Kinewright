@@ -9,8 +9,11 @@
 //! including on Windows, where a `LockFileEx` range denies second-handle
 //! reads of the locked file itself (B4). Release removes the discovery
 //! while still holding the lock, then unlocks; a stale discovery with a
-//! free lock means a dead owner and reclaims with a warning. Any flock
-//! failure reads as *held* (fail-closed).
+//! free lock means a dead owner and reclaims with a warning — unless the
+//! stale claim names a known foreign host, which refuses (F7): flock
+//! liveness is host-local, so on local-lock network filesystems a free
+//! lock proves nothing about a foreign owner, and AW1 claims no
+//! multi-host exclusion. Any flock failure reads as *held* (fail-closed).
 
 use std::{
     fs::{self, File},
@@ -104,16 +107,39 @@ pub fn discovery_path_for_project(project_path: Option<&Path>) -> Option<PathBuf
     Some(PathBuf::from(name))
 }
 
-/// This machine's hostname: `HOSTNAME`, `COMPUTERNAME`, then `"unknown"`.
+/// The hostname published when nothing names this machine: not a host,
+/// but the absence of host information. Stale claims carrying it predate
+/// real hostnames and still reclaim (F7).
+const UNKNOWN_HOSTNAME: &str = "unknown";
+
+/// This machine's OS hostname (`gethostname` on Unix, the computer name
+/// on Windows): `None` when the OS call yields nothing usable. The crate
+/// forbids `unsafe`, and std offers no hostname API, so the call goes
+/// through the tiny `gethostname` dependency (already in the lockfile).
+fn os_hostname() -> Option<String> {
+    let name = gethostname::gethostname();
+    let name = name.to_str()?.trim().to_owned();
+    (!name.is_empty()).then_some(name)
+}
+
+/// This machine's hostname: the OS name, then `HOSTNAME`/`COMPUTERNAME`,
+/// then [`UNKNOWN_HOSTNAME`]. No secret — the name only scopes the F7
+/// foreign-host refusal.
 fn current_hostname() -> String {
+    if let Some(name) = os_hostname() {
+        return name;
+    }
     for key in ["HOSTNAME", "COMPUTERNAME"] {
         if let Some(value) = std::env::var_os(key)
-            && let Some(name) = value.to_str().filter(|name| !name.is_empty())
+            && let Some(name) = value
+                .to_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
         {
             return name.to_owned();
         }
     }
-    "unknown".to_owned()
+    UNKNOWN_HOSTNAME.to_owned()
 }
 
 /// Why a project lock acquire failed.
@@ -134,6 +160,13 @@ pub enum LockfileError {
     /// no chances with undecided crash data (F5, fail-closed).
     RecoveryLookup {
         reason: String,
+    },
+    /// Takeover refused: the stale lock names a known foreign host — a
+    /// locally free lock proves nothing about a foreign owner, and AW1
+    /// claims no multi-host exclusion (F7).
+    ForeignHost {
+        host: String,
+        endpoint: String,
     },
     Io(String),
 }
@@ -162,6 +195,11 @@ impl std::fmt::Display for LockfileError {
                 formatter,
                 "not taking over: the pending-recovery lookup failed ({reason}) — \
                  restore or discard recovery journals in the GUI first"
+            ),
+            Self::ForeignHost { host, endpoint } => write!(
+                formatter,
+                "not taking over: the stale lock belongs to host {host} (endpoint {endpoint}) — \
+                 refusing a cross-host takeover"
             ),
             Self::Io(reason) => write!(formatter, "{reason}"),
         }
@@ -296,7 +334,7 @@ fn build_claim(
 /// Acquire the project lock with the §5 policy (`recovery_dir` feeds the
 /// pending-journal check).
 /// # Errors
-/// `Contention`, `PendingRecovery`, `RecoveryLookup`, or `Io`.
+/// `Contention`, `PendingRecovery`, `RecoveryLookup`, `ForeignHost`, or `Io`.
 pub fn acquire_project_lock(
     project_path: &Path,
     mode: LockMode,
@@ -391,6 +429,20 @@ pub fn acquire_project_lock_with_policy(
             }
         }
         let previous = read_owner(&discovery_path);
+        // F7: a stale claim from a KNOWN foreign host refuses — a locally
+        // free lock proves nothing on local-lock network filesystems, and
+        // AW1 claims no multi-host exclusion. `UNKNOWN_HOSTNAME` predates
+        // real hostnames (S1 never shipped multi-host) and still reclaims.
+        if let Some(refused) = previous
+            .as_ref()
+            .filter(|owner| owner.hostname != UNKNOWN_HOSTNAME && owner.hostname != claim.hostname)
+        {
+            drop(file);
+            return Err(LockfileError::ForeignHost {
+                host: refused.hostname.clone(),
+                endpoint: refused.endpoint.clone(),
+            });
+        }
         claim.reclaimed_from.clone_from(&previous);
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_flock_before_publish");
@@ -726,6 +778,8 @@ mod tests {
             Ok(owner) => {
                 fs::write(signals.join("owned"), owner.handle.claim.pid.to_string())
                     .expect("the owned signal writes");
+                fs::write(signals.join("hostname"), &owner.handle.claim.hostname)
+                    .expect("the hostname signal writes");
                 wait_for_signal(&signals.join("done"));
                 drop(owner);
             }
@@ -748,7 +802,15 @@ mod tests {
     /// Spawn this test binary as a lock claimant; `hook` arms one
     /// `test_hook` pause point in the child only (the parent never sets
     /// the hook variables, so parallel tests cannot interfere).
-    fn spawn_claimant(project: &Path, recovery: &Path, signals: &Path, hook: &str) -> Kid {
+    /// `strip_host_env` removes the hostname variables from the child's
+    /// environment, hermetically (F7).
+    fn spawn_claimant(
+        project: &Path,
+        recovery: &Path,
+        signals: &Path,
+        hook: &str,
+        strip_host_env: bool,
+    ) -> Kid {
         fs::create_dir_all(signals).expect("the signals dir creates");
         let mut command = Command::new(std::env::current_exe().expect("the test binary resolves"));
         command
@@ -760,6 +822,9 @@ mod tests {
             .env("REV2_HOOK", hook)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if strip_host_env {
+            command.env_remove("HOSTNAME").env_remove("COMPUTERNAME");
+        }
         Kid(command.spawn().expect("the claimant spawns"))
     }
 
@@ -785,6 +850,7 @@ mod tests {
             &recovery,
             &signals,
             "after_lock_open_before_flock",
+            false,
         );
         wait_for_signal(&signals.join("paused"));
         let live = acquire_project_lock_with_policy(
@@ -842,6 +908,7 @@ mod tests {
             &recovery,
             &signals,
             "after_lock_open_before_flock",
+            false,
         );
         wait_for_signal(&signals.join("paused"));
         first.handle.release().expect("the release lands");
@@ -947,7 +1014,7 @@ mod tests {
         let project = dir.path("edit.kinewright");
         let recovery = recovery_dir(&dir);
         let signals = dir.path("child");
-        let mut child = spawn_claimant(&project, &recovery, &signals, "");
+        let mut child = spawn_claimant(&project, &recovery, &signals, "", false);
         wait_for_signal(&signals.join("owned"));
         let pid = child.0.id();
         assert!(
@@ -995,7 +1062,13 @@ mod tests {
         let project = dir.path("edit.kinewright");
         let recovery = recovery_dir(&dir);
         let signals = dir.path("holder");
-        let holder = spawn_claimant(&project, &recovery, &signals, "after_flock_before_publish");
+        let holder = spawn_claimant(
+            &project,
+            &recovery,
+            &signals,
+            "after_flock_before_publish",
+            false,
+        );
         wait_for_signal(&signals.join("paused"));
         let error = acquire_project_lock_with_policy(
             &project,
@@ -1262,5 +1335,115 @@ mod tests {
             matches!(error, LockfileError::RecoveryLookup { .. }),
             "a typed fail-closed refusal, got {error}"
         );
+    }
+
+    /// F7/S1: the claim names the OS hostname even with no hostname
+    /// variables in the environment (the child strips them hermetically,
+    /// so parallel tests cannot interfere).
+    #[cfg(unix)]
+    #[test]
+    fn f7_claim_names_the_os_hostname_without_env() {
+        let dir = TempDirectory::new("aw1-f7-host");
+        let project = dir.path("edit.kinewright");
+        let recovery = recovery_dir(&dir);
+        let signals = dir.path("child");
+        let child = spawn_claimant(&project, &recovery, &signals, "", true);
+        wait_for_signal(&signals.join("hostname"));
+        let hostname = fs::read_to_string(signals.join("hostname")).expect("the hostname reads");
+        fs::write(signals.join("done"), "").expect("the done writes");
+        drop(child);
+        assert_ne!(
+            hostname, "unknown",
+            "the OS names the host without env help"
+        );
+        assert!(!hostname.is_empty());
+    }
+
+    /// F7/S1: a stale claim from a known foreign host refuses takeover —
+    /// a locally free lock proves nothing about a foreign owner.
+    #[test]
+    fn f7_foreign_host_claim_refuses_takeover() {
+        let dir = TempDirectory::new("aw1-f7-foreign");
+        let project = dir.path("edit.kinewright");
+        fs::write(&project, b"{}").expect("the project writes");
+        let recovery = recovery_dir(&dir);
+        let first = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Gui,
+            "http://127.0.0.1:9/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect("the acquire lands");
+        let discovery = first.handle.discovery.clone();
+        drop(first); // The crash: a stale discovery, a free lock.
+        // The stale owner was foreign: patch the hostname it published.
+        let mut claim: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&discovery).expect("the discovery reads"))
+                .expect("the discovery parses");
+        claim["hostname"] = serde_json::Value::String("definitely-foreign-host.invalid".to_owned());
+        fs::write(
+            &discovery,
+            serde_json::to_vec_pretty(&claim).expect("the claim serialises"),
+        )
+        .expect("the foreign discovery writes");
+        let error = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Headless,
+            "http://127.0.0.1:10/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect_err("a foreign-host stale lock refuses");
+        assert!(
+            matches!(&error, LockfileError::ForeignHost { host, .. } if host == "definitely-foreign-host.invalid"),
+            "the refusal names the host, got {error}"
+        );
+    }
+
+    /// F7: a stale claim with no host information (`unknown`, predating
+    /// real hostnames) still reclaims — only a KNOWN foreign host refuses.
+    #[test]
+    fn f7_unknown_host_stale_claim_still_reclaims() {
+        let dir = TempDirectory::new("aw1-f7-legacy");
+        let project = dir.path("edit.kinewright");
+        fs::write(&project, b"{}").expect("the project writes");
+        let recovery = recovery_dir(&dir);
+        let first = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Gui,
+            "http://127.0.0.1:9/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect("the acquire lands");
+        let discovery = first.handle.discovery.clone();
+        drop(first); // The crash: a stale discovery, a free lock.
+        let mut claim: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&discovery).expect("the discovery reads"))
+                .expect("the discovery parses");
+        claim["hostname"] = serde_json::Value::String("unknown".to_owned());
+        fs::write(
+            &discovery,
+            serde_json::to_vec_pretty(&claim).expect("the claim serialises"),
+        )
+        .expect("the legacy discovery writes");
+        let got = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Headless,
+            "http://127.0.0.1:10/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect("an unknown-host stale lock reclaims");
+        assert_eq!(
+            got.reclaimed.as_ref().expect("the reclaim warns").hostname,
+            "unknown"
+        );
+        got.handle.release().expect("the release lands");
     }
 }

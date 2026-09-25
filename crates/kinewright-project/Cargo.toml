@@ -15,6 +15,7 @@ test-util = []
 [dependencies]
 crossbeam-channel.workspace = true
 fs2.workspace = true
+gethostname.workspace = true
 kinewright-core = { path = "../kinewright-core" }
 kinewright-media = { path = "../kinewright-media" }
 serde.workspace = true
