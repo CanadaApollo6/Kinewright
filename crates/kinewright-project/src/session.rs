@@ -16,10 +16,13 @@ use kinewright_core::{
     WriteReport, should_flush,
 };
 
-use crate::sidecar::{
-    FlushOutcome, RefuseRename, SidecarLoad, SidecarMode, SidecarWriter, build_sidecar_bytes,
-    digest_bytes, load_sidecar, refuse_sidecar, refuse_sidecar_with, sidecar_matches_project,
-    sidecar_path_for_project, sidecar_refused_observation,
+use crate::{
+    project::write_file_atomic,
+    sidecar::{
+        FlushOutcome, RefuseRename, SidecarLoad, SidecarMode, SidecarWriter, build_sidecar_bytes,
+        digest_bytes, load_sidecar, refuse_sidecar, refuse_sidecar_with, sidecar_matches_project,
+        sidecar_path_for_project, sidecar_refused_observation,
+    },
 };
 
 /// The incident log handle a session shares with its agent servers. Same
@@ -408,6 +411,54 @@ impl SidecarSession {
             self.sidecar_writer.submit(sidecar_path, bytes);
             self.last_written_gen = generation;
         }
+    }
+}
+
+/// What the H12 rollback owes the sidecar (N6.1/J3): the prior bytes to
+/// restore, a removal when no sidecar preceded the save, or nothing when
+/// the pre-flush read failed for any reason but absence — an unreadable
+/// sidecar is never deleted.
+pub enum SidecarRollback {
+    Restore(Vec<u8>),
+    Remove,
+    Skip,
+}
+
+/// Snapshot what the H12 rollback owes the sidecar, before the flush
+/// (N6.1/J3): the prior bytes to restore, a removal when no sidecar
+/// preceded the save, or nothing when the read failed for any reason but
+/// absence — an unreadable sidecar is never deleted. Shared by the app
+/// and headless saves (F6).
+#[must_use]
+pub fn snapshot_sidecar_rollback(sidecar: Option<&Path>) -> SidecarRollback {
+    let Some(sidecar) = sidecar else {
+        return SidecarRollback::Skip;
+    };
+    match fs::read(sidecar) {
+        Ok(bytes) => SidecarRollback::Restore(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SidecarRollback::Remove,
+        Err(_) => SidecarRollback::Skip,
+    }
+}
+
+/// Run the H12 rollback after a failed project write (F6): the sidecar
+/// flushed above the failed write pairs with bytes that never landed —
+/// restore the prior bytes, or remove the sidecar when none preceded the
+/// save. Best-effort: the save already failed, and the pair's previous
+/// arm still loads a newer-than-project sidecar, so a failed rollback
+/// degrades to a re-flush, not a refusal.
+pub fn rollback_sidecar_write(sidecar: Option<PathBuf>, plan: SidecarRollback) {
+    let Some(sidecar) = sidecar else {
+        return;
+    };
+    match plan {
+        SidecarRollback::Restore(bytes) => {
+            let _ = write_file_atomic(&sidecar, &bytes);
+        }
+        SidecarRollback::Remove => {
+            let _ = fs::remove_file(sidecar);
+        }
+        SidecarRollback::Skip => {}
     }
 }
 

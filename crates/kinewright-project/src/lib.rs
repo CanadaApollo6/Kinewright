@@ -26,7 +26,10 @@ pub use recovery::{
     JOURNAL_MAGIC, allocate_journal_path, default_recovery_directory, fnv1a_64, journal_file_name,
     pending_journal_for_project, restore_status, retire_journal_for_project,
 };
-pub use session::{IncidentLogHandle, LoadedSidecarSession, SidecarSession};
+pub use session::{
+    IncidentLogHandle, LoadedSidecarSession, SidecarRollback, SidecarSession,
+    rollback_sidecar_write, snapshot_sidecar_rollback,
+};
 pub use sidecar::{
     FlushOutcome, LoadedSidecar, RefuseRename, SIDECAR_FORMAT_VERSION, SIDECAR_SUFFIX, SidecarLoad,
     SidecarMode, SidecarWriter, build_sidecar_bytes, digest_bytes, load_sidecar, refuse_sidecar,

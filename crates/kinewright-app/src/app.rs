@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeSet,
-    fs,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -26,8 +25,9 @@ use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits
 use kinewright_project::{
     ProjectSaveError, ProjectSaveReport, RefuseRename, SidecarMode, SidecarWriter,
     can_overwrite_save, canonical_session_key, derive_lut_store, digest_bytes, load_document,
-    project_newer_format_observation, serialize_project_document, sidecar_path_for_project,
-    sidecar_write_failed_observation, write_file_atomic, write_project_bytes,
+    project_newer_format_observation, rollback_sidecar_write, serialize_project_document,
+    sidecar_path_for_project, sidecar_write_failed_observation, snapshot_sidecar_rollback,
+    write_project_bytes,
 };
 
 use crate::{
@@ -468,52 +468,6 @@ pub(crate) struct KinewrightApp {
     /// Whether the held card reported itself during the previous frame.
     pub(crate) look_ab_hold_seen: bool,
     performance: Option<crate::performance::PerformanceProbe>,
-}
-
-/// What the H12 rollback owes the sidecar (N6.1/J3): the prior bytes to
-/// restore, a removal when no sidecar preceded the save, or nothing when
-/// the pre-flush read failed for any reason but absence — an unreadable
-/// sidecar is never deleted.
-enum SidecarRollback {
-    Restore(Vec<u8>),
-    Remove,
-    Skip,
-}
-
-/// N6/H12 rollback, split from [`KinewrightApp::write_project`]: the sidecar
-/// flushed above the failed project write pairs with bytes that never
-/// landed — restore the prior bytes, or remove the sidecar when none
-/// preceded the save. Best-effort: the save already failed, and the pair's
-/// previous arm still loads a newer-than-project sidecar, so a failed
-/// rollback degrades to a re-flush, not a refusal.
-/// Snapshot what the H12 rollback owes the sidecar, before the flush
-/// (N6.1/J3): the prior bytes to restore, a removal when no sidecar
-/// preceded the save, or nothing when the read failed for any reason but
-/// absence — an unreadable sidecar is never deleted.
-fn snapshot_sidecar_rollback(sidecar: Option<&Path>) -> SidecarRollback {
-    let Some(sidecar) = sidecar else {
-        return SidecarRollback::Skip;
-    };
-    match fs::read(sidecar) {
-        Ok(bytes) => SidecarRollback::Restore(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SidecarRollback::Remove,
-        Err(_) => SidecarRollback::Skip,
-    }
-}
-
-fn rollback_sidecar_write(sidecar: Option<PathBuf>, plan: SidecarRollback) {
-    let Some(sidecar) = sidecar else {
-        return;
-    };
-    match plan {
-        SidecarRollback::Restore(bytes) => {
-            let _ = write_file_atomic(&sidecar, &bytes);
-        }
-        SidecarRollback::Remove => {
-            let _ = fs::remove_file(sidecar);
-        }
-        SidecarRollback::Skip => {}
-    }
 }
 
 impl KinewrightApp {
