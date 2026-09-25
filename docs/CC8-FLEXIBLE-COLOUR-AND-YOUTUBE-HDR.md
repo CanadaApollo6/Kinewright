@@ -736,9 +736,9 @@ codes; W=100 puts the 10 000-nit input at working 46.4159.
 - **PB3 display absolute** (post-render): white ±10% ≤ 1.0 nit; peak ≤
   max(2.0 nits, 0.2% × P) (errata CE3, CE5); below 1 nit ≤ 0.05 nits.
 - **PB4 final code**: 10-bit delivery anchors (black/18%/white/peak/saturated)
-  ≤ 2 codes max, ≤ 0.5 mean; 8-bit SDR anchors ≤ 1 code. Minor channels of a
-  triplet (reference display value < 1% of its max channel) are held to the
-  max channel's PB3 display bound in nits instead of codes (erratum CE6).
+  ≤ 2 codes max, ≤ 0.5 mean; 8-bit SDR anchors ≤ 1 code. A triplet channel
+  outside 2 codes still passes if its display error ≤ 0.2% of the triplet's
+  max-channel display value (errata CE6, CE7).
 - **S1 precision errata (2026-09-25, lead ruling after the S1 reviews).**
   CE3: the 2.0-nit peak bound was derived at P = 1000; one f16 store of the
   W=100/P=10 000 working peak (≈14.96) alone costs 3.46 nits, so the peak bound
@@ -749,12 +749,20 @@ codes; W=100 puts the 10 000-nit input at working 46.4159.
   f32 intermediates were rejected (memory). CE1 accepted: the HLG compressor
   resolves Y into [0, P]. CE2 withdrawn: EETF identity/clip decide in nits.
   CE5 (S1 re-review): a composed 2020→709→f16→2020 stage pair errs up to
-  0.157% of P at the peak (P = 7004: 11.0 nits), past CE3's one-store 0.1%;
-  the peak bound is 0.2% × P (≈ 27% margin), still under one 10-bit PQ code.
+  0.170% of P at the peak (17.3 M primary chains, P 400–10 000, W 100–400,
+  one and three pairs; worst P = 9539, 16.2 nits), past CE3's one-store 0.1%;
+  the peak bound is 0.2% × P (≈ 15% margin), under a quarter of one 10-bit PQ
+  code (≈ 0.9% × L).
   CE6: HLG's √(3E) toe maps a minor channel's display error — which inherits the
   max channel's storage quantum (CE4) — to unbounded codes (2020 green at
   400 nits: 0.084 nits = 8 codes). Minor channels (< 1% of the triplet max) are
   bounded in nits by the max channel's PB3 limit; masked beside it.
+  CE7 (S1 closing verification) replaces CE6's 1% cutoff: every channel's
+  display error inherits the max channel's storage quantum, so a 4% channel
+  fails codes too ([16, 400, 16] at P = 400: 0.035 nits = 4 codes). A channel
+  passes PB4 by codes (≤ 2) or by display error ≤ 0.2% of the triplet's max
+  channel (CE5's composed budget, relative to the channel that sets the
+  quantum); the mean stays ≤ 0.5 codes over all channels.
   Kernel parameter domain (S1): γ ∈ [1, 3]; P, W, Cs, Ct ∈ [1, 100 000] nits;
   outside it the kernel refuses `OutOfDomain`.
 - Non-finite/overflow in working values: typed render refusal with asset/frame
