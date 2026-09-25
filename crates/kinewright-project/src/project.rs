@@ -289,48 +289,82 @@ pub fn canonical_session_key(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// One canonical identity (F4): full path if it exists, else canonical
-/// parent plus name; relative resolves at the cwd. Raw is the last resort.
-#[must_use]
-/// Resolve a symlink chain one `read_link` at a time (G8): each relative
-/// target resolves against its link's parent. Returns the first non-link
-/// path, or `None` past the depth bound (a loop) and on IO failure — the
-/// caller falls back to the legacy rule, which is safe because a loop can
-/// never name a real file.
-fn resolve_link_chain(path: &Path, depth: u32) -> Option<PathBuf> {
+/// The Linux `MAXSYMLINKS`: the most links the kernel follows in one
+/// lookup, and so the most an identity follows (H5).
+const IDENTITY_LINK_HOPS: u32 = 40;
+
+/// A path with no canonical project identity (H5): its symlink chain
+/// still names a link after [`IDENTITY_LINK_HOPS`] hops (too long, or a
+/// cycle), or a link in it cannot be read. Typed, never a fallback —
+/// aliases must not derive distinct lock/journal identities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectIdentityError {
+    pub path: PathBuf,
+}
+
+impl std::fmt::Display for ProjectIdentityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} has no project identity: its symlink chain is longer than \
+             {IDENTITY_LINK_HOPS} links, loops, or cannot be read",
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for ProjectIdentityError {}
+
+/// Resolve a symlink chain one `read_link` at a time (G8/H5): each
+/// relative target resolves against its link's parent. Follows at most
+/// [`IDENTITY_LINK_HOPS`] links, then checks the reached path — a non-link
+/// terminal resolves (as the kernel would), a link still there refuses.
+fn resolve_link_chain(path: &Path) -> Result<PathBuf, ProjectIdentityError> {
+    let is_link =
+        |path: &Path| fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    let refuse = || ProjectIdentityError {
+        path: path.to_path_buf(),
+    };
     let mut current = path.to_path_buf();
-    for _ in 0..depth {
-        if !fs::symlink_metadata(&current).is_ok_and(|meta| meta.file_type().is_symlink()) {
-            return Some(current);
+    for _ in 0..IDENTITY_LINK_HOPS {
+        if !is_link(&current) {
+            return Ok(current);
         }
-        let target = fs::read_link(&current).ok()?;
+        let target = fs::read_link(&current).map_err(|_| refuse())?;
         current = if target.is_absolute() {
             target
         } else {
             current.parent().unwrap_or(Path::new(".")).join(target)
         };
     }
-    None
+    if is_link(&current) {
+        Err(refuse())
+    } else {
+        Ok(current)
+    }
 }
 
-#[must_use]
-pub fn canonical_project_identity(path: &Path) -> PathBuf {
-    // G8: a dangling symlink leaf resolves through `read_link` so aliases
-    // share their target's identity (canonical-parent-of-target plus target
-    // name when the target is missing); past the depth bound the legacy
-    // fallback below applies.
-    let resolved = resolve_link_chain(path, 40).unwrap_or_else(|| path.to_path_buf());
+/// One canonical identity (F4): full path if it exists, else canonical
+/// parent plus name; relative resolves at the cwd. Raw is the last resort.
+/// G8: a dangling symlink leaf resolves through its chain first, so
+/// aliases share their target's identity (canonical parent of the target
+/// plus the target's name when it is missing).
+/// # Errors
+/// [`ProjectIdentityError`] when the chain exceeds the kernel's link
+/// bound, loops, or cannot be read (H5).
+pub fn canonical_project_identity(path: &Path) -> Result<PathBuf, ProjectIdentityError> {
+    let resolved = resolve_link_chain(path)?;
     if let Ok(canonical) = fs::canonicalize(&resolved) {
-        return canonical;
+        return Ok(canonical);
     }
     let parent = resolved
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    match (fs::canonicalize(parent), resolved.file_name()) {
+    Ok(match (fs::canonicalize(parent), resolved.file_name()) {
         (Ok(dir), Some(name)) => dir.join(name),
         _ => resolved,
-    }
+    })
 }
 
 /// Serialise a document inside the file envelope (`IN2B` §4 rules 1–2).
@@ -560,23 +594,24 @@ mod tests {
     /// dir — and falls back to the raw path when nothing resolves.
     #[test]
     fn canonical_identity_pins_existing_missing_and_unresolvable() {
+        let identity = |path: &Path| canonical_project_identity(path).expect("an identity");
         let dir = TempDirectory::new("aw1-f4-identity");
         let real = dir.path("edit.kinewright");
         fs::write(&real, b"{}").expect("the project writes");
         assert_eq!(
-            canonical_project_identity(&real),
+            identity(&real),
             fs::canonicalize(&real).expect("the real path resolves")
         );
         let missing = dir.path("new.kinewright");
         assert_eq!(
-            canonical_project_identity(&missing),
+            identity(&missing),
             fs::canonicalize(dir.root())
                 .expect("the parent resolves")
                 .join("new.kinewright")
         );
         let nowhere = Path::new("/no/such/kinewright-dir/edit.kinewright");
-        assert_eq!(canonical_project_identity(nowhere), nowhere.to_path_buf());
-        let relative = canonical_project_identity(Path::new("missing.kinewright"));
+        assert_eq!(identity(nowhere), nowhere.to_path_buf());
+        let relative = identity(Path::new("missing.kinewright"));
         assert!(
             relative.is_absolute(),
             "relative resolves against the working dir"
@@ -587,12 +622,10 @@ mod tests {
         );
     }
 
-    /// G8: a dangling symlink leaf shares its target's identity, and a
-    /// symlink loop terminates on the legacy fallback (deterministic, no
-    /// hang — loops can never name a real file).
+    /// G8: a dangling symlink leaf shares its target's identity.
     #[cfg(unix)]
     #[test]
-    fn g8_dangling_leaf_unifies_and_loops_terminate() {
+    fn g8_dangling_leaf_unifies() {
         let dir = TempDirectory::new("aw1-g8-dangling");
         let target = dir.path("real").join("new.kinewright");
         let alias = dir.path("alias.kinewright");
@@ -602,22 +635,61 @@ mod tests {
             canonical_project_identity(&target),
             "a dangling alias shares its target's identity"
         );
+    }
+
+    /// H5: a dangling chain of N relative links (`link0 → link1 → … →
+    /// missing`) unifies with its target up to the kernel's 40 hops — the
+    /// 40th hop's non-link terminal resolves normally — and 41 refuses
+    /// typed, as does a cycle: never a silent fallback identity.
+    #[cfg(unix)]
+    #[test]
+    fn h5_link_chain_depth_unifies_to_40_and_refuses_past_it() {
+        let dir = TempDirectory::new("aw1-h5-depth");
+        let target = canonical_project_identity(&dir.path("missing.kinewright"))
+            .expect("the target identity");
+        for links in [0_usize, 1, 39, 40, 41] {
+            let chain = dir.path(&format!("chain-{links}"));
+            fs::create_dir(&chain).expect("the chain dir creates");
+            for hop in 0..links {
+                let next = if hop + 1 == links {
+                    Path::new("..").join("missing.kinewright")
+                } else {
+                    PathBuf::from(format!("link{}", hop + 1))
+                };
+                std::os::unix::fs::symlink(next, chain.join(format!("link{hop}")))
+                    .expect("a relative link plants");
+            }
+            let head = if links == 0 {
+                dir.path("missing.kinewright")
+            } else {
+                chain.join("link0")
+            };
+            let got = canonical_project_identity(&head);
+            if links <= 40 {
+                assert_eq!(got.as_ref(), Ok(&target), "{links} links unify");
+            } else {
+                assert_eq!(got, Err(ProjectIdentityError { path: head }), "41 refuse");
+            }
+        }
         let loop_a = dir.path("loop-a");
         let loop_b = dir.path("loop-b");
         std::os::unix::fs::symlink(&loop_b, &loop_a).expect("loop a plants");
         std::os::unix::fs::symlink(&loop_a, &loop_b).expect("loop b plants");
-        let first = canonical_project_identity(&loop_a);
-        assert_eq!(
-            first,
-            canonical_project_identity(&loop_a),
-            "loops terminate deterministically"
+        assert!(
+            canonical_project_identity(&loop_a).is_err(),
+            "a cycle refuses typed"
         );
-        assert_eq!(
-            first,
-            fs::canonicalize(dir.root())
-                .expect("the parent resolves")
-                .join("loop-a"),
-            "a loop falls back to the legacy rule"
+        let refused = crate::lockfile::acquire_project_lock_with_policy(
+            &dir.path("chain-41").join("link0"),
+            crate::lockfile::LockMode::Headless,
+            "http://127.0.0.1:9/mcp",
+            &dir.path("recovery"),
+            1,
+            std::time::Duration::ZERO,
+        );
+        assert!(
+            matches!(refused, Err(crate::lockfile::LockfileError::Identity(_))),
+            "the lock refuses typed, creating nothing"
         );
     }
 

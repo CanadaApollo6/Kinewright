@@ -17,7 +17,7 @@ pub use lockfile::{
     lockfile_path_for_project, reclaim_warning_json, reclaim_warning_json_unreadable,
 };
 pub use project::{
-    ProjectFile, ProjectSaveError, ProjectSaveReport, can_overwrite_save,
+    ProjectFile, ProjectIdentityError, ProjectSaveError, ProjectSaveReport, can_overwrite_save,
     canonical_project_identity, canonical_session_key, derive_lut_store, load_document,
     project_newer_format_observation, serialize_project_document, write_file_atomic,
     write_project_bytes, write_project_document,

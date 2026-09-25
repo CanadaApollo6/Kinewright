@@ -117,7 +117,8 @@ impl JournalWriter {
         // meant — legacy relative headers stay readable but never claim.
         let header = serde_json::to_vec(&JournalHeader {
             format_version: FORMAT_VERSION,
-            project_path: project_path.map(canonical_project_identity),
+            // H5: a path with no identity writes no header path (never claims).
+            project_path: project_path.and_then(|path| canonical_project_identity(path).ok()),
             writer_format_version: PROJECT_FORMAT_VERSION,
             initial_document: initial_document.clone(),
         })
@@ -1590,7 +1591,11 @@ mod tests {
         // G5: new headers persist the absolute canonical identity.
         assert_eq!(
             report.project_path.as_deref(),
-            Some(canonical_project_identity(&project).as_path())
+            Some(
+                canonical_project_identity(&project)
+                    .expect("the identity resolves")
+                    .as_path()
+            )
         );
         assert!(report.document.asset(AssetId(1)).is_some());
         assert!(report.document.asset(AssetId(2)).is_some());

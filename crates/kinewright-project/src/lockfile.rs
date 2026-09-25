@@ -77,11 +77,12 @@ pub struct LockfileClaim {
     pub reclaimed_from: Option<ReclaimedOwner>,
 }
 
-/// Sibling lock beside the real file, via the identity (F4).
+/// Sibling lock beside the real file, via the identity (F4); `None`
+/// without a path or an identity (H5).
 #[must_use]
 pub fn lockfile_path_for_project(project_path: Option<&Path>) -> Option<PathBuf> {
     let path = project_path?;
-    let identity = crate::project::canonical_project_identity(path);
+    let identity = crate::project::canonical_project_identity(path).ok()?;
     let stem = identity.file_stem()?;
     let mut name = stem.to_os_string();
     name.push(".");
@@ -180,6 +181,9 @@ pub enum LockfileError {
     LockLost {
         path: PathBuf,
     },
+    /// The path has no canonical identity (H5): its symlink chain is
+    /// longer than the kernel follows, loops, or cannot be read.
+    Identity(String),
     Io(String),
 }
 
@@ -222,7 +226,7 @@ impl std::fmt::Display for LockfileError {
                 "the lock {} was deleted under this live owner; not writing",
                 path.display()
             ),
-            Self::Io(reason) => write!(formatter, "{reason}"),
+            Self::Identity(reason) | Self::Io(reason) => write!(formatter, "{reason}"),
         }
     }
 }
@@ -648,8 +652,9 @@ fn build_claim(
     mode: LockMode,
     endpoint: &str,
     reclaimed_from: Option<ReclaimedOwner>,
-) -> (PathBuf, PathBuf, LockfileClaim) {
-    let canonical = crate::project::canonical_project_identity(project);
+) -> Result<(PathBuf, PathBuf, LockfileClaim), LockfileError> {
+    let canonical = crate::project::canonical_project_identity(project)
+        .map_err(|error| LockfileError::Identity(error.to_string()))?;
     let canonical_text = canonical.to_string_lossy().into_owned();
     let lock_path = lockfile_path_for_project(Some(project))
         .unwrap_or_else(|| PathBuf::from(format!("{}.{LOCKFILE_SUFFIX}", project.display())));
@@ -675,7 +680,7 @@ fn build_claim(
             .map_or(0, |elapsed| elapsed.as_secs()),
         reclaimed_from,
     };
-    (lock_path, discovery_path, claim)
+    Ok((lock_path, discovery_path, claim))
 }
 
 /// Acquire the project lock with the §5 policy (`recovery_dir` feeds the
@@ -710,7 +715,7 @@ pub fn acquire_project_lock_with_policy(
     attempts: u32,
     retry_delay: Duration,
 ) -> Result<AcquiredLock, LockfileError> {
-    let (lock_path, discovery_path, mut claim) = build_claim(project_path, mode, endpoint, None);
+    let (lock_path, discovery_path, mut claim) = build_claim(project_path, mode, endpoint, None)?;
     let attempts = attempts.max(1);
     for attempt in 1..=attempts {
         let last = attempt == attempts;
@@ -875,6 +880,7 @@ mod tests {
             "a fresh acquire reclaims nothing"
         );
         let canonical = crate::project::canonical_project_identity(&project)
+            .expect("the identity resolves")
             .to_string_lossy()
             .into_owned();
         assert_eq!(
@@ -1899,7 +1905,8 @@ mod tests {
         let project = dir.path("edit.kinewright");
         fs::write(&project, b"{}").expect("the project writes");
         let (_, discovery, claim) =
-            build_claim(&project, LockMode::Gui, "http://127.0.0.1:9/mcp", None);
+            build_claim(&project, LockMode::Gui, "http://127.0.0.1:9/mcp", None)
+                .expect("the claim builds");
         let prior = b"prior discovery bytes";
         fs::write(&discovery, prior).expect("the prior discovery writes");
         let refused = |_: &Path, _: &Path| -> io::Result<()> {

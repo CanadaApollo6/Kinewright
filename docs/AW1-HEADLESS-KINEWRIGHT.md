@@ -106,7 +106,13 @@ changes.
   aliases share one lock and one journal name. (Fix round 2, G8: a
   dangling symlink leaf resolves through `read_link` — relative to the
   link's parent, depth-bounded at 40 — so dangling aliases share their
-  target's identity; past the bound the legacy fallback applies. Notes:
+  target's identity. Fix round 3, H5: the bound is Linux `MAXSYMLINKS`
+  (40 hops, what the kernel follows); after the 40th hop the reached path
+  is checked — a non-link terminal resolves normally, a link still there
+  (a longer chain or a cycle) or an unreadable link is a typed
+  `ProjectIdentityError`, never a fallback: the lock refuses with
+  `LockfileError::Identity`, the journal scan fails closed, and a journal
+  header naming such a path never claims. Notes:
   `write_file_atomic` replaces a dangling PROJECT symlink with a regular
   file (pre-existing, unchanged); hard links are a known limitation —
   two hard links to one file hold distinct identities and can

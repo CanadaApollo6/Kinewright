@@ -60,9 +60,12 @@ fn journal_name_for(path: &Path) -> String {
 
 /// `MyVideo-1a2b3c4d5e6f7081.journal` - readable stem, collision-proof hash.
 /// Both halves derive from the canonical identity (F4): one file, one name.
+/// A path with no identity (H5) names by its raw spelling — it can never
+/// be locked or scanned (both refuse typed), so the name owns nothing.
 #[must_use]
 pub fn journal_file_name(project_path: &Path) -> String {
-    journal_name_for(&crate::project::canonical_project_identity(project_path))
+    let identity = canonical_project_identity(project_path);
+    journal_name_for(identity.as_deref().unwrap_or(project_path))
 }
 
 /// The pre-F4 journal name (G5): main hashed the RAW path spelling, so a
@@ -216,7 +219,7 @@ fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Err
     if !project.is_absolute() {
         return Ok(false);
     }
-    Ok(canonical_project_identity(&project) == identity)
+    Ok(canonical_project_identity(&project).is_ok_and(|named| named == identity))
 }
 
 /// Pending journal (AW1 §5/S7, F5/G5/G6): canonical and legacy bases,
@@ -230,7 +233,7 @@ pub fn pending_journal_for_project(
     recovery_dir: &Path,
     project_path: &Path,
 ) -> Result<Option<PathBuf>, io::Error> {
-    let identity = canonical_project_identity(project_path);
+    let identity = canonical_project_identity(project_path).map_err(io::Error::other)?;
     let base = journal_file_name(project_path);
     let legacy = legacy_journal_file_name(project_path);
     // Windows only: the ordinary spelling main hashed, recovered from a
