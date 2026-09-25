@@ -10,8 +10,8 @@ use std::{
 use kinewright_core::{
     Analysis, AssetId, AudioChain, ClipId, Core, Document, Event, Export, IncidentId, IncidentLog,
     IncidentState, IncidentSubject, LutAssetId, LutAvailabilityKind, LutAvailabilityStatus,
-    MarkerId, MediaKind, Playback, RunningInvestigation, TimeCode, TimelineRevision, TrackId,
-    TrackKind,
+    MarkerId, MediaKind, Operation, Playback, RunningInvestigation, TimeCode, TimelineRevision,
+    TrackId, TrackKind,
 };
 use kinewright_media::{LutLibrary, LutStore};
 use kinewright_project::{
@@ -567,9 +567,12 @@ impl ProjectSession {
         project_digest: &str,
         previous_digest: &str,
     ) -> Result<(Vec<u8>, kinewright_core::WriteReport), String> {
-        let running = self.drain_investigator_queue();
-        self.sidecar
-            .sidecar_bytes_for_save(project_digest, previous_digest, running.as_ref())
+        let investigator = self.investigator.as_ref();
+        self.sidecar.sidecar_bytes_for_save(
+            project_digest,
+            previous_digest,
+            prepare_investigator_context(investigator),
+        )
     }
 
     /// The one synchronous sidecar seam, through the session.
@@ -578,39 +581,33 @@ impl ProjectSession {
         project_digest: &str,
         previous_digest: &str,
     ) -> std::io::Result<FlushOutcome> {
-        let running = self.drain_investigator_queue();
+        let investigator = self.investigator.as_ref();
         self.sidecar.flush_incidents(
             self.project_path.as_deref(),
             project_digest,
             previous_digest,
-            running.as_ref(),
+            prepare_investigator_context(investigator),
         )
     }
 
     /// [`Self::flush_incidents`] when the writer has not confirmed the
     /// current generation, through the session.
     pub(crate) fn flush_incidents_if_changed(&mut self) -> std::io::Result<FlushOutcome> {
-        let running = self.drain_investigator_queue();
-        self.sidecar
-            .flush_incidents_if_changed(self.project_path.as_deref(), running.as_ref())
+        let investigator = self.investigator.as_ref();
+        self.sidecar.flush_incidents_if_changed(
+            self.project_path.as_deref(),
+            prepare_investigator_context(investigator),
+        )
     }
 
     /// Queue a debounced background flush without joining, through the
     /// session.
     pub(crate) fn queue_incidents_flush(&mut self) {
-        let running = self.drain_investigator_queue();
-        self.sidecar
-            .queue_incidents_flush(self.project_path.as_deref(), running.as_ref());
-    }
-
-    /// Drain the investigator queue into the stash; report the running one.
-    fn drain_investigator_queue(&mut self) -> Option<RunningInvestigation> {
-        if let Some(session) = self.investigator.as_ref() {
-            session.copy_queued_refused_into(&mut self.sidecar.refused_by_id);
-        }
-        self.investigator
-            .as_ref()
-            .and_then(InvestigatorSession::running_investigation)
+        let investigator = self.investigator.as_ref();
+        self.sidecar.queue_incidents_flush(
+            self.project_path.as_deref(),
+            prepare_investigator_context(investigator),
+        );
     }
 
     /// Cue an asset in the Source viewer without changing the Program
@@ -690,6 +687,22 @@ impl ProjectSession {
             }
             thread.pending_confirmations.clear();
         }
+    }
+}
+
+/// The investigator context a flush prepares at write time (F2): the
+/// running sample leads, then the queued refused ops copy into the
+/// stash — the base `sidecar_bytes_for_save` ordering, restored. The
+/// session runs it inside the builder, so a skipped flush never does.
+fn prepare_investigator_context(
+    investigator: Option<&InvestigatorSession>,
+) -> impl FnOnce(&mut BTreeMap<IncidentId, Operation>) -> Option<RunningInvestigation> + '_ {
+    move |stash| {
+        let running = investigator.and_then(InvestigatorSession::running_investigation);
+        if let Some(session) = investigator {
+            session.copy_queued_refused_into(stash);
+        }
+        running
     }
 }
 

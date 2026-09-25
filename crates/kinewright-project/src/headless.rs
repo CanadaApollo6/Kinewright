@@ -41,7 +41,7 @@ pub fn save_headless(
     let json = serialize_project_document(document)?;
     let new_digest = digest_bytes(json.as_bytes());
     let sidecar_outcome =
-        match sidecar.flush_incidents(Some(path), &new_digest, previous_digest, None) {
+        match sidecar.flush_incidents(Some(path), &new_digest, previous_digest, |_| None) {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
                 let mut log = sidecar

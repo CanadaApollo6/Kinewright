@@ -256,26 +256,29 @@ impl SidecarSession {
     /// entry exactly as a live end would (§3 rule 4), the restored stash
     /// rides by id (rule 13), and carried texts re-emit verbatim (rule 8b).
     /// Both the joining flush and the background submit build through here,
-    /// so one builder means one bytes shape. `running` carries the live
-    /// investigation, when the caller has one.
+    /// so one builder means one bytes shape. `prepare` samples the live
+    /// investigation and copies the queued refused ops into the stash at
+    /// write time; headless passes `|_| None`.
     /// # Errors
     /// Returns the envelope serialisation failure as a string.
     pub fn sidecar_bytes_for_save(
         &mut self,
         project_digest: &str,
         previous_digest: &str,
-        running: Option<&RunningInvestigation>,
+        prepare: impl FnOnce(&mut BTreeMap<IncidentId, Operation>) -> Option<RunningInvestigation>,
     ) -> Result<(Vec<u8>, WriteReport), String> {
-        // The caller drains its investigator queue into the stash before
-        // calling — the app wrapper does, headless has no queue — so only
-        // the open-only retain below runs here (`IN2B` §3 rule 13).
+        // The investigator context prepares at write, never on a skipped
+        // flush (F2): the running sample leads, then the queued refused
+        // ops copy into the stash — the base builder ordering, restored
+        // (`IN2B` §3 rule 13).
+        let running = prepare(&mut self.refused_by_id);
         let log = self
             .incidents
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let open: BTreeSet<IncidentId> = log.open().map(|incident| incident.id).collect();
         self.refused_by_id.retain(|id, _| open.contains(id));
-        let (records, report) = log.records(running, &self.refused_by_id);
+        let (records, report) = log.records(running.as_ref(), &self.refused_by_id);
         let bytes = build_sidecar_bytes(
             &records,
             &self.carried_sidecar_records,
@@ -300,7 +303,7 @@ impl SidecarSession {
         project_path: Option<&Path>,
         project_digest: &str,
         previous_digest: &str,
-        running: Option<&RunningInvestigation>,
+        prepare: impl FnOnce(&mut BTreeMap<IncidentId, Operation>) -> Option<RunningInvestigation>,
     ) -> std::io::Result<FlushOutcome> {
         if self.sidecar_suspended {
             return Ok(FlushOutcome::Skipped);
@@ -309,7 +312,7 @@ impl SidecarSession {
             return Ok(FlushOutcome::Skipped);
         };
         let (bytes, report) = self
-            .sidecar_bytes_for_save(project_digest, previous_digest, running)
+            .sidecar_bytes_for_save(project_digest, previous_digest, prepare)
             .map_err(std::io::Error::other)?;
         // GUARD-B (R6/F1): a stem this session never loaded or wrote
         // keeps its history against an empty flush — the session
@@ -355,7 +358,7 @@ impl SidecarSession {
     pub fn flush_incidents_if_changed(
         &mut self,
         project_path: Option<&Path>,
-        running: Option<&RunningInvestigation>,
+        prepare: impl FnOnce(&mut BTreeMap<IncidentId, Operation>) -> Option<RunningInvestigation>,
     ) -> std::io::Result<FlushOutcome> {
         if self.sidecar_suspended || project_path.is_none() {
             return Ok(FlushOutcome::Skipped);
@@ -369,7 +372,7 @@ impl SidecarSession {
             return Ok(FlushOutcome::Skipped);
         }
         let digest = self.saved_digest.clone();
-        self.flush_incidents(project_path, &digest, &digest, running)
+        self.flush_incidents(project_path, &digest, &digest, prepare)
     }
 
     /// Queue a debounced background flush without joining (`IN2B` §2 rule 4).
@@ -384,7 +387,7 @@ impl SidecarSession {
     pub fn queue_incidents_flush(
         &mut self,
         project_path: Option<&Path>,
-        running: Option<&RunningInvestigation>,
+        prepare: impl FnOnce(&mut BTreeMap<IncidentId, Operation>) -> Option<RunningInvestigation>,
     ) {
         if self.sidecar_suspended {
             return;
@@ -401,7 +404,7 @@ impl SidecarSession {
             return;
         }
         let digest = self.saved_digest.clone();
-        if let Ok((bytes, _)) = self.sidecar_bytes_for_save(&digest, &digest, running) {
+        if let Ok((bytes, _)) = self.sidecar_bytes_for_save(&digest, &digest, prepare) {
             self.sidecar_writer.submit(sidecar_path, bytes);
             self.last_written_gen = generation;
         }
@@ -469,7 +472,7 @@ mod tests {
         let mut session = loaded.session;
         assert_eq!(
             session
-                .flush_incidents(Some(&project), &digest, &digest, None)
+                .flush_incidents(Some(&project), &digest, &digest, |_| None)
                 .expect("the flush reports"),
             FlushOutcome::Skipped,
             "an empty unloaded flush skips"
@@ -505,7 +508,7 @@ mod tests {
         let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
         fs::create_dir(&sidecar).expect("the sidecar path is occupied");
         let error = session
-            .flush_incidents(Some(&project), &digest, &digest, None)
+            .flush_incidents(Some(&project), &digest, &digest, |_| None)
             .expect_err("a loaded empty flush attempts IO");
         assert!(!error.to_string().is_empty(), "the IO error reports");
     }
@@ -529,7 +532,7 @@ mod tests {
         assert!(loaded.session.established.is_empty(), "no load ran");
         let mut session = loaded.session;
         let outcome = session
-            .flush_incidents(Some(&project), &digest, &digest, None)
+            .flush_incidents(Some(&project), &digest, &digest, |_| None)
             .expect("the flush reports");
         assert!(
             matches!(outcome, FlushOutcome::Written(_)),
@@ -562,7 +565,7 @@ mod tests {
         assert!(
             matches!(
                 session
-                    .flush_incidents(Some(&project), &first, &first, None)
+                    .flush_incidents(Some(&project), &first, &first, |_| None)
                     .expect("the first flush reports"),
                 FlushOutcome::Written(_)
             ),
@@ -572,7 +575,7 @@ mod tests {
         // second flush is still empty.
         let second = digest_bytes(b"edited project bytes");
         let outcome = session
-            .flush_incidents(Some(&project), &second, &first, None)
+            .flush_incidents(Some(&project), &second, &first, |_| None)
             .expect("the second flush reports");
         assert!(
             matches!(outcome, FlushOutcome::Written(_)),
@@ -624,7 +627,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove_open_with_code(IncidentCode::Label(LabelIncident::Project));
         let outcome = session
-            .flush_incidents(Some(&project), &digest, &digest, None)
+            .flush_incidents(Some(&project), &digest, &digest, |_| None)
             .expect("the clearing flush reports");
         assert!(
             matches!(outcome, FlushOutcome::Written(_)),

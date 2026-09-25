@@ -13790,6 +13790,106 @@ mod in2b_tests {
         assert_eq!(paired, new_digest, "the adopted stem pairs on re-save");
     }
 
+    /// What the investigator queue still holds, read through the
+    /// production copy (F2 probe).
+    fn f2_queued_probe(
+        session: &ProjectSession,
+    ) -> std::collections::BTreeMap<IncidentId, kinewright_core::Operation> {
+        let mut probe = std::collections::BTreeMap::new();
+        session
+            .investigator
+            .as_ref()
+            .expect("the harness session investigates")
+            .copy_queued_refused_into(&mut probe);
+        probe
+    }
+
+    /// F2/B2: skipped flushes copy nothing — no-path, suspended, and
+    /// unchanged-generation skips all leave `refused_by_id` and the
+    /// investigator queue alone.
+    #[test]
+    fn f2_skipped_flushes_leave_the_stash_and_queue_unchanged() {
+        let temp = TempDirectory::new("aw1-f2-skipped-flush");
+        let project_path = temp.path("edit.kinewright");
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        let op = kinewright_core::Operation::DeleteClip {
+            clip: kinewright_core::ClipId(1),
+        };
+        let (no_path, suspended, unchanged) = {
+            let session = &mut app.projects[0];
+            assert!(
+                session
+                    .investigator
+                    .as_mut()
+                    .expect("the harness session investigates")
+                    .enqueue(crate::investigator::QueuedIncident {
+                        id: IncidentId(41),
+                        code: IncidentCode::Label(LabelIncident::Project),
+                        subject: IncidentSubject::Project,
+                        refused: Some(op.clone()),
+                    }),
+                "the refused op queues"
+            );
+            // No path: every entry point skips.
+            let skipped = session
+                .flush_incidents("new", "old")
+                .expect("the flush reports");
+            let skipped_if_changed = session
+                .flush_incidents_if_changed()
+                .expect("the flush reports");
+            session.queue_incidents_flush();
+            let no_path = (
+                skipped,
+                skipped_if_changed,
+                session.refused_by_id.clone(),
+                f2_queued_probe(session),
+            );
+            // Suspended: a path exists but the session is suspended.
+            session.project_path = Some(project_path);
+            session.sidecar_suspended = true;
+            let skipped = session
+                .flush_incidents("new", "old")
+                .expect("the flush reports");
+            let suspended = (
+                skipped,
+                session.refused_by_id.clone(),
+                f2_queued_probe(session),
+            );
+            // Unchanged generation: the log never moved.
+            session.sidecar_suspended = false;
+            let skipped = session
+                .flush_incidents_if_changed()
+                .expect("the flush reports");
+            let unchanged = (
+                skipped,
+                session.refused_by_id.clone(),
+                f2_queued_probe(session),
+            );
+            (no_path, suspended, unchanged)
+        };
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+        let (skipped, skipped_if_changed, stash, queue) = no_path;
+        assert_eq!(skipped, FlushOutcome::Skipped);
+        assert_eq!(skipped_if_changed, FlushOutcome::Skipped);
+        assert!(stash.is_empty(), "a no-path skip copies nothing");
+        assert_eq!(queue.get(&IncidentId(41)), Some(&op));
+        assert_eq!(queue.len(), 1, "the queue keeps its refused op");
+        let (skipped, stash, queue) = suspended;
+        assert_eq!(skipped, FlushOutcome::Skipped);
+        assert!(stash.is_empty(), "a suspended skip copies nothing");
+        assert_eq!(queue.get(&IncidentId(41)), Some(&op));
+        assert_eq!(queue.len(), 1, "the queue keeps its refused op");
+        let (skipped, stash, queue) = unchanged;
+        assert_eq!(skipped, FlushOutcome::Skipped);
+        assert!(
+            stash.is_empty(),
+            "an unchanged-generation skip copies nothing"
+        );
+        assert_eq!(queue.get(&IncidentId(41)), Some(&op));
+        assert_eq!(queue.len(), 1, "the queue keeps its refused op");
+    }
+
     /// N6.1/J4: the H1 disk-digest arm, pinned without a sidecar — with no
     /// sidecar before the restore, the fallback cannot fire, so the seed
     /// is the disk file's digest by the disk arm alone.
