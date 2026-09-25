@@ -316,10 +316,11 @@ every control has an analytic expected value and no parity case is vacuous.
    systems with the human reviewer left only the matrix's creative questions.
    The contract is `CC7-WORKFLOW-EVALUATION.md`.
 
-With CC7 the colour programme table is complete; HDR, camera RAW, ACES/OCIO,
-calibrated-monitor output, and temporal noise reduction remain deliberate later
-programmes, and the M40 gauntlet continues to rotate colour tasks as
-regressions.
+With CC7 the SDR colour programme is complete. CC8 (flexible scene-referred
+colour management and the YouTube HLG lane, design accepted 2026-09-25) and CC9
+(the PQ/HDR10 lane) extend it to HDR; camera RAW, ACES/OCIO, calibrated-monitor
+output, and temporal noise reduction remain deliberate later programmes, and
+the M40 gauntlet continues to rotate colour tasks as regressions.
 
 11. **AU1 manual mix — implemented 2026-09-07, pending platform smoke.** The
    first slice of the audio programme (below). Every
@@ -563,11 +564,16 @@ programme table below is complete.
 | CC5 — Secondaries | Grade-node matte architecture, HSL qualifier, windows, feathering, tracking/keyframes, matte inspection and matte-scoped scopes | Affected-pixel tests and tracked-shot proof; no misuse of final layer alpha |
 | CC6 — QC and managed delivery | Gamut/legal checks, skin diagnostics, colour tags/transforms, high-quality full-resolution path, decoded-output comparison | Cross-platform encoded fixture passes tag, range, and visual-difference budgets |
 | CC7 — Workflow evaluation | Mixed-camera interview, poor white balance/exposure, skin and product, log-like input, creative look, and tracked secondary | Technical gates pass independently; blind human review is limited to creative and workflow-quality questions |
+| CC8 — Flexible colour + YouTube HLG | Per-project colour management (per-source interpretation, Rec.2020 scene-referred working space, configurable reference white/peak, named versioned intents, per-deliverable output targets); SDR insertion at reference white; `youtube_hlg` and `sdr_from_hdr` lanes; measured MaxCLL/MaxFALL; float HDR scopes; labelled SDR preview | EETF/OOTF/gamut vectors with wrong-transform controls; light-level fixtures; SDR byte-identity pre/post; tagged HLG export re-probes exact; YouTube accepts the upload (Riel); Windows + lavapipe + RTX 3090 budgets |
+| CC9 — YouTube PQ/HDR10 | PQ lane with mastering-display provenance, consuming CC8's measurement and intent registry | Second accepted upload; re-measured light levels; mastering metadata declared or explicitly absent |
 
-HDR, camera RAW controls, ACES/OCIO integration, calibrated-monitor output, and
-advanced temporal noise reduction are deliberate later programmes. CC0–CC6 should
-leave room for them, but we should not claim them before the SDR path is explicit
-and high precision.
+**CC8 design accepted 2026-09-25** (`CC8-FLEXIBLE-COLOUR-AND-YOUTUBE-HDR.md`;
+it re-implements the archived 2026-08 HDR branch, tag
+`archive/cc8-hdr-2026-08`, on the scene-referred model). S0/S1 may start; the
+persisted model and format stage follow AW1 S1's shared project-IO merge.
+Camera RAW controls, ACES/OCIO integration, calibrated-monitor output, dynamic
+HDR metadata, and advanced temporal noise reduction remain deliberate later
+programmes.
 
 ### Agent surface direction
 
