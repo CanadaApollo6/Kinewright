@@ -1456,11 +1456,22 @@ fn rendering_10k_peak_and_white_400() {
 
 // --- precision budgets PB1–PB4 (§14, R35) over f16 storage ---
 
-/// f16 ULP of a normal positive magnitude: 2^(e−10), binade-exact.
+/// f16 ULP of a magnitude: 2^(e−10) on normals, 2^-24 on subnormals
+/// (below 2^-14), sign-insensitive. Binade-exact by construction.
 #[allow(clippy::cast_possible_truncation)] // log2 range fits i32 by construction
 fn f16_ulp_of(x: f64) -> f64 {
-    debug_assert!(x > 0.0);
-    2f64.powi((x.abs().log2().floor() as i32) - 10)
+    debug_assert!(x != 0.0);
+    let a = x.abs();
+    if a < 2f64.powi(-14) {
+        2f64.powi(-24)
+    } else {
+        2f64.powi((a.log2().floor() as i32) - 10)
+    }
+}
+
+/// Triplet magnitude for CE4: ULP/relative limits use the max |channel|.
+fn max_abs_3(w: [f64; 3]) -> f64 {
+    w[0].abs().max(w[1].abs()).max(w[2].abs())
 }
 
 /// Production-shaped f32→f16 store (round-to-nearest via `half`).
@@ -1482,12 +1493,25 @@ fn truncating_f16_store_sub(x: f32) -> f32 {
 
 #[test]
 fn pb1_storage_boundary() {
-    // App. N ULP rows, exact powers of two.
+    // App. N ULP rows, exact powers of two; subnormal/negative pins.
     assert_eq!(f16_ulp_of(1.0).to_bits(), 0.000_976_562_5f64.to_bits());
     assert_eq!(f16_ulp_of(3.776_5).to_bits(), 0.001_953_125f64.to_bits());
+    assert_eq!(
+        f16_ulp_of(2f64.powi(-20)).to_bits(),
+        2f64.powi(-24).to_bits()
+    );
+    assert_eq!(
+        f16_ulp_of(2f64.powi(-14)).to_bits(),
+        2f64.powi(-24).to_bits()
+    );
+    assert_eq!(f16_ulp_of(-1.0).to_bits(), f16_ulp_of(1.0).to_bits());
     // Each f32→f16 store ≤ 0.5 ULP (1e-6 slack absorbs diff rounding; a
-    // truncating store at 1.0 ULP still fails).
+    // truncating store at 1.0 ULP still fails). Per-channel (CE4 keeps
+    // per-value ULP for scalar stores); subnormals/negatives included.
     for x in [
+        2f64.powi(-20),
+        2f64.powi(-15),
+        2f64.powi(-14),
         0.000_976_562_5,
         0.01,
         0.1,
@@ -1497,6 +1521,11 @@ fn pb1_storage_boundary() {
         3.776_475,
         10.0,
         46.415_9,
+        65_504.0,
+        -0.01,
+        -0.5,
+        -3.776_475,
+        -46.415_9,
     ] {
         let stored = f16_store(as_f32(x));
         let err = (f64::from(stored) - x).abs();
@@ -1525,26 +1554,37 @@ fn pb1_storage_boundary() {
         let s2 = f64::from(f16_store(as_f32(w))) * sw;
         assert_close("PB1b scene", s2, s, 2.0 * f16_ulp_of(s));
     }
-    // (iii) 2020 → 709 → f16 → 2020 (all-positive vector; zeros separate).
-    let v = [0.7, 0.3, 0.5];
-    let t = reference::apply_matrix(BT2020_TO_BT709_F64, v).unwrap();
-    let t16 = [
-        f64::from(f16_store(as_f32(t[0]))),
-        f64::from(f16_store(as_f32(t[1]))),
-        f64::from(f16_store(as_f32(t[2]))),
-    ];
-    let b = reference::apply_matrix(BT709_TO_BT2020_F64, t16).unwrap();
-    for (i, (bb, e)) in b.iter().zip(v.iter()).enumerate() {
-        assert_close(&format!("PB1b matrix[{i}]"), *bb, *e, 2.0 * f16_ulp_of(*e));
+    // (iii) 2020 → 709 → f16 → 2020 through the production f32 path.
+    // CE4: triplet ULP is measured against the max |channel|.
+    for v in [
+        [0.7, 0.3, 0.5],
+        [1.0, 0.0, 0.0],
+        [1.0, 2f64.powi(-10), 2f64.powi(-10)],
+        [3.776_475, 2f64.powi(-10), 0.02],
+    ] {
+        let v32 = [as_f32(v[0]), as_f32(v[1]), as_f32(v[2])];
+        let t = apply_matrix(BT2020_TO_BT709, v32).unwrap();
+        let t16 = [f16_store(t[0]), f16_store(t[1]), f16_store(t[2])];
+        let b = apply_matrix(BT709_TO_BT2020, t16).unwrap();
+        let tol = 2.0 * f16_ulp_of(max_abs_3(v));
+        for (i, (bb, e)) in b.iter().zip(v.iter()).enumerate() {
+            assert_close(&format!("PB1b matrix {v:?}[{i}]"), f64::from(*bb), *e, tol);
+        }
     }
-    let z = reference::apply_matrix(BT2020_TO_BT709_F64, [1.0, 0.0, 0.0]).unwrap();
-    let z16 = [
-        f64::from(f16_store(as_f32(z[0]))),
-        f64::from(f16_store(as_f32(z[1]))),
-        f64::from(f16_store(as_f32(z[2]))),
-    ];
-    let zb = reference::apply_matrix(BT709_TO_BT2020_F64, z16).unwrap();
-    assert_close_3("PB1b matrix zeros", zb, [1.0, 0.0, 0.0], 1e-3);
+    // Erratum visibility: the saturated small channel FAILS the old
+    // per-channel reading (R2 measured 8.57 ULP of 2^-10).
+    let sv = [as_f32(1.0), as_f32(2f64.powi(-10)), as_f32(2f64.powi(-10))];
+    let st = apply_matrix(BT2020_TO_BT709, sv).unwrap();
+    let sb = apply_matrix(
+        BT709_TO_BT2020,
+        [f16_store(st[0]), f16_store(st[1]), f16_store(st[2])],
+    )
+    .unwrap();
+    let blue_ulps = (f64::from(sb[2]) - 2f64.powi(-10)).abs() / 2f64.powi(-20);
+    assert!(
+        blue_ulps > 2.0,
+        "saturated blue must fail per-channel 2 ULP: {blue_ulps}"
+    );
     // (iv) display → scene → f16 → display at reference white.
     let sc = reference::display_to_scene([203.0, 203.0, 203.0], 1000.0, 1.2).unwrap();
     let sc16 = [
@@ -1558,8 +1598,9 @@ fn pb1_storage_boundary() {
 
 #[test]
 fn pb2_working_domain_repeated_chain() {
-    // Repeated working→display→working cycles through f16 stores (f32
-    // production): w ≥ 2^-10 stays within 4 ULP(w) and 0.3% relative.
+    // Repeated render/inverse cycles through f16 stores (f32 production)
+    // with a grade-like ×1.05 gain between stores, so the stored values
+    // change every round. CE4: 4 ULP(max|w|), relative ‖err‖∞/‖w‖∞ ≤ 0.3%.
     for white in [100.0, 203.0, 400.0] {
         let sw = s_white(white, 1000.0, 1.2).unwrap();
         for w0 in [
@@ -1573,21 +1614,66 @@ fn pb2_working_domain_repeated_chain() {
                 let s = [w[0] * sw, w[1] * sw, w[2] * sw];
                 let d = scene_to_display(s, 1000.0, 1.2).unwrap();
                 let s2 = display_to_scene(d, 1000.0, 1.2).unwrap();
-                w = [s2[0] / sw, s2[1] / sw, s2[2] / sw];
+                w = [s2[0] / sw * 1.05, s2[1] / sw * 1.05, s2[2] / sw * 1.05];
             }
-            for (i, (a, e)) in w.iter().zip(w0.iter()).enumerate() {
-                let rel = (f64::from(*a) - f64::from(*e)).abs() / f64::from(*e);
-                assert!(rel <= 0.003, "PB2 rel W={white}[{i}]: {rel}");
-                assert_close(
-                    &format!("PB2 abs W={white}[{i}]"),
-                    f64::from(*a),
-                    f64::from(*e),
-                    4.0 * f16_ulp_of(f64::from(*e)),
-                );
+            let grown = 1.05f64.powi(3);
+            let e = [
+                f64::from(w0[0]) * grown,
+                f64::from(w0[1]) * grown,
+                f64::from(w0[2]) * grown,
+            ];
+            let w64 = [f64::from(w[0]), f64::from(w[1]), f64::from(w[2])];
+            let rel = (w64[0] - e[0])
+                .abs()
+                .max((w64[1] - e[1]).abs())
+                .max((w64[2] - e[2]).abs())
+                / max_abs_3(e);
+            assert!(rel <= 0.003, "PB2 grade rel W={white}: {rel}");
+            let tol = 4.0 * f16_ulp_of(max_abs_3(e));
+            for (i, (a, ee)) in w64.iter().zip(e.iter()).enumerate() {
+                assert_close(&format!("PB2 grade abs W={white}[{i}]"), *a, *ee, tol);
             }
         }
     }
-    // Domain edge w = 2^-10 exactly.
+    // R2 B3: three alternating matrix pairs through f16 stores (f32).
+    for start in [
+        [1.0, 2f64.powi(-10), 2f64.powi(-10)],
+        [3.776_475, 2f64.powi(-10), 0.02],
+    ] {
+        let mut v = [as_f32(start[0]), as_f32(start[1]), as_f32(start[2])];
+        for _ in 0..3 {
+            v = apply_matrix(BT2020_TO_BT709, v).unwrap();
+            v = [f16_store(v[0]), f16_store(v[1]), f16_store(v[2])];
+            v = apply_matrix(BT709_TO_BT2020, v).unwrap();
+            v = [f16_store(v[0]), f16_store(v[1]), f16_store(v[2])];
+        }
+        let v64 = [f64::from(v[0]), f64::from(v[1]), f64::from(v[2])];
+        let rel = (v64[0] - start[0])
+            .abs()
+            .max((v64[1] - start[1]).abs())
+            .max((v64[2] - start[2]).abs())
+            / max_abs_3(start);
+        assert!(rel <= 0.003, "PB2 matrix rel {start:?}: {rel}");
+        let tol = 4.0 * f16_ulp_of(max_abs_3(start));
+        for (i, (a, e)) in v64.iter().zip(start.iter()).enumerate() {
+            assert_close(&format!("PB2 matrix abs {start:?}[{i}]"), *a, *e, tol);
+        }
+    }
+    // Erratum visibility: the saturated chain FAILS the old per-channel
+    // reading (R2 measured 9 ULP / 0.88% on blue).
+    let mut old = [1.0f32, 2f32.powi(-10), 2f32.powi(-10)];
+    for _ in 0..3 {
+        old = apply_matrix(BT2020_TO_BT709, old).unwrap();
+        old = [f16_store(old[0]), f16_store(old[1]), f16_store(old[2])];
+        old = apply_matrix(BT709_TO_BT2020, old).unwrap();
+        old = [f16_store(old[0]), f16_store(old[1]), f16_store(old[2])];
+    }
+    let blue_rel = (f64::from(old[2]) - 2f64.powi(-10)).abs() / 2f64.powi(-10);
+    assert!(
+        blue_rel > 0.003,
+        "saturated chain must fail per-channel 0.3%: {blue_rel}"
+    );
+    // Domain edge w = 2^-10 exactly (scalar path: per-value ULP).
     let sw = s_white(203.0, 1000.0, 1.2).unwrap();
     let e = 2f32.powi(-10);
     let w = f16_store(e);
@@ -1605,29 +1691,55 @@ fn pb2_working_domain_repeated_chain() {
 
 #[test]
 fn pb3_display_absolute() {
-    // f32 vs f64 post-render: white ±10% ≤ 1.0 nit, peak ≤ 2.0, sub-1 ≤ 0.05.
-    for (d, tol) in [(0.1f64, 0.05), (0.5, 0.05), (0.9, 0.05)] {
-        let s = (d / 1000.0).powf(1.0 / 1.2);
-        let d32 = scene_to_display([as_f32(s), as_f32(s), as_f32(s)], 1000.0, 1.2).unwrap();
-        let d64 = reference::scene_to_display([s, s, s], 1000.0, 1.2).unwrap();
-        assert_close("PB3 sub-1", f64::from(d32[0]), d64[0], tol);
+    // Production f32 chain through one f16 working store vs exact display:
+    // white ±10% ≤ 1.0 nit, peak ≤ max(2.0, 0.1% × P) (CE3), sub-1 ≤ 0.05.
+    for white in [100.0, 203.0, 400.0] {
+        for peak in [400.0, 1000.0, 2000.0, 4000.0, 10_000.0] {
+            let g = hlg_gamma(as_f32(peak)).unwrap();
+            let sw = s_white(as_f32(white), as_f32(peak), g).unwrap();
+            let g64 = reference::hlg_gamma(peak).unwrap();
+            for (i, d) in [0.1, 0.5, 0.9, white * 0.9, white, white * 1.1, peak]
+                .into_iter()
+                .enumerate()
+            {
+                let s = (d / peak).powf(1.0 / g64);
+                let sw64 = reference::s_white(white, peak, g64).unwrap();
+                let stored = f16_store(as_f32(s / sw64));
+                let back =
+                    scene_to_display([stored * sw, stored * sw, stored * sw], as_f32(peak), g)
+                        .unwrap();
+                let err = (f64::from(back[0]) - d).abs();
+                // Index 6 is the peak anchor however the values collide.
+                let tol = if d < 1.0 {
+                    0.05
+                } else if i == 6 {
+                    2.0f64.max(0.001 * peak)
+                } else {
+                    1.0
+                };
+                assert!(
+                    err <= tol,
+                    "PB3 W={white} P={peak} D={d}: err={err} tol={tol}"
+                );
+            }
+        }
     }
-    for d in [190.0f64, 203.0, 220.0] {
-        let s = (d / 1000.0).powf(1.0 / 1.2);
-        let d32 = scene_to_display([as_f32(s), as_f32(s), as_f32(s)], 1000.0, 1.2).unwrap();
-        let d64 = reference::scene_to_display([s, s, s], 1000.0, 1.2).unwrap();
-        assert_close("PB3 white", f64::from(d32[0]), d64[0], 1.0);
-    }
-    let d32 = scene_to_display([1.0, 1.0, 1.0], 1000.0, 1.2).unwrap();
-    let d64 = reference::scene_to_display([1.0, 1.0, 1.0], 1000.0, 1.2).unwrap();
-    assert_close("PB3 peak", f64::from(d32[0]), d64[0], 2.0);
-    // Chromatic near-white (exact k^γ scaling puts D[0] on 203).
-    let k = (203.0f64 / 395.142_864_255_787_4).powf(1.0 / 1.2);
-    let s = [0.5 * k, 0.25 * k, 0.125 * k];
-    let c32 = scene_to_display([as_f32(s[0]), as_f32(s[1]), as_f32(s[2])], 1000.0, 1.2).unwrap();
-    let c64 = reference::scene_to_display(s, 1000.0, 1.2).unwrap();
-    assert_close("PB3 chroma white", f64::from(c32[0]), c64[0], 1.0);
-    assert_close("PB3 chroma mid", f64::from(c32[1]), c64[1], 1.0);
+    // R1 B2, erratum visibility: W=100/P=10000 neutral (R1: 10003.46 nits)
+    // passes CE3's 10-nit bound and FAILS the old 2.0.
+    let g = hlg_gamma(10_000.0).unwrap();
+    let sw = s_white(100.0, 10_000.0, g).unwrap();
+    let stored = f16_store(1.0 / sw);
+    let got = scene_to_display([stored * sw, stored * sw, stored * sw], 10_000.0, g).unwrap()[0];
+    let err = (f64::from(got) - 10_000.0).abs();
+    assert!(
+        err <= 10.0,
+        "W=100/P=10000 must pass CE3 (10 nits): err={err}"
+    );
+    assert!(
+        err > 2.0,
+        "W=100/P=10000 must fail the old 2.0-nit bound: err={err}"
+    );
+    assert_close("W=100/P=10000 value", f64::from(got), 10_003.462, 0.1);
     // App. N ULP rows via kernel finite differences (central = slope).
     let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
     let u1 = 2f64.powi(-10);
@@ -1651,60 +1763,96 @@ fn pb3_display_absolute() {
     assert_close("nits/ULP fwd white", f1, 0.237_913_850_459_165_13, 1e-9);
 }
 
+/// PB4 working chain: anchor display → f64 scene → f32 working → three
+/// render/inverse pairs with f16 stores → final store → f32 display.
+fn pb4_chain_display(d: [f64; 3], white: f64, peak: f64) -> [f32; 3] {
+    let g = hlg_gamma(as_f32(peak)).unwrap();
+    let sw = s_white(as_f32(white), as_f32(peak), g).unwrap();
+    let g64 = reference::hlg_gamma(peak).unwrap();
+    let sw64 = reference::s_white(white, peak, g64).unwrap();
+    let scene = reference::display_to_scene(d, peak, g64).unwrap();
+    let mut w = [
+        as_f32(scene[0] / sw64),
+        as_f32(scene[1] / sw64),
+        as_f32(scene[2] / sw64),
+    ];
+    for _ in 0..3 {
+        w = [f16_store(w[0]), f16_store(w[1]), f16_store(w[2])];
+        let s = [w[0] * sw, w[1] * sw, w[2] * sw];
+        let rd = scene_to_display(s, as_f32(peak), g).unwrap();
+        let rs = display_to_scene(rd, as_f32(peak), g).unwrap();
+        w = [rs[0] / sw, rs[1] / sw, rs[2] / sw];
+    }
+    w = [f16_store(w[0]), f16_store(w[1]), f16_store(w[2])];
+    scene_to_display([w[0] * sw, w[1] * sw, w[2] * sw], as_f32(peak), g).unwrap()
+}
+
 #[test]
 fn pb4_final_codes() {
     // Test-only quantizers (S4 owns delivery packing): 10-bit HLG narrow +
     // 8-bit 709 narrow behind the BT.1886-inverse encode (§4 display EOTF).
     let code10 = |s: f64| (876.0 * s + 64.0).round();
-    let encode_709 = |d: f64| (d / 100.0).powf(1.0 / 2.4);
+    let encode_709 = |d: f64| (d.max(0.0) / 100.0).powf(1.0 / 2.4);
     let code8 = |d: f64| (219.0 * encode_709(d) + 16.0).round();
-    // 10-bit anchors: black / 18% grey card (w=0.18) / white / peak / RGB.
-    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
-    let s18 = 0.18 * sw;
-    let d18 = reference::scene_to_display([s18, s18, s18], 1000.0, 1.2).unwrap()[0];
-    let mut sum = 0.0;
-    let mut n = 0;
-    for d in [0.0, d18, 203.0, 1000.0] {
-        let s32 = hlg_output([as_f32(d), as_f32(d), as_f32(d)], 1000.0, 1.2)
-            .unwrap()
-            .signal[0];
-        let s64 = reference::hlg_output([d, d, d], 1000.0, 1.2)
-            .unwrap()
-            .signal[0];
-        let delta = (code10(f64::from(s32)) - code10(s64)).abs();
-        assert!(delta <= 2.0, "PB4 10-bit D={d}: {delta}");
-        sum += delta;
-        n += 1;
-    }
-    for prim in [[1000.0, 0.0, 0.0], [0.0, 1000.0, 0.0], [0.0, 0.0, 1000.0]] {
-        let s32 = hlg_output(
-            [as_f32(prim[0]), as_f32(prim[1]), as_f32(prim[2])],
-            1000.0,
-            1.2,
-        )
-        .unwrap()
-        .signal;
-        let s64 = reference::hlg_output(prim, 1000.0, 1.2).unwrap().signal;
-        for (a, e) in f64_3(s32).iter().zip(s64.iter()) {
-            let delta = (code10(*a) - code10(*e)).abs();
-            assert!(delta <= 2.0, "PB4 10-bit saturated: {delta}");
-            sum += delta;
-            n += 1;
+    // Delivery chain through f16 working stores (R2's chain shape): anchor
+    // display → f64 scene → f32 working → 3 render/inverse pairs with
+    // stores → final store → f32 display → HLG + SDR delivery; codes are
+    // compared against direct f64 delivery of the anchor. Bounds are R2's
+    // measured 10-bit max 2 / mean 0.079 and 8-bit max 0.
+    let mut max10 = 0.0f64;
+    let mut sum10 = 0.0f64;
+    let mut n10 = 0u32;
+    let mut max8 = 0.0f64;
+    for white in [100.0, 203.0, 400.0] {
+        for peak in [400.0, 1000.0, 2000.0, 2001.0, 4000.0, 10_000.0] {
+            let g = hlg_gamma(as_f32(peak)).unwrap();
+            let g64 = reference::hlg_gamma(peak).unwrap();
+            let sw64 = reference::s_white(white, peak, g64).unwrap();
+            let grey = reference::scene_to_display([0.18 * sw64; 3], peak, g64).unwrap()[0];
+            for d in [
+                [0.0, 0.0, 0.0],
+                [grey, grey, grey],
+                [white, white, white],
+                [peak, peak, peak],
+                [peak, 0.0, 0.0],
+                [0.0, peak, 0.0],
+                [0.0, 0.0, peak],
+                [0.5, 0.5, 0.5],
+                [white * 0.9; 3],
+                [white * 1.1; 3],
+            ] {
+                let display = pb4_chain_display(d, white, peak);
+                let got = hlg_output(display, as_f32(peak), g).unwrap().signal;
+                let exp = reference::hlg_output(d, peak, g64).unwrap().signal;
+                for (a, e) in f64_3(got).iter().zip(exp.iter()) {
+                    let delta = (code10(*a) - code10(*e)).abs();
+                    max10 = max10.max(delta);
+                    sum10 += delta;
+                    n10 += 1;
+                }
+                let tone = display.map(|x| eetf_to_target(x, as_f32(peak), 100.0).unwrap().value);
+                let rec709 = apply_matrix(BT2020_TO_BT709, tone).unwrap();
+                let sdr = gamut_compress(rec709, CompressDest::Sdr { target_peak: 100.0 })
+                    .unwrap()
+                    .value;
+                let tone64 = d.map(|x| reference::eetf_to_target(x, peak, 100.0).unwrap().value);
+                let rec709_64 = reference::apply_matrix(BT2020_TO_BT709_F64, tone64).unwrap();
+                let sdr64 =
+                    reference::gamut_compress(rec709_64, CompressDest::Sdr { target_peak: 100.0 })
+                        .unwrap()
+                        .value;
+                for (a, e) in f64_3(sdr).iter().zip(sdr64.iter()) {
+                    max8 = max8.max((code8(*a) - code8(*e)).abs());
+                }
+            }
         }
     }
-    assert!(
-        sum / f64::from(n) <= 0.5,
-        "PB4 10-bit mean: {}",
-        sum / f64::from(n)
-    );
-    // 8-bit SDR anchors: EETF outputs at L ∈ {0, 100, 203, 1000}, ≤ 1 code.
-    for l in [0.0, 100.0, 203.0, 1000.0] {
-        let v32 = eetf_to_target(as_f32(l), 1000.0, 100.0).unwrap().value;
-        let v64 = reference::eetf_to_target(l, 1000.0, 100.0).unwrap().value;
-        let delta = (code8(f64::from(v32)) - code8(v64)).abs();
-        assert!(delta <= 1.0, "PB4 8-bit L={l}: {delta}");
-    }
+    assert!(max10 <= 2.0, "PB4 10-bit max: {max10}");
+    let mean10 = sum10 / f64::from(n10);
+    assert!(mean10 <= 0.08, "PB4 10-bit mean: {mean10}");
+    assert!(max8 <= 0.0, "PB4 8-bit max: {max8}");
     // HLG codes per working-ULP at white: oracle 0.1680400672866091.
+    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
     let c_up = reference::hlg_oetf((1.0 + ulp_w1()) * sw).unwrap();
     let c_dn = reference::hlg_oetf((1.0 - ulp_w1()) * sw).unwrap();
     assert_close(
