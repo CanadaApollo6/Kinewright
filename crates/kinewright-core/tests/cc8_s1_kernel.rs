@@ -6,8 +6,9 @@
 //! most assert far tighter. Grows one section per S1 increment.
 
 use kinewright_core::{
-    Cc8KernelError, HLG_GAMMA_RULE_VERSION, hlg_gamma, hlg_inverse_oetf, hlg_oetf, pq_eotf,
-    pq_oetf, pq_q0, reference,
+    Cc8KernelError, DISPLAY_TO_SCENE_VERSION, HLG_GAMMA_RULE_VERSION, display_to_scene, hlg_gamma,
+    hlg_inverse_oetf, hlg_oetf, pq_eotf, pq_oetf, pq_q0, reference, s_white, scene_to_display,
+    scene_to_working, working_to_scene,
 };
 
 /// Narrow an f64 test vector to f32 input. The rounding is the point of the
@@ -369,4 +370,341 @@ fn hlg_gamma_refuses_versions_and_bad_peaks() {
             Err(Cc8KernelError::NonFiniteInput { .. })
         ));
     }
+}
+
+// ---------------------------------------------------------------------------
+// C2: reference-scene normalization + rendering (§2).
+// ---------------------------------------------------------------------------
+
+fn assert_close_3(label: &str, actual: [f64; 3], expected: [f64; 3], tol: f64) {
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert_close(&format!("{label}[{i}]"), *a, *e, tol);
+    }
+}
+
+fn assert_bits_3(label: &str, actual: [f64; 3], expected: [f64; 3]) {
+    let a = [
+        actual[0].to_bits(),
+        actual[1].to_bits(),
+        actual[2].to_bits(),
+    ];
+    let e = [
+        expected[0].to_bits(),
+        expected[1].to_bits(),
+        expected[2].to_bits(),
+    ];
+    assert_eq!(a, e, "{label}");
+}
+
+fn assert_bits_3_f32(label: &str, actual: [f32; 3], expected: [f32; 3]) {
+    let a = [
+        actual[0].to_bits(),
+        actual[1].to_bits(),
+        actual[2].to_bits(),
+    ];
+    let e = [
+        expected[0].to_bits(),
+        expected[1].to_bits(),
+        expected[2].to_bits(),
+    ];
+    assert_eq!(a, e, "{label}");
+}
+
+fn f64_3(v: [f32; 3]) -> [f64; 3] {
+    [f64::from(v[0]), f64::from(v[1]), f64::from(v[2])]
+}
+
+#[test]
+fn s_white_anchors() {
+    // Oracle: 0.26479718562407867; App. N: 0.26479719.
+    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
+    assert_close("s_white", sw, 0.264_797_185_624_078_67, 1e-12);
+    assert_close("s_white App N", sw, 0.264_797_19, 1e-6);
+    assert_close("w_peak", 1.0 / sw, 3.776_475_182_858_089_6, 1e-12);
+    assert_close("w_peak App N", 1.0 / sw, 3.776_475, 1e-6);
+    // White extreme W=100: oracle 0.14677992676220694; App. N 0.146780.
+    let sw100 = reference::s_white(100.0, 1000.0, 1.2).unwrap();
+    assert_close("s_white W=100", sw100, 0.146_779_926_762_206_94, 1e-12);
+    assert_close("s_white W=100 App N", sw100, 0.146_780, 1e-6);
+    // W=P anchors at exactly 1.0 (1.0^anything is 1.0).
+    assert_eq!(
+        reference::s_white(1000.0, 1000.0, 1.2).unwrap().to_bits(),
+        1.0f64.to_bits()
+    );
+    // f32 vs the numpy f32 vector; App. N f32 row 0.26479718.
+    assert_close(
+        "s_white f32",
+        f64::from(s_white(203.0, 1000.0, 1.2).unwrap()),
+        0.264_797_180_891_037,
+        3e-7,
+    );
+}
+
+#[test]
+fn hlg_reference_white_lands_on_working_one() {
+    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
+    // Exact-203 signal 0.749877365 decodes to s_white → working 1.0 (App. N
+    // "exactly" is mathematical; float lands within 1e-9).
+    let scene = reference::hlg_inverse_oetf(0.749_877_365).unwrap();
+    let w = reference::scene_to_working([scene, 0.0, 0.0], sw).unwrap()[0];
+    assert_close("HLG 203 working", w, 0.999_999_999_477_619_4, 1e-9);
+    // Nominal 0.75 → working 1.000624531419893; App. N 1.000625.
+    let scene75 = reference::hlg_inverse_oetf(0.75).unwrap();
+    let w75 = reference::scene_to_working([scene75, 0.0, 0.0], sw).unwrap()[0];
+    assert_close("HLG 0.75 working", w75, 1.000_624_531_419_893, 1e-9);
+    assert_close("HLG 0.75 working App N", w75, 1.000_625, 1e-6);
+    // And back: OETF(s_white) is the HLG signal of exactly 203 nits.
+    assert_close(
+        "OETF(s_white)",
+        reference::hlg_oetf(sw).unwrap(),
+        0.749_877_365_102_611_4,
+        1e-12,
+    );
+    // f32 composition vs the numpy f32 vector; App. N f32 row 0.749877334.
+    let sw32 = s_white(203.0, 1000.0, 1.2).unwrap();
+    assert_close(
+        "OETF(s_white) f32",
+        f64::from(hlg_oetf(sw32).unwrap()),
+        0.749_877_333_641_052_2,
+        3e-7,
+    );
+    // Normalization roundtrips (normalize then denormalize).
+    let v = reference::scene_to_working([0.5, 0.25, 1.5], sw).unwrap();
+    let back = reference::working_to_scene(v, sw).unwrap();
+    assert_close_3("normalize roundtrip", back, [0.5, 0.25, 1.5], 1e-15);
+}
+
+#[test]
+fn forward_rendering_matches_vectors() {
+    // Oracle forward vectors at P=1000, γ=1.2 (tol ≈ 7000 ulp: safe across
+    // libms, lethal to wrong constants — KR+1e-4 shifts D by ~4e-4).
+    let cases: [([f64; 3], [f64; 3]); 3] = [
+        (
+            [0.5, 0.25, 0.125],
+            [
+                395.142_864_255_787_4,
+                197.571_432_127_893_7,
+                98.785_716_063_946_85,
+            ],
+        ),
+        ([1.0, 0.0, 0.0], [765.406_268_293_771_2, 0.0, 0.0]),
+        ([0.5, -0.1, 0.0], [333.162_429_006_763_43, -100.0, 0.0]),
+    ];
+    for (scene, expected) in cases {
+        let actual = reference::scene_to_display(scene, 1000.0, 1.2).unwrap();
+        for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_close(&format!("forward[{i}]"), *a, *e, 1e-12 * e.abs().max(1.0));
+        }
+    }
+    // Reference white renders to exactly 203 nits (working 1.0 anchor).
+    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
+    let white = reference::scene_to_display([sw, sw, sw], 1000.0, 1.2).unwrap();
+    assert_close_3("white renders to 203", white, [203.0, 203.0, 203.0], 1e-9);
+    // Achromatic form D = P·s^γ holds through the triplet path.
+    for s in [0.01, 0.264_797_185_624_078_67, 1.0, 2.5] {
+        let d = reference::scene_to_display([s, s, s], 1000.0, 1.2).unwrap();
+        let expected = 1000.0 * s.powf(1.2);
+        assert_close_3("achromatic", d, [expected, expected, expected], 1e-9);
+    }
+    // Kernel-resolved gamma (exactly 1.2 at P=1000) matches literal 1.2.
+    let via_rule = reference::scene_to_display(
+        [0.5, 0.25, 0.125],
+        1000.0,
+        reference::hlg_gamma(1, 1000.0).unwrap(),
+    )
+    .unwrap();
+    let literal = reference::scene_to_display([0.5, 0.25, 0.125], 1000.0, 1.2).unwrap();
+    assert_bits_3("gamma rule vs literal", via_rule, literal);
+}
+
+#[test]
+fn signed_rendering_never_feeds_powers_negatives() {
+    // Negative channel passes linearly at peak scale; bit-exact -100.0.
+    let d = reference::scene_to_display([0.5, -0.1, 0.0], 1000.0, 1.2).unwrap();
+    assert_eq!(d[1].to_bits(), (-100.0f64).to_bits());
+    assert_eq!(d[2].to_bits(), 0.0f64.to_bits());
+    // All-negative triple: pure P·min(s,0), all exact in binary.
+    let all = reference::scene_to_display([-0.5, -0.25, -0.125], 1000.0, 1.2).unwrap();
+    assert_bits_3("all-negative forward", all, [-500.0, -250.0, -125.0]);
+    // Zero-luma shortcut applies to the nonnegative part only: negatives
+    // still pass through.
+    let mixed = reference::scene_to_display([-0.5, 0.0, 0.0], 1000.0, 1.2).unwrap();
+    assert_bits_3("signed zero-luma forward", mixed, [-500.0, 0.0, 0.0]);
+    // Inverse mirrors: negatives pass at 1/P, bit-exact.
+    let s = reference::display_to_scene(1, [-500.0, 250.0, 0.0], 1000.0, 1.2).unwrap();
+    assert_eq!(s[0].to_bits(), (-0.5f64).to_bits());
+    let neg_only = reference::display_to_scene(1, [-500.0, -250.0, -125.0], 1000.0, 1.2).unwrap();
+    assert_bits_3("all-negative inverse", neg_only, [-0.5, -0.25, -0.125]);
+}
+
+#[test]
+fn zero_luminance_is_exact_zero() {
+    assert_bits_3(
+        "forward zero f64",
+        reference::scene_to_display([0.0, 0.0, 0.0], 1000.0, 1.2).unwrap(),
+        [0.0, 0.0, 0.0],
+    );
+    assert_bits_3_f32(
+        "forward zero f32",
+        scene_to_display([0.0, 0.0, 0.0], 1000.0, 1.2).unwrap(),
+        [0.0, 0.0, 0.0],
+    );
+    assert_bits_3(
+        "inverse zero f64",
+        reference::display_to_scene(1, [0.0, 0.0, 0.0], 1000.0, 1.2).unwrap(),
+        [0.0, 0.0, 0.0],
+    );
+    assert_bits_3_f32(
+        "inverse zero f32",
+        display_to_scene(1, [0.0, 0.0, 0.0], 1000.0, 1.2).unwrap(),
+        [0.0, 0.0, 0.0],
+    );
+}
+
+#[test]
+fn forward_inverse_identity() {
+    let scenes = [
+        [0.5, 0.25, 0.125],
+        [1.0, 0.0, 0.0],
+        [0.5, -0.1, 0.0],
+        [1e-6, 1e-6, 1e-6],
+        [3.776_475, 3.776_475, 3.776_475],
+    ];
+    for scene in scenes {
+        let d = reference::scene_to_display(scene, 1000.0, 1.2).unwrap();
+        let back = reference::display_to_scene(1, d, 1000.0, 1.2).unwrap();
+        for (i, (b, e)) in back.iter().zip(scene.iter()).enumerate() {
+            assert_close(&format!("identity[{i}]"), *b, *e, 1e-12 * e.abs().max(1e-9));
+        }
+        // And the other direction: inverse then forward.
+        let there = reference::display_to_scene(1, d, 1000.0, 1.2).unwrap();
+        let back2 = reference::scene_to_display(there, 1000.0, 1.2).unwrap();
+        for (i, (b, e)) in back2.iter().zip(d.iter()).enumerate() {
+            assert_close(
+                &format!("identity2[{i}]"),
+                *b,
+                *e,
+                1e-12 * e.abs().max(1e-9),
+            );
+        }
+    }
+    // Pure-negative roundtrip is bit-exact (linear passthrough both ways).
+    let d = reference::scene_to_display([-0.5, -0.25, -0.125], 1000.0, 1.2).unwrap();
+    let back = reference::display_to_scene(1, d, 1000.0, 1.2).unwrap();
+    assert_bits_3("negative roundtrip", back, [-0.5, -0.25, -0.125]);
+    // White extreme W=100: working of a 10k-nit input, oracle
+    // 46.41588833612779; App. N 46.4159 (4dp).
+    let sw100 = reference::s_white(100.0, 1000.0, 1.2).unwrap();
+    let s = reference::display_to_scene(1, [10_000.0, 10_000.0, 10_000.0], 1000.0, 1.2).unwrap();
+    let w = reference::scene_to_working(s, sw100).unwrap()[0];
+    assert_close("W=100 working of 10k", w, 46.415_888_336_127_79, 1e-9);
+    assert_close("W=100 working of 10k App N", w, 46.415_9, 1e-4);
+}
+
+#[test]
+fn rendering_f32_agrees_with_f64() {
+    assert_close(
+        "s_white f32~f64",
+        f64::from(s_white(203.0, 1000.0, 1.2).unwrap()),
+        reference::s_white(203.0, 1000.0, 1.2).unwrap(),
+        2e-7,
+    );
+    for scene in [
+        [0.5, 0.25, 0.125],
+        [1.0, 0.0, 0.0],
+        [0.5, -0.1, 0.0],
+        [1e-6, 1e-6, 1e-6],
+    ] {
+        let disp32 = f64_3(
+            scene_to_display(
+                [as_f32(scene[0]), as_f32(scene[1]), as_f32(scene[2])],
+                1000.0,
+                1.2,
+            )
+            .unwrap(),
+        );
+        let disp64 = reference::scene_to_display(scene, 1000.0, 1.2).unwrap();
+        for (i, (a, e)) in disp32.iter().zip(disp64.iter()).enumerate() {
+            assert_close(&format!("fwd32[{i}]"), *a, *e, 1e-5 * e.abs().max(1.0));
+        }
+        let scene32 = f64_3(
+            display_to_scene(
+                1,
+                [as_f32(disp64[0]), as_f32(disp64[1]), as_f32(disp64[2])],
+                1000.0,
+                1.2,
+            )
+            .unwrap(),
+        );
+        let scene64 = reference::display_to_scene(1, disp64, 1000.0, 1.2).unwrap();
+        for (i, (a, e)) in scene32.iter().zip(scene64.iter()).enumerate() {
+            assert_close(&format!("inv32[{i}]"), *a, *e, 1e-5 * e.abs().max(1.0));
+        }
+    }
+}
+
+#[test]
+fn rendering_refusals() {
+    assert_eq!(DISPLAY_TO_SCENE_VERSION, 1);
+    for version in [0, 2, u16::MAX] {
+        assert!(matches!(
+            display_to_scene(version, [100.0, 100.0, 100.0], 1000.0, 1.2),
+            Err(Cc8KernelError::UnsupportedVersion { .. })
+        ));
+        assert!(matches!(
+            reference::display_to_scene(version, [100.0, 100.0, 100.0], 1000.0, 1.2),
+            Err(Cc8KernelError::UnsupportedVersion { .. })
+        ));
+    }
+    // Non-positive white/peak/gamma/s_white refuse.
+    assert!(matches!(
+        s_white(0.0, 1000.0, 1.2),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        s_white(203.0, -1.0, 1.2),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        s_white(203.0, 1000.0, 0.0),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        scene_to_display([0.5, 0.5, 0.5], 1000.0, -0.5),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        scene_to_working([0.5, 0.5, 0.5], 0.0),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        working_to_scene([0.5, 0.5, 0.5], -1.0),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    // Any non-finite component/arg refuses.
+    assert!(matches!(
+        scene_to_display([f32::NAN, 0.0, 0.0], 1000.0, 1.2),
+        Err(Cc8KernelError::NonFiniteInput { .. })
+    ));
+    assert!(matches!(
+        display_to_scene(1, [100.0, f32::INFINITY, 100.0], 1000.0, 1.2),
+        Err(Cc8KernelError::NonFiniteInput { .. })
+    ));
+    assert!(matches!(
+        s_white(f32::NAN, 1000.0, 1.2),
+        Err(Cc8KernelError::NonFiniteInput { .. })
+    ));
+    // Overflow refuses rather than returning infinity (f32 and f64).
+    assert!(matches!(
+        scene_to_display([3e38, 0.0, 0.0], 1e4, 1.7),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+    assert!(matches!(
+        reference::scene_to_display([1e308, 0.0, 0.0], 1e4, 1.7),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+    assert!(matches!(
+        s_white(3e38, 1e-37, 1.0),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
 }

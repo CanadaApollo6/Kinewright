@@ -269,6 +269,204 @@ fn hlg_gamma_unchecked(peak_nits: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// Reference-scene normalization + scene/display rendering (§2).
+// α = 1, β = 0 pinned. Gamma arrives resolved (locks pin it, §2); the S3
+// caller resolves it once per frame via `hlg_gamma`, not per pixel.
+// ---------------------------------------------------------------------------
+
+const BT2020_KR_F32: f32 = 0.2627;
+const BT2020_KG_F32: f32 = 0.6780;
+const BT2020_KB_F32: f32 = 0.0593;
+const BT2020_KR_F64: f64 = 0.2627;
+const BT2020_KG_F64: f64 = 0.6780;
+const BT2020_KB_F64: f64 = 0.0593;
+
+/// Triplet [`finite_input`]: any non-finite component refuses (R35).
+fn finite_input_3<T>(function: &'static str, value: [T; 3]) -> Result<[T; 3], Cc8KernelError>
+where
+    T: Copy + Into<f64>,
+{
+    for component in value {
+        if !component.into().is_finite() {
+            return Err(Cc8KernelError::NonFiniteInput {
+                function,
+                value: component.into(),
+            });
+        }
+    }
+    Ok(value)
+}
+
+/// Triplet [`finite_result`]: overflow refuses rather than clamping (R35).
+fn finite_result_3<T>(function: &'static str, value: [T; 3]) -> Result<[T; 3], Cc8KernelError>
+where
+    T: Copy + Into<f64>,
+{
+    for component in value {
+        if !component.into().is_finite() {
+            return Err(Cc8KernelError::NonFiniteResult { function });
+        }
+    }
+    Ok(value)
+}
+
+/// Reference-scene white `s_white = (W/P)^(1/γ)` (§2). Working = `scene/s_white`.
+///
+/// # Errors
+/// Non-finite args → `NonFiniteInput`; W/P/γ ≤ 0 → `OutOfDomain`.
+pub fn s_white(white_nits: f32, peak_nits: f32, gamma: f32) -> Result<f32, Cc8KernelError> {
+    const FUNCTION: &str = "s_white";
+    let white = finite_input(FUNCTION, white_nits)?;
+    let peak = finite_input(FUNCTION, peak_nits)?;
+    let gamma = finite_input(FUNCTION, gamma)?;
+    if white <= 0.0 || peak <= 0.0 || gamma <= 0.0 {
+        return Err(Cc8KernelError::OutOfDomain {
+            function: FUNCTION,
+            reason: "white/peak/gamma must be > 0",
+        });
+    }
+    finite_result(FUNCTION, (white / peak).powf(1.0 / gamma))
+}
+
+/// Normalize scene to working: `w = s/s_white` per component (§2).
+///
+/// # Errors
+/// Non-finite args → `NonFiniteInput`; `s_white` ≤ 0 → `OutOfDomain`.
+pub fn scene_to_working(scene: [f32; 3], ref_white: f32) -> Result<[f32; 3], Cc8KernelError> {
+    const FUNCTION: &str = "scene_to_working";
+    let scene = finite_input_3(FUNCTION, scene)?;
+    let sw = finite_input(FUNCTION, ref_white)?;
+    if sw <= 0.0 {
+        return Err(Cc8KernelError::OutOfDomain {
+            function: FUNCTION,
+            reason: "s_white must be > 0",
+        });
+    }
+    finite_result_3(FUNCTION, [scene[0] / sw, scene[1] / sw, scene[2] / sw])
+}
+
+/// Denormalize working to scene: `s = w·s_white` per component (§2).
+///
+/// # Errors
+/// Non-finite args → `NonFiniteInput`; `s_white` ≤ 0 → `OutOfDomain`.
+pub fn working_to_scene(working: [f32; 3], ref_white: f32) -> Result<[f32; 3], Cc8KernelError> {
+    const FUNCTION: &str = "working_to_scene";
+    let working = finite_input_3(FUNCTION, working)?;
+    let sw = finite_input(FUNCTION, ref_white)?;
+    if sw <= 0.0 {
+        return Err(Cc8KernelError::OutOfDomain {
+            function: FUNCTION,
+            reason: "s_white must be > 0",
+        });
+    }
+    finite_result_3(
+        FUNCTION,
+        [working[0] * sw, working[1] * sw, working[2] * sw],
+    )
+}
+
+/// Forward rendering, scene → display nits (§2): `D_c = P·Y_s^(γ−1)·s_c`
+/// with 2020 luma of the nonnegative part, plus P3 signed handling
+/// `D = F(max(s,0)) + P·min(s,0)`. `Y_s` = 0 → F part exactly 0.
+///
+/// # Errors
+/// Non-finite args → `NonFiniteInput`; peak/γ ≤ 0 → `OutOfDomain`.
+pub fn scene_to_display(
+    scene: [f32; 3],
+    peak_nits: f32,
+    gamma: f32,
+) -> Result<[f32; 3], Cc8KernelError> {
+    const FUNCTION: &str = "scene_to_display";
+    let scene = finite_input_3(FUNCTION, scene)?;
+    let peak = finite_input(FUNCTION, peak_nits)?;
+    let gamma = finite_input(FUNCTION, gamma)?;
+    if peak <= 0.0 || gamma <= 0.0 {
+        return Err(Cc8KernelError::OutOfDomain {
+            function: FUNCTION,
+            reason: "peak/gamma must be > 0",
+        });
+    }
+    let nonneg = [scene[0].max(0.0), scene[1].max(0.0), scene[2].max(0.0)];
+    let luma = BT2020_KR_F32 * nonneg[0] + BT2020_KG_F32 * nonneg[1] + BT2020_KB_F32 * nonneg[2];
+    // Positive luma takes the power path; zero luma is exactly zero (never
+    // feed 0 to a possibly-negative power). Luma of nonnegatives is ≥ 0.
+    let gain = if luma > 0.0 {
+        peak * luma.powf(gamma - 1.0)
+    } else {
+        0.0
+    };
+    finite_result_3(
+        FUNCTION,
+        [
+            gain * nonneg[0] + peak * scene[0].min(0.0),
+            gain * nonneg[1] + peak * scene[1].min(0.0),
+            gain * nonneg[2] + peak * scene[2].min(0.0),
+        ],
+    )
+}
+
+/// The pinned `display_to_scene` rule version. Only this version exists.
+pub const DISPLAY_TO_SCENE_VERSION: u16 = 1;
+
+/// Inverse rendering, display nits → scene (§2 `display_to_scene` v1):
+/// `Y_s = (Y_d/P)^(1/γ)`, `s_c = D_c/(P·Y_s^(γ−1))`, plus P3 signed
+/// handling `s = F⁻¹(max(D,0)) + min(D,0)/P`. `Y_d` = 0 → F⁻¹ part exactly 0.
+///
+/// # Errors
+/// Other versions → `UnsupportedVersion`; non-finite args → `NonFiniteInput`;
+/// peak/γ ≤ 0 → `OutOfDomain`.
+pub fn display_to_scene(
+    rule_version: u16,
+    display: [f32; 3],
+    peak_nits: f32,
+    gamma: f32,
+) -> Result<[f32; 3], Cc8KernelError> {
+    const FUNCTION: &str = "display_to_scene";
+    if rule_version != DISPLAY_TO_SCENE_VERSION {
+        return Err(Cc8KernelError::UnsupportedVersion {
+            function: FUNCTION,
+            version: rule_version,
+        });
+    }
+    let display = finite_input_3(FUNCTION, display)?;
+    let peak = finite_input(FUNCTION, peak_nits)?;
+    let gamma = finite_input(FUNCTION, gamma)?;
+    if peak <= 0.0 || gamma <= 0.0 {
+        return Err(Cc8KernelError::OutOfDomain {
+            function: FUNCTION,
+            reason: "peak/gamma must be > 0",
+        });
+    }
+    let nonneg = [
+        display[0].max(0.0),
+        display[1].max(0.0),
+        display[2].max(0.0),
+    ];
+    let luma = BT2020_KR_F32 * nonneg[0] + BT2020_KG_F32 * nonneg[1] + BT2020_KB_F32 * nonneg[2];
+    if luma > 0.0 {
+        let scene_luma = (luma / peak).powf(1.0 / gamma);
+        let denom = peak * scene_luma.powf(gamma - 1.0);
+        finite_result_3(
+            FUNCTION,
+            [
+                nonneg[0] / denom + display[0].min(0.0) / peak,
+                nonneg[1] / denom + display[1].min(0.0) / peak,
+                nonneg[2] / denom + display[2].min(0.0) / peak,
+            ],
+        )
+    } else {
+        finite_result_3(
+            FUNCTION,
+            [
+                display[0].min(0.0) / peak,
+                display[1].min(0.0) / peak,
+                display[2].min(0.0) / peak,
+            ],
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // f64 conformance reference: the App. N path. Tested ±1e-6 against the
 // independent vectors; f32 production agreement with this module is itself
 // a test (R35).
@@ -278,9 +476,10 @@ fn hlg_gamma_unchecked(peak_nits: f32) -> f32 {
 /// Same domains, same refusals, same branch ownership.
 pub mod reference {
     use super::{
-        Cc8KernelError, HLG_A_F64, HLG_B_F64, HLG_C_F64, HLG_GAMMA_RULE_VERSION,
-        HLG_SCENE_BREAKPOINT_F64, HLG_SIGNAL_BREAKPOINT_F64, PQ_C1_F64, PQ_C2_F64, PQ_C3_F64,
-        PQ_M1_F64, PQ_M2_F64, PQ_PEAK_NITS_F64, finite_input, finite_result,
+        BT2020_KB_F64, BT2020_KG_F64, BT2020_KR_F64, Cc8KernelError, DISPLAY_TO_SCENE_VERSION,
+        HLG_A_F64, HLG_B_F64, HLG_C_F64, HLG_GAMMA_RULE_VERSION, HLG_SCENE_BREAKPOINT_F64,
+        HLG_SIGNAL_BREAKPOINT_F64, PQ_C1_F64, PQ_C2_F64, PQ_C3_F64, PQ_M1_F64, PQ_M2_F64,
+        PQ_PEAK_NITS_F64, finite_input, finite_input_3, finite_result, finite_result_3,
     };
 
     /// f64 [`super::pq_oetf`].
@@ -410,6 +609,159 @@ pub mod reference {
             1.2 + 0.42 * (peak_nits / 1000.0).log10()
         } else {
             1.2 * 1.111_f64.powf((peak_nits / 1000.0).log2())
+        }
+    }
+
+    /// f64 [`super::s_white`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`super::s_white`].
+    pub fn s_white(white_nits: f64, peak_nits: f64, gamma: f64) -> Result<f64, Cc8KernelError> {
+        const FUNCTION: &str = "reference::s_white";
+        let white = finite_input(FUNCTION, white_nits)?;
+        let peak = finite_input(FUNCTION, peak_nits)?;
+        let gamma = finite_input(FUNCTION, gamma)?;
+        if white <= 0.0 || peak <= 0.0 || gamma <= 0.0 {
+            return Err(Cc8KernelError::OutOfDomain {
+                function: FUNCTION,
+                reason: "white/peak/gamma must be > 0",
+            });
+        }
+        finite_result(FUNCTION, (white / peak).powf(1.0 / gamma))
+    }
+
+    /// f64 [`super::scene_to_working`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`super::scene_to_working`].
+    pub fn scene_to_working(scene: [f64; 3], ref_white: f64) -> Result<[f64; 3], Cc8KernelError> {
+        const FUNCTION: &str = "reference::scene_to_working";
+        let scene = finite_input_3(FUNCTION, scene)?;
+        let sw = finite_input(FUNCTION, ref_white)?;
+        if sw <= 0.0 {
+            return Err(Cc8KernelError::OutOfDomain {
+                function: FUNCTION,
+                reason: "s_white must be > 0",
+            });
+        }
+        finite_result_3(FUNCTION, [scene[0] / sw, scene[1] / sw, scene[2] / sw])
+    }
+
+    /// f64 [`super::working_to_scene`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`super::working_to_scene`].
+    pub fn working_to_scene(working: [f64; 3], ref_white: f64) -> Result<[f64; 3], Cc8KernelError> {
+        const FUNCTION: &str = "reference::working_to_scene";
+        let working = finite_input_3(FUNCTION, working)?;
+        let sw = finite_input(FUNCTION, ref_white)?;
+        if sw <= 0.0 {
+            return Err(Cc8KernelError::OutOfDomain {
+                function: FUNCTION,
+                reason: "s_white must be > 0",
+            });
+        }
+        finite_result_3(
+            FUNCTION,
+            [working[0] * sw, working[1] * sw, working[2] * sw],
+        )
+    }
+
+    /// f64 [`super::scene_to_display`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`super::scene_to_display`].
+    pub fn scene_to_display(
+        scene: [f64; 3],
+        peak_nits: f64,
+        gamma: f64,
+    ) -> Result<[f64; 3], Cc8KernelError> {
+        const FUNCTION: &str = "reference::scene_to_display";
+        let scene = finite_input_3(FUNCTION, scene)?;
+        let peak = finite_input(FUNCTION, peak_nits)?;
+        let gamma = finite_input(FUNCTION, gamma)?;
+        if peak <= 0.0 || gamma <= 0.0 {
+            return Err(Cc8KernelError::OutOfDomain {
+                function: FUNCTION,
+                reason: "peak/gamma must be > 0",
+            });
+        }
+        let nonneg = [scene[0].max(0.0), scene[1].max(0.0), scene[2].max(0.0)];
+        let luma =
+            BT2020_KR_F64 * nonneg[0] + BT2020_KG_F64 * nonneg[1] + BT2020_KB_F64 * nonneg[2];
+        let gain = if luma > 0.0 {
+            peak * luma.powf(gamma - 1.0)
+        } else {
+            0.0
+        };
+        finite_result_3(
+            FUNCTION,
+            [
+                gain * nonneg[0] + peak * scene[0].min(0.0),
+                gain * nonneg[1] + peak * scene[1].min(0.0),
+                gain * nonneg[2] + peak * scene[2].min(0.0),
+            ],
+        )
+    }
+
+    /// f64 [`super::display_to_scene`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`super::display_to_scene`].
+    pub fn display_to_scene(
+        rule_version: u16,
+        display: [f64; 3],
+        peak_nits: f64,
+        gamma: f64,
+    ) -> Result<[f64; 3], Cc8KernelError> {
+        const FUNCTION: &str = "reference::display_to_scene";
+        if rule_version != DISPLAY_TO_SCENE_VERSION {
+            return Err(Cc8KernelError::UnsupportedVersion {
+                function: FUNCTION,
+                version: rule_version,
+            });
+        }
+        let display = finite_input_3(FUNCTION, display)?;
+        let peak = finite_input(FUNCTION, peak_nits)?;
+        let gamma = finite_input(FUNCTION, gamma)?;
+        if peak <= 0.0 || gamma <= 0.0 {
+            return Err(Cc8KernelError::OutOfDomain {
+                function: FUNCTION,
+                reason: "peak/gamma must be > 0",
+            });
+        }
+        let nonneg = [
+            display[0].max(0.0),
+            display[1].max(0.0),
+            display[2].max(0.0),
+        ];
+        let luma =
+            BT2020_KR_F64 * nonneg[0] + BT2020_KG_F64 * nonneg[1] + BT2020_KB_F64 * nonneg[2];
+        if luma > 0.0 {
+            let scene_luma = (luma / peak).powf(1.0 / gamma);
+            let denom = peak * scene_luma.powf(gamma - 1.0);
+            finite_result_3(
+                FUNCTION,
+                [
+                    nonneg[0] / denom + display[0].min(0.0) / peak,
+                    nonneg[1] / denom + display[1].min(0.0) / peak,
+                    nonneg[2] / denom + display[2].min(0.0) / peak,
+                ],
+            )
+        } else {
+            finite_result_3(
+                FUNCTION,
+                [
+                    display[0].min(0.0) / peak,
+                    display[1].min(0.0) / peak,
+                    display[2].min(0.0) / peak,
+                ],
+            )
         }
     }
 }
