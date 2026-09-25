@@ -852,6 +852,31 @@ fn rendering_refuses_hidden_intermediate_overflow() {
 }
 
 #[test]
+fn inverse_denominator_underflow_refuses_in_domain() {
+    // R2 S1/N06 under G1: R2's P=1e30/1e200 + γ=0.5 denom overflows are
+    // out of domain (overflow needs P < 1 or γ < 1 energies — unreachable
+    // with P ≥ 1, γ ≥ 1, so the finite-denom guard was deleted as
+    // provably unreachable). Reachable in-domain is underflow to a zero
+    // denominator, which still refuses NonFiniteResult, both precisions.
+    assert!(matches!(
+        display_to_scene([1.0, 1.0, 1.0], 1e30, 0.5),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        reference::display_to_scene([1.0, 1.0, 1.0], 1e200, 0.5),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        display_to_scene([1e-40, 0.0, 0.0], 1e5, 1.2),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+    assert!(matches!(
+        reference::display_to_scene([1e-319, 0.0, 0.0], 1e5, 1.2),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+}
+
+#[test]
 fn compressor_skips_inactive_infinite_ratio() {
     // R1 S1: SDR P=100, [1e-38,0,0] overflows the upper ratio to +inf, but
     // t ≤ +inf constrains nothing — skipped, pinned finite-correct, both
@@ -1117,6 +1142,50 @@ fn eetf_adjacent_integer_ceiling_scan() {
         assert!(!at64.clipped, "f64 Cs={cs}: L=Cs must not flag");
         assert_eq!(at64.value.to_bits(), tgt.to_bits(), "f64 Cs={cs}");
     }
+}
+
+#[test]
+fn eetf_degenerate_knee_saturates_in_domain() {
+    // R2 S2/N14 under G1: f64 PQ plateaus below Cs=400 (next_down rounds
+    // equal), so m == 1 with Ct < Cs and the knee degenerates (dk == 0)
+    // with x == 1 ≥ knee: saturate exactly to Ct, unflagged — with L ≠ Ct
+    // so the Ct→L mutant is killed. R2's subnormal case now refuses.
+    let cs = 400.0f64;
+    let ct = cs.next_down();
+    let l = ct.next_down();
+    assert_eq!(
+        reference::pq_oetf(ct).unwrap().to_bits(),
+        reference::pq_oetf(cs).unwrap().to_bits()
+    );
+    assert_eq!(
+        reference::pq_oetf(l).unwrap().to_bits(),
+        reference::pq_oetf(cs).unwrap().to_bits()
+    );
+    let out = reference::eetf_to_target(l, cs, ct).unwrap();
+    assert!(!out.clipped);
+    assert_eq!(out.value.to_bits(), ct.to_bits());
+    assert!(matches!(
+        reference::eetf_to_target(f64::from_bits(1), f64::from_bits(4), f64::from_bits(2)),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+}
+
+#[test]
+fn eetf_interior_requires_widening_f32() {
+    // R2 S2/N15: interior values go through the widened f64 core — the
+    // narrowed mutant errs 0.0057 here and 1.1035 at the near endpoint.
+    let got = eetf_to_target(3000.0, 4000.0, 1000.0).unwrap();
+    assert!(!got.clipped);
+    assert_close(
+        "interior widened",
+        f64::from(got.value),
+        998.205_063_342_773_4,
+        1e-4,
+    );
+    let l_near = 9764f32.next_down(); // 9763.9990234375
+    let near = eetf_to_target(l_near, 9764.0, 9763.0).unwrap();
+    assert!(!near.clipped);
+    assert_eq!(near.value.to_bits(), 9763.0f32.to_bits());
 }
 
 #[test]
@@ -1805,6 +1874,7 @@ fn pb2_working_domain_repeated_chain() {
                 let s2 = display_to_scene(d, 1000.0, 1.2).unwrap();
                 w = [s2[0] / sw * 1.05, s2[1] / sw * 1.05, s2[2] / sw * 1.05];
             }
+            w = [f16_store(w[0]), f16_store(w[1]), f16_store(w[2])];
             let grown = 1.05f64.powi(3);
             let e = [
                 f64::from(w0[0]) * grown,

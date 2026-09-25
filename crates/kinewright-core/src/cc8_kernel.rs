@@ -351,7 +351,7 @@ pub fn display_to_scene(
     if luma > 0.0 {
         let ratio = finite_result(FUNCTION, luma / peak)?;
         let scene_luma = finite_result(FUNCTION, ratio.powf(1.0 / gamma))?;
-        let denom = finite_result(FUNCTION, peak * scene_luma.powf(gamma - 1.0))?;
+        let denom = peak * scene_luma.powf(gamma - 1.0);
         if denom == 0.0 {
             return Err(Cc8KernelError::NonFiniteResult { function: FUNCTION });
         }
@@ -870,7 +870,7 @@ pub mod reference {
         if luma > 0.0 {
             let ratio = finite_result(FUNCTION, luma / peak)?;
             let scene_luma = finite_result(FUNCTION, ratio.powf(1.0 / gamma))?;
-            let denom = finite_result(FUNCTION, peak * scene_luma.powf(gamma - 1.0))?;
+            let denom = peak * scene_luma.powf(gamma - 1.0);
             if denom == 0.0 {
                 return Err(Cc8KernelError::NonFiniteResult { function: FUNCTION });
             }
