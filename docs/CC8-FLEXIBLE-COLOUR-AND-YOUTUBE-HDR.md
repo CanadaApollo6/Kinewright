@@ -728,13 +728,24 @@ rev-2 display-linear figures are superseded): f16 ULP at w=1.0 is 0.0009765625
 codes; W=100 puts the 10 000-nit input at working 46.4159.
 
 - **PB1 storage boundary**: each f32→f16 store ≤ 0.5 ULP(w) (round-to-nearest);
-  each encode/decode stage-pair round trip ≤ 2 ULP.
+  each encode/decode stage-pair round trip ≤ 2 ULP (RGB triplets: ULP of the
+  triplet's max |channel|, erratum CE4).
 - **PB2 working domain**: w ≥ 2^-10: end-to-end relative error ≤ 0.3%,
-  absolute ≤ 4 ULP(w).
-- **PB3 display absolute** (post-render): white ±10% ≤ 1.0 nit; peak ≤ 2.0
-  nits; below 1 nit ≤ 0.05 nits.
+  absolute ≤ 4 ULP(w) (RGB triplets: relative ‖err‖∞/‖w‖∞ and ULP of the
+  triplet's max |channel|, erratum CE4).
+- **PB3 display absolute** (post-render): white ±10% ≤ 1.0 nit; peak ≤
+  max(2.0 nits, 0.1% × P) (erratum CE3); below 1 nit ≤ 0.05 nits.
 - **PB4 final code**: 10-bit delivery anchors (black/18%/white/peak/saturated)
   ≤ 2 codes max, ≤ 0.5 mean; 8-bit SDR anchors ≤ 1 code.
+- **S1 precision errata (2026-09-25, lead ruling after the S1 reviews).**
+  CE3: the 2.0-nit peak bound was derived at P = 1000; one f16 store of the
+  W=100/P=10 000 working peak (≈14.96) alone costs 3.46 nits, so the peak bound
+  scales with P above 2000 nits (P ≤ 2000 unchanged). CE4: once a matrix mixes
+  channels, a small channel beside a large one inherits the large channel's
+  storage quantum ([1, 2^-10, 2^-10] 2020→709→f16→2020 errs 8.6 ULP of 2^-10
+  but < 0.01 ULP of 1.0), so triplet ULP/relative limits use the max |channel|.
+  f32 intermediates were rejected (memory). CE1 accepted: the HLG compressor
+  resolves Y into [0, P]. CE2 withdrawn: EETF identity/clip decide in nits.
 - Non-finite/overflow in working values: typed render refusal with asset/frame
   identity (fail closed — never a quiet clamp).
 
