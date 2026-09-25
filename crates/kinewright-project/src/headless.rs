@@ -41,9 +41,7 @@ pub fn save_headless(
     }
     let json = serialize_project_document(document)?;
     let new_digest = digest_bytes(json.as_bytes());
-    // N6/H12, as in the app's `write_project`: the sidecar lands before
-    // the project bytes — snapshot it first, so a failed project write
-    // rolls back. N6.1/J2: the baselines below are restored with it.
+    // N6/H12+J2 (as in `write_project`): snapshot for rollback.
     let rollback_sidecar = sidecar_path_for_project(Some(path));
     let rollback_plan = snapshot_sidecar_rollback(rollback_sidecar.as_deref());
     let pre_flush_last_written = sidecar.last_written_gen;
@@ -73,9 +71,7 @@ pub fn save_headless(
         }
     };
     new_digest.clone_into(&mut sidecar.saved_digest);
-    // F5: headless retires nothing — it owns no journals (only a session
-    // that replayed recovery data may retire it). The parameter stays so
-    // the save-pipeline call shape is stable across callers.
+    // F5: headless retires nothing (param kept for call-shape stability).
     let _ = recovery_dir;
     Ok(HeadlessSaveReport {
         project,

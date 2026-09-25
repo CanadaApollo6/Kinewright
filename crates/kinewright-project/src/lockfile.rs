@@ -1,19 +1,10 @@
-//! The project lock: a lock object with flock liveness plus a readable
-//! discovery file (AW1 §5 as amended by the F3 erratum, R19, R40).
-//!
-//! `<stem>.kinewright.lock` is the lock OBJECT: created if absent, never
-//! unlinked by anyone, contents unused — liveness is the held OS advisory
-//! lock (`fs2`, both OSes) alone. The claim (pid/host/endpoint, no secret)
-//! lives in `<stem>.kinewright.lock.json`, written atomically by the owner
-//! only while holding the lock and readable by anyone at any time —
-//! including on Windows, where a `LockFileEx` range denies second-handle
-//! reads of the locked file itself (B4). Release removes the discovery
-//! while still holding the lock, then unlocks; a stale discovery with a
-//! free lock means a dead owner and reclaims with a warning — unless the
-//! stale claim names a known foreign host, which refuses (F7): flock
-//! liveness is host-local, so on local-lock network filesystems a free
-//! lock proves nothing about a foreign owner, and AW1 claims no
-//! multi-host exclusion. Any flock failure reads as *held* (fail-closed).
+//! Never-unlinked lock object (flock liveness) + discovery (AW1 §5/F3).
+//! The claim (pid/host/endpoint, no secret) publishes atomically while
+//! holding the lock and reads at any time — even on Windows, where
+//! `LockFileEx` denies second-handle reads of the locked file (B4).
+//! Release removes the discovery first; stale discovery reclaims unless
+//! foreign (F7 — host-local liveness; no multi-host exclusion). Flock
+//! failure reads as *held* (fail-closed).
 
 use std::{
     fs::{self, File},
@@ -78,9 +69,7 @@ pub struct LockfileClaim {
     pub reclaimed_from: Option<ReclaimedOwner>,
 }
 
-/// Derive a project's lockfile path from its canonical identity: the
-/// sibling `<stem>.kinewright.lock` beside the real file, so aliases
-/// share one lock (F4). `None` yields `None` and stemless paths likewise.
+/// Sibling lock beside the real file, via the identity (F4).
 #[must_use]
 pub fn lockfile_path_for_project(project_path: Option<&Path>) -> Option<PathBuf> {
     let path = project_path?;
@@ -89,16 +78,11 @@ pub fn lockfile_path_for_project(project_path: Option<&Path>) -> Option<PathBuf>
     let mut name = stem.to_os_string();
     name.push(".");
     name.push(LOCKFILE_SUFFIX);
-    Some(
-        identity
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join(name),
-    )
+    let parent = identity.parent().unwrap_or_else(|| Path::new(""));
+    Some(parent.join(name))
 }
 
-/// Derive a project's lock discovery path: the lock object name plus
-/// `.json`, beside the project. `None` yields `None`.
+/// The lock object name plus `.json`, beside the project.
 #[must_use]
 pub fn discovery_path_for_project(project_path: Option<&Path>) -> Option<PathBuf> {
     let lock = lockfile_path_for_project(project_path)?;
@@ -107,27 +91,17 @@ pub fn discovery_path_for_project(project_path: Option<&Path>) -> Option<PathBuf
     Some(PathBuf::from(name))
 }
 
-/// The hostname published when nothing names this machine: not a host,
-/// but the absence of host information. Stale claims carrying it predate
-/// real hostnames and still reclaim (F7).
+/// Absent host info; stale claims carrying it still reclaim (F7).
 const UNKNOWN_HOSTNAME: &str = "unknown";
 
-/// This machine's OS hostname (`gethostname` on Unix, the computer name
-/// on Windows): `None` when the OS call yields nothing usable. The crate
-/// forbids `unsafe`, and std offers no hostname API, so the call goes
-/// through the tiny `gethostname` dependency (already in the lockfile).
-fn os_hostname() -> Option<String> {
-    let name = gethostname::gethostname();
-    let name = name.to_str()?.trim().to_owned();
-    (!name.is_empty()).then_some(name)
-}
-
-/// This machine's hostname: the OS name, then `HOSTNAME`/`COMPUTERNAME`,
-/// then [`UNKNOWN_HOSTNAME`]. No secret — the name only scopes the F7
-/// foreign-host refusal.
+/// This machine's hostname: OS name, env, [`UNKNOWN_HOSTNAME`].
 fn current_hostname() -> String {
-    if let Some(name) = os_hostname() {
-        return name;
+    if let Some(name) = gethostname::gethostname()
+        .to_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        return name.to_owned();
     }
     for key in ["HOSTNAME", "COMPUTERNAME"] {
         if let Some(value) = std::env::var_os(key)
@@ -145,9 +119,9 @@ fn current_hostname() -> String {
 /// Why a project lock acquire failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockfileError {
-    /// The lock is held elsewhere. `owner` is the holding triple when
-    /// its discovery parses (the full claim overflows `result_large_err`;
-    /// the refusal only names the triple).
+    /// The lockfile exists and its flock is held. `owner` is the holding
+    /// triple when its claim parses (the full claim overflows
+    /// `result_large_err`; the refusal only names the triple).
     Contention {
         path: PathBuf,
         owner: Option<ReclaimedOwner>,
@@ -156,14 +130,11 @@ pub enum LockfileError {
     PendingRecovery {
         journal: PathBuf,
     },
-    /// Takeover refused: the pending-journal lookup itself failed — take
-    /// no chances with undecided crash data (F5, fail-closed).
+    /// Takeover refused: the journal lookup failed — fail closed (F5).
     RecoveryLookup {
         reason: String,
     },
-    /// Takeover refused: the stale lock names a known foreign host — a
-    /// locally free lock proves nothing about a foreign owner, and AW1
-    /// claims no multi-host exclusion (F7).
+    /// Takeover refused: stale lock names a known foreign host (F7).
     ForeignHost {
         host: String,
         endpoint: String,
@@ -191,16 +162,8 @@ impl std::fmt::Display for LockfileError {
                  restore or discard it in the GUI first",
                 journal.display()
             ),
-            Self::RecoveryLookup { reason } => write!(
-                formatter,
-                "not taking over: the pending-recovery lookup failed ({reason}) — \
-                 restore or discard recovery journals in the GUI first"
-            ),
-            Self::ForeignHost { host, endpoint } => write!(
-                formatter,
-                "not taking over: the stale lock belongs to host {host} (endpoint {endpoint}) — \
-                 refusing a cross-host takeover"
-            ),
+            Self::RecoveryLookup { reason } => write!(formatter, "recovery scan failed: {reason}"),
+            Self::ForeignHost { host, endpoint: _ } => write!(formatter, "foreign host {host}"),
             Self::Io(reason) => write!(formatter, "{reason}"),
         }
     }
@@ -208,14 +171,10 @@ impl std::fmt::Display for LockfileError {
 
 impl std::error::Error for LockfileError {}
 
-/// A held project lock: the open lock object with its flock, plus the
-/// discovery this handle published. Dropping frees the flock and leaves a
-/// reclaimable stale discovery; [`Self::release`] removes the discovery
-/// first, so the next acquire is clean. The lock object itself is never
-/// unlinked (F3).
+/// A held lock: open object plus published discovery. Never unlinked (F3).
 #[derive(Debug)]
 pub struct LockfileHandle {
-    /// The lock object path.
+    /// The lockfile path.
     pub path: PathBuf,
     /// The discovery path this handle published.
     pub discovery: PathBuf,
@@ -235,8 +194,6 @@ impl LockfileHandle {
     }
 
     /// Release: remove the discovery while holding the flock, then close.
-    /// A failed removal degrades to a reclaimable stale discovery, never
-    /// a lost unlock.
     /// # Errors
     /// Returns the removal IO error, if any.
     pub fn release(self) -> io::Result<()> {
@@ -273,10 +230,7 @@ pub fn reclaim_warning_json(previous: &ReclaimedOwner) -> String {
     .to_string()
 }
 
-/// The identity triple claimed at a discovery path: `None` when
-/// missing/unparseable. The discovery file is never locked, so this
-/// second-handle read is legal on both OSes — including while the lock
-/// is held (B4).
+/// Triple at a discovery path (`None` if missing/torn); legal while held (B4).
 fn read_owner(discovery_path: &Path) -> Option<ReclaimedOwner> {
     let bytes = fs::read(discovery_path).ok()?;
     let claim: LockfileClaim = serde_json::from_slice(&bytes).ok()?;
@@ -287,9 +241,8 @@ fn read_owner(discovery_path: &Path) -> Option<ReclaimedOwner> {
     })
 }
 
-/// Publish a claim to the discovery path, atomically (temp + rename,
-/// synced through the one handle). Call only while holding the lock —
-/// the flock serialises publishers.
+/// Publish a claim atomically. Call only while holding the lock — the
+/// flock serialises publishers.
 fn write_discovery(discovery_path: &Path, claim: &LockfileClaim) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(claim)
         .map_err(|error| io::Error::other(format!("could not serialize the lockfile: {error}")))?;
@@ -367,11 +320,9 @@ pub fn acquire_project_lock_with_policy(
     let attempts = attempts.max(1);
     for attempt in 1..=attempts {
         let last = attempt == attempts;
-        // Open-or-create: the lock object is never unlinked, so a create
-        // race is harmless — every opener flocks the same object (F3/L1).
-        // The contents are unused and never truncated: truncating through
-        // a contender's handle could fail against a live Windows
-        // `LockFileEx` range, turning contention into an IO error.
+        // Open-or-create on a never-unlinked object: create races share
+        // one flock (F3/L1). Never truncate: it could fail against a live
+        // Windows `LockFileEx` range, turning contention into IO errors.
         let file = match File::options()
             .read(true)
             .write(true)
@@ -399,8 +350,7 @@ pub fn acquire_project_lock_with_policy(
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_lock_open_before_flock");
         if file.try_lock_exclusive().is_err() {
-            // Held: contention, never a steal. The owner read is
-            // best-effort; the verdict never is.
+            // Held: contention, never a steal.
             drop(file);
             let owner = read_owner(&discovery_path);
             if last {
@@ -412,9 +362,7 @@ pub fn acquire_project_lock_with_policy(
             std::thread::sleep(retry_delay);
             continue;
         }
-        // We hold the flock, so any discovery present is stale — a live
-        // owner holds the lock. Pending recovery refuses first (S7), on
-        // every ownership path — and a failed lookup refuses too (F5).
+        // Holding the flock: pending recovery (or lookup failure) refuses first.
         match pending_journal_for_project(recovery_dir, project_path) {
             Ok(Some(journal)) => {
                 drop(file);
@@ -429,10 +377,8 @@ pub fn acquire_project_lock_with_policy(
             }
         }
         let previous = read_owner(&discovery_path);
-        // F7: a stale claim from a KNOWN foreign host refuses — a locally
-        // free lock proves nothing on local-lock network filesystems, and
-        // AW1 claims no multi-host exclusion. `UNKNOWN_HOSTNAME` predates
-        // real hostnames (S1 never shipped multi-host) and still reclaims.
+        // F7: a KNOWN foreign host refuses; unknown-host claims predate
+        // real hostnames and still reclaim.
         if let Some(refused) = previous
             .as_ref()
             .filter(|owner| owner.hostname != UNKNOWN_HOSTNAME && owner.hostname != claim.hostname)

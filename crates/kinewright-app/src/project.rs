@@ -567,11 +567,10 @@ impl ProjectSession {
         project_digest: &str,
         previous_digest: &str,
     ) -> Result<(Vec<u8>, kinewright_core::WriteReport), String> {
-        let investigator = self.investigator.as_ref();
         self.sidecar.sidecar_bytes_for_save(
             project_digest,
             previous_digest,
-            prepare_investigator_context(investigator),
+            prepare_investigator_context(self.investigator.as_ref()),
         )
     }
 
@@ -581,32 +580,29 @@ impl ProjectSession {
         project_digest: &str,
         previous_digest: &str,
     ) -> std::io::Result<FlushOutcome> {
-        let investigator = self.investigator.as_ref();
         self.sidecar.flush_incidents(
             self.project_path.as_deref(),
             project_digest,
             previous_digest,
-            prepare_investigator_context(investigator),
+            prepare_investigator_context(self.investigator.as_ref()),
         )
     }
 
     /// [`Self::flush_incidents`] when the writer has not confirmed the
     /// current generation, through the session.
     pub(crate) fn flush_incidents_if_changed(&mut self) -> std::io::Result<FlushOutcome> {
-        let investigator = self.investigator.as_ref();
         self.sidecar.flush_incidents_if_changed(
             self.project_path.as_deref(),
-            prepare_investigator_context(investigator),
+            prepare_investigator_context(self.investigator.as_ref()),
         )
     }
 
     /// Queue a debounced background flush without joining, through the
     /// session.
     pub(crate) fn queue_incidents_flush(&mut self) {
-        let investigator = self.investigator.as_ref();
         self.sidecar.queue_incidents_flush(
             self.project_path.as_deref(),
-            prepare_investigator_context(investigator),
+            prepare_investigator_context(self.investigator.as_ref()),
         );
     }
 
@@ -690,10 +686,7 @@ impl ProjectSession {
     }
 }
 
-/// The investigator context a flush prepares at write time (F2): the
-/// running sample leads, then the queued refused ops copy into the
-/// stash — the base `sidecar_bytes_for_save` ordering, restored. The
-/// session runs it inside the builder, so a skipped flush never does.
+/// Investigator context for a flush (F2): base order; skips never run it.
 fn prepare_investigator_context(
     investigator: Option<&InvestigatorSession>,
 ) -> impl FnOnce(&mut BTreeMap<IncidentId, Operation>) -> Option<RunningInvestigation> + '_ {

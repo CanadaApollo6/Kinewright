@@ -1132,9 +1132,7 @@ impl KinewrightApp {
         session.name = name;
         session.project_path = Some(path.to_path_buf());
         new_digest.clone_into(&mut session.saved_digest);
-        // F1: the project bytes landed here, so the stem is established —
-        // a later flush pairs instead of skipping, even when this save's
-        // flush skipped over foreign history.
+        // F1: landed bytes establish the stem (later flushes pair).
         if let Some(stem) = sidecar_path_for_project(Some(path)) {
             session.established.insert(stem);
         }

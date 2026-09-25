@@ -277,12 +277,8 @@ pub fn canonical_session_key(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The one canonical project identity (F4): the full canonical path when
-/// the target exists (resolving file symlinks), else the canonical parent
-/// dir plus the file name — so a not-yet-existing first-save target still
-/// identifies. Relative paths resolve against the working dir; when
-/// nothing resolves, the raw path is the identity, which still matches
-/// itself. Lock, discovery, token, and journal derivations all read this.
+/// One canonical identity (F4): full path if it exists, else canonical
+/// parent plus name; relative resolves at the cwd. Raw is the last resort.
 #[must_use]
 pub fn canonical_project_identity(path: &Path) -> PathBuf {
     if let Ok(canonical) = fs::canonicalize(path) {

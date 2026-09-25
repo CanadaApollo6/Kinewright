@@ -37,10 +37,7 @@ pub use sidecar::{
     sidecar_refused_observation, sidecar_write_failed_observation, write_synced,
 };
 
-// Deterministic scheduling for the lock interleaving tests (F3); absent
-// from production builds. Armed per child process via `REV2_HOOK` (the
-// pause point), `REV2_SIGNALS` (the signal dir), `REV2_EXIT` (exit 77 at
-// the point instead of pausing).
+// Lock-test scheduling (F3); per-child REV2_HOOK/SIGNALS/EXIT.
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) fn test_hook(point: &str) {
     if std::env::var("REV2_HOOK").ok().as_deref() != Some(point) {

@@ -43,9 +43,8 @@ pub struct SidecarSession {
     pub last_restore_report: Option<RestoreReport>,
     /// Suspended: loads run, every flush reports `Skipped` (rule 10, H3).
     pub sidecar_suspended: bool,
-    /// The stems this session established a baseline for — loaded, or
-    /// written by a successful flush, or adopted after a save. GUARD-B
-    /// applies only to stems outside this set (F1).
+    /// Stems with a baseline: loaded, flushed, or adopted (F1). GUARD-B
+    /// applies only outside this set.
     pub established: BTreeSet<PathBuf>,
     pub incidents: IncidentLogHandle,
 }
@@ -227,12 +226,10 @@ impl SidecarSession {
         writer: Option<Arc<SidecarWriter>>,
         rename: Option<&RefuseRename>,
     ) -> LoadedSidecarSession {
-        let mut established = BTreeSet::new();
-        if !matches!(mode, SidecarMode::None)
-            && let Some(stem) = project_path.and_then(|path| sidecar_path_for_project(Some(path)))
-        {
-            established.insert(stem);
-        }
+        let stem = (!matches!(mode, SidecarMode::None))
+            .then(|| project_path.and_then(|path| sidecar_path_for_project(Some(path))))
+            .flatten();
+        let established = BTreeSet::from_iter(stem);
         let loaded = load_session_sidecar(mode, project_path, &incidents, opening, rename);
         LoadedSidecarSession {
             session: Self {
@@ -259,9 +256,8 @@ impl SidecarSession {
     /// entry exactly as a live end would (§3 rule 4), the restored stash
     /// rides by id (rule 13), and carried texts re-emit verbatim (rule 8b).
     /// Both the joining flush and the background submit build through here,
-    /// so one builder means one bytes shape. `prepare` samples the live
-    /// investigation and copies the queued refused ops into the stash at
-    /// write time; headless passes `|_| None`.
+    /// so one builder means one bytes shape. `prepare` runs at write time;
+    /// headless passes `|_| None`.
     /// # Errors
     /// Returns the envelope serialisation failure as a string.
     pub fn sidecar_bytes_for_save(
@@ -270,10 +266,8 @@ impl SidecarSession {
         previous_digest: &str,
         prepare: impl FnOnce(&mut BTreeMap<IncidentId, Operation>) -> Option<RunningInvestigation>,
     ) -> Result<(Vec<u8>, WriteReport), String> {
-        // The investigator context prepares at write, never on a skipped
-        // flush (F2): the running sample leads, then the queued refused
-        // ops copy into the stash — the base builder ordering, restored
-        // (`IN2B` §3 rule 13).
+        // The context prepares at write, never on a skip (F2): the
+        // running sample leads, then the queued refused ops copy in.
         let running = prepare(&mut self.refused_by_id);
         let log = self
             .incidents
@@ -317,10 +311,9 @@ impl SidecarSession {
         let (bytes, report) = self
             .sidecar_bytes_for_save(project_digest, previous_digest, prepare)
             .map_err(std::io::Error::other)?;
-        // GUARD-B (R6/F1): a stem this session never loaded or wrote
-        // keeps its history against an empty flush — the session
-        // established no baseline there. Fresh stems, established stems,
-        // and non-empty flushes are untouched.
+        // GUARD-B (R6/F1): an unestablished stem keeps its history
+        // against an empty flush; fresh, established, and non-empty
+        // flushes are untouched.
         if !self.established.contains(&sidecar_path)
             && report.written_open == 0
             && report.written_resolved == 0
@@ -414,21 +407,14 @@ impl SidecarSession {
     }
 }
 
-/// What the H12 rollback owes the sidecar (N6.1/J3): the prior bytes to
-/// restore, a removal when no sidecar preceded the save, or nothing when
-/// the pre-flush read failed for any reason but absence — an unreadable
-/// sidecar is never deleted.
+/// H12 rollback plan (N6.1/J3): restore, remove, or skip (never delete unreadable).
 pub enum SidecarRollback {
     Restore(Vec<u8>),
     Remove,
     Skip,
 }
 
-/// Snapshot what the H12 rollback owes the sidecar, before the flush
-/// (N6.1/J3): the prior bytes to restore, a removal when no sidecar
-/// preceded the save, or nothing when the read failed for any reason but
-/// absence — an unreadable sidecar is never deleted. Shared by the app
-/// and headless saves (F6).
+/// Snapshot the H12 rollback (N6.1/J3, F6): shared by app and headless.
 #[must_use]
 pub fn snapshot_sidecar_rollback(sidecar: Option<&Path>) -> SidecarRollback {
     let Some(sidecar) = sidecar else {
@@ -441,12 +427,7 @@ pub fn snapshot_sidecar_rollback(sidecar: Option<&Path>) -> SidecarRollback {
     }
 }
 
-/// Run the H12 rollback after a failed project write (F6): the sidecar
-/// flushed above the failed write pairs with bytes that never landed —
-/// restore the prior bytes, or remove the sidecar when none preceded the
-/// save. Best-effort: the save already failed, and the pair's previous
-/// arm still loads a newer-than-project sidecar, so a failed rollback
-/// degrades to a re-flush, not a refusal.
+/// Run the H12 rollback (F6); best-effort, degrades to a re-flush.
 pub fn rollback_sidecar_write(sidecar: Option<PathBuf>, plan: SidecarRollback) {
     let Some(sidecar) = sidecar else {
         return;

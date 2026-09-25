@@ -14,9 +14,7 @@ use serde::Deserialize;
 
 use crate::project::canonical_project_identity;
 
-/// The recovery-journal magic: every journal opens with it, and the lock
-/// takeover check reads the owning project from the header line behind it
-/// (F5). Shared with the app's writer/inspector so the two never drift.
+/// The recovery-journal magic, shared with the app's writer/inspector.
 pub const JOURNAL_MAGIC: &[u8] = b"KINEWRIGHT-JOURNAL 1\n";
 
 pub fn default_recovery_directory() -> PathBuf {
@@ -42,9 +40,7 @@ pub fn fnv1a_64(bytes: &[u8]) -> u64 {
 }
 
 /// `MyVideo-1a2b3c4d5e6f7081.journal` - readable stem, collision-proof hash.
-///
-/// Both halves derive from the canonical project identity (F4), so every
-/// spelling of one file allocates, finds, and retires the same journal.
+/// Both halves derive from the canonical identity (F4): one file, one name.
 #[must_use]
 pub fn journal_file_name(project_path: &Path) -> String {
     let identity = crate::project::canonical_project_identity(project_path);
@@ -133,8 +129,7 @@ pub fn restore_status(result: Result<(), String>) -> Result<String, Box<Incident
     }
 }
 
-/// Whether a journal file name belongs to the identity's base name: the
-/// base itself or any `allocate_journal_path` `-N` suffix for it.
+/// Whether a name is the identity's base or a `-N` suffix.
 fn journal_name_matches_for(identity_base: &str, file_name: &str) -> bool {
     if file_name == identity_base {
         return true;
@@ -149,19 +144,15 @@ fn journal_name_matches_for(identity_base: &str, file_name: &str) -> bool {
         })
 }
 
-/// The one header field the takeover check reads: the owning project's
-/// path. Every other header field is the app's business.
+/// The takeover check reads one header field: the owning project.
 #[derive(Deserialize)]
 struct JournalIdentityHeader {
     #[serde(default)]
     project_path: Option<PathBuf>,
 }
 
-/// Whether a journal's header names the identity's project (F5): the
-/// alias arm — a journal named by another spelling still blocks. A
-/// missing or torn header never matches by content (the filename arm
-/// covers our own names whatever their bytes); a vanished file reads as
-/// gone, any other read error propagates (fail-closed).
+/// Whether a journal's header names the project (F5's alias arm). Torn
+/// headers never match (fail-closed); vanished reads as gone.
 fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Error> {
     let bytes = match fs::read(journal) {
         Ok(bytes) => bytes,
@@ -188,14 +179,10 @@ fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Err
     Ok(canonical_project_identity(&project) == identity)
 }
 
-/// The pending journal for a project: the takeover check (AW1 §5/S7, F5).
-///
-/// Covers the identity's base journal, every `allocate_journal_path`
-/// `-N` suffix for it, and any alias-named journal whose header names
-/// the project — the first match in name order wins. A missing recovery
-/// dir holds nothing; any other lookup IO error fails closed.
+/// Pending journal (AW1 §5/S7, F5): base, `-N` suffixes, header-matched
+/// aliases — first in name order. Missing dir means none pending.
 /// # Errors
-/// Returns the lookup IO error.
+/// Returns the lookup IO error (fail-closed).
 pub fn pending_journal_for_project(
     recovery_dir: &Path,
     project_path: &Path,
@@ -224,15 +211,11 @@ pub fn pending_journal_for_project(
             pending.push(journal);
         }
     }
-    pending.sort();
-    Ok(pending.into_iter().next())
+    Ok(pending.into_iter().min())
 }
 
-/// Retire a project's base journal: the checkpoint half of a restore.
-///
-/// The caller must own the journal (F5) — only retire recovery data your
-/// session replayed and superseded. Headless owns none, so it never calls
-/// this; an unreplayed pending journal always survives a headless save.
+/// Retire a base journal you own (F5): only data your session replayed
+/// and superseded. Headless never calls this.
 /// # Errors
 /// Any removal IO error other than absence.
 pub fn retire_journal_for_project(recovery_dir: &Path, project_path: &Path) -> io::Result<bool> {
