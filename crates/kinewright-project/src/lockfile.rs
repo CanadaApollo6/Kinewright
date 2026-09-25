@@ -2,9 +2,10 @@
 //! The claim (pid/host/endpoint, no secret) publishes atomically while
 //! holding the lock and reads at any time — even on Windows, where
 //! `LockFileEx` denies second-handle reads of the locked file (B4).
-//! Release removes the discovery first; stale discovery reclaims unless
-//! foreign (F7 — host-local liveness; no multi-host exclusion). Flock
-//! failure reads as *held* (fail-closed).
+//! Release removes the discovery first, then unlocks explicitly — never
+//! a last-close race against a forked duplicate (F3). Stale discovery
+//! reclaims unless foreign (F7 — host-local liveness; no multi-host
+//! exclusion). Flock failure reads as *held* (fail-closed).
 
 use std::{
     fs::{self, File},
@@ -193,20 +194,30 @@ impl LockfileHandle {
         }
     }
 
-    /// Release: remove the discovery while holding the flock, then close.
+    /// Release: remove the discovery while holding the flock, then drop —
+    /// the drop unlocks explicitly, so the release lands even when a
+    /// forked child still holds a duplicate of the open description.
     /// # Errors
     /// Returns the removal IO error, if any.
     pub fn release(self) -> io::Result<()> {
-        let Self {
-            discovery, file, ..
-        } = self;
-        let removed = fs::remove_file(&discovery);
-        drop(file);
+        let removed = fs::remove_file(&self.discovery);
+        drop(self);
         match removed {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
         }
+    }
+}
+
+impl Drop for LockfileHandle {
+    /// Explicit unlock before close: a bare close releases the flock only
+    /// at the last close of the open description, so a forked child that
+    /// inherited the fd (a spawned claimant, an ffmpeg helper) would hold
+    /// the release hostage until its exec. `LOCK_UN` releases regardless
+    /// of duplicates — the release is deterministic.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }
 
@@ -239,6 +250,13 @@ fn read_owner(discovery_path: &Path) -> Option<ReclaimedOwner> {
         hostname: claim.hostname,
         endpoint: claim.endpoint,
     })
+}
+
+/// Release an acquire attempt's flock before its close: explicit
+/// unlock, then the caller drops. A bare close releases only at the
+/// last close of the open description — see [`LockfileHandle`]'s [`Drop`].
+fn unlock_attempt(file: &File) {
+    let _ = file.unlock();
 }
 
 /// Publish a claim atomically. Call only while holding the lock — the
@@ -365,12 +383,12 @@ pub fn acquire_project_lock_with_policy(
         // Holding the flock: pending recovery (or lookup failure) refuses first.
         match pending_journal_for_project(recovery_dir, project_path) {
             Ok(Some(journal)) => {
-                drop(file);
+                unlock_attempt(&file);
                 return Err(LockfileError::PendingRecovery { journal });
             }
             Ok(None) => {}
             Err(error) => {
-                drop(file);
+                unlock_attempt(&file);
                 return Err(LockfileError::RecoveryLookup {
                     reason: error.to_string(),
                 });
@@ -393,7 +411,7 @@ pub fn acquire_project_lock_with_policy(
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_flock_before_publish");
         if let Err(error) = write_discovery(&discovery_path, &claim) {
-            drop(file);
+            unlock_attempt(&file);
             return Err(LockfileError::Io(error.to_string()));
         }
         return Ok(AcquiredLock {
@@ -781,6 +799,42 @@ mod tests {
             assert!(Instant::now() < until, "waiting for {}", path.display());
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// F3: release is an explicit unlock, never a last-close race — a
+    /// forked child inherits the open description (spawned claimants do),
+    /// and the clone models that duplicate without the fork's timing.
+    #[test]
+    fn f3_release_unlocks_past_a_forked_duplicate() {
+        let dir = TempDirectory::new("aw1-f3-dup");
+        let project = dir.path("edit.kinewright");
+        fs::write(&project, b"{}").expect("the project writes");
+        let recovery = recovery_dir(&dir);
+        let first = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Headless,
+            "http://127.0.0.1:9/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect("the first acquire lands");
+        let inherited = first
+            .handle
+            .file
+            .try_clone()
+            .expect("the description duplicates");
+        drop(first);
+        acquire_project_lock_with_policy(
+            &project,
+            LockMode::Headless,
+            "http://127.0.0.1:10/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect("the release frees the lock past a duplicate");
+        drop(inherited);
     }
 
     /// F3/L1 port: a contender that loses the flock must leave the live
