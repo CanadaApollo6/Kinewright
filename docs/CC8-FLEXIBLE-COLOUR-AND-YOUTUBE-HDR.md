@@ -18,7 +18,7 @@ start.**
 
 Accepted: port critic except N2 overrides; design critic in full (N4 binds);
 verification table + Edits 1–8 as written (N6 binds). SDR insertion default
-appearance-preserving, scene-matching explicit (provisional YES pending Riel).
+appearance-preserving, scene-matching explicit (confirmed by Riel 2026-09-25).
 
 - N2.1 **YouTube** target; N2.2 SDR/stills/titles placeable at ref white (§4,
   R9, R36); N2.3 flexible pipeline now, genuinely scene-referred (§2, B1);
