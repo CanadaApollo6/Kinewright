@@ -2013,7 +2013,7 @@ fn pb3_display_absolute() {
     // One pair errs 10.45 nits, three pairs 11.01: both pass CE5's 14.008
     // and FAIL the old 0.1% (7.004).
     for pairs in [1, 3] {
-        let got = matrix_delivery_chain(7004.0, 100.0, pairs);
+        let got = matrix_chain_display([0.0, 7004.0, 0.0], 100.0, 7004.0, pairs);
         let err = (f64::from(got[1]) - 7004.0).abs();
         assert!(
             err <= pb3_peak_tol(7004.0),
@@ -2063,18 +2063,6 @@ fn pb3_sub1_tol() -> f64 {
     0.05
 }
 
-/// CE6: the PB3 bound for a triplet-max channel: sub-1 → 0.05 nits,
-/// white ±10% → 1.0 nit, else the CE5 peak bound. Shared predicate (G4).
-fn pb3_bound_for_max(max_ch: f64, white: f64, peak: f64) -> f64 {
-    if max_ch < 1.0 {
-        pb3_sub1_tol()
-    } else if (max_ch - white).abs() <= 0.1 * white {
-        pb3_white_tol()
-    } else {
-        pb3_peak_tol(peak)
-    }
-}
-
 /// CE4 triplet ULP bound: `n` ULP of the max |channel|. Shared (G4).
 fn ce4_ulp_tol(max_ch: f64, n: f64) -> f64 {
     n * f16_ulp_of(max_ch)
@@ -2090,14 +2078,16 @@ fn pb4_code_tol() -> f64 {
     2.0
 }
 
-/// PB4 10-bit mean-code bound. Shared predicate (G4).
+/// PB4 10-bit mean-code bound over all channels: design value 0.5 (CE7;
+/// R2's measured 0.08 no longer holds once minors count). Shared (G4).
 fn pb4_mean_tol() -> f64 {
-    0.08
+    0.5
 }
 
-/// PB4 8-bit major-code bound. Shared predicate (G4).
+/// PB4 8-bit code bound: design value 1 (R2's measured 0 fails 1-code
+/// composed channels under CE7). Shared predicate (G4).
 fn pb4_8bit_tol() -> f64 {
-    0.0
+    1.0
 }
 
 #[test]
@@ -2119,39 +2109,6 @@ fn bound_predicates_reject_just_outside() {
     assert_close("sub1 pin", pb3_sub1_tol(), 0.05, 1e-12);
     assert!(0.0499 <= pb3_sub1_tol());
     assert!(0.0501 > pb3_sub1_tol());
-    // Max-channel dispatch: sub-1 / white-band / peak branches.
-    assert_eq!(
-        pb3_bound_for_max(0.5, 100.0, 400.0).to_bits(),
-        pb3_sub1_tol().to_bits()
-    );
-    assert_eq!(
-        pb3_bound_for_max(0.999, 100.0, 400.0).to_bits(),
-        pb3_sub1_tol().to_bits()
-    );
-    assert_eq!(
-        pb3_bound_for_max(1.001, 100.0, 400.0).to_bits(),
-        pb3_peak_tol(400.0).to_bits()
-    );
-    assert_eq!(
-        pb3_bound_for_max(90.1, 100.0, 400.0).to_bits(),
-        pb3_white_tol().to_bits()
-    );
-    assert_eq!(
-        pb3_bound_for_max(89.9, 100.0, 400.0).to_bits(),
-        pb3_peak_tol(400.0).to_bits()
-    );
-    assert_eq!(
-        pb3_bound_for_max(109.9, 100.0, 400.0).to_bits(),
-        pb3_white_tol().to_bits()
-    );
-    assert_eq!(
-        pb3_bound_for_max(110.1, 100.0, 400.0).to_bits(),
-        pb3_peak_tol(400.0).to_bits()
-    );
-    assert_eq!(
-        pb3_bound_for_max(400.0, 203.0, 400.0).to_bits(),
-        pb3_peak_tol(400.0).to_bits()
-    );
     // CE4 ULP(max): exact 2^-9 at (1.0, n=2); asymmetric RGB pins max.
     assert_eq!(ce4_ulp_tol(1.0, 2.0).to_bits(), 2f64.powi(-9).to_bits());
     assert!(1.999 * 2f64.powi(-10) <= ce4_ulp_tol(1.0, 2.0));
@@ -2170,30 +2127,43 @@ fn bound_predicates_reject_just_outside() {
     let b04 = 0.003_001; // magnitude 1.0: relative rejects…
     assert!(!ce4_rel_ok(b04, 1.0));
     assert!(b04 <= ce4_ulp_tol(1.0, 4.0)); // …while ULP accepts.
-    // PB4 codes + minor classification.
+    // PB4 codes.
     assert_eq!(pb4_code_tol().to_bits(), 2.0f64.to_bits());
     assert!(2.0 <= pb4_code_tol());
     assert!(3.0 > pb4_code_tol());
-    assert_close("mean pin", pb4_mean_tol(), 0.08, 1e-12);
-    assert!(0.079 <= pb4_mean_tol());
-    assert!(0.081 > pb4_mean_tol());
-    assert_eq!(pb4_8bit_tol().to_bits(), 0.0f64.to_bits());
-    assert!(0.0 <= pb4_8bit_tol());
-    assert!(1.0 > pb4_8bit_tol());
-    assert!(is_minor_channel(3.999, 400.0));
-    assert!(!is_minor_channel(4.001, 400.0));
-    assert!(!is_minor_channel(4.0, 400.0)); // strict <: the edge is major.
+    assert_eq!(pb4_mean_tol().to_bits(), 0.5f64.to_bits());
+    assert!(0.499 <= pb4_mean_tol());
+    assert!(0.501 > pb4_mean_tol());
+    assert_eq!(pb4_8bit_tol().to_bits(), 1.0f64.to_bits());
+    assert!(1.0 <= pb4_8bit_tol());
+    assert!(2.0 > pb4_8bit_tol());
+    // CE7 display prong: 0.2% of the triplet max (0.8 nits at 400), `≤`
+    // inclusive, magnitude of the max, never of the channel itself.
+    assert!(ce7_display_ok(0.799_6, 400.0));
+    assert!(ce7_display_ok(0.8, 400.0)); // inclusive edge.
+    assert!(!ce7_display_ok(0.800_4, 400.0));
+    assert!(ce7_display_ok(0.799_6, -400.0));
+    // Relative to the max (400), not the channel (16): same error, two verdicts.
+    assert!(ce7_display_ok(0.08, 400.0));
+    assert!(!ce7_display_ok(0.08, 16.0));
+    // CE7 channel acceptance: codes OR display, both prongs bite.
+    assert!(pb4_10bit_channel_ok(2.0, 1e9, 400.0)); // codes alone.
+    assert!(pb4_10bit_channel_ok(4.0, 0.799_6, 400.0)); // display alone.
+    assert!(!pb4_10bit_channel_ok(3.0, 0.800_4, 400.0)); // neither.
+    assert!(pb4_8bit_channel_ok(1.0, 1e9, 100.0));
+    assert!(pb4_8bit_channel_ok(2.0, 0.199_9, 100.0));
+    assert!(!pb4_8bit_channel_ok(2.0, 0.200_1, 100.0));
 }
 
-/// R1's composed matrix/storage delivery leg: saturated-green display →
-/// f64 scene → f32 working → `pairs` × (2020→709→f16→2020→f16) → render.
-fn matrix_delivery_chain(peak: f32, white: f32, pairs: usize) -> [f32; 3] {
-    let g = hlg_gamma(peak).unwrap();
-    let sw = s_white(white, peak, g).unwrap();
-    let p64 = f64::from(peak);
-    let g64 = reference::hlg_gamma(p64).unwrap();
-    let sw64 = reference::s_white(f64::from(white), p64, g64).unwrap();
-    let s = reference::display_to_scene([0.0, p64, 0.0], p64, g64).unwrap();
+/// Composed matrix/storage delivery leg (R1's shape, generalized anchor):
+/// display → f64 scene → f32 working → `pairs` × (2020→709→f16→2020→f16)
+/// → render. Every matrix output crosses an f16 store.
+fn matrix_chain_display(d: [f64; 3], white: f64, peak: f64, pairs: usize) -> [f32; 3] {
+    let g = hlg_gamma(as_f32(peak)).unwrap();
+    let sw = s_white(as_f32(white), as_f32(peak), g).unwrap();
+    let g64 = reference::hlg_gamma(peak).unwrap();
+    let sw64 = reference::s_white(white, peak, g64).unwrap();
+    let s = reference::display_to_scene(d, peak, g64).unwrap();
     let mut w = [
         as_f32(s[0] / sw64),
         as_f32(s[1] / sw64),
@@ -2203,7 +2173,7 @@ fn matrix_delivery_chain(peak: f32, white: f32, pairs: usize) -> [f32; 3] {
         w = apply_matrix(BT2020_TO_BT709, w).unwrap().map(f16_store);
         w = apply_matrix(BT709_TO_BT2020, w).unwrap().map(f16_store);
     }
-    scene_to_display([w[0] * sw, w[1] * sw, w[2] * sw], peak, g).unwrap()
+    scene_to_display([w[0] * sw, w[1] * sw, w[2] * sw], as_f32(peak), g).unwrap()
 }
 
 /// PB4 working chain: anchor display → f64 scene → f32 working → three
@@ -2230,25 +2200,42 @@ fn pb4_chain_display(d: [f64; 3], white: f64, peak: f64) -> [f32; 3] {
     scene_to_display([w[0] * sw, w[1] * sw, w[2] * sw], as_f32(peak), g).unwrap()
 }
 
-/// CE6 minor classification: reference channel under 1% of its triplet max.
-fn is_minor_channel(ch: f64, max_ch: f64) -> bool {
-    ch.abs() < 0.01 * max_ch.abs()
+/// CE7 display prong: display error within 0.2% of the triplet's
+/// max-channel reference display value (CE5's composed budget, relative to
+/// the channel that sets the storage quantum). Replaces CE6's 1% minor
+/// cutoff. Shared predicate (G4).
+fn ce7_display_ok(disp_err: f64, max_ch: f64) -> bool {
+    disp_err <= 0.002 * max_ch.abs()
 }
 
-/// PB4 code accumulators over major channels (minors go to nits, CE6).
+/// CE7 10-bit PB4 channel acceptance: ≤ 2 codes, or the display prong.
+fn pb4_10bit_channel_ok(codes: f64, disp_err: f64, max_ch: f64) -> bool {
+    codes <= pb4_code_tol() || ce7_display_ok(disp_err, max_ch)
+}
+
+/// CE7 8-bit SDR PB4 channel acceptance: 8-bit code bound, or the display
+/// prong (SDR nits vs the SDR triplet max).
+fn pb4_8bit_channel_ok(codes: f64, disp_err: f64, max_ch: f64) -> bool {
+    codes <= pb4_8bit_tol() || ce7_display_ok(disp_err, max_ch)
+}
+
+/// PB4 code accumulators over every channel (CE7: the mean covers all).
+/// `max10`/`max8` are raw code errors; `by_display10`/`by_display8` count
+/// channels that pass only through the CE7 display prong.
+#[derive(Default)]
 struct Pb4Acc {
     max10: f64,
     sum10: f64,
     n10: u32,
     max8: f64,
+    by_display10: u32,
+    by_display8: u32,
 }
 
-/// PB4 per-anchor gate: HLG + SDR delivery of the chain display against the
-/// direct f64 reference; minors in nits vs the max channel's PB3 bound,
-/// majors in codes (test-only quantizers; S4 owns delivery packing).
-fn pb4_gate(acc: &mut Pb4Acc, display: [f32; 3], d: [f64; 3], white: f64, peak: f64) {
+/// PB4 HLG 10-bit leg: chain display vs the direct f64 reference, CE7 per
+/// channel (test-only quantizer; S4 owns delivery packing).
+fn pb4_hlg_gate(acc: &mut Pb4Acc, display: [f32; 3], d: [f64; 3], white: f64, peak: f64) {
     let code10 = |s: f64| (876.0 * s + 64.0).round();
-    let code8 = |x: f64| (219.0 * (x.max(0.0) / 100.0).powf(1.0 / 2.4) + 16.0).round();
     let g = hlg_gamma(as_f32(peak)).unwrap();
     let g64 = reference::hlg_gamma(peak).unwrap();
     let m = max_abs_3(d);
@@ -2256,19 +2243,25 @@ fn pb4_gate(acc: &mut Pb4Acc, display: [f32; 3], d: [f64; 3], white: f64, peak: 
     let got = hlg_output(display, as_f32(peak), g).unwrap().signal;
     let exp = reference::hlg_output(d, peak, g64).unwrap().signal;
     for i in 0..3 {
-        if is_minor_channel(d[i], m) {
-            let err = (disp[i] - d[i]).abs();
-            assert!(
-                err <= pb3_bound_for_max(m, white, peak),
-                "PB4 minor[{i}] W={white} P={peak}: err={err}"
-            );
-        } else {
-            let delta = (code10(f64::from(got[i])) - code10(exp[i])).abs();
-            acc.max10 = acc.max10.max(delta);
-            acc.sum10 += delta;
-            acc.n10 += 1;
+        let delta = (code10(f64::from(got[i])) - code10(exp[i])).abs();
+        let derr = (disp[i] - d[i]).abs();
+        assert!(
+            pb4_10bit_channel_ok(delta, derr, m),
+            "PB4[{i}] d={d:?} W={white} P={peak}: codes={delta} disp={derr}"
+        );
+        if delta > pb4_code_tol() {
+            acc.by_display10 += 1;
         }
+        acc.max10 = acc.max10.max(delta);
+        acc.sum10 += delta;
+        acc.n10 += 1;
     }
+}
+
+/// PB4 SDR leg per channel: (8-bit code error, SDR nit error, SDR triplet
+/// max) of EETF→100 → 709 → SDR compress, chain display vs f64 reference.
+fn pb4_sdr_leg(display: [f32; 3], d: [f64; 3], peak: f64) -> [(f64, f64, f64); 3] {
+    let code8 = |x: f64| (219.0 * (x.max(0.0) / 100.0).powf(1.0 / 2.4) + 16.0).round();
     let tone = display.map(|x| eetf_to_target(x, as_f32(peak), 100.0).unwrap().value);
     let rec709 = apply_matrix(BT2020_TO_BT709, tone).unwrap();
     let sdr = gamut_compress(rec709, CompressDest::Sdr { target_peak: 100.0 })
@@ -2280,32 +2273,39 @@ fn pb4_gate(acc: &mut Pb4Acc, display: [f32; 3], d: [f64; 3], white: f64, peak: 
         .unwrap()
         .value;
     let ms = max_abs_3(sdr64);
-    for i in 0..3 {
-        if is_minor_channel(sdr64[i], ms) {
-            let err = (f64::from(sdr[i]) - sdr64[i]).abs();
-            assert!(
-                err <= pb3_bound_for_max(ms, 100.0, 100.0),
-                "PB4 SDR minor[{i}] W={white} P={peak}: err={err}"
-            );
-        } else {
-            acc.max8 = acc
-                .max8
-                .max((code8(f64::from(sdr[i])) - code8(sdr64[i])).abs());
+    [0, 1, 2].map(|i| {
+        let delta = (code8(f64::from(sdr[i])) - code8(sdr64[i])).abs();
+        (delta, (f64::from(sdr[i]) - sdr64[i]).abs(), ms)
+    })
+}
+
+/// PB4 SDR 8-bit leg: CE7 per channel, display prong in SDR nits vs the
+/// SDR triplet max.
+fn pb4_sdr_gate(acc: &mut Pb4Acc, display: [f32; 3], d: [f64; 3], white: f64, peak: f64) {
+    for (i, (delta, derr, ms)) in pb4_sdr_leg(display, d, peak).into_iter().enumerate() {
+        assert!(
+            pb4_8bit_channel_ok(delta, derr, ms),
+            "PB4 SDR[{i}] d={d:?} W={white} P={peak}: codes={delta} disp={derr}"
+        );
+        if delta > pb4_8bit_tol() {
+            acc.by_display8 += 1;
         }
+        acc.max8 = acc.max8.max(delta);
     }
+}
+
+/// PB4 per-anchor gate: HLG 10-bit + SDR 8-bit legs, CE7 per channel.
+fn pb4_gate(acc: &mut Pb4Acc, display: [f32; 3], d: [f64; 3], white: f64, peak: f64) {
+    pb4_hlg_gate(acc, display, d, white, peak);
+    pb4_sdr_gate(acc, display, d, white, peak);
 }
 
 #[test]
 fn pb4_final_codes() {
     // Delivery chains through f16 working stores vs direct f64 delivery.
-    // CE6: minors in nits, majors in codes (10-bit max 2 / mean ≤ 0.08,
-    // 8-bit max 0 — R2's measured bounds).
-    let mut acc = Pb4Acc {
-        max10: 0.0,
-        sum10: 0.0,
-        n10: 0,
-        max8: 0.0,
-    };
+    // CE7 per channel (inside the gate); the working-chain anchors also
+    // pass codes outright (10-bit ≤ 2, 8-bit ≤ 1 codes).
+    let mut acc = Pb4Acc::default();
     for white in [100.0, 203.0, 400.0] {
         for peak in [400.0, 1000.0, 2000.0, 2001.0, 4000.0, 10_000.0] {
             let g64 = reference::hlg_gamma(peak).unwrap();
@@ -2327,19 +2327,29 @@ fn pb4_final_codes() {
             }
         }
     }
-    // R1 B1 / CE6: composed matrix pair at W=203/P=400, saturated green
-    // (display [-0.084, 399.747, -0.025]; minors in nits, green in codes).
+    assert!(acc.max10 <= pb4_code_tol(), "PB4 10-bit max: {}", acc.max10);
+    assert!(acc.max8 <= pb4_8bit_tol(), "PB4 8-bit max: {}", acc.max8);
+    assert_eq!(acc.by_display10 + acc.by_display8, 0, "no display prong");
+    // R1 B1: composed matrix pair at W=203/P=400, saturated green (display
+    // [-0.084, 399.747, -0.025]): the zero channels miss by codes and pass
+    // only through the CE7 display prong.
     pb4_gate(
         &mut acc,
-        matrix_delivery_chain(400.0, 203.0, 1),
+        matrix_chain_display([0.0, 400.0, 0.0], 203.0, 400.0, 1),
         [0.0, 400.0, 0.0],
         203.0,
         400.0,
     );
-    assert!(acc.max10 <= pb4_code_tol(), "PB4 10-bit max: {}", acc.max10);
+    assert!(
+        acc.by_display10 > 0,
+        "R1 B1 zero channels must miss by codes"
+    );
     let mean10 = acc.sum10 / f64::from(acc.n10);
+    println!(
+        "PB4 anchors: n10={} mean10={mean10} by_display10={}",
+        acc.n10, acc.by_display10
+    );
     assert!(mean10 <= pb4_mean_tol(), "PB4 10-bit mean: {mean10}");
-    assert!(acc.max8 <= pb4_8bit_tol(), "PB4 8-bit max: {}", acc.max8);
     // HLG codes per working-ULP at white: oracle 0.1680400672866091.
     let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
     let c_up = reference::hlg_oetf((1.0 + ulp_w1()) * sw).unwrap();
@@ -2360,6 +2370,92 @@ fn pb4_final_codes() {
         - reference::hlg_oetf(sw).unwrap())
         * 876.0;
     assert_close("codes/ULP fwd", fwd, 0.167_950_006_847_549_02, 1e-9);
+}
+
+#[test]
+fn closing_pb4_major_after_matrix_storage() {
+    // Verify B1 (ported): P=400/W=203, reference [16, 400, 16], one
+    // 2020→709→f16→2020→f16 pair. Every channel is ≥ 4% of the max (major
+    // under CE6's 1% cutoff), yet red/blue inherit green's storage quantum
+    // and miss by 4 codes ([448,940,449] vs [452,940,452]). CE7 passes them
+    // by display error (≈0.035 nits ≤ 0.2% × 400 = 0.8).
+    let d = [16.0, 400.0, 16.0];
+    let mut acc = Pb4Acc::default();
+    let display = matrix_chain_display(d, 203.0, 400.0, 1);
+    pb4_gate(&mut acc, display, d, 203.0, 400.0);
+    println!(
+        "display={display:?} max10={} by_display10={}",
+        acc.max10, acc.by_display10
+    );
+    // Erratum visibility: the pure 2-code rule (CE6's major reading) fails.
+    assert!(
+        acc.max10 > pb4_code_tol(),
+        "[16,400,16] must fail the pure 2-code rule: {}",
+        acc.max10
+    );
+    assert!(acc.by_display10 >= 2, "red and blue pass only by display");
+    assert!(
+        d.iter().all(|&ch| ch >= 0.01 * 400.0),
+        "all major under CE6"
+    );
+}
+
+#[test]
+fn pb4_composed_coloured_anchor_scan() {
+    // CE7 closing scan: coloured anchors around and above CE6's old 1%
+    // cutoff through the composed matrix/storage leg. One channel at P,
+    // the other two at f·P; P × W × pairs × f × position = 324 anchors.
+    // HLG 10-bit: every channel passes CE7; mean over all channels.
+    // SDR 8-bit: every channel passes CE7 except the green-major 0.5% cell
+    // at P=4000 (OPEN, lead ruling): its red minor's HDR display error
+    // (up to ≈1.8 nits, inside CE7's 8) survives the EETF toe almost
+    // unscaled and is amplified by 709 + SDR compression while the SDR max
+    // drops to 100, so SDR-relative 0.2% (0.2 nits) cannot absorb it (all
+    // 6 W × pairs anchors fail on Linux: 4–39 codes). Witness pinned below.
+    let mut acc = Pb4Acc::default();
+    let (mut n, mut sdr_open) = (0u32, 0u32);
+    for (pi, peak) in [400.0, 1000.0, 4000.0].into_iter().enumerate() {
+        for white in [100.0, 203.0, 400.0] {
+            for pairs in [1, 3] {
+                for (fi, f) in [0.005, 0.01, 0.02, 0.04, 0.1, 0.25].into_iter().enumerate() {
+                    for i in 0..3 {
+                        let mut d = [f * peak; 3];
+                        d[i] = peak;
+                        let display = matrix_chain_display(d, white, peak, pairs);
+                        pb4_hlg_gate(&mut acc, display, d, white, peak);
+                        if (pi, fi, i) == (2, 0, 1) {
+                            sdr_open += 1;
+                        } else {
+                            pb4_sdr_gate(&mut acc, display, d, white, peak);
+                        }
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    let mean10 = acc.sum10 / f64::from(acc.n10);
+    println!(
+        "CE7 scan: anchors={n} ch={} max10={} mean10={mean10} by_display10={} \
+         max8={} by_display8={} sdr_open={sdr_open}",
+        acc.n10, acc.max10, acc.by_display10, acc.max8, acc.by_display8
+    );
+    assert_eq!((n, sdr_open), (324, 6));
+    assert!(mean10 <= pb4_mean_tol(), "CE7 scan 10-bit mean: {mean10}");
+    // Erratum visibility: the scan has 10-bit code misses CE7 must absorb.
+    assert!(acc.max10 > pb4_code_tol(), "scan must exercise the prong");
+    assert!(acc.by_display10 > 0);
+    // OPEN SDR witness: [20, 4000, 20], W=203, three pairs. HLG passes
+    // CE7; the SDR red channel fails it (Linux: 39 codes, 1.60 nits).
+    let d = [20.0, 4000.0, 20.0];
+    let display = matrix_chain_display(d, 203.0, 4000.0, 3);
+    pb4_hlg_gate(&mut acc, display, d, 203.0, 4000.0);
+    let (codes, derr, ms) = pb4_sdr_leg(display, d, 4000.0)[0];
+    println!("SDR witness red: codes={codes} disp={derr} sdr_max={ms}");
+    assert!(
+        !pb4_8bit_channel_ok(codes, derr, ms),
+        "SDR witness must fail CE7: codes={codes} disp={derr}"
+    );
 }
 
 fn ulp_w1() -> f64 {
