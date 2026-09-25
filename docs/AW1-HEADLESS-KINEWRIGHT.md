@@ -58,6 +58,60 @@ and every rule owns at least one test.
   `compatibility.platforms`), §4 (`kinewright-eval` uses test-gated
   `test_engine` — production uses `FfmpegMediaEngine`).
 
+## 0.1 Implementation errata (S1 fix round)
+
+Review-1 (B1–B7, S1–S2, N1) and review-2 (L1–L4) findings against S1,
+ruled by the lead (F1–F8) and implemented on `aw1/impl`. Items AF1–AF7
+amend the sections cited; S2-D1 is a named deferral, not a change.
+
+- AF1 → §5: the single lockfile is split. `<project>.lock` is a lock
+  OBJECT (created if absent, never unlinked, contents unused); liveness
+  is the held `try_lock_exclusive` alone. The claim (pid, hostname,
+  endpoint, token_ref, mode, version, started_at, reclaimed_from) lives
+  in `<project>.lock.json`, published atomically by the owner only while
+  holding the lock and readable at any time — the old read-through-the-
+  locked-file fails on Windows (`LockFileEx` denies second-handle reads,
+  OS error 33). Release removes the discovery while holding the lock,
+  then unlocks explicitly — never a last-close race against a forked
+  duplicate. Stale discovery with a free lock reclaims with a warning.
+  Backoff kept.
+- AF2 → §5, §6: one canonical project identity — full canonical path
+  when the target exists, else canonical parent dir plus file name
+  (relative resolves at the cwd; raw path when nothing resolves). Lock,
+  discovery, claim, token_ref, and journal naming all derive from it, so
+  aliases share one lock and one journal name.
+- AF3 → §5/S7: the takeover check scans the recovery dir once — base
+  journal, every allocator `-N` suffix, and alias-named journals via the
+  header's `project_path` — after obtaining the lock, on every ownership
+  path. Lookup IO errors fail closed (`RecoveryLookup`). §2's "journal
+  retire" pipeline step is a no-op for headless: it owns no journals —
+  only a session that replayed recovery data may retire it, so an
+  unreplayed pending journal always survives a headless save.
+- AF4 → §2: headless save shares the app's H12/J2/J3 transaction
+  machinery (`SidecarRollback` in `kinewright-project`): snapshot and
+  restore the destination sidecar and both generation baselines on
+  project-write failure, including unreadable-sidecar preservation.
+- AF5 → §5: claims carry the real OS hostname (new tiny `gethostname`
+  dependency — std has none and the crate forbids `unsafe`; already in
+  the lockfile). A stale claim from a KNOWN foreign host refuses
+  takeover (`ForeignHost` naming the host); `unknown`-host claims
+  predate real hostnames and still reclaim. Limit: flock liveness is
+  host-local, so on local-lock network filesystems a free lock proves
+  nothing about a foreign owner — AW1 claims no multi-host exclusion.
+- AF6 → §2 (S1-delta refinement, GUARD-B): the session tracks an
+  established baseline per stem — a load, a successful flush, or
+  adopting the saved path establishes that stem. The empty-flush guard
+  applies only to stems this session never loaded or wrote, so a changed
+  project save to an established stem always pairs its sidecar.
+- AF7 → §15: S1's 800-line production ceiling is extended by +400 for
+  this fix round (measured: S1 771 + fixes 406 = 1177 of 1200; method:
+  `scripts/aw1-line-ledger.sh`, committed in this round).
+- S2-D1 (deferred, not fixed): an unloaded session's NON-EMPTY flush
+  still replaces an occupied stem — pre-existing IN2B §2 rule-7
+  behaviour, kept deliberately. A changed project save pairs (AF6); a
+  first touch of a foreign stem still overwrites it when the log is
+  non-empty.
+
 ## 1. Goal and non-goals
 
 A `kinewright` CLI plus a `kinewright mcp` stdio mode serving the same
