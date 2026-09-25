@@ -734,9 +734,11 @@ codes; W=100 puts the 10 000-nit input at working 46.4159.
   absolute ≤ 4 ULP(w) (RGB triplets: relative ‖err‖∞/‖w‖∞ and ULP of the
   triplet's max |channel|, erratum CE4).
 - **PB3 display absolute** (post-render): white ±10% ≤ 1.0 nit; peak ≤
-  max(2.0 nits, 0.1% × P) (erratum CE3); below 1 nit ≤ 0.05 nits.
+  max(2.0 nits, 0.2% × P) (errata CE3, CE5); below 1 nit ≤ 0.05 nits.
 - **PB4 final code**: 10-bit delivery anchors (black/18%/white/peak/saturated)
-  ≤ 2 codes max, ≤ 0.5 mean; 8-bit SDR anchors ≤ 1 code.
+  ≤ 2 codes max, ≤ 0.5 mean; 8-bit SDR anchors ≤ 1 code. Minor channels of a
+  triplet (reference display value < 1% of its max channel) are held to the
+  max channel's PB3 display bound in nits instead of codes (erratum CE6).
 - **S1 precision errata (2026-09-25, lead ruling after the S1 reviews).**
   CE3: the 2.0-nit peak bound was derived at P = 1000; one f16 store of the
   W=100/P=10 000 working peak (≈14.96) alone costs 3.46 nits, so the peak bound
@@ -746,6 +748,15 @@ codes; W=100 puts the 10 000-nit input at working 46.4159.
   but < 0.01 ULP of 1.0), so triplet ULP/relative limits use the max |channel|.
   f32 intermediates were rejected (memory). CE1 accepted: the HLG compressor
   resolves Y into [0, P]. CE2 withdrawn: EETF identity/clip decide in nits.
+  CE5 (S1 re-review): a composed 2020→709→f16→2020 stage pair errs up to
+  0.157% of P at the peak (P = 7004: 11.0 nits), past CE3's one-store 0.1%;
+  the peak bound is 0.2% × P (≈ 27% margin), still under one 10-bit PQ code.
+  CE6: HLG's √(3E) toe maps a minor channel's display error — which inherits the
+  max channel's storage quantum (CE4) — to unbounded codes (2020 green at
+  400 nits: 0.084 nits = 8 codes). Minor channels (< 1% of the triplet max) are
+  bounded in nits by the max channel's PB3 limit; masked beside it.
+  Kernel parameter domain (S1): γ ∈ [1, 3]; P, W, Cs, Ct ∈ [1, 100 000] nits;
+  outside it the kernel refuses `OutOfDomain`.
 - Non-finite/overflow in working values: typed render refusal with asset/frame
   identity (fail closed — never a quiet clamp).
 
