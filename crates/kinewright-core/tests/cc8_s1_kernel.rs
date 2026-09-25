@@ -1824,7 +1824,7 @@ fn pb1_storage_boundary() {
         let t = apply_matrix(BT2020_TO_BT709, v32).unwrap();
         let t16 = [f16_store(t[0]), f16_store(t[1]), f16_store(t[2])];
         let b = apply_matrix(BT709_TO_BT2020, t16).unwrap();
-        let tol = 2.0 * f16_ulp_of(max_abs_3(v));
+        let tol = ce4_ulp_tol(max_abs_3(v), 2.0);
         for (i, (bb, e)) in b.iter().zip(v.iter()).enumerate() {
             assert_close(&format!("PB1b matrix {v:?}[{i}]"), f64::from(*bb), *e, tol);
         }
@@ -1882,13 +1882,16 @@ fn pb2_working_domain_repeated_chain() {
                 f64::from(w0[2]) * grown,
             ];
             let w64 = [f64::from(w[0]), f64::from(w[1]), f64::from(w[2])];
-            let rel = (w64[0] - e[0])
+            let err_max = (w64[0] - e[0])
                 .abs()
                 .max((w64[1] - e[1]).abs())
-                .max((w64[2] - e[2]).abs())
-                / max_abs_3(e);
-            assert!(rel <= 0.003, "PB2 grade rel W={white}: {rel}");
-            let tol = 4.0 * f16_ulp_of(max_abs_3(e));
+                .max((w64[2] - e[2]).abs());
+            assert!(
+                ce4_rel_ok(err_max, max_abs_3(e)),
+                "PB2 grade rel W={white}: {}",
+                err_max / max_abs_3(e)
+            );
+            let tol = ce4_ulp_tol(max_abs_3(e), 4.0);
             for (i, (a, ee)) in w64.iter().zip(e.iter()).enumerate() {
                 assert_close(&format!("PB2 grade abs W={white}[{i}]"), *a, *ee, tol);
             }
@@ -1907,13 +1910,16 @@ fn pb2_working_domain_repeated_chain() {
             v = [f16_store(v[0]), f16_store(v[1]), f16_store(v[2])];
         }
         let v64 = [f64::from(v[0]), f64::from(v[1]), f64::from(v[2])];
-        let rel = (v64[0] - start[0])
+        let err_max = (v64[0] - start[0])
             .abs()
             .max((v64[1] - start[1]).abs())
-            .max((v64[2] - start[2]).abs())
-            / max_abs_3(start);
-        assert!(rel <= 0.003, "PB2 matrix rel {start:?}: {rel}");
-        let tol = 4.0 * f16_ulp_of(max_abs_3(start));
+            .max((v64[2] - start[2]).abs());
+        assert!(
+            ce4_rel_ok(err_max, max_abs_3(start)),
+            "PB2 matrix rel {start:?}: {}",
+            err_max / max_abs_3(start)
+        );
+        let tol = ce4_ulp_tol(max_abs_3(start), 4.0);
         for (i, (a, e)) in v64.iter().zip(start.iter()).enumerate() {
             assert_close(&format!("PB2 matrix abs {start:?}[{i}]"), *a, *e, tol);
         }
@@ -1970,11 +1976,11 @@ fn pb3_display_absolute() {
                 let err = (f64::from(back[0]) - d).abs();
                 // Index 6 is the peak anchor however the values collide.
                 let tol = if d < 1.0 {
-                    0.05
+                    pb3_sub1_tol()
                 } else if i == 6 {
-                    2.0f64.max(0.002 * peak)
+                    pb3_peak_tol(peak)
                 } else {
-                    1.0
+                    pb3_white_tol()
                 };
                 assert!(
                     err <= tol,
@@ -1991,7 +1997,7 @@ fn pb3_display_absolute() {
     let got = scene_to_display([stored * sw, stored * sw, stored * sw], 10_000.0, g).unwrap()[0];
     let err = (f64::from(got) - 10_000.0).abs();
     assert!(
-        err <= 20.0,
+        err <= pb3_peak_tol(10_000.0),
         "W=100/P=10000 must pass CE5 (20 nits): err={err}"
     );
     assert!(
@@ -2010,7 +2016,7 @@ fn pb3_display_absolute() {
         let got = matrix_delivery_chain(7004.0, 100.0, pairs);
         let err = (f64::from(got[1]) - 7004.0).abs();
         assert!(
-            err <= 2.0f64.max(0.002 * 7004.0),
+            err <= pb3_peak_tol(7004.0),
             "P=7004 pairs={pairs} must pass CE5: err={err}"
         );
         assert!(
@@ -2041,16 +2047,142 @@ fn pb3_display_absolute() {
     assert_close("nits/ULP fwd white", f1, 0.237_913_850_459_165_13, 1e-9);
 }
 
+/// CE3/CE5 peak bound in nits: `max(2.0, 0.002·P)`. Shared predicate —
+/// PB3/PB4 and the bound-controls below all call this (G4).
+fn pb3_peak_tol(peak: f64) -> f64 {
+    2.0f64.max(0.002 * peak)
+}
+
+/// PB3 white ±10% bound in nits. Shared predicate (G4).
+fn pb3_white_tol() -> f64 {
+    1.0
+}
+
+/// PB3 sub-1-nit bound in nits. Shared predicate (G4).
+fn pb3_sub1_tol() -> f64 {
+    0.05
+}
+
 /// CE6: the PB3 bound for a triplet-max channel: sub-1 → 0.05 nits,
-/// white ±10% → 1.0 nit, else the CE5 peak bound `max(2, 0.002·P)`.
+/// white ±10% → 1.0 nit, else the CE5 peak bound. Shared predicate (G4).
 fn pb3_bound_for_max(max_ch: f64, white: f64, peak: f64) -> f64 {
     if max_ch < 1.0 {
-        0.05
+        pb3_sub1_tol()
     } else if (max_ch - white).abs() <= 0.1 * white {
-        1.0
+        pb3_white_tol()
     } else {
-        2.0f64.max(0.002 * peak)
+        pb3_peak_tol(peak)
     }
+}
+
+/// CE4 triplet ULP bound: `n` ULP of the max |channel|. Shared (G4).
+fn ce4_ulp_tol(max_ch: f64, n: f64) -> f64 {
+    n * f16_ulp_of(max_ch)
+}
+
+/// CE4 relative bound: ‖err‖∞/‖w‖∞ ≤ 0.003. Shared predicate (G4).
+fn ce4_rel_ok(err_max: f64, wmax: f64) -> bool {
+    err_max / wmax <= 0.003
+}
+
+/// PB4 10-bit major-code bound. Shared predicate (G4).
+fn pb4_code_tol() -> f64 {
+    2.0
+}
+
+/// PB4 10-bit mean-code bound. Shared predicate (G4).
+fn pb4_mean_tol() -> f64 {
+    0.08
+}
+
+/// PB4 8-bit major-code bound. Shared predicate (G4).
+fn pb4_8bit_tol() -> f64 {
+    0.0
+}
+
+#[test]
+fn bound_predicates_reject_just_outside() {
+    // G4/R2 S3: every PB acceptance predicate is pinned at just-inside /
+    // just-outside values through the SAME helpers the PB tests call, so
+    // loosening or tightening any bound fails a test.
+    // CE3/CE5 peak: limits at P=1000/4000/10000 are 2/8/20.
+    for (peak, limit) in [(1000.0, 2.0), (4000.0, 8.0), (10_000.0, 20.0)] {
+        let tol = pb3_peak_tol(peak);
+        assert_close("peak pin", tol, limit, 1e-9);
+        assert!(limit * 0.9995 <= tol, "P={peak} just inside");
+        assert!(limit * 1.0005 > tol, "P={peak} just outside");
+    }
+    // White / sub-1.
+    assert_eq!(pb3_white_tol().to_bits(), 1.0f64.to_bits());
+    assert!(0.9995 <= pb3_white_tol());
+    assert!(1.0005 > pb3_white_tol());
+    assert_close("sub1 pin", pb3_sub1_tol(), 0.05, 1e-12);
+    assert!(0.0499 <= pb3_sub1_tol());
+    assert!(0.0501 > pb3_sub1_tol());
+    // Max-channel dispatch: sub-1 / white-band / peak branches.
+    assert_eq!(
+        pb3_bound_for_max(0.5, 100.0, 400.0).to_bits(),
+        pb3_sub1_tol().to_bits()
+    );
+    assert_eq!(
+        pb3_bound_for_max(0.999, 100.0, 400.0).to_bits(),
+        pb3_sub1_tol().to_bits()
+    );
+    assert_eq!(
+        pb3_bound_for_max(1.001, 100.0, 400.0).to_bits(),
+        pb3_peak_tol(400.0).to_bits()
+    );
+    assert_eq!(
+        pb3_bound_for_max(90.1, 100.0, 400.0).to_bits(),
+        pb3_white_tol().to_bits()
+    );
+    assert_eq!(
+        pb3_bound_for_max(89.9, 100.0, 400.0).to_bits(),
+        pb3_peak_tol(400.0).to_bits()
+    );
+    assert_eq!(
+        pb3_bound_for_max(109.9, 100.0, 400.0).to_bits(),
+        pb3_white_tol().to_bits()
+    );
+    assert_eq!(
+        pb3_bound_for_max(110.1, 100.0, 400.0).to_bits(),
+        pb3_peak_tol(400.0).to_bits()
+    );
+    assert_eq!(
+        pb3_bound_for_max(400.0, 203.0, 400.0).to_bits(),
+        pb3_peak_tol(400.0).to_bits()
+    );
+    // CE4 ULP(max): exact 2^-9 at (1.0, n=2); asymmetric RGB pins max.
+    assert_eq!(ce4_ulp_tol(1.0, 2.0).to_bits(), 2f64.powi(-9).to_bits());
+    assert!(1.999 * 2f64.powi(-10) <= ce4_ulp_tol(1.0, 2.0));
+    assert!(2.001 * 2f64.powi(-10) > ce4_ulp_tol(1.0, 2.0));
+    assert_eq!(
+        max_abs_3([1.0, 2f64.powi(-10), 0.02]).to_bits(),
+        1.0f64.to_bits()
+    );
+    assert!(1.5 * 2f64.powi(-10) <= ce4_ulp_tol(max_abs_3([1.0, 2f64.powi(-10), 0.02]), 2.0));
+    // CE4 relative + crossed decoys (R2 B03L/B04L).
+    assert!(ce4_rel_ok(0.002_999, 1.0));
+    assert!(!ce4_rel_ok(0.003_001, 1.0));
+    let b03 = 4.001 * 2f64.powi(-10); // high-in-binade 1.9: ULP rejects…
+    assert!(b03 > ce4_ulp_tol(1.9, 4.0));
+    assert!(ce4_rel_ok(b03, 1.9)); // …while relative accepts.
+    let b04 = 0.003_001; // magnitude 1.0: relative rejects…
+    assert!(!ce4_rel_ok(b04, 1.0));
+    assert!(b04 <= ce4_ulp_tol(1.0, 4.0)); // …while ULP accepts.
+    // PB4 codes + minor classification.
+    assert_eq!(pb4_code_tol().to_bits(), 2.0f64.to_bits());
+    assert!(2.0 <= pb4_code_tol());
+    assert!(3.0 > pb4_code_tol());
+    assert_close("mean pin", pb4_mean_tol(), 0.08, 1e-12);
+    assert!(0.079 <= pb4_mean_tol());
+    assert!(0.081 > pb4_mean_tol());
+    assert_eq!(pb4_8bit_tol().to_bits(), 0.0f64.to_bits());
+    assert!(0.0 <= pb4_8bit_tol());
+    assert!(1.0 > pb4_8bit_tol());
+    assert!(is_minor_channel(3.999, 400.0));
+    assert!(!is_minor_channel(4.001, 400.0));
+    assert!(!is_minor_channel(4.0, 400.0)); // strict <: the edge is major.
 }
 
 /// R1's composed matrix/storage delivery leg: saturated-green display →
@@ -2204,10 +2336,10 @@ fn pb4_final_codes() {
         203.0,
         400.0,
     );
-    assert!(acc.max10 <= 2.0, "PB4 10-bit max: {}", acc.max10);
+    assert!(acc.max10 <= pb4_code_tol(), "PB4 10-bit max: {}", acc.max10);
     let mean10 = acc.sum10 / f64::from(acc.n10);
-    assert!(mean10 <= 0.08, "PB4 10-bit mean: {mean10}");
-    assert!(acc.max8 <= 0.0, "PB4 8-bit max: {}", acc.max8);
+    assert!(mean10 <= pb4_mean_tol(), "PB4 10-bit mean: {mean10}");
+    assert!(acc.max8 <= pb4_8bit_tol(), "PB4 8-bit max: {}", acc.max8);
     // HLG codes per working-ULP at white: oracle 0.1680400672866091.
     let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
     let c_up = reference::hlg_oetf((1.0 + ulp_w1()) * sw).unwrap();
