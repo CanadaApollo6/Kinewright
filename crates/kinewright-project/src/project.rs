@@ -280,17 +280,44 @@ pub fn canonical_session_key(path: &Path) -> PathBuf {
 /// One canonical identity (F4): full path if it exists, else canonical
 /// parent plus name; relative resolves at the cwd. Raw is the last resort.
 #[must_use]
+/// Resolve a symlink chain one `read_link` at a time (G8): each relative
+/// target resolves against its link's parent. Returns the first non-link
+/// path, or `None` past the depth bound (a loop) and on IO failure — the
+/// caller falls back to the legacy rule, which is safe because a loop can
+/// never name a real file.
+fn resolve_link_chain(path: &Path, depth: u32) -> Option<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..depth {
+        if !fs::symlink_metadata(&current).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Some(current);
+        }
+        let target = fs::read_link(&current).ok()?;
+        current = if target.is_absolute() {
+            target
+        } else {
+            current.parent().unwrap_or(Path::new(".")).join(target)
+        };
+    }
+    None
+}
+
+#[must_use]
 pub fn canonical_project_identity(path: &Path) -> PathBuf {
-    if let Ok(canonical) = fs::canonicalize(path) {
+    // G8: a dangling symlink leaf resolves through `read_link` so aliases
+    // share their target's identity (canonical-parent-of-target plus target
+    // name when the target is missing); past the depth bound the legacy
+    // fallback below applies.
+    let resolved = resolve_link_chain(path, 40).unwrap_or_else(|| path.to_path_buf());
+    if let Ok(canonical) = fs::canonicalize(&resolved) {
         return canonical;
     }
-    let parent = path
+    let parent = resolved
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    match (fs::canonicalize(parent), path.file_name()) {
+    match (fs::canonicalize(parent), resolved.file_name()) {
         (Ok(dir), Some(name)) => dir.join(name),
-        _ => path.to_path_buf(),
+        _ => resolved,
     }
 }
 
@@ -545,6 +572,40 @@ mod tests {
         assert_eq!(
             relative.file_name().expect("a file name"),
             "missing.kinewright"
+        );
+    }
+
+    /// G8: a dangling symlink leaf shares its target's identity, and a
+    /// symlink loop terminates on the legacy fallback (deterministic, no
+    /// hang — loops can never name a real file).
+    #[cfg(unix)]
+    #[test]
+    fn g8_dangling_leaf_unifies_and_loops_terminate() {
+        let dir = TempDirectory::new("aw1-g8-dangling");
+        let target = dir.path("real").join("new.kinewright");
+        let alias = dir.path("alias.kinewright");
+        std::os::unix::fs::symlink(&target, &alias).expect("the dangling link plants");
+        assert_eq!(
+            canonical_project_identity(&alias),
+            canonical_project_identity(&target),
+            "a dangling alias shares its target's identity"
+        );
+        let loop_a = dir.path("loop-a");
+        let loop_b = dir.path("loop-b");
+        std::os::unix::fs::symlink(&loop_b, &loop_a).expect("loop a plants");
+        std::os::unix::fs::symlink(&loop_a, &loop_b).expect("loop b plants");
+        let first = canonical_project_identity(&loop_a);
+        assert_eq!(
+            first,
+            canonical_project_identity(&loop_a),
+            "loops terminate deterministically"
+        );
+        assert_eq!(
+            first,
+            fs::canonicalize(dir.root())
+                .expect("the parent resolves")
+                .join("loop-a"),
+            "a loop falls back to the legacy rule"
         );
     }
 

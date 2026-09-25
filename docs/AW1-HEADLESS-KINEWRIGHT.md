@@ -93,7 +93,14 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
   when the target exists, else canonical parent dir plus file name
   (relative resolves at the cwd; raw path when nothing resolves). Lock,
   discovery, claim, token_ref, and journal naming all derive from it, so
-  aliases share one lock and one journal name.
+  aliases share one lock and one journal name. (Fix round 2, G8: a
+  dangling symlink leaf resolves through `read_link` — relative to the
+  link's parent, depth-bounded at 40 — so dangling aliases share their
+  target's identity; past the bound the legacy fallback applies. Notes:
+  `write_file_atomic` replaces a dangling PROJECT symlink with a regular
+  file (pre-existing, unchanged); hard links are a known limitation —
+  two hard links to one file hold distinct identities and can
+  double-own (race N5); the AF5 network-FS limit still applies.)
 - AF3 → §5/S7: the takeover check scans the recovery dir once — base
   journal, every allocator `-N` suffix, and alias-named journals via the
   header's `project_path` — after obtaining the lock, on every ownership

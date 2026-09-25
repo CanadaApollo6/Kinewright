@@ -1572,3 +1572,36 @@ fn journal_scan_bounds_unrelated_reads() {
         "one acquire adds < 16 MB peak RSS over a 256 MiB unrelated journal: {before} -> {after} KiB"
     );
 }
+
+// ───────────────────────── G8: dangling alias ─────────────────────────
+
+/// AF2 hole: a DANGLING symlink alias (the target not yet saved) does not
+/// canonicalise, so its identity is `<link dir>/<link name>` — a different
+/// lock from the real target's. Two owners of one future file.
+#[cfg(unix)]
+#[test]
+fn defect_dangling_symlink_alias_double_owns() {
+    let dir = TempDirectory::new("race-dangling");
+    let real_dir = dir.path("real");
+    let link_dir = dir.path("link");
+    fs::create_dir(&real_dir).unwrap();
+    fs::create_dir(&link_dir).unwrap();
+    let target = real_dir.join("new.kinewright");
+    let alias = link_dir.join("alias.kinewright");
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    let recovery = dir.path("recovery");
+    fs::create_dir(&recovery).unwrap();
+    let first = claim(&target, &recovery, "http://real").expect("the real spelling owns");
+    let second = claim(&alias, &recovery, "http://alias");
+    let double = second.is_ok();
+    // And the identities later converge once the file exists — too late.
+    fs::write(&target, b"{}").unwrap();
+    let converged =
+        lockfile_path_for_project(Some(&alias)) == lockfile_path_for_project(Some(&target));
+    eprintln!(
+        "RACE: dangling alias double-owns={double}, identities converge after first save={converged}"
+    );
+    drop(second);
+    drop(first);
+    assert!(!double, "a dangling alias owned beside the real target");
+}
