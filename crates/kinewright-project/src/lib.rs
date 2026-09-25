@@ -13,8 +13,8 @@ pub use headless::{HeadlessSaveReport, save_headless};
 pub use lockfile::{
     AcquiredLock, LOCK_ACQUIRE_ATTEMPTS, LOCK_ACQUIRE_RETRY_DELAY, LOCKFILE_FORMAT_VERSION,
     LOCKFILE_SUFFIX, LockMode, LockfileClaim, LockfileError, LockfileHandle, ReclaimedOwner,
-    acquire_project_lock, acquire_project_lock_with_policy, lockfile_path_for_project,
-    reclaim_warning_json,
+    acquire_project_lock, acquire_project_lock_with_policy, discovery_path_for_project,
+    lockfile_path_for_project, reclaim_warning_json,
 };
 pub use project::{
     ProjectFile, ProjectSaveError, ProjectSaveReport, can_overwrite_save, canonical_session_key,
@@ -32,3 +32,27 @@ pub use sidecar::{
     refuse_sidecar_with, sidecar_matches_project, sidecar_path_for_project,
     sidecar_refused_observation, sidecar_write_failed_observation, write_synced,
 };
+
+// Deterministic scheduling for the lock interleaving tests (F3); absent
+// from production builds. Armed per child process via `REV2_HOOK` (the
+// pause point), `REV2_SIGNALS` (the signal dir), `REV2_EXIT` (exit 77 at
+// the point instead of pausing).
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) fn test_hook(point: &str) {
+    if std::env::var("REV2_HOOK").ok().as_deref() != Some(point) {
+        return;
+    }
+    let dir = std::path::PathBuf::from(std::env::var_os("REV2_SIGNALS").unwrap());
+    std::fs::write(dir.join("paused"), point).unwrap();
+    if std::env::var("REV2_EXIT").is_ok() {
+        std::process::exit(77);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !dir.join("resume").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "test hook timed out: {point}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
