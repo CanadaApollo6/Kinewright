@@ -169,7 +169,12 @@ changes.
   tests uncounted, visibility/indent normalisation, multiset
   moved-span treatment; S1's 771 is unsupported and not used). The
   honest figure exceeds the ceiling — STOP reported, nothing trimmed
-  to fit.
+  to fit. Lead ruling (2026-09-25): 1,708 accepted for S0+S1 and the
+  S0+S1 ceiling set to 1,750. The overrun is the review-driven lock
+  and persistence hardening (AF1–AF6: object/discovery split, symlink-
+  safe publisher, legacy journals, rollback of establishment), not
+  scope growth. S2–S6 ceilings are unchanged; the ledger script is the
+  method for every later stage.
 - S2-D1 (deferred, not fixed): an unloaded session's NON-EMPTY flush
   still replaces an occupied stem — pre-existing IN2B §2 rule-7
   behaviour, kept deliberately. A changed project save pairs (AF6); a
