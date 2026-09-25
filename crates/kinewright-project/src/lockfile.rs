@@ -49,6 +49,10 @@ pub struct ReclaimedOwner {
     pub pid: u32,
     pub hostname: String,
     pub endpoint: String,
+    /// The owner's claim second: `release` only removes a discovery still
+    /// naming this handle (G9). Defaulted so pre-G9 claims still parse.
+    #[serde(default)]
+    pub started_at_unix: u64,
 }
 
 /// The lockfile claim (AW1 §5): pid/host/endpoint, no secret.
@@ -141,6 +145,12 @@ pub enum LockfileError {
         host: String,
         endpoint: String,
     },
+    /// The lock object was deleted under this live handle (G9): the fd
+    /// still holds its flock, but the path names another (or no) object —
+    /// not writing. Only the `.lock.json` discovery may be hand-deleted.
+    LockLost {
+        path: PathBuf,
+    },
     Io(String),
 }
 
@@ -156,7 +166,11 @@ impl std::fmt::Display for LockfileError {
                         owner.pid, owner.hostname, owner.endpoint
                     ),
                     None => write!(formatter, " (its lock is held)"),
-                }
+                }?;
+                write!(
+                    formatter,
+                    "; only the .lock.json discovery may be hand-deleted, never the .lock object"
+                )
             }
             Self::PendingRecovery { journal } => write!(
                 formatter,
@@ -166,6 +180,11 @@ impl std::fmt::Display for LockfileError {
             ),
             Self::RecoveryLookup { reason } => write!(formatter, "recovery scan failed: {reason}"),
             Self::ForeignHost { host, endpoint: _ } => write!(formatter, "foreign host {host}"),
+            Self::LockLost { path } => write!(
+                formatter,
+                "the lock {} was deleted under this live owner; not writing",
+                path.display()
+            ),
             Self::Io(reason) => write!(formatter, "{reason}"),
         }
     }
@@ -195,13 +214,68 @@ impl LockfileHandle {
         }
     }
 
+    /// Confirm the handle's fd still names the lock object (G9): Unix
+    /// compares the fd's `(dev, ino)` with the path's; a mismatch — or a
+    /// vanished path — is `LockLost`: the object was deleted under this
+    /// live owner, so no write may follow. Call before every headless save
+    /// and every discovery re-publish.
+    /// # Errors
+    /// Returns `LockLost` when the object no longer names this handle.
+    #[cfg(unix)]
+    pub fn verify(&self) -> Result<(), LockfileError> {
+        use std::os::unix::fs::MetadataExt as _;
+        let live = match (self.file.metadata(), fs::metadata(&self.path)) {
+            (Ok(opened), Ok(current)) => {
+                opened.dev() == current.dev() && opened.ino() == current.ino()
+            }
+            _ => false,
+        };
+        if live {
+            Ok(())
+        } else {
+            Err(LockfileError::LockLost {
+                path: self.path.clone(),
+            })
+        }
+    }
+
+    /// Non-Unix `verify` always passes: `std` opens with
+    /// `FILE_SHARE_DELETE`, so a delete goes delete-pending and blocks
+    /// re-create while the handle lives — the object cannot be swapped
+    /// under a live owner.
+    #[cfg(not(unix))]
+    pub fn verify(&self) -> Result<(), LockfileError> {
+        Ok(())
+    }
+
     /// Release: remove the discovery while holding the flock, then drop —
     /// the drop unlocks explicitly, so the release lands even when a
     /// forked child still holds a duplicate of the open description.
+    /// The discovery is removed only if it still names this handle (pid,
+    /// claim second, endpoint — G9); otherwise it is left alone and the
+    /// skip is logged — another owner may have published after an
+    /// external unlink.
     /// # Errors
     /// Returns the removal IO error, if any.
     pub fn release(self) -> io::Result<()> {
-        let removed = fs::remove_file(&self.discovery);
+        let mine = match read_owner(&self.discovery, &self.claim.hostname) {
+            DiscoveryRead::Owner(owner) => {
+                owner.pid == self.claim.pid
+                    && owner.started_at_unix == self.claim.started_at_unix
+                    && owner.endpoint == self.claim.endpoint
+            }
+            DiscoveryRead::Absent => true,
+            _ => false,
+        };
+        let removed = if mine {
+            fs::remove_file(&self.discovery)
+        } else {
+            eprintln!(
+                "kinewright: not removing {}: it no longer names this owner",
+                self.discovery.display()
+            );
+            Ok(())
+        };
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("release_after_remove_before_unlock"); // RACE-REVIEW
         drop(self);
@@ -310,6 +384,7 @@ fn read_owner(discovery_path: &Path, own_hostname: &str) -> DiscoveryRead {
             pid: claim.pid,
             hostname: claim.hostname,
             endpoint: claim.endpoint,
+            started_at_unix: claim.started_at_unix,
         });
     }
     // Lenient (G7/AF5): a hostname string that is neither this host nor
@@ -358,6 +433,11 @@ impl FlockGuard {
     /// Hand the live flock to its handle without unlocking.
     fn release(mut self) -> File {
         self.file.take().expect("a held flock releases once")
+    }
+
+    /// The held file, for pre-publish liveness checks (G9).
+    fn file(&self) -> &File {
+        self.file.as_ref().expect("a held flock")
     }
 }
 
@@ -413,6 +493,7 @@ fn decide_free_claim(
                 pid: 0,
                 hostname: UNKNOWN_HOSTNAME.to_owned(),
                 endpoint: String::new(),
+                started_at_unix: 0,
             }),
             true,
         )),
@@ -676,6 +757,12 @@ pub fn acquire_project_lock_with_policy(
         claim.reclaimed_from.clone_from(&previous);
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_flock_before_publish");
+        // G9: the object may have been deleted under this pending owner
+        // between open and publish — never publish for a stale inode.
+        #[cfg(unix)]
+        if !fd_matches_path(guard.file(), &lock_path) {
+            return Err(LockfileError::LockLost { path: lock_path });
+        }
         if let Err(error) = write_discovery(&discovery_path, &claim) {
             return Err(LockfileError::Io(error.to_string()));
         }
@@ -1837,6 +1924,32 @@ mod tests {
         assert!(!stale.exists(), "our stale temp is swept");
         assert!(stranger.exists(), "nothing else is touched");
         acquired.handle.release().expect("the release lands");
+    }
+
+    /// G9: the fd-vs-path check detects a swapped or vanished object —
+    /// the helper behind the open-time, pre-publish, and `verify` gates.
+    #[cfg(unix)]
+    #[test]
+    fn g9_fd_check_detects_a_swapped_object() {
+        let dir = TempDirectory::new("aw1-g9-fd-check");
+        let lock = dir.path("edit.kinewright.lock");
+        let file = fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock)
+            .expect("the lock opens");
+        assert!(fd_matches_path(&file, &lock), "a live fd names its path");
+        let stash = dir.path("edit.kinewright.lock.stashed");
+        fs::rename(&lock, &stash).expect("the object moves aside");
+        fs::write(&lock, b"").expect("a new object takes the path");
+        assert!(
+            !fd_matches_path(&file, &lock),
+            "a swapped object no longer matches"
+        );
+        fs::remove_file(&lock).expect("the path vanishes");
+        assert!(!fd_matches_path(&file, &lock), "a vanished path mismatches");
     }
 
     /// G7: an unreadable stale discovery with a free lock reclaims WITH the

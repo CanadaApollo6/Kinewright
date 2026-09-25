@@ -8,6 +8,7 @@ use kinewright_core::{Document, TimelineRevision};
 use kinewright_media::LutStore;
 
 use crate::{
+    lockfile::LockfileHandle,
     project::{ProjectSaveError, ProjectSaveReport, serialize_project_document},
     session::{SidecarSession, rollback_sidecar_write, snapshot_sidecar_rollback},
     sidecar::{
@@ -25,9 +26,12 @@ pub struct HeadlessSaveReport {
 }
 
 /// Save a document headless (joining flush on every save, R6). Refuses
-/// fail-closed for an unloaded session.
+/// fail-closed for an unloaded session. `lock` is the held project lock,
+/// verified before any write (G9); `None` while no lock is held
+/// (transitional until S4 threads the acquire through).
 /// # Errors
-/// `SessionNotLoaded`, `Serialize`, or `Write`.
+/// `SessionNotLoaded`, `Serialize`, `Write`, or `LockLost`.
+#[allow(clippy::too_many_arguments)]
 pub fn save_headless(
     document: &Document,
     path: &Path,
@@ -36,7 +40,13 @@ pub fn save_headless(
     previous_digest: &str,
     revision: TimelineRevision,
     recovery_dir: &Path,
+    lock: Option<&LockfileHandle>,
 ) -> Result<HeadlessSaveReport, ProjectSaveError> {
+    if lock.is_some_and(|lock| lock.verify().is_err()) {
+        return Err(ProjectSaveError::LockLost {
+            path: path.to_path_buf(),
+        });
+    }
     if sidecar.established.is_empty() {
         return Err(ProjectSaveError::SessionNotLoaded);
     }
@@ -215,6 +225,7 @@ mod tests {
             "",
             TimelineRevision::default(),
             &recovery,
+            None,
         )
         .expect("the headless save lands");
         assert!(
@@ -293,6 +304,7 @@ mod tests {
             "",
             TimelineRevision::default(),
             &recovery,
+            None,
         )
         .expect("occupied Save As succeeds");
         assert!(
@@ -381,6 +393,7 @@ mod tests {
                     "",
                     TimelineRevision::default(),
                     &recovery,
+                    None,
                 ),
                 Err(ProjectSaveError::SessionNotLoaded)
             ),
@@ -410,6 +423,7 @@ mod tests {
             &previous,
             TimelineRevision::default(),
             &recovery,
+            None,
         )
         .expect("the save succeeds despite the sidecar failure");
         assert!(report.sidecar.is_err(), "the report holds the IO error");
@@ -445,6 +459,7 @@ mod tests {
             &previous,
             TimelineRevision::default(),
             &recovery,
+            None,
         )
         .expect("the first save lands");
         let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
@@ -467,6 +482,7 @@ mod tests {
                     &previous,
                     TimelineRevision::default(),
                     &recovery,
+                    None,
                 ),
                 Err(ProjectSaveError::Write(_))
             ),
@@ -523,6 +539,7 @@ mod tests {
                     "",
                     TimelineRevision::default(),
                     &recovery,
+                    None,
                 ),
                 Err(ProjectSaveError::Write(_))
             ),
@@ -558,6 +575,7 @@ mod tests {
             "",
             TimelineRevision::default(),
             &recovery,
+            None,
         )
         .expect("the save lands");
         note(&session, "aw1 f6 record two");
@@ -575,6 +593,7 @@ mod tests {
                     &previous,
                     TimelineRevision::default(),
                     &recovery,
+                    None,
                 ),
                 Err(ProjectSaveError::Write(_))
             ),
@@ -654,6 +673,7 @@ mod tests {
                     "",
                     TimelineRevision::default(),
                     &recovery,
+                    None,
                 ),
                 Err(ProjectSaveError::Write(_))
             ),
@@ -689,6 +709,7 @@ mod tests {
             "",
             TimelineRevision::default(),
             &recovery,
+            None,
         )
         .expect("the retry succeeds");
         assert!(
@@ -748,6 +769,7 @@ mod tests {
             "",
             TimelineRevision::default(),
             &recovery,
+            None,
         )
         .expect("the save lands");
         let sidecar = sidecar_path_for_project(Some(&project)).expect("derived");
@@ -768,6 +790,7 @@ mod tests {
                     &previous,
                     TimelineRevision::default(),
                     &recovery,
+                    None,
                 ),
                 Err(ProjectSaveError::Write(_))
             ),

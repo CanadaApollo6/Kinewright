@@ -94,6 +94,12 @@ pub enum ProjectSaveError {
     },
     /// Headless save refused: the session never loaded (AW1 S1 D5).
     SessionNotLoaded,
+    /// Headless save refused: the lock object was deleted under the live
+    /// saver (G9) — not writing. Only the `.lock.json` discovery may be
+    /// hand-deleted.
+    LockLost {
+        path: PathBuf,
+    },
 }
 
 impl std::fmt::Display for ProjectSaveError {
@@ -114,6 +120,11 @@ impl std::fmt::Display for ProjectSaveError {
             Self::SessionNotLoaded => write!(
                 formatter,
                 "cannot save headless: the sidecar session never loaded its project history"
+            ),
+            Self::LockLost { path } => write!(
+                formatter,
+                "cannot save {}: the lock was deleted under this live owner; not writing",
+                path.display()
             ),
         }
     }
@@ -139,7 +150,8 @@ impl ProjectSaveError {
             | Self::Write(_)
             | Self::SaveAsRequired { .. }
             | Self::PathOpenElsewhere { .. }
-            | Self::SessionNotLoaded => IncidentCode::Rejection(RejectionIncident::ProjectSave),
+            | Self::SessionNotLoaded
+            | Self::LockLost { .. } => IncidentCode::Rejection(RejectionIncident::ProjectSave),
             Self::NewerFormat { .. } => IncidentCode::Label(LabelIncident::ProjectNewerFormat),
         }
     }

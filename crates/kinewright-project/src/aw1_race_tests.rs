@@ -28,7 +28,13 @@ use std::{
 use kinewright_media::test_support::TempDirectory;
 
 use super::*;
-use crate::recovery::{JOURNAL_MAGIC, allocate_journal_path, journal_file_name};
+use crate::{
+    project::ProjectSaveError,
+    recovery::{JOURNAL_MAGIC, allocate_journal_path, journal_file_name},
+    save_headless,
+    session::SidecarSession,
+    sidecar::SidecarMode,
+};
 
 const CHILD_TEST: &str = "lockfile::race_tests::race_child";
 
@@ -1604,4 +1610,72 @@ fn defect_dangling_symlink_alias_double_owns() {
     drop(second);
     drop(first);
     assert!(!double, "a dangling alias owned beside the real target");
+}
+
+// ───────────────────────── G9: deleted lock object ─────────────────────────
+
+/// AF1/S4, FIXED: the lock object deleted under a live owner. The live
+/// owner's release must NOT remove the successor's discovery, and the live
+/// owner's handle fails `verify` — so its next save refuses `LockLost`
+/// instead of writing.
+#[cfg(unix)]
+#[test]
+fn defect_lock_object_deleted_under_a_live_owner() {
+    let fx = fixture("race-external-unlink");
+    let lock = lockfile_path_for_project(Some(&fx.project)).unwrap();
+    let a = claim(&fx.project, &fx.recovery, "http://a").expect("A claims");
+    fs::remove_file(&lock).unwrap(); // The hand delete.
+    let b = claim(&fx.project, &fx.recovery, "http://b").expect("B claims the re-created object");
+    assert!(
+        matches!(a.handle.verify(), Err(LockfileError::LockLost { .. })),
+        "A's handle detects the swapped object"
+    );
+    assert!(
+        b.handle.verify().is_ok(),
+        "the current owner's handle verifies"
+    );
+    // A's next save refuses instead of writing.
+    let log = std::sync::Arc::new(std::sync::RwLock::new(
+        kinewright_core::IncidentLog::with_start(
+            std::time::Instant::now(),
+            Some(std::time::SystemTime::now()),
+        ),
+    ));
+    let mut session = SidecarSession::load(
+        &SidecarMode::Load {
+            project_digest: String::new(),
+        },
+        Some(&fx.project),
+        log,
+        kinewright_core::TimelineRevision::default(),
+        None,
+        None,
+    )
+    .session;
+    let before = fs::read(&fx.project).unwrap();
+    let saved = save_headless(
+        &kinewright_core::Document::default(),
+        &fx.project,
+        None,
+        &mut session,
+        "",
+        kinewright_core::TimelineRevision::default(),
+        &fx.recovery,
+        Some(&a.handle),
+    );
+    assert!(
+        matches!(saved, Err(ProjectSaveError::LockLost { .. })),
+        "A's next save refuses LockLost"
+    );
+    assert_eq!(fs::read(&fx.project).unwrap(), before, "no write lands");
+    // A's release leaves B's discovery alone.
+    a.handle.release().unwrap();
+    let discovery = discovery_path_for_project(Some(&fx.project)).unwrap();
+    let after = fs::read_to_string(&discovery).expect("B's discovery survives A's release");
+    assert!(
+        after.contains("http://b"),
+        "B's discovery still names B: {after}"
+    );
+    b.handle.release().unwrap();
+    assert!(!discovery.exists(), "B's own release still cleans up");
 }

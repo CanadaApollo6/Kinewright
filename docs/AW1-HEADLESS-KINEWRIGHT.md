@@ -88,7 +88,14 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
   splits from "present but unreadable" — an unreadable stale discovery with
   a free lock reclaims with a typed `lock_reclaimed` warning carrying
   `previous_unreadable: true` (and a pid-0/`unknown` sentinel triple), while
-  absence reclaims silently.)
+  absence reclaims silently. G9: `release` removes the discovery only if it
+  still names the handle (pid, claim second, endpoint), otherwise leaving
+  it and logging; `LockfileHandle::verify` detects an object deleted under
+  a live owner (Unix fd-vs-path, typed `LockLost`, no write — checked
+  before every headless save and every discovery re-publish) and is
+  trivially true elsewhere, where share-delete semantics pin the object;
+  only the `.lock.json` discovery may be hand-deleted, never the `.lock`
+  object.)
 - AF2 → §5, §6: one canonical project identity — full canonical path
   when the target exists, else canonical parent dir plus file name
   (relative resolves at the cwd; raw path when nothing resolves). Lock,
