@@ -162,9 +162,14 @@ changes.
   reopen path's `.bak` naming, a paired sidecar is written for the new
   document, and the stem is established. Benign skips — no path,
   suspended, unchanged generation — still report `Skipped`.)
-- AF7 → §15: S1's 800-line production ceiling is extended by +400 for
-  this fix round (measured: S1 771 + fixes 406 = 1177 of 1200; method:
-  `scripts/aw1-line-ledger.sh`, committed in this round).
+- AF7 → §15 (fix round 2, G13: re-measured, ceiling raised): the
+  production ceiling is now 1,500 lines (+300 for this round). The true
+  figure from 6c2bdec to HEAD is 1,708 (rs 1,672 + manifests 36;
+  method: `scripts/aw1-line-ledger.sh` — `git diff --no-renames`,
+  tests uncounted, visibility/indent normalisation, multiset
+  moved-span treatment; S1's 771 is unsupported and not used). The
+  honest figure exceeds the ceiling — STOP reported, nothing trimmed
+  to fit.
 - S2-D1 (deferred, not fixed): an unloaded session's NON-EMPTY flush
   still replaces an occupied stem — pre-existing IN2B §2 rule-7
   behaviour, kept deliberately. A changed project save pairs (AF6); a
