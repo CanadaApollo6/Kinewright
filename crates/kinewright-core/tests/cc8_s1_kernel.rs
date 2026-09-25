@@ -1219,6 +1219,42 @@ fn compress_refusals() {
     ));
 }
 
+#[test]
+fn post_oetf_clamp_catches_negative_roundoff() {
+    // R2 S3/R18: P=400, RGB=[−80,4,400] leaves raw red HLG negative from
+    // float residue; the post-OETF clamp catches it. Both precisions.
+    let g = hlg_gamma(400.0).unwrap();
+    let rgb = [-80.0, 4.0, 400.0];
+    let fit = gamut_compress(
+        rgb,
+        CompressDest::Hlg {
+            peak: 400.0,
+            gamma: g,
+        },
+    )
+    .unwrap();
+    let s = display_to_scene(fit.value, 400.0, g).unwrap();
+    let raw = hlg_oetf(s[0]).unwrap();
+    assert!(raw < 0.0, "raw red must be negative residue: {raw}");
+    let out = hlg_output(rgb, 400.0, g).unwrap();
+    assert_eq!(out.signal[0].to_bits(), 0.0f32.to_bits());
+    let g64 = reference::hlg_gamma(400.0).unwrap();
+    let rgb64 = [-80.0, 4.0, 400.0];
+    let fit64 = reference::gamut_compress(
+        rgb64,
+        CompressDest::Hlg {
+            peak: 400.0,
+            gamma: g64,
+        },
+    )
+    .unwrap();
+    let s64 = reference::display_to_scene(fit64.value, 400.0, g64).unwrap();
+    let raw64 = reference::hlg_oetf(s64[0]).unwrap();
+    assert!(raw64 < 0.0, "f64 raw red must be negative residue: {raw64}");
+    let out64 = reference::hlg_output(rgb64, 400.0, g64).unwrap();
+    assert_eq!(out64.signal[0].to_bits(), 0.0f64.to_bits());
+}
+
 // ---------------------------------------------------------------------------
 // C5: primaries matrices (R13), precision budgets (R35), wrong-transform
 // controls (§17, R15).
