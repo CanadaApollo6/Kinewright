@@ -17,9 +17,10 @@ pub use lockfile::{
     lockfile_path_for_project, reclaim_warning_json,
 };
 pub use project::{
-    ProjectFile, ProjectSaveError, ProjectSaveReport, can_overwrite_save, canonical_session_key,
-    derive_lut_store, load_document, project_newer_format_observation, serialize_project_document,
-    write_file_atomic, write_project_bytes, write_project_document,
+    ProjectFile, ProjectSaveError, ProjectSaveReport, can_overwrite_save,
+    canonical_project_identity, canonical_session_key, derive_lut_store, load_document,
+    project_newer_format_observation, serialize_project_document, write_file_atomic,
+    write_project_bytes, write_project_document,
 };
 pub use recovery::{
     allocate_journal_path, default_recovery_directory, fnv1a_64, journal_file_name,

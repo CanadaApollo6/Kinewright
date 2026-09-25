@@ -34,9 +34,13 @@ pub fn fnv1a_64(bytes: &[u8]) -> u64 {
 }
 
 /// `MyVideo-1a2b3c4d5e6f7081.journal` - readable stem, collision-proof hash.
+///
+/// Both halves derive from the canonical project identity (F4), so every
+/// spelling of one file allocates, finds, and retires the same journal.
 #[must_use]
 pub fn journal_file_name(project_path: &Path) -> String {
-    let stem: String = project_path
+    let identity = crate::project::canonical_project_identity(project_path);
+    let stem: String = identity
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default()
@@ -49,7 +53,7 @@ pub fn journal_file_name(project_path: &Path) -> String {
     } else {
         stem
     };
-    let hash = fnv1a_64(project_path.to_string_lossy().as_bytes());
+    let hash = fnv1a_64(identity.to_string_lossy().as_bytes());
     format!("{stem}-{hash:016x}.journal")
 }
 

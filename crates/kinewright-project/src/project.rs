@@ -277,6 +277,27 @@ pub fn canonical_session_key(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The one canonical project identity (F4): the full canonical path when
+/// the target exists (resolving file symlinks), else the canonical parent
+/// dir plus the file name — so a not-yet-existing first-save target still
+/// identifies. Relative paths resolve against the working dir; when
+/// nothing resolves, the raw path is the identity, which still matches
+/// itself. Lock, discovery, token, and journal derivations all read this.
+#[must_use]
+pub fn canonical_project_identity(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    match (fs::canonicalize(parent), path.file_name()) {
+        (Ok(dir), Some(name)) => dir.join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// Serialise a document inside the file envelope (`IN2B` §4 rules 1–2).
 ///
 /// The writer stamps its own `PROJECT_FORMAT_VERSION` const — never the
@@ -497,6 +518,38 @@ mod tests {
                 entry.file_name().to_string_lossy()
             );
         }
+    }
+
+    /// F4: the identity resolves an existing file fully, a missing target
+    /// via its canonical parent, a relative spelling against the working
+    /// dir — and falls back to the raw path when nothing resolves.
+    #[test]
+    fn canonical_identity_pins_existing_missing_and_unresolvable() {
+        let dir = TempDirectory::new("aw1-f4-identity");
+        let real = dir.path("edit.kinewright");
+        fs::write(&real, b"{}").expect("the project writes");
+        assert_eq!(
+            canonical_project_identity(&real),
+            fs::canonicalize(&real).expect("the real path resolves")
+        );
+        let missing = dir.path("new.kinewright");
+        assert_eq!(
+            canonical_project_identity(&missing),
+            fs::canonicalize(dir.root())
+                .expect("the parent resolves")
+                .join("new.kinewright")
+        );
+        let nowhere = Path::new("/no/such/kinewright-dir/edit.kinewright");
+        assert_eq!(canonical_project_identity(nowhere), nowhere.to_path_buf());
+        let relative = canonical_project_identity(Path::new("missing.kinewright"));
+        assert!(
+            relative.is_absolute(),
+            "relative resolves against the working dir"
+        );
+        assert_eq!(
+            relative.file_name().expect("a file name"),
+            "missing.kinewright"
+        );
     }
 
     /// R1: save bytes are byte-identical pre/post cutover over the corpus.

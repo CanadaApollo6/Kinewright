@@ -75,16 +75,23 @@ pub struct LockfileClaim {
     pub reclaimed_from: Option<ReclaimedOwner>,
 }
 
-/// Derive a project's lockfile path: the sibling `<stem>.kinewright.lock`.
-/// `None` yields `None` and paths without a file stem likewise do.
+/// Derive a project's lockfile path from its canonical identity: the
+/// sibling `<stem>.kinewright.lock` beside the real file, so aliases
+/// share one lock (F4). `None` yields `None` and stemless paths likewise.
 #[must_use]
 pub fn lockfile_path_for_project(project_path: Option<&Path>) -> Option<PathBuf> {
     let path = project_path?;
-    let stem = path.file_stem()?;
+    let identity = crate::project::canonical_project_identity(path);
+    let stem = identity.file_stem()?;
     let mut name = stem.to_os_string();
     name.push(".");
     name.push(LOCKFILE_SUFFIX);
-    Some(path.parent().unwrap_or_else(|| Path::new("")).join(name))
+    Some(
+        identity
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(name),
+    )
 }
 
 /// Derive a project's lock discovery path: the lock object name plus
@@ -247,7 +254,7 @@ fn build_claim(
     endpoint: &str,
     reclaimed_from: Option<ReclaimedOwner>,
 ) -> (PathBuf, PathBuf, LockfileClaim) {
-    let canonical = crate::project::canonical_session_key(project);
+    let canonical = crate::project::canonical_project_identity(project);
     let canonical_text = canonical.to_string_lossy().into_owned();
     let lock_path = lockfile_path_for_project(Some(project))
         .unwrap_or_else(|| PathBuf::from(format!("{}.{LOCKFILE_SUFFIX}", project.display())));
@@ -424,7 +431,7 @@ mod tests {
             claim.reclaimed_from.is_none(),
             "a fresh acquire reclaims nothing"
         );
-        let canonical = crate::project::canonical_session_key(&project)
+        let canonical = crate::project::canonical_project_identity(&project)
             .to_string_lossy()
             .into_owned();
         assert_eq!(
@@ -655,17 +662,25 @@ mod tests {
     }
 
     /// The lockfile derives from the stem beside the project, like the
-    /// sidecar — and nowhere for a pathless project.
+    /// sidecar — and nowhere for a pathless project. A relative spelling
+    /// resolves against the working dir; an unresolvable parent falls back
+    /// to the raw spelling (F4).
     #[test]
     fn lockfile_path_derives_from_the_stem() {
         assert_eq!(lockfile_path_for_project(None), None);
         assert_eq!(
-            lockfile_path_for_project(Some(Path::new("/tmp/x/edit.kinewright"))),
-            Some(PathBuf::from("/tmp/x/edit.kinewright.lock"))
+            lockfile_path_for_project(Some(Path::new("/no/such/kinewright-dir/edit.kinewright"))),
+            Some(PathBuf::from(
+                "/no/such/kinewright-dir/edit.kinewright.lock"
+            ))
         );
         assert_eq!(
             lockfile_path_for_project(Some(Path::new("edit.kinewright"))),
-            Some(PathBuf::from("edit.kinewright.lock"))
+            Some(
+                fs::canonicalize(".")
+                    .expect("the working dir resolves")
+                    .join("edit.kinewright.lock")
+            )
         );
         assert_eq!(lockfile_path_for_project(Some(Path::new("/"))), None);
     }
@@ -847,12 +862,18 @@ mod tests {
     fn discovery_path_derives_from_the_lock_object() {
         assert_eq!(discovery_path_for_project(None), None);
         assert_eq!(
-            discovery_path_for_project(Some(Path::new("/tmp/x/edit.kinewright"))),
-            Some(PathBuf::from("/tmp/x/edit.kinewright.lock.json"))
+            discovery_path_for_project(Some(Path::new("/no/such/kinewright-dir/edit.kinewright"))),
+            Some(PathBuf::from(
+                "/no/such/kinewright-dir/edit.kinewright.lock.json"
+            ))
         );
         assert_eq!(
             discovery_path_for_project(Some(Path::new("edit.kinewright"))),
-            Some(PathBuf::from("edit.kinewright.lock.json"))
+            Some(
+                fs::canonicalize(".")
+                    .expect("the working dir resolves")
+                    .join("edit.kinewright.lock.json")
+            )
         );
         assert_eq!(discovery_path_for_project(Some(Path::new("/"))), None);
     }
@@ -987,5 +1008,112 @@ mod tests {
         );
         fs::write(signals.join("done"), "").expect("the done writes");
         drop(holder);
+    }
+
+    /// F4/B5: a file symlink to a project in another directory shares the
+    /// one lock — the alias contends, never double-owns.
+    #[cfg(unix)]
+    #[test]
+    fn f4_symlink_alias_shares_one_lock() {
+        let dir = TempDirectory::new("aw1-f4-alias");
+        let real_dir = dir.path("real");
+        let link_dir = dir.path("link");
+        fs::create_dir(&real_dir).expect("the real dir creates");
+        fs::create_dir(&link_dir).expect("the link dir creates");
+        let real = real_dir.join("edit.kinewright");
+        fs::write(&real, b"{}").expect("the project writes");
+        let alias = link_dir.join("alias.kinewright");
+        std::os::unix::fs::symlink(&real, &alias).expect("the alias links");
+        assert_eq!(
+            lockfile_path_for_project(Some(&alias)),
+            lockfile_path_for_project(Some(&real)),
+            "one lock for one file"
+        );
+        let recovery = recovery_dir(&dir);
+        let _held = acquire_project_lock_with_policy(
+            &real,
+            LockMode::Gui,
+            "http://127.0.0.1:9/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect("the real path acquires");
+        assert!(
+            matches!(
+                acquire_project_lock_with_policy(
+                    &alias,
+                    LockMode::Headless,
+                    "http://127.0.0.1:10/mcp",
+                    &recovery,
+                    1,
+                    Duration::ZERO
+                ),
+                Err(LockfileError::Contention { .. })
+            ),
+            "the alias contends"
+        );
+    }
+
+    /// F4: two spellings of a not-yet-existing target share one lock, one
+    /// claim identity, and one journal name.
+    #[test]
+    fn f4_first_save_spellings_share_one_identity() {
+        let dir = TempDirectory::new("aw1-f4-first-save");
+        let sub = dir.path("sub");
+        fs::create_dir(&sub).expect("the sub dir creates");
+        let direct = dir.path("new.kinewright");
+        let crooked = sub.join("..").join("new.kinewright");
+        assert!(!direct.exists(), "the target is not yet saved");
+        assert_eq!(
+            lockfile_path_for_project(Some(&crooked)),
+            lockfile_path_for_project(Some(&direct)),
+            "one lock for one target"
+        );
+        assert_eq!(
+            journal_file_name(&crooked),
+            journal_file_name(&direct),
+            "one journal name for one target"
+        );
+        let recovery = recovery_dir(&dir);
+        let first = acquire_project_lock_with_policy(
+            &direct,
+            LockMode::Headless,
+            "http://127.0.0.1:9/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect("the direct spelling acquires");
+        let identity = first.handle.claim.project.clone();
+        first.handle.release().expect("the release lands");
+        let second = acquire_project_lock_with_policy(
+            &crooked,
+            LockMode::Headless,
+            "http://127.0.0.1:10/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect("the crooked spelling acquires");
+        assert_eq!(
+            second.handle.claim.project, identity,
+            "one claim identity for one target"
+        );
+        let _held = second;
+        assert!(
+            matches!(
+                acquire_project_lock_with_policy(
+                    &direct,
+                    LockMode::Headless,
+                    "http://127.0.0.1:11/mcp",
+                    &recovery,
+                    1,
+                    Duration::ZERO
+                ),
+                Err(LockfileError::Contention { .. })
+            ),
+            "the spellings exclude each other"
+        );
     }
 }
