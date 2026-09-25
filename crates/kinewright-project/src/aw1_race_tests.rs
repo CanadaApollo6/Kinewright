@@ -1499,3 +1499,76 @@ fn defect_unparseable_foreign_claim_bypasses_foreign_host() {
         );
     }
 }
+
+// ───────────────────────── G6: streaming scan ─────────────────────────
+
+/// Fail-closed is global: ONE unreadable entry anywhere in the shared
+/// recovery dir (here a directory named `*.journal`) refuses every
+/// project's acquisition with `RecoveryLookup`.
+#[test]
+fn defect_unrelated_unreadable_journal_blocks_every_project() {
+    let fx = fixture("race-junk-journal");
+    fs::create_dir(fx.recovery.join("zz-unrelated-0000000000000000.journal")).unwrap();
+    let got = claim(&fx.project, &fx.recovery, "http://a");
+    assert!(
+        got.is_ok(),
+        "an unrelated recovery-dir entry blocked this project: {:?}",
+        got.err()
+    );
+}
+
+/// G6/RS3: the takeover scan streams headers — a 256 MiB unrelated journal
+/// adds less than 16 MB peak RSS to one acquire. Child-measured `VmHWM`,
+/// so the parent's allocator state cannot pollute the bound; at 503d221
+/// the same shape peaked at ~270 MB.
+#[cfg(target_os = "linux")]
+#[test]
+fn journal_scan_bounds_unrelated_reads() {
+    let fx = fixture("race-scan-bounded");
+    let other = fx.dir.path("other.kinewright");
+    fs::write(&other, "{}").unwrap();
+    let big = alias_header_journal(&fx.recovery, &other, &other);
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&big).unwrap();
+        let chunk = vec![0x61; 1 << 20];
+        for _ in 0..256 {
+            file.write_all(&chunk).unwrap();
+        }
+    }
+    assert_eq!(
+        pending_journal_for_project(&fx.recovery, &fx.project).unwrap(),
+        None,
+        "the unrelated journal never pends"
+    );
+    let signals = fx.dir.path("measured");
+    let mut kid = spawn(
+        "measure",
+        &fx.project,
+        &fx.recovery,
+        &signals,
+        Opts::default(),
+    );
+    kid.0.wait().unwrap();
+    let measured = fs::read_to_string(signals.join("measured")).unwrap();
+    let field = |key: &str| {
+        measured
+            .split(key)
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    let before = field("hwm_before_kib=");
+    let after = field("hwm_after_kib=");
+    assert!(
+        measured.contains("verdict=Ok(())"),
+        "the unrelated journal never blocks: {measured}"
+    );
+    assert!(
+        after.saturating_sub(before) < 16 * 1024,
+        "one acquire adds < 16 MB peak RSS over a 256 MiB unrelated journal: {before} -> {after} KiB"
+    );
+}

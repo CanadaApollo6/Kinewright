@@ -108,7 +108,12 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
   claimed by header only when `project_path` is absolute and
   canonical-identical; a relative, missing, or unparseable header never
   claims — ambiguous legacy identity is ignored, never rebound to the
-  current cwd, so it cannot block an unrelated project.)
+  current cwd, so it cannot block an unrelated project. G6: the scan
+  streams — `BufReader`, one magic read, one parsed header value — bounded
+  at 1 MiB of header per alias candidate (over-limit headers are ignored
+  as unverifiable); name-matched journals refuse without any header read;
+  non-regular entries are skipped; only a read error on a regular file
+  fails closed.)
 - AF4 → §2: headless save shares the app's H12/J2/J3 transaction
   machinery (`SidecarRollback` in `kinewright-project`): snapshot and
   restore the destination sidecar and both generation baselines on

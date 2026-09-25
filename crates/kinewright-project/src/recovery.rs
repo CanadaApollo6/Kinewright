@@ -174,31 +174,41 @@ struct JournalIdentityHeader {
     project_path: Option<PathBuf>,
 }
 
+/// The most a header scan reads past the magic (G6): headers embed the
+/// initial document but stay small, and name-matched journals refuse
+/// without any header read — so a non-name-matched journal whose header
+/// exceeds this is ignored as unverifiable, never blocking a project, and
+/// the limit can never weaken a name match into a pass.
+const JOURNAL_HEADER_LIMIT: u64 = 1024 * 1024;
+
 /// Whether a journal's header names the project (F5's alias arm). Only an
 /// absolute header path claims, by canonical identity (G5): a relative
-/// header is ambiguous — never rebound to the current cwd — and torn or
-/// missing headers never match, so a non-name-matched journal with one is
-/// ignored, never blocking an unrelated project. Name-matched journals
-/// refuse without consulting the header at all. Vanished reads as gone.
+/// header is ambiguous — never rebound to the current cwd — and torn,
+/// missing, or over-limit headers never match, so a non-name-matched
+/// journal with one is ignored, never blocking an unrelated project.
+/// Name-matched journals refuse without consulting the header at all.
+/// The scan streams (`BufReader`, one magic read, one parsed header value)
+/// so unrelated journals cost kilobytes, not their full bodies (G6/RS3);
+/// only a read error on a regular file fails closed. Vanished reads as gone.
 fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Error> {
-    let bytes = match fs::read(journal) {
-        Ok(bytes) => bytes,
+    use std::io::{BufReader, Read as _};
+    let file = match fs::File::open(journal) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    if !bytes.starts_with(JOURNAL_MAGIC) {
+    let mut file = BufReader::new(file);
+    let mut magic = [0u8; JOURNAL_MAGIC.len()];
+    if file.read_exact(&mut magic).is_err() || magic.as_slice() != JOURNAL_MAGIC {
         return Ok(false);
     }
-    let Some(relative_end) = bytes[JOURNAL_MAGIC.len()..]
-        .iter()
-        .position(|byte| *byte == b'\n')
-    else {
+    let mut values = serde_json::Deserializer::from_reader(file.take(JOURNAL_HEADER_LIMIT))
+        .into_iter::<JournalIdentityHeader>();
+    let Some(header) = values.next() else {
         return Ok(false);
     };
-    let line = &bytes[JOURNAL_MAGIC.len()..JOURNAL_MAGIC.len() + relative_end];
-    let header: JournalIdentityHeader = match serde_json::from_slice(line) {
-        Ok(header) => header,
-        Err(_) => return Ok(false),
+    let Ok(header) = header else {
+        return Ok(false);
     };
     let Some(project) = header.project_path else {
         return Ok(false);
@@ -209,9 +219,11 @@ fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Err
     Ok(canonical_project_identity(&project) == identity)
 }
 
-/// Pending journal (AW1 §5/S7, F5/G5): canonical and legacy bases, every
-/// `-N` allocator suffix of each, and header-matched aliases — first in
-/// name order. Missing dir means none pending.
+/// Pending journal (AW1 §5/S7, F5/G5/G6): canonical and legacy bases,
+/// every `-N` allocator suffix of each, and header-matched aliases — first
+/// in name order. Only regular files scan (a directory or anything else
+/// named `*.journal` is skipped); names refuse without a header read.
+/// Missing dir means none pending.
 /// # Errors
 /// Returns the lookup IO error (fail-closed).
 pub fn pending_journal_for_project(
@@ -235,7 +247,19 @@ pub fn pending_journal_for_project(
     };
     let mut pending = Vec::new();
     for entry in entries {
-        let journal = entry?.path();
+        let entry = entry?;
+        // G6/N1: only regular files scan — a directory (or a symlink, or
+        // anything else) named `*.journal` is skipped, never blocking an
+        // unrelated project. Indeterminate metadata fails closed.
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !kind.is_file() {
+            continue;
+        }
+        let journal = entry.path();
         if journal
             .extension()
             .is_none_or(|extension| extension != "journal")
@@ -350,6 +374,69 @@ mod tests {
                 .expect("the lookup lands"),
             Some(journal),
             "the original spelling is found via the legacy name"
+        );
+    }
+
+    /// G6: the streamed scan claims an alias header past a big body — the
+    /// tail is never materialised to find it.
+    #[test]
+    fn g6_alias_header_with_big_body_claims() {
+        let dir = TempDirectory::new("aw1-g6-big-body");
+        let recovery = dir.path("recovery");
+        fs::create_dir(&recovery).expect("the recovery dir creates");
+        let project = dir.path("edit.kinewright");
+        fs::write(&project, b"{}").expect("the project writes");
+        let journal = recovery.join("elsewhere-0123456789abcdef.journal");
+        let document = serde_json::to_string(&kinewright_core::Document::default())
+            .expect("the document serialises");
+        let header = format!(
+            "KINEWRIGHT-JOURNAL 1\n{{\"format_version\":1,\"writer_format_version\":1,\
+             \"project_path\":{},\"initial_document\":{document}}}\n",
+            serde_json::to_string(&project).expect("the path serialises")
+        );
+        let mut body = header.into_bytes();
+        body.extend(vec![b'x'; 8 * 1024 * 1024]);
+        fs::write(&journal, body).expect("the big journal writes");
+        assert_eq!(
+            pending_journal_for_project(&recovery, &project).expect("the lookup lands"),
+            Some(journal),
+            "an alias header past a big body claims"
+        );
+    }
+
+    /// G6: a header past the byte limit is unverifiable — ignored when
+    /// unmatched, and never weakening a name match.
+    #[test]
+    fn g6_over_limit_header_ignores_unmatched_but_not_a_match() {
+        let dir = TempDirectory::new("aw1-g6-over-limit");
+        let recovery = dir.path("recovery");
+        fs::create_dir(&recovery).expect("the recovery dir creates");
+        let project = dir.path("edit.kinewright");
+        fs::write(&project, b"{}").expect("the project writes");
+        let big = "x".repeat(2 * 1024 * 1024);
+        let header = format!(
+            "KINEWRIGHT-JOURNAL 1\n{{\"format_version\":1,\"writer_format_version\":1,\
+             \"project_path\":{},\"initial_document\":{}}}\n",
+            serde_json::to_string(&project).expect("the path serialises"),
+            serde_json::to_string(&big).expect("the body serialises")
+        );
+        assert!(
+            header.len() as u64 > JOURNAL_HEADER_LIMIT,
+            "the fixture exceeds the limit"
+        );
+        let alias = recovery.join("elsewhere-0123456789abcdef.journal");
+        fs::write(&alias, &header).expect("the alias journal writes");
+        assert_eq!(
+            pending_journal_for_project(&recovery, &project).expect("the lookup lands"),
+            None,
+            "an over-limit header is ignored when unmatched"
+        );
+        let matched = recovery.join(journal_file_name(&project));
+        fs::write(&matched, &header).expect("the matched journal writes");
+        assert_eq!(
+            pending_journal_for_project(&recovery, &project).expect("the lookup lands"),
+            Some(matched),
+            "the limit never weakens a name match"
         );
     }
 
