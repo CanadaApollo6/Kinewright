@@ -1902,7 +1902,7 @@ fn pb3_display_absolute() {
                 let tol = if d < 1.0 {
                     0.05
                 } else if i == 6 {
-                    2.0f64.max(0.001 * peak)
+                    2.0f64.max(0.002 * peak)
                 } else {
                     1.0
                 };
@@ -1914,21 +1914,40 @@ fn pb3_display_absolute() {
         }
     }
     // R1 B2, erratum visibility: W=100/P=10000 neutral (R1: 10003.46 nits)
-    // passes CE3's 10-nit bound and FAILS the old 2.0.
+    // passes CE5 (20 nits), still passes CE3's 10, and FAILS the pre-CE3 2.0.
     let g = hlg_gamma(10_000.0).unwrap();
     let sw = s_white(100.0, 10_000.0, g).unwrap();
     let stored = f16_store(1.0 / sw);
     let got = scene_to_display([stored * sw, stored * sw, stored * sw], 10_000.0, g).unwrap()[0];
     let err = (f64::from(got) - 10_000.0).abs();
     assert!(
+        err <= 20.0,
+        "W=100/P=10000 must pass CE5 (20 nits): err={err}"
+    );
+    assert!(
         err <= 10.0,
-        "W=100/P=10000 must pass CE3 (10 nits): err={err}"
+        "one-store case still passes CE3 (10): err={err}"
     );
     assert!(
         err > 2.0,
         "W=100/P=10000 must fail the old 2.0-nit bound: err={err}"
     );
     assert_close("W=100/P=10000 value", f64::from(got), 10_003.462, 0.1);
+    // R1 B2 / CE5: composed matrix pairs at P=7004/W=100, saturated green.
+    // One pair errs 10.45 nits, three pairs 11.01: both pass CE5's 14.008
+    // and FAIL the old 0.1% (7.004).
+    for pairs in [1, 3] {
+        let got = matrix_delivery_chain(7004.0, 100.0, pairs);
+        let err = (f64::from(got[1]) - 7004.0).abs();
+        assert!(
+            err <= 2.0f64.max(0.002 * 7004.0),
+            "P=7004 pairs={pairs} must pass CE5: err={err}"
+        );
+        assert!(
+            err > 0.001 * 7004.0,
+            "P=7004 pairs={pairs} must fail the old 0.1%: err={err}"
+        );
+    }
     // App. N ULP rows via kernel finite differences (central = slope).
     let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
     let u1 = 2f64.powi(-10);
@@ -1950,6 +1969,39 @@ fn pb3_display_absolute() {
     let f1 = reference::scene_to_display([(1.0 + u1) * sw; 3], 1000.0, 1.2).unwrap()[0]
         - reference::scene_to_display([sw; 3], 1000.0, 1.2).unwrap()[0];
     assert_close("nits/ULP fwd white", f1, 0.237_913_850_459_165_13, 1e-9);
+}
+
+/// CE6: the PB3 bound for a triplet-max channel: sub-1 → 0.05 nits,
+/// white ±10% → 1.0 nit, else the CE5 peak bound `max(2, 0.002·P)`.
+fn pb3_bound_for_max(max_ch: f64, white: f64, peak: f64) -> f64 {
+    if max_ch < 1.0 {
+        0.05
+    } else if (max_ch - white).abs() <= 0.1 * white {
+        1.0
+    } else {
+        2.0f64.max(0.002 * peak)
+    }
+}
+
+/// R1's composed matrix/storage delivery leg: saturated-green display →
+/// f64 scene → f32 working → `pairs` × (2020→709→f16→2020→f16) → render.
+fn matrix_delivery_chain(peak: f32, white: f32, pairs: usize) -> [f32; 3] {
+    let g = hlg_gamma(peak).unwrap();
+    let sw = s_white(white, peak, g).unwrap();
+    let p64 = f64::from(peak);
+    let g64 = reference::hlg_gamma(p64).unwrap();
+    let sw64 = reference::s_white(f64::from(white), p64, g64).unwrap();
+    let s = reference::display_to_scene([0.0, p64, 0.0], p64, g64).unwrap();
+    let mut w = [
+        as_f32(s[0] / sw64),
+        as_f32(s[1] / sw64),
+        as_f32(s[2] / sw64),
+    ];
+    for _ in 0..pairs {
+        w = apply_matrix(BT2020_TO_BT709, w).unwrap().map(f16_store);
+        w = apply_matrix(BT709_TO_BT2020, w).unwrap().map(f16_store);
+    }
+    scene_to_display([w[0] * sw, w[1] * sw, w[2] * sw], peak, g).unwrap()
 }
 
 /// PB4 working chain: anchor display → f64 scene → f32 working → three
@@ -1976,25 +2028,84 @@ fn pb4_chain_display(d: [f64; 3], white: f64, peak: f64) -> [f32; 3] {
     scene_to_display([w[0] * sw, w[1] * sw, w[2] * sw], as_f32(peak), g).unwrap()
 }
 
+/// CE6 minor classification: reference channel under 1% of its triplet max.
+fn is_minor_channel(ch: f64, max_ch: f64) -> bool {
+    ch.abs() < 0.01 * max_ch.abs()
+}
+
+/// PB4 code accumulators over major channels (minors go to nits, CE6).
+struct Pb4Acc {
+    max10: f64,
+    sum10: f64,
+    n10: u32,
+    max8: f64,
+}
+
+/// PB4 per-anchor gate: HLG + SDR delivery of the chain display against the
+/// direct f64 reference; minors in nits vs the max channel's PB3 bound,
+/// majors in codes (test-only quantizers; S4 owns delivery packing).
+fn pb4_gate(acc: &mut Pb4Acc, display: [f32; 3], d: [f64; 3], white: f64, peak: f64) {
+    let code10 = |s: f64| (876.0 * s + 64.0).round();
+    let code8 = |x: f64| (219.0 * (x.max(0.0) / 100.0).powf(1.0 / 2.4) + 16.0).round();
+    let g = hlg_gamma(as_f32(peak)).unwrap();
+    let g64 = reference::hlg_gamma(peak).unwrap();
+    let m = max_abs_3(d);
+    let disp = f64_3(display);
+    let got = hlg_output(display, as_f32(peak), g).unwrap().signal;
+    let exp = reference::hlg_output(d, peak, g64).unwrap().signal;
+    for i in 0..3 {
+        if is_minor_channel(d[i], m) {
+            let err = (disp[i] - d[i]).abs();
+            assert!(
+                err <= pb3_bound_for_max(m, white, peak),
+                "PB4 minor[{i}] W={white} P={peak}: err={err}"
+            );
+        } else {
+            let delta = (code10(f64::from(got[i])) - code10(exp[i])).abs();
+            acc.max10 = acc.max10.max(delta);
+            acc.sum10 += delta;
+            acc.n10 += 1;
+        }
+    }
+    let tone = display.map(|x| eetf_to_target(x, as_f32(peak), 100.0).unwrap().value);
+    let rec709 = apply_matrix(BT2020_TO_BT709, tone).unwrap();
+    let sdr = gamut_compress(rec709, CompressDest::Sdr { target_peak: 100.0 })
+        .unwrap()
+        .value;
+    let tone64 = d.map(|x| reference::eetf_to_target(x, peak, 100.0).unwrap().value);
+    let rec709_64 = reference::apply_matrix(BT2020_TO_BT709_F64, tone64).unwrap();
+    let sdr64 = reference::gamut_compress(rec709_64, CompressDest::Sdr { target_peak: 100.0 })
+        .unwrap()
+        .value;
+    let ms = max_abs_3(sdr64);
+    for i in 0..3 {
+        if is_minor_channel(sdr64[i], ms) {
+            let err = (f64::from(sdr[i]) - sdr64[i]).abs();
+            assert!(
+                err <= pb3_bound_for_max(ms, 100.0, 100.0),
+                "PB4 SDR minor[{i}] W={white} P={peak}: err={err}"
+            );
+        } else {
+            acc.max8 = acc
+                .max8
+                .max((code8(f64::from(sdr[i])) - code8(sdr64[i])).abs());
+        }
+    }
+}
+
 #[test]
 fn pb4_final_codes() {
-    // Test-only quantizers (S4 owns delivery packing): 10-bit HLG narrow +
-    // 8-bit 709 narrow behind the BT.1886-inverse encode (§4 display EOTF).
-    let code10 = |s: f64| (876.0 * s + 64.0).round();
-    let encode_709 = |d: f64| (d.max(0.0) / 100.0).powf(1.0 / 2.4);
-    let code8 = |d: f64| (219.0 * encode_709(d) + 16.0).round();
-    // Delivery chain through f16 working stores (R2's chain shape): anchor
-    // display → f64 scene → f32 working → 3 render/inverse pairs with
-    // stores → final store → f32 display → HLG + SDR delivery; codes are
-    // compared against direct f64 delivery of the anchor. Bounds are R2's
-    // measured 10-bit max 2 / mean 0.079 and 8-bit max 0.
-    let mut max10 = 0.0f64;
-    let mut sum10 = 0.0f64;
-    let mut n10 = 0u32;
-    let mut max8 = 0.0f64;
+    // Delivery chains through f16 working stores vs direct f64 delivery.
+    // CE6: minors in nits, majors in codes (10-bit max 2 / mean ≤ 0.08,
+    // 8-bit max 0 — R2's measured bounds).
+    let mut acc = Pb4Acc {
+        max10: 0.0,
+        sum10: 0.0,
+        n10: 0,
+        max8: 0.0,
+    };
     for white in [100.0, 203.0, 400.0] {
         for peak in [400.0, 1000.0, 2000.0, 2001.0, 4000.0, 10_000.0] {
-            let g = hlg_gamma(as_f32(peak)).unwrap();
             let g64 = reference::hlg_gamma(peak).unwrap();
             let sw64 = reference::s_white(white, peak, g64).unwrap();
             let grey = reference::scene_to_display([0.18 * sw64; 3], peak, g64).unwrap()[0];
@@ -2010,36 +2121,23 @@ fn pb4_final_codes() {
                 [white * 0.9; 3],
                 [white * 1.1; 3],
             ] {
-                let display = pb4_chain_display(d, white, peak);
-                let got = hlg_output(display, as_f32(peak), g).unwrap().signal;
-                let exp = reference::hlg_output(d, peak, g64).unwrap().signal;
-                for (a, e) in f64_3(got).iter().zip(exp.iter()) {
-                    let delta = (code10(*a) - code10(*e)).abs();
-                    max10 = max10.max(delta);
-                    sum10 += delta;
-                    n10 += 1;
-                }
-                let tone = display.map(|x| eetf_to_target(x, as_f32(peak), 100.0).unwrap().value);
-                let rec709 = apply_matrix(BT2020_TO_BT709, tone).unwrap();
-                let sdr = gamut_compress(rec709, CompressDest::Sdr { target_peak: 100.0 })
-                    .unwrap()
-                    .value;
-                let tone64 = d.map(|x| reference::eetf_to_target(x, peak, 100.0).unwrap().value);
-                let rec709_64 = reference::apply_matrix(BT2020_TO_BT709_F64, tone64).unwrap();
-                let sdr64 =
-                    reference::gamut_compress(rec709_64, CompressDest::Sdr { target_peak: 100.0 })
-                        .unwrap()
-                        .value;
-                for (a, e) in f64_3(sdr).iter().zip(sdr64.iter()) {
-                    max8 = max8.max((code8(*a) - code8(*e)).abs());
-                }
+                pb4_gate(&mut acc, pb4_chain_display(d, white, peak), d, white, peak);
             }
         }
     }
-    assert!(max10 <= 2.0, "PB4 10-bit max: {max10}");
-    let mean10 = sum10 / f64::from(n10);
+    // R1 B1 / CE6: composed matrix pair at W=203/P=400, saturated green
+    // (display [-0.084, 399.747, -0.025]; minors in nits, green in codes).
+    pb4_gate(
+        &mut acc,
+        matrix_delivery_chain(400.0, 203.0, 1),
+        [0.0, 400.0, 0.0],
+        203.0,
+        400.0,
+    );
+    assert!(acc.max10 <= 2.0, "PB4 10-bit max: {}", acc.max10);
+    let mean10 = acc.sum10 / f64::from(acc.n10);
     assert!(mean10 <= 0.08, "PB4 10-bit mean: {mean10}");
-    assert!(max8 <= 0.0, "PB4 8-bit max: {max8}");
+    assert!(acc.max8 <= 0.0, "PB4 8-bit max: {}", acc.max8);
     // HLG codes per working-ULP at white: oracle 0.1680400672866091.
     let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
     let c_up = reference::hlg_oetf((1.0 + ulp_w1()) * sw).unwrap();
