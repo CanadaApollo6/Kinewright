@@ -1518,6 +1518,71 @@ fn defect_unrelated_unreadable_journal_blocks_every_project() {
         "an unrelated recovery-dir entry blocked this project: {:?}",
         got.err()
     );
+    if let Ok(held) = got {
+        held.handle.release().unwrap();
+    }
+    // H4: a non-matched FIFO is skipped before any open — opening it would
+    // block the claimant under its flock. Bounded wait: never a hung test.
+    #[cfg(unix)]
+    {
+        let fifo = fx
+            .recovery
+            .join("zz-unrelated-fifo-0000000000000000.journal");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (project, recovery) = (fx.project.clone(), fx.recovery.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let got = claim(&project, &recovery, "http://b").map(|held| held.handle.release());
+            let _ = sender.send(format!("{got:?}"));
+        });
+        let verdict = receiver.recv_timeout(Duration::from_secs(5));
+        assert_eq!(
+            verdict.as_deref(),
+            Ok("Ok(Ok(()))"),
+            "a non-matched FIFO is skipped unopened"
+        );
+    }
+}
+
+/// H4 (race SW3): a NAME-matched journal refuses whatever its type — a
+/// symlink (live or dangling), a FIFO (never opened) or a directory — the
+/// name is evaluated before the regular-file filter.
+#[cfg(unix)]
+#[test]
+fn h4_name_matched_journal_of_any_type_refuses() {
+    for kind in ["symlink", "dangling", "fifo", "dir"] {
+        let fx = fixture("race-h4-named");
+        let named = fx.recovery.join(journal_file_name(&fx.project));
+        let real = fx.dir.path("elsewhere.journal-data");
+        match kind {
+            "symlink" | "dangling" => {
+                if kind == "symlink" {
+                    fs::write(&real, b"KINEWRIGHT-JOURNAL 1\n{}\n").unwrap();
+                }
+                std::os::unix::fs::symlink(&real, &named).unwrap();
+            }
+            "fifo" => assert!(
+                Command::new("mkfifo")
+                    .arg(&named)
+                    .status()
+                    .unwrap()
+                    .success()
+            ),
+            _ => fs::create_dir(&named).unwrap(),
+        }
+        let got = claim(&fx.project, &fx.recovery, "http://a");
+        assert!(
+            matches!(&got, Err(LockfileError::PendingRecovery { journal }) if *journal == named),
+            "{kind}: owned past a name-matched pending journal: {:?}",
+            got.map(|_| ())
+        );
+    }
 }
 
 /// G6/RS3: the takeover scan streams headers — a 256 MiB unrelated journal

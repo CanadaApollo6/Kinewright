@@ -224,8 +224,9 @@ fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Err
 
 /// Pending journal (AW1 §5/S7, F5/G5/G6): canonical and legacy bases,
 /// every `-N` allocator suffix of each, and header-matched aliases — first
-/// in name order. Only regular files scan (a directory or anything else
-/// named `*.journal` is skipped); names refuse without a header read.
+/// in name order. Name matches refuse first, whatever the entry type (H4);
+/// only regular non-matched files header-scan (anything else is skipped
+/// unopened).
 /// Missing dir means none pending.
 /// # Errors
 /// Returns the lookup IO error (fail-closed).
@@ -251,17 +252,6 @@ pub fn pending_journal_for_project(
     let mut pending = Vec::new();
     for entry in entries {
         let entry = entry?;
-        // G6/N1: only regular files scan — a directory (or a symlink, or
-        // anything else) named `*.journal` is skipped, never blocking an
-        // unrelated project. Indeterminate metadata fails closed.
-        let kind = match entry.file_type() {
-            Ok(kind) => kind,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        if !kind.is_file() {
-            continue;
-        }
         let journal = entry.path();
         if journal
             .extension()
@@ -279,7 +269,22 @@ pub fn pending_journal_for_project(
                         .as_deref()
                         .is_some_and(|third| journal_name_matches_for(third, name))
             });
-        if named || journal_header_names(&journal, &identity)? {
+        // H4: a name match refuses whatever the entry is (symlink, FIFO,
+        // dir) — checked first, without opening it.
+        if named {
+            pending.push(journal);
+            continue;
+        }
+        // G6/N1: only regular files header-scan — a non-matched directory,
+        // symlink, FIFO or other entry is skipped before any open (a FIFO
+        // would block), never blocking an unrelated project.
+        // Indeterminate metadata fails closed.
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if kind.is_file() && journal_header_names(&journal, &identity)? {
             pending.push(journal);
         }
     }

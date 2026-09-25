@@ -136,7 +136,12 @@ changes.
   at 1 MiB of header per alias candidate (over-limit headers are ignored
   as unverifiable); name-matched journals refuse without any header read;
   non-regular entries are skipped; only a read error on a regular file
-  fails closed. G10, journal-writer rule: a journal for an identity is
+  fails closed. Fix round 3, H4: the name match is evaluated first — a
+  name-matched entry of ANY type (symlink, FIFO, dir) refuses; only
+  non-matched non-regular entries are skipped, before any open. H5: a
+  project path with no canonical identity names its journal by its raw
+  spelling — a writer-side naming choice, not an identity fallback, since
+  the lock and the scan both refuse such a path typed. G10, journal-writer rule: a journal for an identity is
   created or renamed only while holding that identity's lock, including
   Save-As and first-save transitions.)
 - AF4 → §2: headless save shares the app's H12/J2/J3 transaction
@@ -182,7 +187,10 @@ changes.
   and persistence hardening (AF1–AF6: object/discovery split, symlink-
   safe publisher, legacy journals, rollback of establishment), not
   scope growth. S2–S6 ceilings are unchanged; the ledger script is the
-  method for every later stage.
+  method for every later stage. Fix round 3 (review-driven hardening:
+  typed identity refusal, Windows share mode, streaming header parse,
+  race nits) — ceiling 1,900; the growth is error handling and docs, not
+  scope.
 - S2-D1 (deferred, not fixed): an unloaded session's NON-EMPTY flush
   still replaces an occupied stem — pre-existing IN2B §2 rule-7
   behaviour, kept deliberately. A changed project save pairs (AF6); a
