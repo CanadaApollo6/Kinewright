@@ -1008,13 +1008,11 @@ impl KinewrightApp {
         }
         // N6/H12: the sidecar lands before the project bytes — snapshot
         // it first, so a failed project write rolls back (N6.1/J3: only
-        // absence reads as "no prior sidecar").
+        // absence reads as "no prior sidecar"; G4: establishment and both
+        // generation baselines roll with it).
         let rollback_sidecar = sidecar_path_for_project(self.focused().project_path.as_deref());
-        let rollback_plan = snapshot_sidecar_rollback(rollback_sidecar.as_deref());
-        // N6.1/J2: the flush advances the baselines past bytes the project
-        // write may never land — the failure arm restores the close retry.
-        let pre_flush_last_written = self.focused().last_written_gen;
-        let pre_flush_confirmed = self.focused().confirmed_written_gen;
+        let mut rollback_snapshot =
+            snapshot_sidecar_rollback(rollback_sidecar.as_deref(), self.focused());
         // `IN2B` §2 rule 6: a sidecar write failure never fails the project
         // save — exactly one incident, then the save carries on.
         match self
@@ -1036,12 +1034,16 @@ impl KinewrightApp {
             Ok(FlushOutcome::Occupied) => {
                 let stem = sidecar_path_for_project(self.focused().project_path.as_deref())
                     .expect("an occupied flush derived its stem");
-                if let Err(error) = refuse_sidecar(&stem) {
-                    self.focused_mut().project_path = old_path;
-                    self.focused_mut().sidecar_suspended = was_suspended;
-                    self.focused_mut().recovery_suspended = was_recovery_suspended;
-                    return Err(ProjectSaveError::Write(error.to_string()));
-                }
+                let moved = match refuse_sidecar(&stem) {
+                    Ok(moved) => moved,
+                    Err(error) => {
+                        self.focused_mut().project_path = old_path;
+                        self.focused_mut().sidecar_suspended = was_suspended;
+                        self.focused_mut().recovery_suspended = was_recovery_suspended;
+                        return Err(ProjectSaveError::Write(error.to_string()));
+                    }
+                };
+                rollback_snapshot.note_moved_aside(moved);
                 match self
                     .focused_mut()
                     .flush_incidents(&new_digest, &previous_digest)
@@ -1071,12 +1073,10 @@ impl KinewrightApp {
         let report = match write_project_bytes(&json, to_write, path, previous_store.as_ref()) {
             Ok(report) => report,
             Err(error) => {
-                rollback_sidecar_write(rollback_sidecar, rollback_plan);
+                rollback_sidecar_write(rollback_snapshot, self.focused_mut());
                 self.focused_mut().project_path = old_path;
                 self.focused_mut().sidecar_suspended = was_suspended;
                 self.focused_mut().recovery_suspended = was_recovery_suspended;
-                self.focused_mut().last_written_gen = pre_flush_last_written;
-                self.focused_mut().confirmed_written_gen = pre_flush_confirmed;
                 return Err(error);
             }
         };
@@ -13830,6 +13830,110 @@ mod in2b_tests {
             bak_bytes[0], foreign_bytes,
             "the old history sits in the .bak"
         );
+    }
+
+    /// G4/RB2 (app): a failed nonempty Save As onto an occupied stem
+    /// restores the foreign bytes, the baselines, AND the establishment it
+    /// never earned — and the empty-retry after the fix preserves-and-pairs
+    /// instead of wiping.
+    #[test]
+    fn g4_failed_save_as_restores_established_and_retry_preserves() {
+        let temp = TempDirectory::new("aw1-g4-save-as-rollback");
+        let target = temp.path("target.kinewright");
+        kinewright_project::write_project_document(&Document::default(), &target, None)
+            .expect("the target writes");
+        let foreign_digest = digest_bytes(&fs::read(&target).expect("the target reads"));
+        let mut foreign = kinewright_core::IncidentLog::with_start(std::time::Instant::now(), None);
+        let _ = foreign.observe(IncidentObservation::plain(
+            IncidentCode::Label(LabelIncident::Project),
+            IncidentSubject::Project,
+            "foreign history",
+            TimelineRevision::default(),
+        ));
+        let (records, _) = foreign.records(None, &std::collections::BTreeMap::new());
+        let foreign_bytes = kinewright_project::build_sidecar_bytes(
+            &records,
+            &[],
+            &foreign_digest,
+            &foreign_digest,
+        )
+        .expect("the foreign sidecar builds");
+        let target_sidecar = sidecar_path_for_project(Some(&target)).expect("derived");
+        fs::write(&target_sidecar, &foreign_bytes).expect("the foreign stem writes");
+        let mut source = Document::default();
+        source.markers.push(Marker {
+            id: MarkerId(7),
+            position: kinewright_core::TimeCode(0),
+            label: "g4 edit".to_owned(),
+            color_token: 0,
+        });
+        let (mut app, engine) = in2b_harness(source, None);
+        in2b_observe_opens(&app.projects[0], 1, 41);
+        assert!(
+            !app.focused().established.contains(&target_sidecar),
+            "the target starts unestablished"
+        );
+        let last = app.focused().last_written_gen;
+        let confirmed = app.focused().confirmed_written_gen;
+        // Fail the project write the H12 way: a directory takes the target.
+        let stash = temp.path("target.kinewright.stashed");
+        fs::rename(&target, &stash).expect("the target file moves aside");
+        fs::create_dir(&target).expect("a directory takes its place");
+        assert!(
+            matches!(app.write_project(&target), Err(ProjectSaveError::Write(_))),
+            "the project write fails"
+        );
+        // Collected before shutdown; asserted after — a red assert must
+        // never unwind past the engine quiesce (worker teardown race).
+        let stem_after = fs::read(&target_sidecar).expect("the stem re-reads");
+        let member_after = app.focused().established.contains(&target_sidecar);
+        let last_after = app.focused().last_written_gen;
+        let confirmed_after = app.focused().confirmed_written_gen;
+        let mut baks_after = 0;
+        for entry in fs::read_dir(temp.root()).expect("the dir reads") {
+            let entry = entry.expect("a readable entry");
+            if entry.file_name().to_string_lossy().contains(".bak") {
+                baks_after += 1;
+            }
+        }
+        // Fix the IO failure, empty the log, retry: G3 pairs, and the
+        // foreign history survives in the `.bak`.
+        fs::remove_dir(&target).expect("cleanup");
+        fs::rename(&stash, &target).expect("the target file returns");
+        app.focused()
+            .incidents
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove_open_with_code(IncidentCode::Label(LabelIncident::Project));
+        app.write_project(&target).expect("the retry succeeds");
+        let new_digest = digest_bytes(&fs::read(&target).expect("the target re-reads"));
+        let SidecarLoad::Current(current) = load_sidecar(&target_sidecar) else {
+            panic!("the retried sidecar parses");
+        };
+        let paired = current.project_digest.clone();
+        let mut bak = target_sidecar.as_os_str().to_owned();
+        bak.push(".bak");
+        let bak_bytes = fs::read(std::path::PathBuf::from(bak)).expect("the .bak reads");
+        let member_retry = app.focused().established.contains(&target_sidecar);
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+        assert_eq!(
+            stem_after, foreign_bytes,
+            "the stem rolls back to the foreign bytes"
+        );
+        assert!(!member_after, "the rollback removes the unearned stem");
+        assert_eq!(
+            (last_after, confirmed_after),
+            (last, confirmed),
+            "the baselines roll back with the bytes"
+        );
+        assert_eq!(baks_after, 0, "no .bak litter from the failed save");
+        assert_eq!(paired, new_digest, "the retry pairs on the new digest");
+        assert_eq!(
+            bak_bytes, foreign_bytes,
+            "the foreign history survives the retry in the .bak"
+        );
+        assert!(member_retry, "the landed retry establishes");
     }
 
     /// What the investigator queue still holds, read through the

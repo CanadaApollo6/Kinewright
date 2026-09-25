@@ -44,9 +44,7 @@ pub fn save_headless(
     let new_digest = digest_bytes(json.as_bytes());
     // N6/H12+J2 (as in `write_project`): snapshot for rollback.
     let rollback_sidecar = sidecar_path_for_project(Some(path));
-    let rollback_plan = snapshot_sidecar_rollback(rollback_sidecar.as_deref());
-    let pre_flush_last_written = sidecar.last_written_gen;
-    let pre_flush_confirmed = sidecar.confirmed_written_gen;
+    let mut rollback_snapshot = snapshot_sidecar_rollback(rollback_sidecar.as_deref(), sidecar);
     let sidecar_outcome =
         match sidecar.flush_incidents(Some(path), &new_digest, previous_digest, |_| None) {
             Ok(outcome) => Ok(outcome),
@@ -73,7 +71,9 @@ pub fn save_headless(
                     "an occupied flush derived no stem".to_owned(),
                 ));
             };
-            refuse_sidecar(&stem).map_err(|error| ProjectSaveError::Write(error.to_string()))?;
+            let moved = refuse_sidecar(&stem)
+                .map_err(|error| ProjectSaveError::Write(error.to_string()))?;
+            rollback_snapshot.note_moved_aside(moved);
             match sidecar.flush_incidents(Some(path), &new_digest, previous_digest, |_| None) {
                 Ok(FlushOutcome::Written(report)) => Ok(FlushOutcome::Written(report)),
                 Err(error) => {
@@ -101,9 +101,7 @@ pub fn save_headless(
     let project = match crate::project::write_project_bytes(&json, document, path, previous_store) {
         Ok(report) => report,
         Err(error) => {
-            rollback_sidecar_write(rollback_sidecar, rollback_plan);
-            sidecar.last_written_gen = pre_flush_last_written;
-            sidecar.confirmed_written_gen = pre_flush_confirmed;
+            rollback_sidecar_write(rollback_snapshot, sidecar);
             return Err(error);
         }
     };
@@ -483,6 +481,10 @@ mod tests {
             session.saved_digest, saved_digest,
             "the session keeps its old digest"
         );
+        assert!(
+            session.established.contains(&sidecar),
+            "an earned stem survives the rollback"
+        );
         for entry in std::fs::read_dir(dir.root()).expect("the dir reads") {
             let entry = entry.expect("a readable entry");
             assert!(
@@ -529,6 +531,10 @@ mod tests {
         assert!(
             !sidecar.exists(),
             "the rollback removes the flushed sidecar"
+        );
+        assert!(
+            !session.established.contains(&sidecar),
+            "the rollback removes the unearned stem"
         );
         std::fs::remove_dir(&target).expect("cleanup");
     }
@@ -593,6 +599,120 @@ mod tests {
             current.records.len(),
             2,
             "the close flush rewrote both records"
+        );
+    }
+
+    /// G4/RB2: a failed nonempty Save As onto an occupied stem restores the
+    /// foreign bytes AND the establishment it never earned — and the
+    /// empty-retry after the fix preserves-and-pairs instead of wiping.
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn g4_failed_save_as_restores_established_and_retry_preserves() {
+        let dir = TempDirectory::new("aw1-g4-save-as-rollback");
+        let source = dir.path("source.kinewright");
+        let target = dir.path("target.kinewright");
+        let recovery = dir.path("recovery");
+        std::fs::create_dir(&recovery).expect("the recovery dir creates");
+        write_project_document(&Document::default(), &source, None).expect("source writes");
+        write_project_document(&Document::default(), &target, None).expect("target writes");
+        let foreign_digest = digest_bytes(&std::fs::read(&target).expect("the target reads"));
+        let mut foreign = kinewright_core::IncidentLog::with_start(std::time::Instant::now(), None);
+        foreign.observe(IncidentObservation::plain(
+            IncidentCode::Label(LabelIncident::Project),
+            IncidentSubject::Project,
+            "foreign history",
+            TimelineRevision::default(),
+        ));
+        let (records, _) = foreign.records(None, &std::collections::BTreeMap::new());
+        let foreign_bytes = build_sidecar_bytes(&records, &[], &foreign_digest, &foreign_digest)
+            .expect("the foreign sidecar builds");
+        let target_sidecar = sidecar_path_for_project(Some(&target)).expect("derived");
+        std::fs::write(&target_sidecar, &foreign_bytes).expect("the foreign stem writes");
+        let mut session = loaded_session(&source);
+        note(&session, "aw1 g4 record one");
+        assert!(
+            !session.established.contains(&target_sidecar),
+            "the target starts unestablished"
+        );
+        let stash = dir.path("target.kinewright.stashed");
+        std::fs::rename(&target, &stash).expect("the target file moves aside");
+        std::fs::create_dir(&target).expect("a directory takes its place");
+        let mut changed = Document::default();
+        changed.markers.push(kinewright_core::Marker {
+            id: kinewright_core::MarkerId(7),
+            position: kinewright_core::TimeCode::ZERO,
+            label: "g4 edit".to_owned(),
+            color_token: 0,
+        });
+        assert!(
+            matches!(
+                save_headless(
+                    &changed,
+                    &target,
+                    None,
+                    &mut session,
+                    "",
+                    TimelineRevision::default(),
+                    &recovery,
+                ),
+                Err(ProjectSaveError::Write(_))
+            ),
+            "the project write fails"
+        );
+        assert_eq!(
+            std::fs::read(&target_sidecar).expect("the stem re-reads"),
+            foreign_bytes,
+            "the stem rolls back to the foreign bytes"
+        );
+        assert!(
+            !session.established.contains(&target_sidecar),
+            "the rollback removes the unearned stem"
+        );
+        let baks = std::fs::read_dir(dir.root())
+            .expect("the dir reads")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".bak"))
+            .count();
+        assert_eq!(baks, 0, "no .bak litter from the failed save");
+        std::fs::remove_dir(&target).expect("cleanup");
+        std::fs::rename(&stash, &target).expect("the target file returns");
+        session
+            .incidents
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove_open_with_code(IncidentCode::Label(LabelIncident::Project));
+        let report = save_headless(
+            &changed,
+            &target,
+            None,
+            &mut session,
+            "",
+            TimelineRevision::default(),
+            &recovery,
+        )
+        .expect("the retry succeeds");
+        assert!(
+            matches!(report.sidecar, Ok(FlushOutcome::Written(_))),
+            "the retry pairs, got {:?}",
+            report.sidecar
+        );
+        let SidecarLoad::Current(current) = load_sidecar(&target_sidecar) else {
+            panic!("the retried sidecar parses");
+        };
+        assert_eq!(
+            current.project_digest, report.project.digest,
+            "the retry pairs on the new digest"
+        );
+        let mut bak = target_sidecar.as_os_str().to_owned();
+        bak.push(".bak");
+        assert_eq!(
+            std::fs::read(std::path::PathBuf::from(bak)).expect("the .bak reads"),
+            foreign_bytes,
+            "the foreign history survives the retry in the .bak"
+        );
+        assert!(
+            session.established.contains(&target_sidecar),
+            "the landed retry establishes"
         );
     }
 

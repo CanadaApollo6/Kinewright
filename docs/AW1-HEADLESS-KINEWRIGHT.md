@@ -104,7 +104,11 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
 - AF4 → §2: headless save shares the app's H12/J2/J3 transaction
   machinery (`SidecarRollback` in `kinewright-project`): snapshot and
   restore the destination sidecar and both generation baselines on
-  project-write failure, including unreadable-sidecar preservation.
+  project-write failure, including unreadable-sidecar preservation. (Fix
+  round 2, G4: establishment membership rolls with the transaction too,
+  plus G3's `.bak` move — the `.bak` moves back exactly, else the bytes
+  plan runs; a `.bak` whose move-back fails is left beside the restore,
+  never deleted.)
 - AF5 → §5: claims carry the real OS hostname (new tiny `gethostname`
   dependency — std has none and the crate forbids `unsafe`; already in
   the lockfile). A stale claim from a KNOWN foreign host refuses

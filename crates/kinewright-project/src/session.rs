@@ -408,40 +408,84 @@ impl SidecarSession {
     }
 }
 
-/// H12 rollback plan (N6.1/J3): restore, remove, or skip (never delete unreadable).
-pub enum SidecarRollback {
+/// H12 rollback bytes plan (N6.1/J3): restore, remove, or skip (never
+/// delete unreadable).
+enum RollbackBytes {
     Restore(Vec<u8>),
     Remove,
     Skip,
 }
 
-/// Snapshot the H12 rollback (N6.1/J3, F6): shared by app and headless.
-#[must_use]
-pub fn snapshot_sidecar_rollback(sidecar: Option<&Path>) -> SidecarRollback {
-    let Some(sidecar) = sidecar else {
-        return SidecarRollback::Skip;
-    };
-    match fs::read(sidecar) {
-        Ok(bytes) => SidecarRollback::Restore(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SidecarRollback::Remove,
-        Err(_) => SidecarRollback::Skip,
+/// What a failed save restores (N6.1/J3, F6/G4): the destination sidecar's
+/// bytes plan plus the session state the flush advanced — establishment
+/// membership, both generation baselines, and G3's `.bak` move. Snapshotted
+/// before the flush; the save path records the `.bak` move after it.
+pub struct SidecarRollback {
+    sidecar: Option<PathBuf>,
+    bytes: RollbackBytes,
+    established: BTreeSet<PathBuf>,
+    last_written_gen: u64,
+    confirmed_written_gen: u64,
+    moved_aside: Option<PathBuf>,
+}
+
+impl SidecarRollback {
+    /// Record G3's `.bak` move for the rollback (the move lands after the
+    /// snapshot, so it cannot be captured there).
+    pub fn note_moved_aside(&mut self, moved: PathBuf) {
+        self.moved_aside = Some(moved);
     }
 }
 
-/// Run the H12 rollback (F6); best-effort, degrades to a re-flush.
-pub fn rollback_sidecar_write(sidecar: Option<PathBuf>, plan: SidecarRollback) {
-    let Some(sidecar) = sidecar else {
-        return;
+/// Snapshot the H12 rollback (N6.1/J3, F6/G4): shared by app and headless.
+#[must_use]
+pub fn snapshot_sidecar_rollback(
+    sidecar: Option<&Path>,
+    session: &SidecarSession,
+) -> SidecarRollback {
+    let bytes = match sidecar {
+        None => RollbackBytes::Skip,
+        Some(sidecar) => match fs::read(sidecar) {
+            Ok(bytes) => RollbackBytes::Restore(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => RollbackBytes::Remove,
+            Err(_) => RollbackBytes::Skip,
+        },
     };
-    match plan {
-        SidecarRollback::Restore(bytes) => {
-            let _ = write_file_atomic(&sidecar, &bytes);
-        }
-        SidecarRollback::Remove => {
-            let _ = fs::remove_file(sidecar);
-        }
-        SidecarRollback::Skip => {}
+    SidecarRollback {
+        sidecar: sidecar.map(Path::to_path_buf),
+        bytes,
+        established: session.established.clone(),
+        last_written_gen: session.last_written_gen,
+        confirmed_written_gen: session.confirmed_written_gen,
+        moved_aside: None,
     }
+}
+
+/// Run the H12 rollback (F6/G4): the `.bak` moves back first (exact bytes,
+/// perms, and mtime — and the only restore when the stem was unreadable),
+/// else the bytes plan runs; then establishment and both baselines return.
+/// Best-effort throughout, degrading to a re-flush. A `.bak` whose move-back
+/// fails stays beside the bytes-plan restore — history is never deleted.
+pub fn rollback_sidecar_write(snapshot: SidecarRollback, session: &mut SidecarSession) {
+    let moved_back = snapshot
+        .moved_aside
+        .as_deref()
+        .zip(snapshot.sidecar.as_deref())
+        .is_some_and(|(moved, sidecar)| fs::rename(moved, sidecar).is_ok());
+    if !moved_back {
+        match (snapshot.sidecar, snapshot.bytes) {
+            (Some(sidecar), RollbackBytes::Restore(bytes)) => {
+                let _ = write_file_atomic(&sidecar, &bytes);
+            }
+            (Some(sidecar), RollbackBytes::Remove) => {
+                let _ = fs::remove_file(sidecar);
+            }
+            _ => {}
+        }
+    }
+    session.established = snapshot.established;
+    session.last_written_gen = snapshot.last_written_gen;
+    session.confirmed_written_gen = snapshot.confirmed_written_gen;
 }
 
 #[cfg(test)]
