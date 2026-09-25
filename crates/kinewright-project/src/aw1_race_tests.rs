@@ -20,7 +20,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         Arc, Barrier,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -1351,5 +1351,88 @@ fn fifo_discovery_does_not_hang_the_claim() {
     assert!(
         verdict.starts_with("Ok("),
         "the free lock reclaims, got {verdict}"
+    );
+}
+
+// ───────────────────────── G2: forked duplicates ─────────────────────────
+
+/// The `ForeignHost` refusal path closes its flocked file with a bare `drop`
+/// (lockfile.rs, `drop(file)` before `return Err(ForeignHost…)`) — not the
+/// explicit `unlock_attempt` every other held-refusal path uses. Under a
+/// concurrent spawn storm (every fork copies the fd table until exec), a
+/// refusal can leave the flock held by a forked duplicate, so an immediate
+/// second claimant reads `Contention` instead of `ForeignHost`. The release
+/// path (explicit unlock) is the control.
+#[cfg(unix)]
+#[test]
+fn defect_foreign_refusal_leaks_its_flock_to_forked_children() {
+    let fx = fixture("race-foreign-storm");
+    let discovery = plant_stale(&fx, "http://foreign");
+    patch_discovery(
+        &discovery,
+        "hostname",
+        serde_json::json!("other-machine.invalid"),
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let spawned = Arc::new(AtomicUsize::new(0));
+    let storm: Vec<_> = (0..4)
+        .map(|_| {
+            let (stop, spawned) = (stop.clone(), spawned.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(mut child) = Command::new("true")
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                    {
+                        let _ = child.wait();
+                        spawned.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })
+        })
+        .collect();
+    let rounds = iterations() * 25;
+    let mut foreign_leaks = 0;
+    let attempts = rounds * 2;
+    for _ in 0..attempts {
+        // Every claim must read ForeignHost; `Contention` means an earlier
+        // refusal's flock is still held — by a forked duplicate.
+        match claim(&fx.project, &fx.recovery, "http://a") {
+            Err(LockfileError::ForeignHost { .. }) => {}
+            Err(LockfileError::Contention { .. }) => foreign_leaks += 1,
+            other => panic!("{other:?}"),
+        }
+    }
+    // Control: the explicit-unlock release path under the same storm.
+    let control = fixture("race-release-storm");
+    let mut release_leaks = 0;
+    for _ in 0..rounds {
+        claim(&control.project, &control.recovery, "http://a")
+            .unwrap()
+            .handle
+            .release()
+            .unwrap();
+        match claim(&control.project, &control.recovery, "http://b") {
+            Ok(got) => got.handle.release().unwrap(),
+            Err(_) => release_leaks += 1,
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    for thread in storm {
+        thread.join().unwrap();
+    }
+    eprintln!(
+        "RACE: spawn storm ({} spawns): foreign-refusal leaks {foreign_leaks}/{attempts}, release-path leaks {release_leaks}/{rounds}",
+        spawned.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        release_leaks, 0,
+        "the explicit-unlock control must be clean"
+    );
+    assert_eq!(
+        foreign_leaks, 0,
+        "the ForeignHost refusal left its flock with a forked duplicate"
     );
 }

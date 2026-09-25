@@ -81,7 +81,10 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
   remove the temp and report `Io`. The holder sweeps its own stale publish
   temps after the flock. A lock object that is a symlink refuses with typed
   `Io` (Unix also re-checks the fd against the path after open), and
-  discovery reads only regular files, bounded at 64 KiB.)
+  discovery reads only regular files, bounded at 64 KiB. G2: every
+  post-flock exit — all refusals and the success hand-off — goes through an
+  acquired-flock RAII guard whose drop unlocks explicitly before closing, so
+  the ForeignHost arm's former bare close is covered too.)
 - AF2 → §5, §6: one canonical project identity — full canonical path
   when the target exists, else canonical parent dir plus file name
   (relative resolves at the cwd; raw path when nothing resolves). Lock,

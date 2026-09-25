@@ -280,6 +280,36 @@ fn unlock_attempt(file: &File) {
     let _ = file.unlock();
 }
 
+/// A held flock that unlocks explicitly on every exit (G2): taken
+/// immediately after a successful `try_lock_exclusive`, its drop runs
+/// `unlock_attempt` before the close — so every post-flock refusal unlocks
+/// past forked duplicates by construction, with no per-arm calls to forget.
+/// The success path hands the live flock to [`LockfileHandle`] via
+/// `release`, which skips the unlock (the handle owns the live lock; its
+/// own drop unlocks).
+struct FlockGuard {
+    file: Option<File>,
+}
+
+impl FlockGuard {
+    fn held(file: File) -> Self {
+        Self { file: Some(file) }
+    }
+
+    /// Hand the live flock to its handle without unlocking.
+    fn release(mut self) -> File {
+        self.file.take().expect("a held flock releases once")
+    }
+}
+
+impl Drop for FlockGuard {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            unlock_attempt(&file);
+        }
+    }
+}
+
 /// The discovery temp nonce: `.<file>.<pid>.<nonce>.tmp` is unique per
 /// process, and `create_new` retries past stale siblings anyway.
 static DISCOVERY_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -528,6 +558,8 @@ pub fn acquire_project_lock_with_policy(
             std::thread::sleep(retry_delay);
             continue;
         }
+        // Holding the flock: every exit below goes through the guard.
+        let guard = FlockGuard::held(file);
         // Holding the flock: sweep our own stale publish temps first.
         sweep_discovery_temps(&discovery_path);
         #[cfg(any(test, feature = "test-util"))]
@@ -535,12 +567,10 @@ pub fn acquire_project_lock_with_policy(
         // Holding the flock: pending recovery (or lookup failure) refuses first.
         match pending_journal_for_project(recovery_dir, project_path) {
             Ok(Some(journal)) => {
-                unlock_attempt(&file);
                 return Err(LockfileError::PendingRecovery { journal });
             }
             Ok(None) => {}
             Err(error) => {
-                unlock_attempt(&file);
                 return Err(LockfileError::RecoveryLookup {
                     reason: error.to_string(),
                 });
@@ -553,7 +583,6 @@ pub fn acquire_project_lock_with_policy(
             .as_ref()
             .filter(|owner| owner.hostname != UNKNOWN_HOSTNAME && owner.hostname != claim.hostname)
         {
-            drop(file);
             return Err(LockfileError::ForeignHost {
                 host: refused.hostname.clone(),
                 endpoint: refused.endpoint.clone(),
@@ -563,13 +592,12 @@ pub fn acquire_project_lock_with_policy(
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_flock_before_publish");
         if let Err(error) = write_discovery(&discovery_path, &claim) {
-            unlock_attempt(&file);
             return Err(LockfileError::Io(error.to_string()));
         }
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_publish_before_return"); // RACE-REVIEW
         return Ok(AcquiredLock {
-            handle: LockfileHandle::held(lock_path, discovery_path, claim, file),
+            handle: LockfileHandle::held(lock_path, discovery_path, claim, guard.release()),
             reclaimed: previous,
         });
     }
