@@ -14,7 +14,7 @@ pub use lockfile::{
     AcquiredLock, LOCK_ACQUIRE_ATTEMPTS, LOCK_ACQUIRE_RETRY_DELAY, LOCKFILE_FORMAT_VERSION,
     LOCKFILE_SUFFIX, LockMode, LockfileClaim, LockfileError, LockfileHandle, ReclaimedOwner,
     acquire_project_lock, acquire_project_lock_with_policy, discovery_path_for_project,
-    lockfile_path_for_project, reclaim_warning_json,
+    lockfile_path_for_project, reclaim_warning_json, reclaim_warning_json_unreadable,
 };
 pub use project::{
     ProjectFile, ProjectSaveError, ProjectSaveReport, can_overwrite_save,

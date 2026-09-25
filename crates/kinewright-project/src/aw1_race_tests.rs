@@ -218,6 +218,7 @@ fn hammer(
 ) -> HammerStats {
     let marker = witness.join("owner.marker");
     let last_exit = witness.join("last-exit");
+    let own = current_hostname();
     let mut rng = Rng(seed | 1);
     let mut stats = HammerStats::default();
     for round in 0..rounds {
@@ -242,8 +243,8 @@ fn hammer(
                         false
                     }
                 };
-                match read_owner(&acquired.handle.discovery) {
-                    Some(owner) if owner.endpoint == endpoint => {}
+                match read_owner(&acquired.handle.discovery, &own) {
+                    DiscoveryRead::Owner(owner) if owner.endpoint == endpoint => {}
                     other => stats
                         .violations
                         .push(format!("{endpoint}: discovery names {other:?}")),
@@ -1435,4 +1436,66 @@ fn defect_foreign_refusal_leaks_its_flock_to_forked_children() {
         foreign_leaks, 0,
         "the ForeignHost refusal left its flock with a forked duplicate"
     );
+}
+
+// ───────────────────────── G7: unreadable discovery ─────────────────────────
+
+/// AF1: "Stale discovery with a free lock reclaims with a warning." A torn
+/// or unparseable stale discovery reclaims WITH the typed unreadable
+/// warning (G7) — except the pid-overflow shape, whose lenient hostname is
+/// a known foreign host and refuses under AF5 instead. Nothing reclaims
+/// silently.
+#[test]
+fn defect_garbage_stale_discovery_reclaims_without_warning() {
+    let mut silent = Vec::new();
+    for (name, bytes) in garbage_variants() {
+        let fx = fixture("race-garbage-free");
+        let discovery = plant_stale(&fx, "http://dead");
+        fs::write(&discovery, &bytes).unwrap();
+        if name == "pid-overflow" {
+            let got = claim(&fx.project, &fx.recovery, "http://new");
+            assert!(
+                matches!(&got, Err(LockfileError::ForeignHost { host, .. }) if host == "h"),
+                "{name}: a lenient foreign hostname refuses, got {got:?}"
+            );
+            continue;
+        }
+        let got = claim(&fx.project, &fx.recovery, "http://new").expect("the free lock reclaims");
+        if got.reclaimed.is_none() || !got.reclaimed_unreadable {
+            silent.push(name);
+        } else {
+            got.handle.release().unwrap();
+        }
+    }
+    assert!(
+        silent.is_empty(),
+        "stale discovery reclaimed with no warning for: {silent:?}"
+    );
+}
+
+/// AF5 fail-open: a stale claim from a KNOWN foreign host that this build
+/// cannot parse (a newer writer: new `mode` variant, or a field this build
+/// lacks) bypasses the foreign-host refusal and is reclaimed silently.
+#[test]
+fn defect_unparseable_foreign_claim_bypasses_foreign_host() {
+    for (name, patch) in [
+        ("future-mode", ("mode", serde_json::json!("cloud"))),
+        ("pid-as-string", ("pid", serde_json::json!("4242"))),
+    ] {
+        let fx = fixture("race-future-foreign");
+        let discovery = plant_stale(&fx, "http://foreign");
+        patch_discovery(
+            &discovery,
+            "hostname",
+            serde_json::json!("other-machine.invalid"),
+        );
+        patch_discovery(&discovery, "format_version", serde_json::json!(2));
+        patch_discovery(&discovery, patch.0, patch.1);
+        let got = claim(&fx.project, &fx.recovery, "http://local");
+        assert!(
+            matches!(&got, Err(LockfileError::ForeignHost { host, .. }) if host == "other-machine.invalid"),
+            "{name}: a known foreign host must refuse, got {:?}",
+            got.map(|a| a.reclaimed)
+        );
+    }
 }

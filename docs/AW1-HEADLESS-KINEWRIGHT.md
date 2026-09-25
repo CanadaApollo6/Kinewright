@@ -84,7 +84,11 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
   discovery reads only regular files, bounded at 64 KiB. G2: every
   post-flock exit — all refusals and the success hand-off — goes through an
   acquired-flock RAII guard whose drop unlocks explicitly before closing, so
-  the ForeignHost arm's former bare close is covered too.)
+  the ForeignHost arm's former bare close is covered too. G7: "absent"
+  splits from "present but unreadable" — an unreadable stale discovery with
+  a free lock reclaims with a typed `lock_reclaimed` warning carrying
+  `previous_unreadable: true` (and a pid-0/`unknown` sentinel triple), while
+  absence reclaims silently.)
 - AF2 → §5, §6: one canonical project identity — full canonical path
   when the target exists, else canonical parent dir plus file name
   (relative resolves at the cwd; raw path when nothing resolves). Lock,
@@ -105,7 +109,9 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
   dependency — std has none and the crate forbids `unsafe`; already in
   the lockfile). A stale claim from a KNOWN foreign host refuses
   takeover (`ForeignHost` naming the host); `unknown`-host claims
-  predate real hostnames and still reclaim. Limit: flock liveness is
+  predate real hostnames and still reclaim. (G7: the foreign check also
+  reads leniently — a claim this build cannot parse still refuses when its
+  hostname string names a known foreign host.) Limit: flock liveness is
   host-local, so on local-lock network filesystems a free lock proves
   nothing about a foreign owner — AW1 claims no multi-host exclusion.
 - AF6 → §2 (S1-delta refinement, GUARD-B): the session tracks an

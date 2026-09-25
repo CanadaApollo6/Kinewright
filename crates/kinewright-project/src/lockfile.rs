@@ -229,7 +229,12 @@ impl Drop for LockfileHandle {
 pub struct AcquiredLock {
     pub handle: LockfileHandle,
     /// The reclaimed owner, when set (warn via [`reclaim_warning_json`]).
+    /// An unreadable previous discovery reclaims a pid-0/`unknown` sentinel
+    /// with [`AcquiredLock::reclaimed_unreadable`] set — warn via
+    /// [`reclaim_warning_json_unreadable`] instead.
     pub reclaimed: Option<ReclaimedOwner>,
+    /// The reclaimed discovery existed but was unreadable (G7).
+    pub reclaimed_unreadable: bool,
 }
 
 /// The typed JSON warning a reclaim owes on stderr (AW1 §5).
@@ -244,33 +249,87 @@ pub fn reclaim_warning_json(previous: &ReclaimedOwner) -> String {
     .to_string()
 }
 
+/// The typed JSON warning an unreadable-discovery reclaim owes (G7).
+#[must_use]
+pub fn reclaim_warning_json_unreadable() -> String {
+    serde_json::json!({
+        "code": "lock_reclaimed",
+        "previous_unreadable": true,
+    })
+    .to_string()
+}
+
 /// The most a discovery read takes: claims are small JSON; anything
 /// larger (or a link to `/dev/zero`) reads as unreadable, never unbounded.
 const DISCOVERY_READ_LIMIT: u64 = 64 * 1024;
 
-/// Triple at a discovery path (`None` if missing/torn); legal while held (B4).
-/// Only a regular file reads, bounded (G1): a FIFO, device, directory, or
-/// symlink is unreadable, and the read never blocks on a FIFO's open nor
-/// overruns on a huge file.
-fn read_owner(discovery_path: &Path) -> Option<ReclaimedOwner> {
+/// What the discovery read found (G7): absent splits from present-but-
+/// unreadable, and a lenient pass still catches a known foreign hostname
+/// inside a claim this build cannot parse (AF5 during version skew).
+#[derive(Debug)]
+enum DiscoveryRead {
+    /// No discovery file: a fresh acquire, no warning owed.
+    Absent,
+    /// A parsed claim's triple.
+    Owner(ReclaimedOwner),
+    /// Unparseable, but the lenient pass found a foreign hostname string.
+    Foreign { host: String, endpoint: String },
+    /// Present but unreadable (a special file, a read error, over-limit, or
+    /// unparseable with no usable hostname): reclaims WITH a warning.
+    Unreadable,
+}
+
+/// Triple at a discovery path; legal while held (B4). Only a regular file
+/// reads, bounded (G1): a FIFO, device, directory, or symlink is
+/// unreadable, and the read never blocks on a FIFO's open nor overruns on
+/// a huge file.
+fn read_owner(discovery_path: &Path, own_hostname: &str) -> DiscoveryRead {
     use std::io::Read as _;
-    if !fs::symlink_metadata(discovery_path).is_ok_and(|meta| meta.file_type().is_file()) {
-        return None;
+    match fs::symlink_metadata(discovery_path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return DiscoveryRead::Absent,
+        Err(_) => return DiscoveryRead::Unreadable,
+        Ok(meta) if !meta.file_type().is_file() => return DiscoveryRead::Unreadable,
+        Ok(_) => {}
     }
-    let file = fs::File::open(discovery_path).ok()?;
+    let file = match fs::File::open(discovery_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return DiscoveryRead::Absent,
+        Err(_) => return DiscoveryRead::Unreadable,
+    };
     let mut bytes = Vec::new();
-    file.take(DISCOVERY_READ_LIMIT + 1)
+    if file
+        .take(DISCOVERY_READ_LIMIT + 1)
         .read_to_end(&mut bytes)
-        .ok()?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > DISCOVERY_READ_LIMIT {
-        return None;
+        .is_err()
+        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > DISCOVERY_READ_LIMIT
+    {
+        return DiscoveryRead::Unreadable;
     }
-    let claim: LockfileClaim = serde_json::from_slice(&bytes).ok()?;
-    Some(ReclaimedOwner {
-        pid: claim.pid,
-        hostname: claim.hostname,
-        endpoint: claim.endpoint,
-    })
+    if let Ok(claim) = serde_json::from_slice::<LockfileClaim>(&bytes) {
+        return DiscoveryRead::Owner(ReclaimedOwner {
+            pid: claim.pid,
+            hostname: claim.hostname,
+            endpoint: claim.endpoint,
+        });
+    }
+    // Lenient (G7/AF5): a hostname string that is neither this host nor
+    // `unknown` still refuses, however unparseable the rest of the claim.
+    // (Exact spelling until G11 normalises both this and the strict path.)
+    if let Some(value) = serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+        && let Some(host) = value.get("hostname").and_then(serde_json::Value::as_str)
+        && host != UNKNOWN_HOSTNAME
+        && host != own_hostname
+    {
+        let endpoint = value
+            .get("endpoint")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        return DiscoveryRead::Foreign {
+            host: host.to_owned(),
+            endpoint: endpoint.to_owned(),
+        };
+    }
+    DiscoveryRead::Unreadable
 }
 
 /// Release an acquire attempt's flock before its close: explicit
@@ -325,6 +384,39 @@ static DISCOVERY_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// while holding the lock — the flock serialises publishers.
 fn write_discovery(discovery_path: &Path, claim: &LockfileClaim) -> io::Result<()> {
     write_discovery_with_rename(discovery_path, claim, None)
+}
+
+/// Decide a free lock's claim from its discovery (G7): a known foreign host
+/// refuses (strict or lenient); an unreadable stale discovery reclaims a
+/// pid-0/`unknown` sentinel flagged unreadable; absence is fresh. F7:
+/// unknown-host claims predate real hostnames and still reclaim.
+fn decide_free_claim(
+    discovery_path: &Path,
+    own_hostname: &str,
+) -> Result<(Option<ReclaimedOwner>, bool), LockfileError> {
+    match read_owner(discovery_path, own_hostname) {
+        DiscoveryRead::Absent => Ok((None, false)),
+        DiscoveryRead::Owner(owner)
+            if owner.hostname != UNKNOWN_HOSTNAME && owner.hostname != own_hostname =>
+        {
+            Err(LockfileError::ForeignHost {
+                host: owner.hostname,
+                endpoint: owner.endpoint,
+            })
+        }
+        DiscoveryRead::Owner(owner) => Ok((Some(owner), false)),
+        DiscoveryRead::Foreign { host, endpoint } => {
+            Err(LockfileError::ForeignHost { host, endpoint })
+        }
+        DiscoveryRead::Unreadable => Ok((
+            Some(ReclaimedOwner {
+                pid: 0,
+                hostname: UNKNOWN_HOSTNAME.to_owned(),
+                endpoint: String::new(),
+            }),
+            true,
+        )),
+    }
 }
 
 /// [`write_discovery`] with the rename injected: `None` renames for real.
@@ -546,9 +638,13 @@ pub fn acquire_project_lock_with_policy(
             continue;
         }
         if file.try_lock_exclusive().is_err() {
-            // Held: contention, never a steal.
+            // Held: contention, never a steal. Only a parsed claim names
+            // its owner; anything unreadable contends ownerless.
             drop(file);
-            let owner = read_owner(&discovery_path);
+            let owner = match read_owner(&discovery_path, &claim.hostname) {
+                DiscoveryRead::Owner(owner) => Some(owner),
+                _ => None,
+            };
             if last {
                 return Err(LockfileError::Contention {
                     path: project_path.to_path_buf(),
@@ -576,18 +672,7 @@ pub fn acquire_project_lock_with_policy(
                 });
             }
         }
-        let previous = read_owner(&discovery_path);
-        // F7: a KNOWN foreign host refuses; unknown-host claims predate
-        // real hostnames and still reclaim.
-        if let Some(refused) = previous
-            .as_ref()
-            .filter(|owner| owner.hostname != UNKNOWN_HOSTNAME && owner.hostname != claim.hostname)
-        {
-            return Err(LockfileError::ForeignHost {
-                host: refused.hostname.clone(),
-                endpoint: refused.endpoint.clone(),
-            });
-        }
+        let (previous, unreadable) = decide_free_claim(&discovery_path, &claim.hostname)?;
         claim.reclaimed_from.clone_from(&previous);
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_flock_before_publish");
@@ -599,6 +684,7 @@ pub fn acquire_project_lock_with_policy(
         return Ok(AcquiredLock {
             handle: LockfileHandle::held(lock_path, discovery_path, claim, guard.release()),
             reclaimed: previous,
+            reclaimed_unreadable: unreadable,
         });
     }
     unreachable!("the loop above always returns");
@@ -1751,5 +1837,49 @@ mod tests {
         assert!(!stale.exists(), "our stale temp is swept");
         assert!(stranger.exists(), "nothing else is touched");
         acquired.handle.release().expect("the release lands");
+    }
+
+    /// G7: an unreadable stale discovery with a free lock reclaims WITH the
+    /// typed warning — the sentinel triple plus the `previous_unreadable`
+    /// flag — while a missing discovery reclaims silently.
+    #[test]
+    fn g7_unreadable_reclaim_warns_typed() {
+        let dir = TempDirectory::new("aw1-g7-unreadable");
+        let project = dir.path("edit.kinewright");
+        fs::write(&project, b"{}").expect("the project writes");
+        let recovery = recovery_dir(&dir);
+        let fresh = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Headless,
+            "http://127.0.0.1:9/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect("the fresh acquire lands");
+        assert!(
+            fresh.reclaimed.is_none() && !fresh.reclaimed_unreadable,
+            "absence reclaims silently"
+        );
+        let discovery = fresh.handle.discovery.clone();
+        drop(fresh); // The crash: a stale discovery, a free lock.
+        fs::write(&discovery, b"{ torn").expect("the discovery tears");
+        let got = acquire_project_lock_with_policy(
+            &project,
+            LockMode::Headless,
+            "http://127.0.0.1:10/mcp",
+            &recovery,
+            1,
+            Duration::ZERO,
+        )
+        .expect("the free lock reclaims");
+        let previous = got.reclaimed.as_ref().expect("the reclaim warns");
+        assert_eq!(previous.pid, 0, "the sentinel triple");
+        assert!(got.reclaimed_unreadable, "the unreadable flag");
+        let warning: serde_json::Value =
+            serde_json::from_str(&reclaim_warning_json_unreadable()).expect("the warning is JSON");
+        assert_eq!(warning["code"], "lock_reclaimed");
+        assert_eq!(warning["previous_unreadable"], true);
+        got.handle.release().expect("the release lands");
     }
 }
