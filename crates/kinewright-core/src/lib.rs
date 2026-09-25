@@ -97,7 +97,8 @@ pub use cc7_scenarios::{
 /// CC8 S1 numeric kernel: f32 production entry points for the S3 renderer plus
 /// the f64 `reference` conformance path (App. N) for the conformance suites.
 pub use cc8_kernel::{
-    Cc8KernelError, CompressDest, EetfOutput, GamutOutput, HlgOutput, display_to_scene,
+    BT709_TO_BT2020, BT709_TO_BT2020_F64, BT2020_TO_BT709, BT2020_TO_BT709_F64, Cc8KernelError,
+    CompressDest, EetfOutput, GamutOutput, HlgOutput, apply_matrix, display_to_scene,
     eetf_to_target, gamut_compress, hlg_gamma, hlg_inverse_oetf, hlg_oetf, hlg_output, pq_eotf,
     pq_oetf, reference, s_white, scene_to_display, scene_to_working,
 };

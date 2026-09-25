@@ -437,6 +437,78 @@ pub fn eetf_to_target(
 }
 
 // ========================================================================
+// 2020↔709 primaries matrices (§5, R13): derived from the two primary sets
+// + D65 (test-only derivation pins the transcription), f32 narrowed.
+
+/// Rec.2020 → BT.709 linear matrix, row-major. Negatives are out-of-triangle
+/// colours: never clamped (R12/R13).
+pub const BT2020_TO_BT709: [[f32; 3]; 3] = [
+    [1.660_491, -0.587_641_1, -0.072_849_86],
+    [-0.124_550_48, 1.132_899_9, -0.008_349_422],
+    [-0.018_150_764, -0.100_578_9, 1.118_729_7],
+];
+
+/// BT.709 → Rec.2020 linear matrix, row-major: the delivery direction.
+pub const BT709_TO_BT2020: [[f32; 3]; 3] = [
+    [0.627_403_9, 0.329_283_03, 0.043_313_067],
+    [0.069_097_29, 0.919_540_4, 0.011_362_315],
+    [0.016_391_44, 0.088_013_306, 0.895_595_25],
+];
+
+/// f64 transcription of [`BT2020_TO_BT709`] (full-precision derivation).
+pub const BT2020_TO_BT709_F64: [[f64; 3]; 3] = [
+    [
+        1.660_491_002_108_434_7,
+        -0.587_641_138_788_549_5,
+        -0.072_849_863_319_884_86,
+    ],
+    [
+        -0.124_550_474_521_590_52,
+        1.132_899_897_125_959_8,
+        -0.008_349_422_604_369_487,
+    ],
+    [
+        -0.018_150_763_354_905_22,
+        -0.100_578_898_008_007_36,
+        1.118_729_661_362_912_5,
+    ],
+];
+
+/// f64 transcription of [`BT709_TO_BT2020`] (full-precision derivation).
+pub const BT709_TO_BT2020_F64: [[f64; 3]; 3] = [
+    [
+        0.627_403_895_934_699,
+        0.329_283_038_377_883_8,
+        0.043_313_065_687_417_22,
+    ],
+    [
+        0.069_097_289_358_231_99,
+        0.919_540_395_075_459,
+        0.011_362_315_566_309_157,
+    ],
+    [
+        0.016_391_438_875_150_228,
+        0.088_013_307_877_225_78,
+        0.895_595_253_247_624,
+    ],
+];
+
+/// Primaries matrix multiply, no clamp ever (R13).
+/// # Errors
+/// Non-finite → `NonFiniteInput`.
+pub fn apply_matrix(m: [[f32; 3]; 3], rgb: [f32; 3]) -> Result<[f32; 3], Cc8KernelError> {
+    const FUNCTION: &str = "apply_matrix";
+    let rgb = finite_input_3(FUNCTION, rgb)?;
+    finite_result_3(
+        FUNCTION,
+        [
+            m[0][0] * rgb[0] + m[0][1] * rgb[1] + m[0][2] * rgb[2],
+            m[1][0] * rgb[0] + m[1][1] * rgb[1] + m[1][2] * rgb[2],
+            m[2][0] * rgb[0] + m[2][1] * rgb[1] + m[2][2] * rgb[2],
+        ],
+    )
+}
+
 // Gamut compressor + HLG delivery kernel (§6, R30).
 
 const BT709_KR_F32: f32 = 0.2126;
@@ -928,5 +1000,21 @@ pub mod reference {
             hlg_oetf_unchecked(scene[2]).clamp(0.0, 1.0),
         ];
         Ok(HlgOutput { signal, fit })
+    }
+
+    /// f64 [`super::apply_matrix`].
+    /// # Errors
+    /// Same as [`super::apply_matrix`].
+    pub fn apply_matrix(m: [[f64; 3]; 3], rgb: [f64; 3]) -> Result<[f64; 3], Cc8KernelError> {
+        const FUNCTION: &str = "reference::apply_matrix";
+        let rgb = finite_input_3(FUNCTION, rgb)?;
+        finite_result_3(
+            FUNCTION,
+            [
+                m[0][0] * rgb[0] + m[0][1] * rgb[1] + m[0][2] * rgb[2],
+                m[1][0] * rgb[0] + m[1][1] * rgb[1] + m[1][2] * rgb[2],
+                m[2][0] * rgb[0] + m[2][1] * rgb[1] + m[2][2] * rgb[2],
+            ],
+        )
     }
 }

@@ -22,6 +22,7 @@ serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+half.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
 # core's own `tests/cc7_core.rs` and `tests/au6_core.rs` read the scenario

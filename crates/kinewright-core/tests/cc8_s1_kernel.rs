@@ -5,8 +5,10 @@
 //! values the kernel printed. f64 reference anchors hold ±1e-6 per the design;
 //! most assert far tighter. Grows one section per S1 increment.
 
+use half::f16;
 use kinewright_core::{
-    Cc8KernelError, CompressDest, display_to_scene, eetf_to_target, gamut_compress, hlg_gamma,
+    BT709_TO_BT2020, BT709_TO_BT2020_F64, BT2020_TO_BT709, BT2020_TO_BT709_F64, Cc8KernelError,
+    CompressDest, apply_matrix, display_to_scene, eetf_to_target, gamut_compress, hlg_gamma,
     hlg_inverse_oetf, hlg_oetf, hlg_output, pq_eotf, pq_oetf, reference, s_white, scene_to_display,
     scene_to_working,
 };
@@ -1080,4 +1082,633 @@ fn compress_refusals() {
         hlg_output([100.0, 100.0, 100.0], 0.0, 1.2),
         Err(Cc8KernelError::OutOfDomain { .. })
     ));
+}
+
+// ---------------------------------------------------------------------------
+// C5: primaries matrices (R13), precision budgets (R35), wrong-transform
+// controls (§17, R15).
+// ---------------------------------------------------------------------------
+
+// --- test-only matrix derivation (mirrors /tmp/cc8_oracle.py op order) ---
+
+fn det3(m: [[f64; 3]; 3]) -> f64 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+fn inv3(m: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let det = det3(m);
+    [
+        [
+            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) / det,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / det,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / det,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) / det,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / det,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / det,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) / det,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / det,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / det,
+        ],
+    ]
+}
+
+fn mul3(a: [[f64; 3]; 3], b: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let mut c = [[0.0; 3]; 3];
+    for r in 0..3 {
+        for cc in 0..3 {
+            c[r][cc] = a[r][0] * b[0][cc] + a[r][1] * b[1][cc] + a[r][2] * b[2][cc];
+        }
+    }
+    c
+}
+
+/// RGB→XYZ of one primary set + D65 (textbook derivation, oracle order).
+// Single-letter bindings mirror the matrix-notation derivation.
+#[allow(clippy::many_single_char_names)]
+fn derive_rgb_to_xyz(p: [[f64; 2]; 3]) -> [[f64; 3]; 3] {
+    let w = [0.3127, 0.3290];
+    let mut m = [[0.0; 3]; 3];
+    for (c, prim) in p.iter().enumerate() {
+        m[0][c] = prim[0] / prim[1];
+        m[1][c] = 1.0;
+        m[2][c] = (1.0 - prim[0] - prim[1]) / prim[1];
+    }
+    let wv = [w[0] / w[1], 1.0, (1.0 - w[0] - w[1]) / w[1]];
+    let i = inv3(m);
+    let s = [
+        i[0][0] * wv[0] + i[0][1] * wv[1] + i[0][2] * wv[2],
+        i[1][0] * wv[0] + i[1][1] * wv[1] + i[1][2] * wv[2],
+        i[2][0] * wv[0] + i[2][1] * wv[1] + i[2][2] * wv[2],
+    ];
+    let mut xyz = [[0.0; 3]; 3];
+    for r in 0..3 {
+        for c in 0..3 {
+            xyz[r][c] = m[r][c] * s[c];
+        }
+    }
+    xyz
+}
+
+fn derive_matrices() -> ([[f64; 3]; 3], [[f64; 3]; 3]) {
+    let p709 = [[0.64, 0.33], [0.3, 0.6], [0.15, 0.06]];
+    let p2020 = [[0.708, 0.292], [0.17, 0.797], [0.131, 0.046]];
+    let x709 = derive_rgb_to_xyz(p709);
+    let x2020 = derive_rgb_to_xyz(p2020);
+    (mul3(inv3(x709), x2020), mul3(inv3(x2020), x709))
+}
+
+/// The archived 2026-08 attempt's pinned f32 (third independent source).
+const ARCHIVE_2020_TO_709: [[f32; 3]; 3] = [
+    [1.660_491, -0.587_641_1, -0.072_849_86],
+    [-0.124_550_48, 1.132_899_9, -0.008_349_422],
+    [-0.018_150_764, -0.100_578_9, 1.118_729_7],
+];
+const ARCHIVE_709_TO_2020: [[f32; 3]; 3] = [
+    [0.627_403_9, 0.329_283_03, 0.043_313_067],
+    [0.069_097_29, 0.919_540_4, 0.011_362_315],
+    [0.016_391_44, 0.088_013_306, 0.895_595_25],
+];
+
+#[test]
+fn matrix_transcription_pins_derivation() {
+    let (d20_09, d09_20) = derive_matrices();
+    for r in 0..3 {
+        for c in 0..3 {
+            // Pinned f64 == independent derivation, bit-identical (same IEEE
+            // ops in the same order; catches any transcription typo).
+            assert_eq!(
+                BT2020_TO_BT709_F64[r][c].to_bits(),
+                d20_09[r][c].to_bits(),
+                "2020->709[{r}][{c}]"
+            );
+            assert_eq!(
+                BT709_TO_BT2020_F64[r][c].to_bits(),
+                d09_20[r][c].to_bits(),
+                "709->2020[{r}][{c}]"
+            );
+            // Pinned f32 == correctly-rounded narrowing of pinned f64.
+            assert_eq!(
+                BT2020_TO_BT709[r][c].to_bits(),
+                as_f32(BT2020_TO_BT709_F64[r][c]).to_bits()
+            );
+            assert_eq!(
+                BT709_TO_BT2020[r][c].to_bits(),
+                as_f32(BT709_TO_BT2020_F64[r][c]).to_bits()
+            );
+            // Pinned f32 == archive's pinned f32, bit-identical (reuse).
+            assert_eq!(
+                BT2020_TO_BT709[r][c].to_bits(),
+                ARCHIVE_2020_TO_709[r][c].to_bits()
+            );
+            assert_eq!(
+                BT709_TO_BT2020[r][c].to_bits(),
+                ARCHIVE_709_TO_2020[r][c].to_bits()
+            );
+        }
+    }
+}
+
+#[test]
+fn matrix_roundtrip_preserves_negatives() {
+    // Saturated 2020 primaries go out-of-709-triangle (negatives, never
+    // clamped) and roundtrip back; saturated 709 primaries likewise.
+    for prim in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+        let to709 = reference::apply_matrix(BT2020_TO_BT709_F64, prim).unwrap();
+        assert!(
+            to709.iter().any(|c| *c < 0.0),
+            "2020 primary must leave the 709 triangle: {to709:?}"
+        );
+        let back = reference::apply_matrix(BT709_TO_BT2020_F64, to709).unwrap();
+        for (i, (b, e)) in back.iter().zip(prim.iter()).enumerate() {
+            assert_close(&format!("2020rt[{i}]"), *b, *e, 1e-9 * e.abs().max(1e-6));
+        }
+        let to2020 = reference::apply_matrix(BT709_TO_BT2020_F64, prim).unwrap();
+        assert!(
+            to2020.iter().all(|c| *c >= 0.0),
+            "709 primary stays positive"
+        );
+        let back2 = reference::apply_matrix(BT2020_TO_BT709_F64, to2020).unwrap();
+        for (i, (b, e)) in back2.iter().zip(prim.iter()).enumerate() {
+            assert_close(&format!("709rt[{i}]"), *b, *e, 1e-9 * e.abs().max(1e-6));
+        }
+        // f32 production roundtrip, f32-appropriate bound.
+        let p32 = [as_f32(prim[0]), as_f32(prim[1]), as_f32(prim[2])];
+        let t32 = apply_matrix(BT2020_TO_BT709, p32).unwrap();
+        let b32 = apply_matrix(BT709_TO_BT2020, t32).unwrap();
+        for (i, (b, e)) in b32.iter().zip(p32.iter()).enumerate() {
+            assert_close(
+                &format!("rt32[{i}]"),
+                f64::from(*b),
+                f64::from(*e),
+                // Floor 1e-7: zero components rebuild from O(0.1)
+                // intermediates through two matrices (~4 ulp residue).
+                1e-6 * f64::from(*e).abs().max(1e-1),
+            );
+        }
+    }
+    // Near-black and HDR magnitudes (incl. the W=100 10k-nit working level).
+    for v in [[1e-6, 2e-6, 1e-7], [46.415_9, 10.0, 1.0], [0.7, 0.3, 0.5]] {
+        let there = reference::apply_matrix(BT2020_TO_BT709_F64, v).unwrap();
+        let back = reference::apply_matrix(BT709_TO_BT2020_F64, there).unwrap();
+        for (i, (b, e)) in back.iter().zip(v.iter()).enumerate() {
+            assert_close(&format!("mag[{i}]"), *b, *e, 1e-9 * e.abs().max(1e-6));
+        }
+    }
+}
+
+#[test]
+fn matrix_f32_agrees_with_f64_and_refuses() {
+    for v in [[1.0, 0.0, 0.0], [0.7, 0.3, 0.5], [46.415_9, 10.0, 1.0]] {
+        let a32 = f64_3(
+            apply_matrix(BT2020_TO_BT709, [as_f32(v[0]), as_f32(v[1]), as_f32(v[2])]).unwrap(),
+        );
+        let a64 = reference::apply_matrix(BT2020_TO_BT709_F64, v).unwrap();
+        for (i, (a, e)) in a32.iter().zip(a64.iter()).enumerate() {
+            assert_close(&format!("mx32[{i}]"), *a, *e, 1e-6 * e.abs().max(1e-3));
+        }
+    }
+    assert!(matches!(
+        apply_matrix(BT2020_TO_BT709, [f32::NAN, 0.0, 0.0]),
+        Err(Cc8KernelError::NonFiniteInput { .. })
+    ));
+    assert!(matches!(
+        apply_matrix(BT2020_TO_BT709, [3e38, 0.0, 0.0]),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+    assert!(matches!(
+        reference::apply_matrix(BT2020_TO_BT709_F64, [1.5e308, 0.0, 0.0]),
+        Err(Cc8KernelError::NonFiniteResult { .. })
+    ));
+}
+
+#[test]
+fn rendering_10k_peak_and_white_400() {
+    // White extreme W=400: oracle 0.4659972203002852.
+    assert_close(
+        "s_white W=400",
+        reference::s_white(400.0, 1000.0, 1.2).unwrap(),
+        0.465_997_220_300_285_2,
+        1e-12,
+    );
+    // 10 000-nit peak: kernel-resolved gamma, forward vector + identity.
+    let g = reference::hlg_gamma(10_000.0).unwrap();
+    let d = reference::scene_to_display([0.5, 0.25, 0.125], 10_000.0, g).unwrap();
+    assert_close_3(
+        "P=10k forward",
+        d,
+        [
+            2_187.918_139_940_348,
+            1_093.959_069_970_174,
+            546.979_534_985_087,
+        ],
+        1e-9,
+    );
+    let back = reference::display_to_scene(d, 10_000.0, g).unwrap();
+    assert_close_3("P=10k identity", back, [0.5, 0.25, 0.125], 1e-12);
+    assert_close(
+        "s_white P=10k",
+        reference::s_white(203.0, 10_000.0, g).unwrap(),
+        0.101_335_978_092_349_29,
+        1e-12,
+    );
+}
+
+// --- precision budgets PB1–PB4 (§14, R35) over f16 storage ---
+
+/// f16 ULP of a normal positive magnitude: 2^(e−10), binade-exact.
+#[allow(clippy::cast_possible_truncation)] // log2 range fits i32 by construction
+fn f16_ulp_of(x: f64) -> f64 {
+    debug_assert!(x > 0.0);
+    2f64.powi((x.abs().log2().floor() as i32) - 10)
+}
+
+/// Production-shaped f32→f16 store (round-to-nearest via `half`).
+fn f16_store(x: f32) -> f32 {
+    f16::from_f32(x).to_f32()
+}
+
+/// Truncating f16 store (test-only wrong implementation for PB1).
+fn truncating_f16_store_sub(x: f32) -> f32 {
+    let bits = f16::from_f32(x).to_bits();
+    // Round toward zero instead of to-nearest: strip a set low mantissa bit.
+    let truncated = if x > 0.0 && bits & 1 == 1 {
+        bits - 1
+    } else {
+        bits
+    };
+    f16::from_bits(truncated).to_f32()
+}
+
+#[test]
+fn pb1_storage_boundary() {
+    // App. N ULP rows, exact powers of two.
+    assert_eq!(f16_ulp_of(1.0).to_bits(), 0.000_976_562_5f64.to_bits());
+    assert_eq!(f16_ulp_of(3.776_5).to_bits(), 0.001_953_125f64.to_bits());
+    // Each f32→f16 store ≤ 0.5 ULP (1e-6 slack absorbs diff rounding; a
+    // truncating store at 1.0 ULP still fails).
+    for x in [
+        0.000_976_562_5,
+        0.01,
+        0.1,
+        0.5,
+        1.0,
+        2.0,
+        3.776_475,
+        10.0,
+        46.415_9,
+    ] {
+        let stored = f16_store(as_f32(x));
+        let err = (f64::from(stored) - x).abs();
+        assert!(
+            err <= 0.5 * f16_ulp_of(x) * (1.0 + 1e-6),
+            "PB1 store of {x}: err={err}"
+        );
+    }
+    // The truncating substitute violates 0.5 ULP (control: the bound bites).
+    let bad = truncating_f16_store_sub(1.0006);
+    let bad_err = (f64::from(bad) - 1.0006).abs();
+    assert!(
+        bad_err > 0.5 * f16_ulp_of(1.0006),
+        "truncation must violate PB1: err={bad_err}"
+    );
+    // Stage-pair round trips through an f16 store, ≤ 2 ULP in the starting
+    // domain (pipeline direction: decode→encode).
+    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
+    // (i) HLG signal → scene → f16 → signal.
+    let scene = reference::hlg_inverse_oetf(0.75).unwrap();
+    let sig2 = reference::hlg_oetf(f64::from(f16_store(as_f32(scene)))).unwrap();
+    assert_close("PB1b signal", sig2, 0.75, 2.0 * f16_ulp_of(0.75));
+    // (ii) scene → working → f16 → scene.
+    for s in [0.01, 0.26, 1.0] {
+        let w = reference::scene_to_working([s, 0.0, 0.0], sw).unwrap()[0];
+        let s2 = f64::from(f16_store(as_f32(w))) * sw;
+        assert_close("PB1b scene", s2, s, 2.0 * f16_ulp_of(s));
+    }
+    // (iii) 2020 → 709 → f16 → 2020 (all-positive vector; zeros separate).
+    let v = [0.7, 0.3, 0.5];
+    let t = reference::apply_matrix(BT2020_TO_BT709_F64, v).unwrap();
+    let t16 = [
+        f64::from(f16_store(as_f32(t[0]))),
+        f64::from(f16_store(as_f32(t[1]))),
+        f64::from(f16_store(as_f32(t[2]))),
+    ];
+    let b = reference::apply_matrix(BT709_TO_BT2020_F64, t16).unwrap();
+    for (i, (bb, e)) in b.iter().zip(v.iter()).enumerate() {
+        assert_close(&format!("PB1b matrix[{i}]"), *bb, *e, 2.0 * f16_ulp_of(*e));
+    }
+    let z = reference::apply_matrix(BT2020_TO_BT709_F64, [1.0, 0.0, 0.0]).unwrap();
+    let z16 = [
+        f64::from(f16_store(as_f32(z[0]))),
+        f64::from(f16_store(as_f32(z[1]))),
+        f64::from(f16_store(as_f32(z[2]))),
+    ];
+    let zb = reference::apply_matrix(BT709_TO_BT2020_F64, z16).unwrap();
+    assert_close_3("PB1b matrix zeros", zb, [1.0, 0.0, 0.0], 1e-3);
+    // (iv) display → scene → f16 → display at reference white.
+    let sc = reference::display_to_scene([203.0, 203.0, 203.0], 1000.0, 1.2).unwrap();
+    let sc16 = [
+        f64::from(f16_store(as_f32(sc[0]))),
+        f64::from(f16_store(as_f32(sc[1]))),
+        f64::from(f16_store(as_f32(sc[2]))),
+    ];
+    let d2 = reference::scene_to_display(sc16, 1000.0, 1.2).unwrap();
+    assert_close("PB1b display", d2[0], 203.0, 2.0 * f16_ulp_of(203.0));
+}
+
+#[test]
+fn pb2_working_domain_repeated_chain() {
+    // Repeated working→display→working cycles through f16 stores (f32
+    // production): w ≥ 2^-10 stays within 4 ULP(w) and 0.3% relative.
+    for white in [100.0, 203.0, 400.0] {
+        let sw = s_white(white, 1000.0, 1.2).unwrap();
+        for w0 in [
+            [0.9, 0.45, 1.1],
+            [3.776_475, 0.02, 2.0],
+            [46.415_9, 20.0, 5.0],
+        ] {
+            let mut w = w0;
+            for _ in 0..3 {
+                w = [f16_store(w[0]), f16_store(w[1]), f16_store(w[2])];
+                let s = [w[0] * sw, w[1] * sw, w[2] * sw];
+                let d = scene_to_display(s, 1000.0, 1.2).unwrap();
+                let s2 = display_to_scene(d, 1000.0, 1.2).unwrap();
+                w = [s2[0] / sw, s2[1] / sw, s2[2] / sw];
+            }
+            for (i, (a, e)) in w.iter().zip(w0.iter()).enumerate() {
+                let rel = (f64::from(*a) - f64::from(*e)).abs() / f64::from(*e);
+                assert!(rel <= 0.003, "PB2 rel W={white}[{i}]: {rel}");
+                assert_close(
+                    &format!("PB2 abs W={white}[{i}]"),
+                    f64::from(*a),
+                    f64::from(*e),
+                    4.0 * f16_ulp_of(f64::from(*e)),
+                );
+            }
+        }
+    }
+    // Domain edge w = 2^-10 exactly.
+    let sw = s_white(203.0, 1000.0, 1.2).unwrap();
+    let e = 2f32.powi(-10);
+    let w = f16_store(e);
+    let s = [w * sw, 0.0, 0.0];
+    let d = scene_to_display(s, 1000.0, 1.2).unwrap();
+    let s2 = display_to_scene(d, 1000.0, 1.2).unwrap();
+    let w2 = f16_store(s2[0] / sw);
+    assert_close(
+        "PB2 edge",
+        f64::from(w2),
+        f64::from(e),
+        4.0 * f16_ulp_of(f64::from(e)),
+    );
+}
+
+#[test]
+fn pb3_display_absolute() {
+    // f32 vs f64 post-render: white ±10% ≤ 1.0 nit, peak ≤ 2.0, sub-1 ≤ 0.05.
+    for (d, tol) in [(0.1f64, 0.05), (0.5, 0.05), (0.9, 0.05)] {
+        let s = (d / 1000.0).powf(1.0 / 1.2);
+        let d32 = scene_to_display([as_f32(s), as_f32(s), as_f32(s)], 1000.0, 1.2).unwrap();
+        let d64 = reference::scene_to_display([s, s, s], 1000.0, 1.2).unwrap();
+        assert_close("PB3 sub-1", f64::from(d32[0]), d64[0], tol);
+    }
+    for d in [190.0f64, 203.0, 220.0] {
+        let s = (d / 1000.0).powf(1.0 / 1.2);
+        let d32 = scene_to_display([as_f32(s), as_f32(s), as_f32(s)], 1000.0, 1.2).unwrap();
+        let d64 = reference::scene_to_display([s, s, s], 1000.0, 1.2).unwrap();
+        assert_close("PB3 white", f64::from(d32[0]), d64[0], 1.0);
+    }
+    let d32 = scene_to_display([1.0, 1.0, 1.0], 1000.0, 1.2).unwrap();
+    let d64 = reference::scene_to_display([1.0, 1.0, 1.0], 1000.0, 1.2).unwrap();
+    assert_close("PB3 peak", f64::from(d32[0]), d64[0], 2.0);
+    // Chromatic near-white (exact k^γ scaling puts D[0] on 203).
+    let k = (203.0f64 / 395.142_864_255_787_4).powf(1.0 / 1.2);
+    let s = [0.5 * k, 0.25 * k, 0.125 * k];
+    let c32 = scene_to_display([as_f32(s[0]), as_f32(s[1]), as_f32(s[2])], 1000.0, 1.2).unwrap();
+    let c64 = reference::scene_to_display(s, 1000.0, 1.2).unwrap();
+    assert_close("PB3 chroma white", f64::from(c32[0]), c64[0], 1.0);
+    assert_close("PB3 chroma mid", f64::from(c32[1]), c64[1], 1.0);
+    // App. N ULP rows via kernel finite differences (central = slope).
+    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
+    let u1 = 2f64.powi(-10);
+    // Central difference over a ±(sw·u) scene step = nits per working-ULP.
+    let slope_at = |s: f64, h: f64| {
+        let up = reference::scene_to_display([s + h, s + h, s + h], 1000.0, 1.2).unwrap()[0];
+        let dn = reference::scene_to_display([s - h, s - h, s - h], 1000.0, 1.2).unwrap()[0];
+        (up - dn) / 2.0
+    };
+    let ds = slope_at(sw, sw * u1);
+    assert_close("nits/ULP white", ds, 0.237_890_625_000_000_02, 1e-6);
+    assert_close("nits/ULP white App N", ds, 0.237_891, 1e-6);
+    let wp = 1.0 / sw;
+    let up = 2f64.powi(-9);
+    let dp = slope_at(wp * sw, sw * up);
+    assert_close("nits/ULP peak", dp, 0.620_618_403_806_434_4, 1e-6);
+    assert_close("nits/ULP peak App N", dp, 0.620_618, 1e-6);
+    // Forward differences (one actual ULP step, curvature included).
+    let f1 = reference::scene_to_display([(1.0 + u1) * sw; 3], 1000.0, 1.2).unwrap()[0]
+        - reference::scene_to_display([sw; 3], 1000.0, 1.2).unwrap()[0];
+    assert_close("nits/ULP fwd white", f1, 0.237_913_850_459_165_13, 1e-9);
+}
+
+#[test]
+fn pb4_final_codes() {
+    // Test-only quantizers (S4 owns delivery packing): 10-bit HLG narrow +
+    // 8-bit 709 narrow behind the BT.1886-inverse encode (§4 display EOTF).
+    let code10 = |s: f64| (876.0 * s + 64.0).round();
+    let encode_709 = |d: f64| (d / 100.0).powf(1.0 / 2.4);
+    let code8 = |d: f64| (219.0 * encode_709(d) + 16.0).round();
+    // 10-bit anchors: black / 18% grey card (w=0.18) / white / peak / RGB.
+    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
+    let s18 = 0.18 * sw;
+    let d18 = reference::scene_to_display([s18, s18, s18], 1000.0, 1.2).unwrap()[0];
+    let mut sum = 0.0;
+    let mut n = 0;
+    for d in [0.0, d18, 203.0, 1000.0] {
+        let s32 = hlg_output([as_f32(d), as_f32(d), as_f32(d)], 1000.0, 1.2)
+            .unwrap()
+            .signal[0];
+        let s64 = reference::hlg_output([d, d, d], 1000.0, 1.2)
+            .unwrap()
+            .signal[0];
+        let delta = (code10(f64::from(s32)) - code10(s64)).abs();
+        assert!(delta <= 2.0, "PB4 10-bit D={d}: {delta}");
+        sum += delta;
+        n += 1;
+    }
+    for prim in [[1000.0, 0.0, 0.0], [0.0, 1000.0, 0.0], [0.0, 0.0, 1000.0]] {
+        let s32 = hlg_output(
+            [as_f32(prim[0]), as_f32(prim[1]), as_f32(prim[2])],
+            1000.0,
+            1.2,
+        )
+        .unwrap()
+        .signal;
+        let s64 = reference::hlg_output(prim, 1000.0, 1.2).unwrap().signal;
+        for (a, e) in f64_3(s32).iter().zip(s64.iter()) {
+            let delta = (code10(*a) - code10(*e)).abs();
+            assert!(delta <= 2.0, "PB4 10-bit saturated: {delta}");
+            sum += delta;
+            n += 1;
+        }
+    }
+    assert!(
+        sum / f64::from(n) <= 0.5,
+        "PB4 10-bit mean: {}",
+        sum / f64::from(n)
+    );
+    // 8-bit SDR anchors: EETF outputs at L ∈ {0, 100, 203, 1000}, ≤ 1 code.
+    for l in [0.0, 100.0, 203.0, 1000.0] {
+        let v32 = eetf_to_target(as_f32(l), 1000.0, 100.0).unwrap().value;
+        let v64 = reference::eetf_to_target(l, 1000.0, 100.0).unwrap().value;
+        let delta = (code8(f64::from(v32)) - code8(v64)).abs();
+        assert!(delta <= 1.0, "PB4 8-bit L={l}: {delta}");
+    }
+    // HLG codes per working-ULP at white: oracle 0.1680400672866091.
+    let c_up = reference::hlg_oetf((1.0 + ulp_w1()) * sw).unwrap();
+    let c_dn = reference::hlg_oetf((1.0 - ulp_w1()) * sw).unwrap();
+    assert_close(
+        "codes/ULP",
+        (c_up - c_dn) / 2.0 * 876.0,
+        0.168_040_067_286_609_1,
+        1e-6,
+    );
+    assert_close(
+        "codes/ULP App N",
+        (c_up - c_dn) / 2.0 * 876.0,
+        0.168_0,
+        1e-4,
+    );
+    let fwd = (reference::hlg_oetf((1.0 + ulp_w1()) * sw).unwrap()
+        - reference::hlg_oetf(sw).unwrap())
+        * 876.0;
+    assert_close("codes/ULP fwd", fwd, 0.167_950_006_847_549_02, 1e-9);
+}
+
+fn ulp_w1() -> f64 {
+    2f64.powi(-10)
+}
+
+// --- §17 wrong-transform controls (R15): test-only substitutes that MUST fail
+// the R14/R28/R30 assertions. Each cites the kernel test it mirrors. ---
+
+/// Extended (white-preserving) Reinhard as an EETF substitute: matches 0→0
+/// and Cs→Ct, so it is a worthy adversary — and still wrong in the middle.
+fn reinhard_eetf_sub(l: f64, cs: f64, ct: f64) -> f64 {
+    if ct >= cs {
+        return l;
+    }
+    l * (1.0 + l / (ct * ct)) / (1.0 + l / ct)
+}
+
+#[test]
+fn control_reinhard_fails_eetf() {
+    // Mirrors eetf_anchors_narrow_span (Cs=1000, Ct=100).
+    assert!((reinhard_eetf_sub(0.0, 1000.0, 100.0) - 0.0).abs() <= 1e-12);
+    assert!((reinhard_eetf_sub(1000.0, 1000.0, 100.0) - 100.0).abs() <= 1e-9);
+    for (l, expected) in [
+        (100.0, 69.454_403_035_658_91),
+        (203.0, 88.243_640_538_647_8),
+    ] {
+        let got = reinhard_eetf_sub(l, 1000.0, 100.0);
+        assert!(
+            (got - expected).abs() > 1e-6,
+            "Reinhard must FAIL the EETF anchor L={l}: got {got}, want {expected}"
+        );
+    }
+}
+
+/// §4 sRGB inverse OETF (test-only copy) as an HLG-input substitute.
+fn srgb_gamma_decode_sub(v: f64) -> f64 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+#[test]
+fn control_srgb_gamma_fails_hlg_input() {
+    // Mirrors hlg_inverse_oetf_anchors + hlg_reference_white_lands_on_working_one.
+    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
+    let scene = srgb_gamma_decode_sub(0.75);
+    assert!(
+        (scene - 0.264_962_559_786_400_15).abs() > 1e-6,
+        "sRGB decode must FAIL scene-at-0.75: got {scene}"
+    );
+    let w = srgb_gamma_decode_sub(0.749_877_365) / sw;
+    assert!(
+        (w - 1.0).abs() > 1e-6,
+        "sRGB decode must FAIL working-1.0: got {w}"
+    );
+}
+
+/// HLG compressor with 709 luma (test-only copy of the §6 equation).
+fn hlg_compress_709_sub(rgb: [f64; 3], peak: f64, gamma: f64) -> [f64; 3] {
+    let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    let u = peak * (y / peak).powf((gamma - 1.0) / gamma);
+    let mut t = 1.0f64;
+    for c in rgb {
+        if c < y {
+            t = t.min(y / (y - c));
+        } else if c > y {
+            t = t.min((u - y) / (c - y));
+        }
+    }
+    [
+        y + t * (rgb[0] - y),
+        y + t * (rgb[1] - y),
+        y + t * (rgb[2] - y),
+    ]
+}
+
+#[test]
+fn control_709_luma_fails_hlg_compressor() {
+    // Mirrors hlg_primaries_u_bounds_pre_post_fit (P=1000, γ=1.2).
+    for (prim, u) in [
+        ([1000.0, 0.0, 0.0], 800.282_546_629_577_4),
+        ([0.0, 1000.0, 0.0], 937.284_889_648_623_7),
+        ([0.0, 0.0, 1000.0], 624.466_457_290_609_7),
+    ] {
+        let fit = hlg_compress_709_sub(prim, 1000.0, 1.2);
+        let max_c = fit[0].max(fit[1]).max(fit[2]);
+        assert!(
+            (max_c - u).abs() > 1e-3,
+            "709-luma compressor must FAIL U={u}: got {max_c}"
+        );
+    }
+}
+
+/// HLG input WITH an input-side OOTF (the archived attempt's forbidden light
+/// model): inverse OETF then the full OOTF gain, as scene.
+fn hlg_input_ootf_sub(signal: [f64; 3], peak: f64, gamma: f64) -> [f64; 3] {
+    let s = [
+        reference::hlg_inverse_oetf(signal[0]).unwrap(),
+        reference::hlg_inverse_oetf(signal[1]).unwrap(),
+        reference::hlg_inverse_oetf(signal[2]).unwrap(),
+    ];
+    let y = 0.2627 * s[0] + 0.6780 * s[1] + 0.0593 * s[2];
+    let gain = peak * y.powf(gamma - 1.0);
+    [gain * s[0], gain * s[1], gain * s[2]]
+}
+
+#[test]
+fn control_input_ootf_fails_hlg_input() {
+    // Mirrors hlg_inverse_oetf_anchors + hlg_reference_white_lands_on_working_one.
+    let sw = reference::s_white(203.0, 1000.0, 1.2).unwrap();
+    let scene = hlg_input_ootf_sub([0.75, 0.75, 0.75], 1000.0, 1.2)[0];
+    assert!(
+        (scene - 0.264_962_559_786_400_15).abs() > 1e-6,
+        "input OOTF must FAIL scene-at-0.75: got {scene}"
+    );
+    let w = hlg_input_ootf_sub([0.749_877_365, 0.749_877_365, 0.749_877_365], 1000.0, 1.2)[0] / sw;
+    assert!(
+        (w - 1.0).abs() > 1e-6,
+        "input OOTF must FAIL working-1.0: got {w}"
+    );
 }
