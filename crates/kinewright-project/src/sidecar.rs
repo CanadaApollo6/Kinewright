@@ -375,12 +375,18 @@ pub fn build_sidecar_bytes(
 /// reports `Skipped`": `Written` carries the report, `Skipped` covers the
 /// unsaved project (no path, no IO — item 17) and the unchanged log (nothing
 /// newer than the last write, no torn-write window opened for nothing).
+/// `Occupied` is the GUARD-B refusal (G3): an empty flush against an
+/// occupied stem this session never established — not a benign skip. Both
+/// save paths preserve-and-replace on it (foreign history to `.bak`, then a
+/// paired sidecar); close paths ignore it like a skip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlushOutcome {
     /// Bytes landed via temp + rename; the report counts them.
     Written(kinewright_core::WriteReport),
     /// No IO was attempted.
     Skipped,
+    /// GUARD-B refused: the stem is occupied and unestablished; no IO ran.
+    Occupied,
 }
 
 /// One sidecar write on its way to the writer thread.

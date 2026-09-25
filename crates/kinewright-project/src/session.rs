@@ -311,16 +311,17 @@ impl SidecarSession {
         let (bytes, report) = self
             .sidecar_bytes_for_save(project_digest, previous_digest, prepare)
             .map_err(std::io::Error::other)?;
-        // GUARD-B (R6/F1): an unestablished stem keeps its history
-        // against an empty flush; fresh, established, and non-empty
-        // flushes are untouched.
+        // GUARD-B (R6/F1/G3): an unestablished stem keeps its history
+        // against an empty flush — reported distinctly, so the save path
+        // preserves-and-replaces instead of skipping into an unpaired save.
+        // Fresh, established, and non-empty flushes are untouched.
         if !self.established.contains(&sidecar_path)
             && report.written_open == 0
             && report.written_resolved == 0
             && self.carried_sidecar_records.is_empty()
             && sidecar_path.exists()
         {
-            return Ok(FlushOutcome::Skipped);
+            return Ok(FlushOutcome::Occupied);
         }
         self.sidecar_writer
             .submit_and_join(sidecar_path.clone(), bytes)?;
@@ -479,9 +480,11 @@ mod tests {
         records
     }
 
-    /// R6: an unloaded session never wipes an occupied stem with an empty
-    /// flush — the scratch probe showed `Written(0/0)` overwriting 2 stem
-    /// records on unmodified code; the guard skips instead.
+    /// R6/G3: an unloaded session never wipes an occupied stem with an
+    /// empty flush — the scratch probe showed `Written(0/0)` overwriting 2
+    /// stem records on unmodified code; the guard reports `Occupied`
+    /// instead, and the stem keeps its bytes until the save path preserves
+    /// them aside.
     #[test]
     fn r6_unloaded_empty_flush_skips_and_preserves_the_stem() {
         let dir = TempDirectory::new("aw1-r6-guard");
@@ -506,8 +509,8 @@ mod tests {
             session
                 .flush_incidents(Some(&project), &digest, &digest, |_| None)
                 .expect("the flush reports"),
-            FlushOutcome::Skipped,
-            "an empty unloaded flush skips"
+            FlushOutcome::Occupied,
+            "an empty unloaded flush reports occupied, not a benign skip"
         );
         assert_eq!(
             fs::read(&sidecar).expect("the stem re-reads"),

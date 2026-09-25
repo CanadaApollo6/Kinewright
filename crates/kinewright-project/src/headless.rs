@@ -11,7 +11,8 @@ use crate::{
     project::{ProjectSaveError, ProjectSaveReport, serialize_project_document},
     session::{SidecarSession, rollback_sidecar_write, snapshot_sidecar_rollback},
     sidecar::{
-        FlushOutcome, digest_bytes, sidecar_path_for_project, sidecar_write_failed_observation,
+        FlushOutcome, digest_bytes, refuse_sidecar, sidecar_path_for_project,
+        sidecar_write_failed_observation,
     },
 };
 
@@ -61,6 +62,42 @@ pub fn save_headless(
                 Err(error.to_string())
             }
         };
+    // G3 preserve-and-replace (as in `write_project`): an occupied stem's
+    // foreign history moves aside with the reopen path's `.bak` naming,
+    // then the paired sidecar flushes onto the fresh stem. Either structural
+    // failure fails the save — never an unpaired success.
+    let sidecar_outcome = match sidecar_outcome {
+        Ok(FlushOutcome::Occupied) => {
+            let Some(stem) = sidecar_path_for_project(Some(path)) else {
+                return Err(ProjectSaveError::Write(
+                    "an occupied flush derived no stem".to_owned(),
+                ));
+            };
+            refuse_sidecar(&stem).map_err(|error| ProjectSaveError::Write(error.to_string()))?;
+            match sidecar.flush_incidents(Some(path), &new_digest, previous_digest, |_| None) {
+                Ok(FlushOutcome::Written(report)) => Ok(FlushOutcome::Written(report)),
+                Err(error) => {
+                    let mut log = sidecar
+                        .incidents
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let _ = log.observe(sidecar_write_failed_observation(
+                        error.to_string(),
+                        revision,
+                    ));
+                    Err(error.to_string())
+                }
+                Ok(_) => {
+                    return Err(ProjectSaveError::Write(
+                        "the sidecar stem was re-occupied during Save As; \
+                         not writing an unpaired project"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        outcome => outcome,
+    };
     let project = match crate::project::write_project_bytes(&json, document, path, previous_store) {
         Ok(report) => report,
         Err(error) => {
@@ -70,6 +107,11 @@ pub fn save_headless(
             return Err(error);
         }
     };
+    // Landed bytes establish the stem (as in `adopt_saved_path`), even past
+    // a benign skipped flush — later saves pair.
+    if let Some(stem) = sidecar_path_for_project(Some(path)) {
+        sidecar.established.insert(stem);
+    }
     new_digest.clone_into(&mut sidecar.saved_digest);
     // F5: headless retires nothing (param kept for call-shape stability).
     let _ = recovery_dir;
@@ -89,8 +131,8 @@ mod tests {
         recovery::{journal_file_name, pending_journal_for_project},
         session::LoadedSidecarSession,
         sidecar::{
-            FlushOutcome, SidecarLoad, SidecarMode, digest_bytes, load_sidecar,
-            sidecar_path_for_project,
+            FlushOutcome, SidecarLoad, SidecarMode, build_sidecar_bytes, digest_bytes,
+            load_sidecar, sidecar_path_for_project,
         },
     };
 
@@ -209,6 +251,102 @@ mod tests {
             "the unreplayed journal survives the save"
         );
         assert!(stale.exists(), "headless retires nothing it did not replay");
+    }
+
+    /// G3/RB1 (headless): Save As with an empty log onto an occupied stem
+    /// preserves-and-replaces — the foreign history moves to `.bak`, the
+    /// stem pairs on the new (differing) document, and a reopen finds no
+    /// `sidecar_refused` and no further `.bak`.
+    #[test]
+    fn g3_headless_occupied_save_as_preserves_and_pairs() {
+        let dir = TempDirectory::new("aw1-g3-headless-occupied");
+        let source = dir.path("source.kinewright");
+        let occupied = dir.path("occupied.kinewright");
+        let recovery = dir.path("recovery");
+        std::fs::create_dir(&recovery).expect("the recovery dir creates");
+        write_project_document(&Document::default(), &source, None).expect("source writes");
+        write_project_document(&Document::default(), &occupied, None).expect("target writes");
+        let foreign_digest = digest_bytes(&std::fs::read(&occupied).expect("the target reads"));
+        let mut foreign = kinewright_core::IncidentLog::with_start(std::time::Instant::now(), None);
+        foreign.observe(IncidentObservation::plain(
+            IncidentCode::Label(LabelIncident::Project),
+            IncidentSubject::Project,
+            "foreign history",
+            TimelineRevision::default(),
+        ));
+        let (records, _) = foreign.records(None, &std::collections::BTreeMap::new());
+        let foreign_bytes = build_sidecar_bytes(&records, &[], &foreign_digest, &foreign_digest)
+            .expect("the foreign sidecar builds");
+        let occupied_sidecar = sidecar_path_for_project(Some(&occupied)).expect("derived");
+        std::fs::write(&occupied_sidecar, &foreign_bytes).expect("the foreign stem writes");
+        let mut session = loaded_session(&source);
+        let mut changed = Document::default();
+        changed.markers.push(kinewright_core::Marker {
+            id: kinewright_core::MarkerId(7),
+            position: kinewright_core::TimeCode::ZERO,
+            label: "g3 edit".to_owned(),
+            color_token: 0,
+        });
+        let report = save_headless(
+            &changed,
+            &occupied,
+            None,
+            &mut session,
+            "",
+            TimelineRevision::default(),
+            &recovery,
+        )
+        .expect("occupied Save As succeeds");
+        assert!(
+            matches!(report.sidecar, Ok(FlushOutcome::Written(_))),
+            "the stem pairs, got {:?}",
+            report.sidecar
+        );
+        let SidecarLoad::Current(current) = load_sidecar(&occupied_sidecar) else {
+            panic!("the replaced sidecar parses");
+        };
+        assert_eq!(
+            current.project_digest, report.project.digest,
+            "paired on the new digest"
+        );
+        let mut bak = occupied_sidecar.as_os_str().to_owned();
+        bak.push(".bak");
+        assert_eq!(
+            std::fs::read(std::path::PathBuf::from(bak)).expect("the .bak reads"),
+            foreign_bytes,
+            "the old history sits in the .bak"
+        );
+        // Reopen immediately: the pair gates clean.
+        let digest = digest_bytes(&std::fs::read(&occupied).expect("the target re-reads"));
+        let log = std::sync::Arc::new(std::sync::RwLock::new(
+            kinewright_core::IncidentLog::with_start(
+                std::time::Instant::now(),
+                Some(std::time::SystemTime::now()),
+            ),
+        ));
+        let LoadedSidecarSession { session, .. } = SidecarSession::load(
+            &SidecarMode::Load {
+                project_digest: digest,
+            },
+            Some(&occupied),
+            log,
+            TimelineRevision::default(),
+            None,
+            None,
+        );
+        let refused = session
+            .incidents
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .all()
+            .any(|incident| incident.code == IncidentCode::Label(LabelIncident::SidecarRefused));
+        assert!(!refused, "no sidecar_refused on reopen");
+        let baks = std::fs::read_dir(dir.root())
+            .expect("the dir reads")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".bak"))
+            .count();
+        assert_eq!(baks, 1, "exactly the preserve .bak, no reopen refusal");
     }
 
     /// R6: a headless save refuses an unloaded session fail-closed instead

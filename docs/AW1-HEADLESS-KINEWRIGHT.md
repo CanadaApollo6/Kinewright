@@ -118,7 +118,13 @@ amend the sections cited; S2-D1 is a named deferral, not a change.
   established baseline per stem — a load, a successful flush, or
   adopting the saved path establishes that stem. The empty-flush guard
   applies only to stems this session never loaded or wrote, so a changed
-  project save to an established stem always pairs its sidecar.
+  project save to an established stem always pairs its sidecar. (Fix
+  round 2, G3: an empty flush against an occupied unestablished stem
+  reports `Occupied` instead of the benign `Skipped` — both save paths
+  then preserve-and-replace: the foreign sidecar moves aside with the
+  reopen path's `.bak` naming, a paired sidecar is written for the new
+  document, and the stem is established. Benign skips — no path,
+  suspended, unchanged generation — still report `Skipped`.)
 - AF7 → §15: S1's 800-line production ceiling is extended by +400 for
   this fix round (measured: S1 771 + fixes 406 = 1177 of 1200; method:
   `scripts/aw1-line-ledger.sh`, committed in this round).
