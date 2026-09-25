@@ -6,9 +6,9 @@
 //! most assert far tighter. Grows one section per S1 increment.
 
 use kinewright_core::{
-    Cc8KernelError, DISPLAY_TO_SCENE_VERSION, HLG_GAMMA_RULE_VERSION, display_to_scene,
-    eetf_to_target, hlg_gamma, hlg_inverse_oetf, hlg_oetf, pq_eotf, pq_oetf, pq_q0, reference,
-    s_white, scene_to_display, scene_to_working, working_to_scene,
+    Cc8KernelError, CompressDest, display_to_scene, eetf_to_target, gamut_compress, hlg_gamma,
+    hlg_inverse_oetf, hlg_oetf, hlg_output, pq_eotf, pq_oetf, reference, s_white, scene_to_display,
+    scene_to_working,
 };
 
 /// Narrow an f64 test vector to f32 input. The rounding is the point of the
@@ -33,24 +33,23 @@ fn assert_close(label: &str, actual: f64, expected: f64, tol: f64) {
 #[test]
 fn pq_q0_is_c1_to_m2_not_zero() {
     // Oracle: 7.309559025783966e-07; App. N: 7.3e-7 (c1^m2; not 0).
+    // q0 is defined exclusively as PQ_OETF(0) (§6 P2): the kernel calls the
+    // same unchecked formula there, so asserting pq_oetf(0.0) pins q0.
     assert_close(
         "q0 f64",
-        reference::pq_q0(),
+        reference::pq_oetf(0.0).unwrap(),
         7.309_559_025_783_966e-07,
         1e-18,
     );
-    assert!(reference::pq_q0() > 0.0, "q0 must be positive, not 0");
+    assert!(
+        reference::pq_oetf(0.0).unwrap() > 0.0,
+        "q0 must be positive, not 0"
+    );
     assert_close(
         "q0 f32",
-        f64::from(pq_q0()),
+        f64::from(pq_oetf(0.0).unwrap()),
         7.309_559_025_783_966e-07,
         1e-13,
-    );
-    // q0 is defined exclusively as PQ_OETF(0) (§6 P2): bit-identical.
-    assert_eq!(pq_q0().to_bits(), pq_oetf(0.0).unwrap().to_bits());
-    assert_eq!(
-        reference::pq_q0().to_bits(),
-        reference::pq_oetf(0.0).unwrap().to_bits()
     );
 }
 
@@ -307,7 +306,6 @@ fn hlg_refuses_nonfinite_and_overflow() {
 
 #[test]
 fn hlg_gamma_table_matches_independent_vectors() {
-    assert_eq!(HLG_GAMMA_RULE_VERSION, 1);
     for (peak, expected) in [
         (400.0, 1.032_865_196_357_744_2),
         (1000.0, 1.2),
@@ -315,13 +313,13 @@ fn hlg_gamma_table_matches_independent_vectors() {
         (4000.0, 1.481_185_199_999_999_9),
         (10_000.0, 1.702_315_536_266_557),
     ] {
-        let actual = reference::hlg_gamma(1, peak).unwrap();
+        let actual = reference::hlg_gamma(peak).unwrap();
         assert_close("gamma f64", actual, expected, 1e-12);
         // App. N rounded values, ±1e-6.
         assert_close("gamma App N", actual, (expected * 1e6).round() / 1e6, 1e-6);
         assert_close(
             "gamma f32~f64",
-            f64::from(hlg_gamma(1, as_f32(peak)).unwrap()),
+            f64::from(hlg_gamma(as_f32(peak)).unwrap()),
             expected,
             1e-6,
         );
@@ -332,41 +330,31 @@ fn hlg_gamma_table_matches_independent_vectors() {
 fn hlg_gamma_log_rule_owns_2000() {
     // The power rule would give exactly 1.3332 at 2000; the log rule gives
     // 1.326432598178872 and owns the boundary.
-    let at = reference::hlg_gamma(1, 2000.0).unwrap();
+    let at = reference::hlg_gamma(2000.0).unwrap();
     assert_close("gamma(2000)", at, 1.326_432_598_178_872, 1e-12);
     assert!(at < 1.33, "log rule must own P=2000, got {at}");
     // Just above, the power rule takes over with a visible upward step.
-    let above = reference::hlg_gamma(1, 2001.0).unwrap();
+    let above = reference::hlg_gamma(2001.0).unwrap();
     assert!(above - at > 0.005, "power rule must start above 2000");
     assert_close(
         "gamma f32(2000)",
-        f64::from(hlg_gamma(1, 2000.0).unwrap()),
+        f64::from(hlg_gamma(2000.0).unwrap()),
         at,
         1e-6,
     );
 }
 
 #[test]
-fn hlg_gamma_refuses_versions_and_bad_peaks() {
-    for version in [0, 2, u16::MAX] {
-        assert!(matches!(
-            hlg_gamma(version, 1000.0),
-            Err(Cc8KernelError::UnsupportedVersion { .. })
-        ));
-        assert!(matches!(
-            reference::hlg_gamma(version, 1000.0),
-            Err(Cc8KernelError::UnsupportedVersion { .. })
-        ));
-    }
+fn hlg_gamma_refuses_bad_peaks() {
     for peak in [0.0, -100.0] {
         assert!(matches!(
-            hlg_gamma(1, peak),
+            hlg_gamma(peak),
             Err(Cc8KernelError::OutOfDomain { .. })
         ));
     }
     for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         assert!(matches!(
-            hlg_gamma(1, bad),
+            hlg_gamma(bad),
             Err(Cc8KernelError::NonFiniteInput { .. })
         ));
     }
@@ -468,9 +456,10 @@ fn hlg_reference_white_lands_on_working_one() {
         0.749_877_333_641_052_2,
         3e-7,
     );
-    // Normalization roundtrips (normalize then denormalize).
+    // Normalization roundtrips (normalize, then the trivial × s_white inverse
+    // S3 inlines at render; no kernel entry point by budget design).
     let v = reference::scene_to_working([0.5, 0.25, 1.5], sw).unwrap();
-    let back = reference::working_to_scene(v, sw).unwrap();
+    let back = [v[0] * sw, v[1] * sw, v[2] * sw];
     assert_close_3("normalize roundtrip", back, [0.5, 0.25, 1.5], 1e-15);
 }
 
@@ -510,7 +499,7 @@ fn forward_rendering_matches_vectors() {
     let via_rule = reference::scene_to_display(
         [0.5, 0.25, 0.125],
         1000.0,
-        reference::hlg_gamma(1, 1000.0).unwrap(),
+        reference::hlg_gamma(1000.0).unwrap(),
     )
     .unwrap();
     let literal = reference::scene_to_display([0.5, 0.25, 0.125], 1000.0, 1.2).unwrap();
@@ -531,9 +520,9 @@ fn signed_rendering_never_feeds_powers_negatives() {
     let mixed = reference::scene_to_display([-0.5, 0.0, 0.0], 1000.0, 1.2).unwrap();
     assert_bits_3("signed zero-luma forward", mixed, [-500.0, 0.0, 0.0]);
     // Inverse mirrors: negatives pass at 1/P, bit-exact.
-    let s = reference::display_to_scene(1, [-500.0, 250.0, 0.0], 1000.0, 1.2).unwrap();
+    let s = reference::display_to_scene([-500.0, 250.0, 0.0], 1000.0, 1.2).unwrap();
     assert_eq!(s[0].to_bits(), (-0.5f64).to_bits());
-    let neg_only = reference::display_to_scene(1, [-500.0, -250.0, -125.0], 1000.0, 1.2).unwrap();
+    let neg_only = reference::display_to_scene([-500.0, -250.0, -125.0], 1000.0, 1.2).unwrap();
     assert_bits_3("all-negative inverse", neg_only, [-0.5, -0.25, -0.125]);
 }
 
@@ -551,12 +540,12 @@ fn zero_luminance_is_exact_zero() {
     );
     assert_bits_3(
         "inverse zero f64",
-        reference::display_to_scene(1, [0.0, 0.0, 0.0], 1000.0, 1.2).unwrap(),
+        reference::display_to_scene([0.0, 0.0, 0.0], 1000.0, 1.2).unwrap(),
         [0.0, 0.0, 0.0],
     );
     assert_bits_3_f32(
         "inverse zero f32",
-        display_to_scene(1, [0.0, 0.0, 0.0], 1000.0, 1.2).unwrap(),
+        display_to_scene([0.0, 0.0, 0.0], 1000.0, 1.2).unwrap(),
         [0.0, 0.0, 0.0],
     );
 }
@@ -572,12 +561,12 @@ fn forward_inverse_identity() {
     ];
     for scene in scenes {
         let d = reference::scene_to_display(scene, 1000.0, 1.2).unwrap();
-        let back = reference::display_to_scene(1, d, 1000.0, 1.2).unwrap();
+        let back = reference::display_to_scene(d, 1000.0, 1.2).unwrap();
         for (i, (b, e)) in back.iter().zip(scene.iter()).enumerate() {
             assert_close(&format!("identity[{i}]"), *b, *e, 1e-12 * e.abs().max(1e-9));
         }
         // And the other direction: inverse then forward.
-        let there = reference::display_to_scene(1, d, 1000.0, 1.2).unwrap();
+        let there = reference::display_to_scene(d, 1000.0, 1.2).unwrap();
         let back2 = reference::scene_to_display(there, 1000.0, 1.2).unwrap();
         for (i, (b, e)) in back2.iter().zip(d.iter()).enumerate() {
             assert_close(
@@ -590,12 +579,12 @@ fn forward_inverse_identity() {
     }
     // Pure-negative roundtrip is bit-exact (linear passthrough both ways).
     let d = reference::scene_to_display([-0.5, -0.25, -0.125], 1000.0, 1.2).unwrap();
-    let back = reference::display_to_scene(1, d, 1000.0, 1.2).unwrap();
+    let back = reference::display_to_scene(d, 1000.0, 1.2).unwrap();
     assert_bits_3("negative roundtrip", back, [-0.5, -0.25, -0.125]);
     // White extreme W=100: working of a 10k-nit input, oracle
     // 46.41588833612779; App. N 46.4159 (4dp).
     let sw100 = reference::s_white(100.0, 1000.0, 1.2).unwrap();
-    let s = reference::display_to_scene(1, [10_000.0, 10_000.0, 10_000.0], 1000.0, 1.2).unwrap();
+    let s = reference::display_to_scene([10_000.0, 10_000.0, 10_000.0], 1000.0, 1.2).unwrap();
     let w = reference::scene_to_working(s, sw100).unwrap()[0];
     assert_close("W=100 working of 10k", w, 46.415_888_336_127_79, 1e-9);
     assert_close("W=100 working of 10k App N", w, 46.415_9, 1e-4);
@@ -629,14 +618,13 @@ fn rendering_f32_agrees_with_f64() {
         }
         let scene32 = f64_3(
             display_to_scene(
-                1,
                 [as_f32(disp64[0]), as_f32(disp64[1]), as_f32(disp64[2])],
                 1000.0,
                 1.2,
             )
             .unwrap(),
         );
-        let scene64 = reference::display_to_scene(1, disp64, 1000.0, 1.2).unwrap();
+        let scene64 = reference::display_to_scene(disp64, 1000.0, 1.2).unwrap();
         for (i, (a, e)) in scene32.iter().zip(scene64.iter()).enumerate() {
             assert_close(&format!("inv32[{i}]"), *a, *e, 1e-5 * e.abs().max(1.0));
         }
@@ -645,17 +633,6 @@ fn rendering_f32_agrees_with_f64() {
 
 #[test]
 fn rendering_refusals() {
-    assert_eq!(DISPLAY_TO_SCENE_VERSION, 1);
-    for version in [0, 2, u16::MAX] {
-        assert!(matches!(
-            display_to_scene(version, [100.0, 100.0, 100.0], 1000.0, 1.2),
-            Err(Cc8KernelError::UnsupportedVersion { .. })
-        ));
-        assert!(matches!(
-            reference::display_to_scene(version, [100.0, 100.0, 100.0], 1000.0, 1.2),
-            Err(Cc8KernelError::UnsupportedVersion { .. })
-        ));
-    }
     // Non-positive white/peak/gamma/s_white refuse.
     assert!(matches!(
         s_white(0.0, 1000.0, 1.2),
@@ -677,17 +654,13 @@ fn rendering_refusals() {
         scene_to_working([0.5, 0.5, 0.5], 0.0),
         Err(Cc8KernelError::OutOfDomain { .. })
     ));
-    assert!(matches!(
-        working_to_scene([0.5, 0.5, 0.5], -1.0),
-        Err(Cc8KernelError::OutOfDomain { .. })
-    ));
     // Any non-finite component/arg refuses.
     assert!(matches!(
         scene_to_display([f32::NAN, 0.0, 0.0], 1000.0, 1.2),
         Err(Cc8KernelError::NonFiniteInput { .. })
     ));
     assert!(matches!(
-        display_to_scene(1, [100.0, f32::INFINITY, 100.0], 1000.0, 1.2),
+        display_to_scene([100.0, f32::INFINITY, 100.0], 1000.0, 1.2),
         Err(Cc8KernelError::NonFiniteInput { .. })
     ));
     assert!(matches!(
@@ -875,4 +848,236 @@ fn eetf_refusals() {
             Err(Cc8KernelError::NonFiniteInput { .. })
         ));
     }
+}
+
+// ---------------------------------------------------------------------------
+// C4: gamut compressor + HLG delivery kernel (§6, R30).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hlg_primaries_u_bounds_pre_post_fit() {
+    // (primary, oracle U, App. N U, oracle pre-fit signal, App. N pre).
+    for (prim, u, u_appn, pre, pre_appn) in [
+        (
+            [1000.0, 0.0, 0.0],
+            800.282_546_629_577_4,
+            800.283,
+            1.040_707_984_183_471,
+            1.040_708,
+        ),
+        (
+            [0.0, 1000.0, 0.0],
+            937.284_889_648_623_7,
+            937.285,
+            1.011_854_952_694_234,
+            1.011_855,
+        ),
+        (
+            [0.0, 0.0, 1000.0],
+            624.466_457_290_609_7,
+            624.466,
+            1.085_829_229_257_491,
+            1.085_829,
+        ),
+    ] {
+        let hlg = CompressDest::Hlg {
+            peak: 1000.0,
+            gamma: 1.2,
+        };
+        let fit = reference::gamut_compress(prim, hlg).unwrap();
+        assert!(!fit.y_clamped, "primary Y is in range");
+        assert!(fit.compressed, "primary must report compression");
+        // Fitted max channel lands ON U by construction: this asserts U.
+        let max_c = fit.value[0].max(fit.value[1]).max(fit.value[2]);
+        assert_close("U bound", max_c, u, 1e-9);
+        assert_close("U bound App N", max_c, u_appn, 1e-3);
+        for c in fit.value {
+            assert!(
+                c >= 0.0 && c <= u * (1.0 + 1e-12),
+                "in-volume: {c} vs U={u}"
+            );
+        }
+        // Pre-fit signal (unfitted inverse OOTF + OETF) exceeds 1: the fit
+        // is load-bearing, not decorative.
+        let s_unfit = reference::display_to_scene(prim, 1000.0, 1.2).unwrap();
+        let pre_sig = reference::hlg_oetf(s_unfit[0].max(s_unfit[1]).max(s_unfit[2])).unwrap();
+        assert_close("pre-fit signal", pre_sig, pre, 1e-9);
+        assert_close("pre-fit App N", pre_sig, pre_appn, 1e-6);
+        assert!(pre_sig > 1.0, "pre-fit must exceed 1: {pre_sig}");
+        // Post-fit: all three land on OETF(1.0) = 0.999999996 (App. N).
+        let out = reference::hlg_output(prim, 1000.0, 1.2).unwrap();
+        let post = out.signal[0].max(out.signal[1]).max(out.signal[2]);
+        assert_close("post-fit", post, 0.999_999_995_536_568_6, 1e-9);
+        assert_close("post-fit App N", post, 0.999_999_996, 1e-8);
+        assert!(post < 1.0, "post-OETF clamp must be residue-only: {post}");
+        assert!(out.fit.compressed);
+    }
+    // Oracle fitted triples, pinned componentwise (R primary shown; G/B by
+    // symmetry of the same code path plus their U/max assertions above).
+    let hlg = CompressDest::Hlg {
+        peak: 1000.0,
+        gamma: 1.2,
+    };
+    let fit_r = reference::gamut_compress([1000.0, 0.0, 0.0], hlg).unwrap();
+    assert_close_3(
+        "R fitted",
+        fit_r.value,
+        [
+            800.282_546_629_577_4,
+            71.159_331_344_649_42,
+            71.159_331_344_649_42,
+        ],
+        1e-9,
+    );
+}
+
+#[test]
+fn sdr_cube_compress() {
+    let sdr = CompressDest::Sdr { target_peak: 100.0 };
+    // Chromatic vector: oracle [100.0, 5.76135205339822, 41.100845033373886].
+    let v = reference::gamut_compress([150.0, -10.0, 50.0], sdr).unwrap();
+    assert!(!v.y_clamped);
+    assert!(v.compressed);
+    assert_close_3(
+        "SDR fitted",
+        v.value,
+        [100.0, 5.761_352_053_398_22, 41.100_845_033_373_886],
+        1e-9,
+    );
+    // Grey over-peak: Y resolves to Ct, then t = 0 → Ct exactly, both flags.
+    let over = reference::gamut_compress([200.0, 200.0, 200.0], sdr).unwrap();
+    assert!(over.y_clamped && over.compressed);
+    assert_bits_3("grey over-peak", over.value, [100.0, 100.0, 100.0]);
+    // Negative luma resolves to black exactly (Y flag, no compression).
+    let neg = reference::gamut_compress([-10.0, -10.0, -10.0], sdr).unwrap();
+    assert!(neg.y_clamped && !neg.compressed);
+    assert_bits_3("negative luma", neg.value, [0.0, 0.0, 0.0]);
+    // Neutral ramp and black pass through, no flags.
+    let ramp = reference::gamut_compress([50.0, 50.0, 50.0], sdr).unwrap();
+    assert!(!ramp.y_clamped && !ramp.compressed);
+    assert_close_3("neutral ramp", ramp.value, [50.0, 50.0, 50.0], 1e-9);
+    let black = reference::gamut_compress([0.0, 0.0, 0.0], sdr).unwrap();
+    assert!(!black.y_clamped && !black.compressed);
+    assert_bits_3("black", black.value, [0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn hlg_output_neutrals_and_volume() {
+    // Achromatic D → OETF((D/P)^(1/γ)) exactly (fit is identity on neutrals).
+    for (d, expected) in [
+        (100.0, 0.629_620_321_882_465_1),
+        (203.0, 0.749_877_365_102_611_4),
+        (500.0, 0.893_272_209_305_090_1),
+        (1000.0, 0.999_999_995_536_568_6),
+    ] {
+        let out = reference::hlg_output([d, d, d], 1000.0, 1.2).unwrap();
+        assert!(!out.fit.y_clamped && !out.fit.compressed, "D={d}");
+        assert_close_3(
+            "neutral out",
+            out.signal,
+            [expected, expected, expected],
+            1e-9,
+        );
+    }
+    // Reference white through the FULL output path: 0.749877365 (App. N).
+    let w = reference::hlg_output([203.0, 203.0, 203.0], 1000.0, 1.2).unwrap();
+    assert_close("white out", w.signal[0], 0.749_877_365_102_611_4, 1e-12);
+    // Super-white grey resolves through the fit (both flags), lands on
+    // OETF(1.0) — the post-OETF clamp never engages (residue only).
+    let over = reference::hlg_output([2000.0, 2000.0, 2000.0], 1000.0, 1.2).unwrap();
+    assert!(over.fit.y_clamped && over.fit.compressed);
+    assert_close_3(
+        "super-white out",
+        over.signal,
+        [
+            0.999_999_995_536_568_6,
+            0.999_999_995_536_568_6,
+            0.999_999_995_536_568_6,
+        ],
+        1e-9,
+    );
+    // Extreme HDR red stays in-volume and ≤ 1.0 past the clamp.
+    let x = reference::hlg_output([10_000.0, 0.0, 0.0], 1000.0, 1.2).unwrap();
+    for s in x.signal {
+        assert!((0.0..=1.0).contains(&s), "clamped signal: {s}");
+    }
+}
+
+#[test]
+fn compress_f32_agrees_with_f64() {
+    for prim in [[1000.0, 0.0, 0.0], [0.0, 1000.0, 0.0], [0.0, 0.0, 1000.0]] {
+        let hlg32 = CompressDest::Hlg {
+            peak: 1000.0,
+            gamma: 1.2,
+        };
+        let hlg64 = CompressDest::Hlg {
+            peak: 1000.0,
+            gamma: 1.2,
+        };
+        let f32v =
+            gamut_compress([as_f32(prim[0]), as_f32(prim[1]), as_f32(prim[2])], hlg32).unwrap();
+        let f64v = reference::gamut_compress(prim, hlg64).unwrap();
+        assert_eq!(f32v.y_clamped, f64v.y_clamped);
+        assert_eq!(f32v.compressed, f64v.compressed);
+        let a = f64_3(f32v.value);
+        for (i, (x, e)) in a.iter().zip(f64v.value.iter()).enumerate() {
+            assert_close(&format!("fit32[{i}]"), *x, *e, 1e-5 * e.abs().max(1.0));
+        }
+        let s32 = hlg_output(
+            [as_f32(prim[0]), as_f32(prim[1]), as_f32(prim[2])],
+            1000.0,
+            1.2,
+        )
+        .unwrap();
+        let s64 = reference::hlg_output(prim, 1000.0, 1.2).unwrap();
+        assert_close_3("sig32", f64_3(s32.signal), s64.signal, 2e-6);
+    }
+    let sdr32 = CompressDest::Sdr { target_peak: 100.0 };
+    let sdr64 = CompressDest::Sdr { target_peak: 100.0 };
+    let f32v = gamut_compress([150.0, -10.0, 50.0], sdr32).unwrap();
+    let f64v = reference::gamut_compress([150.0, -10.0, 50.0], sdr64).unwrap();
+    assert_close_3("sdr32", f64_3(f32v.value), f64v.value, 1e-4);
+}
+
+#[test]
+fn compress_refusals() {
+    assert!(matches!(
+        gamut_compress([50.0, 50.0, 50.0], CompressDest::Sdr { target_peak: 0.0 }),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        gamut_compress(
+            [50.0, 50.0, 50.0],
+            CompressDest::Hlg {
+                peak: 1000.0,
+                gamma: -1.0
+            }
+        ),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        reference::gamut_compress(
+            [50.0, 50.0, 50.0],
+            CompressDest::Hlg {
+                peak: -2.0,
+                gamma: 1.2
+            }
+        ),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
+    assert!(matches!(
+        gamut_compress(
+            [f32::NAN, 0.0, 0.0],
+            CompressDest::Sdr { target_peak: 100.0 }
+        ),
+        Err(Cc8KernelError::NonFiniteInput { .. })
+    ));
+    assert!(matches!(
+        hlg_output([100.0, 100.0, 100.0], f32::INFINITY, 1.2),
+        Err(Cc8KernelError::NonFiniteInput { .. })
+    ));
+    assert!(matches!(
+        hlg_output([100.0, 100.0, 100.0], 0.0, 1.2),
+        Err(Cc8KernelError::OutOfDomain { .. })
+    ));
 }

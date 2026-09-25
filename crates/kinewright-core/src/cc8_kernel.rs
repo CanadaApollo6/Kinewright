@@ -1,50 +1,23 @@
-//! CC8 stage S1 numeric kernel: pure colour maths, no I/O.
-//!
-//! Design `docs/CC8-FLEXIBLE-COLOUR-AND-YOUTUBE-HDR.md`, §§2–3, 6, 14.
-//! The f32 entry points are the production path the S3 renderer calls; the
-//! [`reference`] module is the f64 conformance path (App. N anchors, ±1e-6).
-//! S1 fails closed: every entry point refuses non-finite input, non-finite
-//! results (overflow), and out-of-domain arguments with [`Cc8KernelError`]
-//! instead of clamping. S2 maps this error into `OpError`/incidents.
+//! CC8 S1 numeric kernel (design §§2–3, 6, 14): pure colour maths, no I/O.
+//! f32 = production path for S3; [`reference`] = f64 conformance path (App. N).
+//! Fail-closed: non-finite/overflow/out-of-domain refuse, never clamp (R35).
 
 use thiserror::Error;
 
-/// Typed S1 kernel failure: non-finite input/result, out-of-domain argument,
-/// or unsupported version. Failing closed — never a quiet clamp (R35).
+/// Typed S1 kernel failure (R35). S2 maps this into `OpError`/incidents.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum Cc8KernelError {
-    /// A floating-point argument was NaN or infinite.
+    /// NaN/infinite argument (`function`: entry point, `value`: the input).
     #[error("cc8 kernel: {function}: non-finite input {value}")]
-    NonFiniteInput {
-        /// Calling entry point, for incident attribution.
-        function: &'static str,
-        /// The offending value, widened for reporting.
-        value: f64,
-    },
-    /// The correctly-rounded result would be NaN or infinite (overflow, or
-    /// past a pole such as ST 2084's); the caller must handle it, not clamp.
+    NonFiniteInput { function: &'static str, value: f64 },
+    /// NaN/infinite result — overflow or past a pole; handle, don't clamp.
     #[error("cc8 kernel: {function}: non-finite result (overflow), refusing")]
-    NonFiniteResult {
-        /// Calling entry point, for incident attribution.
-        function: &'static str,
-    },
-    /// A finite argument outside the function's domain (negative nits/signal
-    /// into PQ, non-positive peak/white, …).
+    NonFiniteResult { function: &'static str },
+    /// Finite but out-of-domain argument (`reason`: which rule was violated).
     #[error("cc8 kernel: {function}: out of domain ({reason})")]
     OutOfDomain {
-        /// Calling entry point, for incident attribution.
         function: &'static str,
-        /// Which domain rule was violated.
         reason: &'static str,
-    },
-    /// A versioned rule (HLG gamma, `display_to_scene`) was asked for a rule
-    /// version other than the pinned one.
-    #[error("cc8 kernel: {function}: unsupported version {version}")]
-    UnsupportedVersion {
-        /// Calling entry point, for incident attribution.
-        function: &'static str,
-        /// The requested rule version.
-        version: u16,
     },
 }
 
@@ -75,9 +48,8 @@ where
     }
 }
 
-// ---------------------------------------------------------------------------
-// ST 2084 (PQ). Constants are exact binary fractions in both precisions.
-// ---------------------------------------------------------------------------
+// ========================================================================
+// ST 2084 (PQ); constants are exact binary fractions in both precisions.
 
 const PQ_M1_F32: f32 = 2610.0 / 16384.0;
 const PQ_M2_F32: f32 = (2523.0 / 4096.0) * 128.0;
@@ -100,10 +72,7 @@ const PQ_PEAK_NITS_F64: f64 = 10_000.0;
 /// in nits, §6 P3), so they refuse here rather than taking a sign extension.
 ///
 /// # Errors
-///
-/// [`Cc8KernelError::NonFiniteInput`] for NaN/infinite nits,
-/// [`Cc8KernelError::OutOfDomain`] for negative nits, or
-/// [`Cc8KernelError::NonFiniteResult`] on overflow.
+/// Non-finite → `NonFiniteInput`; negative → `OutOfDomain`; overflow → `NonFiniteResult`.
 pub fn pq_oetf(nits: f32) -> Result<f32, Cc8KernelError> {
     const FUNCTION: &str = "pq_oetf";
     let nits = finite_input(FUNCTION, nits)?;
@@ -116,13 +85,6 @@ pub fn pq_oetf(nits: f32) -> Result<f32, Cc8KernelError> {
     finite_result(FUNCTION, pq_oetf_unchecked(nits))
 }
 
-/// `q0`, defined exclusively as `PQ_OETF(0)` (§6 P2): `c1^m2 ≈ 7.31e-7`,
-/// not 0. Infallible: 0.0 is finite and its image is finite.
-#[must_use]
-pub fn pq_q0() -> f32 {
-    pq_oetf_unchecked(0.0)
-}
-
 fn pq_oetf_unchecked(nits: f32) -> f32 {
     let y = (nits / PQ_PEAK_NITS_F32).powf(PQ_M1_F32);
     ((PQ_C1_F32 + PQ_C2_F32 * y) / (1.0 + PQ_C3_F32 * y)).powf(PQ_M2_F32)
@@ -131,11 +93,7 @@ fn pq_oetf_unchecked(nits: f32) -> f32 {
 /// ST 2084 EOTF: PQ signal → absolute nits. Exact 0 → 0.
 ///
 /// # Errors
-///
-/// [`Cc8KernelError::NonFiniteInput`] for NaN/infinite signals,
-/// [`Cc8KernelError::OutOfDomain`] for negative signals, or
-/// [`Cc8KernelError::NonFiniteResult`] at/past the rational-form pole
-/// (`E′ = (c2/c3)^m2 ≈ 1.992`).
+/// Non-finite → `NonFiniteInput`; negative → `OutOfDomain`; at/past pole → `NonFiniteResult`.
 pub fn pq_eotf(signal: f32) -> Result<f32, Cc8KernelError> {
     const FUNCTION: &str = "pq_eotf";
     let signal = finite_input(FUNCTION, signal)?;
@@ -162,9 +120,8 @@ fn pq_eotf_unchecked(signal: f32) -> Option<f32> {
     Some(PQ_PEAK_NITS_F32 * ((p - PQ_C1_F32).max(0.0) / denominator).powf(1.0 / PQ_M1_F32))
 }
 
-// ---------------------------------------------------------------------------
-// ARIB STD-B67 (HLG). a/b/c are the standard's rounded decimals.
-// ---------------------------------------------------------------------------
+// ========================================================================
+// ARIB STD-B67 (HLG); a/b/c are the standard's rounded decimals.
 
 const HLG_A_F32: f32 = 0.178_832_77;
 const HLG_B_F32: f32 = 0.284_668_92;
@@ -183,9 +140,7 @@ const HLG_SIGNAL_BREAKPOINT_F64: f64 = 0.5;
 /// working values keep their sign (negatives are never fed to powers, §2 P3).
 ///
 /// # Errors
-///
-/// [`Cc8KernelError::NonFiniteInput`] for NaN/infinite input or
-/// [`Cc8KernelError::NonFiniteResult`] on overflow.
+/// Non-finite → `NonFiniteInput`; overflow → `NonFiniteResult`.
 pub fn hlg_oetf(scene: f32) -> Result<f32, Cc8KernelError> {
     const FUNCTION: &str = "hlg_oetf";
     let scene = finite_input(FUNCTION, scene)?;
@@ -206,9 +161,7 @@ fn hlg_oetf_unchecked(scene: f32) -> f32 {
 /// input decoding — no OOTF at input, §2 R28), sign-preserving.
 ///
 /// # Errors
-///
-/// [`Cc8KernelError::NonFiniteInput`] for NaN/infinite input or
-/// [`Cc8KernelError::NonFiniteResult`] on overflow.
+/// Non-finite → `NonFiniteInput`; overflow → `NonFiniteResult`.
 pub fn hlg_inverse_oetf(signal: f32) -> Result<f32, Cc8KernelError> {
     const FUNCTION: &str = "hlg_inverse_oetf";
     let signal = finite_input(FUNCTION, signal)?;
@@ -225,38 +178,18 @@ fn hlg_inverse_oetf_unchecked(signal: f32) -> f32 {
     decoded.copysign(signal)
 }
 
-// ---------------------------------------------------------------------------
-// HLG system gamma rule, `gamma_rule_version = 1` (§3).
-// ---------------------------------------------------------------------------
+// ========================================================================
+// HLG system gamma rule v1 (§3).
 
-/// The pinned HLG gamma rule version. Only this version exists.
-pub const HLG_GAMMA_RULE_VERSION: u16 = 1;
-
-/// HLG system gamma at peak `peak_nits` (BT.2100-3 Table 5 Note 5f):
+/// HLG system gamma at peak `peak_nits` (BT.2100-3 Table 5 Note 5f), rule v1:
 /// P ≤ 2000 takes the log rule, P > 2000 the power rule — the log rule owns
 /// the boundary at exactly 2000.
 ///
 /// # Errors
-///
-/// [`Cc8KernelError::UnsupportedVersion`] for any `rule_version` other than
-/// [`HLG_GAMMA_RULE_VERSION`], [`Cc8KernelError::NonFiniteInput`] for
-/// NaN/infinite peaks, [`Cc8KernelError::OutOfDomain`] for peaks ≤ 0, or
-/// [`Cc8KernelError::NonFiniteResult`] on overflow.
-pub fn hlg_gamma(rule_version: u16, peak_nits: f32) -> Result<f32, Cc8KernelError> {
+/// Non-finite → `NonFiniteInput`; peak ≤ 0 → `OutOfDomain`.
+pub fn hlg_gamma(peak_nits: f32) -> Result<f32, Cc8KernelError> {
     const FUNCTION: &str = "hlg_gamma";
-    if rule_version != HLG_GAMMA_RULE_VERSION {
-        return Err(Cc8KernelError::UnsupportedVersion {
-            function: FUNCTION,
-            version: rule_version,
-        });
-    }
-    let peak = finite_input(FUNCTION, peak_nits)?;
-    if peak <= 0.0 {
-        return Err(Cc8KernelError::OutOfDomain {
-            function: FUNCTION,
-            reason: "peak must be > 0 nits",
-        });
-    }
+    let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
     finite_result(FUNCTION, hlg_gamma_unchecked(peak))
 }
 
@@ -268,11 +201,8 @@ fn hlg_gamma_unchecked(peak_nits: f32) -> f32 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Reference-scene normalization + scene/display rendering (§2).
-// α = 1, β = 0 pinned. Gamma arrives resolved (locks pin it, §2); the S3
-// caller resolves it once per frame via `hlg_gamma`, not per pixel.
-// ---------------------------------------------------------------------------
+// ========================================================================
+// Scene normalization + rendering (§2); α = 1, β = 0; gamma arrives resolved.
 
 const BT2020_KR_F32: f32 = 0.2627;
 const BT2020_KG_F32: f32 = 0.6780;
@@ -310,21 +240,30 @@ where
     Ok(value)
 }
 
+/// Require a finite positive scale (white/peak/Ct/γ); else refuse (R35).
+fn positive<T>(function: &'static str, reason: &'static str, value: T) -> Result<T, Cc8KernelError>
+where
+    T: Copy + Into<f64>,
+{
+    let v = value.into();
+    if !v.is_finite() {
+        return Err(Cc8KernelError::NonFiniteInput { function, value: v });
+    }
+    if v <= 0.0 {
+        return Err(Cc8KernelError::OutOfDomain { function, reason });
+    }
+    Ok(value)
+}
+
 /// Reference-scene white `s_white = (W/P)^(1/γ)` (§2). Working = `scene/s_white`.
 ///
 /// # Errors
 /// Non-finite args → `NonFiniteInput`; W/P/γ ≤ 0 → `OutOfDomain`.
 pub fn s_white(white_nits: f32, peak_nits: f32, gamma: f32) -> Result<f32, Cc8KernelError> {
     const FUNCTION: &str = "s_white";
-    let white = finite_input(FUNCTION, white_nits)?;
-    let peak = finite_input(FUNCTION, peak_nits)?;
-    let gamma = finite_input(FUNCTION, gamma)?;
-    if white <= 0.0 || peak <= 0.0 || gamma <= 0.0 {
-        return Err(Cc8KernelError::OutOfDomain {
-            function: FUNCTION,
-            reason: "white/peak/gamma must be > 0",
-        });
-    }
+    let white = positive(FUNCTION, "white must be > 0", white_nits)?;
+    let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
+    let gamma = positive(FUNCTION, "gamma must be > 0", gamma)?;
     finite_result(FUNCTION, (white / peak).powf(1.0 / gamma))
 }
 
@@ -335,34 +274,8 @@ pub fn s_white(white_nits: f32, peak_nits: f32, gamma: f32) -> Result<f32, Cc8Ke
 pub fn scene_to_working(scene: [f32; 3], ref_white: f32) -> Result<[f32; 3], Cc8KernelError> {
     const FUNCTION: &str = "scene_to_working";
     let scene = finite_input_3(FUNCTION, scene)?;
-    let sw = finite_input(FUNCTION, ref_white)?;
-    if sw <= 0.0 {
-        return Err(Cc8KernelError::OutOfDomain {
-            function: FUNCTION,
-            reason: "s_white must be > 0",
-        });
-    }
+    let sw = positive(FUNCTION, "s_white must be > 0", ref_white)?;
     finite_result_3(FUNCTION, [scene[0] / sw, scene[1] / sw, scene[2] / sw])
-}
-
-/// Denormalize working to scene: `s = w·s_white` per component (§2).
-///
-/// # Errors
-/// Non-finite args → `NonFiniteInput`; `s_white` ≤ 0 → `OutOfDomain`.
-pub fn working_to_scene(working: [f32; 3], ref_white: f32) -> Result<[f32; 3], Cc8KernelError> {
-    const FUNCTION: &str = "working_to_scene";
-    let working = finite_input_3(FUNCTION, working)?;
-    let sw = finite_input(FUNCTION, ref_white)?;
-    if sw <= 0.0 {
-        return Err(Cc8KernelError::OutOfDomain {
-            function: FUNCTION,
-            reason: "s_white must be > 0",
-        });
-    }
-    finite_result_3(
-        FUNCTION,
-        [working[0] * sw, working[1] * sw, working[2] * sw],
-    )
 }
 
 /// Forward rendering, scene → display nits (§2): `D_c = P·Y_s^(γ−1)·s_c`
@@ -378,14 +291,8 @@ pub fn scene_to_display(
 ) -> Result<[f32; 3], Cc8KernelError> {
     const FUNCTION: &str = "scene_to_display";
     let scene = finite_input_3(FUNCTION, scene)?;
-    let peak = finite_input(FUNCTION, peak_nits)?;
-    let gamma = finite_input(FUNCTION, gamma)?;
-    if peak <= 0.0 || gamma <= 0.0 {
-        return Err(Cc8KernelError::OutOfDomain {
-            function: FUNCTION,
-            reason: "peak/gamma must be > 0",
-        });
-    }
+    let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
+    let gamma = positive(FUNCTION, "gamma must be > 0", gamma)?;
     let nonneg = [scene[0].max(0.0), scene[1].max(0.0), scene[2].max(0.0)];
     let luma = BT2020_KR_F32 * nonneg[0] + BT2020_KG_F32 * nonneg[1] + BT2020_KB_F32 * nonneg[2];
     // Positive luma takes the power path; zero luma is exactly zero (never
@@ -405,38 +312,22 @@ pub fn scene_to_display(
     )
 }
 
-/// The pinned `display_to_scene` rule version. Only this version exists.
-pub const DISPLAY_TO_SCENE_VERSION: u16 = 1;
-
-/// Inverse rendering, display nits → scene (§2 `display_to_scene` v1):
+/// Inverse rendering, display nits → scene (§2, `display_to_scene` v1):
 /// `Y_s = (Y_d/P)^(1/γ)`, `s_c = D_c/(P·Y_s^(γ−1))`, plus P3 signed
 /// handling `s = F⁻¹(max(D,0)) + min(D,0)/P`. `Y_d` = 0 → F⁻¹ part exactly 0.
 ///
 /// # Errors
-/// Other versions → `UnsupportedVersion`; non-finite args → `NonFiniteInput`;
+/// Non-finite args → `NonFiniteInput`;
 /// peak/γ ≤ 0 → `OutOfDomain`.
 pub fn display_to_scene(
-    rule_version: u16,
     display: [f32; 3],
     peak_nits: f32,
     gamma: f32,
 ) -> Result<[f32; 3], Cc8KernelError> {
     const FUNCTION: &str = "display_to_scene";
-    if rule_version != DISPLAY_TO_SCENE_VERSION {
-        return Err(Cc8KernelError::UnsupportedVersion {
-            function: FUNCTION,
-            version: rule_version,
-        });
-    }
     let display = finite_input_3(FUNCTION, display)?;
-    let peak = finite_input(FUNCTION, peak_nits)?;
-    let gamma = finite_input(FUNCTION, gamma)?;
-    if peak <= 0.0 || gamma <= 0.0 {
-        return Err(Cc8KernelError::OutOfDomain {
-            function: FUNCTION,
-            reason: "peak/gamma must be > 0",
-        });
-    }
+    let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
+    let gamma = positive(FUNCTION, "gamma must be > 0", gamma)?;
     let nonneg = [
         display[0].max(0.0),
         display[1].max(0.0),
@@ -466,17 +357,13 @@ pub fn display_to_scene(
     }
 }
 
-// ---------------------------------------------------------------------------
-// EETF to target (§6): the one tone intent. PQ-normalized Hermite, source
-// span, clip+flag past Cs, identity when Ct ≥ Cs, negatives pass in nits.
-// ---------------------------------------------------------------------------
+// ========================================================================
+// EETF to target (§6): PQ-normalized Hermite, source span, clip+flag past Cs.
 
-/// `eetf_to_target` result: mapped nits + whether L exceeded Cs (clip+flag).
+/// `eetf_to_target`: `value` = mapped nits (or input unchanged), `clipped` = past Cs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EetfOutput<T> {
-    /// Mapped nits (or the input unchanged: negatives, identity, zero).
     pub value: T,
-    /// True iff L exceeded Cs and the value clipped to Ct.
     pub clipped: bool,
 }
 
@@ -493,14 +380,8 @@ pub fn eetf_to_target(
 ) -> Result<EetfOutput<f32>, Cc8KernelError> {
     const FUNCTION: &str = "eetf_to_target";
     let l = finite_input(FUNCTION, nits)?;
-    let cs = finite_input(FUNCTION, source_ceiling_nits)?;
-    let ct = finite_input(FUNCTION, target_peak_nits)?;
-    if cs <= 0.0 || ct <= 0.0 {
-        return Err(Cc8KernelError::OutOfDomain {
-            function: FUNCTION,
-            reason: "source ceiling/target peak must be > 0",
-        });
-    }
+    let cs = positive(FUNCTION, "source ceiling must be > 0", source_ceiling_nits)?;
+    let ct = positive(FUNCTION, "target peak must be > 0", target_peak_nits)?;
     if l < 0.0 {
         return Ok(EetfOutput {
             value: l,
@@ -519,7 +400,7 @@ pub fn eetf_to_target(
             clipped: false,
         }); // identity
     }
-    let q0 = pq_q0();
+    let q0 = pq_oetf_unchecked(0.0); // q0 IS PQ_OETF(0) (§6 P2)
     let span = pq_oetf_unchecked(cs) - q0;
     let x = (pq_oetf_unchecked(l) - q0) / span;
     let m = (pq_oetf_unchecked(ct) - q0) / span;
@@ -555,27 +436,144 @@ pub fn eetf_to_target(
     }
 }
 
-// ---------------------------------------------------------------------------
-// f64 conformance reference: the App. N path. Tested ±1e-6 against the
-// independent vectors; f32 production agreement with this module is itself
-// a test (R35).
-// ---------------------------------------------------------------------------
+// ========================================================================
+// Gamut compressor + HLG delivery kernel (§6, R30).
+
+const BT709_KR_F32: f32 = 0.2126;
+const BT709_KG_F32: f32 = 0.7152;
+const BT709_KB_F32: f32 = 0.0722;
+const BT709_KR_F64: f64 = 0.2126;
+const BT709_KG_F64: f64 = 0.7152;
+const BT709_KB_F64: f64 = 0.0722;
+
+/// Volume for [`gamut_compress`]: `Sdr` (709, `U = Ct`) or `Hlg` (2020, `U` rule).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CompressDest<T> {
+    Sdr { target_peak: T },
+    Hlg { peak: T, gamma: T },
+}
+
+/// [`gamut_compress`]: `value` = fitted RGB, `y_clamped`, `compressed` (`t < 1`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GamutOutput<T> {
+    pub value: [T; 3],
+    pub y_clamped: bool,
+    pub compressed: bool,
+}
+
+/// [`hlg_output`]: `signal` = clamped HLG triple, `fit` = fit report.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HlgOutput<T> {
+    pub signal: [T; 3],
+    pub fit: GamutOutput<T>,
+}
+
+/// Gamut compression in destination RGB (§6): resolve Y into range, `Y = 0`
+/// → black, else affine `c′ = Y + t(c−Y)` with destination luma/U.
+///
+/// # Errors
+/// Non-finite → `NonFiniteInput`; peak/Ct/γ ≤ 0 → `OutOfDomain`.
+pub fn gamut_compress(
+    rgb: [f32; 3],
+    dest: CompressDest<f32>,
+) -> Result<GamutOutput<f32>, Cc8KernelError> {
+    const FUNCTION: &str = "gamut_compress";
+    let rgb = finite_input_3(FUNCTION, rgb)?;
+    let (kr, kg, kb, ymax, hlg) = match dest {
+        CompressDest::Sdr { target_peak } => {
+            let ct = positive(FUNCTION, "target peak must be > 0", target_peak)?;
+            (BT709_KR_F32, BT709_KG_F32, BT709_KB_F32, ct, None)
+        }
+        CompressDest::Hlg { peak, gamma } => {
+            let p = positive(FUNCTION, "peak must be > 0", peak)?;
+            let g = positive(FUNCTION, "gamma must be > 0", gamma)?;
+            (BT2020_KR_F32, BT2020_KG_F32, BT2020_KB_F32, p, Some((p, g)))
+        }
+    };
+    let y = kr * rgb[0] + kg * rgb[1] + kb * rgb[2];
+    let (y, y_clamped) = if y < 0.0 {
+        (0.0, true)
+    } else if y > ymax {
+        (ymax, true)
+    } else {
+        (y, false)
+    };
+    if y <= 0.0 {
+        return Ok(GamutOutput {
+            value: [0.0, 0.0, 0.0],
+            y_clamped,
+            compressed: false,
+        });
+    }
+    let upper = match hlg {
+        Some((p, g)) => p * (y / p).powf((g - 1.0) / g),
+        None => ymax,
+    };
+    let mut t = 1.0f32;
+    for c in rgb {
+        if c < y {
+            t = t.min(y / (y - c));
+        } else if c > y {
+            t = t.min((upper - y) / (c - y));
+        }
+    }
+    let value = finite_result_3(
+        FUNCTION,
+        [
+            y + t * (rgb[0] - y),
+            y + t * (rgb[1] - y),
+            y + t * (rgb[2] - y),
+        ],
+    )?;
+    Ok(GamutOutput {
+        value,
+        y_clamped,
+        compressed: t < 1.0,
+    })
+}
+
+/// HLG delivery kernel (§6): volume fit → inverse OOTF + OETF at the target
+/// peak → post-OETF clamp to `[0, 1]` (float residue only).
+///
+/// # Errors
+/// Non-finite → `NonFiniteInput`; peak/γ ≤ 0 → `OutOfDomain`.
+pub fn hlg_output(
+    display: [f32; 3],
+    target_peak: f32,
+    gamma: f32,
+) -> Result<HlgOutput<f32>, Cc8KernelError> {
+    let fit = gamut_compress(
+        display,
+        CompressDest::Hlg {
+            peak: target_peak,
+            gamma,
+        },
+    )?;
+    let scene = display_to_scene(fit.value, target_peak, gamma)?;
+    let signal = [
+        hlg_oetf_unchecked(scene[0]).clamp(0.0, 1.0),
+        hlg_oetf_unchecked(scene[1]).clamp(0.0, 1.0),
+        hlg_oetf_unchecked(scene[2]).clamp(0.0, 1.0),
+    ];
+    Ok(HlgOutput { signal, fit })
+}
+
+// f64 conformance reference (App. N path; f32 agreement is itself a test).
 
 /// f64 conformance reference for every f32 production entry point above.
 /// Same domains, same refusals, same branch ownership.
 pub mod reference {
     use super::{
-        BT2020_KB_F64, BT2020_KG_F64, BT2020_KR_F64, Cc8KernelError, DISPLAY_TO_SCENE_VERSION,
-        EetfOutput, HLG_A_F64, HLG_B_F64, HLG_C_F64, HLG_GAMMA_RULE_VERSION,
-        HLG_SCENE_BREAKPOINT_F64, HLG_SIGNAL_BREAKPOINT_F64, PQ_C1_F64, PQ_C2_F64, PQ_C3_F64,
-        PQ_M1_F64, PQ_M2_F64, PQ_PEAK_NITS_F64, finite_input, finite_input_3, finite_result,
-        finite_result_3,
+        BT709_KB_F64, BT709_KG_F64, BT709_KR_F64, BT2020_KB_F64, BT2020_KG_F64, BT2020_KR_F64,
+        Cc8KernelError, CompressDest, EetfOutput, GamutOutput, HLG_A_F64, HLG_B_F64, HLG_C_F64,
+        HLG_SCENE_BREAKPOINT_F64, HLG_SIGNAL_BREAKPOINT_F64, HlgOutput, PQ_C1_F64, PQ_C2_F64,
+        PQ_C3_F64, PQ_M1_F64, PQ_M2_F64, PQ_PEAK_NITS_F64, finite_input, finite_input_3,
+        finite_result, finite_result_3, positive,
     };
 
     /// f64 [`super::pq_oetf`].
     ///
     /// # Errors
-    ///
     /// Same as [`super::pq_oetf`].
     pub fn pq_oetf(nits: f64) -> Result<f64, Cc8KernelError> {
         const FUNCTION: &str = "reference::pq_oetf";
@@ -589,12 +587,6 @@ pub mod reference {
         finite_result(FUNCTION, pq_oetf_unchecked(nits))
     }
 
-    /// f64 [`super::pq_q0`].
-    #[must_use]
-    pub fn pq_q0() -> f64 {
-        pq_oetf_unchecked(0.0)
-    }
-
     fn pq_oetf_unchecked(nits: f64) -> f64 {
         let y = (nits / PQ_PEAK_NITS_F64).powf(PQ_M1_F64);
         ((PQ_C1_F64 + PQ_C2_F64 * y) / (1.0 + PQ_C3_F64 * y)).powf(PQ_M2_F64)
@@ -603,7 +595,6 @@ pub mod reference {
     /// f64 [`super::pq_eotf`].
     ///
     /// # Errors
-    ///
     /// Same as [`super::pq_eotf`].
     pub fn pq_eotf(signal: f64) -> Result<f64, Cc8KernelError> {
         const FUNCTION: &str = "reference::pq_eotf";
@@ -632,7 +623,6 @@ pub mod reference {
     /// f64 [`super::hlg_oetf`].
     ///
     /// # Errors
-    ///
     /// Same as [`super::hlg_oetf`].
     pub fn hlg_oetf(scene: f64) -> Result<f64, Cc8KernelError> {
         const FUNCTION: &str = "reference::hlg_oetf";
@@ -653,7 +643,6 @@ pub mod reference {
     /// f64 [`super::hlg_inverse_oetf`].
     ///
     /// # Errors
-    ///
     /// Same as [`super::hlg_inverse_oetf`].
     pub fn hlg_inverse_oetf(signal: f64) -> Result<f64, Cc8KernelError> {
         const FUNCTION: &str = "reference::hlg_inverse_oetf";
@@ -674,23 +663,10 @@ pub mod reference {
     /// f64 [`super::hlg_gamma`].
     ///
     /// # Errors
-    ///
     /// Same as [`super::hlg_gamma`].
-    pub fn hlg_gamma(rule_version: u16, peak_nits: f64) -> Result<f64, Cc8KernelError> {
+    pub fn hlg_gamma(peak_nits: f64) -> Result<f64, Cc8KernelError> {
         const FUNCTION: &str = "reference::hlg_gamma";
-        if rule_version != HLG_GAMMA_RULE_VERSION {
-            return Err(Cc8KernelError::UnsupportedVersion {
-                function: FUNCTION,
-                version: rule_version,
-            });
-        }
-        let peak = finite_input(FUNCTION, peak_nits)?;
-        if peak <= 0.0 {
-            return Err(Cc8KernelError::OutOfDomain {
-                function: FUNCTION,
-                reason: "peak must be > 0 nits",
-            });
-        }
+        let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
         finite_result(FUNCTION, hlg_gamma_unchecked(peak))
     }
 
@@ -705,65 +681,29 @@ pub mod reference {
     /// f64 [`super::s_white`].
     ///
     /// # Errors
-    ///
     /// Same as [`super::s_white`].
     pub fn s_white(white_nits: f64, peak_nits: f64, gamma: f64) -> Result<f64, Cc8KernelError> {
         const FUNCTION: &str = "reference::s_white";
-        let white = finite_input(FUNCTION, white_nits)?;
-        let peak = finite_input(FUNCTION, peak_nits)?;
-        let gamma = finite_input(FUNCTION, gamma)?;
-        if white <= 0.0 || peak <= 0.0 || gamma <= 0.0 {
-            return Err(Cc8KernelError::OutOfDomain {
-                function: FUNCTION,
-                reason: "white/peak/gamma must be > 0",
-            });
-        }
+        let white = positive(FUNCTION, "white must be > 0", white_nits)?;
+        let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
+        let gamma = positive(FUNCTION, "gamma must be > 0", gamma)?;
         finite_result(FUNCTION, (white / peak).powf(1.0 / gamma))
     }
 
     /// f64 [`super::scene_to_working`].
     ///
     /// # Errors
-    ///
     /// Same as [`super::scene_to_working`].
     pub fn scene_to_working(scene: [f64; 3], ref_white: f64) -> Result<[f64; 3], Cc8KernelError> {
         const FUNCTION: &str = "reference::scene_to_working";
         let scene = finite_input_3(FUNCTION, scene)?;
-        let sw = finite_input(FUNCTION, ref_white)?;
-        if sw <= 0.0 {
-            return Err(Cc8KernelError::OutOfDomain {
-                function: FUNCTION,
-                reason: "s_white must be > 0",
-            });
-        }
+        let sw = positive(FUNCTION, "s_white must be > 0", ref_white)?;
         finite_result_3(FUNCTION, [scene[0] / sw, scene[1] / sw, scene[2] / sw])
-    }
-
-    /// f64 [`super::working_to_scene`].
-    ///
-    /// # Errors
-    ///
-    /// Same as [`super::working_to_scene`].
-    pub fn working_to_scene(working: [f64; 3], ref_white: f64) -> Result<[f64; 3], Cc8KernelError> {
-        const FUNCTION: &str = "reference::working_to_scene";
-        let working = finite_input_3(FUNCTION, working)?;
-        let sw = finite_input(FUNCTION, ref_white)?;
-        if sw <= 0.0 {
-            return Err(Cc8KernelError::OutOfDomain {
-                function: FUNCTION,
-                reason: "s_white must be > 0",
-            });
-        }
-        finite_result_3(
-            FUNCTION,
-            [working[0] * sw, working[1] * sw, working[2] * sw],
-        )
     }
 
     /// f64 [`super::scene_to_display`].
     ///
     /// # Errors
-    ///
     /// Same as [`super::scene_to_display`].
     pub fn scene_to_display(
         scene: [f64; 3],
@@ -772,14 +712,8 @@ pub mod reference {
     ) -> Result<[f64; 3], Cc8KernelError> {
         const FUNCTION: &str = "reference::scene_to_display";
         let scene = finite_input_3(FUNCTION, scene)?;
-        let peak = finite_input(FUNCTION, peak_nits)?;
-        let gamma = finite_input(FUNCTION, gamma)?;
-        if peak <= 0.0 || gamma <= 0.0 {
-            return Err(Cc8KernelError::OutOfDomain {
-                function: FUNCTION,
-                reason: "peak/gamma must be > 0",
-            });
-        }
+        let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
+        let gamma = positive(FUNCTION, "gamma must be > 0", gamma)?;
         let nonneg = [scene[0].max(0.0), scene[1].max(0.0), scene[2].max(0.0)];
         let luma =
             BT2020_KR_F64 * nonneg[0] + BT2020_KG_F64 * nonneg[1] + BT2020_KB_F64 * nonneg[2];
@@ -801,30 +735,16 @@ pub mod reference {
     /// f64 [`super::display_to_scene`].
     ///
     /// # Errors
-    ///
     /// Same as [`super::display_to_scene`].
     pub fn display_to_scene(
-        rule_version: u16,
         display: [f64; 3],
         peak_nits: f64,
         gamma: f64,
     ) -> Result<[f64; 3], Cc8KernelError> {
         const FUNCTION: &str = "reference::display_to_scene";
-        if rule_version != DISPLAY_TO_SCENE_VERSION {
-            return Err(Cc8KernelError::UnsupportedVersion {
-                function: FUNCTION,
-                version: rule_version,
-            });
-        }
         let display = finite_input_3(FUNCTION, display)?;
-        let peak = finite_input(FUNCTION, peak_nits)?;
-        let gamma = finite_input(FUNCTION, gamma)?;
-        if peak <= 0.0 || gamma <= 0.0 {
-            return Err(Cc8KernelError::OutOfDomain {
-                function: FUNCTION,
-                reason: "peak/gamma must be > 0",
-            });
-        }
+        let peak = positive(FUNCTION, "peak must be > 0", peak_nits)?;
+        let gamma = positive(FUNCTION, "gamma must be > 0", gamma)?;
         let nonneg = [
             display[0].max(0.0),
             display[1].max(0.0),
@@ -858,7 +778,6 @@ pub mod reference {
     /// f64 [`super::eetf_to_target`].
     ///
     /// # Errors
-    ///
     /// Same as [`super::eetf_to_target`].
     // Single-letter bindings below are the §6 symbols (x, m, ks, H, T) verbatim.
     #[allow(clippy::many_single_char_names)]
@@ -869,14 +788,8 @@ pub mod reference {
     ) -> Result<EetfOutput<f64>, Cc8KernelError> {
         const FUNCTION: &str = "reference::eetf_to_target";
         let l = finite_input(FUNCTION, nits)?;
-        let cs = finite_input(FUNCTION, source_ceiling_nits)?;
-        let ct = finite_input(FUNCTION, target_peak_nits)?;
-        if cs <= 0.0 || ct <= 0.0 {
-            return Err(Cc8KernelError::OutOfDomain {
-                function: FUNCTION,
-                reason: "source ceiling/target peak must be > 0",
-            });
-        }
+        let cs = positive(FUNCTION, "source ceiling must be > 0", source_ceiling_nits)?;
+        let ct = positive(FUNCTION, "target peak must be > 0", target_peak_nits)?;
         if l < 0.0 {
             return Ok(EetfOutput {
                 value: l,
@@ -895,7 +808,7 @@ pub mod reference {
                 clipped: false,
             });
         }
-        let q0 = pq_q0();
+        let q0 = pq_oetf_unchecked(0.0); // q0 IS PQ_OETF(0) (§6 P2)
         let span = pq_oetf_unchecked(cs) - q0;
         let x = (pq_oetf_unchecked(l) - q0) / span;
         let m = (pq_oetf_unchecked(ct) - q0) / span;
@@ -929,5 +842,91 @@ pub mod reference {
             }),
             None => Err(Cc8KernelError::NonFiniteResult { function: FUNCTION }),
         }
+    }
+
+    /// f64 [`super::gamut_compress`].
+    /// # Errors
+    /// Same as [`super::gamut_compress`].
+    pub fn gamut_compress(
+        rgb: [f64; 3],
+        dest: CompressDest<f64>,
+    ) -> Result<GamutOutput<f64>, Cc8KernelError> {
+        const FUNCTION: &str = "reference::gamut_compress";
+        let rgb = finite_input_3(FUNCTION, rgb)?;
+        let (kr, kg, kb, ymax, hlg) = match dest {
+            CompressDest::Sdr { target_peak } => {
+                let ct = positive(FUNCTION, "target peak must be > 0", target_peak)?;
+                (BT709_KR_F64, BT709_KG_F64, BT709_KB_F64, ct, None)
+            }
+            CompressDest::Hlg { peak, gamma } => {
+                let p = positive(FUNCTION, "peak must be > 0", peak)?;
+                let g = positive(FUNCTION, "gamma must be > 0", gamma)?;
+                (BT2020_KR_F64, BT2020_KG_F64, BT2020_KB_F64, p, Some((p, g)))
+            }
+        };
+        let y = kr * rgb[0] + kg * rgb[1] + kb * rgb[2];
+        let (y, y_clamped) = if y < 0.0 {
+            (0.0, true)
+        } else if y > ymax {
+            (ymax, true)
+        } else {
+            (y, false)
+        };
+        if y <= 0.0 {
+            return Ok(GamutOutput {
+                value: [0.0, 0.0, 0.0],
+                y_clamped,
+                compressed: false,
+            });
+        }
+        let upper = match hlg {
+            Some((p, g)) => p * (y / p).powf((g - 1.0) / g),
+            None => ymax,
+        };
+        let mut t = 1.0f64;
+        for c in rgb {
+            if c < y {
+                t = t.min(y / (y - c));
+            } else if c > y {
+                t = t.min((upper - y) / (c - y));
+            }
+        }
+        let value = finite_result_3(
+            FUNCTION,
+            [
+                y + t * (rgb[0] - y),
+                y + t * (rgb[1] - y),
+                y + t * (rgb[2] - y),
+            ],
+        )?;
+        Ok(GamutOutput {
+            value,
+            y_clamped,
+            compressed: t < 1.0,
+        })
+    }
+
+    /// f64 [`super::hlg_output`].
+    /// # Errors
+    /// Same as [`super::hlg_output`].
+    pub fn hlg_output(
+        display: [f64; 3],
+        target_peak: f64,
+        gamma: f64,
+    ) -> Result<HlgOutput<f64>, Cc8KernelError> {
+        let fit = gamut_compress(
+            display,
+            CompressDest::Hlg {
+                peak: target_peak,
+                gamma,
+            },
+        )?;
+        let scene = display_to_scene(fit.value, target_peak, gamma)?;
+        let signal = [
+            hlg_oetf_unchecked(scene[0]).clamp(0.0, 1.0),
+            hlg_oetf_unchecked(scene[1]).clamp(0.0, 1.0),
+            hlg_oetf_unchecked(scene[2]).clamp(0.0, 1.0),
+        ];
+        Ok(HlgOutput { signal, fit })
     }
 }
