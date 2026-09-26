@@ -6228,19 +6228,11 @@ impl KinewrightMcp {
         &self,
         request: &RegionTrackingRequest<'_>,
     ) -> Result<TrackedRegion, String> {
-        let mut isolated = request.document.clone();
-        for track in &mut isolated.tracks {
-            track
-                .clips
-                .retain(|candidate| candidate.id == request.clip_id);
-            for candidate in &mut track.clips {
-                candidate
-                    .effects
-                    .retain(|effect| effect.id != request.excluded_effect);
-            }
-        }
-        isolated.tracks.retain(|track| !track.clips.is_empty());
-        let isolated = Arc::new(isolated);
+        let isolated = Arc::new(tracking_isolation(
+            request.document,
+            request.clip_id,
+            request.excluded_effect,
+        ));
         let project_frame = |local: TimeCode| {
             request
                 .clip_timeline_start
@@ -16042,6 +16034,26 @@ fn clamp_tracking_center(
     ]
 }
 
+/// The tracking thumbnails' document: only `clip`, without `excluded`.
+/// Every other clip is disabled, not removed, so the projection stays a
+/// valid document (MO2 B1 fix G5: every render root validates).
+fn tracking_isolation(document: &Document, clip: ClipId, excluded: EffectId) -> Document {
+    let mut isolated = document.clone();
+    for candidate in isolated
+        .tracks
+        .iter_mut()
+        .flat_map(|track| &mut track.clips)
+    {
+        if candidate.id == clip {
+            candidate.effects.retain(|effect| effect.id != excluded);
+        } else {
+            candidate.enabled = false;
+            candidate.enabled_curve = None;
+        }
+    }
+    isolated
+}
+
 fn track_region(
     previous: &kinewright_core::RgbaImage,
     current: &kinewright_core::RgbaImage,
@@ -23605,6 +23617,32 @@ mod tests {
         assert_eq!(structured["details"]["field"], "window_index");
         assert_eq!(structured["details"]["observed"], 2);
         assert_eq!(structured["details"]["allowed"]["window_count"], 1);
+    }
+
+    /// MO2 B1 fix G5: every render root now validates its document, so the
+    /// tracking isolation must stay valid when the tracked clip ends before
+    /// the project does.
+    #[test]
+    fn region_tracking_isolation_stays_a_valid_document() {
+        let frames = BTreeMap::from([(TimeCode(0), matte_box_frame([160, 90]))]);
+        let (service, _core) = matte_track_service(frames, BTreeMap::new(), Vec::new());
+        let (_, document) = service.snapshot().unwrap();
+        let mut document = (*document).clone();
+        let mut longer = document.clip(ClipId(1)).unwrap().clone();
+        longer.id = ClipId(99);
+        longer.content = ClipContent::Solid(kinewright_core::SolidColor { r: 0, g: 0, b: 0 });
+        longer.timeline_start = TimeCode::ZERO;
+        longer.source_range = TimeCode::ZERO..document.duration.checked_add(TimeCode(10)).unwrap();
+        let mut track = document.tracks[0].clone();
+        track.id = TrackId(99);
+        track.clips = vec![longer];
+        document.tracks.push(track);
+        document.duration = document.duration.checked_add(TimeCode(10)).unwrap();
+        document.validate().unwrap();
+        let isolated = tracking_isolation(&document, ClipId(1), EffectId(7));
+        assert_eq!(isolated.validate(), Ok(()));
+        let hidden = isolated.clip(ClipId(99)).unwrap();
+        assert!(!hidden.enabled && hidden.enabled_curve.is_none());
     }
 
     /// CC5 §5.2: `excluded_effect` narrows the tracker's exclusion from *every*
