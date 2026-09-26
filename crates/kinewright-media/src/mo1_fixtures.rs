@@ -2173,3 +2173,132 @@ fn export_round_trip_carries_motion() {
         );
     }
 }
+
+/// MO2 R16 (discharges MO1 §11): every MO1 R26 golden's input — raster,
+/// output size and transform — re-gated against the MO2 CPU twin within
+/// the R27 working tolerances, so the goldens' probes are no longer the
+/// only witness of the vertex/sampling geometry.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn mo1_transform_r26_matches_twin() {
+    let Some(compositor) = fallback() else {
+        return;
+    };
+    let t = |parameters: &[(&str, i64)]| vec![transform_effect(1, parameters)];
+    let quarter = [
+        ("anchor_x_basis_points", 2_500),
+        ("anchor_y_basis_points", 2_500),
+    ];
+    let cases = [
+        ("default", quadrants(64, 36), (64, 36), t(&[])),
+        (
+            "gradient",
+            mo1_gradient(97, 53),
+            (192, 108),
+            t(&[("scale_percent", 100)]),
+        ),
+        (
+            "scale",
+            quadrants(64, 36),
+            (64, 36),
+            t(&[("scale_percent", 50)]),
+        ),
+        (
+            "per-axis",
+            quadrants(64, 36),
+            (64, 36),
+            t(&[("scale_x_percent", 50)]),
+        ),
+        (
+            "rotation",
+            quadrants(64, 36),
+            (64, 36),
+            t(&[("rotation_centidegrees", 9_000)]),
+        ),
+        (
+            "aspect",
+            l_raster(64, 36),
+            (64, 36),
+            t(&[("scale_percent", 50), ("rotation_centidegrees", 9_000)]),
+        ),
+        (
+            "scale-then-rotate",
+            centred_square(64, 40),
+            (64, 64),
+            t(&[("scale_x_percent", 50), ("rotation_centidegrees", 9_000)]),
+        ),
+        (
+            "anchor",
+            quadrants(64, 36),
+            (64, 36),
+            t(&[
+                ("scale_percent", 50),
+                ("anchor_x_basis_points", 0),
+                ("anchor_y_basis_points", 0),
+            ]),
+        ),
+        (
+            "coarse+fine",
+            quadrants(64, 36),
+            (64, 36),
+            t(&[("x_percent", 25), ("x_basis_points", 2_500)]),
+        ),
+        (
+            "fine nudge",
+            vertical_edge(1920, 1080),
+            (1920, 1080),
+            t(&[("x_basis_points", 5)]),
+        ),
+        (
+            "L order",
+            l_raster(64, 36),
+            (64, 36),
+            t(&[
+                ("scale_percent", 50),
+                ("rotation_centidegrees", 9_000),
+                ("x_percent", -50),
+            ]),
+        ),
+        (
+            "L about anchor",
+            quadrants(64, 36),
+            (64, 36),
+            t(&[
+                ("scale_percent", 50),
+                ("rotation_centidegrees", 9_000),
+                quarter[0],
+                quarter[1],
+            ]),
+        ),
+        (
+            "off-axis",
+            mo1_gradient(97, 53),
+            (64, 36),
+            t(&[
+                ("scale_percent", 73),
+                ("rotation_centidegrees", 1_234),
+                ("y_percent", 7),
+            ]),
+        ),
+    ];
+    for (label, source, resolution, effects) in cases {
+        // The production input type: display-coded rasters enter as linear
+        // f16 working frames (renders never composite 8-bit textures).
+        let source = crate::frame::WorkingFrame::from_display_frame(&source).unwrap();
+        let layers = [CompositorLayer {
+            frame: &source,
+            effects: &effects,
+            transition: TransitionRenderParams::default(),
+            mode: LayerMode::NORMAL,
+        }];
+        let gpu = compositor.render_working(resolution, &layers).unwrap();
+        let twin = crate::compositor::twin::render_working(resolution, &layers, None).unwrap();
+        for (index, (a, e)) in gpu.pixels.iter().zip(&twin.pixels).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-3,
+                "{label}: value {index} (pixel {}) GPU {a} vs twin {e}",
+                index / 4
+            );
+        }
+    }
+}

@@ -40,6 +40,14 @@
   probe pins 0/0/0/1/1/1/1/2/2 across Normal, Slide, Wipe, blend,
   adjustment, Normal Push, Normal adjustment Push, blend Push and blend
   adjustment Push. Ledger two pooled snapshots, not three.
+- ME3 → §4 R16 (Part B1): the MO1 R26 re-gate runs each golden's raster,
+  size and transform through `WorkingFrame::from_display_frame`, the input
+  type every render composites, not the goldens' 8-bit `FrameTexture`.
+  Evidence: lavapipe filters `Rgba8Unorm` at 8-bit precision (up to 0.008
+  linear off an exact bilinear on the high-frequency gradient), which no
+  twin reproduces portably. That path is fixture-only (production never
+  composites 8-bit textures). With f16 inputs, GPU ≡ twin within 5e-4 on
+  all 13 cases.
 
 ## Changes in revision 2
 

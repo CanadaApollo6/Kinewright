@@ -33,6 +33,7 @@ use crate::{
     compositor::{Compositor, CompositorLayer, GpuContext, LayerMode, LayerRole, twin},
     frame::WorkingFrame,
     gpu_test_support::fixture_gpu_or_skip,
+    mo2_identity_corpus,
     render::{DecodeStrategy, FrameRenderer, RenderScale},
     timeline::{TransitionRenderParams, timeline_audio_segments},
 };
@@ -1083,6 +1084,76 @@ fn r22_audio_ramp_is_type_independent() {
     assert!(timeline_audio_segments(&linked, range).unwrap().is_empty());
 }
 
+// ---------------------------------------------------------------- pins
+
+/// The pre-MO2 records for this adapter, or `None` (logged) where no
+/// environment baseline was recorded from the pre-MO2 tree.
+fn pre_mo2(gpu: &GpuContext) -> Option<Vec<mo2_identity_corpus::Record>> {
+    let path = mo2_identity_corpus::baseline_path(gpu);
+    let Ok(bytes) = std::fs::read(&path) else {
+        eprintln!(
+            "SKIPPED: no pre-MO2 baseline {} for this adapter",
+            path.display()
+        );
+        return None;
+    };
+    Some(mo2_identity_corpus::decode(&bytes))
+}
+
+fn post_mo2(gpu: GpuContext) -> (Vec<mo2_identity_corpus::Record>, u64) {
+    crate::initialize_ffmpeg().expect("FFmpeg should initialize");
+    let media = mo2_identity_corpus::source();
+    let mut r = FrameRenderer::new(gpu);
+    let records = mo2_identity_corpus::render(&mut r, media.path());
+    (records, r.accumulator_copies())
+}
+
+fn same_bytes(post: &[u8], pre: &[u8], label: &str, buffer: &str) {
+    assert_eq!(post.len(), pre.len(), "{label}: {buffer} size");
+    if let Some(at) = post.iter().zip(pre).position(|(a, b)| a != b) {
+        panic!(
+            "{label}: {buffer} byte {at} differs pre/post MO2 ({} vs {})",
+            post[at], pre[at]
+        );
+    }
+}
+
+/// R15 pin (B8): a `Normal`-only corpus renders byte-identical working and
+/// monitor buffers before (97fc937, recorded per adapter) and after MO2,
+/// and every frame takes the fast path — zero accumulator copies.
+fn normal_pre_post_identity_on(gpu: GpuContext) {
+    let pre = pre_mo2(&gpu);
+    let (post, copies) = post_mo2(gpu);
+    assert_eq!(
+        copies, 0,
+        "a Normal-only stack never copies the accumulator"
+    );
+    let Some(pre) = pre else {
+        return;
+    };
+    assert_eq!(post.len(), pre.len());
+    for (post, pre) in post.iter().zip(&pre) {
+        assert_eq!(post.label, pre.label);
+        same_bytes(&post.working, &pre.working, &post.label, "working");
+        same_bytes(&post.monitor, &pre.monitor, &post.label, "monitor");
+    }
+}
+
+/// CC8 G2 through the MO2 window: the SDR bytes — monitor RGBA8 and the
+/// delivery RGBA64LE handed to the encoder — are identical pre/post MO2 on
+/// the same adapter (per-environment baselines).
+fn cc8_g2_sdr_identity_on(gpu: GpuContext) {
+    let Some(pre) = pre_mo2(&gpu) else {
+        return;
+    };
+    let (post, _) = post_mo2(gpu);
+    assert_eq!(post.len(), pre.len());
+    for (post, pre) in post.iter().zip(&pre) {
+        same_bytes(&post.monitor, &pre.monitor, &post.label, "monitor");
+        same_bytes(&post.delivery, &pre.delivery, &post.label, "delivery");
+    }
+}
+
 /// Both GPU lanes (R27): each body runs on the default lane (lavapipe) as
 /// its §13-named test, and all of them run on the physical adapter in one
 /// `--ignored` test (the NVIDIA lane).
@@ -1120,4 +1191,6 @@ gpu_lanes! {
     remaining_modes_match_twin => remaining_modes_match_twin_on,
     r9b_opaque_accumulator_vector => r9b_opaque_accumulator_vector_on,
     r10_non_finite_blends_refuse_typed_and_sticky => r10_non_finite_blends_refuse_typed_and_sticky_on,
+    normal_pre_post_identity => normal_pre_post_identity_on,
+    cc8_g2_sdr_identity => cc8_g2_sdr_identity_on,
 }

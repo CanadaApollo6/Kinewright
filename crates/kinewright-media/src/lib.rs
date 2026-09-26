@@ -108,6 +108,10 @@ mod mo1_fixtures;
 /// `pub(crate)` compositor seams.
 #[cfg(test)]
 mod mo2_fixtures;
+/// MO2 R15 / CC8 G2: the `Normal` identity corpus, shared verbatim with the
+/// pre-MO2 tree that recorded its baselines.
+#[cfg(test)]
+mod mo2_identity_corpus;
 mod still_orientation;
 
 use ffmpeg_next as ffmpeg;
