@@ -2293,7 +2293,7 @@ fn mo1_transform_r26_matches_twin() {
         }];
         let gpu = compositor.render_working(resolution, &layers).unwrap();
         let twin = crate::compositor::twin::render_working(resolution, &layers, None).unwrap();
-        // MO2 ME6: resampled values also get the 8-bit sub-texel envelope
+        // MO2 ME9: resampled values also get the 8-bit sub-texel envelope
         // (zero where nothing is filtered), computed only on a miss.
         let pairs = || gpu.pixels.iter().zip(&twin.pixels);
         let slack = if pairs().all(|(a, e)| (a - e).abs() <= 1e-3) {
@@ -2312,7 +2312,7 @@ fn mo1_transform_r26_matches_twin() {
     }
 }
 
-/// MO2 ME6 (G4): the value Windows WARP produced on the R26 gradient
+/// MO2 ME9 (G4): the value Windows WARP produced on the R26 gradient
 /// (run 36222189672) lies outside the unit 1e-3 but inside the derived
 /// 8-bit sub-texel envelope, so the widening is what that adapter needs.
 #[test]

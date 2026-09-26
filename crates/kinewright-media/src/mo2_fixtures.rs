@@ -169,7 +169,7 @@ fn assert_r27(actual: &[f32], expected: &[f32], label: &str) {
     assert_r27_within(actual, expected, &[], label);
 }
 
-/// R27 for one value, widened by the ME6 sub-texel `slack` (zero for every
+/// R27 for one value, widened by the ME9 sub-texel `slack` (zero for every
 /// value nothing filters, so unfiltered pixels keep the unit 1e-3).
 fn r27_close(a: f32, e: f32, slack: f32) -> bool {
     if a.abs() <= 1.0 && e.abs() <= 1.0 {
@@ -219,7 +219,7 @@ fn matched(r: &mut FrameRenderer, document: &Document, at: i64, label: &str) -> 
     let twin = r
         .twin_working(document, TimeCode(at), document.resolution)
         .unwrap_or_else(|error| panic!("{label}: twin {error}"));
-    // ME6: the sub-texel envelope is only computed when a value misses.
+    // ME9: the sub-texel envelope is only computed when a value misses.
     let pairs = || gpu.pixels.iter().zip(&twin.pixels);
     let slack = if pairs().all(|(a, e)| r27_close(*a, *e, 0.0)) {
         Vec::new()
@@ -922,7 +922,7 @@ fn slide_and_wipe_midpoints_on(context: GpuContext) {
     }
 }
 
-/// ME6 (G4): the value Windows WARP produced for `slide_right` over the
+/// ME9 (G4): the value Windows WARP produced for `slide_right` over the
 /// transformed title at frame 3 (run 36222189672) misses the unit 1e-3
 /// against the exact twin but lies in the 8-bit sub-texel envelope.
 fn warp_midpoint_departure_lies_within_the_envelope_on(context: GpuContext) {

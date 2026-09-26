@@ -940,7 +940,7 @@ mod tests {
                 .map_err(attribute_layer(&decoded, project_at))
         }
 
-        /// MO2 ME6: the twin's 8-bit sub-texel envelope for the same frame.
+        /// MO2 ME9: the twin's 8-bit sub-texel envelope for the same frame.
         pub(crate) fn twin_envelope(
             &mut self,
             document: &Document,

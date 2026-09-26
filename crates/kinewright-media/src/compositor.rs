@@ -3225,7 +3225,7 @@ pub(crate) fn params_for(effects: &[Effect], transition: TransitionRenderParams)
     params
 }
 
-/// MO2 R21 (ME5): move the coverage edge from a screen fraction to output
+/// MO2 R21 (ME8): move the coverage edge from a screen fraction to output
 /// pixels, rounded up to the next pixel centre, so both lanes compare the
 /// exact centre `i + 0.5` and keep `< edge` exactly when `(i + 0.5) / n <
 /// edge`. Fragment positions are exact pixel centres; an interpolated NDC
