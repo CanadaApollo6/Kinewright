@@ -849,6 +849,15 @@ in scene-linear, an opaque accumulator with snapshot-based specials, a
 fully specified Push backdrop, typed overflow refusal, and a shared format-v2
 owner with CC8); it lands after AW1 S1 and ahead of CC8's format and render
 stages. The inherited key-editor bundle moves to MO6.
+**MO2 merged 2026-09-26** (main 2bdafb2; errata ME1–ME16). R28 found the
+end-to-end preview decode-bound at about 2 fps on both lavapipe and the RTX
+3090. This predates MO2. The causes are frame-cache thrash under multiple
+sources, 38 ms per-source decode, and, on the 3090, 25.8 ms monitor encode
+plus 7.8 ms upload. MO2's gate therefore measures compositor frames with
+resident sources (ME13). The new standalone slice **PF1, playback
+performance**, owns the fix. It blocks the production session and is
+proposed next, ahead of AW2. The WARP 20 fps floor is measured on a local
+Windows VM, not in hosted CI (ME14).
 
 Each slice writes its design doc (≤ ~600 lines) before implementation
 and records deferrals explicitly, as the colour and audio slices did.
