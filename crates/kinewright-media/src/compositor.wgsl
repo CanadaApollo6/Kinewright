@@ -848,7 +848,9 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let sampled = textureSample(layer_texture, layer_sampler, sample_uv);
     // MO2 R10 (ME11): the sampled alpha's bits, before clamp, fade or mask
     // can erase a NaN/±inf.
-    let source_alpha_invalid = non_finite(vec3<f32>(sampled.a));
+    if non_finite(vec3<f32>(sampled.a)) {
+        atomicStore(&validity, 1u);
+    }
     var linear_rgb = vec3<f32>(
         decode_bt709(sampled.r),
         decode_bt709(sampled.g),
@@ -1011,7 +1013,7 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // in-range) target, a finite in-range source stays in range, so a
         // `Normal` layer flags a non-finite source or alpha, or an over-f16
         // source the fixed-function over would blend (ME10).
-        if source_alpha_invalid || non_finite(output_linear) || non_finite(vec3<f32>(alpha))
+        if non_finite(output_linear) || non_finite(vec3<f32>(alpha))
             || (alpha > 0.0 && any(abs(output_linear) > vec3<f32>(65504.0))) {
             atomicStore(&validity, 1u);
         }
@@ -1030,7 +1032,7 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // rounded to f16 here (ME12) so the α = 1 store below is exact.
     let composite = alpha * blended + (1.0 - alpha) * below;
     let stored = f16_rte(composite);
-    if source_alpha_invalid || non_finite(output_linear) || non_finite(below)
+    if non_finite(output_linear) || non_finite(below)
         || non_finite(blended)
         || non_finite(vec3<f32>(alpha)) || non_finite(composite)
         || any(abs(stored) > vec3<f32>(65504.0)) {

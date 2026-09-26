@@ -219,7 +219,11 @@
     NaN/±inf right after the sample, before clamp, fade, crop or mask can
     erase them, stickily and on both lanes (pinned by
     `rereview_special_nonfinite_source_alpha`: Darken/Screen/Add × NaN/±inf,
-    red on both lanes before the fix).
+    red on both lanes before the fix). The shader writes that flag in its
+    own statement at the sample. Carrying it as a `bool` into the final
+    flag conditions made the RTX 3090 (driver 615.71.09) stop flagging
+    forced-NaN RGB operands, on the NVIDIA lane only (mechanism not
+    diagnosed; lavapipe was green).
   - *ME9 restricted to a proved subset* (re-review S1). Four shared
     corners bound every rounding only where the output is multilinear in
     one sampling's weights. With two resampled layers (two opposing
