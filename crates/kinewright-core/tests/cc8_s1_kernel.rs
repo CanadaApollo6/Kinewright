@@ -2633,6 +2633,107 @@ fn pb4_sdr_high_peak_scan() {
     assert!(control_bad > 0, "foreign-space control must fail CE7");
 }
 
+#[test]
+fn pb4_ce9_ported_witnesses() {
+    // verify2's seven SDR witnesses (CE8 counterexamples through the old
+    // chain: 0.28–31.9% of the SDR max) pass CE7 on both legs under CE9's
+    // model D (investigation: all ≤ 0.0071%).
+    for (p, w, pairs, d) in [
+        (4000.0, 203.0, 3, [20.0, 4000.0, 20.0]),
+        (400.0, 306.0, 3, [20.0, 400.0, 20.0]),
+        (1001.0, 100.0, 1, [20.02, 1001.0, 20.02]),
+        (1000.0, 343.0, 3, [30.0, 1000.0, 30.0]),
+        (9332.0, 113.0, 3, [23.33, 9332.0, 23.33]),
+        (
+            1358.0,
+            395.0,
+            3,
+            [0.022_382_755_838_159_08, 0.016_556_313_386_324_923, 1358.0],
+        ),
+        (9794.0, 159.0, 3, [0.0, 0.0, 9794.0]),
+    ] {
+        let mut acc = Pb4Acc::default();
+        pb4_gate(&mut acc, matrix_chain_display(d, w, p, pairs), d, w, p);
+    }
+    // Investigation's HLG witness: [0, 9.502, 0] at P=9502/W=400, three
+    // pairs. The control's HLG leg fails CE7 (6 codes, 0.27% of max);
+    // model D passes.
+    let d = [0.0, 9.502, 0.0];
+    let ctl = pb4_hlg_leg(foreign_space_store(d, 400.0, 9502.0, 3), d, 9502.0);
+    assert!(ctl.iter().any(|c| !c.ok), "control HLG must fail: {ctl:?}");
+    let mut acc = Pb4Acc::default();
+    pb4_gate(
+        &mut acc,
+        matrix_chain_display(d, 400.0, 9502.0, 3),
+        d,
+        400.0,
+        9502.0,
+    );
+}
+
+/// sRGB-encoded 8-bit → linear Rec.709 → Rec.2020 (skin patches).
+fn skin_2020(r: f64, g: f64, b: f64) -> [f64; 3] {
+    let lin = |v: f64| {
+        let v = v / 255.0;
+        if v <= 0.040_45 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    reference::apply_matrix(BT709_TO_BT2020_F64, [lin(r), lin(g), lin(b)]).unwrap()
+}
+
+#[test]
+fn pb4_ce9_hue_grid() {
+    // Reduced G5 (investigation): 2020 and 709 secondaries + three skins
+    // (9 colours) × P 400/1000/2000/4000/7004/10000 × W 100/203/400 ×
+    // level 0.1/1/10/50/100% of P × 1/3 pairs = 1620 anchors (the full G5
+    // steps P by 37, adds W 159/277, primaries/neutral, 11 levels and 2/5
+    // pairs). Model D: every channel of both legs passes CE7; the control
+    // fails CE7 on the same grid.
+    let m709 = |c: [f64; 3]| reference::apply_matrix(BT709_TO_BT2020_F64, c).unwrap();
+    let colours = [
+        [0.0, 1.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0],
+        m709([0.0, 1.0, 1.0]),
+        m709([1.0, 0.0, 1.0]),
+        m709([1.0, 1.0, 0.0]),
+        skin_2020(194.0, 150.0, 130.0),
+        skin_2020(176.0, 124.0, 100.0),
+        skin_2020(115.0, 82.0, 68.0),
+    ];
+    let mut acc = Pb4Acc::default();
+    let (mut n, mut control_bad) = (0u32, 0usize);
+    for c in colours {
+        let mx = max_abs_3(c);
+        for peak in [400.0, 1000.0, 2000.0, 4000.0, 7004.0, 10_000.0] {
+            for white in [100.0, 203.0, 400.0] {
+                for lv in [0.001, 0.01, 0.1, 0.5, 1.0] {
+                    let d = c.map(|x| x / mx * lv * peak);
+                    for pairs in [1, 3] {
+                        let display = matrix_chain_display(d, white, peak, pairs);
+                        pb4_gate(&mut acc, display, d, white, peak);
+                        let ctl = foreign_space_store(d, white, peak, pairs);
+                        control_bad += pb4_ce7_failures(ctl, d, peak);
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    let mean10 = acc.sum10 / f64::from(acc.n10);
+    println!(
+        "CE9 hue grid: anchors={n} max10={} mean10={mean10} max8={} \
+         by_display10={} by_display8={} control_ce7_failures={control_bad}",
+        acc.max10, acc.max8, acc.by_display10, acc.by_display8
+    );
+    assert_eq!(n, 1620);
+    assert!(mean10 <= pb4_mean_tol(), "hue grid 10-bit mean: {mean10}");
+    assert!(control_bad > 0, "foreign-space control must fail CE7");
+}
+
 fn ulp_w1() -> f64 {
     2f64.powi(-10)
 }
