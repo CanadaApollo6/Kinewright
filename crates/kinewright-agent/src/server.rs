@@ -26643,6 +26643,82 @@ mod tests {
         assert_eq!(nodes[2]["curves"]["red"]["structural_identity"], true);
     }
 
+    /// MO2 R8/R25: the four generated mutators drive the real dispatcher —
+    /// revision-gated, typed refusals surfaced as tool errors, and the
+    /// timeline read-back naming what they wrote.
+    #[test]
+    fn mo2_generated_mutators_create_blend_and_recolour() {
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let call = |name: &str, arguments: serde_json::Value| {
+            service
+                .call_blocking(
+                    CallToolRequestParams::new(name.to_owned())
+                        .with_arguments(arguments.as_object().unwrap().clone()),
+                )
+                .unwrap()
+        };
+        let text = |result: &CallToolResult| result.content[0].as_text().unwrap().text.clone();
+
+        let solid = call(
+            "add_solid_clip",
+            json!({"expected_revision": 0, "track": 1, "timeline_start": 60,
+                   "duration": 30, "color": {"r": 255, "g": 16, "b": 0}}),
+        );
+        assert_eq!(solid.is_error, Some(false), "{}", text(&solid));
+        let refused = call(
+            "add_adjustment_clip",
+            json!({"expected_revision": 1, "track": 1, "timeline_start": 90,
+                   "duration": 30, "effects": [{"id": 1, "name": "chroma_key",
+                   "parameters": {}, "keyframes": {}}]}),
+        );
+        assert_eq!(refused.is_error, Some(true));
+        assert!(
+            text(&refused).contains("adjustment clip 3 cannot carry effect \"chroma_key\""),
+            "{}",
+            text(&refused)
+        );
+        let adjustment = call(
+            "add_adjustment_clip",
+            json!({"expected_revision": 1, "track": 1, "timeline_start": 90,
+                   "duration": 30, "effects": []}),
+        );
+        assert_eq!(adjustment.is_error, Some(false), "{}", text(&adjustment));
+        let blend = call(
+            "set_clip_blend_mode",
+            json!({"expected_revision": 2, "clip": 3, "blend_mode": "screen"}),
+        );
+        assert_eq!(blend.is_error, Some(false), "{}", text(&blend));
+        let recolour = call(
+            "set_solid_color",
+            json!({"expected_revision": 3, "clip": 1, "color": {"r": 0, "g": 0, "b": 0}}),
+        );
+        assert_eq!(recolour.is_error, Some(true));
+        assert!(text(&recolour).contains("SetSolidColor accepts solid clips only"));
+        let stale = call(
+            "set_solid_color",
+            json!({"expected_revision": 2, "clip": 2, "color": {"r": 0, "g": 0, "b": 0}}),
+        );
+        assert!(
+            text(&stale).contains("revision conflict"),
+            "{}",
+            text(&stale)
+        );
+
+        let (revision, document) = service.snapshot().unwrap();
+        assert_eq!(revision, TimelineRevision(3));
+        let rendered = crate::render_timeline_state(&document);
+        assert!(
+            rendered.contains("clip 2 solid=#ff1000 timeline=60f"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("clip 3 adjustment timeline=90f")
+                && rendered.contains("blend=screen"),
+            "{rendered}"
+        );
+    }
+
     #[test]
     fn generated_color_override_is_revision_gated_and_undo_restores_probed_metadata() {
         let (seed_core, playback, analysis) = fixture();
@@ -28630,6 +28706,18 @@ mod tests {
     ///   The arithmetic: 1 822 003 + 70 820 = **1 892 823**,
     ///   1 672 150 + 68 930 = **1 741 080**, 125 550 + 1 890 = **127 440**.
     ///   Counts `148 / 60 / 88`. Served quad unchanged.
+    ///
+    /// - **MO2 A3 (R8 operations): +107 698 / +105 762 / +1 273.** Four
+    ///   generated mutators, each carrying the full shared `$defs`:
+    ///   `set_clip_blend_mode` 26 475 / 25 946 / 361, `add_adjustment_clip`
+    ///   26 658 / 26 076 / 414, `add_solid_clip` 26 545 / 26 051 / 331 and
+    ///   `set_solid_color` 26 268 / 25 937 / 167 (sum 105 946 / 104 010 /
+    ///   1 273), plus their four `oneOf` branches in `apply_edit_plan`
+    ///   (+1 752 input). The arithmetic: 1 892 823 + 107 698 =
+    ///   **2 000 521**, 1 741 080 + 105 762 = **1 846 842**, 127 440 +
+    ///   1 273 = **128 713**. Counts `152 / 64 / 88` — Part A's `(4,4,0)`.
+    ///   Served quad unchanged (`7 / 5 660 / 3 510 / 998`) — the
+    ///   twenty-second consecutive measurement.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28655,15 +28743,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_892_823, 5_660),
+            (2_000_521, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_741_080,
+            registry_metrics.input_schema_bytes, 1_846_842,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 127_440,
+            registry_metrics.description_bytes, 128_713,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -34585,13 +34673,15 @@ mod tests {
     /// `147 / 60 / 87`. Part C (R20) adds one inspector planner
     /// (`plan_motion`): counts `148 / 60 / 88`. All are registry-only —
     /// served tools come from the compact authority, which MO1 does not
-    /// touch.
+    /// touch. MO2 A3 (R8) generates four more mutators
+    /// (`set_clip_blend_mode`, `add_adjustment_clip`, `add_solid_clip`,
+    /// `set_solid_color`), registry-only the same way: counts `152 / 64 / 88`.
     #[test]
     fn in2_the_registry_grows_by_one_capability() {
         let registry = KinewrightMcp::capability_tools().unwrap();
-        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 148);
+        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 152);
         assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
-        assert_eq!(operation_tools().unwrap().len(), 60);
+        assert_eq!(operation_tools().unwrap().len(), 64);
         let generated = operation_tools().unwrap();
         for name in [
             "upsert_effect_keyframe",
@@ -34600,6 +34690,10 @@ mod tests {
             "set_clip_enabled",
             "set_clip_enabled_curve",
             "copy_clip_attributes",
+            "set_clip_blend_mode",
+            "add_adjustment_clip",
+            "add_solid_clip",
+            "set_solid_color",
         ] {
             assert!(
                 generated.iter().any(|tool| tool.tool.name == name),

@@ -312,6 +312,10 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::SetMarkerParam { .. } => "set_marker_param",
         Operation::AddFreezeFrame { .. } => "add_freeze_frame",
         Operation::SetClipSpeed { .. } => "set_clip_speed",
+        Operation::SetClipBlendMode { .. } => "set_clip_blend_mode",
+        Operation::AddAdjustmentClip { .. } => "add_adjustment_clip",
+        Operation::AddSolidClip { .. } => "add_solid_clip",
+        Operation::SetSolidColor { .. } => "set_solid_color",
     }
 }
 
@@ -537,6 +541,18 @@ fn operation_tool(
         "SetClipSpeed" => description.push_str(
             " speed_percent is an integer percentage in 10..=1000; 100 is real time. Speed scales the media clip's effective source rate, so 50 doubles its project duration and 200 halves it. The operation fails if the new duration would overlap a later clip - ripple-insert a gap first when slowing a clip down. Audio is muted at any speed other than 100. Titles and freeze frames have no speed.",
         ),
+        // MO2 R8: the load-bearing rules first; the equations live in the
+        // design, not in every request.
+        "SetClipBlendMode" => description.push_str(
+            " blend_mode (normal, multiply, screen, overlay, darken, lighten, add) combines the clip's visual layer with the composite of lower tracks in scene-linear working space; normal is the default. Audio-only clips ignore it.",
+        ),
+        "AddAdjustmentClip" => description.push_str(
+            " An adjustment layer has no asset and no audio; its effects (the add_effect vocabulary) grade the composite of strictly lower tracks over a positive project-frame duration on a video track. chroma_key and the fade_from_black/fade_from_white transitions are refused on it.",
+        ),
+        "AddSolidClip" => description.push_str(
+            " A solid is an opaque fill of display sRGB bytes with no asset and no audio over a positive project-frame duration on a video track; effects, transitions, blend and enable apply as on any clip.",
+        ),
+        "SetSolidColor" => description.push_str(" Only solid clips accept it."),
         _ => {}
     }
     let tool =
@@ -950,6 +966,11 @@ mod tests {
                 "set_marker_param",
                 "add_freeze_frame",
                 "set_clip_speed",
+                // MO2 R8, declared after `SetClipSpeed`.
+                "set_clip_blend_mode",
+                "add_adjustment_clip",
+                "add_solid_clip",
+                "set_solid_color",
             ]
         );
         for definition in tools {

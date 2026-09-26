@@ -2508,16 +2508,17 @@ async fn cc7_prepare_commit_and_compare(
 /// `COMPACT_TOOL_NAMES` and IN1 touches neither that list nor `Operation`.
 ///
 /// **Pin site 2 of 3 (`IN1b` §6.4 rules 7–8, erratum `IN1b`-R3).** The served
-/// quad does not move for the **twenty-first** measurement: `IN1b` added no
+/// quad does not move for the **twenty-second** measurement: `IN1b` added no
 /// served tool, no capability and no schema field, IN2 Part A adds one
 /// **registry-only** capability, `propose_fix`, which `served_tools()`'s
 /// `COMPACT_TOOL_NAMES` filter never publishes, IN2B Part B rewords two
 /// registry-only texts, which the filter never publishes either, and MO1 A4a
 /// adds two **registry-only** generated mutators, which the compact authority
 /// never serves either, MO1 A4b adds three more of the same shape,
-/// MO1 A4c adds the last one, and MO1 Part C adds one **registry-only**
-/// planner, `plan_motion`. The registry sextuple does move, to
-/// `148 / 60 / 88`,
+/// MO1 A4c adds the last one, MO1 Part C adds one **registry-only**
+/// planner, `plan_motion`, and MO2 Part A generates four more
+/// **registry-only** mutators. The registry sextuple does move, to
+/// `152 / 64 / 88`,
 /// which is the two assertions below.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
@@ -2545,12 +2546,12 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 148 tools, of which `INSPECTOR_TOOL_NAMES` is 88.
+    // The internal registry: 152 tools, of which `INSPECTOR_TOOL_NAMES` is 88.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        148,
+        152,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
@@ -2563,11 +2564,12 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          MO1 A4a generates upsert_effect_keyframe and remove_effect_keyframe; \
          MO1 A4b generates set_effect_enabled, set_clip_enabled and set_clip_enabled_curve; \
          MO1 A4c generates copy_clip_attributes; \
-         MO1 Part C adds plan_motion"
+         MO1 Part C adds plan_motion; \
+         MO2 Part A generates set_clip_blend_mode, add_adjustment_clip, add_solid_clip and set_solid_color"
     );
     assert_eq!(
         operations.len(),
-        60,
+        64,
         "AU2 Part B generates two more mutators; neither part of AU3 generates one; \
          AU4 Part A generates two more; AU4 Part B generates none; \
          AU5 Part A generates none, because it adds no Operation variant; \
@@ -2575,7 +2577,8 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          AU6 adds no Operation variant; IN1 Part A adds none either; \
          MO1 A4a adds UpsertEffectKeyframe and RemoveEffectKeyframe; \
          MO1 A4b adds SetEffectEnabled, SetClipEnabled and SetClipEnabledCurve; \
-         MO1 A4c adds CopyClipAttributes"
+         MO1 A4c adds CopyClipAttributes; \
+         MO2 Part A adds SetClipBlendMode, AddAdjustmentClip, AddSolidClip and SetSolidColor"
     );
     for name in [
         "set_track_mix",
@@ -10481,9 +10484,9 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 
 /// IN1 §6.6 and §9 clause 13, `IN1b` §6.4 rules 7–8 and §9 clause 17, and IN2
 /// §6.4 rules 12–13 and §9 clause 19: **three** registry-only capabilities, no
-/// served tool, for the **twenty-first** consecutive measurement.
+/// served tool, for the **twenty-second** consecutive measurement.
 ///
-/// The registry sextuple is `148 / 60 / 88 / 1 892 823 / 1 741 080 / 127 440`,
+/// The registry sextuple is `152 / 64 / 88 / 2 000 521 / 1 846 842 / 128 713`,
 /// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
 /// this test pins the three counts and the served quad over the live endpoint.
@@ -10497,9 +10500,11 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 ///
 /// Renamed from `in1b_the_served_quad_does_not_move_for_the_seventeenth_measurement`
 /// to IN2 §9.1 item 33's name; every IN1 and `IN1b` assertion in it is
-/// unchanged except the two registry counts and the ceiling.
+/// unchanged except the two registry counts and the ceiling. MO2 R25 renames
+/// it again from `mo1_…_twenty_first_measurement`: Part A's four generated
+/// mutators are registry-only.
 #[tokio::test(flavor = "multi_thread")]
-async fn mo1_the_served_quad_does_not_move_for_the_twenty_first_measurement() {
+async fn mo2_the_served_quad_does_not_move_for_the_twenty_second_measurement() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
@@ -10524,6 +10529,10 @@ async fn mo1_the_served_quad_does_not_move_for_the_twenty_first_measurement() {
         "resolve_incident",
         "propose_fix",
         "plan_motion",
+        "set_clip_blend_mode",
+        "add_adjustment_clip",
+        "add_solid_clip",
+        "set_solid_color",
     ] {
         assert!(
             !tools.iter().any(|tool| tool.name == name),
@@ -10535,13 +10544,13 @@ async fn mo1_the_served_quad_does_not_move_for_the_twenty_first_measurement() {
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        148,
-        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a/b/c add six mutators, MO1 Part C adds plan_motion"
+        152,
+        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a/b/c add six mutators, MO1 Part C adds plan_motion, MO2 Part A adds four mutators"
     );
     assert_eq!(
         operations.len(),
-        60,
-        "MO1 A4c adds the last Operation variant"
+        64,
+        "MO2 Part A adds four Operation variants"
     );
     assert_eq!(registry.len() - operations.len(), 88);
     let state = registry
@@ -10572,7 +10581,7 @@ async fn mo1_the_served_quad_does_not_move_for_the_twenty_first_measurement() {
             metrics.description_bytes
         ),
         (7, 5_660, 3_510, 998),
-        "the served quad does not move for the twenty-first consecutive measurement: {metrics:?}"
+        "the served quad does not move for the twenty-second consecutive measurement: {metrics:?}"
     );
 
     // IN1 §6.2 rule 9, `IN1b` §3.11 rule 43 and IN2 §4.2 rule 11: the two

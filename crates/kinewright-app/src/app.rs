@@ -3612,6 +3612,14 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
             clip,
             speed_percent,
         } => format!("Set clip {clip} speed to {speed_percent}%"),
+        Operation::SetClipBlendMode { clip, blend_mode } => {
+            format!("Set clip {clip} blend to {blend_mode:?}")
+        }
+        Operation::AddAdjustmentClip { track, .. } => {
+            format!("Added adjustment layer to track {track}")
+        }
+        Operation::AddSolidClip { track, .. } => format!("Added solid to track {track}"),
+        Operation::SetSolidColor { clip, .. } => format!("Set solid {clip} colour"),
     }
 }
 

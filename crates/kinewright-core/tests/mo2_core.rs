@@ -786,3 +786,341 @@ fn r19_generated_kinds_carry_the_mo1_enable_model() {
     assert!(!clip(&doc, 3).is_enabled_at(TimeCode(0)));
     doc.validate().unwrap();
 }
+
+// ------------------------------------------------------------------ R8
+
+/// R8: the four operations' wire shapes — the agent's generated tools and
+/// the journal both carry exactly these.
+#[test]
+fn r8_operation_wire_shapes() {
+    let cases = [
+        (
+            Operation::SetClipBlendMode {
+                clip: ClipId(2),
+                blend_mode: BlendMode::Multiply,
+            },
+            serde_json::json!({"SetClipBlendMode": {"clip": 2, "blend_mode": "multiply"}}),
+        ),
+        (
+            Operation::AddAdjustmentClip {
+                track: TrackId(2),
+                timeline_start: TimeCode(60),
+                duration: TimeCode(30),
+                effects: Vec::new(),
+            },
+            serde_json::json!({"AddAdjustmentClip": {
+                "track": 2, "timeline_start": 60, "duration": 30, "effects": []
+            }}),
+        ),
+        (
+            Operation::AddSolidClip {
+                track: TrackId(2),
+                timeline_start: TimeCode(60),
+                duration: TimeCode(30),
+                color: SolidColor { r: 1, g: 2, b: 3 },
+            },
+            serde_json::json!({"AddSolidClip": {
+                "track": 2, "timeline_start": 60, "duration": 30,
+                "color": {"r": 1, "g": 2, "b": 3}
+            }}),
+        ),
+        (
+            Operation::SetSolidColor {
+                clip: ClipId(3),
+                color: SolidColor { r: 9, g: 8, b: 7 },
+            },
+            serde_json::json!({"SetSolidColor": {"clip": 3, "color": {"r": 9, "g": 8, "b": 7}}}),
+        ),
+    ];
+    for (op, json) in cases {
+        assert_eq!(serde_json::to_value(&op).unwrap(), json);
+        assert_eq!(serde_json::from_value::<Operation>(json).unwrap(), op);
+    }
+}
+
+/// R8: creation ops address their track, the setters their clip (the
+/// `AddTitle` precedent).
+#[test]
+fn r8_incident_subjects() {
+    use kinewright_core::IncidentSubject;
+    let track =
+        |op: Operation| assert_eq!(op.incident_subject(), IncidentSubject::Track(TrackId(2)));
+    track(Operation::AddAdjustmentClip {
+        track: TrackId(2),
+        timeline_start: TimeCode(0),
+        duration: TimeCode(1),
+        effects: Vec::new(),
+    });
+    track(Operation::AddSolidClip {
+        track: TrackId(2),
+        timeline_start: TimeCode(0),
+        duration: TimeCode(1),
+        color: SolidColor::default(),
+    });
+    let clip = |op: Operation| assert_eq!(op.incident_subject(), IncidentSubject::Clip(ClipId(3)));
+    clip(Operation::SetClipBlendMode {
+        clip: ClipId(3),
+        blend_mode: BlendMode::Add,
+    });
+    clip(Operation::SetSolidColor {
+        clip: ClipId(3),
+        color: SolidColor::default(),
+    });
+}
+
+/// R8: both creation ops place a fresh clip over `0..duration` of project
+/// frames at `timeline_start`, with no asset and no audio, and extend the
+/// project.
+#[test]
+fn r8_creation_places_generated_clips() {
+    let mut doc = stack();
+    let mut look = effect(7, "brightness");
+    look.parameters
+        .insert("percent".to_owned(), ParamValue::Integer(20));
+    Operation::AddAdjustmentClip {
+        track: TrackId(2),
+        timeline_start: TimeCode(60),
+        duration: TimeCode(30),
+        effects: vec![look.clone()],
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let adjustment = doc.tracks[1].clips.last().unwrap().clone();
+    assert_eq!(adjustment.id, ClipId(5), "the next clip id");
+    assert_eq!(adjustment.content, ClipContent::Adjustment);
+    assert_eq!(adjustment.effects, vec![look]);
+    assert_eq!(adjustment.blend_mode, BlendMode::Normal);
+    assert_eq!(span(&doc, 5), (60, 90, 0, 30));
+    assert_eq!(doc.duration, TimeCode(90));
+
+    Operation::AddSolidClip {
+        track: TrackId(1),
+        timeline_start: TimeCode(60),
+        duration: TimeCode(15),
+        color: SolidColor { r: 1, g: 2, b: 3 },
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(
+        clip(&doc, 6).content,
+        ClipContent::Solid(SolidColor { r: 1, g: 2, b: 3 })
+    );
+    assert_eq!(span(&doc, 6), (60, 75, 0, 15));
+    assert_eq!(doc.timeline_referenced_media_assets().len(), 1);
+    doc.validate().unwrap();
+}
+
+/// R8's creation validation matrix, each refusal typed and each leaving the
+/// document untouched.
+#[test]
+fn r8_creation_validation_matrix() {
+    let doc = stack();
+    let adjustment = |track: u64, start: i64, duration: i64, effects: Vec<Effect>| {
+        Operation::AddAdjustmentClip {
+            track: TrackId(track),
+            timeline_start: TimeCode(start),
+            duration: TimeCode(duration),
+            effects,
+        }
+    };
+    let solid = |track: u64, start: i64, duration: i64| Operation::AddSolidClip {
+        track: TrackId(track),
+        timeline_start: TimeCode(start),
+        duration: TimeCode(duration),
+        color: SolidColor::default(),
+    };
+    for (op, error) in [
+        (
+            adjustment(9, 60, 10, vec![]),
+            OpError::MissingTrack(TrackId(9)),
+        ),
+        (solid(9, 60, 10), OpError::MissingTrack(TrackId(9))),
+        (
+            adjustment(2, -1, 10, vec![]),
+            OpError::NegativeTimelinePosition(TimeCode(-1)),
+        ),
+        (
+            solid(2, -1, 10),
+            OpError::NegativeTimelinePosition(TimeCode(-1)),
+        ),
+        (
+            adjustment(2, 60, 0, vec![]),
+            OpError::InvalidSourceRange { start: 0, end: 0 },
+        ),
+        (
+            solid(2, 60, -5),
+            OpError::InvalidSourceRange { start: 0, end: -5 },
+        ),
+        (
+            adjustment(2, i64::MAX - 1, 10, vec![]),
+            OpError::TimeOverflow,
+        ),
+        (solid(2, i64::MAX - 1, 10), OpError::TimeOverflow),
+        (
+            adjustment(3, 60, 10, vec![]),
+            OpError::AdjustmentOnAudioTrack(TrackId(3)),
+        ),
+        (solid(3, 60, 10), OpError::SolidOnAudioTrack(TrackId(3))),
+        (
+            adjustment(2, 50, 10, vec![]),
+            OpError::ClipOverlap {
+                track: TrackId(2),
+                clip: ClipId(4),
+                with: ClipId(5),
+            },
+        ),
+        (
+            adjustment(2, 60, 10, vec![effect(1, "chroma_key")]),
+            OpError::EffectUnsupportedOnAdjustment {
+                clip: ClipId(5),
+                effect: "chroma_key".to_owned(),
+            },
+        ),
+        (
+            adjustment(2, 60, 10, vec![effect(1, "audio_gain")]),
+            OpError::AudioEffectOnClip {
+                clip: ClipId(5),
+                effect: "audio_gain".to_owned(),
+            },
+        ),
+        (
+            adjustment(
+                2,
+                60,
+                10,
+                vec![effect(1, "brightness"), effect(1, "contrast")],
+            ),
+            OpError::DuplicateEffect {
+                clip: ClipId(5),
+                effect: EffectId(1),
+            },
+        ),
+    ] {
+        refuse(&doc, op, &error);
+    }
+}
+
+/// R8: the two setters, including the solid-only refusal and a blend on an
+/// audio clip (inert, accepted).
+#[test]
+fn r8_setters() {
+    let mut doc = stack();
+    for id in [1, 2, 3] {
+        Operation::SetClipBlendMode {
+            clip: ClipId(id),
+            blend_mode: BlendMode::Overlay,
+        }
+        .apply(&mut doc)
+        .unwrap();
+        assert_eq!(clip(&doc, id).blend_mode, BlendMode::Overlay);
+    }
+    Operation::SetClipBlendMode {
+        clip: ClipId(1),
+        blend_mode: BlendMode::Normal,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert!(
+        !serde_json::to_string(clip(&doc, 1))
+            .unwrap()
+            .contains("blend_mode"),
+        "setting normal restores the pre-MO2 bytes"
+    );
+
+    let color = SolidColor {
+        r: 200,
+        g: 100,
+        b: 0,
+    };
+    Operation::SetSolidColor {
+        clip: ClipId(3),
+        color,
+    }
+    .apply(&mut doc)
+    .unwrap();
+    assert_eq!(clip(&doc, 3).content, ClipContent::Solid(color));
+    for id in [1, 2] {
+        refuse(
+            &doc,
+            Operation::SetSolidColor {
+                clip: ClipId(id),
+                color,
+            },
+            &OpError::SolidColorOnNonSolidClip(ClipId(id)),
+        );
+    }
+    refuse(
+        &doc,
+        Operation::SetClipBlendMode {
+            clip: ClipId(99),
+            blend_mode: BlendMode::Add,
+        },
+        &OpError::MissingClip(ClipId(99)),
+    );
+}
+
+/// R8: each operation is revision-gated and one undo step through the Core
+/// actor.
+#[test]
+fn r8_operations_are_revision_gated_single_undo_steps() {
+    let initial = stack();
+    let core = Core::spawn(initial.clone()).unwrap();
+    let revision = || match core.request(Command::Query(Query::Snapshot)).unwrap() {
+        Event::QueryResult(QueryResult::Snapshot { revision, .. }) => revision,
+        other => panic!("{other:?}"),
+    };
+    let ops = [
+        Operation::AddAdjustmentClip {
+            track: TrackId(2),
+            timeline_start: TimeCode(60),
+            duration: TimeCode(30),
+            effects: vec![effect(1, "brightness")],
+        },
+        Operation::AddSolidClip {
+            track: TrackId(1),
+            timeline_start: TimeCode(60),
+            duration: TimeCode(30),
+            color: SolidColor::default(),
+        },
+        Operation::SetClipBlendMode {
+            clip: ClipId(5),
+            blend_mode: BlendMode::Screen,
+        },
+        Operation::SetSolidColor {
+            clip: ClipId(6),
+            color: SolidColor { r: 1, g: 1, b: 1 },
+        },
+    ];
+    let mut history = vec![initial];
+    for op in ops {
+        let stale = revision();
+        let Event::DocumentChanged { doc, .. } = core
+            .request(Command::DoIfRevision {
+                expected: stale,
+                operation: op.clone(),
+                token: None,
+            })
+            .unwrap()
+        else {
+            panic!("{op:?} lands at the current revision");
+        };
+        history.push((*doc).clone());
+        let Event::RevisionConflict { .. } = core
+            .request(Command::DoIfRevision {
+                expected: stale,
+                operation: op.clone(),
+                token: None,
+            })
+            .unwrap()
+        else {
+            panic!("{op:?} at a stale revision is refused");
+        };
+    }
+    history.pop();
+    while let Some(expected) = history.pop() {
+        let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+            panic!("undo answers with the document");
+        };
+        assert_eq!(*doc, expected, "one undo step per operation");
+    }
+}
