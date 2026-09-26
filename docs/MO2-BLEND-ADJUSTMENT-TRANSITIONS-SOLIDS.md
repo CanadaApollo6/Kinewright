@@ -99,6 +99,19 @@
   recorded overrides: B1's review-fix growth (N15, N18), R28's
   resident-source scope (N19, N20) and its 191 lines (N21). R28 ran after
   the B1 review fixes, since those change the render hot path.
+  **R28 now (N23).** The 191 was the pre-fix snapshot. The final
+  verification fix added 13 production lines and removed 1, giving
+  204 added / 29 removed; ME14 added none. ME15 adds 107 and removes 45
+  (`git diff -U0`). Fourteen of those removals are R28's own earlier
+  lines (11 from the final-verification fix, 3 from the first R28
+  commit). The other 31 are earlier code: 20 pre-MO2 lines (the
+  `write_texture` call) and 11 MO2 B1 lines (imports, the stage-layer
+  call site). R28 therefore stands at **297 added / 60 removed** (net
+  237), counted like the re-review's `current-line-count.json`:
+  `compositor.rs` production code, blank lines included, `#[cfg(test)]`
+  items excluded. B2 is then ≈ 821 and the total ≈ 4,055, about 27%
+  over 3,200. The ME15 growth was
+  lead-ordered (N23) and is carried by that override.
 - ME6 → §8 R26 (Part B3), readings the rule leaves open:
   - Solids:
     - The colour editor is egui's picker plus labelled R/G/B fields. A
@@ -265,9 +278,10 @@
     envelope slack there. At those offsets GPU ≡ twin bit-exactly for
     special layers (the `Normal` adjustments included, ME12). The
     `Normal`-title frames keep the target's own store and differ by at
-    most ½ f16 ULP (worst 0.00048828125, 12 of 16 frames), within R27
-    with zero slack (final verification N1; this corrects N18's "exactly"
-    wording). The solid keeps its scale and rotation.
+    most one f16 ULP — adjacent half values, e.g. GPU 0.2156982421875 vs
+    twin 0.2158203125 (worst 0.00048828125, 12 of 16 frames) — within R27
+    with zero slack (final verification N1, re-review N1; this corrects
+    N18's "exactly" and N21's "½ ULP" wording). The solid keeps its scale and rotation.
 - ME12 → §3 R9b/R10 (B1 fix round 3, re-review S2, lead ruling N17.4):
   **one storage rule.** A special layer (selectors 1–6 and 8) rounds its
   composite `α·B + (1−α)·D` to f16 round-to-nearest-even **in the shader**
@@ -363,18 +377,12 @@
     63.3 MiB, heavy 4K 70.3 MiB. Full-resolution frames: 126.6, 142.4
     and 632.8 MiB. Ceilings are 384 / 384 / 1,536 MiB. Not charged: the
     LUT-atlas upload staging, which exists only on an atlas-cache miss
-    and is bounded by the charged atlas. *(Final verification B1/B2.)* An
-    upload's staging is charged with each row padded to
-    `COPY_BYTES_PER_ROW_ALIGNMENT` (256, DX12's; Vulkan pads to 128), an
-    upper bound on every backend. A frame that fails after staging
-    flushes its queued writes (empty submit + wait) before its charges
-    drop, so failed frames never leave uncharged staging. The
-    full-resolution peaks were re-measured after both fixes and are
-    unchanged. The proxy peaks cannot move either: every workload's rows
-    (1280, 1920 and 3840 px × 8 B) are already 256-aligned.
-    wgpu's own buffer counters witness both
-    (`final_ledger_upload_padding_counterexample`,
-    `final_ledger_failed_frame_retains_pending_uploads`).
+    and is bounded by the charged atlas. Layer-upload staging and
+    failed-frame release follow ME15 (which supersedes the final
+    verification's padded-upper-bound charge and unbounded flush). The
+    peaks above cannot move under ME15: every workload's rows (1280, 1920
+    and 3840 px × 8 B) are already 256-aligned, so each upload's staging
+    is the bytes charged before, held for the same span (to readback).
   - *`validate()` per frame (N11-4):* 1.1–1.8 µs at 1080p, 10 µs for the
     200-clip 4K document. No revision-keyed cache is needed.
 - ME14 → §9 R28, §13 gate 10 (Windows CI run 36248329932, lead rulings
@@ -407,6 +415,76 @@
     helpers are test-only (`compositor::phases`, `render::phases`).
     Lavapipe, typical 1080p: 7.4 / 6.3 / 18.9 ms of a 33.3 ms frame,
     which agrees with ME13's breakdown.
+
+- ME15 → §9 R28 (re-review of the final verification, B1/B2/S2, lead
+  ruling N23): **the ledger charges API-level bytes, and MO2 owns the
+  layer-upload staging.** R28's "staging" is the buffers MO2 asks wgpu
+  for, charged at their API size. What a backend allocator rounds that up
+  to is documented here and not charged.
+  - *Explicit staging.* A pixel layer's upload no longer goes through
+    `queue.write_texture`, whose internal staging row pitch belongs to the
+    backend (Vulkan passes the driver's
+    `optimalBufferCopyRowPitchAlignment` through unclamped, so no constant
+    bounds it). `upload_layer` creates one buffer per uploaded layer
+    (`MAP_WRITE | COPY_SRC`, mapped at creation). Each row is padded to
+    `COPY_BYTES_PER_ROW_ALIGNMENT` (256), the `copy_buffer_to_texture`
+    contract on every backend. The rows are written into the mapping, the
+    buffer is unmapped and charged exactly (`padded row × height`). The
+    frame's encoder copies it into the pooled source texture before its
+    first pass. The buffer is held in the layer's resources until
+    readback and dropped with the frame. It is not reused across frames:
+    reuse would need a `map_async` and a poll per frame. The uniform and
+    grade `write_buffer` staging stays charged at its data size, because
+    buffer writes have no row pitch.
+  - *Backend granularity (documented, not charged).* DX12 places
+    buffers on 64 KiB boundaries: on the Windows CI WARP adapter, wgpu's
+    buffer counter moved 65,536 B for a 32-px-wide upload charged
+    16,384 B. Vulkan implementations suballocate with their own
+    alignment; lavapipe's counter delta equals the charge. These are
+    allocator properties. The ledger bounds what MO2
+    requests, so the counters are reported (`LEDGER_UPLOAD … backend_delta`)
+    and never asserted. `reverify_b1_legal_vulkan_pitch_512` is moot:
+    MO2 now chooses the pitch, so a driver's larger recommendation no
+    longer changes the bytes staged.
+  - *Bounded failed-frame wait.* A frame that fails after staging submits
+    nothing new, registers `on_submitted_work_done`, and polls
+    `PollType::Wait` for that submission with a **100 ms** timeout
+    (`FAILED_FRAME_WAIT`). If the callback has run, the frame's
+    resources and charges drop at once. Otherwise (a timeout, a poll
+    error) the frame moves to a `retired` list, still charged. Each later
+    `composite` sweeps the list and drops only frames whose callback a
+    poll has since run. Teardown drops the list with the compositor.
+    wgpu-core runs pending completion callbacks when a lost device's
+    queue drains, so device loss releases the frames too. A malformed
+    frame's refusal therefore waits at most 100 ms, and no charge leaves
+    before its writes are done.
+  - *Tests (default lane, all backends).*
+    - `final_ledger_upload_padding_counterexample` checks the row, the
+      buffer size and the charge against `(w·8)⌈256⌉ × h` for widths
+      1–65 and heights 1/3/64. It also checks that the frame copies that
+      buffer (G02).
+    - `final_ledger_exact_resources_and_lifetime` covers exactness and
+      lifetime.
+    - `final_ledger_failed_frame_retains_pending_uploads`: four failed
+      frames retire nothing and leave the ledger at baseline.
+    - `reverify_b2_requires_bounded_wait`: the poll carries a timeout of
+      at most 1 s.
+    - `reverify_b2_poll_error_preserves_charges`: a Timeout keeps every
+      charge and one retired frame, and a sweep with no completion keeps
+      it. A later completing poll plus the next frame release it to
+      baseline.
+    - `reverify_b2_flush_observes_live_charges` (G08): the charges are
+      live when the poll runs.
+    - `reverify_me14_phases_sum_same_frame` (G09/G10): the printed phases
+      partition one measured frame, each non-zero.
+    - `reverify_me14_warp_floor_boundary` (G11): synthetic WARP adapter
+      metadata selects the 20 fps floor and its boundary.
+
+    Each probe was red against its mutation: padding at 128, uncharged
+    staging, release before the poll, an unbounded wait, a timeout taken
+    as completion, a missing sweep, a zero phase, and floor 8. Probes that
+    parse `include_str!` sources normalise CRLF, so Windows checkouts
+    parse them identically.
 
 ## Changes in revision 2
 
