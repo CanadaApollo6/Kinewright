@@ -56,7 +56,7 @@ then one update per fully composited and submitted video frame.
 With the documented FFmpeg build environment active, run:
 
 ```powershell
-cargo run -p kinewright-media --example m4_verify -- target/m4-manual
+cargo run -p kinewright-project --example m4_verify -- target/m4-manual
 ```
 
 The example generates two 2-second A/V source clips, builds `two-track.kinewright` through effect

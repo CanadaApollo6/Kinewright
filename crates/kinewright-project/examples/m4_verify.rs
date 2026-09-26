@@ -13,6 +13,7 @@ use kinewright_core::{
     MediaEvent, ParamValue, Playback, Rational, TimeCode, Track, TrackId, TrackKind, Transition,
 };
 use kinewright_media::FfmpegMediaEngine;
+use kinewright_project::{load_document, min_required_format_version, write_project_document};
 
 // This manual verifier deliberately keeps its complete preview/export scenario together.
 #[allow(clippy::too_many_lines)]
@@ -122,10 +123,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     }
     .apply(&mut document)?;
-    fs::write(
-        output_dir.join("two-track.kinewright"),
-        serde_json::to_string_pretty(&document)?,
-    )?;
+    if write_fixture(&document, &output_dir.join("two-track.kinewright"))? != 1 {
+        return Err("the pre-MO2 two-track fixture must stay v1".into());
+    }
+    // The MO2 fixture assertion: a blend on the same fixture stamps v2 and
+    // survives the round trip, so this writer cannot mislabel MO2 content.
+    let mut blended = document.clone();
+    kinewright_core::Operation::SetClipBlendMode {
+        clip: ClipId(2),
+        blend_mode: kinewright_core::BlendMode::Screen,
+    }
+    .apply(&mut blended)?;
+    if write_fixture(&blended, &output_dir.join("two-track-mo2.kinewright"))? != 2 {
+        return Err("an MO2 fixture must stamp v2".into());
+    }
 
     let frames = engine.frames();
     let events = engine.events();
@@ -176,6 +187,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         export_path.display()
     );
     Ok(())
+}
+
+/// Write a fixture through the shared R7 envelope (MO2 R7, review 2 S6), never
+/// a raw `Document` serialization, and prove the stamp: the file reopens as
+/// the same document at exactly the minimum-required format version, which
+/// is returned.
+fn write_fixture(document: &Document, path: &Path) -> Result<u32, Box<dyn Error>> {
+    write_project_document(document, path, None)?;
+    let (reopened, version, _) = load_document(path)?;
+    let required = min_required_format_version(document);
+    if reopened != *document || version != required {
+        return Err(format!(
+            "{} reopened as v{version}, expected the same document at v{required}",
+            path.display()
+        )
+        .into());
+    }
+    Ok(version)
 }
 
 fn generate_source(

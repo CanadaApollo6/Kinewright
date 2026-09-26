@@ -21,7 +21,7 @@
 //!
 //! ```bash
 //! source scripts/setup-ffmpeg.sh
-//! cargo run --release -p kinewright-media --example performance_workloads -- \
+//! cargo run --release -p kinewright-project --example performance_workloads -- \
 //!   --lane all --workdir /tmp/kinewright-perf/workloads
 //! ```
 
@@ -40,6 +40,7 @@ use kinewright_core::{
     TimeCode, Track, TrackId, TrackKind, TranscriptWord,
 };
 use kinewright_media::FfmpegMediaEngine;
+use kinewright_project::{load_document, min_required_format_version, write_project_document};
 
 /// Per-frame receive timeout. A seek that never produces its frame is invalid
 /// evidence, so the run fails instead of recording a timeout sample.
@@ -186,6 +187,24 @@ impl FootageSpec {
 
 /// Generate one synthetic source file. Deterministic arguments; the only
 /// per-run input is the output path.
+/// Write a fixture through the shared R7 envelope (MO2 R7, review 2 S6), never
+/// a raw `Document` serialization, and prove the stamp: the file reopens as
+/// the same document at exactly the minimum-required format version, which
+/// is returned.
+fn write_fixture(document: &Document, path: &Path) -> Result<u32, Box<dyn Error>> {
+    write_project_document(document, path, None)?;
+    let (reopened, version, _) = load_document(path)?;
+    let required = min_required_format_version(document);
+    if reopened != *document || version != required {
+        return Err(format!(
+            "{} reopened as v{version}, expected the same document at v{required}",
+            path.display()
+        )
+        .into());
+    }
+    Ok(version)
+}
+
 fn generate_source(spec: &FootageSpec, output: &Path) -> Result<Duration, Box<dyn Error>> {
     let ffmpeg = ffmpeg_executable();
     if !ffmpeg.is_file() {
@@ -426,10 +445,7 @@ fn run_playback_lane(
         spec.clip_total,
         spec.clip_len,
     )?;
-    fs::write(
-        lane_dir.join("project.kinewright"),
-        serde_json::to_vec_pretty(&document)?,
-    )?;
+    write_fixture(&document, &lane_dir.join("project.kinewright"))?;
     let duration_frames = document.duration.0;
     engine.set_document(Arc::new(document));
 
@@ -583,10 +599,7 @@ fn run_agent_lane(
         .flat_map(|track| track.clips.iter().map(|clip| clip.id))
         .collect();
 
-    fs::write(
-        lane_dir.join("project.kinewright"),
-        serde_json::to_vec_pretty(&document)?,
-    )?;
+    write_fixture(&document, &lane_dir.join("project.kinewright"))?;
     let core = Core::spawn(document)?;
     let mut do_batch = Vec::with_capacity(plans);
     let mut undo = Vec::with_capacity(plans);
