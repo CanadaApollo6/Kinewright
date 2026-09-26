@@ -51,8 +51,8 @@ pub struct ReclaimedOwner {
     pub pid: u32,
     pub hostname: String,
     pub endpoint: String,
-    /// The owner's claim second: `release` only removes a discovery still
-    /// naming this handle (G9). Defaulted so pre-G9 claims still parse.
+    /// The owner's claim second, informational only: `release` matches
+    /// on [`Self::claim_id`] alone (N-d). Defaulted so pre-G9 claims parse.
     #[serde(default)]
     pub started_at_unix: u64,
     /// The owner's claim nonce (N-d): `release` compares it alone.
@@ -748,7 +748,9 @@ fn build_claim(
 /// Acquire the project lock with the §5 policy (`recovery_dir` feeds the
 /// pending-journal check).
 /// # Errors
-/// `Contention`, `PendingRecovery`, `RecoveryLookup`, `ForeignHost`, or `Io`.
+/// `Contention`, `PendingRecovery`, `RecoveryLookup`, `ForeignHost`, `Io`,
+/// `Identity` (the path has no identity or lock object), or `LockLost`
+/// (the lock object was deleted or replaced before the publish).
 pub fn acquire_project_lock(
     project_path: &Path,
     mode: LockMode,
