@@ -136,6 +136,10 @@
   **455 added / 118 removed** (net 337). B2 is ≈ 544 + 455 = 999 and the
   total ≈ 691 + 1,713 + 999 + 830 = 4,233, about 32% over 3,200. The
   ME16 growth was lead-ordered (N25), and that override carries it.
+  N26 reverts the readback deadline and adds the blocking callback wait.
+  That is +24/−17 production lines, all 17 removals ME16's own. R28 is
+  now **462 added / 118 removed** (net 344). B2 is ≈ 1,006 and the total
+  ≈ 4,240, about 32.5% over 3,200.
 - ME6 → §8 R26 (Part B3), readings the rule leaves open:
   - Solids:
     - The colour editor is egui's picker plus labelled R/G/B fields. A
@@ -403,7 +407,7 @@
     resource is charged. Layer-upload staging and failed-frame release
     follow ME15, which supersedes the final verification's
     padded-upper-bound charge and unbounded flush. LUT-atlas staging and
-    the bounded readback wait follow ME16, which removes the earlier
+    the completion-owned readback follow ME16, which removes the earlier
     atlas exception. The peaks above cannot move under ME15: every
     workload's rows (1280, 1920 and 3840 px × 8 B) are already
     256-aligned, so each upload's staging is the bytes charged before,
@@ -513,9 +517,9 @@
     as completion, a missing sweep, a zero phase, and floor 8. Probes that
     parse `include_str!` sources normalise CRLF, so Windows checkouts
     parse them identically.
-- ME16 → §9 R28 (render re-verification 2, B1/B2/S1, lead ruling N25):
-  **every frame resource is charged, and every frame-path wait is
-  bounded, with completion-owned charges.**
+- ME16 → §9 R28 (render re-verification 2, B1/B2/S1, lead rulings N25
+  and N26): **every frame resource is charged, and every submitted charge
+  is completion-owned.**
   - *Atlas staging.* A cold LUT atlas no longer uses
     `queue.write_texture`. `build_lut_atlas` writes every slot into one
     ME15 staging buffer (`staging_rows`: mapped at creation, charged
@@ -529,39 +533,78 @@
     end of the frame that built it, since that frame's readback wait
     completes the copy too. Otherwise it goes at the next failed frame,
     composite or teardown. ME13's atlas exception is gone.
-  - *Bounded readback.* The readback wait covers every read-back frame:
-    normal frames, R10 refusals, and encode errors after readback. It now
-    polls `Wait` for the frame's own submission with a **10 s** bound
-    (`READBACK_WAIT`, N25). The map callback, not the poll status,
-    decides completion.
-    - If the callback has not run by then, the frame refuses with
-      `gpu_readback_timeout`. That is a `Backend` message with a stable
-      code prefix, like `lut_atlas_too_large`; a `MediaError` variant
-      would need a `kinewright-core` change outside this slice. The
-      frame's output, readback buffer and layer resources move to
-      `retired` under the submission's completion flag.
-    - A later sweep drops them exactly once, after a poll observes
-      completion. Teardown also drops them.
-    - A driver watchdog that fires first surfaces as device loss, whose
-      map callback errors, so the frame refuses either way.
-    - The staging cleanup stays at 100 ms (ME15).
+  - *Readback: wait for completion (N26 reverses N25's bound).* The
+    readback wait covers every read-back frame: normal frames, R10
+    refusals, and encode errors after readback. It polls `Wait` for the
+    frame's own submission with **no deadline**. An application
+    deadline cannot tell a slow adapter from a hung one. Hang detection
+    belongs to the driver watchdog (Windows TDR, Linux GPU reset), which
+    wgpu surfaces as device loss or a poll error. The map callback, not
+    the poll status, decides completion:
+    - After a completed wait the frame blocks on the callback, which
+      another thread's submit may have collected and still be running.
+    - After a poll error it takes the callback only if it already ran.
+    - If the callback has not run, the frame refuses (`wgpu readback poll
+      failed: …`, or `wgpu readback callback stopped`). Its output,
+      readback buffer and layer resources move to `retired` under the
+      submission's completion flag. A later sweep drops them exactly
+      once, after a poll observes completion; teardown also drops them.
+    - The failed-frame staging cleanup keeps its 100 ms bound (ME15).
+      That frame has already failed, and its charges stay pending on
+      non-completion.
     - Both waits go through one `frame_poll`, which the tests observe
       and override. These are the only waits in the frame path.
-  - *Tests (default lane; NVIDIA once with `--include-ignored`, 15/15).*
+  - *Evidence (CI 36264529798 at 527afbf, the N25 10 s bound).*
+    - On Windows (hosted WARP), three legitimate slow software frames
+      were refused with `gpu_readback_timeout … within 10s`:
+      `cc1_managed_cache_memory_bound_is_measured_in_working_bytes`
+      (frame 10), `cc5_performance_evidence_is_recorded_on_software_fallback`
+      and `r28_ledger_holds_the_ceilings_and_releases_every_charge`.
+      The run ended 831 passed / 3 failed.
+    - On Linux, `generated_media`'s
+      `timeline_decode_selects_two_clips_and_renders_the_gap_black`
+      failed with "no frame 14 arrived". The bound does not explain this:
+      the whole binary finished in 11.3 s, and a readback refused at 10 s
+      would also miss the test's own 10 s receive. The cause was that
+      N25 read the map result with a non-blocking `try_recv` right after
+      the wait. `Queue::submit` runs wgpu-core's maintain and fires the
+      completed callbacks on the *submitting* thread. The engine's GPU
+      is process-wide (`FfmpegMediaEngine`'s static `GpuContext`), so
+      another test's submit could collect this frame's map callback
+      after its wait returned. The frame then refused spuriously, and the
+      engine sent an error event instead of frame 14.
+    - Reproduced: with `try_recv` after a completed wait, 8 threads × 600
+      frames on one lavapipe device refused 1–3 frames per run (3/3
+      runs). `generated_media` failed 1 of 15 runs with that variant.
+      With the blocking wait, 0 in 5 runs and 3/3 `generated_media`
+      runs pass.
+  - *Tests (default lane; NVIDIA once, `ledger_probes` 19/19).*
     - `rev2_api_atlas_write_staging_is_charged`: the atlas charges its
       texture plus its staging, 1,152 B for the identity cube, against the
       earlier 128 B. The staging is retained until completion is
       observed, then released.
-    - `rev2_runtime_refusal_readback_wait_is_bounded`: an R10 refusal's
-      only wait is exactly `Wait{Some(_), Some(10 s)}`.
-    - `rev2_simulated_readback_timeout_keeps_submitted_charges`: an
-      injected timeout refuses with `gpu_readback_timeout`. It keeps
-      every charge live at the poll (51,436 B, against a 9,100 B
-      baseline) and one retired frame, and a sweep without completion
-      keeps them. After a completing poll the sweep releases them; the
-      ledger returns to the baseline after the next frame, and to 0 at
-      teardown.
-    - The five survivor probes of the re-verification:
+    - `rev3_runtime_refusal_readback_waits_for_completion`: an R10
+      refusal's only wait is `Wait{Some(own), None}`.
+    - `rev3_readback_poll_error_keeps_submitted_charges`: an injected
+      poll error refuses. It keeps every charge live at the poll (51,436
+      B, against a 9,100 B baseline) and one retired frame, and a sweep
+      without completion keeps them. After a completing poll the sweep
+      releases them; the ledger returns to the baseline after the next
+      frame, and to 0 at teardown.
+    - `rev3_repeated_readback_poll_errors_all_entries` (I06): three
+      cycles of 16 unfinished readbacks across the four entries, normal
+      and special. They alternate a poll error with a return that has no
+      callback. Every charge is retained and matches an independent
+      inventory. Completion recovers to the baseline, and teardown with
+      frames pending returns to 0.
+    - `rev3_readback_callback_overrules_poll_error` (I07): a completed
+      map wins over an error status on all four entries.
+    - `rev3_actual_upload_callsite_count` (I08): `copy_uploads` issues
+      one `copy_buffer_to_texture`. This is the API call, which the H10
+      counter alone cannot see.
+    - `rev3_concurrent_readbacks_never_refuse`: 8 threads × 600 frames
+      on one device, with no refusals.
+    - The five survivor probes of re-verification 2:
       - `rev2_failed_flush_has_submission_index` (G05).
       - `rev2_all_staging_error_paths_have_100ms_cleanup` (G07). All 18
         staging refusals clean up with exactly one 100 ms wait and no
@@ -573,16 +616,23 @@
         pixel layer gets one upload copy, and RGBA8 and RGBA16F pixels
         arrive exact.
 
-    Each probe was red against its mutation. The survivor mutations were
-    no submission index, cleanup only above one staged layer, a 500 ms
-    wait, poll `Ok` taken as completion, and a duplicated upload copy.
+    Each probe was red against its mutation. The re-verification
+    survivors were:
+    - no submission index;
+    - cleanup only above one staged layer;
+    - a 500 ms wait;
+    - poll `Ok` taken as completion;
+    - a duplicated upload copy;
+    - retained frames truncated to one (I06);
+    - a poll error overriding a completed map (I07);
+    - a duplicate API copy with no counter call (I08).
+
     The mutations for the new rules were:
     - an uncharged atlas staging;
-    - an unbounded readback wait;
-    - a 20 s readback wait;
-    - a timeout that releases the frame;
-    - a timeout that drops the output;
-    - a timeout refusal without retention.
+    - a 10 s readback deadline;
+    - a poll error that releases the frame;
+    - a poll error that drops the output;
+    - `try_recv` after a completed wait (the concurrency test).
 
 ## Changes in revision 2
 
