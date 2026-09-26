@@ -1,8 +1,9 @@
 //! MO2 §13 gate 10 (`blend_heavy_holds_floors`) and R28's ledger.
 //!
 //! Lanes: the floors are release-mode evidence on three backends — the
-//! `--ignored` fallback test is lavapipe on Linux and WARP in the Windows CI
-//! lane, the `--ignored` hardware test is the RTX 3090. The ledger ceilings
+//! `--ignored` fallback test is lavapipe on Linux and WARP on a local
+//! Windows VM, run by hand (ME14), the `--ignored` hardware test is the
+//! RTX 3090. The ledger ceilings
 //! and both failing controls also run in the default (lavapipe) lane.
 
 #![allow(
@@ -24,7 +25,7 @@ use crate::{
     gpu_test_support::fixture_gpu_or_skip,
     mo2_bench::{Run, run},
     mo2_fixtures::{clip, effect, with_transition},
-    render::{DecodeStrategy, FrameRenderer, RenderScale},
+    render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
     test_support::GeneratedMedia,
 };
 
@@ -260,6 +261,9 @@ fn lane(acquire: fn() -> GpuContext, resident: bool) -> (f64, Vec<String>) {
             );
             means.push(result.mean_ms);
         }
+        if resident {
+            print_phases(acquire(), &document, key);
+        }
         let mean = means.iter().sum::<f64>() / 3.0;
         let pinned = BASELINES
             .iter()
@@ -277,6 +281,32 @@ fn lane(acquire: fn() -> GpuContext, resident: bool) -> (f64, Vec<String>) {
         }
     }
     (floor, failures)
+}
+
+/// ME14: a resident frame's mean phases over 30 frames after 10 warm-up —
+/// printed, never gated — so a backend pathology shows in the log.
+fn print_phases(gpu: GpuContext, document: &Document, key: &str) {
+    let scale = RenderScale::Proxy {
+        max_width: PREVIEW_MAX_WIDTH,
+    };
+    let dims = scale.output_resolution(document.resolution);
+    let mut renderer = FrameRenderer::new(gpu);
+    renderer.set_cache_budget(1 << 30);
+    let mut means = [0.0; 3];
+    for frame in 0..40 {
+        let at = TimeCode(frame % document.duration.0);
+        let phases = crate::render::phases::render(&mut renderer, document, at, dims, scale);
+        let phases = phases.expect("an R28 frame renders");
+        if frame >= 10 {
+            for (mean, phase) in means.iter_mut().zip(phases) {
+                *mean += phase.as_secs_f64() * 1e3 / 30.0;
+            }
+        }
+    }
+    let [upload, gpu, encode] = means;
+    println!(
+        "R28 phases workload={key} upload_ms={upload:.2} gpu_passes_readback_ms={gpu:.2} monitor_encode_ms={encode:.2}"
+    );
 }
 
 /// Gate 10 on compositor frames (ME13), then the slowdown control: a

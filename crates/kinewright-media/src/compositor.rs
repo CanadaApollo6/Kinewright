@@ -7639,3 +7639,45 @@ mod tests {
 #[cfg(test)]
 #[path = "mo2_ledger_probes.rs"]
 mod ledger_probes;
+
+/// MO2 R28 (ME14): one monitor frame split into its phases, for the perf
+/// lanes' printed breakdown.
+#[cfg(test)]
+pub(crate) mod phases {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// [`Compositor::render_monitor_with_luts`], timed: staging + upload
+    /// recording, GPU passes + readback (submit to mapped), monitor encode.
+    pub(crate) fn monitor(
+        compositor: &Compositor,
+        (width, height): (u32, u32),
+        layers: &[CompositorLayer<'_, WorkingFrame>],
+        monitoring: &ColorDescription,
+        library: Option<&LutLibrary>,
+    ) -> Result<[Duration; 3], MediaError> {
+        let started = Instant::now();
+        let (output, frame, encoder) =
+            compositor.composite(width, height, layers, library, None)?;
+        let staged = Instant::now();
+        let (mut mapped, mut rgba) = (
+            None,
+            Vec::with_capacity(width as usize * height as usize * 4),
+        );
+        let result =
+            compositor.for_each_linear_pixel(width, height, &output, encoder, &frame, |linear| {
+                mapped.get_or_insert_with(Instant::now);
+                let code = encode_monitor_rgba8_for_description(linear, monitoring)
+                    .map_err(|error| MediaError::Backend(format!("{error}")))?;
+                rgba.extend_from_slice(&code);
+                Ok(())
+            });
+        std::hint::black_box(rgba);
+        compositor.release_layer_textures(frame);
+        result?;
+        let done = Instant::now();
+        let mapped = mapped.unwrap_or(done);
+        Ok([staged - started, mapped - staged, done - mapped])
+    }
+}

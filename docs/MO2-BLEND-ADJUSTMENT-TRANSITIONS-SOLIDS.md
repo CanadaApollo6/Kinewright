@@ -329,7 +329,7 @@
     |---|---|---|---|---|
     | lavapipe (llvmpipe, LLVM 22.1.8) | 33.1 / 36.8 ms, 30.2 fps | 44.4 / 49.0 ms, 22.5 fps | 38.8 / 43.6 ms | 8 fps: holds |
     | RTX 3090 (driver 615.71.09) | 28.9 / 36.8 ms, 34.6 fps | 36.5 / 46.1 ms, 27.4 fps | 31.9 / 42.0 ms | 60 fps: **missed, pre-existing** |
-    | WARP (Windows CI) | CI lane | CI lane | — (local only) | 20 fps |
+    | WARP | owed (ME14) | owed (ME14) | — | 20 fps |
 
     The 3090 miss is recorded, not loosened. Its breakdown (blend_heavy
     per frame, instrumented probe): CPU monitor encode 25.8 ms (CC1's
@@ -377,6 +377,36 @@
     `final_ledger_failed_frame_retains_pending_uploads`).
   - *`validate()` per frame (N11-4):* 1.1–1.8 µs at 1080p, 10 µs for the
     200-clip 4K document. No revision-keyed cache is needed.
+- ME14 → §9 R28, §13 gate 10 (Windows CI run 36248329932, lead rulings
+  N22 and Riel's follow-up): **the WARP floor is measured by hand, not in
+  hosted CI.** A shared hosted runner does not represent the floor's
+  target, a Windows desktop with no GPU. The CI step is removed. The
+  fallback-adapter test stays `--ignored` with its 20 fps floor
+  unchanged, and the lead runs it by hand on a local Windows VM
+  (`cargo test --release -p kinewright-media --lib
+  blend_heavy_holds_floors_on_the_fallback_adapter -- --ignored
+  --nocapture`, with `R28_ONLY=typical_1080p,blend_heavy_1080p`). The
+  WARP floor stays owed until that run is pinned here.
+  - *Recorded observation (hosted `windows-latest`, 4 vCPU, WARP
+    "Microsoft Basic Render Driver", release, compositor frames, three
+    runs; not a pin).*
+
+    | workload | mean ms per run | worst p95 | fps | ledger peak |
+    |---|---|---|---|---|
+    | typical 1080p | 796.9 / 740.0 / 750.0 | 857.6 ms | 1.3–1.4 | 56.3 MiB |
+    | blend_heavy 1080p | 944.2 / 941.0 / 940.4 | 1,004.4 ms | 1.1 | 63.3 MiB |
+
+    p95 ≤ 3× mean and the ledger ceilings held; the slowdown control
+    (125 ms delay, 0.9 fps) was detected. The step took 53 min (7 min of
+    it the release build). Ledger peaks match lavapipe exactly.
+  - *Breakdown print.* Every resident lane now also prints one
+    `R28 phases` line per workload: the mean over 30 frames (after 10
+    warm-up) of upload (staging and command recording), GPU passes +
+    readback (submit to mapped) and CPU monitor encode. It is recorded,
+    never gated, so a backend pathology shows in the log. The timing
+    helpers are test-only (`compositor::phases`, `render::phases`).
+    Lavapipe, typical 1080p: 7.4 / 6.3 / 18.9 ms of a 33.3 ms frame,
+    which agrees with ME13's breakdown.
 
 ## Changes in revision 2
 
@@ -897,7 +927,7 @@ fail throughput. The ledger control submits four 4096×4096 RGBA16F
 reservations, totalling 512 MiB, and must reject the 1080p budget. Extra
 copies and an unspecified 8K texture alone are not guaranteed failing
 controls. Report solo peak resources and elapsed time. Part B measures on
-all three backends and pins; a miss optimises copies, never tolerances. *(ME13: the floors bind compositor frames with resident sources; end-to-end is tracked, its 5% rule gates.)*
+all three backends and pins; a miss optimises copies, never tolerances. *(ME13: the floors bind compositor frames with resident sources; end-to-end is tracked, its 5% rule gates. ME14: WARP is measured by hand on a local Windows VM, not in hosted CI.)*
 
 ## 10 Incidents
 

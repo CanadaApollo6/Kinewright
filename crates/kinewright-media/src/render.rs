@@ -1661,3 +1661,31 @@ mod tests {
         );
     }
 }
+
+/// MO2 R28 (ME14): a resident compositor frame's phases.
+#[cfg(test)]
+pub(crate) mod phases {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// [`FrameRenderer::render_timed`]'s compositor frame, split by
+    /// [`crate::compositor::phases::monitor`].
+    pub(crate) fn render(
+        renderer: &mut FrameRenderer,
+        document: &Document,
+        at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+    ) -> Result<[Duration; 3], MediaError> {
+        let strategy = DecodeStrategy::Sequential;
+        let decoded = renderer.decoded_layers(document, at, resolution, scale, strategy)?;
+        crate::compositor::phases::monitor(
+            &renderer.compositor,
+            resolution,
+            &compositor_layers(&decoded),
+            &document.color_context.monitoring,
+            Some(&renderer.lut_library),
+        )
+    }
+}
