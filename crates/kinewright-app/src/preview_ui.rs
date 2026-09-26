@@ -3127,4 +3127,168 @@ pub(crate) mod mo2_tests {
         );
         in1_shutdown(&mut app);
     }
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss
+    )]
+    fn new_mo2_combined_transform_real_program_drags() {
+        // Every corner is derived independently in physical pixel space from
+        // the shader contract, then driven through the real Program viewer.
+        for (case, angle, sx, sy, fine, ax, ay, bx, by, disabled, portrait) in [
+            (0, 3200, 70, 130, 7500, 3500, 6500, 300, -400, true, false),
+            (1, -3700, 135, 60, 8500, 6000, 4000, -500, 200, true, false),
+            (2, 9000, 80, 120, 6500, 4000, 5000, 100, 350, false, false),
+            (3, -9000, 110, 75, 8000, 4500, 5500, -250, -200, true, false),
+            (4, 4100, 70, 130, 7500, 4500, 5500, 300, -400, true, true),
+            (5, -2800, 125, 60, 7000, 4000, 6500, -400, 200, false, true),
+        ] {
+            let mut doc = transform_document(true);
+            if portrait {
+                doc.resolution = (1080, 1920);
+            }
+            doc.tracks[0].clips[0].content = ClipContent::Solid(kinewright_core::SolidColor {
+                r: 220,
+                g: 80,
+                b: 30,
+            });
+            for (name, value) in [
+                ("scale_percent", 60),
+                ("rotation_centidegrees", angle),
+                ("scale_x_percent", sx),
+                ("scale_y_percent", sy),
+                ("scale_fine_hundredths", fine),
+                ("anchor_x_basis_points", ax),
+                ("anchor_y_basis_points", ay),
+                ("x_basis_points", bx),
+                ("y_basis_points", by),
+            ] {
+                doc.tracks[0].clips[0].effects[0]
+                    .parameters
+                    .insert(name.into(), ParamValue::Integer(value));
+            }
+            if disabled {
+                let mut extra = doc.tracks[0].clips[0].effects[0].clone();
+                extra.id = EffectId(99);
+                extra.enabled = false;
+                extra
+                    .parameters
+                    .insert("scale_percent".into(), ParamValue::Integer(400));
+                doc.tracks[0].clips[0].effects.push(extra);
+            }
+            doc.validate().unwrap();
+            let (mut app, _engine) = in1_harness(doc.clone());
+            select(&mut app, doc.clone(), Some(CLIP), 25);
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let proof = app
+                .analysis
+                .monitor_proof_for_document(Arc::new(doc.clone()), TimeCode(25))
+                .unwrap();
+            let texture = ctx.load_texture(
+                "new-real-program",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [proof.image.width as usize, proof.image.height as usize],
+                    &proof.image.pixels,
+                ),
+                egui::TextureOptions::NEAREST,
+            );
+            let id = texture.id();
+            app.texture = Some(texture);
+            let frame = |app: &mut KinewrightApp, events: Vec<egui::Event>, time: f64| {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(900.0, 800.0),
+                        )),
+                        time: Some(time),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| app.program_viewer(ui, 640.0),
+                )
+            };
+            let output = frame(&mut app, vec![], 0.0);
+            let image = output
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Mesh(m) if m.texture_id == id => Some(m.calc_bounds()),
+                    _ => None,
+                })
+                .unwrap();
+            let pin = image.min
+                + egui::vec2(
+                    ax as f32 / 10000.0 * image.width(),
+                    ay as f32 / 10000.0 * image.height(),
+                );
+            let pivot = pin
+                + egui::vec2(
+                    bx as f32 / 10000.0 * image.width(),
+                    by as f32 / 10000.0 * image.height(),
+                );
+            let a = (angle as f64 / 100.0).to_radians();
+            let corners = [
+                image.left_top(),
+                image.right_top(),
+                image.right_bottom(),
+                image.left_bottom(),
+            ]
+            .map(|c| {
+                let x = f64::from(c.x - pin.x) * 0.6 * sx as f64 / 100.0 * fine as f64 / 10000.0;
+                let y = f64::from(c.y - pin.y) * 0.6 * sy as f64 / 100.0 * fine as f64 / 10000.0;
+                pivot
+                    + egui::vec2(
+                        (x * a.cos() - y * a.sin()) as f32,
+                        (x * a.sin() + y * a.cos()) as f32,
+                    )
+            });
+            let (actual, actual_pivot) =
+                super::transform_geometry(&doc.tracks[0].clips[0], TimeCode(5), image);
+            assert!(actual_pivot.distance(pivot) < 0.01, "pivot case {case}");
+            for (got, want) in actual.into_iter().zip(corners) {
+                assert!(
+                    got.distance(want) < 0.01,
+                    "corner case {case}: {got:?} != {want:?}"
+                );
+            }
+            let from = *corners
+                .iter()
+                .filter(|p| image.shrink(12.0).contains(**p))
+                .min_by(|a, b| {
+                    a.distance(image.center())
+                        .total_cmp(&b.distance(image.center()))
+                })
+                .expect("a visible handle");
+            let to = pivot + (from - pivot) * 1.2;
+            let button = |p, pressed| egui::Event::PointerButton {
+                pos: p,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            for (i, events) in [
+                vec![egui::Event::PointerMoved(from), button(from, true)],
+                vec![egui::Event::PointerMoved(to)],
+                vec![button(to, false)],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                frame(&mut app, events, 0.05 * (i + 1) as f64);
+                settle(&mut app);
+            }
+            assert_eq!(
+                transform_values(&app),
+                [0, 0, 72],
+                "real corner drag case {case}"
+            );
+            app.undo();
+            settle(&mut app);
+            assert_eq!(*app.focused().document, doc, "one gesture undo case {case}");
+            in1_shutdown(&mut app);
+        }
+    }
 }

@@ -608,4 +608,144 @@ pub(crate) mod tests {
         assert!(strip.png == agent.unwrap().png, "the agent's exact strip");
         crate::app::in1_tests::in1_shutdown(&mut app);
     }
+    #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn new_mo2_fullres_far_corner_and_all_tile_pixels() {
+        let mut pixels = Vec::with_capacity(3840 * 2160 * 4);
+        for y in 0..2160 {
+            for x in 0..3840 {
+                pixels.extend_from_slice(&[
+                    (x % 251) as u8,
+                    (y % 241) as u8,
+                    ((x + y) % 239) as u8,
+                    255,
+                ]);
+            }
+        }
+        let image = kinewright_core::RgbaImage {
+            width: 3840,
+            height: 2160,
+            pixels,
+        };
+        for limit in [2048, 1024, 1537] {
+            let mut view = SoloView::new();
+            let mut tiles = vec![];
+            let output = view.ctx.run_ui(
+                egui::RawInput {
+                    max_texture_side: Some(limit),
+                    ..Default::default()
+                },
+                |ui| {
+                    tiles = super::strip_tiles(ui.ctx(), &image);
+                },
+            );
+            view.uploads.extend(output.textures_delta.set);
+            let strip = SoloStrip {
+                image: image.clone(),
+                png: vec![],
+                report: serde_json::json!({}),
+            };
+            let actual = uploaded_strip(&view, &strip, &tiles);
+            let far = ((2159 * 3840 + 3839) * 4) as usize;
+            assert_eq!(
+                &actual[far..far + 4],
+                &image.pixels[far..far + 4],
+                "far corner limit={limit}"
+            );
+            assert_eq!(actual, image.pixels, "all original pixels limit={limit}");
+            for (_, tile) in &tiles {
+                assert!(tile.size().iter().all(|n| *n <= limit));
+            }
+        }
+    }
+    #[test]
+    fn new_mo2_solo_control_argument_matrix() {
+        use kinewright_core::{
+            AssetId, BlendMode, Clip, ClipContent, ClipId, Document, SolidColor, TimeCode, Track,
+            TrackId, TrackKind,
+        };
+        let solid = |id, [r, g, b]: [u8; 3]| Clip {
+            id: ClipId(id),
+            asset: AssetId(0),
+            content: ClipContent::Solid(SolidColor { r, g, b }),
+            timeline_start: TimeCode(0),
+            source_range: TimeCode(0)..TimeCode(60),
+            effects: vec![],
+            transition_in: None,
+            link: None,
+            enabled: true,
+            enabled_curve: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode(0),
+            audio_fade_out_frames: TimeCode(0),
+            speed_percent: 100,
+            audio_gain_curve: None,
+            blend_mode: BlendMode::Normal,
+        };
+        let track = |id, clip| Track {
+            id: TrackId(id),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![clip],
+        };
+        let document = Document {
+            resolution: (64, 36),
+            duration: TimeCode(60),
+            tracks: vec![
+                track(1, solid(1, [20, 90, 160])),
+                track(2, solid(2, [200, 60, 30])),
+            ],
+            ..Document::default()
+        };
+        let (mut app, _engine) = crate::app::in1_tests::in1_harness(document);
+        app.open_solo_dialog(ClipId(2), false);
+        let mut view = SoloView::new();
+        view.settle(&mut app);
+        let before = app.focused().document.clone();
+        let revision = app.focused().revision;
+        for (label, context) in [
+            ("By blend", None),
+            ("Isolated", Some(kinewright_agent::SoloContext::Isolated)),
+            (
+                "Over below-stack",
+                Some(kinewright_agent::SoloContext::Below),
+            ),
+        ] {
+            for count in [2, 16] {
+                view.click(&mut app, "solo_context");
+                view.click(&mut app, label);
+                view.click(&mut app, "solo_samples");
+                let enter = egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                view.frame(&mut app, vec![egui::Event::Text(count.to_string()), enter]);
+                view.click(&mut app, "solo_render");
+                view.settle(&mut app);
+                let dialog = app.solo_dialog.as_ref().unwrap();
+                let strip = dialog.strip().unwrap();
+                let args = kinewright_agent::SoloArgs {
+                    expected_revision: revision,
+                    clip_id: ClipId(2),
+                    samples: count,
+                    context,
+                    full_res: false,
+                };
+                let agent =
+                    kinewright_agent::preview_solo(&*app.analysis, revision, &before, &args)
+                        .unwrap();
+                assert_eq!(strip.report["requested"], count);
+                assert_eq!(strip.report["context"], agent.report["context"]);
+                assert_eq!(strip.png, agent.png, "{label} {count}");
+                assert_eq!(dialog.context, context);
+                assert_eq!(dialog.samples, count);
+                assert_eq!(app.focused().revision, revision);
+                assert_eq!(*app.focused().document, *before);
+            }
+        }
+        crate::app::in1_tests::in1_shutdown(&mut app);
+    }
 }
