@@ -2303,11 +2303,15 @@ struct Pb4Acc {
 }
 
 /// One delivered channel vs the f64 reference: code error, display error
-/// (nits of that leg) and the CE7 verdict.
+/// (nits of that leg), the channel's reference value, the display prong's
+/// norm (the leg classifies it: the REFERENCE triplet's max |channel|) and
+/// the CE7 verdict.
 #[derive(Clone, Copy, Debug)]
 struct Ce7Ch {
     codes: f64,
     disp_err: f64,
+    reference: f64,
+    norm: f64,
     ok: bool,
 }
 
@@ -2327,6 +2331,8 @@ fn pb4_hlg_leg(display: [f32; 3], d: [f64; 3], peak: f64) -> [Ce7Ch; 3] {
         Ce7Ch {
             codes,
             disp_err,
+            reference: d[i],
+            norm: m,
             ok,
         }
     })
@@ -2355,6 +2361,8 @@ fn pb4_sdr_leg(display: [f32; 3], d: [f64; 3], peak: f64) -> [Ce7Ch; 3] {
         Ce7Ch {
             codes,
             disp_err,
+            reference: sdr64[i],
+            norm: ms,
             ok,
         }
     })
@@ -2622,6 +2630,52 @@ fn pb4_sdr_high_peak_scan() {
     );
     assert_eq!(n, 72);
     assert!(control_bad > 0, "foreign-space control must fail CE7");
+}
+
+#[test]
+fn pb4_leg_classification_real_triplets() {
+    // verify2 P09 after CE8's removal: the display prong's norm must be the
+    // REFERENCE triplet's max channel, classified inside the leg. Real
+    // model-D triplets whose minor channels miss by codes and pass only
+    // through the prong — a per-channel (or no-max) classification rejects
+    // them, and the leg's recorded norm must be the reference max.
+    // HLG: saturated green [0, 400, 0] at P=400/W=194, one pair.
+    let d = [0.0, 400.0, 0.0];
+    let hlg = pb4_hlg_leg(matrix_chain_display(d, 194.0, 400.0, 1), d, 400.0);
+    println!("HLG classification: {hlg:?}");
+    for i in [0, 2] {
+        let c = hlg[i];
+        assert!(c.ok && c.codes > pb4_code_tol(), "HLG[{i}] prong: {c:?}");
+    }
+    // Red carries a nonzero display error on a zero reference: a norm
+    // taken from the channel itself (0) rejects it.
+    let c = hlg[0];
+    assert!(
+        c.disp_err > 0.002 * c.reference.abs(),
+        "per-channel rejects"
+    );
+    assert!(hlg.iter().all(|c| c.norm.to_bits() == 400f64.to_bits()));
+    // Crafted actual triplets through the same leg: 0.7 nits on a zero
+    // channel beside 400 passes by display (≤ 0.8); 0.9 fails both prongs.
+    let pass = pb4_hlg_leg([0.7, 400.0, 0.0], d, 400.0)[0];
+    let fail = pb4_hlg_leg([0.9, 400.0, 0.0], d, 400.0)[0];
+    assert!(pass.ok && pass.codes > pb4_code_tol(), "{pass:?}");
+    assert!(!fail.ok, "{fail:?}");
+    // SDR: 709 cyan at 10% of P=400, W=203, one pair — SDR red sits near
+    // zero, misses by codes and passes by 0.2% of the SDR triplet max.
+    let c709 = reference::apply_matrix(BT709_TO_BT2020_F64, [0.0, 1.0, 1.0]).unwrap();
+    let d = c709.map(|x| x / max_abs_3(c709) * 40.0);
+    let sdr = pb4_sdr_leg(matrix_chain_display(d, 203.0, 400.0, 1), d, 400.0);
+    println!("SDR classification: {sdr:?}");
+    let c = sdr[0];
+    assert!(c.ok && c.codes > pb4_8bit_tol(), "SDR red prong: {c:?}");
+    assert!(
+        c.disp_err > 0.002 * c.reference.abs(),
+        "per-channel rejects"
+    );
+    let refmax = sdr.iter().map(|c| c.reference.abs()).fold(0.0, f64::max);
+    assert!(sdr.iter().all(|c| c.norm.to_bits() == refmax.to_bits()));
+    assert!(refmax > 100.0 * c.reference.abs(), "red is not the max");
 }
 
 #[test]
