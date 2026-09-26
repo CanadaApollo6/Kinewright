@@ -487,11 +487,89 @@ fn r5_generated_kinds_refuse_media_only_edits() {
     }
 }
 
+/// R8: the *neutral* audio setters — a gain-envelope clear and an all-zero
+/// `SetClipAudio` — are refused on both generated kinds with their typed
+/// error, directly and through the Core actor, leaving document, revision
+/// and both undo and redo histories exactly as they were.
+#[test]
+fn r8_neutral_audio_setters_refuse_generated_clips() {
+    let neutral = |clip| {
+        [
+            Operation::SetClipGainEnvelope { clip, curve: None },
+            Operation::SetClipAudio {
+                clip,
+                gain_tenth_db: 0,
+                fade_in_frames: TimeCode::ZERO,
+                fade_out_frames: TimeCode::ZERO,
+            },
+        ]
+    };
+    let cases = [
+        (ClipId(2), OpError::AdjustmentClipHasNoAudio(ClipId(2))),
+        (ClipId(3), OpError::SolidClipHasNoAudio(ClipId(3))),
+    ];
+    let initial = stack();
+    for (clip_id, error) in &cases {
+        for op in neutral(*clip_id) {
+            refuse(&initial, op, error);
+        }
+    }
+
+    // One undo and one redo entry, so a refusal that touched either history
+    // shows up when both are walked afterwards.
+    let core = Core::spawn(initial.clone()).unwrap();
+    let mut done = Vec::new();
+    for blend_mode in [BlendMode::Screen, BlendMode::Overlay] {
+        let Event::DocumentChanged { doc, .. } = core
+            .request(Command::Do(Operation::SetClipBlendMode {
+                clip: ClipId(1),
+                blend_mode,
+            }))
+            .unwrap()
+        else {
+            panic!("the blend lands");
+        };
+        done.push((*doc).clone());
+    }
+    let Event::DocumentChanged { doc, .. } = core.request(Command::Undo).unwrap() else {
+        panic!("undo answers with the document");
+    };
+    assert_eq!(*doc, done[0]);
+    let snapshot = || match core.request(Command::Query(Query::Snapshot)).unwrap() {
+        Event::QueryResult(QueryResult::Snapshot { revision, document }) => (revision, document),
+        other => panic!("{other:?}"),
+    };
+    let before = snapshot();
+    for (clip_id, error) in cases {
+        for op in neutral(clip_id) {
+            let Event::OpRejected {
+                error: rejected, ..
+            } = core.request(Command::Do(op.clone())).unwrap()
+            else {
+                panic!("{op:?} on a generated clip is refused");
+            };
+            assert_eq!(rejected, error, "{op:?}");
+            assert_eq!(snapshot(), before, "{op:?} left revision and document");
+        }
+    }
+    for (command, expected) in [
+        (Command::Redo, &done[1]),
+        (Command::Undo, &done[0]),
+        (Command::Undo, &initial),
+    ] {
+        let Event::DocumentChanged { doc, .. } = core.request(command).unwrap() else {
+            panic!("history answers with the document");
+        };
+        assert_eq!(*doc, *expected, "both histories survive the refusals");
+    }
+}
+
 // ------------------------------------------------------------------ R6
 
-/// An adjustment carrying a keyed look, a keyed effect toggle and a keyed
-/// clip toggle — every keep-outside owner the generated kinds have.
-fn keyed_adjustment() -> Document {
+/// Generated clip 2 (of `content`) carrying a keyed look, a keyed effect
+/// toggle and a keyed clip toggle — every keep-outside owner the generated
+/// kinds have: effect values, effect enable and clip enable.
+fn keyed_generated(content: ClipContent) -> Document {
     let mut doc = stack();
     let toggle = curve(&[
         (0, 1, KeyframeInterpolation::Hold),
@@ -510,11 +588,21 @@ fn keyed_adjustment() -> Document {
         ]),
     );
     look.enabled_curve = Some(toggle.clone());
-    let adjustment = clip_mut(&mut doc, 2);
-    adjustment.effects.push(look);
-    adjustment.enabled_curve = Some(toggle);
+    let generated = clip_mut(&mut doc, 2);
+    generated.content = content;
+    generated.effects.push(look);
+    generated.enabled_curve = Some(toggle);
     doc.validate().unwrap();
     doc
+}
+
+fn keyed_adjustment() -> Document {
+    keyed_generated(ClipContent::Adjustment)
+}
+
+/// Both generated kinds: R6 survival holds for each, not only adjustments.
+fn generated_kinds() -> [ClipContent; 2] {
+    [ClipContent::Adjustment, solid()]
 }
 
 fn keys(curve: &AutomationCurve) -> Vec<(i64, i64)> {
@@ -525,71 +613,85 @@ fn keys(curve: &AutomationCurve) -> Vec<(i64, i64)> {
         .collect()
 }
 
-/// R6: trimming an adjustment in shifts every keep-outside curve (negative
-/// keys legal), and trimming back out restores the bytes exactly.
-#[test]
-fn r6_adjustment_curves_survive_a_trim_cycle() {
-    let base = keyed_adjustment();
-    let mut doc = base.clone();
-    Operation::TrimClip {
-        clip: ClipId(2),
-        new_source: TimeCode(5)..TimeCode(20),
-    }
-    .apply(&mut doc)
-    .unwrap();
-    let trimmed = clip(&doc, 2);
-    assert_eq!(
-        keys(&trimmed.effects[0].keyframes["percent"]),
-        [(-5, 0), (14, 40)]
-    );
-    assert_eq!(
-        keys(trimmed.enabled_curve.as_ref().unwrap()),
-        [(-5, 1), (5, 1), (6, 0), (14, 0)]
-    );
-    assert_eq!(
-        keys(trimmed.effects[0].enabled_curve.as_ref().unwrap()),
-        [(-5, 1), (5, 1), (6, 0), (14, 0)]
-    );
-
-    Operation::TrimClip {
-        clip: ClipId(2),
-        new_source: TimeCode(0)..TimeCode(20),
-    }
-    .apply(&mut doc)
-    .unwrap();
-    assert_eq!(
-        serde_json::to_string(clip(&doc, 2)).unwrap(),
-        serde_json::to_string(clip(&base, 2)).unwrap()
-    );
+/// The three keep-outside owners of a generated clip, in owner order:
+/// effect values, effect enable, clip enable.
+fn owners(clip: &Clip) -> [Vec<(i64, i64)>; 3] {
+    [
+        keys(&clip.effects[0].keyframes["percent"]),
+        keys(
+            clip.effects[0]
+                .enabled_curve
+                .as_ref()
+                .expect("effect enable"),
+        ),
+        keys(clip.enabled_curve.as_ref().expect("clip enable")),
+    ]
 }
 
-/// R6: a split copies every curve to both halves, each shifted to its own
-/// clip-local origin.
+/// R6: trimming either generated kind in shifts every keep-outside curve
+/// (negative keys legal), and trimming back out restores the bytes exactly.
 #[test]
-fn r6_adjustment_curves_survive_a_split() {
-    let mut doc = keyed_adjustment();
-    Operation::SplitClip {
-        clip: ClipId(2),
-        at: TimeCode(8),
+fn r6_generated_curves_survive_a_trim_cycle() {
+    for content in generated_kinds() {
+        let base = keyed_generated(content.clone());
+        let mut doc = base.clone();
+        Operation::TrimClip {
+            clip: ClipId(2),
+            new_source: TimeCode(5)..TimeCode(20),
+        }
+        .apply(&mut doc)
+        .unwrap();
+        let toggle = vec![(-5, 1), (5, 1), (6, 0), (14, 0)];
+        assert_eq!(
+            owners(clip(&doc, 2)),
+            [vec![(-5, 0), (14, 40)], toggle.clone(), toggle],
+            "{content:?} trimmed in"
+        );
+        assert_eq!(clip(&doc, 2).content, content);
+
+        Operation::TrimClip {
+            clip: ClipId(2),
+            new_source: TimeCode(0)..TimeCode(20),
+        }
+        .apply(&mut doc)
+        .unwrap();
+        assert_eq!(doc, base, "{content:?} trimmed back out");
+        assert_eq!(
+            serde_json::to_string(clip(&doc, 2)).unwrap(),
+            serde_json::to_string(clip(&base, 2)).unwrap()
+        );
     }
-    .apply(&mut doc)
-    .unwrap();
-    let left = clip(&doc, 2);
-    let right = &doc.tracks[1].clips[1];
-    assert_eq!(right.content, ClipContent::Adjustment);
-    assert_eq!(
-        keys(&left.effects[0].keyframes["percent"]),
-        [(0, 0), (19, 40)]
-    );
-    assert_eq!(
-        keys(&right.effects[0].keyframes["percent"]),
-        [(-8, 0), (11, 40)]
-    );
-    assert_eq!(
-        keys(right.enabled_curve.as_ref().unwrap()),
-        [(-8, 1), (2, 1), (3, 0), (11, 0)]
-    );
-    doc.validate().unwrap();
+}
+
+/// R6: a split of either generated kind copies every curve to both halves,
+/// each shifted to its own clip-local origin.
+#[test]
+fn r6_generated_curves_survive_a_split() {
+    for content in generated_kinds() {
+        let mut doc = keyed_generated(content.clone());
+        Operation::SplitClip {
+            clip: ClipId(2),
+            at: TimeCode(8),
+        }
+        .apply(&mut doc)
+        .unwrap();
+        let toggle = vec![(0, 1), (10, 1), (11, 0), (19, 0)];
+        assert_eq!(
+            owners(clip(&doc, 2)),
+            [vec![(0, 0), (19, 40)], toggle.clone(), toggle],
+            "{content:?} left half"
+        );
+        let right = &doc.tracks[1].clips[1];
+        assert_eq!(right.content, content);
+        assert_eq!(clip(&doc, 2).content, content);
+        let toggle = vec![(-8, 1), (2, 1), (3, 0), (11, 0)];
+        assert_eq!(
+            owners(right),
+            [vec![(-8, 0), (11, 40)], toggle.clone(), toggle],
+            "{content:?} right half"
+        );
+        doc.validate().unwrap();
+    }
 }
 
 // ----------------------------------------------------------- R8 / R18
