@@ -175,6 +175,7 @@ const CAPABILITY_KIND_OVERRIDES: &[(&str, CapabilityKind)] = &[
     // CC4 §8: `list_look_assets` is read-only LUT-asset evidence.
     ("list_look_assets", CapabilityKind::Inspector),
     ("inspect_grade_matte", CapabilityKind::Inspector),
+    ("preview_solo", CapabilityKind::Inspector),
 ];
 
 fn capability_kind(name: &str, operation_names: &BTreeSet<String>) -> CapabilityKind {

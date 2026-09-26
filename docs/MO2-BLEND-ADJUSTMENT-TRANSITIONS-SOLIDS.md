@@ -48,6 +48,17 @@
   twin reproduces portably. That path is fixture-only (production never
   composites 8-bit textures). With f16 inputs, GPU ≡ twin within 5e-4 on
   all 13 cases.
+- ME4 → §7 R24 (Part B2): the argument is `clip_id`, not `clip` — every
+  clip-targeted capability (`plan_motion`, the colour planners) spells it
+  that way, and a lone `clip` would be the registry's only exception.
+  `SoloError` carries two variants beyond the three R24 names:
+  `InvalidSamples` (`samples` outside 2..16, which the schema cannot bound)
+  and `RenderFailed` (the proof path's own `MediaError`, kept typed rather
+  than folded into `SoloClipNotVisible`). A `context: isolated` sent for an
+  adjustment is answered as `below` — the report says so — rather than
+  refused, since R24 says "no override". Codes are `solo_clip_not_visible`,
+  `solo_window_empty`, `solo_over_budget`, `solo_invalid_samples`,
+  `solo_render_failed`.
 
 ## Changes in revision 2
 

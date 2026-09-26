@@ -38,6 +38,7 @@ mod server;
 /// The session pump (IN2 §3.5). Not feature-gated, for the same reason.
 mod session;
 mod silence;
+mod solo;
 
 pub use acp_drivers::{
     DEVIN_SANDBOX_NOTICE, DevinDriver, KIMI_SANDBOX_NOTICE, KIRO_SANDBOX_NOTICE, KimiDriver,
@@ -85,4 +86,8 @@ pub use session::{
 pub use silence::{
     shrink_silence_span_for_cutting, shrink_silence_span_for_cutting_with_transcript,
     silence_cut_margin_frames,
+};
+pub use solo::{
+    SOLO_PNG_BUDGET_BYTES, SOLO_REPORT_BUDGET_BYTES, SOLO_WIRE_BUDGET_BYTES, SoloArgs, SoloContext,
+    SoloError, SoloStrip, preview_solo, sample_offsets,
 };

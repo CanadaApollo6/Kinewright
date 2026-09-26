@@ -142,6 +142,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-25, after MO2 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-26, after the MO2 Part A fixes) | 152 | 2,000,542 B | 1,846,842 B | 128,734 B |
 | Served MCP runtime (2026-09-26, after the MO2 Part A fixes) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-26, after MO2 Part B preview_solo) | 153 | 2,002,954 B | 1,848,392 B | 129,437 B |
+| Served MCP runtime (2026-09-26, after MO2 Part B preview_solo) | 7 | 5,660 B | 3,510 B | 998 B |
 
 IN1 Part A adds two capabilities, `get_incidents` and `resolve_incident`,
 reached through `invoke_capability` and served as no tool: the registry grows
@@ -227,6 +229,15 @@ the registry moves to 2,000,542 B serialized (1,846,842 input schema,
 128,734 description) at unchanged counts 152 / 64 / 88. Both endpoint pin
 sites now assert the registry byte trio beside the counts. The served quad
 does not move.
+
+MO2 Part B adds one registry-only inspector, `preview_solo` (R24), and no
+operation. The registry grows by 2,412 B serialized (2,000,542 →
+2,002,954): +1,550 B of generated `SoloArgs` input schema (revision, clip,
+samples, two-way context enum, full_res), +703 B of description, and
++159 B fixed — 147 B plus the 12 bytes of `preview_solo`. Counts move to
+153 / 64 / 89 — Part B's `(1,0,1)`. The served quad is byte-identical for
+the twenty-third consecutive measurement at 7 / 5,660 B / 3,510 B / 998 B
+(MO2 R25), asserted in three value sites.
 
 AU6 Part A adds no capability and no operation; the registry is
 unchanged and the served quad is byte-identical at 7 / 5,660 B /

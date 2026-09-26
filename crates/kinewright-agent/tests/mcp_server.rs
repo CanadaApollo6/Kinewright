@@ -2516,10 +2516,11 @@ async fn cc7_prepare_commit_and_compare(
 /// adds two **registry-only** generated mutators, which the compact authority
 /// never serves either, MO1 A4b adds three more of the same shape,
 /// MO1 A4c adds the last one, MO1 Part C adds one **registry-only**
-/// planner, `plan_motion`, and MO2 Part A generates four more
-/// **registry-only** mutators. The registry sextuple does move, to
-/// `152 / 64 / 88`, which is the count assertions below, and its three byte
-/// measures `2 000 542 / 1 846 842 / 128 734` are pinned beside the served
+/// planner, `plan_motion`, MO2 Part A generates four more
+/// **registry-only** mutators, and MO2 Part B adds one **registry-only**
+/// inspector, `preview_solo`. The registry sextuple does move, to
+/// `153 / 64 / 89`, which is the count assertions below, and its three byte
+/// measures `2 002 954 / 1 848 392 / 129 437` are pinned beside the served
 /// quad.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
@@ -2547,12 +2548,12 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 152 tools, of which `INSPECTOR_TOOL_NAMES` is 88.
+    // The internal registry: 153 tools, of which `INSPECTOR_TOOL_NAMES` is 89.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        152,
+        153,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
@@ -2566,7 +2567,8 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          MO1 A4b generates set_effect_enabled, set_clip_enabled and set_clip_enabled_curve; \
          MO1 A4c generates copy_clip_attributes; \
          MO1 Part C adds plan_motion; \
-         MO2 Part A generates set_clip_blend_mode, add_adjustment_clip, add_solid_clip and set_solid_color"
+         MO2 Part A generates set_clip_blend_mode, add_adjustment_clip, add_solid_clip and set_solid_color; \
+         MO2 Part B adds preview_solo"
     );
     assert_eq!(
         operations.len(),
@@ -2601,7 +2603,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     }
     assert_eq!(
         registry.len() - operations.len(),
-        88,
+        89,
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector; \
          AU4 Part A adds no inspector; AU4 Part B adds the two planners; \
@@ -2609,7 +2611,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          AU6 §5.4 Part A and Part B add none; \
          IN1 Part A adds get_incidents and resolve_incident; \
          IN2 Part A adds propose_fix; \
-         MO1 Part C adds plan_motion"
+         MO1 Part C adds plan_motion; MO2 Part B adds preview_solo"
     );
     let spectrum = registry
         .iter()
@@ -2667,13 +2669,14 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     }
     for (before, after) in [
         ("plan_clip_fades", "plan_motion"),
-        ("plan_motion", "plan_dialogue_repair"),
+        ("plan_motion", "preview_solo"),
+        ("preview_solo", "plan_dialogue_repair"),
     ] {
         let index = registry.iter().position(|entry| entry == before).unwrap();
         assert_eq!(
             registry.get(index + 1).map(String::as_str),
             Some(after),
-            "MO1 R20: {after} is registered directly after {before}"
+            "MO1 R20 / MO2 R24: {after} is registered directly after {before}"
         );
     }
 
@@ -2693,7 +2696,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (152, 2_000_542, 1_846_842, 128_734),
+        (153, 2_002_954, 1_848_392, 129_437),
         "registry={registry_metrics:?}"
     );
 
@@ -10499,9 +10502,9 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 
 /// IN1 §6.6 and §9 clause 13, `IN1b` §6.4 rules 7–8 and §9 clause 17, and IN2
 /// §6.4 rules 12–13 and §9 clause 19: **three** registry-only capabilities, no
-/// served tool, for the **twenty-second** consecutive measurement.
+/// served tool, for the **twenty-third** consecutive measurement.
 ///
-/// The registry sextuple is `152 / 64 / 88 / 2 000 542 / 1 846 842 / 128 734`,
+/// The registry sextuple is `153 / 64 / 89 / 2 002 954 / 1 848 392 / 129 437`,
 /// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
 /// this test pins all six registry numbers and the served quad over the live
@@ -10518,9 +10521,10 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 /// to IN2 §9.1 item 33's name; every IN1 and `IN1b` assertion in it is
 /// unchanged except the two registry counts and the ceiling. MO2 R25 renames
 /// it again from `mo1_…_twenty_first_measurement`: Part A's four generated
-/// mutators are registry-only.
+/// mutators are registry-only; and MO2 Part B from `…_twenty_second_…`:
+/// `preview_solo` is registry-only too.
 #[tokio::test(flavor = "multi_thread")]
-async fn mo2_the_served_quad_does_not_move_for_the_twenty_second_measurement() {
+async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
@@ -10549,6 +10553,7 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_second_measurement() {
         "add_adjustment_clip",
         "add_solid_clip",
         "set_solid_color",
+        "preview_solo",
     ] {
         assert!(
             !tools.iter().any(|tool| tool.name == name),
@@ -10560,15 +10565,15 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_second_measurement() {
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        152,
-        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a/b/c add six mutators, MO1 Part C adds plan_motion, MO2 Part A adds four mutators"
+        153,
+        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a/b/c add six mutators, MO1 Part C adds plan_motion, MO2 Part A adds four mutators, MO2 Part B adds preview_solo"
     );
     assert_eq!(
         operations.len(),
         64,
         "MO2 Part A adds four Operation variants"
     );
-    assert_eq!(registry.len() - operations.len(), 88);
+    assert_eq!(registry.len() - operations.len(), 89);
     // MO2 R25/R30 (review 1 S1): the registry byte trio beside the counts.
     let registry_metrics = kinewright_agent::capability_tool_metrics().unwrap();
     assert_eq!(
@@ -10578,7 +10583,7 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_second_measurement() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (152, 2_000_542, 1_846_842, 128_734),
+        (153, 2_002_954, 1_848_392, 129_437),
         "registry={registry_metrics:?}"
     );
     let state = registry
@@ -10609,7 +10614,7 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_second_measurement() {
             metrics.description_bytes
         ),
         (7, 5_660, 3_510, 998),
-        "the served quad does not move for the twenty-second consecutive measurement: {metrics:?}"
+        "the served quad does not move for the twenty-third consecutive measurement: {metrics:?}"
     );
 
     // IN1 §6.2 rule 9, `IN1b` §3.11 rule 43 and IN2 §4.2 rule 11: the two
@@ -10761,5 +10766,364 @@ async fn in2b_get_incidents_returns_the_observed_name() {
         unnamed.get("subject_name").is_none(),
         "no schema change: the key is absent, not null"
     );
+    server.shutdown();
+}
+
+// ------------------------------------------------------------ MO2 R24/R25
+
+fn mo2_solo_clip(id: u64, content: kinewright_core::ClipContent, span: i64) -> Clip {
+    Clip {
+        enabled: true,
+        enabled_curve: None,
+        id: ClipId(id),
+        asset: AssetId::default(),
+        source_range: TimeCode::ZERO..TimeCode(span),
+        content,
+        timeline_start: TimeCode::ZERO,
+        effects: Vec::new(),
+        transition_in: None,
+        link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
+        speed_percent: 100,
+        audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
+    }
+}
+
+fn mo2_solo_solid(id: u64, [r, g, b]: [u8; 3], span: i64) -> Clip {
+    let color = kinewright_core::SolidColor { r, g, b };
+    mo2_solo_clip(id, kinewright_core::ClipContent::Solid(color), span)
+}
+
+/// An adjustment lifting exposure by two stops over its below-stack.
+fn mo2_solo_adjustment(id: u64, span: i64) -> Clip {
+    let mut clip = mo2_solo_clip(id, kinewright_core::ClipContent::Adjustment, span);
+    clip.effects.push(Effect {
+        id: EffectId(id),
+        name: "primary_correction".to_owned(),
+        parameters: [(
+            "exposure_milli_stops".to_owned(),
+            ParamValue::Integer(2_000),
+        )]
+        .into(),
+        keyframes: std::collections::BTreeMap::new(),
+        enabled: true,
+        enabled_curve: None,
+    });
+    clip
+}
+
+/// Push `clips` as new video tracks above whatever `document` holds.
+fn mo2_solo_stack(mut document: Document, clips: Vec<Clip>) -> Document {
+    for clip in clips {
+        let id = TrackId(document.tracks.len() as u64 + 1);
+        document.tracks.push(Track {
+            id,
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![clip],
+        });
+    }
+    document.validate().unwrap();
+    document
+}
+
+async fn mo2_solo_start(document: Document) -> (McpServer, RunningService<RoleClient, ()>) {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let server = McpServer::start(Core::spawn(document).unwrap(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    (server, client)
+}
+
+/// One strip decoded from the response's `ContentBlock::image`.
+fn mo2_solo_png(result: &CallToolResult) -> image::RgbaImage {
+    let png = result.content[1]
+        .as_image()
+        .expect("the strip image")
+        .data
+        .clone();
+    image::load_from_memory(&BASE64.decode(png).unwrap())
+        .unwrap()
+        .to_rgba8()
+}
+
+/// The strip PNG, report and serialized response all inside R25, measured
+/// on what crossed the endpoint.
+fn mo2_assert_solo_budgets(result: &CallToolResult) {
+    let report = result.structured_content.as_ref().unwrap();
+    let png = BASE64
+        .decode(&result.content[1].as_image().unwrap().data)
+        .unwrap();
+    assert!(png.len() <= 768 * 1024, "png {} B", png.len());
+    assert_eq!(report["png_bytes"], png.len());
+    assert!(report.to_string().len() <= 4 * 1024, "{report}");
+    let wire = serde_json::to_vec(result).unwrap().len();
+    assert!(wire <= 1_056 * 1024, "response {wire} B");
+}
+
+/// §13 gate 8: soloing an adjustment returns BEFORE-over-AFTER pairs over
+/// its true below-stack, with the layer above hidden, and the report names
+/// provenance, counts, hashes and inactive cells.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn adjustment_solo_returns_pair() {
+    let red = [160, 40, 40];
+    let document = mo2_solo_stack(
+        Document {
+            fps: Rational::new(30, 1).unwrap(),
+            resolution: (160, 90),
+            duration: TimeCode(12),
+            ..Document::default()
+        },
+        vec![
+            mo2_solo_solid(1, red, 12),
+            mo2_solo_adjustment(2, 12),
+            mo2_solo_solid(3, [20, 220, 20], 12),
+        ],
+    );
+    let mut hidden = document.clone();
+    hidden.tracks[2].clips[0].enabled = false;
+    let (server, client) = mo2_solo_start(document).await;
+
+    let solo = |clip: u64, extra: serde_json::Value| {
+        let mut arguments = json!({"expected_revision": 0, "clip_id": clip});
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        invoke_capability(&client, "preview_solo", arguments)
+    };
+
+    // The pair, even when `isolated` is asked for: an adjustment is always `below`.
+    let result = solo(2, json!({"samples": 16, "context": "isolated"})).await;
+    assert_eq!(result.is_error, Some(false), "{result:?}");
+    mo2_assert_solo_budgets(&result);
+    let report = result.structured_content.clone().unwrap();
+    assert_eq!(report["pairs"], true);
+    assert_eq!(report["context"], "below");
+    assert_eq!(report["layout"], "before_row_over_after_row");
+    assert_eq!(
+        (report["requested"].clone(), report["emitted"].clone()),
+        (json!(16), json!(8))
+    );
+    assert_eq!(report["degraded"], serde_json::Value::Null);
+    assert_eq!(report["cell"], json!({"width": 160, "height": 90}));
+    assert_eq!(report["provenance"]["full_resolution"], true);
+    assert!(!report["provenance"]["backend"].as_str().unwrap().is_empty());
+    let frames: Vec<i64> = report["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|sample| {
+            let hashes = sample["hashes"].as_array().unwrap();
+            assert_eq!(hashes.len(), 2, "{sample}");
+            assert_ne!(hashes[0], hashes[1], "the adjustment changes the frame");
+            sample["frame"].as_i64().unwrap()
+        })
+        .collect();
+    assert_eq!(frames, [0, 1, 3, 4, 6, 7, 9, 11], "floor(i×11/7)");
+    let strip = mo2_solo_png(&result);
+    assert_eq!(strip.dimensions(), (8 * 160, 2 * 90));
+    let before = strip.get_pixel(80, 45).0;
+    let after = strip.get_pixel(80, 90 + 45).0;
+    assert!(
+        before[0] > before[1] + 60,
+        "BEFORE is the red below-stack: {before:?}"
+    );
+    assert!(
+        after[0] > before[0] + 30,
+        "AFTER is lifted two stops: {after:?} vs {before:?}"
+    );
+    assert!(
+        strip.pixels().all(|pixel| pixel.0[1] <= pixel.0[0]),
+        "the green solid above the adjustment is hidden"
+    );
+
+    // Full resolution: one midpoint floor((12−1)/2) = 5, still a pair.
+    let full = solo(2, json!({"full_res": true})).await;
+    assert_eq!(full.is_error, Some(false), "{full:?}");
+    let report = full.structured_content.clone().unwrap();
+    assert_eq!(report["samples"][0]["frame"], 5);
+    assert_eq!(
+        (report["requested"].clone(), report["emitted"].clone()),
+        (json!(1), json!(1))
+    );
+    assert_eq!(mo2_solo_png(&full).dimensions(), (160, 180));
+
+    // A `normal` solid defaults to isolated; k = min(16, L) samples with no duplicates.
+    let single = solo(1, json!({"samples": 16})).await;
+    let report = single.structured_content.clone().unwrap();
+    assert_eq!(
+        (report["context"].clone(), report["pairs"].clone()),
+        (json!("isolated"), json!(false))
+    );
+    assert_eq!(report["emitted"], 12);
+    let frames: Vec<_> = report["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["frame"].as_i64().unwrap())
+        .collect();
+    assert_eq!(frames, (0..12).collect::<Vec<_>>());
+
+    // Typed refusals: a missing clip, a sample count outside 2..16, a stale revision.
+    let missing = solo(99, json!({})).await;
+    assert_eq!(missing.is_error, Some(true));
+    assert_eq!(
+        missing.structured_content.unwrap()["code"],
+        "solo_clip_not_visible"
+    );
+    let invalid = solo(1, json!({"samples": 1})).await;
+    assert_eq!(
+        invalid.structured_content.unwrap()["code"],
+        "solo_invalid_samples"
+    );
+    let stale = invoke_capability(
+        &client,
+        "preview_solo",
+        json!({"expected_revision": 7, "clip_id": 1}),
+    )
+    .await;
+    assert_eq!(stale.is_error, Some(true));
+    assert!(
+        stale.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("revision conflict")
+    );
+    client.cancel().await.unwrap();
+    server.shutdown();
+
+    // A disabled clip yields inactive cells with a reason, never a silent gap.
+    let (server, client) = mo2_solo_start(hidden).await;
+    let result = invoke_capability(
+        &client,
+        "preview_solo",
+        json!({"expected_revision": 0, "clip_id": 3, "samples": 2}),
+    )
+    .await;
+    assert_eq!(result.is_error, Some(false), "{result:?}");
+    let report = result.structured_content.clone().unwrap();
+    for sample in report["samples"].as_array().unwrap() {
+        assert_eq!(
+            (sample["active"].clone(), sample["reason"].clone()),
+            (json!(false), json!("clip_disabled"))
+        );
+    }
+    assert_eq!(mo2_solo_png(&result).dimensions(), (2 * 160, 90));
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// Uniform per-pixel noise, lossless managed BT.709, so the strip PNG cannot
+/// compress away.
+fn mo2_noise_media(width: u32, height: u32) -> GeneratedMedia {
+    let source = format!(
+        "nullsrc=s={width}x{height}:r=30,geq=lum='random(1)*255':cb='random(2)*255':cr='random(3)*255'"
+    );
+    let mut arguments = vec!["-f", "lavfi", "-i", &source, "-frames:v", "12", "-qp", "0"];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    GeneratedMedia::ffmpeg("mo2-solo-noise", &arguments, "mp4")
+}
+
+/// §13 gate 9: every strip stays inside R25 on the wire; noise that cannot
+/// fit degrades samples, then (for pairs) bounds, and full resolution
+/// that cannot fit refuses JSON-only.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn solo_strip_inside_byte_budget() {
+    let probe = FfmpegMediaEngine::new().unwrap();
+    for (width, height) in [(1280_u32, 720_u32), (720, 1280)] {
+        let media = mo2_noise_media(width, height);
+        let asset = probe.probe(media.path()).unwrap();
+        let portrait = height > width;
+        let base = single_clip_document(asset);
+        let span = base.duration.0;
+        let document = if portrait {
+            mo2_solo_stack(base, vec![mo2_solo_adjustment(2, span)])
+        } else {
+            base
+        };
+        let target = if portrait { 2 } else { 1 };
+        let (server, client) = mo2_solo_start(document).await;
+        let result = invoke_capability(
+            &client,
+            "preview_solo",
+            json!({"expected_revision": 0, "clip_id": target, "samples": 16}),
+        )
+        .await;
+        assert_eq!(result.is_error, Some(false), "{width}x{height}: {result:?}");
+        mo2_assert_solo_budgets(&result);
+        let report = result.structured_content.clone().unwrap();
+        assert_eq!(report["emitted"], 2, "{report}");
+        let frames: Vec<_> = report["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["frame"].as_i64().unwrap())
+            .collect();
+        assert_eq!(frames, [0, span - 1]);
+        if portrait {
+            assert_eq!(report["degraded"], "samples_then_bounds", "{report}");
+            assert_eq!(report["cell"], json!({"width": 160, "height": 284}));
+            assert_eq!(
+                report["samples"][1]["hashes"].as_array().unwrap().len(),
+                2,
+                "pairs stay together"
+            );
+        } else {
+            assert_eq!(report["degraded"], "samples", "{report}");
+            assert_eq!(report["cell"], json!({"width": 320, "height": 180}));
+        }
+
+        // Full resolution is never downsampled: noise past 768 KiB refuses, JSON-only.
+        let full = invoke_capability(
+            &client,
+            "preview_solo",
+            json!({"expected_revision": 0, "clip_id": target, "full_res": true}),
+        )
+        .await;
+        assert_eq!(full.is_error, Some(true), "{full:?}");
+        assert!(full.content.iter().all(|block| block.as_image().is_none()));
+        let body = full.structured_content.unwrap();
+        assert_eq!(
+            (body["code"].clone(), body["applied"].clone()),
+            (json!("solo_over_budget"), json!(false))
+        );
+        client.cancel().await.unwrap();
+        server.shutdown();
+    }
+
+    // Flat solids fit at 16 samples with no degradation.
+    let document = mo2_solo_stack(
+        Document {
+            fps: Rational::new(30, 1).unwrap(),
+            resolution: (1920, 1080),
+            duration: TimeCode(40),
+            ..Document::default()
+        },
+        vec![mo2_solo_solid(1, [30, 60, 90], 40)],
+    );
+    let (server, client) = mo2_solo_start(document).await;
+    let result = invoke_capability(
+        &client,
+        "preview_solo",
+        json!({"expected_revision": 0, "clip_id": 1, "samples": 16}),
+    )
+    .await;
+    mo2_assert_solo_budgets(&result);
+    let report = result.structured_content.clone().unwrap();
+    assert_eq!(
+        (report["emitted"].clone(), report["degraded"].clone()),
+        (json!(16), serde_json::Value::Null)
+    );
+    assert_eq!(mo2_solo_png(&result).dimensions(), (16 * 320, 180));
+    client.cancel().await.unwrap();
     server.shutdown();
 }

@@ -1577,6 +1577,22 @@ impl KinewrightMcp {
                 let args: MotionPlanArgs = decode_args("plan_motion", arguments)?;
                 self.motion_plan(&args)
             }
+            "preview_solo" => {
+                let args: crate::solo::SoloArgs = decode_args("preview_solo", arguments)?;
+                let (revision, document) = self.snapshot()?;
+                if args.expected_revision != revision {
+                    return Ok(revision_conflict_text(args.expected_revision, revision));
+                }
+                Ok(
+                    match crate::solo::preview_solo(&*self.analysis, revision, &document, &args) {
+                        Ok(strip) => strip.to_result(),
+                        Err(error) => error_structured(
+                            format!("preview_solo rejected: {error}"),
+                            error.body(),
+                        ),
+                    },
+                )
+            }
             "plan_room_tone_fill" => {
                 let args: RoomToneFillPlanArgs = decode_args("plan_room_tone_fill", arguments)?;
                 self.plan_room_tone_fill(&args)
@@ -13707,6 +13723,12 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "preview_solo",
+            "Render one video-track clip solo as a PNG strip of sampled frames plus a sampling report, so its own contribution is visible. context isolated draws it alone over black, below draws it over its true below-stack with above-layers hidden; default isolated for normal blend, below otherwise, and adjustments are always below as BEFORE-over-AFTER pairs. samples 2..16 (default 8) spread evenly over the span; full_res renders one midpoint at working resolution instead. The report names frames, cell size, backend provenance, per-sample hashes and disabled frames as inactive cells. Budgets degrade to 2 samples then half-size thumbnails; otherwise solo_over_budget, JSON-only. Read-only and revision-gated.",
+            schema_object::<crate::solo::SoloArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "plan_dialogue_repair",
             "Build a measured denoise, hum-removal and de-click chain at the head of the selected audio tracks' bus and REFUSE it, naming both numbers, when the measured signal-to-noise gain falls under minimum_snr_gain_db_hundredths - the floor is a 10th-percentile short window rather than a detected silence, so continuous speech reads a higher floor and a lower gain than material carrying real room tone. The noise profile is learned over the longest silence span on those tracks, so a project whose silence analysis has not finished is refused with a different sentence from one whose longest silence is too short to learn over. An existing bus is reused with its own effects preserved and the repair prefix inserted at the head; a chain that would exceed the 20 ms lookahead budget is refused by name before it can fail inside a plan; replace must be true to rebuild a repair prefix that is already there. Returns an opaque prepared_edit_plan preview; the timeline is unchanged until commit_edit_plan.",
             schema_object::<DialogueRepairPlanArgs>(),
@@ -23753,7 +23775,7 @@ mod tests {
         }
         // IN1 §6.6: get_incidents and resolve_incident join the registry;
         // IN2 §4.1 rule 2 adds propose_fix beside them.
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 89);
 
         for name in [
             "plan_primary_correction",
@@ -27688,7 +27710,7 @@ mod tests {
             }
         }
 
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 89);
         // IN1 §6.1 rule 3: nothing the dispatcher accepted before is now
         // refused, and no generated operation tool became invocable.
         let stranded = crate::schema::INSPECTOR_TOOL_NAMES
@@ -27729,6 +27751,73 @@ mod tests {
         assert_eq!(annotations.destructive_hint, Some(false));
         assert_eq!(annotations.idempotent_hint, Some(false));
         assert_eq!(annotations.open_world_hint, Some(false));
+    }
+
+    /// MO2 R24/R25: `preview_solo` is registry-only and costs its measured
+    /// row — `2 412 / 1 550 / 703`, Part B's whole `(1,0,1)` move — with the
+    /// load-bearing clause first inside the 1 KiB description budget and the
+    /// five R24 arguments as the whole, closed input schema.
+    #[test]
+    fn mo2_preview_solo_costs_its_measured_row() {
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        let tool = registry
+            .iter()
+            .find(|tool| tool.name == "preview_solo")
+            .expect("preview_solo must be registered");
+        let metrics = ToolSurfaceMetrics::measure(std::slice::from_ref(tool));
+        assert_eq!(
+            (
+                metrics.serialized_bytes,
+                metrics.input_schema_bytes,
+                metrics.description_bytes
+            ),
+            (2_412, 1_550, 703),
+            "{metrics:?}"
+        );
+        let description = tool.description.as_deref().unwrap();
+        assert!(description.len() <= 1_024);
+        assert!(description.starts_with("Render one video-track clip solo as a PNG strip"));
+
+        let schema = serde_json::to_value(tool.input_schema.as_ref()).unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+        assert_eq!(
+            properties
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "clip_id",
+                "context",
+                "expected_revision",
+                "full_res",
+                "samples"
+            ]),
+            "{schema}"
+        );
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["expected_revision", "clip_id"])
+        );
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert_eq!(properties["samples"]["default"], serde_json::json!(8));
+        assert_eq!(properties["full_res"]["default"], serde_json::json!(false));
+        let context = schema.to_string();
+        assert!(
+            context.contains("\"isolated\"") && context.contains("\"below\""),
+            "{schema}"
+        );
+
+        let names = crate::schema::INSPECTOR_TOOL_NAMES;
+        let motion = names
+            .iter()
+            .position(|name| *name == "plan_motion")
+            .unwrap();
+        assert_eq!(names.get(motion + 1), Some(&"preview_solo"));
+        assert!(is_invocable_capability("preview_solo"));
+        assert!(!crate::runtime::COMPACT_TOOL_NAMES.contains(&"preview_solo"));
+        let annotations = tool.annotations.as_ref().unwrap();
+        assert_eq!(annotations.read_only_hint, Some(true));
+        assert_eq!(annotations.destructive_hint, Some(false));
     }
 
     /// MO1 R21: `plan_motion` is registry-only and costs its measured row —
@@ -28764,6 +28853,16 @@ mod tests {
     ///   of description). The arithmetic: 2 000 521 + 21 = **2 000 542**,
     ///   input schema unchanged at **1 846 842**, 128 713 + 21 =
     ///   **128 734**. Counts `152 / 64 / 88`; served quad unchanged.
+    ///
+    /// - **MO2 Part B (R24 `preview_solo`): +2 412 / +1 550 / +703.** One
+    ///   registry-only inspector, pinned in
+    ///   `mo2_preview_solo_costs_its_measured_row`: +1 550 B of generated
+    ///   `SoloArgs` input schema, +703 B of description, +159 B of fixed row
+    ///   cost (147 B plus the 12 bytes of `preview_solo`). The arithmetic:
+    ///   2 000 542 + 2 412 = **2 002 954**, 1 846 842 + 1 550 =
+    ///   **1 848 392**, 128 734 + 703 = **129 437**. Counts `153 / 64 / 89` —
+    ///   Part B's `(1,0,1)`. Served quad unchanged (`7 / 5 660 / 3 510 /
+    ///   998`) — the twenty-third consecutive measurement.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28789,15 +28888,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (2_000_542, 5_660),
+            (2_002_954, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_846_842,
+            registry_metrics.input_schema_bytes, 1_848_392,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 128_734,
+            registry_metrics.description_bytes, 129_437,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -34722,11 +34821,12 @@ mod tests {
     /// touch. MO2 A3 (R8) generates four more mutators
     /// (`set_clip_blend_mode`, `add_adjustment_clip`, `add_solid_clip`,
     /// `set_solid_color`), registry-only the same way: counts `152 / 64 / 88`.
+    /// MO2 Part B (R24) adds one inspector (`preview_solo`): `153 / 64 / 89`.
     #[test]
     fn in2_the_registry_grows_by_one_capability() {
         let registry = KinewrightMcp::capability_tools().unwrap();
-        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 152);
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
+        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 153);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 89);
         assert_eq!(operation_tools().unwrap().len(), 64);
         let generated = operation_tools().unwrap();
         for name in [
