@@ -2583,3 +2583,62 @@ fn j2_chain_grown_past_the_bound_after_resolution_changes_nothing() {
         "no raw-path lock object"
     );
 }
+
+/// J3 (race S2): a `current → v3` link is re-pointed to v4 under a live
+/// headless owner A, and B then owns v4 directly. A's `verify` re-derives
+/// the identity of the spelling it claimed through, so A's next save
+/// refuses `LockLost` and nothing lands in v4 — at 9a14698 `verify` only
+/// checked the lock inode, so both owners were verified and A's write
+/// landed in B's file.
+#[cfg(unix)]
+#[test]
+fn j3_link_retargeted_after_acquire_refuses_the_next_save() {
+    let fx = fixture("j3-retarget");
+    let v4 = fx.dir.path("v4.kinewright");
+    fs::write(&v4, b"{\"v\":4}").unwrap();
+    let current = fx.dir.path("current.kinewright");
+    std::os::unix::fs::symlink(&fx.project, &current).unwrap();
+    let a = claim(&current, &fx.recovery, "http://a").expect("A owns v3 via current");
+    a.handle.verify().expect("A verifies before the retarget");
+    let staged = fx.dir.path("staged");
+    std::os::unix::fs::symlink(&v4, &staged).unwrap();
+    fs::rename(&staged, &current).unwrap();
+    let b = claim(&v4, &fx.recovery, "http://b").expect("B owns v4");
+    let log = std::sync::Arc::new(std::sync::RwLock::new(
+        kinewright_core::IncidentLog::with_start(
+            std::time::Instant::now(),
+            Some(std::time::SystemTime::now()),
+        ),
+    ));
+    let mut session = SidecarSession::load(
+        &SidecarMode::Load {
+            project_digest: String::new(),
+        },
+        Some(&current),
+        log,
+        kinewright_core::TimelineRevision::default(),
+        None,
+        None,
+    )
+    .session;
+    let saved = save_headless(
+        &kinewright_core::Document::default(),
+        &current,
+        None,
+        &mut session,
+        "",
+        kinewright_core::TimelineRevision::default(),
+        &fx.recovery,
+        Some(&a.handle),
+    );
+    assert!(
+        matches!(saved, Err(ProjectSaveError::LockLost { .. })),
+        "A's save through the retargeted link refuses LockLost"
+    );
+    assert_eq!(fs::read(&v4).unwrap(), b"{\"v\":4}", "nothing lands in v4");
+    b.handle
+        .verify()
+        .expect("B, the real owner of v4, still verifies");
+    b.handle.release().unwrap();
+    a.handle.release().unwrap();
+}

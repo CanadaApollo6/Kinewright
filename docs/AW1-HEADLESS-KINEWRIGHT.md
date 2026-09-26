@@ -102,7 +102,15 @@ changes.
   is hand-deleted anyway (Unix), the next claimant B owns a new object and
   its `lock_reclaimed` warning names the still-LIVE owner A; both hold a
   flock until A's next save or re-publish, whose `verify` refuses
-  `LockLost` (race N-l). Fix round 3, H7: the Unix lock-object open adds
+  `LockLost` (race N-l). Fix round 4, J3: on both OSes `verify` also
+  re-derives the canonical identity of the spelling the handle claimed
+  through and refuses `LockLost` when it no longer equals the claimed
+  identity — a link re-pointed after the acquire (`current` → v4) would
+  otherwise send a verified owner's writes into a file another owner
+  holds; a declared Save-As transfer re-establishes the claim first. A
+  claim made through a relative spelling therefore also refuses after a
+  cwd change, and one made through a dangling alias refuses once a save
+  has replaced the alias with a regular file (AF2 note). Fix round 3, H7: the Unix lock-object open adds
   `O_NOFOLLOW`, so a link planted after the symlink check is never
   followed (N-b); discovery and journal reads open `O_NONBLOCK` on Unix
   and read only an fd that `fstat`s as a regular file, so a FIFO swapped

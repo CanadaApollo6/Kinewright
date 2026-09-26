@@ -259,52 +259,44 @@ pub struct LockfileHandle {
     /// This handle's claim.
     pub claim: LockfileClaim,
     file: File,
+    /// The spelling claimed through and the identity it resolved to (J3).
+    spelling: PathBuf,
+    identity: PathBuf,
 }
 
 impl LockfileHandle {
-    fn held(path: PathBuf, discovery: PathBuf, claim: LockfileClaim, file: File) -> Self {
-        Self {
-            path,
-            discovery,
-            claim,
-            file,
-        }
-    }
-
-    /// Confirm the handle's fd still names the lock object (G9): Unix
-    /// compares the fd's `(dev, ino)` with the path's; a mismatch — or a
-    /// vanished path — is `LockLost`: the object was deleted under this
-    /// live owner, so no write may follow. Call before every headless save
-    /// and every discovery re-publish.
+    /// Confirm the handle still owns what it claimed, before every headless
+    /// save and every discovery re-publish; `LockLost` means no write may
+    /// follow. J3 (both OSes): the claimed spelling must still resolve to
+    /// the claimed identity — a link re-pointed after the acquire (say
+    /// `current` → v4) would send writes to a file this lock does not
+    /// cover (a declared Save-As transfer re-establishes the claim first).
+    /// G9: the fd must still name the lock object — Unix compares the fd's
+    /// `(dev, ino)` with the path's (a vanished or replaced object was
+    /// deleted under this live owner); elsewhere the object cannot be
+    /// swapped, as every handle opens without `FILE_SHARE_DELETE` (H2).
     /// # Errors
-    /// Returns `LockLost` when the object no longer names this handle.
-    #[cfg(unix)]
+    /// Returns `LockLost` when the spelling or the object moved.
     pub fn verify(&self) -> Result<(), LockfileError> {
-        use std::os::unix::fs::MetadataExt as _;
-        let live = match (self.file.metadata(), fs::metadata(&self.path)) {
-            (Ok(opened), Ok(current)) => {
-                opened.dev() == current.dev() && opened.ino() == current.ino()
+        let same = crate::project::canonical_project_identity(&self.spelling)
+            .is_ok_and(|now| now == self.identity);
+        #[cfg(unix)]
+        let same = same && {
+            use std::os::unix::fs::MetadataExt as _;
+            match (self.file.metadata(), fs::metadata(&self.path)) {
+                (Ok(opened), Ok(current)) => {
+                    opened.dev() == current.dev() && opened.ino() == current.ino()
+                }
+                _ => false,
             }
-            _ => false,
         };
-        if live {
+        if same {
             Ok(())
         } else {
             Err(LockfileError::LockLost {
                 path: self.path.clone(),
             })
         }
-    }
-
-    /// Non-Unix `verify` always passes: every handle on the object opens
-    /// without `FILE_SHARE_DELETE` (H2), so no process can rename or
-    /// delete it while this handle lives — it cannot be swapped under a
-    /// live owner.
-    /// # Errors
-    /// Returns nothing: the non-Unix object cannot be swapped.
-    #[cfg(not(unix))]
-    pub fn verify(&self) -> Result<(), LockfileError> {
-        Ok(())
     }
 
     /// Release: remove the discovery while holding the flock, then drop —
@@ -769,6 +761,7 @@ pub fn acquire_project_lock(
 /// fast one; production uses the §5 constants).
 /// # Errors
 /// As [`acquire_project_lock`].
+#[allow(clippy::too_many_lines)] // One protocol, read top to bottom (AF1).
 pub fn acquire_project_lock_with_policy(
     project_path: &Path,
     mode: LockMode,
@@ -895,7 +888,14 @@ pub fn acquire_project_lock_with_policy(
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_publish_before_return"); // RACE-REVIEW
         return Ok(AcquiredLock {
-            handle: LockfileHandle::held(lock_path, discovery_path, claim, guard.release()),
+            handle: LockfileHandle {
+                path: lock_path,
+                discovery: discovery_path,
+                claim,
+                file: guard.release(),
+                spelling: project_path.to_path_buf(),
+                identity,
+            },
             reclaimed: previous,
             reclaimed_unreadable: unreadable,
         });
