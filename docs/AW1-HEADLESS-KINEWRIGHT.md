@@ -131,7 +131,12 @@ changes.
   (a longer chain or a cycle) or an unreadable link is a typed
   `ProjectIdentityError`, never a fallback: the lock refuses with
   `LockfileError::Identity`, the journal scan fails closed, and a journal
-  header naming such a path never claims. Notes:
+  header naming such a path never claims. Fix round 4, J2: an acquire
+  resolves the identity exactly ONCE and derives the claim, lock,
+  discovery and pending-journal scan from that value, so a link
+  re-pointed mid-acquire cannot split the lock from the scan; an
+  identity that names no lock object is `Identity` — no raw-path
+  `<spelling>.kinewright.lock` fallback anywhere. Notes:
   `write_file_atomic` replaces a dangling PROJECT symlink with a regular
   file (pre-existing, unchanged); hard links are a known limitation —
   two hard links to one file hold distinct identities and can
@@ -227,7 +232,8 @@ changes.
   method for every later stage. Fix round 3 (review-driven hardening:
   typed identity refusal, Windows share mode, streaming header parse,
   race nits) — ceiling 1,900; the growth is error handling and docs, not
-  scope.
+  scope. Closing round 4 — single-resolution identity, verify re-check,
+  Windows retry codes — ceiling 1,950.
 - S2-D1 (deferred, not fixed): an unloaded session's NON-EMPTY flush
   still replaces an occupied stem — pre-existing IN2B §2 rule-7
   behaviour, kept deliberately. A changed project save pairs (AF6); a

@@ -281,7 +281,18 @@ pub fn pending_journal_for_project(
     project_path: &Path,
 ) -> Result<Option<PathBuf>, io::Error> {
     let identity = canonical_project_identity(project_path).map_err(io::Error::other)?;
-    let base = journal_file_name(project_path);
+    pending_journal_for_identity(recovery_dir, project_path, &identity)
+}
+
+/// [`pending_journal_for_project`] for an identity the caller resolved
+/// once (J2: the acquire's single resolution); `project_path` only names
+/// the legacy raw-spelling journal.
+pub(crate) fn pending_journal_for_identity(
+    recovery_dir: &Path,
+    project_path: &Path,
+    identity: &Path,
+) -> Result<Option<PathBuf>, io::Error> {
+    let base = journal_name_for(identity);
     let legacy = legacy_journal_file_name(project_path);
     // Windows only: the ordinary spelling main hashed, recovered from a
     // verbatim identity (unit-pinned on every OS via `ordinary_spelling`).
@@ -330,7 +341,7 @@ pub fn pending_journal_for_project(
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
-        if kind.is_file() && journal_header_names(&journal, &identity)? {
+        if kind.is_file() && journal_header_names(&journal, identity)? {
             pending.push(journal);
         }
     }

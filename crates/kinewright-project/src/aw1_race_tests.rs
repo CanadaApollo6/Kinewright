@@ -1685,7 +1685,7 @@ fn journal_scan_bounds_unrelated_reads() {
         }
     }
     assert_eq!(
-        pending_journal_for_project(&fx.recovery, &fx.project).unwrap(),
+        crate::recovery::pending_journal_for_project(&fx.recovery, &fx.project).unwrap(),
         None,
         "the unrelated journal never pends"
     );
@@ -2476,4 +2476,110 @@ fn h5_link_bound_agrees_with_the_kernel() {
             );
         }
     }
+}
+
+// ───────── Round-3 race review, folded (fix round 4): fixed behaviour ─────────
+//
+// From rereview3-race-scenarios/aw1_race3_tests.rs (Opus, 2026-09-25),
+// rewritten to assert the fixed behaviour.
+
+/// J2 (race S1, split identity): the claimant pauses holding the flock,
+/// before its scan, and the alias it claimed through is re-pointed from T
+/// to U. The scan uses the identity the acquire resolved once (T), so T's
+/// name-matched pending journal refuses — at 9a14698 the scan re-resolved
+/// to U and the claimant owned T's lock past T's journal.
+#[cfg(unix)]
+#[test]
+fn j2_alias_repointed_before_the_scan_still_refuses_its_journal() {
+    let fx = fixture("j2-split-identity");
+    let pending = plant_journal(&fx, "base");
+    let other = fx.dir.path("other.kinewright");
+    fs::write(&other, b"{}").unwrap();
+    let alias = fx.dir.path("alias.kinewright");
+    std::os::unix::fs::symlink(&fx.project, &alias).unwrap();
+    let signals = fx.dir.path("owner");
+    let mut owner = spawn(
+        "hold",
+        &alias,
+        &fx.recovery,
+        &signals,
+        Opts {
+            hook: Some("after_flock_before_scan"),
+            ..Opts::default()
+        },
+    );
+    wait_for(&signals.join("paused"));
+    let staged = fx.dir.path("staged");
+    std::os::unix::fs::symlink(&other, &staged).unwrap();
+    fs::rename(&staged, &alias).unwrap();
+    fs::write(signals.join("resume"), "").unwrap();
+    let took = wait_either(&signals.join("owned"), &signals.join("error"));
+    let error = fs::read_to_string(signals.join("error")).unwrap_or_default();
+    if took {
+        fs::write(signals.join("release"), "").unwrap();
+    }
+    owner.0.wait().unwrap();
+    assert!(
+        !took && error.starts_with("PendingRecovery"),
+        "T's pending journal refuses the claim made as T: {error}"
+    );
+    assert!(pending.exists(), "the pending journal is untouched");
+}
+
+/// J2 (race S1, raw fallback): the alias becomes a 41-link chain after
+/// the acquire resolved it. Nothing re-resolves, so the claimant owns
+/// T's lock (a probe of T contends) and no raw-path
+/// `alias.kinewright.kinewright.lock` appears — at 9a14698 the scan's
+/// re-resolution failed (`RecoveryLookup`) and a later resolution could
+/// fall back to the raw-path lock object.
+#[cfg(unix)]
+#[test]
+fn j2_chain_grown_past_the_bound_after_resolution_changes_nothing() {
+    let fx = fixture("j2-grown-chain");
+    let alias = fx.dir.path("alias.kinewright");
+    std::os::unix::fs::symlink(&fx.project, &alias).unwrap();
+    let signals = fx.dir.path("owner");
+    let mut owner = spawn(
+        "hold",
+        &alias,
+        &fx.recovery,
+        &signals,
+        Opts {
+            hook: Some("before_lock_open"),
+            ..Opts::default()
+        },
+    );
+    wait_for(&signals.join("paused"));
+    let chain = fx.dir.path("chain");
+    fs::create_dir(&chain).unwrap();
+    for index in 0..41 {
+        let to = if index == 40 {
+            fx.project.clone()
+        } else {
+            chain.join(format!("l{}", index + 1))
+        };
+        std::os::unix::fs::symlink(to, chain.join(format!("l{index}"))).unwrap();
+    }
+    let staged = fx.dir.path("staged");
+    std::os::unix::fs::symlink(chain.join("l0"), &staged).unwrap();
+    fs::rename(&staged, &alias).unwrap();
+    fs::write(signals.join("resume"), "").unwrap();
+    let took = wait_either(&signals.join("owned"), &signals.join("error"));
+    let error = fs::read_to_string(signals.join("error")).unwrap_or_default();
+    let probe = claim(&fx.project, &fx.recovery, "http://probe-t");
+    let probe_verdict = format!("{:?}", probe.as_ref().map(|_| ()));
+    drop(probe);
+    if took {
+        fs::write(signals.join("release"), "").unwrap();
+    }
+    owner.0.wait().unwrap();
+    assert!(took, "the claim made as T owns T: {error}");
+    assert!(
+        probe_verdict.contains("Contention"),
+        "T's lock is the one held: {probe_verdict}"
+    );
+    assert!(
+        !fx.dir.path("alias.kinewright.kinewright.lock").exists(),
+        "no raw-path lock object"
+    );
 }

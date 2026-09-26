@@ -18,7 +18,7 @@ use std::{
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 
-use crate::recovery::{fnv1a_64, open_regular, pending_journal_for_project};
+use crate::recovery::{fnv1a_64, open_regular, pending_journal_for_identity};
 
 /// The lockfile suffix: `<stem>.kinewright.lock` beside the project.
 pub const LOCKFILE_SUFFIX: &str = "kinewright.lock";
@@ -89,8 +89,12 @@ pub struct LockfileClaim {
 /// without a path or an identity (H5).
 #[must_use]
 pub fn lockfile_path_for_project(project_path: Option<&Path>) -> Option<PathBuf> {
-    let path = project_path?;
-    let identity = crate::project::canonical_project_identity(path).ok()?;
+    let identity = crate::project::canonical_project_identity(project_path?).ok()?;
+    lockfile_path_for_identity(&identity)
+}
+
+/// The lock object beside an already-resolved identity (J2).
+fn lockfile_path_for_identity(identity: &Path) -> Option<PathBuf> {
     let stem = identity.file_stem()?;
     let mut name = stem.to_os_string();
     name.push(".");
@@ -697,17 +701,19 @@ fn fd_matches_path(file: &File, lock_path: &Path) -> bool {
         && opened.ino() == current.ino()
 }
 
+/// The claim, lock and discovery paths of one resolved identity (J2): no
+/// re-resolution and no raw-path fallback — an identity naming no lock
+/// object refuses typed.
 fn build_claim(
-    project: &Path,
+    identity: &Path,
     mode: LockMode,
     endpoint: &str,
     reclaimed_from: Option<ReclaimedOwner>,
 ) -> Result<(PathBuf, PathBuf, LockfileClaim), LockfileError> {
-    let canonical = crate::project::canonical_project_identity(project)
-        .map_err(|error| LockfileError::Identity(error.to_string()))?;
-    let canonical_text = canonical.to_string_lossy().into_owned();
-    let lock_path = lockfile_path_for_project(Some(project))
-        .unwrap_or_else(|| PathBuf::from(format!("{}.{LOCKFILE_SUFFIX}", project.display())));
+    let canonical_text = identity.to_string_lossy().into_owned();
+    let lock_path = lockfile_path_for_identity(identity).ok_or_else(|| {
+        LockfileError::Identity(format!("{} names no lock object", identity.display()))
+    })?;
     let discovery_path = {
         let mut name = lock_path.as_os_str().to_owned();
         name.push(".json");
@@ -771,7 +777,12 @@ pub fn acquire_project_lock_with_policy(
     attempts: u32,
     retry_delay: Duration,
 ) -> Result<AcquiredLock, LockfileError> {
-    let (lock_path, discovery_path, mut claim) = build_claim(project_path, mode, endpoint, None)?;
+    // J2: the identity resolves exactly once; claim, lock, discovery and
+    // the pending-journal scan all derive from it, so a link re-pointed
+    // mid-acquire can never split the lock from the scan.
+    let identity = crate::project::canonical_project_identity(project_path)
+        .map_err(|error| LockfileError::Identity(error.to_string()))?;
+    let (lock_path, discovery_path, mut claim) = build_claim(&identity, mode, endpoint, None)?;
     let attempts = attempts.max(1);
     for attempt in 1..=attempts {
         let last = attempt == attempts;
@@ -857,7 +868,7 @@ pub fn acquire_project_lock_with_policy(
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_flock_before_scan"); // RACE-REVIEW
         // Holding the flock: pending recovery (or lookup failure) refuses first.
-        match pending_journal_for_project(recovery_dir, project_path) {
+        match pending_journal_for_identity(recovery_dir, project_path, &identity) {
             Ok(Some(journal)) => {
                 return Err(LockfileError::PendingRecovery { journal });
             }
@@ -2232,6 +2243,17 @@ mod tests {
                 .expect("the claim builds");
             assert!(write_discovery_with_rename(&discovery, &claim, Some(raw_temp)).is_err());
         }
+    }
+
+    /// J2: an identity that names no lock object refuses typed — never a
+    /// raw-path `<spelling>.kinewright.lock` fallback.
+    #[test]
+    fn j2_an_identity_naming_no_lock_refuses_typed() {
+        let built = build_claim(Path::new("/"), LockMode::Headless, "http://x", None);
+        assert!(
+            matches!(built, Err(LockfileError::Identity(_))),
+            "no raw fallback: {built:?}"
+        );
     }
 
     /// H7 N-g: an empty (or bare-dot) hostname is `unknown` — a stale
