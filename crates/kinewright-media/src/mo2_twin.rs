@@ -37,7 +37,7 @@ struct Texture {
     texels: Vec<Rgba>,
 }
 
-/// ME6: bilinear weights exact (`None`), or quantized to 2⁻⁸ per axis with
+/// ME9: bilinear weights exact (`None`), or quantized to 2⁻⁸ per axis with
 /// floor (`false`) or ceil (`true`), the corners of the box containing any
 /// 8-bit sub-texel rounding a conformant adapter may apply.
 type Subtexel = Option<[bool; 2]>;
@@ -267,7 +267,7 @@ fn legacy(p: &LayerParams, linear: [f32; 3], cube: Option<&CubeLut>) -> [f32; 3]
 /// Shade one fragment: straight working RGB and processed alpha.
 ///
 /// `pixel` is the output pixel and `extent` the raster size: R21 coverage is
-/// decided exactly, `(i + 0.5) / n` against the edge in f64 (ME5).
+/// decided exactly, `(i + 0.5) / n` against the edge in f64 (ME8).
 fn shade(
     p: &LayerParams,
     cube: Option<&CubeLut>,
@@ -354,7 +354,7 @@ pub(crate) fn render_working<F: CompositorInput>(
     render_sampled(resolution, layers, library, None)
 }
 
-/// ME6: per value, the largest departure from the exact twin over the four
+/// ME9: per value, the largest departure from the exact twin over the four
 /// 8-bit sub-texel weight corners. Zero wherever nothing is filtered between
 /// distinct texels, so it widens R27 only on resampled pixels.
 pub(crate) fn subtexel_envelope<F: CompositorInput>(

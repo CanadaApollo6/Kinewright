@@ -48,7 +48,7 @@
   twin reproduces portably. That path is fixture-only (production never
   composites 8-bit textures). With f16 inputs, GPU ≡ twin within 5e-4 on
   all 13 cases.
-- ME4 → §3 R10 (B1 fix round 1, review-1 B1 / review-2 B2 + S1): R10's
+- ME7 → §3 R10 (B1 fix round 1, review-1 B1 / review-2 B2 + S1): R10's
   checked set is every *special* layer — non-`Normal` blends **and every
   adjustment, `Normal` included** (selector word 8: a `Normal` adjustment
   validated against its snapshot; under Push its covered pixels' backdrop
@@ -56,9 +56,13 @@
   below value, the blend result and alpha must be finite, tested on the
   bits before `min`/`max` can erase them; magnitude is checked only on the
   value the target stores (`α·B + (1−α)·D`), so `Add(40000,40000)` at
-  α=0.25 stores 49,984 instead of refusing. `Normal` pixel layers stay
-  unchecked (the CC3 overflow contract and R12's untouched fast path).
-- ME5 → §4 R14 / §6 R21 (B1 fix round 1, review-2 B1 + S2): no NDC
+  α=0.25 stores 49,984 instead of refusing. **Scope (lead ruling N15.3):**
+  `Normal` *pixel* layers stay unchecked in MO2. Three things rule it: the
+  CC3 overflow contract (`cc3_boundary_controls_…overflows_to_infinity`),
+  R12's untouched all-`Normal` fast path, and CC8 R35. Review-2's
+  `(Normal, +inf)` pair-lanes case was therefore ruled out, not dropped
+  silently.
+- ME8 → §4 R14 / §6 R21 (B1 fix round 1, review-2 B1 + S2): no NDC
   varying. The GPU decides coverage on the exact fragment position `i + ½`
   against an edge the host moves into output pixels, rounded up to the
   next pixel centre (`⌈e·n − ½⌉ + ½`), and the twin compares `(i + ½) <
@@ -70,7 +74,7 @@
   isolated down Push/Slide mismatch). The crop now tests uv clamped to
   [0, 1]. Pinned by the odd/even transition grid and the exact-centre
   probe (M22/M25 and both fixes' reversals killed).
-- ME6 → §9 R27 (B1 fix round 1, Windows CI run 36222189672, WARP): a
+- ME9 → §9 R27 (B1 fix round 1, Windows CI run 36222189672, WARP): a
   GPU≡twin working value may also differ by a **derived sub-texel
   envelope**. D3D requires only 8 bits of sub-texel filter precision
   (Vulkan's `subTexelPrecisionBits`; lavapipe and NVIDIA report 8). The
@@ -364,7 +368,7 @@ bytes asserted by an exact layout/size test: `blend_mode` selector (0 =
 `Normal`, accumulator sample under guard) plus transition-coverage words
 (edge, axis, on) shared by wipe/slide/push; `Push`/`Slide` offsets fold
 host-side into the offset arms; output-space coverage uses the fragment's
-pixel position (ME5). One pipeline, one bind-group
+pixel position (ME8). One pipeline, one bind-group
 layout. Budget one additional writable storage binding for per-layer
 validity flags: three sampled textures, two samplers, one uniform, two
 storage buffers. Identity is recovered from the layer-to-clip mapping; the
@@ -570,7 +574,7 @@ differentials and contract tests; no SHA-256 frame pins (N4 G5). Pinned
 tolerances per domain (B8): unit-domain working-linear max abs ≤ 1e-3/
 channel; over-range relative ≤ 2^-10 and ≤ 4 f16 ULP; monitor bytes max ≤
 2 codes, p99 ≤ 1, mean ≤ 0.25 (the CC1 `abs_code_diff_rgb` method).
-Resampled GPU≡twin values add the ME6 sub-texel envelope. R27's tolerances are MO2-specific; the future CC8 column additionally
+Resampled GPU≡twin values add the ME9 sub-texel envelope. R27's tolerances are MO2-specific; the future CC8 column additionally
 satisfies PB1–PB4. Fixtures are production-flavoured:
 PiP-over-presenter (`Normal`), `Screen` light leak, `Multiply` callout,
 adjustment look, solid title card, push/slide/wipe midpoints, and the §3

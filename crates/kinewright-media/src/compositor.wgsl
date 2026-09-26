@@ -941,7 +941,7 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if params.fade_mix > 0.0 {
         alpha = 1.0;
     }
-    // MO2 ME5: a rasterized centre on the quad edge interpolates uv a few
+    // MO2 ME8: a rasterized centre on the quad edge interpolates uv a few
     // ulps outside [0, 1]; the crop tests the uv the rasterizer meant.
     let crop_uv = clamp(input.uv, vec2<f32>(0.0), vec2<f32>(1.0));
     if crop_uv.x < params.crop_left
@@ -972,7 +972,7 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         alpha *= mask_alpha;
     }
     // MO2 R21: output-space coverage, alpha-multiplied, at the exact pixel
-    // centre against the host's pixel-centre edge (ME5).
+    // centre against the host's pixel-centre edge (ME8).
     if params.coverage_on > 0.5 {
         var coord = input.position.x;
         if params.coverage_axis > 0.5 {
