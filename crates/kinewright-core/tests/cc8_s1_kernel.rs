@@ -2263,9 +2263,11 @@ fn primary_contrast_f32(x: f32, contrast: f32, pivot: f32) -> f32 {
 }
 
 /// CE10 slope-bound acceptance (actual-vs-reference, like the PB helpers):
-/// a grade of slope `slope` after one f16 source store errs, in working
-/// units, by at most `slope` × PB1's store bound (0.5 ULP of the SOURCE
-/// triplet's max |channel|, same 1e-6 slack). Error and norm are computed
+/// the one f16 source store's error, propagated through exact grade math of
+/// absolute slope `slope`, is at most `slope` × PB1's store bound (0.5 ULP of
+/// the SOURCE triplet's max |channel|, same 1e-6 slack). f32 grade
+/// evaluation and later stores are NOT covered; callers use sources where
+/// those are negligible (the named controls). Error and norm are computed
 /// inside; the caller passes values only.
 fn ce10_graded_ok(actual: [f64; 3], reference: [f64; 3], source: [f64; 3], slope: f64) -> bool {
     err_inf(actual, reference) <= slope * 0.5 * f16_ulp_of(max_abs_3(source)) * (1.0 + 1e-6)

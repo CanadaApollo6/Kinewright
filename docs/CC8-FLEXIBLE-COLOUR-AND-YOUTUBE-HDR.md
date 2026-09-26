@@ -788,18 +788,22 @@ codes; W=100 puts the 10 000-nit input at working 46.4159.
   in-pass in f32, and f32 readback encoding. The Hdr2020 lanes (S3) must keep
   that topology: f16 stores only at the source and composite boundaries of a
   layer, a layer's grade nodes fused in one pass, no foreign-space intermediate
-  texture, pinned by an S3 test. (Sixteen serial non-identity 2020 stores measured
-  up to 4 SDR / 3 HLG codes; fusing them passes.) f32 working storage stays
-  rejected (memory).
+  texture, pinned by an S3 test. (Two repeated-LUT witnesses with one source
+  store plus 16 non-identity 2020 node stores fail CE7 by 4 SDR / 3 HLG codes
+  and pass when fused; this is a witness, not a stress maximum — the same LUT's
+  16-node scan reaches 8 raw HLG codes, mostly accepted by CE7's display prong.)
+  f32 working storage stays rejected (memory).
   CE10 (S1 closing verification 3, PB4 scope): PB1–PB4 bound the kernel plus the
   declared storage topology on the §14/R35 anchor set (identity nodes and the
   fused grade stack); they are not a guarantee for arbitrary grades. A grade whose
   slope exceeds 1 amplifies the working-storage quantum exactly as it amplifies the
   source's own quantization: 2× contrast about a pivot of 1 maps a value f16-rounded
   from 0.5001 to 0.5 onto 0 instead of 0.06 nits (P = W = 400; 100 % of that
-  near-black channel, 10 SDR / 21 HLG codes). In working units the added error is
-  bounded by the grade's slope times PB1's storage error; the suite keeps this
-  case as a control.
+  near-black channel, 10 SDR / 21 HLG codes). In working units, the source-store
+  error propagated through exact grade math is bounded by the grade's absolute
+  slope (for multi-channel grades, its Jacobian ∞-norm) times PB1's storage error.
+  f32 evaluation of the grade and later stores add their own error on top and are
+  not covered by that bound. The suite keeps this case as a control.
   Kernel parameter domain (S1): γ ∈ [1, 3]; P, W, Cs, Ct ∈ [1, 100 000] nits;
   outside it the kernel refuses `OutOfDomain`.
 - Non-finite/overflow in working values: typed render refusal with asset/frame
