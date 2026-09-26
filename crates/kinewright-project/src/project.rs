@@ -881,6 +881,152 @@ mod tests {
         }
     }
 
+    /// The four MO2 R7 features on `mo2_v1_document`, each with the clip
+    /// that carries it: an adjustment, a solid, a non-`normal` blend and a
+    /// geometric transition.
+    fn mo2_feature_documents() -> Vec<(&'static str, Document, kinewright_core::ClipId)> {
+        use kinewright_core::{BlendMode, Operation, SolidColor, TimeCode, TrackId, Transition};
+        let v1 = mo2_v1_document();
+        let first = v1.tracks[0].clips[0].id;
+        let features = [
+            (
+                "adjustment",
+                Operation::AddAdjustmentClip {
+                    track: TrackId(1),
+                    timeline_start: TimeCode(240),
+                    duration: TimeCode(30),
+                    effects: Vec::new(),
+                },
+            ),
+            (
+                "solid",
+                Operation::AddSolidClip {
+                    track: TrackId(1),
+                    timeline_start: TimeCode(240),
+                    duration: TimeCode(30),
+                    color: SolidColor { r: 1, g: 2, b: 3 },
+                },
+            ),
+            (
+                "blend",
+                Operation::SetClipBlendMode {
+                    clip: first,
+                    blend_mode: BlendMode::Screen,
+                },
+            ),
+            (
+                "transition",
+                Operation::AddTransition {
+                    clip: first,
+                    transition: Transition {
+                        name: "push_left".to_owned(),
+                        duration: TimeCode(10),
+                    },
+                },
+            ),
+        ];
+        features
+            .into_iter()
+            .map(|(name, feature)| {
+                let mut doc = v1.clone();
+                feature.apply(&mut doc).expect("the MO2 feature applies");
+                let carrier = doc.tracks[0]
+                    .clips
+                    .iter()
+                    .find(|clip| {
+                        clip.content != kinewright_core::ClipContent::Media
+                            || !clip.blend_mode.is_normal()
+                            || clip
+                                .transition_in
+                                .as_ref()
+                                .is_some_and(|transition| transition.name == "push_left")
+                    })
+                    .expect("one clip carries the feature")
+                    .id;
+                (name, doc, carrier)
+            })
+            .collect()
+    }
+
+    /// MO2 R7 (review 2 S1): the predicate scans every clip, active or not —
+    /// a feature on a disabled clip, a key-disabled clip or a muted track
+    /// still stamps 2 through the real writer and reopens as 2, since the
+    /// bytes carry the feature whether or not it renders today.
+    #[test]
+    fn mo2_inactive_features_still_stamp_v2() {
+        use kinewright_core::{KeyframeInterpolation, Operation, TimeCode, TrackId};
+        let dir = TempDirectory::new("mo2-r7-inactive");
+        for (name, doc, carrier) in mo2_feature_documents() {
+            let hold_off = kinewright_core::AutomationCurve {
+                keyframes: vec![kinewright_core::Keyframe {
+                    at: TimeCode(0),
+                    value: 0,
+                    interpolation: KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                }],
+            };
+            let states = [
+                (
+                    "disabled",
+                    Operation::SetClipEnabled {
+                        clip: carrier,
+                        enabled: false,
+                    },
+                ),
+                (
+                    "key-disabled",
+                    Operation::SetClipEnabledCurve {
+                        clip: carrier,
+                        curve: Some(hold_off),
+                    },
+                ),
+                (
+                    "muted",
+                    Operation::SetTrackMix {
+                        track: TrackId(1),
+                        gain_tenth_db: 0,
+                        pan_percent: 0,
+                        mute: true,
+                        solo: false,
+                    },
+                ),
+            ];
+            for (state, operation) in states {
+                let mut inactive = doc.clone();
+                operation.apply(&mut inactive).expect("the state applies");
+                match state {
+                    "disabled" => assert!(!inactive.clip(carrier).expect("carrier").enabled),
+                    "key-disabled" => assert!(
+                        !inactive
+                            .clip(carrier)
+                            .expect("carrier")
+                            .is_enabled_at(TimeCode(0))
+                    ),
+                    _ => assert!(inactive.track_mix(TrackId(1)).mute),
+                }
+                assert_eq!(min_required_format_version(&inactive), 2, "{name}/{state}");
+                let path = dir.path(&format!("{name}-{state}.kinewright"));
+                let report = write_project_document(&inactive, &path, None).expect("v2 writes");
+                let bytes = fs::read_to_string(&path).expect("v2 reads");
+                assert!(
+                    bytes.starts_with("{\n  \"format_version\": 2,"),
+                    "{name}/{state} stamps 2"
+                );
+                let (reopened, version, digest) = load_document(&path).expect("v2 reopens");
+                assert_eq!((reopened, version), (inactive, 2), "{name}/{state}");
+                assert_eq!(digest, report.digest);
+            }
+
+            // Review 2 N1: a feature on a clip past the document duration is
+            // an invalid document (never loaded), but the pure predicate
+            // still counts it — the scan is unconditional.
+            let mut outside = doc.clone();
+            outside.duration = outside.clip(carrier).expect("carrier").timeline_start;
+            assert_eq!(min_required_format_version(&outside), 2, "{name}/outside");
+        }
+    }
+
     /// MO2 R7 old-reader behaviour, simulated with a v3 file against this
     /// reader: unknown content fails at parse; an unknown transition parses
     /// then fails validation; an otherwise parseable newer file opens
@@ -939,5 +1085,59 @@ mod tests {
         assert_eq!(version, 3, "the newer file reports its version");
         assert!(!can_overwrite_save(version), "overwrite-save refuses");
         assert!(can_overwrite_save(2) && can_overwrite_save(1));
+    }
+
+    /// MO2 R7 blend-only old reader (review 2 S5, lead ruling N10), simulated
+    /// against this reader: the real f241aa5 reader opens a blend-only v2
+    /// file, silently drops the `blend_mode` field it does not know, and
+    /// refuses overwrite only because the retained file version is newer.
+    /// Here a v3 file carries a clip field this build does not know: it
+    /// opens advisory with version 3, the field is gone from the document
+    /// and from any re-save (which would even stamp a lower version), and
+    /// overwrite-save is refused, so the loss never launders into the file.
+    /// The real two-build check is `scripts/mo2-old-reader-check.sh`.
+    #[test]
+    fn mo2_old_reader_drops_an_unknown_blend_and_refuses_overwrite() {
+        let (_, blended, carrier) = mo2_feature_documents()
+            .into_iter()
+            .find(|(name, ..)| *name == "blend")
+            .expect("the blend feature");
+        let v2 = serialize_project_document(&blended).expect("v2 serialises");
+        assert!(v2.starts_with("{\n  \"format_version\": 2,"));
+        assert_eq!(v2.matches("\"blend_mode\": \"screen\"").count(), 1);
+        let newer = v2
+            .replace("\"format_version\": 2", "\"format_version\": 3")
+            .replace("\"blend_mode\": \"screen\"", "\"future_blend\": \"screen\"");
+        let dir = TempDirectory::new("mo2-old-reader-blend");
+        let path = dir.path("blend.kinewright");
+        fs::write(&path, &newer).expect("the file writes");
+
+        let (opened, version, _) = load_document(&path).expect("a parseable newer file opens");
+        assert_eq!(version, 3, "the retained version is the file's");
+        let mut dropped = blended.clone();
+        dropped
+            .tracks
+            .iter_mut()
+            .flat_map(|track| &mut track.clips)
+            .find(|clip| clip.id == carrier)
+            .expect("carrier")
+            .blend_mode = kinewright_core::BlendMode::Normal;
+        assert_eq!(opened, dropped, "the unknown blend is dropped at parse");
+        let resaved = serialize_project_document(&opened).expect("re-serialises");
+        assert!(!resaved.contains("future_blend") && !resaved.contains("blend_mode"));
+        assert_eq!(
+            min_required_format_version(&opened),
+            1,
+            "what survives the drop would stamp an older version"
+        );
+        assert!(
+            !can_overwrite_save(version),
+            "the retained newer version refuses overwrite"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("reads"),
+            newer,
+            "opening leaves the source bytes untouched"
+        );
     }
 }
