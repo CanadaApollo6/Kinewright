@@ -1271,6 +1271,8 @@ impl Compositor {
                 label: Some("Kinewright compositor commands"),
             });
         let mut load = wgpu::LoadOp::Clear(wgpu::Color::BLACK);
+        // MO2 R12: no schedule is an all-Normal frame, drawn in order.
+        let scheduled = !steps.is_empty();
         let mut steps = steps.into_iter().peekable();
         loop {
             {
@@ -1291,6 +1293,12 @@ impl Compositor {
                     multiview_mask: None,
                 });
                 pass.set_pipeline(&self.pipeline);
+                if !scheduled {
+                    for layer in &frame.layers {
+                        pass.set_bind_group(0, &layer.bind_group, &[]);
+                        pass.draw(0..4, 0..1);
+                    }
+                }
                 while let Some(Step::Draw(index)) =
                     steps.next_if(|step| matches!(step, Step::Draw(_)))
                 {
@@ -1371,10 +1379,21 @@ impl Compositor {
                 mapped_at_creation: false,
             })
         });
-        let mut steps = Vec::with_capacity(layers.len());
+        // MO2 R12: an all-Normal frame stages today's storage only — one
+        // exact layer-resource allocation, no schedule, snapshot or flags.
+        let backdrops = layers
+            .iter()
+            .filter(|layer| layer.transition.backdrop.is_some());
+        frame.layers.reserve_exact(layers.len() + backdrops.count());
+        let mut steps = Vec::new();
+        let mut schedule = |step| {
+            if snapshots > 0 {
+                steps.push(step);
+            }
+        };
         for (index, layer) in layers.iter().enumerate() {
             if splits(layer) {
-                steps.push(Step::Snapshot(0));
+                schedule(Step::Snapshot(0));
             }
             let mut accumulator = if layer.mode.is_special() {
                 &views[0]
@@ -1385,10 +1404,10 @@ impl Compositor {
                 frame
                     .layers
                     .push(self.backdrop_resources(&views[0], shift, width, height)?);
-                steps.push(Step::Draw(frame.layers.len() - 1));
+                schedule(Step::Draw(frame.layers.len() - 1));
                 if !layer.mode.blend.is_normal() {
                     let target = usize::from(adjustment(layer));
-                    steps.push(Step::Snapshot(target));
+                    schedule(Step::Snapshot(target));
                     accumulator = &views[target];
                 }
             }
@@ -1407,7 +1426,7 @@ impl Compositor {
             frame
                 .layers
                 .push(self.layer_resources(layer, width, height, library, debug_node, &bindings)?);
-            steps.push(Step::Draw(frame.layers.len() - 1));
+            schedule(Step::Draw(frame.layers.len() - 1));
         }
         frame.validity = validity.map(|buffer| (buffer, checked));
         Ok(steps)
@@ -4578,6 +4597,40 @@ mod tests {
                 .find(field)
                 .unwrap_or_else(|| panic!("{field} must follow in WGSL order"));
             cursor += at + field.len();
+        }
+    }
+
+    /// MO2 R12 (G8, review-1 S2): an all-Normal frame stages exactly today's
+    /// storage — the layer resources in one exact allocation and no
+    /// schedule, snapshot or validity storage (a zero-capacity `Vec` never
+    /// touched the heap). A special layer does schedule.
+    #[test]
+    fn mo2_all_normal_frame_stages_no_schedule_storage() {
+        let Some(compositor) = fallback() else {
+            return;
+        };
+        let frame = crate::frame::WorkingFrame::from_display_frame(&solid(4, 4, [90; 4])).unwrap();
+        let layer = |blend| CompositorLayer {
+            frame: &frame,
+            effects: &[],
+            transition: TransitionRenderParams::default(),
+            mode: LayerMode {
+                blend,
+                role: LayerRole::Pixels,
+            },
+        };
+        let (normal, screen) = (BlendMode::Normal, BlendMode::Screen);
+        for (stack, scheduled) in [([normal; 3], false), ([normal, screen, normal], true)] {
+            let layers = stack.map(layer);
+            let mut staged = FrameResources::default();
+            let steps = compositor
+                .stage_layers(4, 4, &layers, None, None, &mut staged)
+                .unwrap();
+            assert_eq!(steps.capacity() > 0, scheduled, "{stack:?}: schedule");
+            assert_eq!(staged.snapshots.capacity() > 0, scheduled);
+            assert_eq!(staged.validity.is_some(), scheduled);
+            assert_eq!(staged.layers.capacity(), 3, "one exact allocation");
+            compositor.release_layer_textures(staged);
         }
     }
 
