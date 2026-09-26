@@ -1900,6 +1900,11 @@ pub enum MediaError {
         /// The project frame being rendered, when the caller knows it.
         at: Option<TimeCode>,
     },
+    /// MO2 R8 (review-1 B1): the render entry refused a document that
+    /// violates a document invariant, disabled clips included. Boxed to keep
+    /// `MediaError` small; code-less like [`Self::NonFiniteRender`].
+    #[error("invalid_document: {0}")]
+    InvalidDocument(Box<crate::OpError>),
     #[error("{0}")]
     Backend(String),
 }
@@ -1907,11 +1912,11 @@ pub enum MediaError {
 impl MediaError {
     /// Return the machine-readable recovery code, when this error has one.
     ///
-    /// `Some` for **9 of 16** variants after `IN1b` §3.9 rule 36, the
-    /// N4/CR-D1 addendum, `IN2B` §6 rule 2 and MO2 R10: the seven that
+    /// `Some` for **9 of 17** variants after `IN1b` §3.9 rule 36, the
+    /// N4/CR-D1 addendum, `IN2B` §6 rule 2 and MO2 R8/R10: the eight that
     /// answer `None` are `NotImplemented`, `Cancelled`, the two mix-range
-    /// refusals, `Backend`, `Scope` and `NonFiniteRender`, and `IN1b` §5.1
-    /// rule 11 step 1 routes those to
+    /// refusals, `Backend`, `Scope`, `NonFiniteRender` and `InvalidDocument`,
+    /// and `IN1b` §5.1 rule 11 step 1 routes those to
     /// `media_backend_unclassified`.
     #[must_use]
     pub const fn recovery_code(&self) -> Option<&'static str> {
@@ -1931,6 +1936,7 @@ impl MediaError {
             | Self::MixLoudnessRangeTooShort { .. }
             | Self::Scope(_)
             | Self::NonFiniteRender { .. }
+            | Self::InvalidDocument(_)
             | Self::Backend(_) => None,
         }
     }
@@ -3275,9 +3281,10 @@ mod tests {
         assert_eq!(carried_coverage.to_string(), coverage.to_string());
         assert!(carried_coverage.to_string().starts_with(coverage.code()));
 
-        // Nine of sixteen carry a code (MO2 R10 added the code-less
-        // `NonFiniteRender`); the seven that do not are the ones `IN1b` §5.1
-        // rule 11 step 1 routes to `media_backend_unclassified`.
+        // Nine of seventeen carry a code (MO2 R8/R10 added the code-less
+        // `InvalidDocument` and `NonFiniteRender`); the eight that do not are
+        // the ones `IN1b` §5.1 rule 11 step 1 routes to
+        // `media_backend_unclassified`.
         let every_variant = [
             MediaError::NotImplemented,
             MediaError::Cancelled,
@@ -3328,9 +3335,10 @@ mod tests {
                 clip: None,
                 at: None,
             },
+            MediaError::InvalidDocument(Box::new(crate::OpError::InvalidResolution)),
             MediaError::Backend(String::new()),
         ];
-        assert_eq!(every_variant.len(), 16);
+        assert_eq!(every_variant.len(), 17);
         assert_eq!(
             every_variant
                 .iter()

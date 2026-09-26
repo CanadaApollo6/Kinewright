@@ -1693,10 +1693,10 @@ impl IncidentObservation {
             // The two matte enums and the two stores mint **no** `IncidentCode`
             // (`IN1b` §0.2/e, §3.9 rule 37, and the code table of §3.2 rule 12,
             // which declares none of their 21 + 10 strings), so they share the
-            // unclassified media code with the seven code-less variants — the
+            // unclassified media code with the eight code-less variants — the
             // five `IN1b` ones, `Scope`, whose `recovery_code` is `None`
-            // (`IN2B` §6 rule 2, d16), and MO2's `NonFiniteRender` (R10) — and
-            // so does their evidence, because one
+            // (`IN2B` §6 rule 2, d16), and MO2's `NonFiniteRender` (R10) and
+            // `InvalidDocument` (R8) — and so does their evidence, because one
             // incident carries one code. Their own code is not lost: it is the
             // first token of every one of their rendered refusals and therefore
             // the first word of `observed`.
@@ -1709,6 +1709,7 @@ impl IncidentObservation {
             | MediaError::MixSpectrumRangeTooShort { .. }
             | MediaError::MixLoudnessRangeTooShort { .. }
             | MediaError::NonFiniteRender { .. }
+            | MediaError::InvalidDocument(_)
             | MediaError::Backend(_) => {
                 let code = IncidentCode::Media(MediaIncident::BackendUnclassified);
                 Self {
@@ -5494,6 +5495,10 @@ mod tests {
                     clip: Some(crate::ClipId(7)),
                     at: Some(TimeCode(3)),
                 },
+                IncidentCode::Media(MediaIncident::BackendUnclassified),
+            ),
+            (
+                MediaError::InvalidDocument(Box::new(crate::OpError::InvalidResolution)),
                 IncidentCode::Media(MediaIncident::BackendUnclassified),
             ),
         ] {

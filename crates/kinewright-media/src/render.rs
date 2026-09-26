@@ -467,6 +467,11 @@ impl FrameRenderer {
         strategy: DecodeStrategy,
     ) -> Result<Vec<DecodedLayer>, MediaError> {
         validate_managed_context(document)?;
+        // MO2 R8 (review-1 B1): every render root refuses an invalid
+        // document defensively, disabled clips included, before resolving.
+        document
+            .validate()
+            .map_err(|error| MediaError::InvalidDocument(Box::new(error)))?;
         let layer_specs = visual_layers_at(document, project_at)?;
         let mut decoded_layers = Vec::with_capacity(layer_specs.len());
         for layer in layer_specs {
@@ -1005,24 +1010,9 @@ mod tests {
         };
         look.parameters
             .insert("lut_asset_id".to_owned(), ParamValue::Integer(1));
-        let document = title_document(vec![look]);
-
-        let error = renderer
-            .render(
-                &document,
-                TimeCode::ZERO,
-                document.resolution,
-                RenderScale::FullResolution,
-                DecodeStrategy::Seek,
-            )
-            .expect_err("an unpublished library blocks an active LUT node");
-        let MediaError::Backend(message) = error else {
-            panic!("expected a backend error");
-        };
-        assert!(
-            message.starts_with("missing_lut_asset:"),
-            "unexpected message: {message}"
-        );
+        // MO2 R8: the render entry validates the document, so the look's
+        // asset is registered; only the renderer's library is unpublished.
+        let mut document = title_document(vec![look]);
 
         let directory = TempDirectory::new("cc4-renderer-library");
         let store = LutStore::for_project(&directory.path("project.kinewright"))
@@ -1046,6 +1036,25 @@ mod tests {
             .import_lut_asset(&source)
             .expect("the fixture LUT imports")
             .into_lut_asset(LutAssetId(1));
+        document.lut_assets.push(asset.clone());
+
+        let error = renderer
+            .render(
+                &document,
+                TimeCode::ZERO,
+                document.resolution,
+                RenderScale::FullResolution,
+                DecodeStrategy::Seek,
+            )
+            .expect_err("an unpublished library blocks an active LUT node");
+        let MediaError::Backend(message) = error else {
+            panic!("expected a backend error");
+        };
+        assert!(
+            message.starts_with("missing_lut_asset:"),
+            "unexpected message: {message}"
+        );
+
         let (library, _) = LutLibrary::build(&[asset], Some(&store));
         assert_eq!(library.len(), 1);
         renderer.set_lut_library(Arc::new(library));
@@ -1551,5 +1560,68 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("source_color=supported"), "{message}");
         assert!(message.contains("source_profile="), "{message}");
+    }
+
+    /// Review-1 B1 (MO2 R8), ported from the reviewer's failing probe: the
+    /// render entry refuses an invalid document even when the offending clip
+    /// is disabled, and still omits a valid disabled clip.
+    #[test]
+    fn reviewer1_render_must_defensively_reject_disabled_invalid_adjustment() {
+        use kinewright_core::{OpError, Operation, Transition};
+        let Some(mut renderer) = test_renderer() else {
+            return;
+        };
+        let mut document = Document {
+            resolution: (32, 18),
+            ..Document::default()
+        };
+        Operation::AddTrack {
+            track: Track {
+                id: TrackId(901),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            },
+        }
+        .apply(&mut document)
+        .unwrap();
+        Operation::AddAdjustmentClip {
+            track: TrackId(901),
+            timeline_start: TimeCode(0),
+            duration: TimeCode(30),
+            effects: vec![],
+        }
+        .apply(&mut document)
+        .unwrap();
+        let clip = &mut document.tracks[0].clips[0];
+        clip.enabled = false;
+        let valid = document.clone();
+        let clip = &mut document.tracks[0].clips[0];
+        clip.transition_in = Some(Transition {
+            name: "fade_from_black".into(),
+            duration: TimeCode(5),
+        });
+        let expected = OpError::TransitionUnsupportedOnAdjustment {
+            clip: clip.id,
+            transition: "fade_from_black".into(),
+        };
+        assert_eq!(document.validate(), Err(expected.clone()));
+        let (at, full) = (TimeCode(0), RenderScale::FullResolution);
+        let refused = renderer.render(&document, at, (32, 18), full, DecodeStrategy::Seek);
+        assert_eq!(
+            refused.err(),
+            Some(MediaError::InvalidDocument(Box::new(expected))),
+            "invalid disabled adjustment rendered a frame successfully"
+        );
+        let working = renderer.render_working(&document, at, (32, 18), full, DecodeStrategy::Seek);
+        assert!(matches!(working, Err(MediaError::InvalidDocument(_))));
+        let omitted = renderer.render_working(&valid, at, (32, 18), full, DecodeStrategy::Seek);
+        assert!(
+            omitted
+                .unwrap()
+                .pixels
+                .chunks(4)
+                .all(|p| p == [0.0, 0.0, 0.0, 1.0])
+        );
     }
 }

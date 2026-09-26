@@ -173,7 +173,13 @@ pub fn timeline_source_at(
     source_on_track(document, track, project_at)
 }
 
-/// Resolve every active video track at a project frame, bottom-to-top.
+/// Resolve the active **media-backed** clip on every video track at a
+/// project frame, bottom-to-top.
+///
+/// Generated and non-pixel content — titles, freeze frames, and the MO2
+/// solids and adjustment clips — is omitted by contract (MO2 review-1 S2):
+/// an empty result does not mean an empty picture. The rendered stack is
+/// [`visual_layers_at`]; use it for anything that composites.
 ///
 /// # Errors
 ///
@@ -1676,6 +1682,39 @@ mod tests {
             // `video_layers_at` resolves media only.
             assert!(video_layers_at(&document, TimeCode(0)).unwrap().is_empty());
         }
+    }
+
+    /// MO2 review-1 S2 (option b): `video_layers_at` is media-only by its
+    /// documented contract — a stack of media under a solid, an adjustment
+    /// and a title resolves the media layer alone there, while
+    /// `visual_layers_at` carries the whole rendered stack.
+    #[test]
+    fn video_layers_at_is_media_only_by_contract() {
+        let mut document = fixture();
+        let media = document.tracks[0].clips[0].clone();
+        let generated = [
+            ClipContent::Solid(kinewright_core::SolidColor { r: 9, g: 9, b: 9 }),
+            ClipContent::Adjustment,
+            ClipContent::Title(kinewright_core::Title::default()),
+        ];
+        for (index, content) in generated.into_iter().enumerate() {
+            let mut clip = media.clone();
+            clip.id = ClipId(100 + index as u64);
+            clip.content = content;
+            clip.source_range = TimeCode(0)..TimeCode(10);
+            clip.link = None;
+            document.tracks.push(Track {
+                id: TrackId(100 + index as u64),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![clip],
+            });
+        }
+        document.validate().unwrap();
+        let media_only = video_layers_at(&document, TimeCode(0)).unwrap();
+        assert_eq!(media_only.len(), 1);
+        assert_eq!(media_only[0].source.clip, media.id);
+        assert_eq!(visual_layers_at(&document, TimeCode(0)).unwrap().len(), 4);
     }
 
     /// MO2 R1/R2/R3: blend is inert on audio — segments are identical
