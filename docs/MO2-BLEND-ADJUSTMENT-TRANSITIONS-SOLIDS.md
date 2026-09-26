@@ -250,7 +250,12 @@
     (non-uniform alpha), so its test now asserts the refusal. The gate
     fixture moves the title by whole pixels only (x = 20% is 32 px; the
     slide/push offsets at frames 1/3/4 are integral), so no lane needs
-    slack there. The solid keeps its scale and rotation.
+    envelope slack there. At those offsets GPU ≡ twin bit-exactly for
+    special layers (the `Normal` adjustments included, ME12). The
+    `Normal`-title frames keep the target's own store and differ by at
+    most ½ f16 ULP (worst 0.00048828125, 12 of 16 frames), within R27
+    with zero slack (final verification N1; this corrects N18's "exactly"
+    wording). The solid keeps its scale and rotation.
 - ME12 → §3 R9b/R10 (B1 fix round 3, re-review S2, lead ruling N17.4):
   **one storage rule.** A special layer (selectors 1–6 and 8) rounds its
   composite `α·B + (1−α)·D` to f16 round-to-nearest-even **in the shader**
@@ -346,7 +351,18 @@
     63.3 MiB, heavy 4K 70.3 MiB. Full-resolution frames: 126.6, 142.4
     and 632.8 MiB. Ceilings are 384 / 384 / 1,536 MiB. Not charged: the
     LUT-atlas upload staging, which exists only on an atlas-cache miss
-    and is bounded by the charged atlas.
+    and is bounded by the charged atlas. *(Final verification B1/B2.)* An
+    upload's staging is charged with each row padded to
+    `COPY_BYTES_PER_ROW_ALIGNMENT` (256, DX12's; Vulkan pads to 128), an
+    upper bound on every backend. A frame that fails after staging
+    flushes its queued writes (empty submit + wait) before its charges
+    drop, so failed frames never leave uncharged staging. The
+    full-resolution peaks were re-measured after both fixes and are
+    unchanged. The proxy peaks cannot move either: every workload's rows
+    (1280, 1920 and 3840 px × 8 B) are already 256-aligned.
+    wgpu's own buffer counters witness both
+    (`final_ledger_upload_padding_counterexample`,
+    `final_ledger_failed_frame_retains_pending_uploads`).
   - *`validate()` per frame (N11-4):* 1.1–1.8 µs at 1080p, 10 µs for the
     200-clip 4K document. No revision-keyed cache is needed.
 

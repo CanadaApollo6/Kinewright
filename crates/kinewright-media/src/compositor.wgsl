@@ -788,8 +788,10 @@ fn non_finite(value: vec3<f32>) -> bool {
 // bits only build exact powers of two: `value · 2^(10−e)` and the product
 // back are exact, and `round` ties to even. `e` is the f16 exponent,
 // floored at −14 so subnormals share the 2^−24 quantum; f32 zero and
-// subnormals round to a signed zero. Past 65504 the result is ±inf; NaN
-// and ±inf fall through (callers bit-check the unrounded value).
+// subnormals round to a signed zero. A magnitude that rounds past 65504
+// (from 65520, the midpoint above it, up) returns ±inf; below 65520 it
+// rounds to at most 65504. NaN and ±inf fall through (callers bit-check
+// the unrounded value).
 fn f16_rte(value: vec3<f32>) -> vec3<f32> {
     let biased = vec3<i32>((bitcast<vec3<u32>>(value) >> vec3<u32>(23u)) & vec3<u32>(0xffu));
     let exponent = max(biased - vec3<i32>(127), vec3<i32>(-14));

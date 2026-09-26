@@ -211,6 +211,14 @@ impl GpuLedger {
     }
 }
 
+/// MO2 R28 (B1): an upload's queue-write staging, an upper bound on every
+/// backend — each row padded to the largest copy alignment (DX12's 256).
+fn upload_staging_bytes((key, texture): &(TexturePoolKey, HeldTexture)) -> u64 {
+    let row = texture.1 / u64::from(key.height.max(1));
+    let aligned = row.next_multiple_of(u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT));
+    aligned * u64::from(key.height)
+}
+
 /// One charged allocation; dropping it releases the charge.
 pub(crate) struct Ledgered<T>(T, u64, Arc<GpuLedger>);
 pub(crate) type HeldTexture = Ledgered<wgpu::Texture>;
@@ -1336,6 +1344,10 @@ impl Compositor {
         {
             Ok(steps) => steps,
             Err(error) => {
+                // MO2 R28 (B2): the staged layers' queue writes still hold
+                // their staging; complete them before the charges go.
+                self.gpu.queue.submit([]);
+                let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
                 self.release_layer_textures(frame);
                 return Err(error);
             }
@@ -1808,7 +1820,7 @@ impl Compositor {
         });
         let uniform = self.gpu.charge_buffer(uniform);
         self.gpu.queue.write_buffer(&uniform, 0, &params.as_bytes());
-        let upload = source.as_ref().map_or(0, |(_, texture)| texture.1);
+        let upload = source.as_ref().map_or(0, upload_staging_bytes);
         let staging = upload + grade.size() + UNIFORM_SIZE;
         let (validity, offset) = bindings.validity;
         let bind_group = self
@@ -7622,3 +7634,8 @@ mod tests {
         assert_eq!(report.raster, document);
     }
 }
+
+/// The final verification's ledger probes, retained (final-mo2-1 B1/B2/S1).
+#[cfg(test)]
+#[path = "mo2_ledger_probes.rs"]
+mod ledger_probes;

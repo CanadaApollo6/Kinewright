@@ -1263,3 +1263,7 @@ gpu_lanes! {
 /// The B1 reviewers' probes, retained (fix round 1).
 #[path = "mo2_review_probes.rs"]
 mod review_probes;
+
+/// The final verification's survivor probes, retained (final-mo2-1 S1).
+#[path = "mo2_final_probes.rs"]
+mod final_probes;
