@@ -987,8 +987,8 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if mode == 0u {
         return vec4<f32>(output_linear, alpha);
     }
-    // MO2 R9/R9b: emit `(B, alpha)` into the fixed-function over (8 blends
-    // `Normal`).
+    // MO2 R9/R9b (ME10): composite the over here and emit it opaque, so the
+    // fixed-function blend stores `stored` unchanged (8 blends `Normal`).
     let below = textureLoad(accumulator, vec2<i32>(input.position.xy), 0).rgb;
     let blended = vec3<f32>(
         blend_channel(mode, output_linear.r, below.r),
@@ -1003,5 +1003,5 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         || any(abs(stored) > vec3<f32>(65504.0)) {
         atomicStore(&validity, 1u);
     }
-    return vec4<f32>(blended, alpha);
+    return vec4<f32>(stored, 1.0);
 }

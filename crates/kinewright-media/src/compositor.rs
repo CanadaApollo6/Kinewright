@@ -1329,7 +1329,7 @@ impl Compositor {
     /// Upload and bind every layer, returning the draw/snapshot schedule.
     ///
     /// MO2 R13: snapshot A holds `D0` before each special layer; a Push draws
-    /// the full-raster backdrop from it; a non-`Normal` entering layer then
+    /// the full-raster backdrop from it; a special entering layer then
     /// re-snapshots the shifted backdrop (into B for an adjustment, whose
     /// source stays `D0` in A).
     fn stage_layers<F: CompositorInput>(
@@ -1346,11 +1346,10 @@ impl Compositor {
         };
         let adjustment =
             |layer: &CompositorLayer<'_, F>| matches!(layer.mode.role, LayerRole::Adjustment);
-        let snapshots = if layers.iter().any(|layer| {
-            layer.transition.backdrop.is_some()
-                && adjustment(layer)
-                && !layer.mode.blend.is_normal()
-        }) {
+        let snapshots = if layers
+            .iter()
+            .any(|layer| layer.transition.backdrop.is_some() && adjustment(layer))
+        {
             2
         } else {
             usize::from(layers.iter().any(splits))
@@ -1405,7 +1404,8 @@ impl Compositor {
                     .layers
                     .push(self.backdrop_resources(&views[0], shift, width, height)?);
                 schedule(Step::Draw(frame.layers.len() - 1));
-                if !layer.mode.blend.is_normal() {
+                // ME10: the opaque emission needs the true target below.
+                if layer.mode.is_special() {
                     let target = usize::from(adjustment(layer));
                     schedule(Step::Snapshot(target));
                     accumulator = &views[target];
