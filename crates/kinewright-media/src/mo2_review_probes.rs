@@ -1034,6 +1034,24 @@ fn rereview_me7_valid_normal_solid_overflow_on(context: GpuContext) {
     }
 }
 
+/// Re-review B2 (N17.2, ME11): NaN/±inf sampled alpha on a special layer
+/// refuses on both lanes, checked before clamp/fade/mask can erase it.
+fn rereview_special_nonfinite_source_alpha_on(context: GpuContext) {
+    let c = Compositor::new(context);
+    for mode in [BlendMode::Darken, BlendMode::Screen, BlendMode::Add] {
+        for alpha in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let (a, b) = pair_lanes(&c, mode, grey4(0.5), [0.25, 0.25, 0.25, alpha]);
+            let refused = |lane: &Result<LinearRgbaImage, MediaError>| {
+                matches!(lane, Err(MediaError::NonFiniteRender { layer: 1, .. }))
+            };
+            assert!(
+                refused(&a) && refused(&b),
+                "{mode:?} α={alpha}: {a:?} / {b:?}"
+            );
+        }
+    }
+}
+
 fn cube_effect(id: u64, path: &std::path::Path, intensity: i64) -> Effect {
     let mut lut = effect(id, "cube_lut", &[("intensity_percent", intensity)]);
     let path = ParamValue::Text(path.to_string_lossy().into_owned());
@@ -1157,6 +1175,7 @@ gpu_lanes! {
     review1_public_matte_shorter_clip_remains_valid => review1_public_matte_shorter_clip_remains_valid_on,
     review1_twin_covers_supported_legacy_cube => review1_twin_covers_supported_legacy_cube_on,
     rereview_me7_valid_normal_solid_overflow => rereview_me7_valid_normal_solid_overflow_on,
+    rereview_special_nonfinite_source_alpha => rereview_special_nonfinite_source_alpha_on,
     rereview_cube_domains_and_last_lattice => rereview_cube_domains_and_last_lattice_on,
     rereview_projection_enabled_curve => rereview_projection_enabled_curve_on,
 }

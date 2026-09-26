@@ -214,6 +214,11 @@
     finite grade); and MO2's own `r10_refusal_names_clip_and_frame…`
     (2²⁰ now refuses at layer 0) and `review1_r10_nan_extrema…` (a NaN
     below refuses at its own layer, 0).
+  - *Sampled alpha.* Every layer tests the sampled source alpha's bits for
+    NaN/±inf right after the sample, before clamp, fade, crop or mask can
+    erase them, stickily and on both lanes (pinned by
+    `rereview_special_nonfinite_source_alpha`: Darken/Screen/Add × NaN/±inf,
+    red on both lanes before the fix).
 
 ## Changes in revision 2
 
