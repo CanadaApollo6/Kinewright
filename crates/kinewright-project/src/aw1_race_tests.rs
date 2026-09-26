@@ -2642,3 +2642,61 @@ fn j3_link_retargeted_after_acquire_refuses_the_next_save() {
     b.handle.release().unwrap();
     a.handle.release().unwrap();
 }
+
+/// J4 (Astra R2 S1, narrowed AF2): the 40-hop bound counts the LEAF link
+/// chain only, not directory-component links. Through a symlinked
+/// directory, a 39-link leaf chain unifies and writes; a 40-link leaf
+/// chain (41 kernel hops) still unifies to the same identity, but the
+/// kernel refuses the write (`ELOOP`) — the spelling can never be opened or
+/// written, and a claim through it contends with the real target's, so no
+/// two owners arise.
+#[cfg(target_os = "linux")]
+#[test]
+fn rr3_mixed_directory_and_leaf_depth() {
+    let dir = TempDirectory::new("rr3-mixed-depth");
+    let root = fs::canonicalize(dir.root()).unwrap();
+    let real = root.join("real");
+    let alias = root.join("alias");
+    fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink("real", &alias).unwrap();
+    let recovery = root.join("recovery");
+    fs::create_dir(&recovery).unwrap();
+    for hops in [39_usize, 40] {
+        let base = real.join(format!("chain{hops}"));
+        fs::create_dir(&base).unwrap();
+        for index in 0..hops {
+            let to = if index + 1 == hops {
+                "end.kinewright".to_owned()
+            } else {
+                format!("l{}", index + 1)
+            };
+            std::os::unix::fs::symlink(to, base.join(format!("l{index}"))).unwrap();
+        }
+        let head = alias.join(format!("chain{hops}/l0"));
+        let end = base.join("end.kinewright");
+        let identity = crate::project::canonical_project_identity(&head);
+        assert_eq!(
+            identity.as_deref().ok(),
+            Some(end.as_path()),
+            "leaf {hops} + 1 directory link unifies"
+        );
+        let real_owner = claim(&end, &recovery, "http://end").expect("the target owns");
+        let through_head = claim(&head, &recovery, "http://head");
+        assert!(
+            matches!(through_head, Err(LockfileError::Contention { .. })),
+            "leaf {hops}: one identity, one owner: {:?}",
+            through_head.map(|_| ())
+        );
+        real_owner.handle.release().unwrap();
+        let written = fs::write(&head, b"{}");
+        if hops == 39 {
+            assert!(written.is_ok(), "40 kernel hops write: {written:?}");
+        } else {
+            assert_eq!(
+                written.unwrap_err().raw_os_error(),
+                Some(libc::ELOOP),
+                "41 kernel hops: the OS refuses the write"
+            );
+        }
+    }
+}

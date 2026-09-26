@@ -139,7 +139,13 @@ changes.
   (a longer chain or a cycle) or an unreadable link is a typed
   `ProjectIdentityError`, never a fallback: the lock refuses with
   `LockfileError::Identity`, the journal scan fails closed, and a journal
-  header naming such a path never claims. Fix round 4, J2: an acquire
+  header naming such a path never claims. Fix round 4, J4 (narrows H5):
+  the 40-hop bound applies to the LEAF link chain; directory-component
+  links are not counted. A path whose full kernel traversal exceeds the
+  kernel's own limit may still unify to an identity, but it can never be
+  opened or written — the OS refuses with `ELOOP`, a typed IO error at
+  save — and it shares the unified identity's lock, so no two owners
+  arise (`rr3_mixed_directory_and_leaf_depth`). Fix round 4, J2: an acquire
   resolves the identity exactly ONCE and derives the claim, lock,
   discovery and pending-journal scan from that value, so a link
   re-pointed mid-acquire cannot split the lock from the scan; an

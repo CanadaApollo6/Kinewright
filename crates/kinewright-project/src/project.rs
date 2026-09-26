@@ -289,8 +289,9 @@ pub fn canonical_session_key(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The Linux `MAXSYMLINKS`: the most links the kernel follows in one
-/// lookup, and so the most an identity follows (H5).
+/// The Linux `MAXSYMLINKS` (H5), applied to the LEAF link chain only
+/// (J4): directory-component links are not counted, so a spelling past the
+/// kernel's whole-lookup limit may still unify, but can never be opened.
 const IDENTITY_LINK_HOPS: u32 = 40;
 
 /// A path with no canonical project identity (H5): its symlink chain
@@ -350,8 +351,8 @@ fn resolve_link_chain(path: &Path) -> Result<PathBuf, ProjectIdentityError> {
 /// aliases share their target's identity (canonical parent of the target
 /// plus the target's name when it is missing).
 /// # Errors
-/// [`ProjectIdentityError`] when the chain exceeds the kernel's link
-/// bound, loops, or cannot be read (H5).
+/// [`ProjectIdentityError`] when the leaf chain exceeds
+/// [`IDENTITY_LINK_HOPS`], loops, or cannot be read (H5).
 pub fn canonical_project_identity(path: &Path) -> Result<PathBuf, ProjectIdentityError> {
     let resolved = resolve_link_chain(path)?;
     if let Ok(canonical) = fs::canonicalize(&resolved) {
