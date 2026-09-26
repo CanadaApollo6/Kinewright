@@ -892,20 +892,24 @@ fn slide_and_wipe_midpoints_on(context: GpuContext) {
         );
     }
     // Transformed and translucent sources, through the last frame and after.
-    let moved = || {
-        effect(
-            1,
-            "transform",
-            &[
-                ("scale_percent", 60),
-                ("x_percent", 20),
-                ("rotation_centidegrees", 1_500),
-            ],
-        )
-    };
+    // ME11: the title (non-uniform alpha, so outside ME9's proved subset)
+    // moves by whole pixels only: x = 20% is 32 px, and every slide/push
+    // offset at frames 1, 3 and 4 (¾, ¼, 0 of 160×88) is integral.
+    // The uniform solid keeps its scale and rotation.
+    let moved = |parameters: &[(&str, i64)]| effect(1, "transform", parameters);
+    let tilted = [
+        ("scale_percent", 60),
+        ("x_percent", 20),
+        ("rotation_centidegrees", 1_500),
+    ];
     let sources = [
-        solid(4, BLUE, BlendMode::Normal, vec![moved(), opacity(2, 70)]),
-        title_clip(4, TitlePosition::Center, vec![moved()]),
+        solid(
+            4,
+            BLUE,
+            BlendMode::Normal,
+            vec![moved(&tilted), opacity(2, 70)],
+        ),
+        title_clip(4, TitlePosition::Center, vec![moved(&[("x_percent", 20)])]),
     ];
     for source in sources {
         for name in ["slide_right", "wipe_up", "push_down", "slide_down"] {
@@ -924,10 +928,12 @@ fn slide_and_wipe_midpoints_on(context: GpuContext) {
     }
 }
 
-/// ME9 (G4): the value Windows WARP produced for `slide_right` over the
-/// transformed title at frame 3 (run 36222189672) misses the unit 1e-3
-/// against the exact twin but lies in the 8-bit sub-texel envelope.
-fn warp_midpoint_departure_lies_within_the_envelope_on(context: GpuContext) {
+/// ME9 (G4) / ME11: the value Windows WARP produced for `slide_right` over
+/// the transformed title at frame 3 (run 36222189672) misses the unit 1e-3
+/// against the exact twin. The title's alpha is not uniform, so the output
+/// is not multilinear in the weights and the envelope refuses rather than
+/// widening; the gate fixture moves the title by whole pixels instead.
+fn warp_midpoint_departure_is_refused_by_the_envelope_on(context: GpuContext) {
     let mut r = FrameRenderer::new(context);
     let moved = [
         ("scale_percent", 60),
@@ -944,14 +950,14 @@ fn warp_midpoint_departure_lies_within_the_envelope_on(context: GpuContext) {
     let document = document(clips);
     let (at, size, value) = (TimeCode(3), document.resolution, 6708 * 4);
     let twin = r.twin_working(&document, at, size).unwrap();
-    let slack = r.twin_envelope(&document, at, size).unwrap();
     let (warp, exact) = (0.330_810_55_f32, twin.pixels[value]);
-    println!(
-        "pixel 6708: twin {exact} slack {} WARP {warp}",
-        slack[value]
-    );
     assert_eq!(exact, 0.332_031_25, "the CI twin value");
-    assert!(!r27_close(warp, exact, 0.0) && r27_close(warp, exact, slack[value]));
+    assert!(
+        !r27_close(warp, exact, 0.0),
+        "WARP misses the unit tolerance"
+    );
+    let envelope = r.twin_envelope(&document, at, size);
+    assert!(envelope.is_err(), "unproved stack widened: {envelope:?}");
 }
 
 /// R12/R13/B8 copy counts per frame: Normal-only stacks (Slide/Wipe too) 0;
@@ -1238,7 +1244,7 @@ gpu_lanes! {
     adjustment_look_over_section => adjustment_look_over_section_on,
     push_midpoint_splits_frame => push_midpoint_splits_frame_on,
     slide_and_wipe_midpoints => slide_and_wipe_midpoints_on,
-    warp_midpoint_departure_lies_within_the_envelope => warp_midpoint_departure_lies_within_the_envelope_on,
+    warp_midpoint_departure_is_refused_by_the_envelope => warp_midpoint_departure_is_refused_by_the_envelope_on,
     accumulator_copy_counts => accumulator_copy_counts_on,
     solid_title_card_renders => solid_title_card_renders_on,
     r32_generated_alpha_under_blend_matches_twin => r32_generated_alpha_under_blend_matches_twin_on,

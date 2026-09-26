@@ -20,8 +20,8 @@ use half::f16;
 use kinewright_core::{Effect, LinearRgbaImage, MediaError, ParamValue};
 
 use super::{
-    Compositor, CompositorInput, CompositorLayer, LayerParams, LayerRole, LutLibrary, blend_word,
-    legacy_stage_active, params_for,
+    Compositor, CompositorInput, CompositorLayer, LayerMode, LayerParams, LayerRole, LutLibrary,
+    blend_word, legacy_stage_active, params_for,
 };
 use crate::color_pipeline::{
     apply_color_nodes_at, decode_bt709, encode_bt709, resolve_color_nodes_with,
@@ -355,13 +355,53 @@ pub(crate) fn render_working<F: CompositorInput>(
 }
 
 /// ME9: per value, the largest departure from the exact twin over the four
-/// 8-bit sub-texel weight corners. Zero wherever nothing is filtered between
-/// distinct texels, so it widens R27 only on resampled pixels.
+/// 8-bit sub-texel weight corners. Zero for unfiltered values (cancellation
+/// can make a filtered value's slack zero too), so it widens R27 only on
+/// resampled pixels.
+///
+/// ME11: the corners bound every per-sample weight rounding only where the
+/// output is multilinear in one sampling's weights. So at most one layer may
+/// resample distinct texels: the topmost, a `Normal` pixel layer with
+/// uniform source alpha and only affine per-pixel effects, with no Push
+/// backdrop anywhere. Anything else is refused, not widened.
 pub(crate) fn subtexel_envelope<F: CompositorInput>(
     resolution: (u32, u32),
     layers: &[CompositorLayer<'_, F>],
     library: Option<&LutLibrary>,
 ) -> Result<Vec<f32>, MediaError> {
+    let resampled = |layer: &CompositorLayer<'_, F>| {
+        let p = params_for(layer.effects, layer.transition);
+        let blit = Compositor::is_pixel_exact_blit(layer, &p, resolution.0, resolution.1);
+        let uniform = matches!(layer.mode.role, LayerRole::Pixels)
+            && Texture::of(layer.frame)
+                .texels
+                .windows(2)
+                .all(|t| t[0] == t[1]);
+        layer.transition.backdrop.is_some() || !(blit || uniform)
+    };
+    let proved = match layers.iter().rposition(resampled) {
+        None => true,
+        Some(top) => {
+            let layer = &layers[top];
+            let alpha = Texture::of(layer.frame).texels;
+            top + 1 == layers.len()
+                && !layers[..top].iter().any(resampled)
+                && layer.mode == LayerMode::NORMAL
+                && layer.transition.backdrop.is_none()
+                && alpha.windows(2).all(|t| t[0][3] == t[1][3])
+                && layer.effects.iter().all(|effect| {
+                    matches!(
+                        effect.name.as_str(),
+                        "transform" | "opacity" | "crop" | "mask"
+                    )
+                })
+        }
+    };
+    if !proved {
+        return Err(MediaError::Backend(
+            "ME9 envelope: the four shared corners bound only one resampled top layer".into(),
+        ));
+    }
     let exact = render_sampled(resolution, layers, library, None)?.pixels;
     let mut envelope = vec![0.0_f32; exact.len()];
     for corner in [[false, false], [false, true], [true, false], [true, true]] {
