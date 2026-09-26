@@ -738,7 +738,7 @@ codes; W=100 puts the 10 000-nit input at working 46.4159.
 - **PB4 final code**: 10-bit delivery anchors (black/18%/white/peak/saturated)
   ≤ 2 codes max, ≤ 0.5 mean; 8-bit SDR anchors ≤ 1 code. A triplet channel
   outside 2 codes still passes if its display error ≤ 0.2% of the triplet's
-  max-channel display value (errata CE6, CE7; SDR leg above 1500 nits: CE8).
+  max-channel display value (errata CE6, CE7; storage placement: CE9).
 - **S1 precision errata (2026-09-25, lead ruling after the S1 reviews).**
   CE3: the 2.0-nit peak bound was derived at P = 1000; one f16 store of the
   W=100/P=10 000 working peak (≈14.96) alone costs 3.46 nits, so the peak bound
@@ -763,17 +763,26 @@ codes; W=100 puts the 10 000-nit input at working 46.4159.
   passes PB4 by codes (≤ 2) or by display error ≤ 0.2% of the triplet's max
   channel (CE5's composed budget, relative to the channel that sets the
   quantum); the mean stays ≤ 0.5 codes over all channels.
-  CE8 (S1 fix round 3, SDR leg): the 8-bit SDR leg meets CE7 for every source
-  peak P ≤ 1500 nits, which covers HLG sources (nominal 1000). Above it the
-  HDR→SDR EETF shrinks the max channel by up to P/W while a non-max channel keeps
-  the max channel's inherited storage quantum (CE4), so its SDR error can exceed
-  both prongs: a 1,620-channel scan (P 400–10 000, W 100–400, minor 0.1–2 %)
-  found 17 failures, all at P ≥ 2000, never on the max channel, worst 1.60 % of
-  the SDR triplet's max display value (39 codes; [20, 4000, 20], W = 203). For
-  P > 1500 a non-max SDR channel is bounded in display error by 2 % of the SDR
-  triplet max (codes unbounded); the max channel keeps CE7. PQ-class masters are
-  CC9's scope: CC9 must remove or re-derive this bound (e.g. f32 through the
-  EETF) before it claims PQ→SDR delivery.
+  CE8 withdrawn (S1 closing verification 2 disproved it: SDR failures at
+  P = 400–1000 and on the max channel). CE9 (S1 precision investigation,
+  supersedes CE8): working images are stored in f16 only in the Rec.2020 working
+  space. A stage or node that operates in another space (LUT wrapper authored in
+  709, gamut conversions, output transforms) converts at its boundary and keeps
+  foreign-space values in f32 within the same pass; it never stores them in f16.
+  Source frames may be stored in their decoded native space before conversion.
+  A foreign-space f16 store quantizes large opposite-sign components (2020 green
+  in 709 is [−0.588, 1.133, −0.101]·w); the return matrix sums those quanta into
+  the 2020 minor channels, which the per-component EETF does not compress, and
+  the 709 compressor spreads them into every channel (up to 83 % of the SDR max
+  measured). The CE4/CE5 2020→709→f16→2020 pair stays a conservative storage
+  model for PB1–PB3 only, not a delivery path, and is kept in the suite as a
+  control that must fail PB4. Under this rule (26.7 M channels; P 400–10 000;
+  W 100–400; 2020/709 hues and skin; up to 16 stores) PB4 SDR and HLG meet CE7
+  on every channel at every peak; worst SDR error 0.083 % of the SDR triplet max;
+  the production BT.709 8-bit quantizer stays ≤ 1 code. The rendered appearance
+  of the pinned recipe is unchanged, and it costs no memory: today's compositor
+  already stores only 2020 f16 (source working frame and composite target) and
+  runs grade nodes in-pass in f32. f32 working storage stays rejected (memory).
   Kernel parameter domain (S1): γ ∈ [1, 3]; P, W, Cs, Ct ∈ [1, 100 000] nits;
   outside it the kernel refuses `OutOfDomain`.
 - Non-finite/overflow in working values: typed render refusal with asset/frame
