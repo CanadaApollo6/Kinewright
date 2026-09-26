@@ -628,16 +628,13 @@ pub struct Compositor {
     /// MO2 R12/R13: accumulator snapshots taken, for the copy-count probes.
     accumulator_copies: AtomicU64,
     /// MO2 R28 (ME15/ME16): resources a submission may still use — failed
-    /// and timed-out frames, atlas staging — charged until a poll marks the
+    /// and unfinished frames, atlas staging — charged until a poll marks the
     /// submission done.
     retired: Mutex<Vec<(Arc<AtomicBool>, FrameResources)>>,
 }
 
 /// MO2 R28 (ME15): the longest a failed frame waits for its queued writes.
 const FAILED_FRAME_WAIT: Duration = Duration::from_millis(100);
-
-/// MO2 R28 (ME16): the longest a frame waits for its readback (N25).
-const READBACK_WAIT: Duration = Duration::from_secs(10);
 
 /// MO2 R28 (ME16): every frame-path wait polls through here, so the tests can
 /// observe and override it (`ledger_probes::hook`).
@@ -796,12 +793,12 @@ struct FrameResources {
     validity: Option<Ledgered<wgpu::Buffer>>,
     /// MO2 R10 (ME11): an all-`Normal` frame's pooled flags, slot = layer.
     pooled_flags: Option<Ledgered<wgpu::Buffer>>,
-    /// MO2 R28 (ME16): the output, a timed-out readback's buffer, and atlas
-    /// staging, held while their submission may still run.
+    /// MO2 R28 (ME16): the output, an unfinished readback's buffer, and
+    /// atlas staging, held while their submission may still run.
     output: Option<HeldTexture>,
     buffers: Vec<Ledgered<wgpu::Buffer>>,
-    /// MO2 R28 (ME16): set when the readback wait timed out; the flag turns
-    /// true once the frame's submission completes.
+    /// MO2 R28 (ME16): set when the readback wait ended without completion
+    /// (a poll error, device loss); true once the submission completes.
     pending: Option<Arc<AtomicBool>>,
 }
 
@@ -1880,7 +1877,7 @@ impl Compositor {
     }
 
     /// MO2 R28 (ME16): recycle a read-back frame, or retain it, output
-    /// included, while its timed-out submission may still run.
+    /// included, while its unfinished submission may still run.
     fn finish_frame(&self, output: HeldTexture, mut frame: FrameResources) {
         if let Some(done) = frame.pending.take() {
             frame.output = Some(output);
@@ -2301,19 +2298,29 @@ impl Compositor {
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = sender.send(result);
             });
+        // MO2 R28 (ME16, N26): wait for completion; hang detection is the
+        // driver watchdog's, surfacing as device loss or a poll error. The
+        // map callback, not the poll status, says done. After a completed
+        // wait the callback may still be running on another thread whose
+        // submit collected it, so only then block on it.
         let wait = wgpu::PollType::Wait {
             submission_index: Some(index),
-            timeout: Some(READBACK_WAIT),
+            timeout: None,
         };
-        // MO2 R28 (ME16): the map callback, not the poll status, says done.
-        let _ = frame_poll(&self.gpu.device, wait);
-        let Ok(mapped) = receiver.try_recv() else {
+        let polled = frame_poll(&self.gpu.device, wait);
+        let mapped = match polled {
+            Ok(wgpu::PollStatus::WaitSucceeded | wgpu::PollStatus::QueueEmpty) => {
+                receiver.recv().ok()
+            }
+            _ => receiver.try_recv().ok(),
+        };
+        let Some(mapped) = mapped else {
             frame.buffers.push(buffer);
             frame.pending = Some(done);
-            return Err(MediaError::Backend(format!(
-                "gpu_readback_timeout: the frame's GPU work did not complete within \
-                 {READBACK_WAIT:?}; its resources stay charged until it does"
-            )));
+            return Err(MediaError::Backend(match polled {
+                Err(error) => format!("wgpu readback poll failed: {error}"),
+                Ok(_) => "wgpu readback callback stopped".to_owned(),
+            }));
         };
         mapped
             .map_err(|error| MediaError::Backend(format!("wgpu readback map failed: {error}")))?;

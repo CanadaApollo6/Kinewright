@@ -548,10 +548,93 @@ fn rev2_api_atlas_write_staging_is_charged() {
     assert_eq!(gpu.ledger().live_bytes() - before, atlas.texture.1);
 }
 
-/// Rereview-2 B2 → ME16: the readback wait, the one an R10 refusal passes
-/// through, is bounded at exactly 10 s.
+/// The readback wait: its own submission, no deadline (N26).
+fn waits_for_completion(wait: &wgpu::PollType) -> bool {
+    matches!(
+        wait,
+        wgpu::PollType::Wait {
+            submission_index: Some(_),
+            timeout: None,
+        }
+    )
+}
+
+/// Every charge a retained frame still holds.
+fn owned(r: &FrameResources) -> u64 {
+    let layers = r.layers.iter().map(|l| {
+        l.source.as_ref().map_or(0, |(_, t)| t.1)
+            + l.upload.as_ref().map_or(0, |(b, _)| b.1)
+            + l._uniform.1
+            + l._grade.1
+            + l._staging.1
+    });
+    layers.sum::<u64>()
+        + r.snapshots.iter().map(|(_, t)| t.1).sum::<u64>()
+        + r.validity.as_ref().map_or(0, |b| b.1)
+        + r.pooled_flags.as_ref().map_or(0, |b| b.1)
+        + r.output.as_ref().map_or(0, |t| t.1)
+        + r.buffers.iter().map(|b| b.1).sum::<u64>()
+}
+
+/// Everything the compositor holds charged, listed independently.
+fn inventory(c: &Compositor) -> u64 {
+    let atlases = c.lut_atlas_cache.lock().unwrap();
+    let pool = c.texture_pool.lock().unwrap();
+    c.dummy_accumulator.1.1
+        + c.dummy_validity.1
+        + atlases.iter().map(|a| a.texture.1).sum::<u64>()
+        + pool.shapes.values().flatten().map(|t| t.1).sum::<u64>()
+        + c.flag_pool.lock().unwrap().as_ref().map_or(0, |b| b.1)
+        + c.retired
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, r)| owned(r))
+            .sum::<u64>()
+}
+
+/// A two-layer frame through read-back entry `which`: working, monitor,
+/// delivery or matte; the top layer carries a matte, `special` blends it.
+fn entry(c: &Compositor, f: &WorkingFrame, which: usize, special: bool) -> Result<(), MediaError> {
+    let matte = [
+        ("exposure_milli_stops", 0),
+        ("matte_enabled", 1),
+        ("matte_window_count", 1),
+        ("matte_window0_shape_token", 1),
+        ("matte_window0_half_width_basis_points", 2500),
+        ("matte_window0_half_height_basis_points", 2500),
+    ];
+    let effects = [crate::mo2_fixtures::effect(1, "primary_correction", &matte)];
+    let mut top = CompositorLayer {
+        effects: &effects,
+        ..layer(f)
+    };
+    if special {
+        top.mode.blend = BlendMode::Screen;
+        top.transition.backdrop = Some([0.5, 0.0]);
+    }
+    let layers = [layer(f), top];
+    let dims = (f.width, f.height);
+    let monitor = kinewright_core::ColorContext::sdr_rec709().monitoring;
+    match which {
+        0 => c.render_working(dims, &layers).map(|_| ()),
+        1 => c.render_monitor(dims, &layers, &monitor).map(|_| ()),
+        2 => c.render_delivery(dims, &layers, &monitor).map(|_| ()),
+        _ => {
+            let target = MatteRenderTarget {
+                layer_index: 1,
+                clip: kinewright_core::ClipId(1),
+                effect: kinewright_core::EffectId(1),
+            };
+            c.render_matte(dims, &layers, None, target).map(|_| ())
+        }
+    }
+}
+
+/// N26: the readback, the wait an R10 refusal passes through, waits for its
+/// own submission to complete — no application deadline.
 #[test]
-fn rev2_runtime_refusal_readback_wait_is_bounded() {
+fn rev3_runtime_refusal_readback_waits_for_completion() {
     let Some(gpu) = fixture_gpu_or_skip() else {
         return;
     };
@@ -562,7 +645,7 @@ fn rev2_runtime_refusal_readback_wait_is_bounded() {
     let seen = std::rc::Rc::clone(&waits);
     let result = with_hook(
         move |_, wait| {
-            seen.borrow_mut().push(bound(wait));
+            seen.borrow_mut().push(waits_for_completion(wait));
             None
         },
         || c.render_working((17, 3), &[layer(&src)]),
@@ -571,14 +654,15 @@ fn rev2_runtime_refusal_readback_wait_is_bounded() {
         matches!(result, Err(MediaError::NonFiniteRender { .. })),
         "{result:?}"
     );
-    assert_eq!(*waits.borrow(), [Some(Duration::from_secs(10))]);
+    assert_eq!(*waits.borrow(), [true], "one wait, for completion");
 }
 
-/// Rereview-2 B2 → ME16: a readback that does not complete within the bound
-/// refuses typed and keeps every submitted charge (output, readback, layers)
-/// until completion is observed, then releases them exactly once.
+/// N26: a readback poll that errors (device loss, a wgpu error) without the
+/// map completing refuses and keeps every submitted charge (output,
+/// readback, layers) until completion is observed, then releases them
+/// exactly once.
 #[test]
-fn rev2_simulated_readback_timeout_keeps_submitted_charges() {
+fn rev3_readback_poll_error_keeps_submitted_charges() {
     let Some(gpu) = fixture_gpu_or_skip() else {
         return;
     };
@@ -592,19 +676,22 @@ fn rev2_simulated_readback_timeout_keeps_submitted_charges() {
     let ledger = gpu.clone();
     let result = with_hook(
         move |_, wait| {
-            assert_eq!(bound(wait), Some(Duration::from_secs(10)));
+            assert!(waits_for_completion(wait), "{wait:?}");
             seen.set(ledger.ledger().live_bytes());
             Some(Err(wgpu::PollError::Timeout))
         },
         || c.render_working((17, 64), &[layer(&src)]),
     );
     let Err(MediaError::Backend(message)) = result else {
-        panic!("a timed-out readback refuses: {result:?}");
+        panic!("an unfinished readback refuses: {result:?}");
     };
-    assert!(message.starts_with("gpu_readback_timeout:"), "{message}");
+    assert!(
+        message.starts_with("wgpu readback poll failed"),
+        "{message}"
+    );
     let live = gpu.ledger().live_bytes();
     println!(
-        "READBACK_TIMEOUT base={base} at_poll={} returned={live}",
+        "READBACK_POLL_ERROR base={base} at_poll={} returned={live}",
         at_poll.get()
     );
     assert!(
@@ -623,12 +710,151 @@ fn rev2_simulated_readback_timeout_keeps_submitted_charges() {
     settle(&gpu);
     c.sweep_retired();
     assert_eq!(retired(&c), 0);
-    let released = gpu.ledger().live_bytes();
     c.render_working((17, 64), &[layer(&src)]).unwrap();
     settle(&gpu);
     c.sweep_retired();
     assert_eq!(gpu.ledger().live_bytes(), base, "released exactly once");
-    assert!(released <= base);
     drop(c);
     assert_eq!(gpu.ledger().live_bytes(), 0);
+}
+
+/// Rereview-3 I06: repeated unfinished readbacks through every entry, normal
+/// and special, each retain all their charges; completion recovers to the
+/// baseline; teardown releases what is still pending.
+#[test]
+fn rev3_repeated_readback_poll_errors_all_entries() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let c = std::rc::Rc::new(Compositor::new(gpu.clone()));
+    let src = frame(17, 3);
+    let empty_pools = |c: &Compositor| {
+        *c.texture_pool.lock().unwrap() = TexturePool::default();
+        *c.flag_pool.lock().unwrap() = None;
+    };
+    entry(&c, &src, 0, true).unwrap();
+    empty_pools(&c);
+    let base = gpu.ledger().live_bytes();
+    for cycle in 0..3 {
+        for i in 0..16 {
+            let weak = std::rc::Rc::downgrade(&c);
+            let expected = std::rc::Rc::new(Cell::new(0));
+            let seen = std::rc::Rc::clone(&expected);
+            let ledger = gpu.clone();
+            let result = with_hook(
+                move |_, wait| {
+                    assert!(waits_for_completion(wait), "{wait:?}");
+                    let c = weak.upgrade().unwrap();
+                    // A submit may run old callbacks; completed frames may be
+                    // swept at finish, this one may not.
+                    let retired = c.retired.lock().unwrap();
+                    let completed = retired
+                        .iter()
+                        .filter(|(done, _)| done.load(Ordering::Acquire));
+                    let completed = completed.map(|(_, r)| owned(r)).sum::<u64>();
+                    seen.set(ledger.ledger().live_bytes() - completed);
+                    // Non-completion: a poll error, or a poll that returned
+                    // without the map callback.
+                    Some(if i % 2 == 0 {
+                        Err(wgpu::PollError::Timeout)
+                    } else {
+                        Ok(wgpu::PollStatus::Poll)
+                    })
+                },
+                || entry(&c, &src, i % 4, i % 8 >= 4),
+            );
+            let case = format!("cycle={cycle} i={i}");
+            assert!(
+                matches!(result, Err(MediaError::Backend(_))),
+                "{case}: {result:?}"
+            );
+            assert_eq!(
+                gpu.ledger().live_bytes(),
+                expected.get(),
+                "{case}: all retained"
+            );
+            assert_eq!(gpu.ledger().live_bytes(), inventory(&c), "{case}");
+            let before = gpu.ledger().live_bytes();
+            c.sweep_retired();
+            c.sweep_retired();
+            assert_eq!(gpu.ledger().live_bytes(), before, "{case}");
+        }
+        if cycle == 2 {
+            break;
+        }
+        settle(&gpu);
+        c.sweep_retired();
+        assert_eq!(retired(&c), 0);
+        assert_eq!(gpu.ledger().live_bytes(), base, "cycle={cycle}: recovered");
+        for which in 0..4 {
+            entry(&c, &src, which, true).unwrap();
+        }
+        empty_pools(&c);
+        assert_eq!(gpu.ledger().live_bytes(), base);
+    }
+    assert!(retired(&c) > 0, "teardown with frames pending");
+    drop(c);
+    assert_eq!(gpu.ledger().live_bytes(), 0);
+    settle(&gpu);
+    assert_eq!(gpu.ledger().live_bytes(), 0);
+}
+
+/// Rereview-3 I07: a completed map wins over an error status, on every entry.
+#[test]
+fn rev3_readback_callback_overrules_poll_error() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let c = Compositor::new(gpu.clone());
+    let src = frame(17, 3);
+    for which in 0..4 {
+        let result = with_hook(
+            |device, wait| {
+                device.poll(wait.clone()).unwrap();
+                Some(Err(wgpu::PollError::Timeout))
+            },
+            || entry(&c, &src, which, true),
+        );
+        result.unwrap();
+        assert_eq!(retired(&c), 0);
+    }
+    drop(c);
+    assert_eq!(gpu.ledger().live_bytes(), 0);
+}
+
+/// Rereview-3 I08: the frame issues one upload copy per layer — at the API,
+/// which the H10 counter alone cannot see.
+#[test]
+fn rev3_actual_upload_callsite_count() {
+    let text = include_str!("compositor.rs").replace("\r\n", "\n");
+    let function = text.split("fn copy_uploads(").nth(1).unwrap();
+    let function = function.split("pub(crate) struct Ledgered").next().unwrap();
+    assert_eq!(function.matches(".copy_buffer_to_texture(").count(), 1);
+}
+
+/// N26 (the CI frame-14 failure): another thread's submit can collect a
+/// completed readback's map callback and run it after this thread's wait
+/// returned. Readbacks on threads sharing one device must never refuse.
+#[test]
+fn rev3_concurrent_readbacks_never_refuse() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let threads = (0..8)
+        .map(|_| {
+            let gpu = gpu.clone();
+            std::thread::spawn(move || {
+                let c = Compositor::new(gpu);
+                let src = frame(8, 8);
+                (0..600)
+                    .filter(|_| c.render_working((8, 8), &[layer(&src)]).is_err())
+                    .count()
+            })
+        })
+        .collect::<Vec<_>>();
+    let refused = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .sum::<usize>();
+    assert_eq!(refused, 0, "completed readbacks refused");
 }
