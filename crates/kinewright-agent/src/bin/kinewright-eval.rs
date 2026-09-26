@@ -2538,7 +2538,7 @@ fn fixture_cc7_log_like() -> Result<PreparedFixture, EvalError> {
             "the CC7 inverse cube could not be named {CC7_LOG_CUBE_FILE_NAME}: {error}"
         ))
     })?;
-    let saved = serde_json::to_vec_pretty(&document)
+    let saved = kinewright_project::serialize_project_document(&document)
         .map_err(|error| EvalError::Fixture(error.to_string()))?;
     fs::write(&project_path, saved).map_err(|error| {
         EvalError::Fixture(format!(
@@ -2965,7 +2965,7 @@ fn fixture_au6_location_dialogue() -> Result<PreparedFixture, EvalError> {
         au6_fixture_from_sources(&media, Au6Scenario::LocationDialogue)?;
     let temporary = TempDirectory::new("au6-location-project");
     let project_path = temporary.path(AU6_LOCATION_PROJECT_FILE_NAME);
-    let saved = serde_json::to_vec_pretty(&document)
+    let saved = kinewright_project::serialize_project_document(&document)
         .map_err(|error| EvalError::Fixture(error.to_string()))?;
     fs::write(&project_path, saved).map_err(|error| {
         EvalError::Fixture(format!(
@@ -5261,22 +5261,24 @@ mod tests {
         // and refuses newer ones naming the version.
         assert!(check_saved_document_format(br"{}").is_ok());
         assert!(check_saved_document_format(br#"{"format_version": 1}"#).is_ok());
+        assert!(check_saved_document_format(br#"{"format_version": 2}"#).is_ok());
         let error = check_saved_document_format(br#"{"format_version": 999}"#).unwrap_err();
         assert!(
-            format!("{error}").contains("newer format_version 999 > 1"),
+            format!("{error}").contains("newer format_version 999 > 2"),
             "unexpected refusal text: {error}"
         );
-        // N5/G2: the boundary is exact — v2 refuses, and the u32 ceiling and
+        // N5/G2: the boundary is exact — v3 refuses (MO2 R7: 2 is the
+        // maximum supported), and the u32 ceiling and
         // past-u32 oversize refuse through N4/F9's saturation, naming the
         // saturated version.
         for (bytes, named) in [
-            (&br#"{"format_version": 2}"#[..], "2"),
+            (&br#"{"format_version": 3}"#[..], "3"),
             (&br#"{"format_version": 4294967295}"#[..], "4294967295"),
             (&br#"{"format_version": 99999999999}"#[..], "4294967295"),
         ] {
             let error = check_saved_document_format(bytes).unwrap_err();
             assert!(
-                format!("{error}").contains(&format!("newer format_version {named} > 1")),
+                format!("{error}").contains(&format!("newer format_version {named} > 2")),
                 "unexpected refusal text for {named}: {error}"
             );
         }
@@ -5296,7 +5298,7 @@ mod tests {
         };
         let error = rerender_document(&document_path, &options).unwrap_err();
         assert!(
-            format!("{error}").contains("newer format_version 999 > 1"),
+            format!("{error}").contains("newer format_version 999 > 2"),
             "unexpected rerender refusal text: {error}"
         );
         std::fs::remove_file(&document_path).unwrap();

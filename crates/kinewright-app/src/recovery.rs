@@ -65,6 +65,8 @@ struct JournalHeader {
     /// The project `format_version` the writing build stamped: its own
     /// `PROJECT_FORMAT_VERSION` const, not the session's read version — the
     /// journal describes the bytes this build wrote (`IN2B` §4 rule 5, N-4).
+    /// MO2 R7: the maximum supported, never the initial snapshot's minimum —
+    /// later operations may need features the snapshot lacks.
     /// The journal's own strict `format_version` gate above is unchanged:
     /// the two versions answer different questions ("can I parse this
     /// journal?" vs "can I run this project?").
@@ -934,7 +936,7 @@ mod tests {
         AssetId, ClipId, Command, Effect, EffectId, Event, Marker, MarkerId, MediaAsset, MediaKind,
         Operation, ParamValue, Rational, TimeCode, Title, Track, TrackId, TrackKind,
     };
-    use kinewright_project::journal_file_name;
+    use kinewright_project::{journal_file_name, min_required_format_version};
     use proptest::prelude::*;
 
     use super::*;
@@ -1710,6 +1712,40 @@ mod tests {
         bytes.extend_from_slice(header_line);
         bytes.push(b'\n');
         bytes
+    }
+
+    /// MO2 R7: a journal whose initial snapshot needs only v1 still stamps
+    /// the maximum supported version, because an appended MO2 operation can
+    /// need v2 — the header is never downgraded to the snapshot's minimum.
+    #[test]
+    fn mo2_v1_snapshot_journal_keeps_the_maximum_writer_version() {
+        let initial = Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: Vec::new(),
+            }],
+            ..Document::default()
+        };
+        assert_eq!(min_required_format_version(&initial), 1);
+        let command = JournalCommand::Do(Operation::AddSolidClip {
+            track: TrackId(1),
+            timeline_start: TimeCode(0),
+            duration: TimeCode(30),
+            color: kinewright_core::SolidColor { r: 9, g: 8, b: 7 },
+        });
+        let directory = TestDirectory::new("mo2-writer-version");
+        let mut writer = JournalWriter::create(&directory.journal(), None, &initial).unwrap();
+        writer.append(&command).unwrap();
+        drop(writer);
+        let Inspection::Recoverable(report) = inspect_path(&directory.journal()) else {
+            panic!("expected a recoverable journal");
+        };
+        assert_eq!(report.document, execute(&initial, &[command]));
+        assert_eq!(min_required_format_version(&report.document), 2);
+        assert_eq!(report.writer_format_version, PROJECT_FORMAT_VERSION);
+        assert!(report.writer_format_version >= min_required_format_version(&report.document));
     }
 
     /// `IN2B` §4 rule 5's parse/write halves: pre-Part-B headers (no key)

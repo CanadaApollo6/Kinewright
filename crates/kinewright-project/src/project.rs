@@ -10,8 +10,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use kinewright_core::{
-    Document, IncidentCode, IncidentEvidence, IncidentObservation, IncidentSubject, LabelIncident,
-    LutAssetId, PROJECT_FORMAT_VERSION, RejectionIncident, TimelineRevision,
+    BlendMode, ClipContent, Document, IncidentCode, IncidentEvidence, IncidentObservation,
+    IncidentSubject, LabelIncident, LutAssetId, PROJECT_FORMAT_VERSION, RejectionIncident,
+    TimelineRevision,
 };
 use kinewright_media::LutStore;
 
@@ -244,7 +245,7 @@ pub struct ProjectFile {
 }
 
 /// Whether the session that read `read_version` may save over its own file
-/// (`IN2B` §4 rule 3).
+/// (`IN2B` §4 rule 3): at most the maximum version this build supports.
 ///
 /// Newer files open (rule 4) but never overwrite: the in-memory document has
 /// already lost the newer writer's fields at parse, and overwriting would
@@ -368,15 +369,43 @@ pub fn canonical_project_identity(path: &Path) -> Result<PathBuf, ProjectIdentit
     })
 }
 
+/// MO2 R7: the lowest format version able to read `document` — the version
+/// the writer stamps.
+///
+/// 2 iff the document uses adjustment or solid content, a non-`normal`
+/// blend, or a transition outside the M20 three; else 1, so a file without
+/// MO2 features keeps its v1 bytes. v2 is one union: CC8 S2 adds its
+/// disjuncts here (N6 R-B), never a rival predicate.
+#[must_use]
+pub fn min_required_format_version(document: &Document) -> u32 {
+    let uses_v2 = document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .any(|clip| {
+            matches!(
+                clip.content,
+                ClipContent::Adjustment | ClipContent::Solid(_)
+            ) || clip.blend_mode != BlendMode::Normal
+                || clip.transition_in.as_ref().is_some_and(|transition| {
+                    !matches!(
+                        transition.name.as_str(),
+                        "crossfade" | "fade_from_black" | "fade_from_white"
+                    )
+                })
+        });
+    if uses_v2 { 2 } else { 1 }
+}
+
 /// Serialise a document inside the file envelope (`IN2B` §4 rules 1–2).
 ///
-/// The writer stamps its own `PROJECT_FORMAT_VERSION` const — never the
-/// session's read version: the bytes are this build's, whatever it opened.
+/// The writer stamps [`min_required_format_version`] — never the session's
+/// read version: the bytes are this build's, whatever it opened (MO2 R7).
 /// # Errors
 /// Returns `ProjectSaveError::Serialize` when the document does not serialise.
 pub fn serialize_project_document(document: &Document) -> Result<String, ProjectSaveError> {
     let file = ProjectFile {
-        format_version: PROJECT_FORMAT_VERSION,
+        format_version: min_required_format_version(document),
         document: document.clone(),
     };
     serde_json::to_string_pretty(&file)
@@ -717,5 +746,198 @@ mod tests {
             "7f899f0203ea23fb",
             "the fixture envelope keeps its pre-cutover digest"
         );
+    }
+
+    /// The M20-corpus envelope bytes on `13e3cb1`, before MO2 R7.
+    const V1_RICH_LEN: usize = 2818;
+    const V1_RICH_DIGEST: &str = "973547bf2726430b";
+
+    fn mo2_v1_document() -> Document {
+        use kinewright_core::{
+            AssetId, MediaAsset, MediaKind, MediaSourceFingerprint, Operation, Rational, TimeCode,
+            Track, TrackId, TrackKind, Transition,
+        };
+        let mut doc = Document {
+            fps: Rational::new(30, 1).expect("30 fps"),
+            ..Document::default()
+        };
+        let asset = MediaAsset {
+            id: AssetId(1),
+            path: PathBuf::from("a1.mp4"),
+            name: "a1".to_owned(),
+            duration: TimeCode(600),
+            fps: Rational::new(30, 1).expect("30 fps"),
+            kind: MediaKind::AudioVideo,
+            resolution: Some((1_920, 1_080)),
+            source_fingerprint: MediaSourceFingerprint::default(),
+            color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
+        };
+        let track = Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: Vec::new(),
+        };
+        Operation::AddTrack { track }
+            .apply(&mut doc)
+            .expect("the track adds");
+        Operation::AddAsset { asset }
+            .apply(&mut doc)
+            .expect("the asset adds");
+        for at in [0, 60, 120, 180] {
+            Operation::AddClip {
+                track: TrackId(1),
+                asset: AssetId(1),
+                at: TimeCode(at),
+                source: TimeCode(0)..TimeCode(60),
+            }
+            .apply(&mut doc)
+            .expect("the clip adds");
+        }
+        let ids: Vec<_> = doc.tracks[0].clips.iter().map(|clip| clip.id).collect();
+        for (clip, name) in
+            ids.into_iter()
+                .skip(1)
+                .zip(["crossfade", "fade_from_black", "fade_from_white"])
+        {
+            Operation::AddTransition {
+                clip,
+                transition: Transition {
+                    name: name.to_owned(),
+                    duration: TimeCode(10),
+                },
+            }
+            .apply(&mut doc)
+            .expect("an M20 transition adds");
+        }
+        doc
+    }
+
+    /// MO2 §13 gate 11 (R7): MO2-feature files stamp 2 and reopen as 2; the
+    /// v1 corpus — every M20 transition included — stays 1 and writes the
+    /// pre-MO2 bytes (digests captured on `13e3cb1`, before the predicate).
+    #[test]
+    fn v2_stamps_only_when_used() {
+        use kinewright_core::{BlendMode, Operation, SolidColor, TimeCode, TrackId, Transition};
+        let fixture: &[u8] =
+            include_bytes!("../../kinewright-core/tests/fixtures/pre_m13_project.json");
+        let legacy: ProjectFile = serde_json::from_slice(fixture).expect("the fixture parses");
+        let v1 = mo2_v1_document();
+        for doc in [&Document::default(), &legacy.document, &v1] {
+            assert_eq!(min_required_format_version(doc), 1);
+            let json = serialize_project_document(doc).expect("v1 serialises");
+            assert!(!json.contains("format_version"), "v1 skips the key");
+        }
+        let v1_json = serialize_project_document(&v1).expect("v1 serialises");
+        assert_eq!(
+            (v1_json.len(), digest_bytes(v1_json.as_bytes()).as_str()),
+            (V1_RICH_LEN, V1_RICH_DIGEST),
+            "the M20 corpus writes its pre-MO2 bytes"
+        );
+
+        let first = v1.tracks[0].clips[0].id;
+        let features = [
+            Operation::AddAdjustmentClip {
+                track: TrackId(1),
+                timeline_start: TimeCode(240),
+                duration: TimeCode(30),
+                effects: Vec::new(),
+            },
+            Operation::AddSolidClip {
+                track: TrackId(1),
+                timeline_start: TimeCode(240),
+                duration: TimeCode(30),
+                color: SolidColor { r: 1, g: 2, b: 3 },
+            },
+            Operation::SetClipBlendMode {
+                clip: first,
+                blend_mode: BlendMode::Screen,
+            },
+            Operation::AddTransition {
+                clip: first,
+                transition: Transition {
+                    name: "push_left".to_owned(),
+                    duration: TimeCode(10),
+                },
+            },
+        ];
+        let dir = TempDirectory::new("mo2-gate11-v2");
+        for (index, feature) in features.into_iter().enumerate() {
+            let mut doc = v1.clone();
+            feature.apply(&mut doc).expect("the MO2 feature applies");
+            assert_eq!(min_required_format_version(&doc), 2, "{feature:?}");
+            let path = dir.path(&format!("mo2-{index}.kinewright"));
+            let report = write_project_document(&doc, &path, None).expect("v2 writes");
+            let bytes = fs::read_to_string(&path).expect("v2 reads");
+            assert!(
+                bytes.starts_with("{\n  \"format_version\": 2,"),
+                "v2 stamps first: {feature:?}"
+            );
+            let (reopened, version, digest) = load_document(&path).expect("v2 reopens");
+            assert_eq!((reopened, version), (doc, 2));
+            assert_eq!(digest, report.digest);
+            assert!(can_overwrite_save(version), "this build overwrites v2");
+        }
+    }
+
+    /// MO2 R7 old-reader behaviour, simulated with a v3 file against this
+    /// reader: unknown content fails at parse; an unknown transition parses
+    /// then fails validation; an otherwise parseable newer file opens
+    /// advisory with its version, and overwrite-save is refused.
+    #[test]
+    fn mo2_old_readers_distinguish_parse_validation_and_advisory() {
+        use kinewright_core::{OpError, Operation, TimeCode, TrackId, Transition};
+        let mut doc = mo2_v1_document();
+        let first = doc.tracks[0].clips[0].id;
+        for op in [
+            Operation::AddAdjustmentClip {
+                track: TrackId(1),
+                timeline_start: TimeCode(240),
+                duration: TimeCode(30),
+                effects: Vec::new(),
+            },
+            Operation::AddTransition {
+                clip: first,
+                transition: Transition {
+                    name: "push_left".to_owned(),
+                    duration: TimeCode(10),
+                },
+            },
+        ] {
+            op.apply(&mut doc).expect("the MO2 feature applies");
+        }
+        let v2 = serialize_project_document(&doc).expect("v2 serialises");
+        let newer = v2.replace("\"format_version\": 2", "\"format_version\": 3");
+        let dir = TempDirectory::new("mo2-old-readers");
+        let load = |name: &str, bytes: &str| {
+            let path = dir.path(name);
+            fs::write(&path, bytes).expect("the file writes");
+            load_document(&path)
+        };
+
+        let error = load(
+            "content.kinewright",
+            &newer.replace("\"adjustment\"", "\"hologram\""),
+        )
+        .expect_err("unknown content fails");
+        assert!(error.contains("unknown variant `hologram`"), "{error}");
+
+        let error = load(
+            "transition.kinewright",
+            &newer.replace("push_left", "iris_open"),
+        )
+        .expect_err("an unknown transition fails");
+        assert_eq!(
+            error,
+            OpError::UnknownTransition("iris_open".to_owned()).to_string()
+        );
+
+        let (opened, version, _) =
+            load("advisory.kinewright", &newer).expect("a parseable newer file opens");
+        assert!(opened == doc, "the newer file keeps its content");
+        assert_eq!(version, 3, "the newer file reports its version");
+        assert!(!can_overwrite_save(version), "overwrite-save refuses");
+        assert!(can_overwrite_save(2) && can_overwrite_save(1));
     }
 }

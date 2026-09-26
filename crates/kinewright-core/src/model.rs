@@ -1251,14 +1251,16 @@ fn effect_references_lut_asset(effect: &Effect, id: LutAssetId) -> bool {
             })
 }
 
-/// The project-file format version this build writes (`IN2B` §4 rule 1).
+/// The maximum project-file format version this build reads and may
+/// overwrite (`IN2B` §4 rule 1; MO2 R7).
 ///
-/// Core-owned so the app-side envelope (`ProjectFile`) and the eval binary —
-/// which has no app dependency — gate on the one reader,
-/// [`project_format_version`]. Every file written before the envelope is
-/// version 1 by definition; bumping this constant is a format change with a
-/// migration story, not a flag day.
-pub const PROJECT_FORMAT_VERSION: u32 = 1;
+/// Core-owned so the app-side envelope (`ProjectFile`) and the eval binary
+/// gate on the one reader, [`project_format_version`]. Every file written
+/// before the envelope is version 1 by definition. Writers stamp the
+/// document's minimum required version (`kinewright-project`'s
+/// `min_required_format_version`), so a file without MO2 features stays 1;
+/// recovery journal headers carry this maximum.
+pub const PROJECT_FORMAT_VERSION: u32 = 2;
 
 /// The `format_version` of serialised project-file bytes (`IN2B` §4 rule 1).
 ///
@@ -1861,7 +1863,7 @@ mod tests {
     /// envelope tests and stage D2's eval test drive through real files.
     #[test]
     fn project_format_version_reads_the_top_level_key() {
-        assert_eq!(PROJECT_FORMAT_VERSION, 1);
+        assert_eq!(PROJECT_FORMAT_VERSION, 2);
         // Valid documents, differentially checked against `serde_json`.
         for document in [
             "{}",

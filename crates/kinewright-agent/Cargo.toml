@@ -16,7 +16,13 @@ repository.workspace = true
 # `kinewright-app` takes this crate with `default-features = false` instead, so
 # the shipping binary links an agent library with no fixture data in it.
 default = ["eval-harness"]
-eval-harness = ["kinewright-core/test-util", "kinewright-media/test-util"]
+# MO2 R7: the harness saves its project fixtures through the shared project
+# writer, so they stamp the same minimum-required format version.
+eval-harness = [
+    "kinewright-core/test-util",
+    "kinewright-media/test-util",
+    "dep:kinewright-project",
+]
 
 [dependencies]
 axum.workspace = true
@@ -25,6 +31,7 @@ crossbeam-channel.workspace = true
 image.workspace = true
 kinewright-core = { path = "../kinewright-core" }
 kinewright-media = { path = "../kinewright-media" }
+kinewright-project = { path = "../kinewright-project", optional = true }
 reqwest.workspace = true
 rmcp.workspace = true
 schemars.workspace = true

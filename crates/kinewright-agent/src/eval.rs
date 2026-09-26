@@ -1954,7 +1954,8 @@ fn produce_deliverable(
         ));
         return finish_deliverable(result);
     }
-    match serde_json::to_vec_pretty(document)
+    // MO2 R7: the shared project writer stamps the minimum-required version.
+    match kinewright_project::serialize_project_document(document)
         .map_err(|error| error.to_string())
         .and_then(|json| fs::write(&result.document_path, json).map_err(|error| error.to_string()))
     {
