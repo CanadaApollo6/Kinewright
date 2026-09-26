@@ -123,8 +123,6 @@ var<private> matte_debug_coverage: f32 = 0.0;
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    // MO2 R14: output-space NDC for transition coverage.
-    @location(1) ndc: vec2<f32>,
 };
 
 @vertex
@@ -167,7 +165,6 @@ fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let translated = rotated + anchor + vec2<f32>(params.offset_x, -params.offset_y);
     output.position = vec4<f32>(translated, 0.0, 1.0);
     output.uv = uvs[vertex_index];
-    output.ndc = translated;
     return output;
 }
 
@@ -944,10 +941,13 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if params.fade_mix > 0.0 {
         alpha = 1.0;
     }
-    if input.uv.x < params.crop_left
-        || input.uv.x > 1.0 - params.crop_right
-        || input.uv.y < params.crop_top
-        || input.uv.y > 1.0 - params.crop_bottom {
+    // MO2 ME5: a rasterized centre on the quad edge interpolates uv a few
+    // ulps outside [0, 1]; the crop tests the uv the rasterizer meant.
+    let crop_uv = clamp(input.uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    if crop_uv.x < params.crop_left
+        || crop_uv.x > 1.0 - params.crop_right
+        || crop_uv.y < params.crop_top
+        || crop_uv.y > 1.0 - params.crop_bottom {
         alpha = 0.0;
     }
     if params.mask_shape > 0.5 {
@@ -971,12 +971,12 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
         alpha *= mask_alpha;
     }
-    // MO2 R21: output-space coverage, alpha-multiplied, pixel centres.
+    // MO2 R21: output-space coverage, alpha-multiplied, at the exact pixel
+    // centre against the host's pixel-centre edge (ME5).
     if params.coverage_on > 0.5 {
-        let screen = vec2<f32>(input.ndc.x + 1.0, 1.0 - input.ndc.y) * 0.5;
-        var coord = screen.x;
+        var coord = input.position.x;
         if params.coverage_axis > 0.5 {
-            coord = screen.y;
+            coord = input.position.y;
         }
         var keep = coord >= params.coverage_edge;
         if params.coverage_on < 1.5 {

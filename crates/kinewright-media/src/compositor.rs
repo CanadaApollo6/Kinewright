@@ -762,10 +762,11 @@ pub(crate) struct LayerParams {
     pub(crate) anchor_y: f32,
     /// MO2 R14: blend selector, see [`blend_word`]; 7 draws a Push backdrop.
     pub(crate) blend_mode: f32,
-    /// MO2 R14/R21: output-space coverage — the edge in screen fractions,
-    /// the axis (0 = x, 1 = y), and on (0 = off, 1 = keep `< edge`,
-    /// 2 = keep `>= edge`). The backdrop draw carries its displacement in
-    /// `coverage_edge` along `coverage_axis`.
+    /// MO2 R14/R21: output-space coverage — the edge (a screen fraction
+    /// from [`params_for`], pixels after [`pixel_coverage_edge`]), the axis
+    /// (0 = x, 1 = y), and on (0 = off, 1 = keep `< edge`, 2 = keep
+    /// `>= edge`). The backdrop draw carries its displacement (a screen
+    /// fraction) in `coverage_edge` along `coverage_axis`.
     pub(crate) coverage_edge: f32,
     pub(crate) coverage_axis: f32,
     pub(crate) coverage_on: f32,
@@ -1593,6 +1594,7 @@ impl Compositor {
         {
             params.frame_aspect = height as f32 / width as f32;
         }
+        pixel_coverage_edge(&mut params, width, height);
         params.blend_mode = blend_word(layer.mode.blend);
         // MO2 R10: a `Normal` adjustment is validated against its snapshot.
         if layer.mode.role == LayerRole::Adjustment && layer.mode.blend.is_normal() {
@@ -3202,6 +3204,24 @@ pub(crate) fn params_for(effects: &[Effect], transition: TransitionRenderParams)
         params.coverage_axis = f32::from(u8::from(coverage.axis == TransitionAxis::Vertical));
     }
     params
+}
+
+/// MO2 R21 (ME5): move the coverage edge from a screen fraction to output
+/// pixels, rounded up to the next pixel centre, so both lanes compare the
+/// exact centre `i + 0.5` and keep `< edge` exactly when `(i + 0.5) / n <
+/// edge`. Fragment positions are exact pixel centres; an interpolated NDC
+/// is not.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn pixel_coverage_edge(params: &mut LayerParams, width: u32, height: u32) {
+    if params.coverage_on != 0.0 {
+        let n = if params.coverage_axis > 0.5 {
+            height
+        } else {
+            width
+        };
+        let edge = f64::from(params.coverage_edge) * f64::from(n);
+        params.coverage_edge = ((edge - 0.5).ceil() + 0.5) as f32;
+    }
 }
 
 #[allow(clippy::cast_precision_loss)]
