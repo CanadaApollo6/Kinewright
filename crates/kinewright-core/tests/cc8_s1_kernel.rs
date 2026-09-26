@@ -1807,16 +1807,14 @@ fn pb1_storage_boundary() {
         -3.776_475,
         -46.415_9,
     ] {
-        let stored = f16_store(as_f32(x));
-        let err = (f64::from(stored) - x).abs();
-        assert!(pb1_store_ok(err, x), "PB1 store of {x}: err={err}");
+        let stored = f64::from(f16_store(as_f32(x)));
+        assert!(pb1_store_ok(stored, x), "PB1 store of {x}: {stored}");
     }
     // The truncating substitute violates 0.5 ULP (control: the bound bites).
-    let bad = truncating_f16_store_sub(1.0006);
-    let bad_err = (f64::from(bad) - 1.0006).abs();
+    let bad = f64::from(truncating_f16_store_sub(1.0006));
     assert!(
-        !pb1_store_ok(bad_err, 1.0006),
-        "truncation must violate PB1: err={bad_err}"
+        !pb1_store_ok(bad, 1.0006),
+        "truncation must violate PB1: {bad}"
     );
     // Stage-pair round trips through an f16 store, ≤ 2 ULP in the starting
     // domain (pipeline direction: decode→encode).
@@ -1825,14 +1823,17 @@ fn pb1_storage_boundary() {
     let scene = reference::hlg_inverse_oetf(0.75).unwrap();
     let sig2 = reference::hlg_oetf(f64::from(f16_store(as_f32(scene)))).unwrap();
     assert!(
-        pb1_pair_ok((sig2 - 0.75).abs(), 0.75),
+        pb1_pair_ok([sig2, 0.0, 0.0], [0.75, 0.0, 0.0]),
         "PB1b signal: {sig2}"
     );
     // (ii) scene → working → f16 → scene.
     for s in [0.01, 0.26, 1.0] {
         let w = reference::scene_to_working([s, 0.0, 0.0], sw).unwrap()[0];
         let s2 = f64::from(f16_store(as_f32(w))) * sw;
-        assert!(pb1_pair_ok((s2 - s).abs(), s), "PB1b scene {s}: {s2}");
+        assert!(
+            pb1_pair_ok([s2, 0.0, 0.0], [s, 0.0, 0.0]),
+            "PB1b scene {s}: {s2}"
+        );
     }
     // (iii) 2020 → 709 → f16 → 2020 through the production f32 path.
     // CE4: triplet ULP is measured against the max |channel|.
@@ -1846,13 +1847,7 @@ fn pb1_storage_boundary() {
         let t = apply_matrix(BT2020_TO_BT709, v32).unwrap();
         let t16 = [f16_store(t[0]), f16_store(t[1]), f16_store(t[2])];
         let b = apply_matrix(BT709_TO_BT2020, t16).unwrap();
-        for (i, (bb, e)) in b.iter().zip(v.iter()).enumerate() {
-            let err = (f64::from(*bb) - e).abs();
-            assert!(
-                pb1_pair_ok(err, max_abs_3(v)),
-                "PB1b matrix {v:?}[{i}]: err={err}"
-            );
-        }
+        assert!(pb1_pair_ok(f64_3(b), v), "PB1b matrix {v:?}: {b:?}");
     }
     // Erratum visibility: the saturated small channel FAILS the old
     // per-channel reading (R2 measured 8.57 ULP of 2^-10).
@@ -1863,12 +1858,15 @@ fn pb1_storage_boundary() {
         [f16_store(st[0]), f16_store(st[1]), f16_store(st[2])],
     )
     .unwrap();
-    let blue_err = (f64::from(sb[2]) - 2f64.powi(-10)).abs();
+    let blue = f64::from(sb[2]);
     assert!(
-        !pb1_pair_ok(blue_err, 2f64.powi(-10)),
-        "saturated blue must fail per-channel 2 ULP: {blue_err}"
+        !pb1_pair_ok([0.0, 0.0, blue], [0.0, 0.0, 2f64.powi(-10)]),
+        "saturated blue must fail per-channel 2 ULP: {blue}"
     );
-    assert!(pb1_pair_ok(blue_err, 1.0), "…and pass CE4's ULP(max)");
+    assert!(
+        pb1_pair_ok(f64_3(sb), [1.0, 2f64.powi(-10), 2f64.powi(-10)]),
+        "…and pass CE4's ULP(max)"
+    );
     // (iv) display → scene → f16 → display at reference white.
     let sc = reference::display_to_scene([203.0, 203.0, 203.0], 1000.0, 1.2).unwrap();
     let sc16 = [
@@ -1877,11 +1875,7 @@ fn pb1_storage_boundary() {
         f64::from(f16_store(as_f32(sc[2]))),
     ];
     let d2 = reference::scene_to_display(sc16, 1000.0, 1.2).unwrap();
-    assert!(
-        pb1_pair_ok((d2[0] - 203.0).abs(), 203.0),
-        "PB1b display: {}",
-        d2[0]
-    );
+    assert!(pb1_pair_ok(d2, [203.0; 3]), "PB1b display: {d2:?}");
 }
 
 #[test]
@@ -1911,23 +1905,9 @@ fn pb2_working_domain_repeated_chain() {
                 f64::from(w0[1]) * grown,
                 f64::from(w0[2]) * grown,
             ];
-            let w64 = [f64::from(w[0]), f64::from(w[1]), f64::from(w[2])];
-            let err_max = (w64[0] - e[0])
-                .abs()
-                .max((w64[1] - e[1]).abs())
-                .max((w64[2] - e[2]).abs());
-            assert!(
-                ce4_rel_ok(err_max, max_abs_3(e)),
-                "PB2 grade rel W={white}: {}",
-                err_max / max_abs_3(e)
-            );
-            for (i, (a, ee)) in w64.iter().zip(e.iter()).enumerate() {
-                let err = (a - ee).abs();
-                assert!(
-                    pb2_abs_ok(err, max_abs_3(e)),
-                    "PB2 grade abs W={white}[{i}]: err={err}"
-                );
-            }
+            let w64 = f64_3(w);
+            assert!(ce4_rel_ok(w64, e), "PB2 grade rel W={white}: {w64:?}");
+            assert!(pb2_abs_ok(w64, e), "PB2 grade abs W={white}: {w64:?}");
         }
     }
     // R2 B3: three alternating matrix pairs through f16 stores (f32).
@@ -1942,23 +1922,9 @@ fn pb2_working_domain_repeated_chain() {
             v = apply_matrix(BT709_TO_BT2020, v).unwrap();
             v = [f16_store(v[0]), f16_store(v[1]), f16_store(v[2])];
         }
-        let v64 = [f64::from(v[0]), f64::from(v[1]), f64::from(v[2])];
-        let err_max = (v64[0] - start[0])
-            .abs()
-            .max((v64[1] - start[1]).abs())
-            .max((v64[2] - start[2]).abs());
-        assert!(
-            ce4_rel_ok(err_max, max_abs_3(start)),
-            "PB2 matrix rel {start:?}: {}",
-            err_max / max_abs_3(start)
-        );
-        for (i, (a, e)) in v64.iter().zip(start.iter()).enumerate() {
-            let err = (a - e).abs();
-            assert!(
-                pb2_abs_ok(err, max_abs_3(start)),
-                "PB2 matrix abs {start:?}[{i}]: err={err}"
-            );
-        }
+        let v64 = f64_3(v);
+        assert!(ce4_rel_ok(v64, start), "PB2 matrix rel {start:?}: {v64:?}");
+        assert!(pb2_abs_ok(v64, start), "PB2 matrix abs {start:?}: {v64:?}");
     }
     // Erratum visibility: the saturated chain FAILS the old per-channel
     // reading (R2 measured 9 ULP / 0.88% on blue).
@@ -1969,10 +1935,10 @@ fn pb2_working_domain_repeated_chain() {
         old = apply_matrix(BT709_TO_BT2020, old).unwrap();
         old = [f16_store(old[0]), f16_store(old[1]), f16_store(old[2])];
     }
-    let blue_err = (f64::from(old[2]) - 2f64.powi(-10)).abs();
+    let blue = f64::from(old[2]);
     assert!(
-        !ce4_rel_ok(blue_err, 2f64.powi(-10)),
-        "saturated chain must fail per-channel 0.3%: {blue_err}"
+        !ce4_rel_ok([0.0, 0.0, blue], [0.0, 0.0, 2f64.powi(-10)]),
+        "saturated chain must fail per-channel 0.3%: {blue}"
     );
     // Domain edge w = 2^-10 exactly (scalar path: per-value ULP).
     let sw = s_white(203.0, 1000.0, 1.2).unwrap();
@@ -1982,10 +1948,9 @@ fn pb2_working_domain_repeated_chain() {
     let d = scene_to_display(s, 1000.0, 1.2).unwrap();
     let s2 = display_to_scene(d, 1000.0, 1.2).unwrap();
     let w2 = f16_store(s2[0] / sw);
-    let edge_err = (f64::from(w2) - f64::from(e)).abs();
     assert!(
-        pb2_abs_ok(edge_err, f64::from(e)),
-        "PB2 edge: err={edge_err}"
+        pb2_abs_ok([f64::from(w2), 0.0, 0.0], [f64::from(e), 0.0, 0.0]),
+        "PB2 edge: {w2}"
     );
 }
 
@@ -2099,29 +2064,41 @@ fn pb3_sub1_tol() -> f64 {
     0.05
 }
 
-/// PB1 store acceptance: one f32→f16 store errs ≤ 0.5 ULP of the value
+// Actual-vs-reference acceptance helpers (verify2 S2): each takes the
+// ACTUAL and REFERENCE values and computes the error and the norm inside,
+// with its limit fixed inside, so no caller passes a precomputed error,
+// norm or multiplier. Scalar callers pass `[x, 0, 0]`.
+
+/// ‖actual − reference‖∞ over a triplet.
+fn err_inf(actual: [f64; 3], reference: [f64; 3]) -> f64 {
+    (0..3)
+        .map(|i| (actual[i] - reference[i]).abs())
+        .fold(0.0, f64::max)
+}
+
+/// PB1 store acceptance: one f32→f16 store of `x` errs ≤ 0.5 ULP(x)
 /// (1e-6 slack absorbs the f64 difference's rounding; a truncating store
-/// at up to 1 ULP still fails). Fixed limit (verify S1). Shared (G4).
-fn pb1_store_ok(err: f64, x: f64) -> bool {
-    err <= 0.5 * f16_ulp_of(x) * (1.0 + 1e-6)
+/// at up to 1 ULP still fails). Shared (G4).
+fn pb1_store_ok(stored: f64, x: f64) -> bool {
+    (stored - x).abs() <= 0.5 * f16_ulp_of(x) * (1.0 + 1e-6)
 }
 
-/// PB1 stage-pair acceptance: ≤ 2 ULP of `max_ch` (CE4: the triplet's max
-/// |channel|; scalar callers pass the value). The limit is fixed inside
-/// the helper — no caller-chosen multiplier (verify S1). Shared (G4).
-fn pb1_pair_ok(err: f64, max_ch: f64) -> bool {
-    err <= 2.0 * f16_ulp_of(max_ch)
+/// PB1 stage-pair acceptance: every channel within 2 ULP of the
+/// REFERENCE triplet's max |channel| (CE4). Shared (G4).
+fn pb1_pair_ok(actual: [f64; 3], reference: [f64; 3]) -> bool {
+    err_inf(actual, reference) <= 2.0 * f16_ulp_of(max_abs_3(reference))
 }
 
-/// PB2 absolute acceptance: ≤ 4 ULP of `max_ch` (CE4 triplet max; scalar
-/// callers pass the value). Fixed limit (verify S1). Shared (G4).
-fn pb2_abs_ok(err: f64, max_ch: f64) -> bool {
-    err <= 4.0 * f16_ulp_of(max_ch)
+/// PB2 absolute acceptance: every channel within 4 ULP of the REFERENCE
+/// triplet's max |channel| (CE4). Shared (G4).
+fn pb2_abs_ok(actual: [f64; 3], reference: [f64; 3]) -> bool {
+    err_inf(actual, reference) <= 4.0 * f16_ulp_of(max_abs_3(reference))
 }
 
-/// CE4 relative bound: ‖err‖∞/‖w‖∞ ≤ 0.003. Shared predicate (G4).
-fn ce4_rel_ok(err_max: f64, wmax: f64) -> bool {
-    err_max / wmax <= 0.003
+/// CE4 relative acceptance: ‖actual − reference‖∞ / ‖reference‖∞ ≤ 0.003.
+/// Shared (G4).
+fn ce4_rel_ok(actual: [f64; 3], reference: [f64; 3]) -> bool {
+    err_inf(actual, reference) / max_abs_3(reference) <= 0.003
 }
 
 /// PB4 10-bit major-code bound. Shared predicate (G4).
@@ -2160,36 +2137,50 @@ fn bound_predicates_reject_just_outside() {
     assert_close("sub1 pin", pb3_sub1_tol(), 0.05, 1e-12);
     assert!(0.0499 <= pb3_sub1_tol());
     assert!(0.0501 > pb3_sub1_tol());
-    // PB1 store 0.5 ULP / pair 2 ULP and PB2 4 ULP, through the SAME fixed
-    // helpers the PB tests call (verify S1): inclusive edge, just inside,
-    // just outside, at max 1.0 (ULP 2^-10).
+    // PB1 store 0.5 ULP / pair 2 ULP and PB2 4 ULP, through the SAME
+    // actual-vs-reference helpers the PB tests call (verify S1/verify2 S2):
+    // inclusive edge, just inside, just outside, at magnitude 1.0 (ULP
+    // 2^-10), positive and negative triplets, error on any channel.
     let u = 2f64.powi(-10);
-    assert!(pb1_store_ok(0.5 * u, 1.0));
-    assert!(!pb1_store_ok(0.501 * u, 1.0));
-    assert!(pb1_pair_ok(2.0 * u, 1.0));
-    assert!(pb1_pair_ok(1.999 * u, 1.0));
-    assert!(!pb1_pair_ok(2.001 * u, 1.0));
-    assert!(pb2_abs_ok(4.0 * u, 1.0));
-    assert!(pb2_abs_ok(3.999 * u, 1.0));
-    assert!(!pb2_abs_ok(4.001 * u, 1.0));
-    // PB1's pair limit is not PB2's: 3 ULP splits them.
-    assert!(!pb1_pair_ok(3.0 * u, 1.0) && pb2_abs_ok(3.0 * u, 1.0));
-    // CE4: the asymmetric triplet's ULP comes from its max, not its min.
-    assert_eq!(
-        max_abs_3([1.0, 2f64.powi(-10), 0.02]).to_bits(),
-        1.0f64.to_bits()
-    );
-    assert!(pb1_pair_ok(1.5 * u, max_abs_3([1.0, u, 0.02])));
-    assert!(!pb1_pair_ok(1.5 * u, u));
+    let t = |a: f64| [a, 0.0, 0.0];
+    assert!(pb1_store_ok(1.0 + 0.5 * u, 1.0));
+    assert!(!pb1_store_ok(1.0 + 0.501 * u, 1.0));
+    assert!(!pb1_store_ok(-1.0 - 0.501 * u, -1.0));
+    for sign in [1.0, -1.0] {
+        let r = [sign, 0.5 * sign, -0.25 * sign];
+        let at = |k: f64, ch: usize| {
+            let mut a = r;
+            a[ch] += sign * k * u;
+            a
+        };
+        for ch in 0..3 {
+            assert!(pb1_pair_ok(at(2.0, ch), r));
+            assert!(pb1_pair_ok(at(1.999, ch), r));
+            assert!(!pb1_pair_ok(at(2.001, ch), r), "pair {sign} ch{ch}");
+            assert!(pb2_abs_ok(at(4.0, ch), r));
+            assert!(pb2_abs_ok(at(3.999, ch), r));
+            assert!(!pb2_abs_ok(at(4.001, ch), r), "abs {sign} ch{ch}");
+            // PB1's pair limit is not PB2's: 3 ULP splits them.
+            assert!(!pb1_pair_ok(at(3.0, ch), r) && pb2_abs_ok(at(3.0, ch), r));
+        }
+    }
+    // CE4: the norm is the REFERENCE triplet's max, not its min, not the
+    // channel, not the actual's (a binade-crossing actual would widen it).
+    assert!(pb1_pair_ok([1.0, 2.5 * u, 0.02], [1.0, u, 0.02]));
+    assert!(!pb1_pair_ok([0.0, 2.5 * u, 0.0], [0.0, u, 0.0]));
+    assert!(!pb1_pair_ok(t(1.001), t(0.9995)));
+    assert!(!pb2_abs_ok(t(1.002_5), t(0.9995)));
     // CE4 relative + crossed decoys (R2 B03L/B04L).
-    assert!(ce4_rel_ok(0.002_999, 1.0));
-    assert!(!ce4_rel_ok(0.003_001, 1.0));
-    let b03 = 4.001 * 2f64.powi(-10); // high-in-binade 1.9: ULP rejects…
-    assert!(!pb2_abs_ok(b03, 1.9));
-    assert!(ce4_rel_ok(b03, 1.9)); // …while relative accepts.
-    let b04 = 0.003_001; // magnitude 1.0: relative rejects…
-    assert!(!ce4_rel_ok(b04, 1.0));
-    assert!(pb2_abs_ok(b04, 1.0)); // …while ULP accepts.
+    assert!(ce4_rel_ok(t(1.002_999), t(1.0)));
+    assert!(!ce4_rel_ok(t(1.003_001), t(1.0)));
+    assert!(!ce4_rel_ok([-1.0, -0.003_001, 0.0], [-1.0, 0.0, 0.0]));
+    assert!(ce4_rel_ok([-1.0, -0.002_999, 0.0], [-1.0, 0.0, 0.0]));
+    let b03 = t(1.9 + 4.001 * u); // high-in-binade 1.9: ULP rejects…
+    assert!(!pb2_abs_ok(b03, t(1.9)));
+    assert!(ce4_rel_ok(b03, t(1.9))); // …while relative accepts.
+    let b04 = t(1.003_001); // magnitude 1.0: relative rejects…
+    assert!(!ce4_rel_ok(b04, t(1.0)));
+    assert!(pb2_abs_ok(b04, t(1.0))); // …while ULP accepts.
     // PB4 codes.
     assert_eq!(pb4_code_tol().to_bits(), 2.0f64.to_bits());
     assert!(2.0 <= pb4_code_tol());
