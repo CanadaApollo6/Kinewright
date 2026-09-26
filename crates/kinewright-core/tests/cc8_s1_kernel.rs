@@ -2221,8 +2221,9 @@ fn working_from_display(d: [f64; 3], white: f64, peak: f64) -> ([f32; 3], f32, f
 }
 
 /// CE9 delivery model (storage model D): the source is stored once in f16
-/// in 2020; each of `pairs` nodes converts 2020→709→2020 in f32 in-pass and
-/// stores only in 2020 f16; then render. 709 values never cross a store.
+/// in 2020; each of `pairs` identity nodes converts 2020→709→2020 in f32
+/// in-pass and stores only in 2020 f16; then render. Stores: one source
+/// store + `pairs` identity-node 2020 stores. 709 values never cross a store.
 fn matrix_chain_display(d: [f64; 3], white: f64, peak: f64, pairs: usize) -> [f32; 3] {
     let (w0, g, sw) = working_from_display(d, white, peak);
     let mut w = w0.map(f16_store);
@@ -2234,8 +2235,9 @@ fn matrix_chain_display(d: [f64; 3], white: f64, peak: f64, pairs: usize) -> [f3
 }
 
 /// CE9 CONTROL — the CE4/CE5 conservative storage model (PB1–PB3 only,
-/// never a delivery path): f32 source, then `pairs` × (2020→709→f16 in 709
-/// →2020→f16). The 709 store quantizes large opposite-sign components into
+/// never a delivery path): f32 source (no source store), then `pairs` ×
+/// (2020→709→f16 in 709 →2020→f16): 2·`pairs` stores, half of them 709.
+/// The 709 store quantizes large opposite-sign components into
 /// the 2020 minors; it must FAIL PB4 CE7 on verify2's witnesses.
 fn foreign_space_store(d: [f64; 3], white: f64, peak: f64, pairs: usize) -> [f32; 3] {
     let (mut w, g, sw) = working_from_display(d, white, peak);
@@ -2524,7 +2526,7 @@ fn closing_pb4_major_after_matrix_storage() {
 fn pb4_foreign_space_store_control_fails_ce7() {
     // CE9 is load-bearing: verify2's three `verify2_gate_*` witnesses FAIL
     // PB4 CE7 through the foreign-space control (709 f16 store) and pass
-    // through model D (2020-only stores).
+    // through model D (one source store + N identity-node 2020 stores).
     for (p, w, pairs, d) in [
         (1001.0, 100.0, 1, [20.02, 1001.0, 20.02]),
         (9332.0, 113.0, 3, [23.33, 9332.0, 23.33]),
@@ -2541,7 +2543,8 @@ fn pb4_foreign_space_store_control_fails_ce7() {
 fn pb4_composed_coloured_anchor_scan() {
     // CE7 closing scan under CE9's model D: coloured anchors around and
     // above CE6's old 1% cutoff. One channel at P, the other two at f·P;
-    // P × W × pairs × f × position = 324 anchors. HLG 10-bit and SDR 8-bit:
+    // P × W × N × f × position = 324 anchors (model D: one source store +
+    // N = 1/3 identity-node 2020 stores). HLG 10-bit and SDR 8-bit:
     // every channel passes CE7; 10-bit mean over all channels. The same
     // grid through the foreign-space control must FAIL CE7 somewhere.
     let mut acc = Pb4Acc::default();
@@ -2584,7 +2587,8 @@ fn pb4_composed_coloured_anchor_scan() {
     assert!(acc.max10 > pb4_code_tol(), "scan must exercise the prong");
     assert!(acc.by_display10 > 0);
     assert!(control_bad > 0, "foreign-space control must fail CE7");
-    // Former CE8 witness: [20, 4000, 20], W=203, three pairs. Through the
+    // Former CE8 witness: [20, 4000, 20], W=203, N = 3 (model D: one source
+    // store + 3 identity-node 2020 stores). Through the
     // control the SDR red channel fails CE7 (Linux: 39 codes, 1.60% of the
     // SDR max); through model D it passes.
     let d = [20.0, 4000.0, 20.0];
@@ -2605,7 +2609,8 @@ fn pb4_composed_coloured_anchor_scan() {
 fn pb4_sdr_high_peak_scan() {
     // CE9 withdrew CE8: the SDR leg is CE7 at every peak. Former CE8
     // envelope grid (P 1500/2000/4000/10000 × minor 0.1/0.5/1% × W 203/400
-    // × three pairs × major position = 72 anchors) under model D: HLG and
+    // × major position = 72 anchors) under model D with one source store + 3
+    // identity-node 2020 stores: HLG and
     // SDR every channel passes CE7; the control fails CE7 on the same grid.
     let mut acc = Pb4Acc::default();
     let (mut n, mut control_bad) = (0u32, 0usize);
@@ -2639,7 +2644,8 @@ fn pb4_leg_classification_real_triplets() {
     // model-D triplets whose minor channels miss by codes and pass only
     // through the prong — a per-channel (or no-max) classification rejects
     // them, and the leg's recorded norm must be the reference max.
-    // HLG: saturated green [0, 400, 0] at P=400/W=194, one pair.
+    // HLG: saturated green [0, 400, 0] at P=400/W=194, one source store + 1
+    // identity-node 2020 store.
     let d = [0.0, 400.0, 0.0];
     let hlg = pb4_hlg_leg(matrix_chain_display(d, 194.0, 400.0, 1), d, 400.0);
     println!("HLG classification: {hlg:?}");
@@ -2661,7 +2667,8 @@ fn pb4_leg_classification_real_triplets() {
     let fail = pb4_hlg_leg([0.9, 400.0, 0.0], d, 400.0)[0];
     assert!(pass.ok && pass.codes > pb4_code_tol(), "{pass:?}");
     assert!(!fail.ok, "{fail:?}");
-    // SDR: 709 cyan at 10% of P=400, W=203, one pair — SDR red sits near
+    // SDR: 709 cyan at 10% of P=400, W=203, one source store + 1
+    // identity-node 2020 store — SDR red sits near
     // zero, misses by codes and passes by 0.2% of the SDR triplet max.
     let c709 = reference::apply_matrix(BT709_TO_BT2020_F64, [0.0, 1.0, 1.0]).unwrap();
     let d = c709.map(|x| x / max_abs_3(c709) * 40.0);
@@ -2700,9 +2707,10 @@ fn pb4_ce9_ported_witnesses() {
         let mut acc = Pb4Acc::default();
         pb4_gate(&mut acc, matrix_chain_display(d, w, p, pairs), d, w, p);
     }
-    // Investigation's HLG witness: [0, 9.502, 0] at P=9502/W=400, three
-    // pairs. The control's HLG leg fails CE7 (6 codes, 0.27% of max);
-    // model D passes.
+    // Investigation's HLG witness: [0, 9.502, 0] at P=9502/W=400, N = 3
+    // (model D: one source store + 3 identity-node 2020 stores; control: 3
+    // pairs, 6 stores). The control's HLG leg fails CE7 (6 codes, 0.27% of
+    // max); model D passes.
     let d = [0.0, 9.502, 0.0];
     let ctl = pb4_hlg_leg(foreign_space_store(d, 400.0, 9502.0, 3), d, 9502.0);
     assert!(ctl.iter().any(|c| !c.ok), "control HLG must fail: {ctl:?}");
@@ -2733,7 +2741,8 @@ fn skin_2020(r: f64, g: f64, b: f64) -> [f64; 3] {
 fn pb4_ce9_hue_grid() {
     // Reduced G5 (investigation): 2020 and 709 secondaries + three skins
     // (9 colours) × P 400/1000/2000/4000/7004/10000 × W 100/203/400 ×
-    // level 0.1/1/10/50/100% of P × 1/3 pairs = 1620 anchors (the full G5
+    // level 0.1/1/10/50/100% of P × N = 1/3 = 1620 anchors (model D: one
+    // source store + N identity-node 2020 stores; the full G5
     // steps P by 37, adds W 159/277, primaries/neutral, 11 levels and 2/5
     // pairs). Model D: every channel of both legs passes CE7; the control
     // fails CE7 on the same grid.
