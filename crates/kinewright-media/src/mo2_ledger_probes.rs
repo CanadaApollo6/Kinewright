@@ -8,12 +8,53 @@
 
 #![allow(clippy::used_underscore_binding)]
 
+use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 use super::*;
 use crate::frame::WorkingFrame;
 use crate::gpu_test_support::fixture_gpu_or_skip;
 use half::f16;
+
+type Poll = Result<wgpu::PollStatus, wgpu::PollError>;
+type Hook = Box<dyn FnMut(&wgpu::Device, &wgpu::PollType) -> Option<Poll>>;
+
+thread_local! {
+    static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    static UPLOAD_COPIES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// ME16: every frame-path poll on this thread passes here first; a hook may
+/// observe it (`None`: poll for real) or answer in its place.
+pub(super) fn hook(device: &wgpu::Device, wait: &wgpu::PollType) -> Option<Poll> {
+    HOOK.with_borrow_mut(|hook| hook.as_mut().and_then(|hook| hook(device, wait)))
+}
+
+/// H10: counts the frame's layer-upload copies on this thread.
+pub(super) fn count_upload_copy() {
+    UPLOAD_COPIES.set(UPLOAD_COPIES.get() + 1);
+}
+
+fn with_hook<T>(
+    hook: impl FnMut(&wgpu::Device, &wgpu::PollType) -> Option<Poll> + 'static,
+    body: impl FnOnce() -> T,
+) -> T {
+    HOOK.set(Some(Box::new(hook)));
+    let result = body();
+    HOOK.set(None);
+    result
+}
+
+/// The wait's timeout, for a `Wait` that names its submission.
+fn bound(wait: &wgpu::PollType) -> Option<Duration> {
+    match wait {
+        wgpu::PollType::Wait {
+            submission_index: Some(_),
+            timeout,
+        } => *timeout,
+        _ => None,
+    }
+}
 
 fn frame(width: u32, height: u32) -> WorkingFrame {
     let len = usize::try_from(width * height * 4).unwrap();
@@ -82,7 +123,7 @@ fn final_ledger_exact_resources_and_lifetime() {
     let layers = [layer(&src)];
     c.render_working((32, 4), &layers).unwrap();
     let baseline = gpu.ledger().live_bytes();
-    let (output, resources, encoder) = c.composite(32, 4, &layers, None, None).unwrap();
+    let (output, mut resources, encoder) = c.composite(32, 4, &layers, None, None).unwrap();
     let held = &resources.layers[0];
     let (upload, row) = held.upload.as_ref().unwrap();
     // 32 × 8 bytes is one 256-byte aligned row: no padding.
@@ -101,10 +142,9 @@ fn final_ledger_exact_resources_and_lifetime() {
         "every per-frame resource counted"
     );
     let monitor = kinewright_core::ColorContext::sdr_rec709().monitoring;
-    c.readback_for(32, 4, &output, encoder, &resources, &monitor)
+    c.readback_for(32, 4, &output, encoder, &mut resources, &monitor)
         .unwrap();
-    drop(output);
-    c.release_layer_textures(resources);
+    c.finish_frame(output, resources);
     assert_eq!(
         gpu.ledger().live_bytes(),
         baseline,
@@ -305,4 +345,290 @@ fn reverify_me14_phases_sum_same_frame() {
         assert!(sum <= wall);
         assert!(phases.iter().all(|phase| !phase.is_zero()), "{phases:?}");
     }
+}
+
+/// Rereview-2 H01: the cleanup wait is exactly 100 ms.
+#[test]
+fn rev2_exact_100ms_cleanup_argument() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let c = Compositor::new(gpu);
+    let src = frame(17, 3);
+    c.render_working((17, 3), &[layer(&src)]).unwrap();
+    let staged = failed_frame(&c, &src);
+    c.retire_failed(staged, |_, wait| {
+        assert_eq!(bound(&wait), Some(Duration::from_millis(100)), "{wait:?}");
+        Err(wgpu::PollError::Timeout)
+    });
+    assert_eq!(retired(&c), 1);
+}
+
+/// Rereview-2 G05: the cleanup waits on its own submission.
+#[test]
+fn rev2_failed_flush_has_submission_index() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let c = Compositor::new(gpu);
+    let staged = failed_frame(&c, &frame(17, 3));
+    c.retire_failed(staged, |device, wait| {
+        assert!(
+            bound(&wait).is_some(),
+            "flush must target its writes: {wait:?}"
+        );
+        device.poll(wait)
+    });
+    assert_eq!(retired(&c), 0);
+}
+
+/// Rereview-2 H06: the completion callback, not the poll status, decides.
+#[test]
+fn rev2_callback_completion_overrules_error_status() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let c = Compositor::new(gpu.clone());
+    let src = frame(17, 3);
+    c.render_working((17, 3), &[layer(&src)]).unwrap();
+    let base = gpu.ledger().live_bytes();
+    let staged = failed_frame(&c, &src);
+    c.retire_failed(staged, |device, wait| {
+        device.poll(wait).unwrap();
+        Err(wgpu::PollError::Timeout)
+    });
+    assert_eq!(retired(&c), 0);
+    // The two-layer frame pools a two-slot flag buffer; all else releases.
+    assert_eq!(gpu.ledger().live_bytes(), base + c.validity_stride);
+}
+
+/// Rereview-2 G07: every staging refusal — malformed pixels, a missing LUT,
+/// a grade stack over its limit; normal and special; all three entries —
+/// cleans up with exactly one 100 ms wait and no readback wait.
+#[test]
+fn rev2_all_staging_error_paths_have_100ms_cleanup() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let c = Compositor::new(gpu);
+    let (src, bad) = (frame(17, 3), broken(17, 3));
+    let missing = vec![crate::mo2_fixtures::effect(1, "cube_lut", &[])];
+    let grade = (0..65)
+        .map(|i| {
+            let exposure = [("exposure_milli_stops", 1000)];
+            crate::mo2_fixtures::effect(i, "primary_correction", &exposure)
+        })
+        .collect::<Vec<_>>();
+    let waits = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let seen = std::rc::Rc::clone(&waits);
+    let monitor = kinewright_core::ColorContext::sdr_rec709().monitoring;
+    with_hook(
+        move |_, wait| {
+            seen.borrow_mut().push(bound(wait));
+            None
+        },
+        || {
+            for special in [false, true] {
+                for kind in 0..3 {
+                    for entry in 0..3 {
+                        let mut good = layer(&src);
+                        if special {
+                            good.mode.blend = BlendMode::Screen;
+                            good.transition.backdrop = Some([0.5, 0.0]);
+                        }
+                        let failing = match kind {
+                            0 => layer(&bad),
+                            1 => CompositorLayer {
+                                effects: &missing,
+                                ..layer(&src)
+                            },
+                            _ => CompositorLayer {
+                                effects: &grade,
+                                ..layer(&src)
+                            },
+                        };
+                        let layers = [good, failing];
+                        let before = waits.borrow().len();
+                        let failed = match entry {
+                            0 => c.render_working((17, 3), &layers).is_err(),
+                            1 => c.render_monitor((17, 3), &layers, &monitor).is_err(),
+                            _ => c.render_delivery((17, 3), &layers, &monitor).is_err(),
+                        };
+                        let case = format!("special={special} kind={kind} entry={entry}");
+                        assert!(failed, "{case}");
+                        let new = waits.borrow()[before..].to_vec();
+                        assert_eq!(new, [Some(Duration::from_millis(100))], "{case}");
+                    }
+                }
+            }
+        },
+    );
+    assert_eq!(waits.borrow().len(), 18);
+}
+
+/// Rereview-2 H10: one upload copy per pixel layer, and the pixels arrive.
+#[test]
+fn rev2_upload_pixels_rgba8_rgba16_and_copy_count() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let c = Compositor::new(gpu);
+    for (width, height) in [(1, 1), (17, 3), (33, 64)] {
+        let mut src = frame(width, height);
+        let pixels = Arc::make_mut(&mut src.pixels);
+        for (i, p) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let quarter = |n: usize| f16::from_f32([0.0, 0.25, 0.5, 0.75][n % 4]);
+            let (x, y) = (quarter(i), quarter(i / width as usize));
+            *p = [x, y, f16::ZERO, f16::ONE];
+        }
+        UPLOAD_COPIES.set(0);
+        let output = c.render_working((width, height), &[layer(&src)]).unwrap();
+        assert_eq!(UPLOAD_COPIES.get(), 1, "RGBA16F {width}x{height}");
+        let expected = src.pixels.iter().map(|v| v.to_f32());
+        assert!(
+            output.pixels.iter().copied().eq(expected),
+            "RGBA16F {width}x{height}"
+        );
+        let rgba = (0..width * height)
+            .flat_map(|i| [if i % 2 == 0 { 0 } else { 255 }, 0, 255, 255])
+            .collect::<Vec<u8>>();
+        let src = FrameTexture {
+            width,
+            height,
+            rgba: Arc::new(rgba),
+        };
+        let layers = [CompositorLayer {
+            frame: &src,
+            effects: &[],
+            transition: TransitionRenderParams::default(),
+            mode: LayerMode::NORMAL,
+        }];
+        UPLOAD_COPIES.set(0);
+        let output = c.render_working((width, height), &layers).unwrap();
+        assert_eq!(UPLOAD_COPIES.get(), 1, "RGBA8 {width}x{height}");
+        let expected = src.rgba.iter().map(|&b| f32::from(b) / 255.0);
+        assert!(
+            output.pixels.iter().copied().eq(expected),
+            "RGBA8 {width}x{height}"
+        );
+    }
+}
+
+/// Rereview-2 B1 → ME16: the atlas upload's staging is charged — API
+/// bytes, 256-padded rows — until a poll observes its copy done.
+#[test]
+fn rev2_api_atlas_write_staging_is_charged() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let c = Compositor::new(gpu.clone());
+    settle(&gpu);
+    let before = gpu.ledger().live_bytes();
+    let slots = [LutAtlasSlot {
+        z_origin: 0,
+        lut: Arc::clone(&c.identity_lut),
+    }];
+    let size = u64::from(c.identity_lut.size);
+    let data = u64::try_from(c.identity_lut.rgba.len()).unwrap() * 4;
+    let atlas = c.build_lut_atlas(&slots).unwrap();
+    let delta = gpu.ledger().live_bytes() - before;
+    let staging = (size * 16).next_multiple_of(256) * size * size;
+    println!(
+        "ATLAS_API texture={} write_data={data} staging={staging} charged={delta}",
+        atlas.texture.1
+    );
+    assert!(
+        delta >= atlas.texture.1 + data,
+        "the atlas write is charged"
+    );
+    assert_eq!(delta, atlas.texture.1 + staging);
+    assert_eq!(retired(&c), 1, "held until its copy completes");
+    settle(&gpu);
+    c.sweep_retired();
+    assert_eq!(gpu.ledger().live_bytes() - before, atlas.texture.1);
+}
+
+/// Rereview-2 B2 → ME16: the readback wait, the one an R10 refusal passes
+/// through, is bounded at exactly 10 s.
+#[test]
+fn rev2_runtime_refusal_readback_wait_is_bounded() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let c = Compositor::new(gpu);
+    let mut src = frame(17, 3);
+    Arc::make_mut(&mut src.pixels)[3] = f16::NAN;
+    let waits = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let seen = std::rc::Rc::clone(&waits);
+    let result = with_hook(
+        move |_, wait| {
+            seen.borrow_mut().push(bound(wait));
+            None
+        },
+        || c.render_working((17, 3), &[layer(&src)]),
+    );
+    assert!(
+        matches!(result, Err(MediaError::NonFiniteRender { .. })),
+        "{result:?}"
+    );
+    assert_eq!(*waits.borrow(), [Some(Duration::from_secs(10))]);
+}
+
+/// Rereview-2 B2 → ME16: a readback that does not complete within the bound
+/// refuses typed and keeps every submitted charge (output, readback, layers)
+/// until completion is observed, then releases them exactly once.
+#[test]
+fn rev2_simulated_readback_timeout_keeps_submitted_charges() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let c = Compositor::new(gpu.clone());
+    let src = frame(17, 64);
+    c.render_working((17, 64), &[layer(&src)]).unwrap();
+    settle(&gpu);
+    let base = gpu.ledger().live_bytes();
+    let at_poll = std::rc::Rc::new(Cell::new(0));
+    let seen = std::rc::Rc::clone(&at_poll);
+    let ledger = gpu.clone();
+    let result = with_hook(
+        move |_, wait| {
+            assert_eq!(bound(wait), Some(Duration::from_secs(10)));
+            seen.set(ledger.ledger().live_bytes());
+            Some(Err(wgpu::PollError::Timeout))
+        },
+        || c.render_working((17, 64), &[layer(&src)]),
+    );
+    let Err(MediaError::Backend(message)) = result else {
+        panic!("a timed-out readback refuses: {result:?}");
+    };
+    assert!(message.starts_with("gpu_readback_timeout:"), "{message}");
+    let live = gpu.ledger().live_bytes();
+    println!(
+        "READBACK_TIMEOUT base={base} at_poll={} returned={live}",
+        at_poll.get()
+    );
+    assert!(
+        at_poll.get() > base + 17 * 64 * 8,
+        "output + readback charged"
+    );
+    assert_eq!(live, at_poll.get(), "nothing released before completion");
+    assert_eq!(retired(&c), 1);
+    c.sweep_retired();
+    assert_eq!(
+        gpu.ledger().live_bytes(),
+        live,
+        "no completion observed yet"
+    );
+    // Later: a poll observes completion; the next sweep releases it once.
+    settle(&gpu);
+    c.sweep_retired();
+    assert_eq!(retired(&c), 0);
+    let released = gpu.ledger().live_bytes();
+    c.render_working((17, 64), &[layer(&src)]).unwrap();
+    settle(&gpu);
+    c.sweep_retired();
+    assert_eq!(gpu.ledger().live_bytes(), base, "released exactly once");
+    assert!(released <= base);
+    drop(c);
+    assert_eq!(gpu.ledger().live_bytes(), 0);
 }
