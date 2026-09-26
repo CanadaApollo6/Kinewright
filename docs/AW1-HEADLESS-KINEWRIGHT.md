@@ -125,7 +125,15 @@ changes.
   atomic rename each time, never a fallback (N-h). Recorded limit (N-k):
   a local writer that plants directories at the next 100 predicted temp
   names denies the publish with a typed `Io` — local-writer only, no
-  hang.)
+  hang. Fix round 4, J6: the publish rename also retries Windows'
+  `ERROR_SHARING_VIOLATION` (32) and `ERROR_LOCK_VIOLATION` (33), which
+  std leaves uncategorised — the AV/indexer case N-h targets (N3);
+  `release` removes nothing when its discovery read is `Absent`, so a
+  successor publishing after a hand-delete keeps its discovery (N4); and
+  discovery reads add `O_NOFOLLOW` on Unix, so a link swapped in after
+  the type check reads unreadable (the pid-0 sentinel), never followed
+  (N5). Journal reads still follow links: a late link to a naming header
+  must refuse, not be skipped.)
 - AF2 → §5, §6: one canonical project identity — full canonical path
   when the target exists, else canonical parent dir plus file name
   (relative resolves at the cwd; raw path when nothing resolves). Lock,
@@ -193,7 +201,25 @@ changes.
   spelling — a writer-side naming choice, not an identity fallback, since
   the lock and the scan both refuse such a path typed. G10, journal-writer rule: a journal for an identity is
   created or renamed only while holding that identity's lock, including
-  Save-As and first-save transitions.)
+  Save-As and first-save transitions. Fix round 4, J6: N1 — besides the
+  `read_dir` pass, the exact base and legacy names (and, on Windows, the
+  ordinary spelling) are probed directly with `symlink_metadata`, any
+  type refusing, since `read_dir` may miss an entry renamed in mid-scan.
+  N2 — the nesting residual stands, and its RSS bound is the ceiling.
+  Measured on a 64 MiB hostile header (debug / release): `[[[…` adds
+  65 MiB peak RSS (3.9 s / 0.44 s); an unterminated `project_path`
+  string, which the scan must buffer to read, adds the same 65 MiB
+  (2.5 s / 0.34 s); a skipped 64 MiB string adds 2 MiB. So peak RSS is
+  at most about one byte per header byte, up to the 1 GiB ceiling, for
+  either shape, and a depth limit alone would not lower that bound. A
+  recursive skip visitor (serde's 128-level limit) was not adopted:
+  serde_json's `deserialize_any` buffers every skipped string in scratch,
+  regressing the skipped-string case to the same one-to-one cost. N6 —
+  "committed" means the header's closing `}` immediately followed by
+  `\n`; the app's recovery parser tolerates whitespace between them. The
+  writer never emits any, so the two agree on every journal the app
+  writes; a hand-edited alias journal with `} \n` is merely unmatched by
+  the scan (local writer only).)
 - AF4 → §2: headless save shares the app's H12/J2/J3 transaction
   machinery (`SidecarRollback` in `kinewright-project`): snapshot and
   restore the destination sidecar and both generation baselines on

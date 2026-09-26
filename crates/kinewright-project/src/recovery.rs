@@ -180,13 +180,20 @@ struct JournalIdentityHeader {
 /// Open for reading without ever blocking (race N-c): Unix opens
 /// `O_NONBLOCK` (a FIFO opens at once; regular files ignore the flag), and
 /// the fd itself must be a regular file (`fstat`) — `None` otherwise.
+/// `follow: false` (discovery reads, N5) adds Unix `O_NOFOLLOW`: a link
+/// swapped in since the caller's `symlink_metadata` check fails the open.
 /// # Errors
 /// The open or `fstat` IO error.
-pub(crate) fn open_regular(path: &Path) -> io::Result<Option<fs::File>> {
+pub(crate) fn open_regular(path: &Path, follow: bool) -> io::Result<Option<fs::File>> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NONBLOCK);
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        libc::O_NONBLOCK | if follow { 0 } else { libc::O_NOFOLLOW },
+    );
+    #[cfg(not(unix))]
+    let _ = follow;
     let file = options.open(path)?;
     Ok(file.metadata()?.is_file().then_some(file))
 }
@@ -210,7 +217,7 @@ fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Err
     // blocking.
     #[cfg(any(test, feature = "test-util"))]
     crate::test_hook("journal_before_open");
-    let file = match open_regular(journal) {
+    let file = match open_regular(journal, true) {
         Ok(Some(file)) => file,
         Ok(None) => return Ok(false),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -345,6 +352,19 @@ pub(crate) fn pending_journal_for_identity(
         };
         if kind.is_file() && journal_header_names(&journal, identity)? {
             pending.push(journal);
+        }
+    }
+    // N1: `read_dir` can miss an entry renamed in mid-scan, so the exact
+    // names are probed directly too — any type refuses, as in H4.
+    for name in [Some(&base), Some(&legacy), ordinary_base.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        let journal = recovery_dir.join(name);
+        match fs::symlink_metadata(&journal) {
+            Ok(_) => pending.push(journal),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
     }
     Ok(pending.into_iter().min())

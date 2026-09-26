@@ -306,26 +306,29 @@ impl LockfileHandle {
     /// random `claim_id` — N-d; G9's pid/second/endpoint triple was not
     /// unique within one process); otherwise it is left alone and the
     /// skip is logged — another owner may have published after an
-    /// external unlink. G10: release ends this handle's writer right — a
+    /// external unlink. An absent discovery removes nothing (N4). G10: release ends this handle's writer right — a
     /// journal for the identity may be created or renamed only under its
     /// lock, so the removal lands under the held flock and any later
     /// journal write must re-acquire first.
     /// # Errors
     /// Returns the removal IO error, if any.
     pub fn release(self) -> io::Result<()> {
-        let mine = match read_owner(&self.discovery, &self.claim.hostname) {
-            DiscoveryRead::Owner(owner) => owner.claim_id == self.claim.claim_id,
-            DiscoveryRead::Absent => true,
-            _ => false,
-        };
-        let removed = if mine {
-            fs::remove_file(&self.discovery)
-        } else {
-            eprintln!(
-                "kinewright: not removing {}: it no longer names this owner",
-                self.discovery.display()
-            );
-            Ok(())
+        let read = read_owner(&self.discovery, &self.claim.hostname);
+        #[cfg(any(test, feature = "test-util"))]
+        crate::test_hook("release_after_read");
+        let removed = match read {
+            DiscoveryRead::Owner(owner) if owner.claim_id == self.claim.claim_id => {
+                fs::remove_file(&self.discovery)
+            }
+            // N4: absent — nothing of ours; a successor may publish now.
+            DiscoveryRead::Absent => Ok(()),
+            _ => {
+                eprintln!(
+                    "kinewright: not removing {}: it no longer names this owner",
+                    self.discovery.display()
+                );
+                Ok(())
+            }
         };
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("release_after_remove_before_unlock"); // RACE-REVIEW
@@ -419,8 +422,8 @@ fn read_owner(discovery_path: &Path, own_hostname: &str) -> DiscoveryRead {
     #[cfg(any(test, feature = "test-util"))]
     crate::test_hook("read_owner_after_meta");
     // N-c: the path may have become a FIFO since the check — the open
-    // never blocks, and only a regular fd reads.
-    let file = match open_regular(discovery_path) {
+    // never blocks, and only a regular fd reads; N5: nor a late link.
+    let file = match open_regular(discovery_path, false) {
         Ok(Some(file)) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return DiscoveryRead::Absent,
         Ok(None) | Err(_) => return DiscoveryRead::Unreadable,
@@ -523,6 +526,14 @@ fn write_discovery(discovery_path: &Path, claim: &LockfileClaim) -> io::Result<(
     write_discovery_with_rename(discovery_path, claim, None)
 }
 
+/// N3: a rename refusal worth retrying — `PermissionDenied` on every OS,
+/// plus Windows' sharing (32) and lock (33) violations, which std leaves
+/// uncategorised. Pure, so the unit test runs on every OS.
+fn rename_is_transient(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+        || (cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33)))
+}
+
 /// Decide a free lock's claim from its discovery (G7): a known foreign host
 /// refuses (strict or lenient); an unreadable stale discovery reclaims a
 /// pid-0/`unknown` sentinel flagged unreadable; absence is fresh. F7:
@@ -609,7 +620,7 @@ fn write_discovery_with_rename(
         drop(file);
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("publish_before_rename");
-        // N-h: a `PermissionDenied` rename (Windows AV/indexer holding the
+        // N-h: a transient rename refusal (Windows AV/indexer holding the
         // discovery) retries within the §5 acquire budget — the same
         // atomic rename each time, never a non-atomic fallback.
         let mut renamed = Err(io::Error::from(io::ErrorKind::PermissionDenied));
@@ -619,10 +630,7 @@ fn write_discovery_with_rename(
                 None => fs::rename(&temp, discovery_path),
             };
             match &renamed {
-                Err(error)
-                    if error.kind() == io::ErrorKind::PermissionDenied
-                        && attempt < LOCK_ACQUIRE_ATTEMPTS =>
-                {
+                Err(error) if rename_is_transient(error) && attempt < LOCK_ACQUIRE_ATTEMPTS => {
                     std::thread::sleep(LOCK_ACQUIRE_RETRY_DELAY);
                 }
                 _ => break,
@@ -2291,6 +2299,25 @@ mod tests {
             Some("")
         );
         got.handle.release().expect("the release lands");
+    }
+
+    /// J6 N3: the retry classifier names Windows' sharing (32) and lock
+    /// (33) violations on Windows only; `PermissionDenied` everywhere.
+    #[test]
+    fn j6_rename_retry_classifier_names_windows_sharing_codes() {
+        for code in [32, 33] {
+            assert_eq!(
+                rename_is_transient(&io::Error::from_raw_os_error(code)),
+                cfg!(windows),
+                "raw os error {code}"
+            );
+        }
+        assert!(rename_is_transient(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        assert!(!rename_is_transient(&io::Error::from(
+            io::ErrorKind::NotFound
+        )));
     }
 
     /// H7 N-h: a `PermissionDenied` rename retries within the §5 budget

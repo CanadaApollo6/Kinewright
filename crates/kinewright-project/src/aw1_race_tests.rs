@@ -2803,3 +2803,116 @@ fn j5_journal_swapped_between_type_check_and_open_never_blocks() {
         }
     }
 }
+
+/// J6 N4: a release that reads its discovery `Absent` (hand-deleted with
+/// the lock object) removes nothing — a successor that claims and
+/// publishes in that window keeps its discovery. Unix: Windows refuses to
+/// delete a held lock object.
+#[cfg(unix)]
+#[test]
+fn j6_release_after_an_absent_read_spares_the_successor() {
+    let fx = fixture("j6-release-absent");
+    let signals = fx.dir.path("first");
+    let mut first = spawn(
+        "hold",
+        &fx.project,
+        &fx.recovery,
+        &signals,
+        Opts {
+            hook: Some("release_after_read"),
+            ..Opts::default()
+        },
+    );
+    wait_for(&signals.join("owned"));
+    fs::remove_file(lockfile_path_for_project(Some(&fx.project)).unwrap()).unwrap();
+    let discovery = discovery_path_for_project(Some(&fx.project)).unwrap();
+    fs::remove_file(&discovery).unwrap();
+    fs::write(signals.join("release"), "").unwrap();
+    wait_for(&signals.join("paused"));
+    let took = claim(&fx.project, &fx.recovery, "http://successor")
+        .expect("the hand-deleted lock object frees the path");
+    fs::write(signals.join("resume"), "").unwrap();
+    wait_for(&signals.join("exited"));
+    first.0.wait().unwrap();
+    let published = fs::read_to_string(&discovery).unwrap_or_default();
+    assert!(
+        published.contains("http://successor"),
+        "the absent-read release removed the successor's discovery: {published:?}"
+    );
+    took.handle.release().unwrap();
+}
+
+/// J6 N5: a discovery swapped for a link (to a regular file naming a
+/// foreign host) after the claimant's `symlink_metadata` check is never
+/// followed: the open refuses, the discovery reads unreadable, and the
+/// claimant reclaims the pid-0 sentinel instead of believing the link.
+#[cfg(unix)]
+#[test]
+fn j6_discovery_swapped_for_a_link_is_never_followed() {
+    let fx = fixture("j6-discovery-link");
+    let discovery = plant_stale(&fx, "http://stale");
+    let foreign = fx.dir.path("foreign.json");
+    fs::copy(&discovery, &foreign).unwrap();
+    patch_discovery(&foreign, "hostname", "elsewhere-host".into());
+    let signals = fx.dir.path("claimant");
+    let mut claimant = spawn(
+        "hold",
+        &fx.project,
+        &fx.recovery,
+        &signals,
+        Opts {
+            hook: Some("read_owner_after_meta"),
+            ..Opts::default()
+        },
+    );
+    wait_for(&signals.join("paused"));
+    fs::remove_file(&discovery).unwrap();
+    std::os::unix::fs::symlink(&foreign, &discovery).unwrap();
+    fs::write(signals.join("resume"), "").unwrap();
+    let took = wait_either(&signals.join("owned"), &signals.join("error"));
+    let verdict = fs::read_to_string(signals.join(if took { "owned" } else { "error" })).unwrap();
+    if took {
+        fs::write(signals.join("release"), "").unwrap();
+    }
+    claimant.0.wait().unwrap();
+    assert!(
+        took && field(&verdict, "reclaimed") == "0",
+        "a late link was followed: {verdict}"
+    );
+}
+
+/// J6 N1: a base-named journal that appears after the scan's `read_dir`
+/// began (paused on an unrelated journal) is still seen — the exact names
+/// are probed directly. Red on btrfs (whose `read_dir` never returns an
+/// entry added after it opened); other file systems may pass either way.
+#[cfg(unix)]
+#[test]
+fn j6_base_journal_appearing_mid_scan_refuses() {
+    let fx = fixture("j6-journal-mid-scan");
+    fs::write(fx.recovery.join("unrelated-0123456789abcdef.journal"), b"").unwrap();
+    let signals = fx.dir.path("claimant");
+    let mut claimant = spawn(
+        "hold",
+        &fx.project,
+        &fx.recovery,
+        &signals,
+        Opts {
+            hook: Some("journal_before_open"),
+            ..Opts::default()
+        },
+    );
+    wait_for(&signals.join("paused"));
+    let journal = plant_journal(&fx, "base");
+    fs::write(signals.join("resume"), "").unwrap();
+    let took = wait_either(&signals.join("owned"), &signals.join("error"));
+    let error = fs::read_to_string(signals.join("error")).unwrap_or_default();
+    if took {
+        fs::write(signals.join("release"), "").unwrap();
+    }
+    claimant.0.wait().unwrap();
+    assert!(
+        !took && error.contains("PendingRecovery"),
+        "{} was missed: {error}",
+        journal.display()
+    );
+}
