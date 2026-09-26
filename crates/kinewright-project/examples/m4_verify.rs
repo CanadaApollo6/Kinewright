@@ -235,6 +235,18 @@ fn generate_source(
             "libx264",
             "-pix_fmt",
             "yuv420p",
+            // Managed decode refuses untagged sources (CC1), which starved
+            // the preview-frame wait into `Error: Timeout`: tag BT.709.
+            "-vf",
+            "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
             "-c:a",
             "aac",
             "-shortest",
