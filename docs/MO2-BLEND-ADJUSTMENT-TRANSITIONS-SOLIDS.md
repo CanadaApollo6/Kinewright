@@ -126,6 +126,16 @@
   about 27% over 3,200. The ME15 growth was lead-ordered (N23) and the
   choke-point fixes review-ordered (N21, N24); those overrides carry
   them.
+  **R28 after ME16 (N25).** ME16 adds 186 production lines and removes
+  86 (`git diff -U0`, the same count). Six of the added lines are
+  `#[cfg(test)]` hook calls inside production functions, counted anyway.
+  Twenty-eight of the removals are ME15's own lines (the upload helper
+  and the cleanup's inline submit, now shared). The other 58 are earlier
+  code: 42 pre-MO2 lines (the atlas `write_texture`, the readback wait)
+  and 16 MO2 B1 lines (the readback callers). R28 therefore stands at
+  **455 added / 118 removed** (net 337). B2 is ≈ 544 + 455 = 999 and the
+  total ≈ 691 + 1,713 + 999 + 830 = 4,233, about 32% over 3,200. The
+  ME16 growth was lead-ordered (N25), and that override carries it.
 - ME6 → §8 R26 (Part B3), readings the rule leaves open:
   - Solids:
     - The colour editor is egui's picker plus labelled R/G/B fields. A
@@ -389,14 +399,17 @@
     returned to 0 (`r28_solo_peak_resources_and_elapsed`).
   - *Ledger peaks.* Preview-proxy runs: typical 56.3 MiB, blend_heavy
     63.3 MiB, heavy 4K 70.3 MiB. Full-resolution frames: 126.6, 142.4
-    and 632.8 MiB. Ceilings are 384 / 384 / 1,536 MiB. Not charged: the
-    LUT-atlas upload staging, which exists only on an atlas-cache miss
-    and is bounded by the charged atlas. Layer-upload staging and
-    failed-frame release follow ME15 (which supersedes the final
-    verification's padded-upper-bound charge and unbounded flush). The
-    peaks above cannot move under ME15: every workload's rows (1280, 1920
-    and 3840 px × 8 B) are already 256-aligned, so each upload's staging
-    is the bytes charged before, held for the same span (to readback).
+    and 632.8 MiB. Ceilings are 384 / 384 / 1,536 MiB. Every MO2 frame
+    resource is charged. Layer-upload staging and failed-frame release
+    follow ME15, which supersedes the final verification's
+    padded-upper-bound charge and unbounded flush. LUT-atlas staging and
+    the bounded readback wait follow ME16, which removes the earlier
+    atlas exception. The peaks above cannot move under ME15: every
+    workload's rows (1280, 1920 and 3840 px × 8 B) are already
+    256-aligned, so each upload's staging is the bytes charged before,
+    held for the same span (to readback). Under ME16 the full-resolution
+    peaks were re-measured and are unchanged. These workloads bind only
+    the identity atlas, whose staging is 1 KiB.
   - *`validate()` per frame (N11-4):* 1.1–1.8 µs at 1080p, 10 µs for the
     200-clip 4K document. No revision-keyed cache is needed.
 - ME14 → §9 R28, §13 gate 10 (Windows CI run 36248329932, lead rulings
@@ -449,7 +462,8 @@
     readback and dropped with the frame. It is not reused across frames:
     reuse would need a `map_async` and a poll per frame. The uniform and
     grade `write_buffer` staging stays charged at its data size, because
-    buffer writes have no row pitch.
+    buffer writes have no row pitch. The LUT atlas's upload follows the
+    same path (ME16).
   - *Backend granularity (documented, not charged).* DX12 places
     buffers on 64 KiB boundaries: on the Windows CI WARP adapter, wgpu's
     buffer counter moved 65,536 B for a 32-px-wide upload charged
@@ -499,6 +513,76 @@
     as completion, a missing sweep, a zero phase, and floor 8. Probes that
     parse `include_str!` sources normalise CRLF, so Windows checkouts
     parse them identically.
+- ME16 → §9 R28 (render re-verification 2, B1/B2/S1, lead ruling N25):
+  **every frame resource is charged, and every frame-path wait is
+  bounded, with completion-owned charges.**
+  - *Atlas staging.* A cold LUT atlas no longer uses
+    `queue.write_texture`. `build_lut_atlas` writes every slot into one
+    ME15 staging buffer (`staging_rows`: mapped at creation, charged
+    exactly). Each lattice row (`S × 16` B) sits at the widest slot's
+    pitch, padded to 256. One `copy_buffer_to_texture` per slot goes into
+    the atlas's own command buffer, which is submitted at once. Queue
+    order therefore puts the copy ahead of any frame that samples the
+    atlas, exactly as the queue write did. The staging buffer joins the
+    `retired` list with that submission's completion flag. It stays
+    charged until a poll observes the flag. It is normally swept at the
+    end of the frame that built it, since that frame's readback wait
+    completes the copy too. Otherwise it goes at the next failed frame,
+    composite or teardown. ME13's atlas exception is gone.
+  - *Bounded readback.* The readback wait covers every read-back frame:
+    normal frames, R10 refusals, and encode errors after readback. It now
+    polls `Wait` for the frame's own submission with a **10 s** bound
+    (`READBACK_WAIT`, N25). The map callback, not the poll status,
+    decides completion.
+    - If the callback has not run by then, the frame refuses with
+      `gpu_readback_timeout`. That is a `Backend` message with a stable
+      code prefix, like `lut_atlas_too_large`; a `MediaError` variant
+      would need a `kinewright-core` change outside this slice. The
+      frame's output, readback buffer and layer resources move to
+      `retired` under the submission's completion flag.
+    - A later sweep drops them exactly once, after a poll observes
+      completion. Teardown also drops them.
+    - A driver watchdog that fires first surfaces as device loss, whose
+      map callback errors, so the frame refuses either way.
+    - The staging cleanup stays at 100 ms (ME15).
+    - Both waits go through one `frame_poll`, which the tests observe
+      and override. These are the only waits in the frame path.
+  - *Tests (default lane; NVIDIA once with `--include-ignored`, 15/15).*
+    - `rev2_api_atlas_write_staging_is_charged`: the atlas charges its
+      texture plus its staging, 1,152 B for the identity cube, against the
+      earlier 128 B. The staging is retained until completion is
+      observed, then released.
+    - `rev2_runtime_refusal_readback_wait_is_bounded`: an R10 refusal's
+      only wait is exactly `Wait{Some(_), Some(10 s)}`.
+    - `rev2_simulated_readback_timeout_keeps_submitted_charges`: an
+      injected timeout refuses with `gpu_readback_timeout`. It keeps
+      every charge live at the poll (51,436 B, against a 9,100 B
+      baseline) and one retired frame, and a sweep without completion
+      keeps them. After a completing poll the sweep releases them; the
+      ledger returns to the baseline after the next frame, and to 0 at
+      teardown.
+    - The five survivor probes of the re-verification:
+      - `rev2_failed_flush_has_submission_index` (G05).
+      - `rev2_all_staging_error_paths_have_100ms_cleanup` (G07). All 18
+        staging refusals clean up with exactly one 100 ms wait and no
+        readback wait.
+      - `rev2_exact_100ms_cleanup_argument` (H01), which checks for
+        exactly 100 ms.
+      - `rev2_callback_completion_overrules_error_status` (H06).
+      - `rev2_upload_pixels_rgba8_rgba16_and_copy_count` (H10). Each
+        pixel layer gets one upload copy, and RGBA8 and RGBA16F pixels
+        arrive exact.
+
+    Each probe was red against its mutation. The survivor mutations were
+    no submission index, cleanup only above one staged layer, a 500 ms
+    wait, poll `Ok` taken as completion, and a duplicated upload copy.
+    The mutations for the new rules were:
+    - an uncharged atlas staging;
+    - an unbounded readback wait;
+    - a 20 s readback wait;
+    - a timeout that releases the frame;
+    - a timeout that drops the output;
+    - a timeout refusal without retention.
 
 ## Changes in revision 2
 
