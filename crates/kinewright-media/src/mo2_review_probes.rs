@@ -691,6 +691,83 @@ fn review1_all_geometric_frames_independent_oracle_on(context: GpuContext) {
     }
 }
 
+// ---------------------------------------------------------------- proofs
+
+/// Review-1 B3: the public proof of an adjustment's luma qualifier over grey
+/// qualifies what the adjustment grades — the stack below it — exactly as
+/// the full-stack renderer does.
+fn review1_public_matte_adjustment_qualifier_keeps_below_on(context: GpuContext) {
+    use kinewright_core::Analysis;
+    let directory = crate::test_support::TempDirectory::new("mo2-b1-adjustment-matte");
+    let data = directory.path("data");
+    let engine = crate::FfmpegMediaEngine::new_with_gpu_and_data_dir(context.clone(), data);
+    let look = effect(
+        1,
+        "color_wheels",
+        &[
+            ("gain_master_thousandths", 1_500),
+            ("matte_enabled", 1),
+            ("matte_qualifier_enabled", 1),
+            ("matte_luma_low_basis_points", 3_000),
+            ("matte_luma_high_basis_points", 7_000),
+        ],
+    );
+    let plate = solid(1, GREY, BlendMode::Normal, vec![]);
+    let doc = document(vec![plate, adjustment(2, BlendMode::Normal, vec![look])]);
+    let mut renderer = FrameRenderer::new(context);
+    let (scale, seek) = full();
+    let reference = renderer
+        .render_matte(
+            &doc,
+            TimeCode(0),
+            doc.resolution,
+            scale,
+            seek,
+            ClipId(2),
+            EffectId(1),
+        )
+        .unwrap();
+    assert!(
+        reference.coverage.iter().all(|v| *v == 255),
+        "grey qualifies"
+    );
+    let proof = engine
+        .unwrap()
+        .matte_proof_for_document(Arc::new(doc), TimeCode(0), ClipId(2), EffectId(1))
+        .unwrap();
+    let values: Vec<u8> = proof.coverage.pixels.chunks(4).map(|p| p[0]).collect();
+    assert_eq!(
+        values, reference.coverage,
+        "R18: the proof qualifies the below-stack"
+    );
+}
+
+/// Review-1 B2: a valid 9-frame document whose target clip spans 6 frames
+/// still proves (the scratch projection stays a valid document).
+fn review1_public_matte_shorter_clip_remains_valid_on(context: GpuContext) {
+    use kinewright_core::Analysis;
+    let directory = crate::test_support::TempDirectory::new("mo2-b1-shorter-matte");
+    let data = directory.path("data");
+    let engine = crate::FfmpegMediaEngine::new_with_gpu_and_data_dir(context, data).unwrap();
+    let look = effect(
+        1,
+        "color_wheels",
+        &[
+            ("gain_master_thousandths", 1_500),
+            ("matte_enabled", 1),
+            ("matte_window_count", 1),
+            ("matte_window0_shape_token", 1),
+        ],
+    );
+    let mut top = solid(2, BLUE, BlendMode::Normal, vec![look]);
+    top.source_range.end = TimeCode(6);
+    let doc = document(vec![solid(1, GREY, BlendMode::Normal, vec![]), top]);
+    let result =
+        engine.matte_proof_for_document(Arc::new(doc), TimeCode(0), ClipId(2), EffectId(1));
+    let proof = result.expect("a valid document's derived proof renders");
+    assert_eq!((proof.coverage.width, proof.coverage.height), (W, H));
+}
+
 gpu_lanes! {
     review1_r10_normal_adjustment_storage_must_refuse => review1_r10_normal_adjustment_storage_must_refuse_on,
     review1_r10_nan_extrema_must_refuse => review1_r10_nan_extrema_must_refuse_on,
@@ -701,4 +778,6 @@ gpu_lanes! {
     review2_independent_transition_grid => review2_independent_transition_grid_on,
     review2_exact_pixel_centre_coverage => review2_exact_pixel_centre_coverage_on,
     review1_all_geometric_frames_independent_oracle => review1_all_geometric_frames_independent_oracle_on,
+    review1_public_matte_adjustment_qualifier_keeps_below => review1_public_matte_adjustment_qualifier_keeps_below_on,
+    review1_public_matte_shorter_clip_remains_valid => review1_public_matte_shorter_clip_remains_valid_on,
 }
