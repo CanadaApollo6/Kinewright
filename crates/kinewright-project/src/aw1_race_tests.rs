@@ -2700,3 +2700,106 @@ fn rr3_mixed_directory_and_leaf_depth() {
         }
     }
 }
+
+/// J5 (race N-c, journal side — the `journal_before_open` hook): a
+/// non-matched regular alias journal naming the project is swapped, between
+/// the scan's type check and its open, for a FIFO, a directory, a link to a
+/// FIFO / dir / `/dev/zero`, nothing, or a link to a naming header. The
+/// claimant (holding the flock) returns within 2 s every time: non-regular
+/// fds are skipped, and a naming header read through a late link still
+/// refuses (fail closed).
+#[cfg(unix)]
+#[test]
+fn j5_journal_swapped_between_type_check_and_open_never_blocks() {
+    fn mkfifo(path: &Path) {
+        assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+    }
+    // Open a FIFO's write end without blocking (ENXIO when no reader).
+    fn unblock_fifo(path: &Path) {
+        let mut options = fs::OpenOptions::new();
+        options.write(true);
+        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NONBLOCK);
+        drop(options.open(path));
+    }
+    for kind in [
+        "fifo",
+        "dir",
+        "link-fifo",
+        "link-dir",
+        "link-dev-zero",
+        "gone",
+        "link-naming",
+    ] {
+        let fx = fixture("j5-journal-swap");
+        let alias = alias_header_journal(
+            &fx.recovery,
+            &fx.project,
+            &fx.dir.path("elsewhere.kinewright"),
+        );
+        let signals = fx.dir.path("owner");
+        let mut owner = spawn(
+            "hold",
+            &fx.project,
+            &fx.recovery,
+            &signals,
+            Opts {
+                hook: Some("journal_before_open"),
+                ..Opts::default()
+            },
+        );
+        wait_for(&signals.join("paused"));
+        let side = fx.dir.path("side");
+        let naming = fx.dir.path("naming.journal-data");
+        fs::copy(&alias, &naming).unwrap();
+        fs::remove_file(&alias).unwrap();
+        match kind {
+            "fifo" => mkfifo(&alias),
+            "dir" => fs::create_dir(&alias).unwrap(),
+            "link-fifo" => {
+                mkfifo(&side);
+                std::os::unix::fs::symlink(&side, &alias).unwrap();
+            }
+            "link-dir" => {
+                fs::create_dir(&side).unwrap();
+                std::os::unix::fs::symlink(&side, &alias).unwrap();
+            }
+            "link-dev-zero" => std::os::unix::fs::symlink("/dev/zero", &alias).unwrap(),
+            "gone" => {}
+            "link-naming" => std::os::unix::fs::symlink(&naming, &alias).unwrap(),
+            other => panic!("{other}"),
+        }
+        fs::write(signals.join("resume"), "").unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        let mut returned = false;
+        while Instant::now() < until {
+            if signals.join("owned").exists() || signals.join("error").exists() {
+                returned = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if !returned {
+            // Unblock a regressed claimant, then fail below.
+            unblock_fifo(&side);
+            unblock_fifo(&alias);
+        }
+        let took = wait_either(&signals.join("owned"), &signals.join("error"));
+        let error = fs::read_to_string(signals.join("error")).unwrap_or_default();
+        if took {
+            fs::write(signals.join("release"), "").unwrap();
+        }
+        owner.0.wait().unwrap();
+        assert!(returned, "{kind}: the claimant blocked under its flock");
+        if kind == "link-naming" {
+            assert!(
+                !took && error.contains("PendingRecovery"),
+                "{kind}: a naming header read through a late link fails closed: {error}"
+            );
+        } else {
+            assert!(
+                took,
+                "{kind}: a non-regular fd is skipped, never an error: {error}"
+            );
+        }
+    }
+}

@@ -208,6 +208,8 @@ fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Err
     // N-c: an entry swapped to a FIFO (or anything non-regular) since the
     // type check is skipped like any other non-regular entry, never opened
     // blocking.
+    #[cfg(any(test, feature = "test-util"))]
+    crate::test_hook("journal_before_open");
     let file = match open_regular(journal) {
         Ok(Some(file)) => file,
         Ok(None) => return Ok(false),
@@ -545,6 +547,55 @@ mod tests {
     }
 
     /// H3 (R1 S2 / R2 S1): only a committed header line claims — the value
+    /// J5 (Astra R2 S2): the production journal entry point opens through
+    /// `open_regular` — a directory at the journal name is rejected as a
+    /// non-regular fd, never read (a plain `File::open` reads it as
+    /// `IsADirectory`).
+    #[cfg(unix)]
+    #[test]
+    fn rr3_journal_entry_rejects_nonregular_fd() {
+        let dir = TempDirectory::new("rr3-journal-entry");
+        let result = journal_header_names(dir.root(), Path::new("/p"));
+        assert!(
+            matches!(result, Ok(false)),
+            "the entry point rejects the non-regular fd before reading: {result:?}"
+        );
+    }
+
+    /// J5 (race N-c, journal side): a FIFO at the journal name returns
+    /// promptly through the entry point — the open never blocks.
+    #[cfg(unix)]
+    #[test]
+    fn j5_journal_entry_fifo_never_blocks() {
+        let dir = TempDirectory::new("j5-journal-fifo");
+        let fifo = dir.path("x.journal");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo runs")
+                .success()
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let probe = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(format!(
+                "{:?}",
+                journal_header_names(&probe, Path::new("/p"))
+            ));
+        });
+        let verdict = receiver.recv_timeout(std::time::Duration::from_secs(5));
+        if verdict.is_err() {
+            // Unblock a regressed open: a writer opens and closes — EOF.
+            drop(fs::OpenOptions::new().write(true).open(&fifo));
+        }
+        assert_eq!(
+            verdict.as_deref(),
+            Ok("Ok(false)"),
+            "the FIFO is skipped unopened"
+        );
+    }
+
     /// followed immediately by `\n`. No newline, or trailing garbage before
     /// it, is uncommitted and never blocks.
     #[test]
