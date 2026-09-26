@@ -377,6 +377,9 @@ const fn blend_word(blend: BlendMode) -> f32 {
 /// MO2 R13: the selector of the full-raster Push backdrop draw.
 const PUSH_BACKDROP_WORD: f32 = 7.0;
 
+/// MO2 R10: a `Normal` adjustment, validated against the accumulator.
+const VALIDATED_NORMAL_WORD: f32 = 8.0;
+
 /// Which layer's grade buffer carries the CC5 3.2 matte-debug selector.
 ///
 /// The selector is a word of the *layer's own* storage buffer, not a global
@@ -1354,9 +1357,10 @@ impl Compositor {
             views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
             frame.snapshots.push((key, texture));
         }
-        // MO2 R10: one sticky flag slot per checked (non-`Normal`) layer.
+        // MO2 R10: one sticky flag slot per checked layer: every special
+        // (non-`Normal` or adjustment) layer, whatever its blend.
         let checked = (0..layers.len())
-            .filter(|index| !layers[*index].mode.blend.is_normal())
+            .filter(|index| layers[*index].mode.is_special())
             .collect::<Vec<_>>();
         let validity = (!checked.is_empty()).then(|| {
             self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1371,7 +1375,11 @@ impl Compositor {
             if splits(layer) {
                 steps.push(Step::Snapshot(0));
             }
-            let mut accumulator = &self.dummy_accumulator;
+            let mut accumulator = if layer.mode.is_special() {
+                &views[0]
+            } else {
+                &self.dummy_accumulator
+            };
             if let Some(shift) = layer.transition.backdrop {
                 frame
                     .layers
@@ -1382,8 +1390,6 @@ impl Compositor {
                     steps.push(Step::Snapshot(target));
                     accumulator = &views[target];
                 }
-            } else if !layer.mode.blend.is_normal() {
-                accumulator = &views[0];
             }
             let slot = checked.iter().position(|checked| *checked == index);
             let bindings = LayerBindings {
@@ -1588,6 +1594,10 @@ impl Compositor {
             params.frame_aspect = height as f32 / width as f32;
         }
         params.blend_mode = blend_word(layer.mode.blend);
+        // MO2 R10: a `Normal` adjustment is validated against its snapshot.
+        if layer.mode.role == LayerRole::Adjustment && layer.mode.blend.is_normal() {
+            params.blend_mode = VALIDATED_NORMAL_WORD;
+        }
         let grade_bytes =
             grade_buffer_bytes_for(layer.effects, library, (width, height), matte_debug_node)?;
         let sampler = if Self::is_pixel_exact_blit(layer, &params, width, height) {

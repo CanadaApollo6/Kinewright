@@ -493,8 +493,8 @@ fn r10_non_finite_blends_refuse_typed_and_sticky_on(gpu_context: GpuContext) {
 }
 
 /// R10 / N6 R-C: through every document render entry the refusal names the
-/// offending clip and project frame; a `Normal` overflow keeps the CC3
-/// contract (no refusal).
+/// offending clip and project frame; a real `Normal` pixel-layer overflow
+/// keeps the CC3 contract (unchecked fast path, no refusal).
 fn r10_refusal_names_clip_and_frame_on_every_path_on(context: GpuContext) {
     let mut r = FrameRenderer::new(context);
     let boost = |id| primary(id, &[("exposure_milli_stops", 5_000)]);
@@ -519,11 +519,13 @@ fn r10_refusal_names_clip_and_frame_on_every_path_on(context: GpuContext) {
     let delivery = r.render_delivery(&document, at, size, full, seek);
     assert_eq!(delivery.err(), Some(expected.clone()));
     assert_eq!(r.twin_working(&document, at, size).err(), Some(expected));
-    let mut normal = document.clone();
-    normal.tracks[1].clips[0].blend_mode = BlendMode::Normal;
+    let boosts = (1..=4).map(boost).collect();
+    let normal = self::document(vec![solid(1, [255; 3], BlendMode::Normal, boosts)]);
+    let saturated = gpu(&mut r, &normal, 3).expect("a Normal pixel overflow is not refused");
     assert!(
-        gpu(&mut r, &normal, 3).is_ok(),
-        "a Normal overflow is not refused"
+        saturated.pixels[0] >= 65_504.0 || !saturated.pixels[0].is_finite(),
+        "2^20 really leaves the f16 range: {}",
+        saturated.pixels[0]
     );
 }
 
@@ -1194,3 +1196,7 @@ gpu_lanes! {
     normal_pre_post_identity => normal_pre_post_identity_on,
     cc8_g2_sdr_identity => cc8_g2_sdr_identity_on,
 }
+
+/// The B1 reviewers' probes, retained (fix round 1).
+#[path = "mo2_review_probes.rs"]
+mod review_probes;

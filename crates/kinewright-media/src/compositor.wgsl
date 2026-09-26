@@ -59,7 +59,9 @@ struct LayerParams {
     anchor_y: f32,
     // MO2 R14: 0 = `Normal` (fixed-function over only), 1..6 = Multiply,
     // Screen, Overlay, Darken, Lighten, Add against the accumulator
-    // snapshot, 7 = the R13 Push backdrop. Coverage keeps screen `< edge`
+    // snapshot, 7 = the R13 Push backdrop, 8 = a `Normal` adjustment,
+    // validated against the snapshot (under Push too: its covered pixels'
+    // backdrop is the unshifted `D0(x)`, R21). Coverage keeps screen `< edge`
     // (on = 1) or `>= edge` (on = 2) along x (axis 0) or y (axis 1).
     blend_mode: f32,
     coverage_edge: f32,
@@ -776,10 +778,11 @@ fn blend_channel(mode: u32, s: f32, d: f32) -> f32 {
     }
 }
 
-// MO2 R10: non-finite (exponent all ones) or beyond the f16 maximum.
-fn unstorable(value: vec3<f32>) -> bool {
+// MO2 R10: non-finite (exponent all ones), tested on the bits so min/max
+// or fast-math folding cannot erase it.
+fn non_finite(value: vec3<f32>) -> bool {
     let bits = bitcast<vec3<u32>>(value) & vec3<u32>(0x7f800000u);
-    return any(bits == vec3<u32>(0x7f800000u)) || any(abs(value) > vec3<f32>(65504.0));
+    return any(bits == vec3<u32>(0x7f800000u));
 }
 
 // MO2 R13: the opaque Push backdrop samples `D0(x - q)` where that lands in
@@ -984,15 +987,20 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if mode == 0u {
         return vec4<f32>(output_linear, alpha);
     }
-    // MO2 R9/R9b: emit `(B, alpha)` into the fixed-function over.
+    // MO2 R9/R9b: emit `(B, alpha)` into the fixed-function over (8 blends
+    // `Normal`).
     let below = textureLoad(accumulator, vec2<i32>(input.position.xy), 0).rgb;
     let blended = vec3<f32>(
         blend_channel(mode, output_linear.r, below.r),
         blend_channel(mode, output_linear.g, below.g),
         blend_channel(mode, output_linear.b, below.b),
     );
-    if unstorable(blended) || unstorable(vec3<f32>(alpha))
-        || unstorable(alpha * blended + (1.0 - alpha) * below) {
+    // MO2 R10: operands and intermediates must be finite (checked before
+    // min/max can erase them); magnitude only where the target stores.
+    let stored = alpha * blended + (1.0 - alpha) * below;
+    if non_finite(output_linear) || non_finite(below) || non_finite(blended)
+        || non_finite(vec3<f32>(alpha)) || non_finite(stored)
+        || any(abs(stored) > vec3<f32>(65504.0)) {
         atomicStore(&validity, 1u);
     }
     return vec4<f32>(blended, alpha);
