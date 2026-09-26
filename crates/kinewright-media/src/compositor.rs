@@ -526,10 +526,12 @@ pub struct Compositor {
     texture_pool: Mutex<TexturePool>,
     /// MO2 R12/R14: the cached 1x1 accumulator every fast-path draw binds.
     dummy_accumulator: wgpu::TextureView,
-    /// MO2 R14: the validity slot every unchecked draw binds; never written.
+    /// MO2 R14: the validity slot the Push backdrop binds; never written.
     dummy_validity: wgpu::Buffer,
     /// MO2 R10: per-layer validity slot stride (the storage offset alignment).
     validity_stride: u64,
+    /// MO2 R10 (ME11): an all-`Normal` frame's flag slots, recycled (B8).
+    flag_pool: Mutex<Option<wgpu::Buffer>>,
     /// MO2 R12/R13: accumulator snapshots taken, for the copy-count probes.
     accumulator_copies: AtomicU64,
 }
@@ -666,8 +668,10 @@ struct FrameResources {
     layers: Vec<LayerResources>,
     /// MO2 R13: pooled accumulator snapshots A (and B).
     snapshots: Vec<(TexturePoolKey, wgpu::Texture)>,
-    /// MO2 R10: the sticky validity flags and the layer each slot checks.
-    validity: Option<(wgpu::Buffer, Vec<usize>)>,
+    /// MO2 R10: a split frame's sticky validity flags, slot = layer.
+    validity: Option<wgpu::Buffer>,
+    /// MO2 R10 (ME11): an all-`Normal` frame's pooled flags, slot = layer.
+    pooled_flags: Option<wgpu::Buffer>,
 }
 
 /// One entry of a frame's schedule.
@@ -1018,6 +1022,7 @@ impl Compositor {
             dummy_accumulator,
             dummy_validity,
             validity_stride,
+            flag_pool: Mutex::new(None),
             accumulator_copies: AtomicU64::new(0),
         }
     }
@@ -1270,6 +1275,9 @@ impl Compositor {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Kinewright compositor commands"),
             });
+        if let Some(flags) = &frame.pooled_flags {
+            encoder.clear_buffer(flags, 0, None);
+        }
         let mut load = wgpu::LoadOp::Clear(wgpu::Color::BLACK);
         // MO2 R12: no schedule is an all-Normal frame, drawn in order.
         let scheduled = !steps.is_empty();
@@ -1365,18 +1373,16 @@ impl Compositor {
             views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
             frame.snapshots.push((key, texture));
         }
-        // MO2 R10: one sticky flag slot per checked layer: every special
-        // (non-`Normal` or adjustment) layer, whatever its blend.
-        let checked = (0..layers.len())
-            .filter(|index| layers[*index].mode.is_special())
-            .collect::<Vec<_>>();
-        let validity = (!checked.is_empty()).then(|| {
-            self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Kinewright compositor validity flags"),
-                size: self.validity_stride * checked.len() as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            })
+        // MO2 R10 (ME11): one sticky flag slot per layer, every layer. An
+        // all-`Normal` frame recycles its slots instead of allocating them.
+        let size = self.validity_stride * layers.len() as u64;
+        let validity = (snapshots > 0).then(|| self.flags_buffer(size));
+        frame.pooled_flags = (snapshots == 0).then(|| {
+            let mut pool = self.flag_pool.lock().ok();
+            let pooled = pool
+                .as_mut()
+                .and_then(|pool| pool.take_if(|b| b.size() >= size));
+            pooled.unwrap_or_else(|| self.flags_buffer(size))
         });
         // MO2 R12: an all-Normal frame stages today's storage only — one
         // exact layer-resource allocation, no schedule, snapshot or flags.
@@ -1411,14 +1417,13 @@ impl Compositor {
                     accumulator = &views[target];
                 }
             }
-            let slot = checked.iter().position(|checked| *checked == index);
+            let flags = validity.as_ref().or(frame.pooled_flags.as_ref());
             let bindings = LayerBindings {
                 source: adjustment(layer).then(|| &views[0]),
                 accumulator,
-                validity: match (&validity, slot) {
-                    (Some(buffer), Some(slot)) => (buffer, self.validity_stride * slot as u64),
-                    _ => (&self.dummy_validity, 0),
-                },
+                validity: flags.map_or((&self.dummy_validity, 0), |buffer| {
+                    (buffer, self.validity_stride * index as u64)
+                }),
             };
             let debug_node = matte_debug
                 .filter(|selection| selection.layer_index == index)
@@ -1428,8 +1433,19 @@ impl Compositor {
                 .push(self.layer_resources(layer, width, height, library, debug_node, &bindings)?);
             schedule(Step::Draw(frame.layers.len() - 1));
         }
-        frame.validity = validity.map(|buffer| (buffer, checked));
+        frame.validity = validity;
         Ok(steps)
+    }
+
+    fn flags_buffer(&self, size: u64) -> wgpu::Buffer {
+        self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Kinewright compositor validity flags"),
+            size: size.max(self.validity_stride),
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
     }
 
     /// MO2 R13: the full-raster opaque Push backdrop, sampling snapshot `D0`
@@ -1499,6 +1515,9 @@ impl Compositor {
     /// A poisoned lock or a full pool simply destroys the textures; recycling
     /// is an optimization and must never change rendered output.
     fn release_layer_textures(&self, frame: FrameResources) {
+        if let (Some(flags), Ok(mut pool)) = (frame.pooled_flags, self.flag_pool.lock()) {
+            *pool = Some(flags);
+        }
         let Ok(mut pool) = self.texture_pool.lock() else {
             return;
         };
@@ -1999,10 +2018,8 @@ impl Compositor {
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let pixel_bytes = u64::from(padded_row_bytes).saturating_mul(u64::from(height));
         // MO2 R10: the validity flags ride the same readback, after the pixels.
-        let flag_bytes = frame
-            .validity
-            .as_ref()
-            .map_or(0, |(buffer, _)| buffer.size());
+        let flags = frame.validity.as_ref().or(frame.pooled_flags.as_ref());
+        let flag_bytes = flags.map_or(0, wgpu::Buffer::size);
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Kinewright compositor readback"),
             size: pixel_bytes + flag_bytes,
@@ -2030,7 +2047,7 @@ impl Compositor {
                 depth_or_array_layers: 1,
             },
         );
-        if let Some((flags, _)) = &frame.validity {
+        if let Some(flags) = flags {
             encoder.copy_buffer_to_buffer(flags, 0, &buffer, pixel_bytes, flag_bytes);
         }
         self.gpu.queue.submit([encoder.finish()]);
@@ -2049,18 +2066,14 @@ impl Compositor {
             .map_err(|error| MediaError::Backend(format!("wgpu readback map failed: {error}")))?;
         let mapped = slice.get_mapped_range();
         let mut outcome = Ok(());
-        if let Some((_, checked)) = &frame.validity {
-            let stride = usize::try_from(self.validity_stride).unwrap_or(usize::MAX);
-            let flags = &mapped[usize::try_from(pixel_bytes).unwrap_or_default()..];
-            if let Some(slot) =
-                (0..checked.len()).find(|slot| flags[slot * stride..slot * stride + 4] != [0; 4])
-            {
-                outcome = Err(MediaError::NonFiniteRender {
-                    layer: checked[slot],
-                    clip: None,
-                    at: None,
-                });
-            }
+        let stride = usize::try_from(self.validity_stride).unwrap_or(usize::MAX);
+        let mut slots = mapped[usize::try_from(pixel_bytes).unwrap_or_default()..].chunks(stride);
+        if let Some(layer) = slots.position(|slot| slot[..4] != [0; 4]) {
+            outcome = Err(MediaError::NonFiniteRender {
+                layer,
+                clip: None,
+                at: None,
+            });
         }
         let rows = if outcome.is_ok() { height } else { 0 };
         'rows: for row in 0..usize::try_from(rows).unwrap_or_default() {
@@ -6591,7 +6604,9 @@ mod tests {
 
     /// CC5 2.5.5: at exactly zero coverage the node's transform is not
     /// blended in, so `-0.0` keeps its sign bit and a non-finite node output
-    /// cannot poison a pixel the matte never selected.
+    /// cannot poison a pixel the matte never selected. MO2 ME11: the
+    /// non-finite output inside the matte now refuses the frame typed (R10),
+    /// so the outside identity is read off a finite grade.
     #[test]
     fn zero_coverage_is_an_exact_identity() {
         let Some(compositor) = fallback() else {
@@ -6633,16 +6648,42 @@ mod tests {
                 ("matte_window0_half_height_basis_points", 2_500),
             ],
         );
+        let extreme_render = compositor.render_working(
+            (frame.width, frame.height),
+            &[CompositorLayer {
+                frame: &frame,
+                effects: std::slice::from_ref(&node),
+                transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
+            }],
+        );
+        assert!(
+            matches!(
+                extreme_render,
+                Err(MediaError::NonFiniteRender { layer: 0, .. })
+            ),
+            "the non-finite node output inside the matte must refuse typed"
+        );
+        let finite = with_matte(
+            wheels(1, &[("gain_master_thousandths", 1_500)]),
+            &[
+                ("matte_window_count", 1),
+                ("matte_window0_center_x_basis_points", 5_000),
+                ("matte_window0_center_y_basis_points", 5_000),
+                ("matte_window0_half_width_basis_points", 2_500),
+                ("matte_window0_half_height_basis_points", 2_500),
+            ],
+        );
         let baseline = render_linear(compositor, &frame, &[]);
-        let matted = render_linear(compositor, &frame, std::slice::from_ref(&node));
+        let matted = render_linear(compositor, &frame, std::slice::from_ref(&finite));
         let inside = |x: usize, y: usize| (16..=47).contains(&x) && (9..=26).contains(&y);
-        let mut saw_non_finite = false;
+        let mut saw_changed = false;
         let mut saw_negative_zero = false;
         for y in 0..36_usize {
             for x in 0..64_usize {
                 let pixel = (y * 64 + x) * 4;
                 if inside(x, y) {
-                    saw_non_finite |= !matted[pixel + 1].is_finite();
+                    saw_changed |= matted[pixel + 1].to_bits() != baseline[pixel + 1].to_bits();
                 } else {
                     for c in 0..4 {
                         assert_eq!(
@@ -6660,10 +6701,7 @@ mod tests {
                 }
             }
         }
-        assert!(
-            saw_non_finite,
-            "the over-range sample must actually reach a non-finite node output"
-        );
+        assert!(saw_changed, "the finite grade must move the inside pixels");
         assert!(
             saw_negative_zero,
             "the fixture must exercise outside pixels"

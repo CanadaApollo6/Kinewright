@@ -468,15 +468,21 @@ fn render_sampled<F: CompositorInput>(
                 std::array::from_fn(|c| blend(mode, [r, g, b][c], below[c]))
             };
             let out: [f32; 3] = std::array::from_fn(|c| over(blended[c], below[c]));
-            // R10: every special layer; finite operands and intermediates,
-            // magnitude only at the store.
+            // R10: every layer; finite operands and intermediates, magnitude
+            // only at the store.
             let finite = [r, g, b, alpha, below[0], below[1], below[2]]
                 .iter()
                 .chain(&blended)
                 .chain(&out)
                 .all(|v| v.is_finite());
-            let invalid = !finite || out.iter().any(|v| v.abs() > 65504.0);
-            if (mode != 0 || adjustment) && flagged.is_none() && invalid {
+            // ME11: a `Normal` pixel layer flags what it blends, not `out`.
+            let invalid = if mode == 0 && !adjustment {
+                ![r, g, b, alpha].iter().all(|v| v.is_finite())
+                    || (alpha > 0.0 && [r, g, b].iter().any(|v| v.abs() > 65504.0))
+            } else {
+                !finite || out.iter().any(|v| v.abs() > 65504.0)
+            };
+            if flagged.is_none() && invalid {
                 flagged = Some(index);
             }
             *texel = [

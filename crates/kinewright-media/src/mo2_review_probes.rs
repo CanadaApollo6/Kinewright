@@ -74,7 +74,8 @@ fn review1_r10_normal_adjustment_storage_must_refuse_on(context: GpuContext) {
 }
 
 /// Review-1 B1 / review-2 B2: NaN and ±inf operands refuse before
-/// `min`/`max` can erase them, on both lanes.
+/// `min`/`max` can erase them, on both lanes. ME11: a NaN below is now
+/// caught where its `Normal` layer writes it, layer 0.
 fn review1_r10_nan_extrema_must_refuse_on(context: GpuContext) {
     let c = Compositor::new(context);
     for mode in [BlendMode::Darken, BlendMode::Lighten] {
@@ -86,8 +87,9 @@ fn review1_r10_nan_extrema_must_refuse_on(context: GpuContext) {
         ] {
             let (gpu, cpu) = pair_lanes(&c, mode, grey4(d), grey4(s));
             let label = format!("{mode:?}({s}, {d})");
-            refused(gpu, 1, &label);
-            refused(cpu, 1, &label);
+            let layer = usize::from(!d.is_nan());
+            refused(gpu, layer, &label);
+            refused(cpu, layer, &label);
         }
     }
 }
@@ -992,6 +994,152 @@ fn review1_twin_covers_supported_legacy_cube_on(context: GpuContext) {
     }
 }
 
+// ------------------------------------------------ re-review (fix round 3)
+
+/// Re-review B1 (N17.1, ME11): a valid `Normal` solid whose four +5-stop
+/// corrections leave the f16 range refuses typed on every path, also when an
+/// opaque layer covers it afterwards.
+fn rereview_me7_valid_normal_solid_overflow_on(context: GpuContext) {
+    let mut r = FrameRenderer::new(context);
+    let boosts = (1..=4)
+        .map(|id| primary(id, &[("exposure_milli_stops", 5_000)]))
+        .collect();
+    let mut doc = document_sized((3, 3), vec![solid(1, [255; 3], BlendMode::Normal, boosts)]);
+    let (scale, strategy) = full();
+    for covered in [false, true] {
+        if covered {
+            doc.tracks.push(Track {
+                id: TrackId(2),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![solid(2, GREY, BlendMode::Normal, vec![])],
+            });
+        }
+        doc.validate().unwrap();
+        let at = TimeCode(0);
+        let paths = [
+            gpu(&mut r, &doc, 0).map(|_| ()),
+            r.twin_working(&doc, at, doc.resolution).map(|_| ()),
+            r.render(&doc, at, doc.resolution, scale, strategy)
+                .map(|_| ()),
+            r.render_delivery(&doc, at, doc.resolution, scale, strategy)
+                .map(|_| ()),
+        ];
+        for (path, result) in paths.into_iter().enumerate() {
+            assert!(
+                matches!(result, Err(MediaError::NonFiniteRender { layer: 0, .. })),
+                "covered={covered} path {path}: {result:?}"
+            );
+        }
+    }
+}
+
+fn cube_effect(id: u64, path: &std::path::Path, intensity: i64) -> Effect {
+    let mut lut = effect(id, "cube_lut", &[("intensity_percent", intensity)]);
+    let path = ParamValue::Text(path.to_string_lossy().into_owned());
+    lut.parameters.insert("path".into(), path);
+    lut
+}
+
+/// Re-review S3 (N13/N14): a non-default cube domain, and the last of two
+/// enabled lattices wins, GPU ≡ twin.
+fn rereview_cube_domains_and_last_lattice_on(context: GpuContext) {
+    let directory = crate::test_support::TempDirectory::new("rereview-cube-domains");
+    let (domain, first, last) = (
+        directory.path("domain.cube"),
+        directory.path("first.cube"),
+        directory.path("last.cube"),
+    );
+    let lattice = "0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
+    let bounds = "DOMAIN_MIN 0.2 0.1 0.3\nDOMAIN_MAX 0.8 0.9 0.7\n";
+    std::fs::write(&domain, format!("LUT_3D_SIZE 2\n{bounds}{lattice}")).unwrap();
+    std::fs::write(&first, format!("LUT_3D_SIZE 2\n{}", "1 0 0\n".repeat(8))).unwrap();
+    std::fs::write(&last, format!("LUT_3D_SIZE 2\n{}", "0 0 1\n".repeat(8))).unwrap();
+    let mut r = FrameRenderer::new(context);
+    let cases = [
+        ("domain", vec![cube_effect(1, &domain, 100)]),
+        (
+            "last",
+            vec![cube_effect(1, &first, 100), cube_effect(2, &last, 100)],
+        ),
+    ];
+    for (label, effects) in cases {
+        let plate = solid(1, [139, 151, 125], BlendMode::Normal, vec![]);
+        let doc = document_sized(
+            (3, 3),
+            vec![plate, adjustment(2, BlendMode::Normal, effects)],
+        );
+        doc.validate().unwrap();
+        let gpu = gpu(&mut r, &doc, 0).unwrap();
+        let twin = r.twin_working(&doc, TimeCode(0), doc.resolution).unwrap();
+        assert_r27(&gpu.pixels, &twin.pixels, label);
+    }
+}
+
+/// Re-review S3 (N12): an excluded upper clip's enable curve must not
+/// survive into the matte projection (its missing media is never decoded).
+fn rereview_projection_enabled_curve_on(context: GpuContext) {
+    use kinewright_core::Analysis;
+    let directory = crate::test_support::TempDirectory::new("rereview-projection-curve");
+    let engine =
+        crate::FfmpegMediaEngine::new_with_gpu_and_data_dir(context, directory.path("data"))
+            .unwrap();
+    let look = effect(
+        1,
+        "color_wheels",
+        &[
+            ("gain_master_thousandths", 1_500),
+            ("matte_enabled", 1),
+            ("matte_qualifier_enabled", 1),
+            ("matte_luma_low_basis_points", 3_000),
+            ("matte_luma_high_basis_points", 7_000),
+        ],
+    );
+    let mut cover = solid(3, BLUE, BlendMode::Normal, vec![]);
+    cover.enabled_curve = Some(AutomationCurve {
+        keyframes: vec![Keyframe {
+            at: TimeCode(0),
+            value: 1,
+            interpolation: KeyframeInterpolation::Hold,
+            tangent_in: 0,
+            tangent_out: 0,
+        }],
+    });
+    let grey = solid(1, GREY, BlendMode::Normal, vec![]);
+    let mut doc = document(vec![
+        grey,
+        adjustment(2, BlendMode::Normal, vec![look]),
+        cover,
+    ]);
+    doc.media_pool.push(kinewright_core::MediaAsset {
+        id: AssetId::default(),
+        path: directory.path("unneeded-missing.mp4"),
+        name: "excluded".into(),
+        duration: TimeCode(30),
+        fps: doc.fps,
+        kind: kinewright_core::MediaKind::Video,
+        resolution: Some((W, H)),
+        source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+        color_description: kinewright_core::ColorDescription::default(),
+        assumed_from: None,
+    });
+    doc.tracks[2].clips[0].content = ClipContent::Media;
+    doc.validate().unwrap();
+    let proof = engine
+        .matte_proof_for_document(Arc::new(doc), TimeCode(0), ClipId(2), EffectId(1))
+        .unwrap();
+    assert!(
+        proof
+            .coverage
+            .pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p[0] == 255),
+        "an excluded clip's enable curve must not cover the proof"
+    );
+}
+
 gpu_lanes! {
     review1_r10_normal_adjustment_storage_must_refuse => review1_r10_normal_adjustment_storage_must_refuse_on,
     review1_r10_nan_extrema_must_refuse => review1_r10_nan_extrema_must_refuse_on,
@@ -1008,4 +1156,7 @@ gpu_lanes! {
     review1_public_matte_adjustment_qualifier_keeps_below => review1_public_matte_adjustment_qualifier_keeps_below_on,
     review1_public_matte_shorter_clip_remains_valid => review1_public_matte_shorter_clip_remains_valid_on,
     review1_twin_covers_supported_legacy_cube => review1_twin_covers_supported_legacy_cube_on,
+    rereview_me7_valid_normal_solid_overflow => rereview_me7_valid_normal_solid_overflow_on,
+    rereview_cube_domains_and_last_lattice => rereview_cube_domains_and_last_lattice_on,
+    rereview_projection_enabled_curve => rereview_projection_enabled_curve_on,
 }
