@@ -11146,6 +11146,7 @@ fn r28_solo_peak_resources_and_elapsed() {
     let base = single_clip_document(engine.probe(media.path()).unwrap());
     let span = base.duration.0;
     let document = mo2_solo_stack(base, vec![mo2_solo_adjustment(2, span)]);
+    let mut final_modes = Vec::new();
     for full_res in [false, true] {
         let args = SoloArgs {
             expected_revision: kinewright_core::TimelineRevision(0),
@@ -11158,6 +11159,13 @@ fn r28_solo_peak_resources_and_elapsed() {
         let strip = preview_solo(&engine, args.expected_revision, &document, &args);
         let elapsed = started.elapsed();
         let peak = gpu.ledger().peak_bytes();
+        final_modes.push(full_res);
+        let verified = strip.as_ref().expect("R28 must measure a rendered strip");
+        assert_eq!(verified.report["pairs"], true);
+        assert_eq!(verified.report["requested"], if full_res { 1 } else { 16 });
+        assert_eq!(verified.report["emitted"], if full_res { 1 } else { 8 });
+        assert!(peak > 0);
+
         println!(
             "R28 solo full_res={full_res} ok={} elapsed_ms={} ledger_peak_mib={:.1} live_mib={:.1}",
             strip.is_ok(),
@@ -11167,6 +11175,7 @@ fn r28_solo_peak_resources_and_elapsed() {
         );
         assert!(peak <= 384 << 20, "solo at 1080p holds the R28 ceiling");
     }
+    assert_eq!(final_modes, [false, true], "both R28 modes measured");
 }
 
 /// MO2 B2 fix round 1: review 1's controlled probes, kept as regressions.
@@ -11745,19 +11754,6 @@ mod mo2_solo_review {
                 assert!(result.content.iter().all(|b| b.as_image().is_none()));
             }
         }
-        // The transport envelope counts too: a refusal that fits alone but
-        // not beside a long request id shrinks to the fixed-size one.
-        let error = SoloError::RenderFailed("x".repeat(3000));
-        let alone = serde_json::to_vec(&error.to_result()).unwrap().len();
-        for (envelope, code) in [
-            (1_056 * 1024 - alone, "solo_render_failed"),
-            (1_056 * 1024 - alone + 1, "solo_over_budget"),
-        ] {
-            let result = error.to_result_within(envelope);
-            let body = result.structured_content.as_ref().unwrap();
-            assert_eq!(body["code"], code, "envelope {envelope}");
-            assert!(serde_json::to_vec(&result).unwrap().len() + envelope <= 1_056 * 1024);
-        }
     }
 
     /// Review 3 (S1): both axes, every mode and context, and the u32
@@ -11941,9 +11937,9 @@ mod mo2_solo_review {
         }
     }
 
-    /// Review 3 (B2): admission counts the JSON-RPC envelope. A legal
-    /// 60,000-byte string request id pushes the near-cap strip over R25,
-    /// so it is refused typed inside the budget; a numeric id still
+    /// Review 3 (B2): the JSON-RPC envelope counts. A legal 60,000-byte
+    /// string request id pushes the near-cap strip over R25, so it becomes
+    /// the minimal typed refusal inside the budget; a numeric id still
     /// receives the strip, and both complete bodies obey the budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn new_wire_budget_includes_string_request_id() {
@@ -11977,13 +11973,318 @@ mod mo2_solo_review {
         assert_eq!(refusal.is_error, Some(true));
         assert!(refusal.content.iter().all(|b| b.as_image().is_none()));
         let body = refusal.structured_content.unwrap();
-        assert_eq!(body["code"], "solo_over_budget", "{body}");
-        assert!(
-            body["message"].as_str().unwrap().contains("response_bytes"),
-            "{body}"
-        );
+        assert_eq!(body, json!({"code": "solo_over_budget"}));
         for bytes in [numeric_bytes, string_bytes] {
             assert!(bytes <= 1_056 * 1024, "complete body {bytes}");
         }
+    }
+
+    const WIRE: usize = kinewright_agent::SOLO_WIRE_BUDGET_BYTES;
+
+    /// What the server's choke point measures for a reply that arrived as
+    /// `message`: rmcp's own JSON-RPC serialization with the `resultType`
+    /// a legacy session strips restored, plus the framing bound.
+    fn measured(message: &serde_json::Value) -> usize {
+        use rmcp::model::{ResultType, ServerJsonRpcMessage, ServerResult};
+        let id = serde_json::from_value(message["id"].clone()).unwrap();
+        let rebuilt = if message.get("error").is_some() {
+            let error = serde_json::from_value(message["error"].clone()).unwrap();
+            ServerJsonRpcMessage::error(error, Some(id))
+        } else {
+            let mut result: CallToolResult =
+                serde_json::from_value(message["result"].clone()).unwrap();
+            result.result_type = Some(ResultType::COMPLETE);
+            ServerJsonRpcMessage::response(ServerResult::CallToolResult(result), id)
+        };
+        serde_json::to_vec(&rebuilt).unwrap().len() + kinewright_agent::SOLO_FRAMING_BYTES
+    }
+
+    /// The outcome a reply carries.
+    fn outcome(message: &serde_json::Value) -> &'static str {
+        let result = &message["result"];
+        if message["error"]["data"]["code"] == "solo_invalid_arguments" {
+            "invalid"
+        } else if result["structuredContent"] == json!({"code": "solo_over_budget"}) {
+            "minimal"
+        } else if result["isError"] == false {
+            "success"
+        } else if result["structuredContent"]["code"] == "solo_clip_not_visible" {
+            "not_visible"
+        } else if (result["content"][0]["text"].as_str())
+            .is_some_and(|text| text.starts_with("timeline revision conflict"))
+        {
+            "stale"
+        } else {
+            panic!("unexpected reply {message}")
+        }
+    }
+
+    /// `preview_solo` arguments producing each outcome kind on `doc(2, 2, 1)`.
+    fn outcome_arguments(kind: &str) -> serde_json::Value {
+        let mut arguments = json!({"expected_revision": 0, "clip_id": 1, "samples": 2});
+        match kind {
+            "not_visible" => arguments["clip_id"] = json!(9),
+            "stale" => arguments["expected_revision"] = json!(1),
+            "invalid" => arguments["samples"] = json!("bad"),
+            _ => {}
+        }
+        arguments
+    }
+
+    /// A string id whose JSON is exactly `bytes` long: `unit` (two JSON
+    /// bytes each: two ASCII, escaped or two-byte UTF-8) padded with one
+    /// ASCII byte.
+    fn id_of(bytes: usize, unit: &str) -> serde_json::Value {
+        let body = bytes - 2;
+        let id = json!(format!("{}{}", unit.repeat(body / 2), "i".repeat(body % 2)));
+        assert_eq!(id.to_string().len(), bytes);
+        id
+    }
+
+    /// Final review (B1): every reply is measured as sent, and the only
+    /// overrun ME4 leaves is an id whose JSON alone passes the budget less
+    /// the minimal refusal: bytes on the wire never exceed the measure,
+    /// and the measure never exceeds R25 below that residual edge.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn final_request_id_residual_matrix() {
+        let (server, service) = mo2_solo_start(doc(2, 2, 1, false)).await;
+        let raw = RawSession::open(&server).await;
+        let (_, small) = raw.solo(json!(""), outcome_arguments("stale")).await;
+        let minimal = SoloError::minimal_result();
+        let minimal_overhead = {
+            let message = json!({"jsonrpc": "2.0", "id": "", "result": minimal});
+            measured(&message) - 2
+        };
+        // ME4's arithmetic: a 175-byte message around the id, plus 128.
+        assert_eq!(minimal_overhead, 175 + 128);
+        assert!(minimal_overhead < measured(&small) - 2);
+        let residual = WIRE - minimal_overhead;
+        let mut violations = vec![];
+        for kind in ["success", "not_visible", "stale", "invalid"] {
+            for n in [
+                0,
+                1,
+                4096,
+                60_000,
+                WIRE - 1024,
+                WIRE - 512,
+                WIRE - 256,
+                residual - 3,
+                residual - 2,
+                residual - 1,
+                WIRE - 128,
+                WIRE - 2,
+                WIRE - 1,
+                WIRE,
+                WIRE + 1,
+            ] {
+                let id = json!("i".repeat(n));
+                let id_bytes = id.to_string().len();
+                let (bytes, message) = raw.solo(id.clone(), outcome_arguments(kind)).await;
+                assert_eq!(message["id"], id);
+                let size = measured(&message);
+                let sent = outcome(&message);
+                if bytes > size || (id_bytes <= residual && size > WIRE) {
+                    violations.push(format!("{kind} {sent}: id={id_bytes} {bytes}/{size}"));
+                }
+                if size > WIRE {
+                    assert!(
+                        size <= id_bytes + minimal_overhead,
+                        "{kind} kept a larger reply"
+                    );
+                }
+            }
+        }
+        service.cancel().await.unwrap();
+        server.shutdown();
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// Final review (B1): ±1 around both edges of every outcome kind: its
+    /// own reply at exactly R25, the minimal refusal one byte later, and
+    /// the residual edge where even that stops fitting; escaped and UTF-8
+    /// ids land on the same bytes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn final_exact_wire_limit_edges_and_escaped_ids() {
+        let (server, service) = mo2_solo_start(doc(2, 2, 1, false)).await;
+        let raw = RawSession::open(&server).await;
+        let minimal = SoloError::minimal_result();
+        let minimal_overhead =
+            measured(&json!({"jsonrpc": "2.0", "id": "", "result": minimal})) - 2;
+        let mut cases = 0;
+        for kind in ["success", "not_visible", "stale", "invalid"] {
+            let (_, small) = raw.solo(json!(""), outcome_arguments(kind)).await;
+            assert_eq!(outcome(&small), kind);
+            let own = measured(&small) - 2;
+            let units: &[&str] = if kind == "success" {
+                &["ii", "é", "\"", "\n"]
+            } else {
+                &["ii"]
+            };
+            for edge in [WIRE - own, WIRE - minimal_overhead] {
+                for id_bytes in [edge - 1, edge, edge + 1] {
+                    for unit in units {
+                        let id = id_of(id_bytes, unit);
+                        let (expected, overhead) =
+                            if id_bytes + own <= WIRE || own <= minimal_overhead {
+                                (kind, own)
+                            } else {
+                                ("minimal", minimal_overhead)
+                            };
+                        let label = format!("{kind} id={id_bytes} unit={unit:?}");
+                        // A success report carries `elapsed_ms`, whose digit
+                        // count can change under load and move `own` by a byte
+                        // or two; retry until the reply matches the baseline.
+                        let mut seen = Vec::new();
+                        let exact = 'attempts: {
+                            for _ in 0..8 {
+                                let (bytes, message) =
+                                    raw.solo(id.clone(), outcome_arguments(kind)).await;
+                                assert_eq!(message["id"], id, "{label}");
+                                let size = measured(&message);
+                                assert!(bytes <= size, "{label}: wire {bytes} > {size}");
+                                if outcome(&message) == expected && size == id_bytes + overhead {
+                                    break 'attempts true;
+                                }
+                                seen.push((outcome(&message), size));
+                            }
+                            false
+                        };
+                        assert!(
+                            exact,
+                            "{label}: expected {expected} at {}, saw {seen:?}",
+                            id_bytes + overhead
+                        );
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        service.cancel().await.unwrap();
+        server.shutdown();
+        assert_eq!(cases, 3 * 2 * (4 + 1 + 1 + 1));
+    }
+
+    /// Final review: every field's wrong type, a missing required field
+    /// and large unknown keys are all the one fixed-size typed refusal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn final_invalid_field_type_matrix() {
+        let (server, service) = mo2_solo_start(doc(2, 2, 1, false)).await;
+        let raw = RawSession::open(&server).await;
+        let mut replies = vec![];
+        for field in [
+            "expected_revision",
+            "clip_id",
+            "samples",
+            "context",
+            "full_res",
+        ] {
+            let mut values = vec![
+                json!(null),
+                json!([]),
+                json!({}),
+                json!(-1),
+                json!(1.5),
+                json!(true),
+                json!("bad"),
+            ];
+            values.extend(
+                [4095, 4096, 4097, WIRE - 1, WIRE, WIRE + 1].map(|n| json!("é\\\"".repeat(n / 4))),
+            );
+            for value in values {
+                let valid = (field == "context" && value.is_null())
+                    || (field == "full_res" && value.is_boolean());
+                if !valid {
+                    let mut arguments = outcome_arguments("success");
+                    arguments[field] = value;
+                    replies.push(raw.solo(json!(1), arguments).await);
+                }
+            }
+        }
+        for field in ["expected_revision", "clip_id"] {
+            let mut arguments = outcome_arguments("success");
+            arguments.as_object_mut().unwrap().remove(field);
+            replies.push(raw.solo(json!(1), arguments).await);
+        }
+        for size in [4095, 4096, 4097, WIRE - 1, WIRE, WIRE + 1] {
+            let mut arguments = outcome_arguments("success");
+            arguments[&"z".repeat(size)] = json!(null);
+            replies.push(raw.solo(json!(1), arguments).await);
+        }
+        service.cancel().await.unwrap();
+        server.shutdown();
+        assert_eq!(replies.len(), 71);
+        for (bytes, message) in &replies {
+            assert_eq!(message["error"]["code"], -32602, "{message}");
+            assert_eq!(outcome(message), "invalid");
+            assert!(*bytes < 4096, "{bytes}");
+            assert_eq!(message, &replies[0].1, "one fixed-size refusal");
+        }
+    }
+
+    /// Final review (S3): the report carries the caller's revision and one
+    /// hash per row in before/after order, each the FNV-1a of exactly that
+    /// cell's pixels; an inactive clip's cells are opaque neutral grey with
+    /// no hashes.
+    #[test]
+    fn final_report_revision_hash_order_and_inactive_pixels() {
+        let proof = ProofDouble {
+            noise: true,
+            ..ProofDouble::default()
+        };
+        let document = doc(3, 2, 12, true);
+        let strip = preview_solo(&proof, TimelineRevision(1234), &document, &args(true)).unwrap();
+        assert_eq!(strip.report["revision"], 1234);
+        let hash = |bytes: &[u8]| {
+            let mut n = 0xcbf2_9ce4_8422_2325_u64;
+            for byte in bytes {
+                n ^= u64::from(*byte);
+                n = n.wrapping_mul(0x0100_0000_01b3);
+            }
+            format!("{n:016x}")
+        };
+        let width = strip.image.width as usize;
+        for (column, sample) in strip.report["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            for row in 0..2 {
+                let mut pixels = vec![];
+                for y in row * 2..row * 2 + 2 {
+                    let start = (y * width + column * 3) * 4;
+                    pixels.extend_from_slice(&strip.image.pixels[start..start + 12]);
+                }
+                assert_eq!(
+                    sample["hashes"][row],
+                    hash(&pixels),
+                    "sample {column} row {row}"
+                );
+            }
+        }
+        let mut hidden = document.clone();
+        hidden.tracks[1].clips[0].enabled = false;
+        let strip = preview_solo(&proof, TimelineRevision(1234), &hidden, &args(true)).unwrap();
+        assert!(
+            strip
+                .image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|[r, g, b, a]| r == g && g == b && *r > 0 && *r < 255 && *a == 255)
+        );
+        assert!(
+            strip.report["samples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|sample| {
+                    sample["active"] == false
+                        && sample["reason"] == "clip_disabled"
+                        && sample.get("hashes").is_none()
+                })
+        );
     }
 }

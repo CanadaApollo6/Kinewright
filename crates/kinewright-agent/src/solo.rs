@@ -21,9 +21,11 @@ use thiserror::Error;
 pub const SOLO_REPORT_BUDGET_BYTES: usize = 4 * 1024;
 pub const SOLO_PNG_BUDGET_BYTES: usize = 768 * 1024;
 pub const SOLO_WIRE_BUDGET_BYTES: usize = 1_056 * 1024;
-/// What the transport adds around a reply besides the echoed request id:
-/// the JSON-RPC object and the SSE event lines (under 100 B observed).
-pub const SOLO_FRAMING_BYTES: usize = 512;
+/// A bound on what rmcp 3.1.2's streamable-HTTP transport writes around a
+/// reply's JSON-RPC message: the priming event `data: \nid: E\nretry:
+/// 3000\n\n` (25 + |E|) and the reply event `data: M\nid: E\n\n` (13 + |E|),
+/// where an event id `E` = `usize/u64` is at most 41 bytes: 120, rounded up.
+pub const SOLO_FRAMING_BYTES: usize = 128;
 const MAX_THUMB_PIXELS: usize = 3_276_800;
 /// Every proof renders at working resolution on a device that requires
 /// `wgpu::Limits::default()`: 8192-px 2D textures, on every lane.
@@ -100,18 +102,20 @@ impl SoloError {
         json!({"code": self.code(), "message": self.to_string(), "applied": false})
     }
 
+    /// ME4: the smallest typed refusal, which replaces any `preview_solo`
+    /// reply whose wire size would pass R25.
+    #[must_use]
+    pub fn minimal_result() -> CallToolResult {
+        let mut result = CallToolResult::error(vec![ContentBlock::text("solo_over_budget")]);
+        result.structured_content = Some(json!({"code": "solo_over_budget"}));
+        result
+    }
+
     /// The MCP refusal, bounded like a strip (R25): one whose report or
     /// complete serialization is over budget (a path-bearing render failure)
     /// becomes a typed, fixed-size `solo_over_budget`.
     #[must_use]
     pub fn to_result(&self) -> CallToolResult {
-        self.to_result_within(0)
-    }
-
-    /// [`Self::to_result`], counting `envelope` transport bytes (the
-    /// request id plus [`SOLO_FRAMING_BYTES`]) against the response budget.
-    #[must_use]
-    pub fn to_result_within(&self, envelope: usize) -> CallToolResult {
         let refusal = |error: &Self| {
             let text = format!("preview_solo rejected: {error}");
             let mut result = CallToolResult::error(vec![ContentBlock::text(text)]);
@@ -121,7 +125,6 @@ impl SoloError {
         let result = refusal(self);
         let report = self.body().to_string().len();
         let wire = serde_json::to_vec(&result).map_or(usize::MAX, |wire| wire.len());
-        let wire = wire.saturating_add(envelope);
         for (limit, observed, allowed) in [
             ("report_bytes", report, SOLO_REPORT_BUDGET_BYTES),
             ("response_bytes", wire, SOLO_WIRE_BUDGET_BYTES),
@@ -170,28 +173,12 @@ impl SoloStrip {
 /// # Errors
 ///
 /// A typed [`SoloError`]; nothing is applied either way.
+#[allow(clippy::too_many_lines)]
 pub fn preview_solo(
     analysis: &dyn Analysis,
     revision: TimelineRevision,
     document: &Document,
     args: &SoloArgs,
-) -> Result<SoloStrip, SoloError> {
-    preview_solo_within(analysis, revision, document, args, 0)
-}
-
-/// [`preview_solo`], admitting a strip only when its reply plus `envelope`
-/// transport bytes (see [`SoloError::to_result_within`]) fits R25.
-///
-/// # Errors
-///
-/// A typed [`SoloError`]; nothing is applied either way.
-#[allow(clippy::too_many_lines)]
-pub fn preview_solo_within(
-    analysis: &dyn Analysis,
-    revision: TimelineRevision,
-    document: &Document,
-    args: &SoloArgs,
-    envelope: usize,
 ) -> Result<SoloStrip, SoloError> {
     let started = Instant::now();
     let clip_id = args.clip_id;
@@ -360,7 +347,6 @@ pub fn preview_solo_within(
         });
         let solo = SoloStrip { image, png, report };
         let wire = serde_json::to_vec(&solo.to_result()).map_or(usize::MAX, |wire| wire.len());
-        let wire = wire.saturating_add(envelope);
         for (limit, observed, allowed) in [
             ("png_bytes", solo.png.len(), SOLO_PNG_BUDGET_BYTES),
             (

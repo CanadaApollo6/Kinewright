@@ -61,15 +61,25 @@
   1,056 KiB (a path-bearing render failure) is answered as a fixed-size
   `solo_over_budget` instead, and a working raster past the device's 8192-px
   texture side is refused `solo_over_budget` (`render_side`) in every mode
-  before any product or allocation (fix round 1). The budget is the whole
-  reply on the wire (fix round 2): admission counts the echoed JSON-RPC
-  request id plus 512 B of framing, so a long string id makes a near-cap
-  strip a typed `solo_over_budget` (`response_bytes`) rather than an
-  over-budget reply; only an id that alone exceeds the budget can still
-  overrun, since the protocol must echo it. Malformed arguments get one
-  fixed-size JSON-RPC InvalidParams (`preview_solo: invalid arguments`, data
-  code `solo_invalid_arguments`) instead of the decoder's message, which
-  echoes the input; other tools keep their decoder messages. A `context: isolated` sent for an
+  before any product or allocation (fix round 1). Malformed arguments get
+  one fixed-size JSON-RPC InvalidParams (`preview_solo: invalid arguments`,
+  data code `solo_invalid_arguments`) instead of the decoder's message,
+  which echoes the input; other tools keep their decoder messages (fix
+  round 2). The budget is the whole reply on the wire (final fix): every
+  `preview_solo` reply — strip, solo refusal, stale-revision text,
+  InvalidParams or any other error — crosses one choke point in
+  `call_tool`, which measures it as rmcp serializes the JSON-RPC message
+  (echoed request id and `resultType` included) plus
+  `SOLO_FRAMING_BYTES` = 128, a bound on rmcp 3.1.2's SSE framing (priming
+  event 25 B + reply event 13 B + two event ids of at most 41 B = 120 B;
+  SSE keep-alive comments, sent only while a render passes 15 s, are
+  transport liveness, not reply bytes). A reply measuring over
+  1,081,344 B is replaced by the minimal typed refusal —
+  `{"resultType":"complete","content":[{"type":"text","text":"solo_over_budget"}],"structuredContent":{"code":"solo_over_budget"},"isError":true}`
+  (142 B), a 175-B message around the id, 303 B with framing — whenever
+  that is smaller (an InvalidParams already is, and stays). **Residual:** a
+  reply can pass the budget only when the request id's JSON is longer than
+  1,081,344 − 303 = 1,081,041 B, since the protocol must echo the id. A `context: isolated` sent for an
   adjustment is answered as `below` — the report says so — rather than
   refused, since R24 says "no override". Codes are `solo_clip_not_visible`,
   `solo_window_empty`, `solo_over_budget`, `solo_invalid_samples`,
@@ -83,10 +93,12 @@
   landed at 688 production lines and stands at 830 after fix round 1 (inside
   the 840 stop), over S7's ≤ 400 for GUI gestures + menus, because it also
   holds the solo strip dialog, its context/sample controls and the parity
-  seams. The
-  projected MO2 total is ≈ 3,400 against 3,200 (~6% over, inside 20%),
-  accepted per N13. R28 runs after the B1 review fixes, since those change
-  the render hot path.
+  seams. The final ledger (N21) is Part A 691, B1 ≈ 1,713, B2 ≈ 715
+  (solo/registry 524, R28 191) and B3 830: ≈ 3,950 against 3,200, about
+  23% over and past §12's 20%. The overage is accepted through the
+  recorded overrides: B1's review-fix growth (N15, N18), R28's
+  resident-source scope (N19, N20) and its 191 lines (N21). R28 ran after
+  the B1 review fixes, since those change the render hot path.
 - ME6 → §8 R26 (Part B3), readings the rule leaves open:
   - Solids:
     - The colour editor is egui's picker plus labelled R/G/B fields. A

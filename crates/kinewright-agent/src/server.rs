@@ -49,8 +49,9 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
-        ToolAnnotations,
+        JsonObject, JsonRpcError, JsonRpcMessage, JsonRpcResponse, ListToolsResult,
+        PaginatedRequestParams, RequestId, ServerCapabilities, ServerInfo, ServerJsonRpcMessage,
+        ServerResult, Tool, ToolAnnotations,
     },
     service::RequestContext,
     transport::streamable_http_server::{
@@ -1166,12 +1167,9 @@ impl KinewrightMcp {
         Self::capability_tools()
     }
 
-    /// `envelope`: the transport bytes around this reply (request id plus
-    /// framing); only `preview_solo` counts them against its R25 budget.
     fn call_exposed_blocking(
         &self,
         request: CallToolRequestParams,
-        envelope: usize,
     ) -> Result<CallToolResult, McpError> {
         if !crate::runtime::COMPACT_TOOL_NAMES.contains(&request.name.as_ref()) {
             return Ok(error_text(format!(
@@ -1179,20 +1177,11 @@ impl KinewrightMcp {
                 request.name
             )));
         }
-        self.call_within(request, envelope)
-    }
-
-    #[cfg(test)]
-    fn call_blocking(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
-        self.call_within(request, 0)
+        self.call_blocking(request)
     }
 
     #[allow(clippy::too_many_lines)]
-    fn call_within(
-        &self,
-        request: CallToolRequestParams,
-        envelope: usize,
-    ) -> Result<CallToolResult, McpError> {
+    fn call_blocking(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
         let arguments = request.arguments.unwrap_or_default();
         match request.name.as_ref() {
             "search_capabilities" => {
@@ -1234,8 +1223,7 @@ impl KinewrightMcp {
                 let serde_json::Value::Object(arguments) = args.arguments else {
                     return Ok(error_text("capability arguments must be a JSON object"));
                 };
-                let request = CallToolRequestParams::new(args.name).with_arguments(arguments);
-                self.call_within(request, envelope)
+                self.call_blocking(CallToolRequestParams::new(args.name).with_arguments(arguments))
             }
             "prepare_edit_plan" => {
                 let args: PrepareEditPlanArgs = decode_args("prepare_edit_plan", arguments)?;
@@ -1602,15 +1590,9 @@ impl KinewrightMcp {
                     return Ok(revision_conflict_text(args.expected_revision, revision));
                 }
                 Ok(
-                    match crate::solo::preview_solo_within(
-                        &*self.analysis,
-                        revision,
-                        &document,
-                        &args,
-                        envelope,
-                    ) {
+                    match crate::solo::preview_solo(&*self.analysis, revision, &document, &args) {
                         Ok(strip) => strip.to_result(),
-                        Err(error) => error.to_result_within(envelope),
+                        Err(error) => error.to_result(),
                     },
                 )
             }
@@ -11890,13 +11872,20 @@ impl ServerHandler for KinewrightMcp {
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResponse, McpError>> + Send + '_ {
         let service = self.clone();
-        let id = serde_json::to_vec(&context.id).map_or(usize::MAX, |id| id.len());
-        let envelope = id.saturating_add(crate::solo::SOLO_FRAMING_BYTES);
+        let solo = (request.name == "invoke_capability")
+            .then(|| request.arguments.as_ref()?.get("name")?.as_str())
+            .flatten()
+            == Some("preview_solo");
         async move {
-            tokio::task::spawn_blocking(move || service.call_exposed_blocking(request, envelope))
+            let reply = tokio::task::spawn_blocking(move || service.call_exposed_blocking(request))
                 .await
-                .map_err(|error| McpError::internal_error(error.to_string(), None))?
-                .map(Into::into)
+                .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+            let reply = if solo {
+                bound_solo_reply(context.id, reply)
+            } else {
+                reply
+            };
+            reply.map(Into::into)
         }
     }
 }
@@ -14062,6 +14051,40 @@ fn inspector_tools() -> Vec<Tool> {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct EmptyArgs {}
+
+/// MO2 R25 (ME4): the one choke point every `preview_solo` reply crosses,
+/// whatever its kind. Its size is the JSON-RPC message the transport
+/// serializes, id included, plus [`crate::solo::SOLO_FRAMING_BYTES`]; over
+/// budget, the minimal typed refusal replaces it whenever that is smaller.
+fn bound_solo_reply(
+    id: RequestId,
+    reply: Result<CallToolResult, McpError>,
+) -> Result<CallToolResult, McpError> {
+    let wire = |message: &ServerJsonRpcMessage| {
+        serde_json::to_vec(message).map_or(usize::MAX, |bytes| {
+            bytes.len().saturating_add(crate::solo::SOLO_FRAMING_BYTES)
+        })
+    };
+    let respond =
+        |result, id| ServerJsonRpcMessage::response(ServerResult::CallToolResult(result), id);
+    let fallback = respond(crate::solo::SoloError::minimal_result(), id.clone());
+    let mut message = match reply {
+        Ok(result) => respond(result, id),
+        Err(error) => ServerJsonRpcMessage::error(error, Some(id)),
+    };
+    let size = wire(&message);
+    if size > crate::solo::SOLO_WIRE_BUDGET_BYTES && wire(&fallback) < size {
+        message = fallback;
+    }
+    match message {
+        JsonRpcMessage::Response(JsonRpcResponse {
+            result: ServerResult::CallToolResult(result),
+            ..
+        }) => Ok(result),
+        JsonRpcMessage::Error(JsonRpcError { error, .. }) => Err(error),
+        _ => unreachable!("built above as a tool result or an error"),
+    }
+}
 
 fn decode_args<T: for<'de> Deserialize<'de>>(
     tool_name: &str,
@@ -19958,7 +19981,6 @@ mod tests {
                     .unwrap()
                     .clone(),
                 ),
-                0,
             )
             .unwrap();
         assert_eq!(invoked.is_error, Some(false));
@@ -20299,7 +20321,6 @@ mod tests {
                     .unwrap()
                     .clone(),
                 ),
-                0,
             )
             .unwrap();
         assert_eq!(invoked.is_error, Some(false));
@@ -34952,7 +34973,6 @@ mod tests {
                         .unwrap()
                         .clone(),
                 ),
-                0,
             )
             .unwrap();
         assert_eq!(direct.is_error, Some(true));

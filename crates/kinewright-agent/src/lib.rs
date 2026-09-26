@@ -88,6 +88,6 @@ pub use silence::{
     silence_cut_margin_frames,
 };
 pub use solo::{
-    SOLO_PNG_BUDGET_BYTES, SOLO_REPORT_BUDGET_BYTES, SOLO_WIRE_BUDGET_BYTES, SoloArgs, SoloContext,
-    SoloError, SoloStrip, preview_solo, sample_offsets,
+    SOLO_FRAMING_BYTES, SOLO_PNG_BUDGET_BYTES, SOLO_REPORT_BUDGET_BYTES, SOLO_WIRE_BUDGET_BYTES,
+    SoloArgs, SoloContext, SoloError, SoloStrip, preview_solo, sample_offsets,
 };
