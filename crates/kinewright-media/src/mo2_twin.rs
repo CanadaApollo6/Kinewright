@@ -4,8 +4,9 @@
 //! It reuses `params_for`, the blit rule and the unquantized CPU colour
 //! kernels, and independently reproduces rasterization (the vertex transform
 //! on an 8-bit sub-pixel grid with the top-left rule), nearest/bilinear
-//! clamp-to-edge sampling, the legacy stage, key/spill, fades, crop, mask,
-//! coverage, the blend equations, the Push backdrop and the opaque over. It
+//! clamp-to-edge sampling, the legacy stage (its `.cube` lattice included),
+//! key/spill, fades, crop, mask, coverage, the blend equations, the Push
+//! backdrop and the opaque over. It
 //! rounds only where the GPU stores (`Rgba16Float` targets and snapshots).
 //!
 //! Single-letter names follow the shader's; exact float compares and the
@@ -16,7 +17,7 @@
 #![allow(clippy::manual_midpoint)]
 
 use half::f16;
-use kinewright_core::{LinearRgbaImage, MediaError};
+use kinewright_core::{Effect, LinearRgbaImage, MediaError, ParamValue};
 
 use super::{
     Compositor, CompositorInput, CompositorLayer, LayerParams, LayerRole, LutLibrary, blend_word,
@@ -25,6 +26,7 @@ use super::{
 use crate::color_pipeline::{
     apply_color_nodes_at, decode_bt709, encode_bt709, resolve_color_nodes_with,
 };
+use crate::lut::{CubeLut, parse_cube_lut};
 
 type Rgba = [f32; 4];
 
@@ -187,9 +189,55 @@ fn rasterized(p: &LayerParams, size: [f32; 2], pixel: [usize; 2]) -> bool {
         })
 }
 
+/// R16: the legacy `.cube` lattice at a display-coded colour, trilinear over
+/// IRIDAS red-fastest samples, normalized into the domain and clamped.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn sample_cube(cube: &CubeLut, rgb: [f32; 3]) -> [f32; 3] {
+    let (n, top) = (cube.size as usize, cube.size as usize - 1);
+    let scaled: [f32; 3] = std::array::from_fn(|i| {
+        let span = (cube.domain_max[i] - cube.domain_min[i]).max(0.000_001);
+        ((rgb[i] - cube.domain_min[i]) / span).clamp(0.0, 1.0) * top as f32
+    });
+    let low = scaled.map(|v| v.floor() as usize);
+    let f: [f32; 3] = std::array::from_fn(|i| scaled[i] - scaled[i].floor());
+    let at = |corner: [usize; 3], c: usize| {
+        let [x, y, z] = std::array::from_fn(|i| (low[i] + corner[i]).min(top));
+        cube.rgba[((z * n + y) * n + x) * 4 + c]
+    };
+    let mix = |a: f32, b: f32, t: f32| a * (1.0 - t) + b * t;
+    std::array::from_fn(|c| {
+        let plane = |z| {
+            let row = |y| mix(at([0, y, z], c), at([1, y, z], c), f[0]);
+            mix(row(0), row(1), f[1])
+        };
+        mix(plane(0), plane(1), f[2])
+    })
+}
+
+/// R16: the last enabled `cube_lut`'s lattice, read and parsed on its own.
+fn legacy_cube(effects: &[Effect]) -> Result<Option<CubeLut>, MediaError> {
+    let Some(effect) = effects
+        .iter()
+        .rev()
+        .find(|e| e.enabled && e.name == "cube_lut")
+    else {
+        return Ok(None);
+    };
+    let Some(ParamValue::Text(path)) = effect.parameters.get("path") else {
+        return Err(MediaError::Backend("cube_lut without a path".to_owned()));
+    };
+    let source =
+        std::fs::read_to_string(path).map_err(|error| MediaError::Backend(error.to_string()))?;
+    parse_cube_lut(&source).map(Some)
+}
+
 /// The legacy display-coded compatibility stage (`legacy_stage_active`).
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn legacy(p: &LayerParams, linear: [f32; 3]) -> [f32; 3] {
+fn legacy(p: &LayerParams, linear: [f32; 3], cube: Option<&CubeLut>) -> [f32; 3] {
     let mut rgb = linear.map(|v| (encode_bt709(v) + p.brightness - 0.5) * p.contrast + 0.5);
     let l = luma(rgb);
     rgb = rgb.map(|v| l * (1.0 - p.saturation) + v * p.saturation);
@@ -206,8 +254,13 @@ fn legacy(p: &LayerParams, linear: [f32; 3]) -> [f32; 3] {
         }
         _ => rgb,
     };
-    let mixed: [f32; 3] =
+    let mut mixed: [f32; 3] =
         std::array::from_fn(|i| pre[i] * (1.0 - p.lut_intensity) + rgb[i] * p.lut_intensity);
+    if let Some(cube) = cube {
+        let k = p.external_lut_intensity;
+        let looked = sample_cube(cube, mixed);
+        mixed = std::array::from_fn(|i| mixed[i] * (1.0 - k) + looked[i] * k);
+    }
     mixed.map(|v| decode_bt709(v.clamp(0.0, 1.0)))
 }
 
@@ -217,6 +270,7 @@ fn legacy(p: &LayerParams, linear: [f32; 3]) -> [f32; 3] {
 /// decided exactly, `(i + 0.5) / n` against the edge in f64 (ME5).
 fn shade(
     p: &LayerParams,
+    cube: Option<&CubeLut>,
     rgb: [f32; 3],
     a: f32,
     uv: [f32; 2],
@@ -225,7 +279,7 @@ fn shade(
 ) -> Rgba {
     let (mut rgb, mut alpha) = (rgb, (a * p.opacity).clamp(0.0, 1.0));
     if p.legacy_stage_active > 0.5 {
-        rgb = legacy(p, rgb);
+        rgb = legacy(p, rgb, cube);
     }
     if p.key_threshold >= 0.0 {
         let key = [p.key_red, p.key_green, p.key_blue];
@@ -292,10 +346,6 @@ fn shade(
 }
 
 /// Composite `layers` bottom-to-top on the CPU, as `render_working` does.
-///
-/// # Panics
-///
-/// On an active legacy `cube_lut`, which the twin does not reproduce.
 pub(crate) fn render_working<F: CompositorInput>(
     resolution: (u32, u32),
     layers: &[CompositorLayer<'_, F>],
@@ -342,13 +392,7 @@ fn render_sampled<F: CompositorInput>(
     let mut flagged = None;
     let empty = LutLibrary::default();
     for (index, layer) in layers.iter().enumerate() {
-        assert!(
-            !layer
-                .effects
-                .iter()
-                .any(|e| e.enabled && e.name == "cube_lut"),
-            "the twin does not reproduce the legacy cube_lut"
-        );
+        let cube = legacy_cube(layer.effects)?;
         let d0 = Texture {
             width,
             height,
@@ -407,7 +451,15 @@ fn render_sampled<F: CompositorInput>(
                 rgb = rgb.map(decode_bt709);
             }
             rgb = apply_color_nodes_at(&nodes, rgb, uv, w / h);
-            let [r, g, b, alpha] = shade(&p, rgb, a, uv, [i % width, i / width], [w, h]);
+            let [r, g, b, alpha] = shade(
+                &p,
+                cube.as_ref(),
+                rgb,
+                a,
+                uv,
+                [i % width, i / width],
+                [w, h],
+            );
             let below = *texel;
             let over = |s: f32, d: f32| alpha * s + (1.0 - alpha) * d;
             let blended = if mode == 0 {

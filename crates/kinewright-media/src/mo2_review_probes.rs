@@ -768,6 +768,49 @@ fn review1_public_matte_shorter_clip_remains_valid_on(context: GpuContext) {
     assert_eq!((proof.coverage.width, proof.coverage.height), (W, H));
 }
 
+// ---------------------------------------------------------------- R16
+
+/// Review-1 S1: the twin reproduces a supported legacy `cube_lut` (an
+/// identity and a channel-swapping lattice) on an adjustment and a solid.
+fn review1_twin_covers_supported_legacy_cube_on(context: GpuContext) {
+    let directory = crate::test_support::TempDirectory::new("mo2-b1-legacy-cube");
+    let mut r = FrameRenderer::new(context);
+    let lattices = [
+        (
+            "identity.cube",
+            "0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n",
+        ),
+        (
+            "swap.cube",
+            "0 0 0\n0 1 0\n1 0 0\n1 1 0\n0 0 1\n0 1 1\n1 0 1\n1 1 1\n",
+        ),
+    ];
+    for (name, body) in lattices {
+        let path = directory.path(name);
+        std::fs::write(&path, format!("LUT_3D_SIZE 2\n{body}")).unwrap();
+        let mut lut = effect(1, "cube_lut", &[("intensity_percent", 70)]);
+        let path = ParamValue::Text(path.to_string_lossy().into_owned());
+        lut.parameters.insert("path".into(), path);
+        let plate = solid(1, ORANGE, BlendMode::Normal, vec![]);
+        for top in [
+            adjustment(2, BlendMode::Normal, vec![lut.clone()]),
+            // 70%, not the review's 60%: at 60% the exact BLUE Screen over
+            // ORANGE lies just above an f16 rounding midpoint and lavapipe's
+            // blend store rounds it down with no LUT at all (0.87353516 vs
+            // 0.87402344), one monitor code on every pixel of this uniform
+            // frame. The LUT's coverage is unchanged.
+            solid(
+                2,
+                BLUE,
+                BlendMode::Screen,
+                vec![lut.clone(), opacity(2, 70)],
+            ),
+        ] {
+            matched(&mut r, &document(vec![plate.clone(), top]), 0, name);
+        }
+    }
+}
+
 gpu_lanes! {
     review1_r10_normal_adjustment_storage_must_refuse => review1_r10_normal_adjustment_storage_must_refuse_on,
     review1_r10_nan_extrema_must_refuse => review1_r10_nan_extrema_must_refuse_on,
@@ -780,4 +823,5 @@ gpu_lanes! {
     review1_all_geometric_frames_independent_oracle => review1_all_geometric_frames_independent_oracle_on,
     review1_public_matte_adjustment_qualifier_keeps_below => review1_public_matte_adjustment_qualifier_keeps_below_on,
     review1_public_matte_shorter_clip_remains_valid => review1_public_matte_shorter_clip_remains_valid_on,
+    review1_twin_covers_supported_legacy_cube => review1_twin_covers_supported_legacy_cube_on,
 }
