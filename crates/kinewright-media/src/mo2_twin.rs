@@ -114,11 +114,6 @@ pub(crate) fn blend(mode: u32, s: f32, d: f32) -> f32 {
     }
 }
 
-/// MO2 R10: what an `Rgba16Float` store cannot hold.
-fn unstorable(values: &[f32]) -> bool {
-    values.iter().any(|v| !v.is_finite() || v.abs() > 65504.0)
-}
-
 /// The quad uv the rasterizer interpolates at an NDC pixel centre (MO1 R3,
 /// inverted).
 fn quad_uv(p: &LayerParams, ndc: [f32; 2]) -> [f32; 2] {
@@ -369,8 +364,15 @@ pub(crate) fn render_working<F: CompositorInput>(
                 std::array::from_fn(|c| blend(mode, [r, g, b][c], below[c]))
             };
             let out: [f32; 3] = std::array::from_fn(|c| over(blended[c], below[c]));
-            let checked = [&blended[..], &out[..], &[alpha]].concat();
-            if mode != 0 && flagged.is_none() && unstorable(&checked) {
+            // R10: every special layer; finite operands and intermediates,
+            // magnitude only at the store.
+            let finite = [r, g, b, alpha, below[0], below[1], below[2]]
+                .iter()
+                .chain(&blended)
+                .chain(&out)
+                .all(|v| v.is_finite());
+            let invalid = !finite || out.iter().any(|v| v.abs() > 65504.0);
+            if (mode != 0 || adjustment) && flagged.is_none() && invalid {
                 flagged = Some(index);
             }
             *texel = [

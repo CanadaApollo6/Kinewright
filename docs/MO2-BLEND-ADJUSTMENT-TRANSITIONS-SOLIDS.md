@@ -48,6 +48,16 @@
   twin reproduces portably. That path is fixture-only (production never
   composites 8-bit textures). With f16 inputs, GPU ≡ twin within 5e-4 on
   all 13 cases.
+- ME4 → §3 R10 (B1 fix round 1, review-1 B1 / review-2 B2 + S1): R10's
+  checked set is every *special* layer — non-`Normal` blends **and every
+  adjustment, `Normal` included** (selector word 8: a `Normal` adjustment
+  validated against its snapshot; under Push its covered pixels' backdrop
+  is the unshifted `D0(x)` by R21, so no extra copy). The source, the
+  below value, the blend result and alpha must be finite, tested on the
+  bits before `min`/`max` can erase them; magnitude is checked only on the
+  value the target stores (`α·B + (1−α)·D`), so `Add(40000,40000)` at
+  α=0.25 stores 49,984 instead of refusing. `Normal` pixel layers stay
+  unchecked (the CC3 overflow contract and R12's untouched fast path).
 
 ## Changes in revision 2
 
