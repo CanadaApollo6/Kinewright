@@ -446,6 +446,8 @@ fn render_sampled<F: CompositorInput>(
                 }
             }
             let [r, g, b, a] = source.sample(sample_uv, filtering, subtexel);
+            // ME11: the sampled alpha's bits, before `shade` clamps them.
+            let source_alpha_invalid = !a.is_finite();
             let mut rgb = [r, g, b];
             if p.input_linear < 0.5 {
                 rgb = rgb.map(decode_bt709);
@@ -476,12 +478,13 @@ fn render_sampled<F: CompositorInput>(
                 .chain(&out)
                 .all(|v| v.is_finite());
             // ME11: a `Normal` pixel layer flags what it blends, not `out`.
-            let invalid = if mode == 0 && !adjustment {
-                ![r, g, b, alpha].iter().all(|v| v.is_finite())
-                    || (alpha > 0.0 && [r, g, b].iter().any(|v| v.abs() > 65504.0))
-            } else {
-                !finite || out.iter().any(|v| v.abs() > 65504.0)
-            };
+            let invalid = source_alpha_invalid
+                || if mode == 0 && !adjustment {
+                    ![r, g, b, alpha].iter().all(|v| v.is_finite())
+                        || (alpha > 0.0 && [r, g, b].iter().any(|v| v.abs() > 65504.0))
+                } else {
+                    !finite || out.iter().any(|v| v.abs() > 65504.0)
+                };
             if flagged.is_none() && invalid {
                 flagged = Some(index);
             }
