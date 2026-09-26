@@ -1677,7 +1677,7 @@ pub(crate) mod phases {
         at: TimeCode,
         resolution: (u32, u32),
         scale: RenderScale,
-    ) -> Result<[Duration; 3], MediaError> {
+    ) -> Result<([Duration; 3], Duration), MediaError> {
         let strategy = DecodeStrategy::Sequential;
         let decoded = renderer.decoded_layers(document, at, resolution, scale, strategy)?;
         crate::compositor::phases::monitor(

@@ -296,7 +296,7 @@ fn print_phases(gpu: GpuContext, document: &Document, key: &str) {
     for frame in 0..40 {
         let at = TimeCode(frame % document.duration.0);
         let phases = crate::render::phases::render(&mut renderer, document, at, dims, scale);
-        let phases = phases.expect("an R28 frame renders");
+        let (phases, _) = phases.expect("an R28 frame renders");
         if frame >= 10 {
             for (mean, phase) in means.iter_mut().zip(phases) {
                 *mean += phase.as_secs_f64() * 1e3 / 30.0;
@@ -437,4 +437,45 @@ fn r28_ledger_control_rejects_the_1080p_budget() {
     );
     drop(reservations);
     assert_eq!(context.ledger().live_bytes(), 0);
+}
+
+/// G11 (rereview-final-mo2-1): the WARP floor is 20 fps with p95 ≤ 3× the
+/// mean, pinned on synthetic DX12 CPU metadata — no Windows run claimed.
+#[test]
+fn reverify_me14_warp_floor_boundary() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let info = wgpu::AdapterInfo {
+        name: "Synthetic WARP metadata only".into(),
+        vendor: 0,
+        device: 0,
+        device_type: wgpu::DeviceType::Cpu,
+        device_pci_bus_id: String::new(),
+        driver: String::new(),
+        driver_info: String::new(),
+        backend: wgpu::Backend::Dx12,
+        subgroup_min_size: 4,
+        subgroup_max_size: 128,
+        transient_saves_memory: false,
+    };
+    let warp = GpuContext::new_with_adapter_info(gpu.device.clone(), gpu.queue.clone(), info);
+    let floor = floor_fps(&warp);
+    assert!((floor - 20.0).abs() < f64::EPSILON, "WARP floor {floor}");
+    for (mean_ms, p95_ms, holds) in [
+        (50.0, 150.0, true),
+        (50.01, 50.01, false),
+        (49.0, 147.01, false),
+    ] {
+        let run = Run {
+            dims: (1280, 720),
+            mean_ms,
+            p95_ms,
+        };
+        assert_eq!(
+            throughput(&run, floor).is_ok(),
+            holds,
+            "mean {mean_ms} p95 {p95_ms}"
+        );
+    }
 }

@@ -96,7 +96,8 @@ fn final_rte_all_half_boundaries_and_dense_f32() {
         65504.0_f32.next_up(),
         65520.0_f32.next_down(),
     ]);
-    let source = include_str!("compositor.wgsl");
+    // Windows checks sources out CRLF; parse the LF form.
+    let source = include_str!("compositor.wgsl").replace("\r\n", "\n");
     let start = source.find("fn f16_rte(").unwrap();
     let end = start + source[start..].find("\n}\n").unwrap() + 2;
     let function = &source[start..end];

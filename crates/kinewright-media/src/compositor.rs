@@ -5,10 +5,10 @@ use std::{
     ops::Deref,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use half::f16;
@@ -211,12 +211,28 @@ impl GpuLedger {
     }
 }
 
-/// MO2 R28 (B1): an upload's queue-write staging, an upper bound on every
-/// backend — each row padded to the largest copy alignment (DX12's 256).
-fn upload_staging_bytes((key, texture): &(TexturePoolKey, HeldTexture)) -> u64 {
-    let row = texture.1 / u64::from(key.height.max(1));
-    let aligned = row.next_multiple_of(u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT));
-    aligned * u64::from(key.height)
+/// MO2 R28 (ME15): copy each staged layer into its source texture, ahead of
+/// the frame's passes.
+fn copy_uploads(encoder: &mut wgpu::CommandEncoder, frame: &FrameResources) {
+    for layer in &frame.layers {
+        if let (Some((staging, row)), Some((key, texture))) = (&layer.upload, &layer.source) {
+            let layout = wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(*row),
+                rows_per_image: Some(key.height),
+            };
+            let source = wgpu::TexelCopyBufferInfo {
+                buffer: staging,
+                layout,
+            };
+            let size = wgpu::Extent3d {
+                width: key.width,
+                height: key.height,
+                depth_or_array_layers: 1,
+            };
+            encoder.copy_buffer_to_texture(source, texture.as_image_copy(), size);
+        }
+    }
 }
 
 /// One charged allocation; dropping it releases the charge.
@@ -609,7 +625,13 @@ pub struct Compositor {
     flag_pool: Mutex<Option<Ledgered<wgpu::Buffer>>>,
     /// MO2 R12/R13: accumulator snapshots taken, for the copy-count probes.
     accumulator_copies: AtomicU64,
+    /// MO2 R28 (ME15): failed frames whose queued writes outlived the bounded
+    /// wait, charged until a later poll marks their submission done.
+    retired: Mutex<Vec<(Arc<AtomicBool>, FrameResources)>>,
 }
+
+/// MO2 R28 (ME15): the longest a failed frame waits for its queued writes.
+const FAILED_FRAME_WAIT: Duration = Duration::from_millis(100);
 
 /// The number of distinct (width, height, format) shapes the pool retains.
 /// A resized preview or a proxy/full-raster switch must not accumulate
@@ -724,16 +746,22 @@ impl TexturePool {
     }
 }
 
+/// MO2 R28 (ME15): a staged source — pool key, texture, staging + row bytes.
+type LayerUpload = (TexturePoolKey, HeldTexture, (Ledgered<wgpu::Buffer>, u32));
+
 struct LayerResources {
     /// The uploaded source texture; `None` for an adjustment or a backdrop,
     /// which sample an accumulator snapshot instead.
     source: Option<(TexturePoolKey, HeldTexture)>,
+    /// MO2 R28 (ME15): the source's staging buffer and its padded row bytes,
+    /// copied into `source` at the head of the frame's commands.
+    upload: Option<(Ledgered<wgpu::Buffer>, u32)>,
     /// The atlas this layer's bind group reads; held so the texture outlives
     /// the queue submission even if the cache evicts it meanwhile.
     _lut_atlas: Arc<LutAtlas>,
     _uniform: Ledgered<wgpu::Buffer>,
     _grade: Ledgered<wgpu::Buffer>,
-    /// MO2 R28: this draw's queue-write staging, in flight until readback.
+    /// MO2 R28: this draw's uniform + grade queue-write staging.
     _staging: Ledgered<()>,
     bind_group: wgpu::BindGroup,
 }
@@ -1103,6 +1131,7 @@ impl Compositor {
             validity_stride,
             flag_pool: Mutex::new(None),
             accumulator_copies: AtomicU64::new(0),
+            retired: Mutex::default(),
         }
     }
 
@@ -1339,16 +1368,13 @@ impl Compositor {
             view_formats: &[],
         });
         let output = self.gpu.charge_texture(output);
+        self.sweep_retired();
         let mut frame = FrameResources::default();
         let steps = match self.stage_layers(width, height, layers, library, matte_debug, &mut frame)
         {
             Ok(steps) => steps,
             Err(error) => {
-                // MO2 R28 (B2): the staged layers' queue writes still hold
-                // their staging; complete them before the charges go.
-                self.gpu.queue.submit([]);
-                let _ = self.gpu.device.poll(wgpu::PollType::wait_indefinitely());
-                self.release_layer_textures(frame);
+                self.retire_failed(frame, wgpu::Device::poll);
                 return Err(error);
             }
         };
@@ -1362,6 +1388,7 @@ impl Compositor {
         if let Some(flags) = &frame.pooled_flags {
             encoder.clear_buffer(flags, 0, None);
         }
+        copy_uploads(&mut encoder, &frame);
         let mut load = wgpu::LoadOp::Clear(wgpu::Color::BLACK);
         // MO2 R12: no schedule is an all-Normal frame, drawn in order.
         let scheduled = !steps.is_empty();
@@ -1731,14 +1758,14 @@ impl Compositor {
         } else {
             &self.sampler
         };
-        let (source, view) = if let Some(snapshot) = bindings.source {
-            (None, snapshot.clone())
+        let (source, view, upload) = if let Some(snapshot) = bindings.source {
+            (None, snapshot.clone(), None)
         } else {
-            let (key, texture) = self.upload_layer(layer)?;
+            let (key, texture, upload) = self.upload_layer(layer)?;
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            (Some((key, texture)), view)
+            (Some((key, texture)), view, Some(upload))
         };
-        Ok(self.bind_layer(
+        let mut resources = self.bind_layer(
             source,
             &view,
             sampler,
@@ -1746,14 +1773,18 @@ impl Compositor {
             binding.atlas,
             &grade_bytes,
             bindings,
-        ))
+        );
+        resources.upload = upload;
+        Ok(resources)
     }
 
-    /// Upload one pixel layer into a pooled source texture.
+    /// Stage one pixel layer for a pooled source texture: a mapped staging
+    /// buffer, rows padded to `COPY_BYTES_PER_ROW_ALIGNMENT` (ME15), which the
+    /// frame copies into the texture ahead of its passes.
     fn upload_layer<F: CompositorInput>(
         &self,
         layer: &CompositorLayer<'_, F>,
-    ) -> Result<(TexturePoolKey, HeldTexture), MediaError> {
+    ) -> Result<LayerUpload, MediaError> {
         let expected_len = usize::try_from(layer.frame.width())
             .unwrap_or_default()
             .saturating_mul(usize::try_from(layer.frame.height()).unwrap_or_default())
@@ -1769,27 +1800,58 @@ impl Compositor {
             height: layer.frame.height(),
             format: F::FORMAT,
         };
+        let row = layer.frame.width().saturating_mul(F::BYTES_PER_PIXEL);
+        let padded = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let staging = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Kinewright layer upload staging"),
+            size: u64::from(padded) * u64::from(pool_key.height),
+            usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: true,
+        });
+        {
+            let mut mapped = staging.get_mapped_range_mut(..);
+            let (row, padded) = (row as usize, padded as usize);
+            for (index, source) in upload_bytes.chunks_exact(row).enumerate() {
+                let start = index * padded;
+                mapped.slice(start..start + row).copy_from_slice(source);
+            }
+        }
+        staging.unmap();
         let texture = self.acquire_layer_texture(pool_key);
-        self.gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &upload_bytes,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(layer.frame.width().saturating_mul(F::BYTES_PER_PIXEL)),
-                rows_per_image: Some(layer.frame.height()),
-            },
-            wgpu::Extent3d {
-                width: layer.frame.width(),
-                height: layer.frame.height(),
-                depth_or_array_layers: 1,
-            },
-        );
-        Ok((pool_key, texture))
+        Ok((pool_key, texture, (self.gpu.charge_buffer(staging), padded)))
+    }
+
+    /// MO2 R28 (ME15): release a failed frame once its queued writes are
+    /// done, waiting at most [`FAILED_FRAME_WAIT`]; past that it stays
+    /// charged in `retired` until a later poll completes its submission.
+    fn retire_failed(
+        &self,
+        frame: FrameResources,
+        poll: impl FnOnce(&wgpu::Device, wgpu::PollType) -> Result<wgpu::PollStatus, wgpu::PollError>,
+    ) {
+        let done = Arc::new(AtomicBool::new(false));
+        let index = self.gpu.queue.submit([]);
+        let flag = Arc::clone(&done);
+        self.gpu
+            .queue
+            .on_submitted_work_done(move || flag.store(true, Ordering::Release));
+        let wait = wgpu::PollType::Wait {
+            submission_index: Some(index),
+            timeout: Some(FAILED_FRAME_WAIT),
+        };
+        let _ = poll(&self.gpu.device, wait);
+        if done.load(Ordering::Acquire) {
+            self.release_layer_textures(frame);
+        } else {
+            let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
+            retired.push((done, frame));
+        }
+    }
+
+    /// Drop every retired frame whose submission a poll has since completed.
+    fn sweep_retired(&self) {
+        let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
+        retired.retain(|(done, _)| !done.load(Ordering::Acquire));
     }
 
     /// Create one draw's uniform, grade buffer and bind group.
@@ -1820,8 +1882,7 @@ impl Compositor {
         });
         let uniform = self.gpu.charge_buffer(uniform);
         self.gpu.queue.write_buffer(&uniform, 0, &params.as_bytes());
-        let upload = source.as_ref().map_or(0, upload_staging_bytes);
-        let staging = upload + grade.size() + UNIFORM_SIZE;
+        let staging = grade.size() + UNIFORM_SIZE;
         let (validity, offset) = bindings.validity;
         let bind_group = self
             .gpu
@@ -1870,6 +1931,7 @@ impl Compositor {
             });
         LayerResources {
             source,
+            upload: None,
             _lut_atlas: atlas,
             _uniform: uniform,
             _grade: grade,
@@ -7649,14 +7711,15 @@ pub(crate) mod phases {
     use super::*;
 
     /// [`Compositor::render_monitor_with_luts`], timed: staging + upload
-    /// recording, GPU passes + readback (submit to mapped), monitor encode.
+    /// recording, GPU passes + readback (submit to mapped), monitor encode,
+    /// and the whole frame they partition.
     pub(crate) fn monitor(
         compositor: &Compositor,
         (width, height): (u32, u32),
         layers: &[CompositorLayer<'_, WorkingFrame>],
         monitoring: &ColorDescription,
         library: Option<&LutLibrary>,
-    ) -> Result<[Duration; 3], MediaError> {
+    ) -> Result<([Duration; 3], Duration), MediaError> {
         let started = Instant::now();
         let (output, frame, encoder) =
             compositor.composite(width, height, layers, library, None)?;
@@ -7678,6 +7741,9 @@ pub(crate) mod phases {
         result?;
         let done = Instant::now();
         let mapped = mapped.unwrap_or(done);
-        Ok([staged - started, mapped - staged, done - mapped])
+        Ok((
+            [staged - started, mapped - staged, done - mapped],
+            done - started,
+        ))
     }
 }
