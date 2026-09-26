@@ -940,6 +940,20 @@ mod tests {
                 .map_err(attribute_layer(&decoded, project_at))
         }
 
+        /// MO2 ME6: the twin's 8-bit sub-texel envelope for the same frame.
+        pub(crate) fn twin_envelope(
+            &mut self,
+            document: &Document,
+            project_at: TimeCode,
+            resolution: (u32, u32),
+        ) -> Result<Vec<f32>, MediaError> {
+            let (scale, strategy) = (RenderScale::FullResolution, DecodeStrategy::Seek);
+            let decoded = self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+            let layers = compositor_layers(&decoded);
+            let library = Some(&*self.lut_library);
+            crate::compositor::twin::subtexel_envelope(resolution, &layers, library)
+        }
+
         /// MO2 R12/R13: accumulator snapshots this renderer has taken.
         pub(crate) fn accumulator_copies(&self) -> u64 {
             self.compositor.accumulator_copies()

@@ -166,17 +166,28 @@ fn f16_key(value: f32) -> i32 {
 /// R27 working tolerances: unit domain max abs ≤ 1e-3; over-range relative
 /// ≤ 2^-10 and ≤ 4 f16 ULP.
 fn assert_r27(actual: &[f32], expected: &[f32], label: &str) {
+    assert_r27_within(actual, expected, &[], label);
+}
+
+/// R27 for one value, widened by the ME6 sub-texel `slack` (zero for every
+/// value nothing filters, so unfiltered pixels keep the unit 1e-3).
+fn r27_close(a: f32, e: f32, slack: f32) -> bool {
+    if a.abs() <= 1.0 && e.abs() <= 1.0 {
+        (a - e).abs() <= 1e-3 + slack
+    } else {
+        (a - e).abs() <= e.abs() * 2_f32.powi(-10) + slack
+            && (slack > 0.0 || f16_key(a).abs_diff(f16_key(e)) <= 4)
+    }
+}
+
+fn assert_r27_within(actual: &[f32], expected: &[f32], slack: &[f32], label: &str) {
     assert_eq!(actual.len(), expected.len(), "{label}: raster size");
     for (index, (&a, &e)) in actual.iter().zip(expected).enumerate() {
-        let close = if a.abs() <= 1.0 && e.abs() <= 1.0 {
-            (a - e).abs() <= 1e-3
-        } else {
-            (a - e).abs() <= e.abs() * 2_f32.powi(-10) && f16_key(a).abs_diff(f16_key(e)) <= 4
-        };
+        let slack = slack.get(index).copied().unwrap_or(0.0);
         let (pixel, channel) = (index / 4, index % 4);
         assert!(
-            close,
-            "{label}: pixel {pixel} channel {channel}: {a} vs {e}"
+            r27_close(a, e, slack),
+            "{label}: pixel {pixel} channel {channel}: {a} vs {e} (slack {slack})"
         );
     }
 }
@@ -208,7 +219,15 @@ fn matched(r: &mut FrameRenderer, document: &Document, at: i64, label: &str) -> 
     let twin = r
         .twin_working(document, TimeCode(at), document.resolution)
         .unwrap_or_else(|error| panic!("{label}: twin {error}"));
-    assert_r27(&gpu.pixels, &twin.pixels, label);
+    // ME6: the sub-texel envelope is only computed when a value misses.
+    let pairs = || gpu.pixels.iter().zip(&twin.pixels);
+    let slack = if pairs().all(|(a, e)| r27_close(*a, *e, 0.0)) {
+        Vec::new()
+    } else {
+        r.twin_envelope(document, TimeCode(at), document.resolution)
+            .unwrap()
+    };
+    assert_r27_within(&gpu.pixels, &twin.pixels, &slack, label);
     assert!(
         gpu.pixels.chunks(4).all(|pixel| pixel[3] == 1.0),
         "{label}: R9b the accumulator is opaque"
@@ -903,6 +922,36 @@ fn slide_and_wipe_midpoints_on(context: GpuContext) {
     }
 }
 
+/// ME6 (G4): the value Windows WARP produced for `slide_right` over the
+/// transformed title at frame 3 (run 36222189672) misses the unit 1e-3
+/// against the exact twin but lies in the 8-bit sub-texel envelope.
+fn warp_midpoint_departure_lies_within_the_envelope_on(context: GpuContext) {
+    let mut r = FrameRenderer::new(context);
+    let moved = [
+        ("scale_percent", 60),
+        ("x_percent", 20),
+        ("rotation_centidegrees", 1_500),
+    ];
+    let title = title_clip(
+        4,
+        TitlePosition::Center,
+        vec![effect(1, "transform", &moved)],
+    );
+    let mut clips = quartered();
+    clips.push(with_transition(title, "slide_right", 5));
+    let document = document(clips);
+    let (at, size, value) = (TimeCode(3), document.resolution, 6708 * 4);
+    let twin = r.twin_working(&document, at, size).unwrap();
+    let slack = r.twin_envelope(&document, at, size).unwrap();
+    let (warp, exact) = (0.330_810_55_f32, twin.pixels[value]);
+    println!(
+        "pixel 6708: twin {exact} slack {} WARP {warp}",
+        slack[value]
+    );
+    assert_eq!(exact, 0.332_031_25, "the CI twin value");
+    assert!(!r27_close(warp, exact, 0.0) && r27_close(warp, exact, slack[value]));
+}
+
 /// R12/R13/B8 copy counts per frame: Normal-only stacks (Slide/Wipe too) 0;
 /// an ordinary special layer 1; a Normal Push 1; a non-`Normal` Push 2; a
 /// non-`Normal` adjustment Push 2 (erratum ME2).
@@ -1187,6 +1236,7 @@ gpu_lanes! {
     adjustment_look_over_section => adjustment_look_over_section_on,
     push_midpoint_splits_frame => push_midpoint_splits_frame_on,
     slide_and_wipe_midpoints => slide_and_wipe_midpoints_on,
+    warp_midpoint_departure_lies_within_the_envelope => warp_midpoint_departure_lies_within_the_envelope_on,
     accumulator_copy_counts => accumulator_copy_counts_on,
     solid_title_card_renders => solid_title_card_renders_on,
     r32_generated_alpha_under_blend_matches_twin => r32_generated_alpha_under_blend_matches_twin_on,
